@@ -15,7 +15,7 @@ at a time under the machine lock, `--workers=1`, no retries.
 | T3 | Variable speed not integrated as amendment 16 says | `pm-eval/src/retime.rs`: two midpoint samples per frame of the owning composition, at least 60 Hz | Engine and legacy bit-identical at the root at 5 rates; the layer vectors check the engine step against the TypeScript; a corpus project that exercises it |
 | T5 | `restoreProject` hydrates `format` unannounced | `legacy/gl/raster.ts`: `PM.touch()` when it hydrated anything | Unit test; auditor 0 failures |
 | T6 | The `requiresEngine` stamp unannounced | `media/host-media-store.ts`: `PM.doc.touched([['requiresEngine']])` | Unit test; auditor 0 failures |
-| D1 | Exports lose the last frames of video clips | `pm-render`: `RenderRequest::video_end`, today's padding per output kind | pm-render test at 10, 24, 25, 30, 60 fps; `export-video-frames.spec.ts:12` 9 of 9 with the flag on |
+| D1 | Exports lose the last frames of video clips | `pm-render`: select source timestamps without browser seek padding | pm-render test at 10, 24, 25, 30, 60 fps; `export-video-frames.spec.ts:12` 9 of 9 with the flag on |
 | D2 | `PM.proj = PM.mkProject(…)` never plays on the engine clock; Play starts about 300 ms late on Bluetooth | Engine connection: lay the viewer out after a document load; presenter: silent compositions on the host clock from Play, the device opened ahead of the first Play | `export-mp4.spec.ts` 2 of 2 and `native-engine-tracer.spec.ts` 10 of 10 with the flag on; vitest; pm-node child-process test |
 | R1 | Image-sequence exports fail intermittently with the flag off | `prepareFrame` waits for the viewer's compositor context (`GL.whenReady`) | `import-image-sequence.spec.ts:7` `--repeat-each=12`: 24 of 24 off, 24 of 24 on |
 
@@ -90,38 +90,19 @@ test registries have no `touch`); the stamp listener calls
   tracking violations. (The gate's control run without the fixes had 8 failures in 914
   audits.)
 
-## D1: the last frames of video clips in exports
+## D1: the last frames of video clips
 
-**Defect.** `pm-render` clamped every video source time to `dur − 0.04`, the padding
-today's compositor uses for its own seeks (the viewer). Today's exports and agent stills
-run `prepareFrame` first (`frame-preparation.ts`, `exporter.ts` `run` and
-`snapshotAsync`), which seeks every clip with `videoPlaybackTime(asset, t, 1 /
-PM.proj.fps)`, so they keep a clip's last frame. A 20-frame clip in a project of its
-length lost its last frame at 30 fps and its last two at 60 fps in engine exports.
+Native video selection uses the source timestamps (or its Interpret Footage
+frame grid) and holds the last source frame after the file ends. It does not
+subtract Chromium's 40 ms seek padding or one composition frame from the
+asset duration. Those offsets hid valid frames, especially at high source
+rates and when a source and composition used different rates.
 
-**Fix.** `RenderRequest::video_end` (`VideoEnd::Preview`, the default, 0.04 s;
-`VideoEnd::Final`, `1 / fps` of the composition rendered). `VideoEnd::of(purpose)`
-makes exports and agent captures final (`FramePurpose::is_final`); viewer, scrub, and
-thumbnail requests are previews, as today's `renderToPixels` without `prepareFrame` is.
-The job engine's export plan and agent stills (`pm-export/src/render.rs`) ask for
-`Final`; the viewer's compose (`pm-node/src/present/compose.rs`) states `Preview`.
-`plan::build` takes the kind and `playback_time(time, dur, padding)` applies it.
-Precomps inside the exported composition keep its padding, as `prepareFrame` does.
-
-**Evidence.**
-
-- `pm-render/tests/video_end.rs`: a 20-frame 64 × 64 H.264 clip of 20 levels (the
-  clip `export-video-frames.spec.ts` makes), rendered at every frame of a project of
-  its length at 10, 24, 25, 30, and 60 fps and read back. `Final` shows all 20 source
-  frames at every rate and equals today's rule (the padding, Chromium's microsecond
-  seek, the last frame starting at or before it); `Preview` equals today's rule with
-  0.04 s (the last frame hidden at 30 fps, the last two at 60). With the old padding the
-  test fails at 30 fps: `[…, 17, 18, 18]` against `[…, 17, 18, 19]`. Unit tests check
-  the purposes and `playback_time`.
-- `cargo test --release -p pm-render --lib --test headless --test video_end`,
-  `-p pm-export --lib --test job_export`: pass.
-- `POWERMOVE_NEW_ENGINE=1`, `export-video-frames.spec.ts`: **9 of 9 pass**, including
-  the three MP4 cases at 30 fps that failed at the gate.
+`RenderRequest::output_kind` distinguishes preview canvas clipping from final
+output; it cannot change video timing. `pm-render/tests/video_end.rs` checks
+distinct source frames at 10, 24, 25, 30, 60 and 120 fps, matching and mixed
+composition rates, and nested compositions. The corpus requires preview and
+export equality without a video-end exception. See `quality-ledger.md`.
 
 ## D2: a project installed by assigning `PM.proj`, and the Play start
 
@@ -240,7 +221,7 @@ than waiting at every frame.
 ## Files outside this lane's own
 
 Minimal edits, listed for the owners: `pm-export/src/render.rs` (two requests ask for
-`VideoEnd::Final`), `pm-node/src/present/compose.rs` (one field), `pm-node/src/present/render.rs`
+`OutputKind::Final`), `pm-node/src/present/compose.rs` (one field), `pm-node/src/present/render.rs`
 and `audio.rs` (the silent run and the warm-up), `pm-audio/src/graph.rs` (`audible`, a walk
 without media), `pm-eval/tests/support/layer_replay.rs` (the engine-step check),
 `legacy/gl/compositor.ts` (`GL.whenReady`), `engine/corpus/src/projects/time.ts` (one

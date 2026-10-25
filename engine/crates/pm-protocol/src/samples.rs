@@ -57,8 +57,8 @@ use crate::host::{
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
 use crate::lease::{Lease, LeaseCategories, LeaseReason, LeaseRequest, LeaseUsage};
 use crate::patch::{
-    ConsistencyCheck, ConsistencyResult, DocumentEncoding, EngineFact, PatchBatch, PatchEncoding,
-    PatchOrigin, PatchesApplied, RelinkReason, Resync, ResyncSource,
+    ConfirmRevision, ConsistencyCheck, ConsistencyResult, DocumentEncoding, EngineFact, PatchBatch,
+    PatchEncoding, PatchOrigin, PatchesApplied, RelinkReason, Resync, ResyncSource,
 };
 use crate::priority::{
     AgentFrame, AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AlphaOutput, AudioCoding,
@@ -531,6 +531,7 @@ pub fn export_settings() -> ExportSettings {
             end: ticks(7_056_000_000),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: true,
         color: OutputColor::Rec709Broadcast,
         precision: Precision::Float32,
@@ -855,6 +856,25 @@ pub fn requests() -> Vec<Envelope> {
                 output: "fallback-out.rgba16f".into(),
             }),
         ),
+        request(
+            id(30),
+            Request::HostEncode(crate::host_encode::HostEncode {
+                job: "job-7".into(),
+                step: crate::host_encode::EncodeStep::Open {
+                    codec: crate::host_encode::EncodeVideoCodec::Vp9,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: crate::common::FrameRate::new(30_000, 1001),
+                    bitrate: 16_000_000,
+                    frames: crate::common::Count::new(300).expect("safe"),
+                    audio: Some(crate::host_encode::EncodeAudio {
+                        sample_rate: 48_000,
+                        channels: 2,
+                    }),
+                    output: handle(15),
+                },
+            }),
+        ),
     ]
 }
 
@@ -885,6 +905,7 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         pixels: crate::snapshot::SnapshotPixels::Opaque,
         class: crate::snapshot::SnapshotClass::Sync,
         view_seq: Some(seq(12)),
+        viewer: None,
         wait_ms: 5_000,
         blender_wait_ms: 0,
         captions_hidden: false,
@@ -1260,6 +1281,11 @@ pub fn events() -> Vec<Envelope> {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: 2,
             body: Bytes(vec![0x92, 0x01, 0x02]),
+            provisional: false,
+        })),
+        event(Event::ConfirmRevision(ConfirmRevision {
+            document: "doc-1".into(),
+            revision: rev(42),
         })),
         event(Event::PatchesApplied(PatchesApplied {
             document: "doc-1".into(),
@@ -1481,6 +1507,15 @@ pub fn events() -> Vec<Envelope> {
             snapshots: Count::new(3).expect("count"),
             snapshot_us_max: 48_000,
             revision: rev(42),
+            audio: Some(crate::snapshot::AudioDiagnostics {
+                error: None,
+                problems: vec![
+                    "Audio decode exceeded 120 ms; missing voice plays as silence: music".into(),
+                ],
+                starved_renders: Count::new(4).expect("count"),
+                underruns: Count::ZERO,
+                device_overloads: Count::new(1).expect("count"),
+            }),
         })),
         event(Event::PreviewControl(crate::preview::PreviewControl {
             generation: seq(3), revision: rev(42), composition: "comp-1".into(),
@@ -1497,9 +1532,11 @@ pub fn events() -> Vec<Envelope> {
         })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
         })),
         event(Event::Audio(AudioMessage::Peaks(AudioPeaks {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
             peaks_per_second: 100.0,
             duration: 0.03,
             peaks: vec![0.0, 0.5, 0.25],
@@ -1774,9 +1811,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::Snapshot(_) => 26,
         Request::CompatFrame(_) => 27,
         Request::ShaderFallback(_) => 28,
+        Request::HostEncode(_) => 29,
     }
 }
-pub const REQUEST_VARIANTS: usize = 29;
+pub const REQUEST_VARIANTS: usize = 30;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {
@@ -1815,32 +1853,33 @@ pub const RESPONSE_VARIANTS: usize = 26;
 pub const fn event_index(event: &Event) -> usize {
     match event {
         Event::ApplyPatches(_) => 0,
-        Event::PatchesApplied(_) => 1,
-        Event::Frame(_) => 2,
-        Event::ReleaseFrame(_) => 3,
-        Event::SurfacePool(_) => 4,
-        Event::Viewer(_) => 5,
-        Event::Transport(_) => 6,
-        Event::Clock(_) => 7,
-        Event::Deadline(_) => 8,
-        Event::Slicing(_) => 9,
-        Event::Failure(_) => 10,
-        Event::Crash(_) => 11,
-        Event::LeaseUsage(_) => 12,
-        Event::JobStatus(_) => 13,
-        Event::BlenderProgress(_) => 14,
-        Event::BlenderSurface(_) => 15,
-        Event::Fact(_) => 16,
-        Event::InFlight(_) => 17,
-        Event::Audio(_) => 18,
-        Event::ShaderFallback(_) => 19,
-        Event::Compat(_) => 20,
-        Event::RenderStats(_) => 21,
-        Event::PreviewControl(_) => 22,
-        Event::PreviewStatus(_) => 23,
+        Event::ConfirmRevision(_) => 1,
+        Event::PatchesApplied(_) => 2,
+        Event::Frame(_) => 3,
+        Event::ReleaseFrame(_) => 4,
+        Event::SurfacePool(_) => 5,
+        Event::Viewer(_) => 6,
+        Event::Transport(_) => 7,
+        Event::Clock(_) => 8,
+        Event::Deadline(_) => 9,
+        Event::Slicing(_) => 10,
+        Event::Failure(_) => 11,
+        Event::Crash(_) => 12,
+        Event::LeaseUsage(_) => 13,
+        Event::JobStatus(_) => 14,
+        Event::BlenderProgress(_) => 15,
+        Event::BlenderSurface(_) => 16,
+        Event::Fact(_) => 17,
+        Event::InFlight(_) => 18,
+        Event::Audio(_) => 19,
+        Event::ShaderFallback(_) => 20,
+        Event::Compat(_) => 21,
+        Event::RenderStats(_) => 22,
+        Event::PreviewControl(_) => 23,
+        Event::PreviewStatus(_) => 24,
     }
 }
-pub const EVENT_VARIANTS: usize = 24;
+pub const EVENT_VARIANTS: usize = 25;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

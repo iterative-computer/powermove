@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
-import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
+import type { ShaderFallbackRequest, SnapshotViewer } from '../../../shared/engine-protocol';
 import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
@@ -30,7 +30,7 @@ function canvasFake() {
   return { canvas: canvas as unknown as HTMLCanvasElement, drawn };
 }
 
-function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters; captionsHidden?: () => boolean } = {}) {
+function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; session?: TransportSession | null; windowDocument?: () => { id: string; revision: number; nativeKernel?: true; full(): { json: Uint8Array; hash: string; revision: number } } | null; wake?: () => Promise<void>; usesBlender?: () => boolean; svgRasters?: TransportSvgRasters; captionsHidden?: () => boolean } = {}) {
   const asked: EngineSnapshotRequest[] = [];
   const s = session();
   const runner = { renderSync: vi.fn((r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })), render: vi.fn(async (r: ShaderFallbackRequest) => ({ key: r.key, width: 2, height: 2, rgba16f: new Uint16Array(16) })) };
@@ -62,6 +62,32 @@ function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; 
 }
 
 describe('EngineRenderTransport', () => {
+  it('pins viewer camera, crop and selected sequence across asynchronous renderer rounds', async () => {
+    const viewer: SnapshotViewer = { viewSeq: 19,
+      canvas: { width: 2, height: 2, crop: { x: 40, y: 20, width: 100, height: 50 }, css: { x: 5, y: 6, width: 200, height: 100 } },
+      view: { camera: { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: .01, far: 100 } }, shading: 'solid', xray: true, localView: ['cube'] } };
+    const selected = structuredClone(viewer);
+    const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('a'.repeat(64))], compat: [] };
+    const reply = { ...rendered(2, 2), viewSeq: 19 } as EngineSnapshotReply;
+    const { transport, asked } = setup([needs, reply]);
+    const pending = transport.snapshot({ time: .5, width: 2, height: 2, viewer }, 'idle');
+    viewer.viewSeq = 20;
+    viewer.canvas.crop.x = 80;
+    viewer.view!.camera!.view[12] = 99;
+    const result = await pending;
+    expect(asked).toHaveLength(2);
+    for (const request of asked) expect(request.snapshot).toMatchObject({ viewer: selected, viewSeq: 19 });
+    expect(result.viewSeq).toBe(19);
+    expect(asked[0]!.snapshot.viewer!.view!.camera).not.toBe(viewer.view!.camera);
+  });
+
+  it('rejects a thumbnail tagged with a different selected view sequence', async () => {
+    const viewer: SnapshotViewer = { view: null, viewSeq: 19, canvas: { width: 2, height: 2, crop: { x: 0, y: 0, width: 2, height: 2 }, css: { x: 0, y: 0, width: 2, height: 2 } } };
+    const { transport } = setup([rendered(2, 2)]);
+    expect(await transport.thumbnails.request({ key: 'viewer', time: 0, width: 2, height: 2, viewer })).toBeNull();
+    expect(transport.thumbnails.stale).toBe(1);
+  });
+
   it('asks synchronously at the flushed revision, with the window session and view', () => {
     let flushed = 0;
     const { transport, asked } = setup([rendered(4, 2)], { flush: () => { flushed++; return 12; } });
@@ -70,6 +96,30 @@ describe('EngineRenderTransport', () => {
     expect(asked[0]).toMatchObject({ generation: 2, session: 5, revision: 12, snapshot: { composition: 'comp-1', time: 352_800_000, outputSize: { width: 4, height: 2 }, class: 'sync', viewSeq: 4, pixels: 'opaque', uploaded: [] } });
     expect(snap).toMatchObject({ width: 4, height: 2, revision: 12, viewSeq: 4 });
     expect(snap.data).toBeInstanceOf(Uint8ClampedArray);
+  });
+
+  it('never sends main more asynchronous snapshots than it admits, and waits out a refusal instead of failing', async () => {
+    // A large project's idle thumbnails and compatibility rasters filled
+    // main's eight slots and an extension's renderFrameToAsync failed with
+    // "Too many snapshots are in flight" (C1); today's never fails for that.
+    const { transport, asked } = setup([]);
+    let inFlight = 0, most = 0, refusals = 1;
+    (transport as any).options.native.snapshot = async (request: EngineSnapshotRequest) => {
+      asked.push(request);
+      inFlight++; most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      if (refusals-- > 0) return { status: 'failed', code: 'refused', message: 'Too many snapshots are in flight; try again when they finish.' } as EngineSnapshotReply;
+      return rendered(4, 2);
+    };
+    const all = await Promise.all([
+      ...Array.from({ length: 12 }, () => transport.snapshot({ time: 0, width: 4, height: 2 }, 'idle')),
+      ...Array.from({ length: 6 }, () => transport.snapshot({ time: 1, width: 4, height: 2 })),
+    ]);
+    expect(all).toHaveLength(18);
+    expect(all.every((snap) => snap.width === 4)).toBe(true);
+    expect(most).toBeLessThanOrEqual(8);
+    expect(asked).toHaveLength(19);
   });
 
   it('prepares playback base pixels over async IPC at dependency priority, without changing ordinary async snapshots', async () => {
@@ -406,6 +456,41 @@ describe('EngineRenderTransport', () => {
       };
     };
 
+    it.each(['no session', 'resync pending', 'ready session before crash notification'])('uses only an opaque native reference for every %s snapshot round', (state) => {
+      const full = vi.fn(() => { throw new Error('native references must never serialize JSON'); });
+      const pending = state === 'no session' ? null : { ...session(), resyncPending: state === 'resync pending' };
+      const { transport, asked, runner } = setup([
+        { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('n'.repeat(64))], compat: [] },
+        rendered(2, 2),
+      ], { session: pending, windowDocument: () => ({ id: 'doc-1', revision: 12, nativeKernel: true, full }) });
+
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(runner.renderSync).toHaveBeenCalledOnce();
+      expect(full).not.toHaveBeenCalled();
+      expect(asked.map((ask) => ask.document)).toEqual([
+        { id: 'doc-1', revision: 12, nativeKernel: true },
+        { id: 'doc-1', revision: 12, nativeKernel: true },
+      ]);
+      expect(asked.every((ask) => ask.revision === 12 && ask.session === null)).toBe(true);
+      expect(asked.every((ask) => !('owner' in ask.document!))).toBe(true);
+    });
+
+    it('keeps native references after a main-session needsDocument response', () => {
+      const full = vi.fn(() => { throw new Error('native references must never serialize JSON'); });
+      const reference = { id: 'doc-1', revision: 12, nativeKernel: true as const };
+      const { transport, asked } = setup([
+        rendered(2, 2),
+        { status: 'failed', code: 'needsDocument', message: 'session restarted' },
+        rendered(2, 2),
+      ], { session: null, windowDocument: () => ({ ...reference, full }) });
+
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(() => transport.snapshotSync({ time: 0, width: 2, height: 2 })).toThrow(EngineSnapshotError);
+      expect(transport.snapshotSync({ time: 0, width: 2, height: 2 }).width).toBe(2);
+      expect(asked.map((ask) => ask.document)).toEqual([reference, reference, reference]);
+      expect(full).not.toHaveBeenCalled();
+    });
+
     it('a staged resync in flight: the document goes along once, then only its revision', () => {
       const d = doc();
       const pending = { ...session(), resyncPending: true };
@@ -569,6 +654,27 @@ describe('compatibility answers during playback', () => {
       await vi.advanceTimersByTimeAsync(4);
       expect(asked.at(-1)).toBe((40 + COMPAT_LOOKAHEAD) * frame);
       expect(t.lookaheadStats.recoveries).toBeGreaterThan(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('prepares an edited paused frame urgently without warming obsolete future revisions', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(false);
+    const prepare = vi.fn(async () => {});
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), prepare);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      prepare.mockClear();
+      state.revision++;
+      t.prepareShown();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepare).toHaveBeenCalledExactlyOnceWith(need(0), state.revision, { urgent: true });
+      expect(vi.getTimerCount()).toBe(0);
+      state.playing = true;
+      t.playbackStarted();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepare.mock.calls.length).toBeGreaterThan(1);
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 

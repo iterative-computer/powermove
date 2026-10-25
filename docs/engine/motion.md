@@ -220,9 +220,9 @@ plane and out through the flat layer's world matrix, onto the flat layer's ink
   `retiming.ts` bit for bit at 23.976, 24, 29.97, 30, 59.94, 60, and 120 fps over
   400 times each (`engine_retiming_matches_today_at_the_root`). A nested composition
   keeps its own rate whichever composition is open (the allowed difference).
-- **Video frames.** The source time is clamped to `[0, dur − 0.04]` as
-  `videoPlaybackTime`; `pm-media` selects the last frame with PTS ≤ t + q/2
-  (section 5 rule 7).
+- **Video frames.** Nonnegative source time selects the last frame with
+  PTS ≤ t + q/2 and holds the final decoded frame after the source ends.
+  Preview and export share this selection; no browser seek padding applies.
 - **Frame-rate override** (Interpret Footage, `asset.interpret.frameRate`, `[num,
   den]` or a number snapped like composition rates): frame n is shown at n / rate;
   the frame is ⌊t · rate + 1/8⌋ (rule 7 on the overridden grid), clamped to the
@@ -234,9 +234,9 @@ plane and out through the flat layer's world matrix, onto the flat layer's ink
 
 ## Level 2 sampling
 
-Level 1 content keeps today's sampling exactly (bilinear, no mipmaps, hard UV edges,
-pixel-center coverage); `level1_keeps_todays_sampling` checks that the resampler
-setting does not reach it. Level 1 stills are sampled from today's 8-bit texture
+Level 1 content is still sampled as today (bilinear, no mipmaps, hard UV edges,
+pixel-center coverage); no gate pins that, and the sampler's bars are meant to
+apply to all content (gate-policy.md). Level 1 stills are sampled from today's 8-bit texture
 (composite.md, "Today's composite drift"). Level 2 raster content (`compat` ≥ 2
 image, video, precomp, shader, and extension layers; SVG images, shapes, text, and
 solids belong to their own renderers) is drawn by `sampling::gpu`. Level 2 shader
@@ -426,15 +426,12 @@ compares 354 frames and fails exactly those five. The historical release
 comparisons disable LTO because they predate the CrabbyAvif link fix
 (`release-build.md`); the pixel bounds stay unchanged.
 
-The precomp chroma residuals came from the source upload, not frame selection:
-ordinary opaque level 1 video needs Chromium's centered bilinear chroma
-reconstruction and RGBA8 source storage before layer filtering. Native float
-sources keep their existing reconstruction. The last retiming sample also
-used the wrong output kind in the corpus harness: the capture's `prepareFrame`
-uses final-output padding, while `RenderRequest::sized` defaults to viewer
-padding. The harness now explicitly requests `VideoEnd::Final`; production
-viewer and final-output policies are unchanged. See `pm-render.md` for the
-source conversion and regression coverage.
+Video source selection is independent of the output kind: the source PTS or
+conformed grid chooses the frame, including the last frame. Browser seek
+padding is removed. The corpus requires preview/export equality and the
+endpoint gate covers mixed rates and nested compositions (`video_end.rs`).
+Video colour and chroma reconstruction follow `video-parity.md`; legacy
+capture comparisons do not define the production reading.
 
 Before the COMPCLOSE-1 reference correction, the normal thin-LTO release run
 compared the same 354 frames:

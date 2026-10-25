@@ -486,6 +486,12 @@ impl<'r> Shaper<'r> {
                 self.shape_segment(text, seg, rtl, &mut result);
             }
         }
+        // A range a fallback font shapes is committed after the ranges the
+        // fonts before it shaped, so runs arrive out of text order ("⌘K" in a
+        // font without ⌘ gave K's run first). Blink's `ShapeResult::InsertRun`
+        // keeps runs ordered by their first character; consumers read them
+        // in logical order (reversed for an RTL item).
+        result.runs.sort_by_key(|run| run.start_index);
         result
     }
 

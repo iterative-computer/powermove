@@ -146,7 +146,7 @@
     "import_3d_600k": {
       "all_threads": {
         "cpu.heap_alloc_bytes": 50871009,
-        "cpu.heap_allocs": 109754,
+        "cpu.heap_allocs": 111919,
         "engine.comp_passes": 11,
         "engine.layers_planned": 33,
         "gpu.bind_group_binds": 88,
@@ -162,7 +162,7 @@
       },
       "thread": {
         "cpu.heap_alloc_bytes": 50870987,
-        "cpu.heap_allocs": 109754,
+        "cpu.heap_allocs": 111919,
         "engine.comp_passes": 11,
         "engine.layers_planned": 33,
         "gpu.bind_group_binds": 88,
@@ -250,6 +250,58 @@
       },
       "unit": "opens",
       "units": 1
+    },
+    "paused_edit_with_override_2500": {
+      "units": 60,
+      "unit": "edits",
+      "thread": {
+        "cache.bind_group.hits": 60,
+        "cache.bind_group.misses": 60,
+        "cache.frame_prefix.misses": 60,
+        "cache.target_pool.hits": 60,
+        "cpu.heap_alloc_bytes": 182487960,
+        "cpu.heap_allocs": 922801,
+        "engine.comp_passes": 60,
+        "engine.layers_planned": 150060,
+        "gpu.bind_group_binds": 300,
+        "gpu.bind_group_creations": 240,
+        "gpu.buffer_alloc_bytes": 15360,
+        "gpu.buffer_allocs": 60,
+        "gpu.command_encoders": 120,
+        "gpu.draw_calls": 180,
+        "gpu.pipeline_binds": 180,
+        "gpu.render_passes": 180,
+        "gpu.submits": 180,
+        "gpu.texture_alloc_bytes": 110592000,
+        "gpu.texture_allocs": 60,
+        "gpu.texture_views": 120,
+        "gpu.upload_bytes": 110629440,
+        "gpu.uploads": 240
+      },
+      "all_threads": {
+        "cache.bind_group.hits": 60,
+        "cache.bind_group.misses": 60,
+        "cache.frame_prefix.misses": 60,
+        "cache.target_pool.hits": 60,
+        "cpu.heap_alloc_bytes": 182487960,
+        "cpu.heap_allocs": 922801,
+        "engine.comp_passes": 60,
+        "engine.layers_planned": 150060,
+        "gpu.bind_group_binds": 300,
+        "gpu.bind_group_creations": 240,
+        "gpu.buffer_alloc_bytes": 15360,
+        "gpu.buffer_allocs": 60,
+        "gpu.command_encoders": 120,
+        "gpu.draw_calls": 180,
+        "gpu.pipeline_binds": 180,
+        "gpu.render_passes": 180,
+        "gpu.submits": 180,
+        "gpu.texture_alloc_bytes": 110592000,
+        "gpu.texture_allocs": 60,
+        "gpu.texture_views": 120,
+        "gpu.upload_bytes": 110629440,
+        "gpu.uploads": 240
+      }
     },
     "playback_500": {
       "all_threads": {

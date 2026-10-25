@@ -7,7 +7,7 @@
 //! `yuv420p` and `yuva420p` for libvpx, and full-range RGBA for PNG. This is the
 //! reference the GPU encoder-input pass is checked against and the fallback when
 //! no GPU pass runs. It follows S2's prototype pass
-//! (`engine/spikes/s2-precision/src/pipeline.wgsl`) exactly, in f64:
+//! (spike S2's `pipeline.wgsl`, docs/engine/spikes/S2.md) exactly, in f64:
 //!
 //! * alpha: opaque outputs take premultiplied values (compositing over black);
 //!   straight outputs unpremultiply, guarded below α = 1/4096; premultiplied outputs
@@ -151,9 +151,6 @@ pub struct ConvertParams {
     pub working: WorkingEncoding,
     pub alpha: AlphaOutput,
     pub dither: bool,
-    /// Reproduce the legacy PNG byte boundaries for documents containing
-    /// level-1 layers. All-level-2 documents retain straight-alpha precision.
-    pub legacy_png: bool,
     /// Frame index: the dither seed.
     pub frame: u32,
 }
@@ -224,28 +221,6 @@ pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) ->
     }
 }
 
-/// Today's transparent PNG export reads the premultiplied accumulator into
-/// RGBA8, truncates the unpremultiplication in `alphaFrame`, and puts that
-/// ImageData into a Canvas2D before encoding it. Reproduce both byte boundaries;
-/// dividing the original floats by alpha changes existing translucent pixels.
-fn legacy_png_rgba(p: [f32; 4]) -> [u8; 4] {
-    let q = p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u32);
-    let a = q[3];
-    if a == 0 {
-        return [0; 4];
-    }
-    let mut out = [0, 0, 0, a as u8];
-    for c in 0..3 {
-        let straight = (q[c] * 255 / a).min(255);
-        // Canvas2D stores the ImageData in premultiplied N32. PNG's
-        // SkUnPreMultiply converts it back using a rounded reciprocal.
-        let premul = (straight * a + 127) / 255;
-        let scale = ((255u64 << 24) + u64::from(a) / 2) / u64::from(a);
-        out[c] = ((u64::from(premul) * scale + (1 << 23)) >> 24).min(255) as u8;
-    }
-    out
-}
-
 fn code(v: f64, lo: f64, hi: f64) -> f64 {
     v.round_ties_even().clamp(lo, hi)
 }
@@ -281,6 +256,69 @@ fn u8_plane(data: Vec<u8>, row_samples: usize, rows: usize) -> Plane {
     }
 }
 
+fn working_dimensions(frame: &WorkingFrame) -> Result<(usize, usize), Error> {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w == 0 || h == 0 || w.checked_mul(h).and_then(|n| n.checked_mul(4)) != Some(frame.rgba.len())
+    {
+        return Err(Error::InvalidFrame(format!(
+            "working frame {}×{} has {} floats",
+            w,
+            h,
+            frame.rgba.len()
+        )));
+    }
+    Ok((w, h))
+}
+
+fn rgba_quant(
+    frame: &WorkingFrame,
+    params: &ConvertParams,
+    x: usize,
+    y: usize,
+    scale: f64,
+) -> [f64; 4] {
+    let p = pixel(frame, x, y);
+    let (c, a) = output_rgba(p, params.working, params.alpha);
+    let d = |ch| {
+        if params.dither {
+            dither_offset(params.frame, x as u32, y as u32, ch)
+        } else {
+            0.0
+        }
+    };
+    [
+        code(c[0] * scale + d(0), 0.0, scale),
+        code(c[1] * scale + d(1), 0.0, scale),
+        code(c[2] * scale + d(2), 0.0, scale),
+        code(a * scale, 0.0, scale),
+    ]
+}
+
+fn fill_rgba8(frame: &WorkingFrame, params: &ConvertParams, out: &mut [u8]) {
+    let w = frame.width as usize;
+    crate::par::rows(out, w * 4, |y, row| {
+        for x in 0..w {
+            let q = rgba_quant(frame, params, x, y, 255.0);
+            for k in 0..4 {
+                row[x * 4 + k] = q[k] as u8;
+            }
+        }
+    });
+}
+
+/// Convert to tightly packed RGBA8 in a caller-owned buffer. The entire
+/// destination is overwritten; its capacity can be reused across frames.
+pub(crate) fn convert_rgba8_into(
+    frame: &WorkingFrame,
+    params: &ConvertParams,
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let (w, h) = working_dimensions(frame)?;
+    out.resize(w * h * 4, 0);
+    fill_rgba8(frame, params, out);
+    Ok(())
+}
+
 /// Converts one working frame to `format`. Rows are converted in parallel
 /// ([`crate::par`]); every sample depends only on its own inputs, so the result is
 /// the same bytes on any number of threads.
@@ -289,15 +327,7 @@ pub fn convert(
     format: InputFormat,
     params: &ConvertParams,
 ) -> Result<EncoderInput, Error> {
-    let (w, h) = (frame.width as usize, frame.height as usize);
-    if w == 0 || h == 0 || frame.rgba.len() != w * h * 4 {
-        return Err(Error::InvalidFrame(format!(
-            "working frame {}×{} has {} floats",
-            w,
-            h,
-            frame.rgba.len()
-        )));
-    }
+    let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(
         format,
         InputFormat::Y416 | InputFormat::Rgba8 | InputFormat::Rgba16
@@ -458,28 +488,11 @@ pub fn convert(
                 InputFormat::Rgba8 => (255.0, false),
                 _ => (65535.0, true),
             };
-            let quant = |x: usize, y: usize| -> [f64; 4] {
-                let p = pixel(frame, x, y);
-                if params.legacy_png
-                    && !wide
-                    && params.working == WorkingEncoding::Standard
-                    && params.alpha == AlphaOutput::Straight
-                {
-                    return legacy_png_rgba(p).map(f64::from);
-                }
-                let (c, a) = output_rgba(p, params.working, params.alpha);
-                [
-                    code(c[0] * scale + d(x, y, 0), 0.0, scale),
-                    code(c[1] * scale + d(x, y, 1), 0.0, scale),
-                    code(c[2] * scale + d(x, y, 2), 0.0, scale),
-                    code(a * scale, 0.0, scale),
-                ]
-            };
             if wide {
                 let mut out = vec![0u16; w * h * 4];
                 crate::par::rows(&mut out, w * 4, |y, row| {
                     for x in 0..w {
-                        let q = quant(x, y);
+                        let q = rgba_quant(frame, params, x, y, scale);
                         for k in 0..4 {
                             row[x * 4 + k] = q[k] as u16;
                         }
@@ -488,14 +501,7 @@ pub fn convert(
                 vec![u16_plane(out, w * 4, h)]
             } else {
                 let mut out = vec![0u8; w * h * 4];
-                crate::par::rows(&mut out, w * 4, |y, row| {
-                    for x in 0..w {
-                        let q = quant(x, y);
-                        for k in 0..4 {
-                            row[x * 4 + k] = q[k] as u8;
-                        }
-                    }
-                });
+                fill_rgba8(frame, params, &mut out);
                 vec![u8_plane(out, w * 4, h)]
             }
         }
@@ -595,45 +601,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transparent_png_keeps_the_legacy_byte_boundaries() {
-        assert_eq!(legacy_png_rgba([0.0; 4]), [0; 4]);
-        assert_eq!(legacy_png_rgba([0.2, 0.4, 0.6, 1.0]), [51, 102, 153, 255]);
-        assert_eq!(legacy_png_rgba([0.2, 0.1, 0.0, 0.5]), [102, 52, 0, 128]);
-        // Quantization precedes alpha division; RGB is clipped only after
-        // division, including the out-of-gamut RGB > alpha bitmap case.
-        assert_eq!(legacy_png_rgba([0.01, 0.0, 0.0, 0.001]), [0; 4]);
-        assert_eq!(legacy_png_rgba([0.7, 0.0, 0.0, 0.5]), [255, 0, 0, 128]);
-        let values = [0.2, 0.1, 0.0, 0.5];
-        let f = WorkingFrame {
-            width: 1,
-            height: 1,
-            rgba: &values,
-        };
-        let p = params(AlphaOutput::Straight, false);
-        let byte = convert(&f, InputFormat::Rgba8, &p).unwrap();
-        assert_eq!(byte.planes[0].u8().unwrap(), [102, 52, 0, 128]);
-        let wide = convert(&f, InputFormat::Rgba16, &p).unwrap();
-        assert_eq!(wide.planes[0].u16().unwrap(), [26214, 13107, 0, 32768]);
-    }
-
-    #[test]
-    fn level2_png_unpremultiplies_before_byte_quantization() {
-        let values = [0.0003, 0.0006, 0.0009, 0.003];
-        let frame = WorkingFrame {
-            width: 1,
-            height: 1,
-            rgba: &values,
-        };
-        let mut p = params(AlphaOutput::Straight, false);
-        let legacy = convert(&frame, InputFormat::Rgba8, &p).unwrap();
-        p.legacy_png = false;
-        let precise = convert(&frame, InputFormat::Rgba8, &p).unwrap();
-        assert_eq!(precise.planes[0].u8().unwrap(), [26, 51, 76, 1]);
-        assert_ne!(precise, legacy);
-        // The flag is irrelevant to native-depth PNG output.
-        let wide = convert(&frame, InputFormat::Rgba16, &p).unwrap();
-        p.legacy_png = true;
-        assert_eq!(convert(&frame, InputFormat::Rgba16, &p).unwrap(), wide);
+    fn transparent_png_unpremultiplies_the_working_floats() {
+        // Straight RGB is the premultiplied float divided by alpha, rounded
+        // once: no 8-bit premultiplied value is unpremultiplied.
+        for (values, expected) in [
+            ([0.2f32, 0.1, 0.0, 0.5], [102u8, 51, 0, 128]),
+            ([0.0003, 0.0006, 0.0009, 0.003], [26, 51, 76, 1]),
+            ([0.7, 0.0, 0.0, 0.5], [255, 0, 0, 128]),
+            ([0.2, 0.4, 0.6, 1.0], [51, 102, 153, 255]),
+        ] {
+            let frame = WorkingFrame {
+                width: 1,
+                height: 1,
+                rgba: &values,
+            };
+            let p = params(AlphaOutput::Straight, false);
+            let byte = convert(&frame, InputFormat::Rgba8, &p).unwrap();
+            assert_eq!(byte.planes[0].u8().unwrap(), expected, "{values:?}");
+            // The f64 reference: one division, one rounding.
+            let a = f64::from(values[3]);
+            for c in 0..3 {
+                let want = (f64::from(values[c]) / a).clamp(0.0, 1.0) * 255.0;
+                assert!((f64::from(expected[c]) - want).abs() <= 0.5 + 1e-9);
+            }
+        }
     }
 
     fn frame(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Vec<f32> {
@@ -645,11 +636,114 @@ mod tests {
 
     fn params(alpha: AlphaOutput, dither: bool) -> ConvertParams {
         ConvertParams {
-            legacy_png: true,
             working: WorkingEncoding::Standard,
             alpha,
             dither,
             frame: 0,
+        }
+    }
+
+    #[test]
+    fn reusable_rgba8_matches_convert_for_modes_and_special_values() {
+        let values = [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.2,
+            0.1,
+            0.0,
+            0.5,
+            0.0003,
+            0.0006,
+            0.0009,
+            0.003,
+            -0.25,
+            1.25,
+            0.5,
+            1.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            0.5,
+            -0.0,
+            1.0,
+            f32::INFINITY,
+            1.0,
+            0.0,
+            0.0,
+            1.0 / 8192.0,
+            0.7,
+            0.0,
+            0.0,
+            0.5,
+        ];
+        let frame = WorkingFrame {
+            width: 4,
+            height: 2,
+            rgba: &values,
+        };
+        let mut reused = vec![0xaa; 128];
+        for working in [WorkingEncoding::Standard, WorkingEncoding::Linear] {
+            for alpha in [
+                AlphaOutput::None,
+                AlphaOutput::Straight,
+                AlphaOutput::Premultiplied,
+            ] {
+                for dither in [false, true] {
+                    let params = ConvertParams {
+                        working,
+                        alpha,
+                        dither,
+                        frame: 37,
+                    };
+                    let expected = convert(&frame, InputFormat::Rgba8, &params).unwrap();
+                    convert_rgba8_into(&frame, &params, &mut reused).unwrap();
+                    assert_eq!(
+                        reused.as_slice(),
+                        expected.planes[0].u8().unwrap(),
+                        "{params:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_rgba8_resizes_and_rejects_invalid_frames_without_changing_buffer() {
+        let mut out = Vec::with_capacity(128);
+        let allocation = out.as_ptr();
+        let params = params(AlphaOutput::Straight, false);
+        for (width, height, pixel) in [(2, 2, 0.2), (4, 3, 0.8), (1, 1, 0.4)] {
+            let values = [pixel, pixel * 0.5, 0.0, 0.5].repeat((width * height) as usize);
+            let frame = WorkingFrame {
+                width,
+                height,
+                rgba: &values,
+            };
+            convert_rgba8_into(&frame, &params, &mut out).unwrap();
+            assert_eq!(out.len(), (width * height * 4) as usize);
+            assert_eq!(out.as_ptr(), allocation);
+            assert_eq!(
+                out.as_slice(),
+                convert(&frame, InputFormat::Rgba8, &params).unwrap().planes[0]
+                    .u8()
+                    .unwrap()
+            );
+        }
+        let before = out.clone();
+        for (width, height, values) in [(0, 1, vec![]), (2, 2, vec![0.0; 15])] {
+            let frame = WorkingFrame {
+                width,
+                height,
+                rgba: &values,
+            };
+            assert!(matches!(
+                convert_rgba8_into(&frame, &params, &mut out),
+                Err(Error::InvalidFrame(_))
+            ));
+            assert_eq!(out, before);
         }
     }
 

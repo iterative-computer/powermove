@@ -9,7 +9,7 @@
 //! The tile is generated in plain IEEE f64 arithmetic with `libm`'s software `exp`,
 //! so it is identical on every platform; `tests::tile_is_pinned` fixes its hash. The
 //! GPU encoder-input pass must use this tile and `dither_offset` bit for bit (S2's
-//! prototype, `engine/spikes/s2-precision/src/pipeline.wgsl`, does).
+//! prototype, docs/engine/spikes/S2.md, does).
 
 use std::sync::OnceLock;
 

@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use pm_protocol::clock::TransportState;
 use pm_protocol::common::{PlaybackRate, TickRange};
 
+use crate::clock::host_now_us;
+
 /// Frames per chunk.
 pub const CHUNK: usize = 256;
 /// The widest device the ring carries.
@@ -54,6 +56,8 @@ struct Slot {
     next: AtomicPtr<Slot>,
     tag: UnsafeCell<Tag>,
     data: UnsafeCell<[f32; CHUNK * MAX_CHANNELS]>,
+    /// An upper bound on publication, stored after `head` publishes it.
+    published_after_us: AtomicU64,
 }
 
 /// Shared state. `head` counts chunks written, `tail` chunks consumed.
@@ -73,7 +77,12 @@ pub struct Ring {
     /// Host µs at which the current epoch's first frame is to be presented
     /// (0: as soon as it is queued). Published before `epoch`.
     start_at: AtomicU64,
+    /// `start_at` is a bound until [`Ring::time_held_start`] times it.
+    start_held: std::sync::atomic::AtomicBool,
     underruns: AtomicU64,
+    /// Whether the transport runs, so an empty ring is a miss
+    /// ([`Ring::set_expecting`]).
+    expecting: std::sync::atomic::AtomicBool,
     /// Frames the consumer has played (all epochs).
     played: AtomicU64,
     written: AtomicU64,
@@ -105,6 +114,7 @@ impl Ring {
                     next: AtomicPtr::new(std::ptr::null_mut()),
                     tag: UnsafeCell::new(Tag::default()),
                     data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+                    published_after_us: AtomicU64::new(0),
                 })
             })
             .collect();
@@ -124,7 +134,9 @@ impl Ring {
             tail: AtomicUsize::new(0),
             epoch: AtomicU32::new(0),
             start_at: AtomicU64::new(0),
+            start_held: std::sync::atomic::AtomicBool::new(false),
             underruns: AtomicU64::new(0),
+            expecting: std::sync::atomic::AtomicBool::new(true),
             played: AtomicU64::new(0),
             written: AtomicU64::new(0),
             retired: AtomicU64::new(0),
@@ -159,6 +171,7 @@ impl Ring {
                 next: AtomicPtr::new(after),
                 tag: UnsafeCell::new(Tag::default()),
                 data: UnsafeCell::new([0.0; CHUNK * MAX_CHANNELS]),
+                published_after_us: AtomicU64::new(0),
             }));
         }
         for i in base..slots.len() - 1 {
@@ -184,22 +197,44 @@ impl Ring {
 
     /// Moves to a new epoch: queued chunks of older epochs will not play.
     pub fn set_epoch(&self, epoch: u32) {
-        self.set_epoch_at(epoch, 0);
+        self.set_epoch_at(epoch, Start::Ready);
     }
 
     /// [`Self::set_epoch`] for an epoch whose first frame is presented at
-    /// host µs `start_at` ([`Consumer::fill_from`]); 0 starts it as soon as
-    /// it is queued.
-    pub fn set_epoch_at(&self, epoch: u32, start_at: u64) {
+    /// `start` ([`Consumer::fill_from`]).
+    pub fn set_epoch_at(&self, epoch: u32, start: Start) {
         self.epoch_base
             .store(self.written.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.start_at.store(start_at, Ordering::Relaxed);
+        let (at, held) = match start {
+            Start::Ready => (0, false),
+            Start::At(at) => (at, false),
+            Start::Held(until) => (until, true),
+        };
+        self.start_held.store(held, Ordering::Relaxed);
+        self.start_at.store(at, Ordering::Relaxed);
         self.epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Times the held start of the current epoch ([`Start::Held`]): its
+    /// first frame is presented at host µs `at` (0: as soon as queued).
+    /// Nothing held (already timed, or a later epoch): no effect.
+    pub fn time_held_start(&self, at: u64) {
+        if self.start_held.swap(false, Ordering::AcqRel) {
+            self.start_at.store(at, Ordering::Release);
+        }
     }
 
     /// The largest device buffer seen so far (frames).
     pub fn callback_frames(&self) -> usize {
         self.callback_frames.load(Ordering::Relaxed)
+    }
+
+    /// Whether the producer is running a playback: a callback that finds
+    /// the ring empty counts as an underrun only then. Paused or stopped,
+    /// the device plays silence by design (today's context does the same
+    /// with nothing scheduled), so an idle open device is not starving.
+    pub fn set_expecting(&self, running: bool) {
+        self.expecting.store(running, Ordering::Release);
     }
 
     pub fn underruns(&self) -> u64 {
@@ -246,12 +281,33 @@ impl Ring {
                 ..tag
             };
         }
+        slot.published_after_us.store(0, Ordering::Relaxed);
         self.written.fetch_add(frames as u64, Ordering::Relaxed);
         self.producer
             .store(slot.next.load(Ordering::Acquire), Ordering::Relaxed);
+        // The zeroed timestamp and PCM become visible together here. If the
+        // producer is descheduled before the following stamp, an observer can
+        // still use its own clock as an upper bound on publication.
         self.head.store(head + 1, Ordering::Release);
+        slot.published_after_us
+            .store(host_now_us().saturating_add(1), Ordering::Release);
         true
     }
+}
+
+/// When a Play presents its first sample (host µs on the device's clock).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Start {
+    /// As soon as its audio is queued.
+    #[default]
+    Ready,
+    /// At this host µs: before it the device plays silence, and audio that
+    /// was not queued in time is passed over, so what is heard stays on the
+    /// line that starts there.
+    At(u64),
+    /// Prepared and held until [`Ring::time_held_start`] times it, at
+    /// this host µs at the latest.
+    Held(u64),
 }
 
 /// The device callback's side: a read position inside the current chunk.
@@ -262,6 +318,11 @@ pub struct Consumer {
     started: u32,
     /// Frames of the current epoch still to pass over: it started late.
     skip: usize,
+    /// The epoch whose media this consumer has played: an empty ring is an
+    /// underrun only once the run's first chunk was heard (before it, the
+    /// start is still being prepared and nothing audible is missing; the
+    /// start's own accounting reports a late or missing first buffer).
+    heard_epoch: Option<u32>,
 }
 
 /// What a device buffer plays first.
@@ -274,6 +335,17 @@ pub struct Heard {
     pub at_frame: usize,
 }
 
+/// Two upper bounds on a chunk's publication on the monotonic host clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Publication {
+    /// Producer clock sampled after the release, if it stamped the slot yet.
+    pub published_us: Option<u64>,
+    /// Observer clock sampled after acquiring the published slot.
+    pub observed_us: u64,
+    /// Earlier of those upper bounds: the deadline must hold for this value.
+    pub visible_by_us: u64,
+}
+
 impl Consumer {
     pub fn new(ring: Arc<Ring>) -> Consumer {
         Consumer {
@@ -281,6 +353,7 @@ impl Consumer {
             offset: 0,
             started: 0,
             skip: 0,
+            heard_epoch: None,
         }
     }
 
@@ -292,11 +365,28 @@ impl Consumer {
     /// rest of the chunk being played counts its unplayed frames only).
     /// Called from the callback's side, like `fill`.
     pub fn queued_frames(&self) -> usize {
+        self.queued_snapshot(usize::MAX).0
+    }
+
+    /// Upper bounds on when at least `frames` of the current epoch were
+    /// queued. Clocks round up by one microsecond so truncation cannot turn
+    /// a sub-microsecond deadline miss into a pass. The crossing chunk is read under the same acquired `head`
+    /// snapshot as its tag and PCM. Either side may be descheduled after the
+    /// release; the earlier clock still bounds publication from above.
+    pub fn publication_for_queued_frames(&self, frames: usize) -> Option<Publication> {
+        if frames == 0 {
+            return None;
+        }
+        self.queued_snapshot(frames).1
+    }
+
+    fn queued_snapshot(&self, threshold: usize) -> (usize, Option<Publication>) {
         let ring = &*self.ring;
         let current = ring.epoch.load(Ordering::Acquire);
         let tail = ring.tail.load(Ordering::Relaxed);
         let head = ring.head.load(Ordering::Acquire);
         let mut frames = 0;
+        let mut publication = None;
         let mut ptr = ring.consumer.load(Ordering::Relaxed);
         for i in 0..head - tail {
             // SAFETY: all nodes before the acquired head are published.
@@ -310,8 +400,18 @@ impl Consumer {
             }
             let played = if i == 0 { self.offset } else { 0 };
             frames += (tag.frames as usize).saturating_sub(played);
+            if publication.is_none() && frames >= threshold {
+                let stamped = slot.published_after_us.load(Ordering::Acquire);
+                let observed_us = host_now_us().saturating_add(1);
+                let published_us = (stamped != 0).then_some(stamped);
+                publication = Some(Publication {
+                    published_us,
+                    observed_us,
+                    visible_by_us: published_us.map_or(observed_us, |at| at.min(observed_us)),
+                });
+            }
         }
-        frames
+        (frames, publication)
     }
 
     /// Fills `out` (interleaved, `device_channels` wide) from the ring.
@@ -339,7 +439,7 @@ impl Consumer {
         if self.started == current {
             return self.fill_after(out, device_channels, 0);
         }
-        let at = ring.start_at.load(Ordering::Relaxed);
+        let at = ring.start_at.load(Ordering::Acquire);
         if at == 0 {
             self.started = current;
             self.skip = 0;
@@ -384,7 +484,9 @@ impl Consumer {
             let tail = ring.tail.load(Ordering::Relaxed);
             let head = ring.head.load(Ordering::Acquire);
             if tail == head {
-                ring.underruns.fetch_add(1, Ordering::Relaxed);
+                if ring.expecting.load(Ordering::Acquire) && self.heard_epoch == Some(current) {
+                    ring.underruns.fetch_add(1, Ordering::Relaxed);
+                }
                 break;
             }
             // SAFETY: tail is published and owned by this consumer.
@@ -424,6 +526,7 @@ impl Consumer {
                     at_frame: done,
                 });
             }
+            self.heard_epoch = Some(tag.epoch);
             let take = (tag.frames as usize - self.offset).min(frames - done);
             for i in 0..take {
                 let src = &data[(self.offset + i) * rc..(self.offset + i + 1) * rc];
@@ -492,7 +595,7 @@ mod tests {
         let ramp: Vec<f32> = (0..CHUNK).map(|i| i as f32 + 1.0).collect();
         let start = |at: u64| {
             let ring = Ring::new(16, 1);
-            ring.set_epoch_at(1, at);
+            ring.set_epoch_at(1, Start::At(at));
             for n in 0..8 {
                 assert!(ring.push(tag(n * 1000, 1, CHUNK as u32), &ramp));
             }
@@ -515,7 +618,7 @@ mod tests {
         assert_eq!(out[0], 97.0);
         // Nothing queued yet: silence, and the start is decided at the next buffer.
         let ring = Ring::new(16, 1);
-        ring.set_epoch_at(1, 1_005_000);
+        ring.set_epoch_at(1, Start::At(1_005_000));
         let mut c = Consumer::new(ring.clone());
         assert_eq!(c.fill_from(&mut out, 1, 1_000_000, RATE), None);
         assert!(ring.push(tag(0, 1, CHUNK as u32), &ramp));
@@ -528,6 +631,44 @@ mod tests {
         assert!(ring.push(tag(0, 2, CHUNK as u32), &ramp));
         let h = c.fill_from(&mut out, 1, 1_000_000, RATE).unwrap();
         assert_eq!((h.at_frame, h.offset, h.tag.epoch), (0, 0, 2));
+    }
+
+    #[test]
+    fn a_held_start_waits_for_its_time_or_its_bound() {
+        const RATE: u32 = 48_000;
+        let ramp: Vec<f32> = (0..CHUNK).map(|i| i as f32 + 1.0).collect();
+        let held = |until: u64| {
+            let ring = Ring::new(16, 1);
+            ring.set_epoch_at(1, Start::Held(until));
+            for n in 0..8 {
+                assert!(ring.push(tag(n * 1000, 1, CHUNK as u32), &ramp));
+            }
+            (ring.clone(), Consumer::new(ring))
+        };
+        let mut out = vec![0f32; 480];
+        // Queued and held: silent until timed, then heard at that time.
+        let (ring, mut c) = held(2_000_000);
+        assert_eq!(c.fill_from(&mut out, 1, 1_000_000, RATE), None);
+        ring.time_held_start(1_015_000);
+        assert_eq!(
+            c.fill_from(&mut out, 1, 1_010_000, RATE).unwrap().at_frame,
+            240
+        );
+        // Timing it again, or a later epoch's ready start, changes nothing.
+        ring.time_held_start(5_000_000);
+        ring.set_epoch(2);
+        ring.time_held_start(5_000_000);
+        assert!(ring.push(tag(0, 2, CHUNK as u32), &ramp));
+        assert_eq!(
+            c.fill_from(&mut out, 1, 1_020_000, RATE).unwrap().tag.epoch,
+            2
+        );
+        // Never timed: it starts at its bound.
+        let (_, mut c) = held(1_005_000);
+        assert_eq!(
+            c.fill_from(&mut out, 1, 1_000_000, RATE).unwrap().at_frame,
+            240
+        );
     }
 
     #[test]
@@ -558,6 +699,52 @@ mod tests {
     }
 
     #[test]
+    fn publication_clock_follows_the_threshold_chunk_and_epoch() {
+        let ring = Ring::new(4, 1);
+        let mut consumer = Consumer::new(ring.clone());
+        let first = vec![1.0; CHUNK];
+        let second = vec![2.0; CHUNK];
+        let third = vec![3.0; CHUNK];
+        assert!(ring.push(tag(0, 0, CHUNK as u32), &first));
+        assert!(ring.push(tag(CHUNK as i64, 0, CHUNK as u32), &second));
+        let first_slot = ring.consumer.load(Ordering::Relaxed);
+        let second_slot = unsafe { (*first_slot).next.load(Ordering::Relaxed) };
+        let second_stamp = unsafe { (*second_slot).published_after_us.load(Ordering::Acquire) };
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let publication = consumer.publication_for_queued_frames(2 * CHUNK).unwrap();
+        assert_eq!(publication.published_us, Some(second_stamp));
+        assert_eq!(publication.visible_by_us, second_stamp);
+        assert!(publication.observed_us >= second_stamp);
+        assert!(
+            consumer
+                .publication_for_queued_frames(2 * CHUNK + 1)
+                .is_none()
+        );
+
+        ring.set_epoch(1);
+        assert!(ring.push(tag(10_000, 1, CHUNK as u32), &third));
+        let third_slot = unsafe { (*second_slot).next.load(Ordering::Relaxed) };
+        assert_eq!(consumer.queued_frames(), CHUNK);
+        let third_stamp = unsafe { (*third_slot).published_after_us.load(Ordering::Acquire) };
+        let publication = consumer.publication_for_queued_frames(CHUNK).unwrap();
+        assert_eq!(publication.published_us, Some(third_stamp));
+        assert_eq!(
+            publication.visible_by_us,
+            third_stamp.min(publication.observed_us)
+        );
+
+        // Model an observer arriving after the release but before the
+        // producer's post-release stamp. Its own clock still bounds the PCM.
+        unsafe { (*third_slot).published_after_us.store(0, Ordering::Release) };
+        let publication = consumer.publication_for_queued_frames(CHUNK).unwrap();
+        assert_eq!(publication.published_us, None);
+        assert_eq!(publication.visible_by_us, publication.observed_us);
+        let mut out = vec![0.0; CHUNK];
+        assert_eq!(consumer.fill(&mut out, 1).unwrap().tag.epoch, 1);
+        assert_eq!(out, third);
+    }
+
+    #[test]
     fn full_and_empty() {
         let ring = Ring::new(2, 1);
         let a = vec![0.5f32; CHUNK];
@@ -570,6 +757,29 @@ mod tests {
         assert_eq!(ring.underruns(), 1);
         assert_eq!(out[CHUNK * 2 + 5], 0.0);
         assert_eq!(out[CHUNK + 5], 0.5);
+    }
+
+    /// An empty ring before a run's first chunk is its start being
+    /// prepared, not an underrun; once the run is heard, an empty ring is.
+    #[test]
+    fn underruns_count_after_the_runs_first_chunk() {
+        let ring = Ring::new(4, 1);
+        let mut c = Consumer::new(ring.clone());
+        let mut out = vec![0f32; CHUNK];
+        ring.set_epoch(1);
+        ring.set_expecting(true);
+        c.fill(&mut out, 1);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 0, "waiting for the first chunk");
+        assert!(ring.push(tag(0, 1, CHUNK as u32), &vec![0.5; CHUNK]));
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 0);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 1, "heard, then empty");
+        // A new run (epoch) waits for its own first chunk again.
+        ring.set_epoch(2);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 1);
     }
 
     #[test]

@@ -131,6 +131,7 @@ fn settings(format: ExportFormat, alpha: AlphaOutput) -> ExportSettings {
             end: Ticks::new(i64::from(FRAMES) * TICKS_PER_SECOND / 30).unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: if image {
             OutputColor::SrgbImage
@@ -481,8 +482,8 @@ fn depth8_project_exports_every_shipped_format() {
         };
         assert_eq!(job.settings.precision, Precision::Float32, "{}", case.name);
         assert_eq!(job.settings.dither, case.depth <= 8, "{}", case.name);
-        let plan = plan_export_for(&job, false, &renderer)
-            .unwrap_or_else(|e| panic!("{} plan: {e}", case.name));
+        let plan =
+            plan_export_for(&job, &renderer).unwrap_or_else(|e| panic!("{} plan: {e}", case.name));
         assert_eq!(
             plan.request.precision,
             Precision::Float32,
@@ -652,8 +653,24 @@ fn depth8_project_exports_every_shipped_format() {
                 "{}: {info}",
                 case.name
             );
-            assert!(info.contains("color_space=bt709"), "{}: {info}", case.name);
-            assert!(info.contains("color_range=tv"), "{}: {info}", case.name);
+            // Opaque WebM is today's WebCodecs file (EXPORT-1): its mux
+            // writes no Colour element, so VP9's bitstream alone marks
+            // BT.709 limited range and opaque VP8 carries no tags at all.
+            let (space, range) = if case.codec == "vp8" && case.alpha == AlphaOutput::None {
+                ("unknown", "unknown")
+            } else {
+                ("bt709", "tv")
+            };
+            assert!(
+                info.contains(&format!("color_space={space}")),
+                "{}: {info}",
+                case.name
+            );
+            assert!(
+                info.contains(&format!("color_range={range}")),
+                "{}: {info}",
+                case.name
+            );
             if case.name.starts_with("vp") {
                 assert_eq!(
                     info.contains("TAG:ALPHA_MODE=1"),
@@ -712,7 +729,7 @@ fn depth8_project_exports_every_shipped_format() {
                     mode: Some(0o600),
                     seed: 73,
                 };
-                let baseline_plan = plan_export_for(&baseline_job, false, &renderer).unwrap();
+                let baseline_plan = plan_export_for(&baseline_job, &renderer).unwrap();
                 assert_eq!(baseline_plan.request.precision, Precision::Float16);
                 run_export(
                     &mut renderer,
@@ -825,7 +842,7 @@ fn depth8_png_keeps_translucent_and_overlap_witnesses() {
         mode: Some(0o600),
         seed: 73,
     };
-    let plan = plan_export_for(&job, false, &renderer).unwrap();
+    let plan = plan_export_for(&job, &renderer).unwrap();
     assert_eq!(plan.request.precision, Precision::Float32);
     assert!(
         job.settings.dither,

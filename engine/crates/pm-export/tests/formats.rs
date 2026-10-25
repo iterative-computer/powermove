@@ -183,9 +183,9 @@ fn webm_vp9_with_opus_is_frame_exact_and_tagged() {
         (r.codec.as_str(), r.pixel_format.as_str(), r.frames, r.alpha),
         ("vp09", "4:2:0", 30, false)
     );
-    assert_eq!(r.cicp, (1, 13, 1));
-    // round(30 × 1001/24000 × 48000) = 60060.
-    assert_eq!(r.audio.as_ref().unwrap().samples, 60_060);
+    assert_eq!(r.cicp, (2, 2, 1));
+    // 60060 input samples, then WebCodecs' untrimmed final Opus frame.
+    assert_eq!(r.audio.as_ref().unwrap().samples, 60_168);
     if let Some(p) = probe(
         &done.path,
         "stream=codec_name,pix_fmt,color_range,color_transfer,color_primaries,color_space,chroma_location,nb_read_frames,r_frame_rate",
@@ -195,10 +195,10 @@ fn webm_vp9_with_opus_is_frame_exact_and_tagged() {
             "codec_name=vp9",
             "pix_fmt=yuv420p",
             "color_range=tv",
-            "color_transfer=iec61966-2-1",
-            "color_primaries=bt709",
+            "color_transfer=unknown",
+            "color_primaries=unknown",
             "color_space=bt709",
-            "chroma_location=left",
+            "chroma_location=unspecified",
             "nb_read_frames=30",
             "r_frame_rate=24000/1001",
             "codec_name=opus",
@@ -229,7 +229,7 @@ fn webm_vp9_and_vp8_with_alpha() {
             (r.pixel_format.as_str(), r.alpha, r.frames),
             ("4:2:0:4", true, 30)
         );
-        assert_eq!(r.cicp, (1, 1, 1));
+        assert_eq!(r.cicp, (2, 2, 1));
         let alphas: Vec<f64> = r
             .pixels
             .iter()
@@ -264,8 +264,8 @@ fn webm_vp8_opaque_at_29_97() {
     let done = run(s).unwrap();
     let r = &done.report;
     assert_eq!((r.codec.as_str(), r.frames), ("vp08", 45));
-    // round(45 × 1001/30000 × 48000) = 72072.
-    assert_eq!(r.audio.as_ref().unwrap().samples, 72_072);
+    // 72072 input samples, then WebCodecs' untrimmed final Opus frame.
+    assert_eq!(r.audio.as_ref().unwrap().samples, 72_648);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -309,10 +309,7 @@ fn png_sequences_and_stills_at_8_and_16_bits() {
         assert_eq!(info.cicp, Some((1, 13, 0, 1)));
         // Lossless: the file equals a fresh conversion of the same frame.
         let px = picture(33, 17, 3, alpha);
-        // `export()` keeps level 1's E1 PNG conversion unless a job selects
-        // otherwise (`Pipeline::set_legacy_png`).
         let params = pm_export::convert::ConvertParams {
-            legacy_png: true,
             working: WorkingEncoding::Standard,
             alpha: s.alpha,
             dither: !sixteen_bit,

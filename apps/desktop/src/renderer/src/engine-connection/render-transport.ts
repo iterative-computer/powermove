@@ -33,9 +33,11 @@
  *   context) on the session's port; `provideCompat` registers the producer
  *   the job engine's export frames are drawn by (main asks the window).
  */
-import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
+import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SnapshotViewer, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAnswer, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
+import { RenderPerfTrace } from './perf-trace';
+import { SnapshotSlots } from './snapshot-slots';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
@@ -81,6 +83,8 @@ export type EngineSnapshotOptions = {
   background?: boolean;
   /** Native shading may stand in for Blender (thumbnails, posters). Default false. */
   draft3d?: boolean;
+  /** A pinned editor view, rendered before the viewer scales its canvas. */
+  viewer?: SnapshotViewer;
   /** How long the engine may wait for the revision and its turn (ms). */
   waitMs?: number;
   /** Today's `snapshotAsync`: Blender renders the frame's Blender
@@ -264,6 +268,9 @@ export function intoLoop(time: number, loop: PlaybackLoop | null): number {
  *  is known. */
 type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null };
 
+export type CompatPrepareOptions = { urgent?: boolean };
+export type CompatPreparer = (need: CompatNeed, revision: number, options?: CompatPrepareOptions) => Promise<void>;
+
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
 /** `fresh`: never `reuse` (an export frame, or a need asked again after a
@@ -312,7 +319,7 @@ export type RenderTransportOptions = {
   /** The window's document for a sync snapshot its session cannot serve
    *  (none yet, the document not arrived, or a staged resync in flight):
    *  main serves it from a session of its own. `full` serializes it. */
-  windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null;
+  windowDocument?: () => { id: string; revision: number; nativeKernel?: true; full(): { json: Uint8Array; hash: string; revision: number } } | null;
   /** Whether the window's document has a composition Blender renders
    *  (`render3d.enabled`): only then does a capture that prepares its
    *  Blender frame ask the engine (and main) to wait for Blender. */
@@ -339,6 +346,10 @@ export function svgUploadKey(key: SvgRasterKey): string {
 }
 
 export type TransportStats = { sync: number; async: number; idle: number; failed: number; rounds: number; lastFailure: string | null; slowestSyncMs: number; documentSync: number };
+
+function pinViewer(options: EngineSnapshotOptions): EngineSnapshotOptions {
+  return options.viewer ? { ...options, viewer: structuredClone(options.viewer) } : options;
+}
 
 function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): EngineSnapshotError {
   return new EngineSnapshotError(reply.code, reply.message);
@@ -370,10 +381,11 @@ export const VANISHING_RASTER_SCALE = 1e-9;
 export const ANSWER_LOG_LIMIT = 4096;
 
 export class EngineRenderTransport {
+  readonly trace = new RenderPerfTrace();
   private readonly producers = new Map<CompatSource, CompatProducer>();
   /** Producers of viewer frames' and snapshots' compatibility answers. */
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
-  private readonly preparers = new Map<CompatSource, (need: CompatNeed, revision: number) => Promise<void>>();
+  private readonly preparers = new Map<CompatSource, CompatPreparer>();
   private aheadInFlight = 0;
   private prefetchInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
@@ -393,6 +405,7 @@ export class EngineRenderTransport {
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
+  private pausedEditRevision: number | null = null;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
@@ -414,6 +427,7 @@ export class EngineRenderTransport {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
     this.aheadTimer = null;
     this.ahead.clear();
+    this.pausedEditRevision = null;
     this.producers.clear();
     this.answerers.clear();
     this.preparers.clear();
@@ -445,7 +459,7 @@ export class EngineRenderTransport {
    * `needsRenderer` rounds). The session learns which producers it has; the
    * engine asks none without one. Returns an unregister.
    */
-  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>): () => void {
+  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: CompatPreparer): () => void {
     for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
     this.answerers.set(source, answerer);
     if (prepare) this.preparers.set(source, prepare); else this.preparers.delete(source);
@@ -573,7 +587,11 @@ export class EngineRenderTransport {
         ? Math.min(COMPAT_LOOKAHEAD, Math.ceil((this.prepareMs * Math.abs(clock.rate)) / frameMs)) : 0;
       let done = 0, pending = 0;
       const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
-      for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
+      // An edit needs its current pixels first. Preparing an entire paused
+      // playback horizon at every revision competes with the next pointer
+      // move, and those future answers are invalidated by that move anyway.
+      const horizon = !this.options.playing?.() && revision === this.pausedEditRevision ? 0 : COMPAT_LOOKAHEAD;
+      for (let offset = 0; offset <= horizon; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           // Past the loop's end, the frames after the wrap.
@@ -627,7 +645,7 @@ export class EngineRenderTransport {
   /** Prepares one frame's compatibility work ahead; the answer horizon reaching
    *  that frame finds them ready (raster-compat `prepare`). A failure is
    *  reported when that frame's own preparation repeats it. */
-  private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>): void {
+  private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: CompatPreparer): void {
     this.prefetchInFlight++;
     this.lookaheadStats.prefetched++;
     this.lookaheadStats.maxPrefetchInFlight = Math.max(this.lookaheadStats.maxPrefetchInFlight, this.prefetchInFlight);
@@ -637,14 +655,16 @@ export class EngineRenderTransport {
     });
   }
 
-  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
+  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: CompatPreparer, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
     const need = { ...entry.need, time };
     entry.pending.add(time);
     this.aheadInFlight++;
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
-    void Promise.resolve().then(() => prepare(need, revision)).then(() => {
+    this.trace.record('prepare dispatched', revision, time);
+    void Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
+      this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
       this.lookaheadStats.prepareMs = Math.round(this.prepareMs * 10) / 10;
@@ -773,6 +793,7 @@ export class EngineRenderTransport {
    *  new revision at once (the paused warm-up the engine's ask would start). */
   prepareShown(): void {
     if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
+    this.pausedEditRevision = this.options.revision();
     this.presentedWhilePlaying(true);
   }
 
@@ -833,6 +854,7 @@ export class EngineRenderTransport {
       posted = this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
     }
     if (posted) {
+      this.trace.record(`answer posted: ${answer.kind}`, revision, need.time, began);
       this.logAnswer(need, revision, answer.kind, answer.kind === 'native' ? undefined : answer.key);
       this.postedFor.delete(tag);
       this.postedFor.set(tag, answer.kind === 'native' ? 'native' : `raster:${answer.key}`);
@@ -943,7 +965,8 @@ export class EngineRenderTransport {
       captionsHidden: !layer && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
       pixels: options.pixels ?? 'opaque',
       class: cls,
-      viewSeq: this.options.viewSeq(),
+      viewSeq: options.viewer?.viewSeq ?? this.options.viewSeq(),
+      ...(options.viewer ? { viewer: options.viewer } : {}),
       waitMs: Math.max(1, Math.min(120_000, Math.round(wait))),
       ...(blender ? { blenderWaitMs: BLENDER_WAIT_MS } : {}),
       uploaded
@@ -1038,6 +1061,7 @@ export class EngineRenderTransport {
    * here waits for a task.
    */
   snapshotSync(options: EngineSnapshotOptions): EngineSnapshot {
+    options = pinViewer(options);
     const started = performance.now();
     const native = this.options.native;
     if (!native.snapshotSync) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no synchronous engine snapshots.'), 'snapshot');
@@ -1049,8 +1073,12 @@ export class EngineRenderTransport {
     // (the resync's next step would need this thread). Otherwise main serves
     // it from a session of its own, with the document sent along.
     const session = this.options.session();
-    const direct = !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
-    if (!direct && this.options.windowDocument?.()) {
+    const document = this.options.windowDocument?.();
+    // A native document reference also survives a killed utility before this
+    // blocked renderer has received its port-close notification. Main restores
+    // and adopts it independently of the stale viewer session.
+    const direct = !document?.nativeKernel && !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
+    if (!direct && document) {
       // The window's own session (the standby) serves later ones.
       if (!session || session.closed) void this.options.wake?.();
       try {
@@ -1116,14 +1144,15 @@ export class EngineRenderTransport {
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_DEPENDENCY_PHASES + 1; round++) {
-      if (send && !body) body = doc.full();
+      if (send && !body && !doc.nativeKernel) body = doc.full();
       const request = this.request(options, 'sync', uploaded, true, revision);
       request.snapshot.compatUploaded = compatUploaded;
       const reply = native.snapshotSync!({
         ...request,
         session: null,
         revision,
-        document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
+        document: doc.nativeKernel ? { id: doc.id, revision: doc.revision, nativeKernel: true }
+          : body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
         ...(fallbackPixels.length ? { fallbackPixels } : {}),
         ...(compatEvents.length ? { compatEvents } : {}),
         ...(svgPixels.length ? { svgPixels } : {})
@@ -1170,7 +1199,25 @@ export class EngineRenderTransport {
 
   /** The same, asynchronously (`async` or `idle` class). */
   async snapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'> = 'async'): Promise<EngineSnapshot> {
-    return this.snapshotAsyncAt(options, cls);
+    return this.snapshotAsyncAt(pinViewer(options), cls);
+  }
+
+  /** This window's asynchronous snapshots, queued to what main admits (snapshot-slots.ts). */
+  private readonly slots = new SnapshotSlots();
+
+  /**
+   * One snapshot request through the window's slots. Main can still refuse
+   * one for the bytes every window has outstanding: that is a wait as well
+   * (today's capture waits for the GPU), retried as slots free up, within
+   * the class's own wait.
+   */
+  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>): Promise<EngineSnapshotReply> {
+    const until = performance.now() + (cls === 'idle' ? IDLE_WAIT_MS : ASYNC_WAIT_MS);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await this.slots.run(cls, ask);
+      if (reply.status !== 'failed' || reply.code !== 'refused' || performance.now() >= until) return reply;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
+    }
   }
 
   private async snapshotAsyncAt(options: EngineSnapshotOptions, cls: SnapshotClass): Promise<EngineSnapshot> {
@@ -1190,7 +1237,14 @@ export class EngineRenderTransport {
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
-        const reply = await native.snapshot(request);
+        const began = performance.now();
+        const reply = await this.admitted(cls, () => native.snapshot!(request));
+        this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
+        if (reply.status === 'rendered') {
+          this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));
+          this.trace.record('snapshot native wait', reply.revision, request.snapshot.time, began, reply.waitedUs);
+          this.trace.record('snapshot native render', reply.revision, request.snapshot.time, began, reply.renderUs);
+        }
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;
@@ -1505,9 +1559,11 @@ export class EngineThumbnails {
     const ticket = ++this.next;
     this.latest.set(request.key, ticket);
     const required = request.minRevision ?? revision() ?? 0;
+    const viewSeq = request.viewer?.viewSeq;
     try {
       const result = await this.transport.snapshot(request, 'idle');
-      if (this.latest.get(request.key) !== ticket || result.revision < required) {
+      if (this.latest.get(request.key) !== ticket || result.revision < required
+        || (viewSeq !== undefined && result.viewSeq !== viewSeq)) {
         this.stale++;
         return null;
       }

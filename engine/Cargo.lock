@@ -2106,6 +2106,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "libc",
+ "libm",
  "pm-audio",
  "pm-eval",
  "pm-media",
@@ -2113,24 +2114,14 @@ dependencies = [
  "pm-protocol",
  "pm-stretch",
  "pm-time",
- "proptest",
  "rubato",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "pm-blender"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "libc",
- "pm-model",
- "pm-protocol",
- "png",
- "serde_json",
  "sha2",
+ "symphonia",
+ "symphonia-bundle-mp3",
+ "symphonia-core",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2161,15 +2152,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-cache"
-version = "0.1.0"
-
-[[package]]
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
  "libc",
- "pm-blender",
+ "pm-audio",
  "pm-eval",
  "pm-export",
  "pm-media",
@@ -2214,7 +2201,6 @@ dependencies = [
  "libc",
  "pm-model",
  "pm-protocol",
- "proptest",
  "serde",
  "thiserror 2.0.21",
 ]
@@ -2254,9 +2240,9 @@ dependencies = [
  "objc2-io-surface",
  "objc2-video-toolbox",
  "pm-audio",
- "pm-blender",
  "pm-eval",
  "pm-export",
+ "pm-gpu",
  "pm-media",
  "pm-model",
  "pm-protocol",
@@ -2296,14 +2282,11 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
- "libc",
  "naga",
- "proptest",
  "rspirv",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2354,11 +2337,11 @@ dependencies = [
  "pm-color",
  "pm-protocol",
  "pm-time",
- "proptest",
  "resvg",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2383,7 +2366,6 @@ dependencies = [
  "napi-derive",
  "objc2",
  "pm-audio",
- "pm-blender",
  "pm-bridge",
  "pm-engine",
  "pm-eval",
@@ -2396,9 +2378,12 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-text",
+ "pm-time",
+ "pm-wasm",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "wgpu",
 ]
 
@@ -2451,18 +2436,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-proxy"
+name = "pm-reference"
 version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "libm",
+ "pm-color",
+ "pm-protocol",
+]
 
 [[package]]
 name = "pm-render"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "flate2",
  "kurbo",
  "libm",
- "pm-blender",
  "pm-color",
  "pm-edit",
  "pm-eval",
@@ -2475,6 +2464,7 @@ dependencies = [
  "pm-model",
  "pm-perf",
  "pm-protocol",
+ "pm-reference",
  "pm-text",
  "pm-time",
  "pm-vector",
@@ -2494,7 +2484,6 @@ dependencies = [
 name = "pm-skia-path"
 version = "0.12.0"
 dependencies = [
- "arrayref",
  "bytemuck",
  "libm",
  "strict-num",
@@ -2569,7 +2558,6 @@ dependencies = [
 name = "pm-wasm"
 version = "0.1.0"
 dependencies = [
- "flate2",
  "pm-edit",
  "pm-eval",
  "pm-expr",
@@ -2844,6 +2832,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
@@ -3248,6 +3242,56 @@ checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
 dependencies = [
  "kurbo",
  "siphasher",
+]
+
+[[package]]
+name = "symphonia"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1758d6c853020a7244de03cc3e0185eaea3f58715122422dd3cc7452e6d4c16a"
+dependencies = [
+ "lazy_static",
+ "symphonia-bundle-mp3",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-mp3"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350f1f2f2e19ad4dd315db94304d1eb361b29af070681f94e51b8fdaad769546"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-core"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ec293b5f288383b72a7bffcade6b2860b642cf66f28b3bd5967349a49938b1"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "lazy_static",
+ "log",
+ "num-complex",
+ "smallvec",
+]
+
+[[package]]
+name = "symphonia-metadata"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31acf5cd623398a6208e2225d18f4b20f761c55098a796a5247ad516a4a8681"
+dependencies = [
+ "lazy_static",
+ "log",
+ "regex-lite",
+ "smallvec",
+ "symphonia-core",
 ]
 
 [[package]]

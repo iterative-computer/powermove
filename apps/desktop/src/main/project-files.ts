@@ -36,7 +36,7 @@ export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<
 
 type Association = { path: string; hash: string; generation?: number };
 type OpenedProject = { path: string; projectId: string; token: string; size: number; media: ProjectMediaRange[] };
-type FullProject = OpenedProject & { document: any; documentRange?: ProjectRecord };
+type FullProject = OpenedProject & { document: any; documentJSON: string; documentMember?: 'document'; documentRange?: ProjectRecord };
 type RangeProject = OpenedProject & { document?: never; documentRange: ProjectRecord };
 type HashResult = { ok: true; hash: string } | { ok: false; error: unknown };
 
@@ -45,7 +45,7 @@ export class ProjectFiles {
   private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; busy: boolean }>();
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
-  private queue: Promise<unknown> = Promise.resolve();
+  private queue: Promise<void> = Promise.resolve();
   private saving = new Set<string>();
   private readonly validateDocument: ProjectDocumentValidator;
   private readonly storedFile: ProjectFilesOptions['storedFile'];
@@ -224,6 +224,13 @@ export class ProjectFiles {
       } finally { if (!retainTemporary) await unlink(temporary).catch(() => undefined); }
     });
   }
+  /** `documentJSON` is the JSON text `document` was parsed from (for a PMV3
+   * container, its header's, with the document under `documentMember`). The
+   * window receives the text rather than the object: an object crossing the
+   * renderer's context bridge is copied member by member on its JavaScript
+   * thread, which took 62 to 119 s for the large private projects (C1). A
+   * large PMV4 document may instead stay in the file (`documentRange`) for
+   * the window's bounded reader. */
   open(filePath: string): Promise<FullProject>;
   open(filePath: string, options: { allowDocumentRange?: boolean }): Promise<FullProject | RangeProject>;
   open(filePath: string, options: { allowDocumentRange?: boolean } = {}): Promise<FullProject | RangeProject> {
@@ -244,7 +251,7 @@ export class ProjectFiles {
           return buffer;
         };
         const prefix = await readExactly(0, Math.min(9, info.size));
-        let document: any, rangeValidated = false, rangeReaderVersion = 0, media: ProjectMediaRange[] = [], documentRange: ProjectRecord | undefined, mediaToVerify: ProjectRecord[] = [];
+        let document: any, documentJSON = '', documentMember: 'document' | undefined, rangeValidated = false, rangeReaderVersion = 0, media: ProjectMediaRange[] = [], documentRange: ProjectRecord | undefined, mediaToVerify: ProjectRecord[] = [];
         if (isIncrementalProject(prefix)) {
           const index = await readIncrementalIndex(info.size, readExactly, nativeHash);
           const workerRange = options.allowDocumentRange && index.document.length >= WORKER_DOCUMENT_BYTES;
@@ -267,11 +274,13 @@ export class ProjectFiles {
               // fails. Retry the original checksum/parser on the same handle.
               if (bytes.byteLength !== index.document.length) bytes = await readExactly(index.document.offset, index.document.length);
               if (await nativeHash(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
-              document = JSON.parse(bytes.toString('utf8'));
+              documentJSON = bytes.toString('utf8');
+              document = JSON.parse(documentJSON);
             }
           } else {
             if (await nativeHash(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
-            document = JSON.parse(bytes.toString('utf8'));
+            documentJSON = bytes.toString('utf8');
+            document = JSON.parse(documentJSON);
           }
           media = index.media;
           mediaToVerify = index.media;
@@ -280,12 +289,15 @@ export class ProjectFiles {
           if (prefix.length < 9) throw new Error('The project container is truncated.');
           const headerLength = prefix.readUInt32LE(5);
           if (headerLength < 2 || headerLength > info.size - 9) throw new Error('The project container header is invalid.');
-          const header = JSON.parse((await readExactly(9, headerLength)).toString('utf8'));
+          documentJSON = (await readExactly(9, headerLength)).toString('utf8');
+          documentMember = 'document';
+          const header = JSON.parse(documentJSON);
           ({ document, media } = projectContainerIndex(header, 9 + headerLength, info.size));
         } else {
           // Legacy JSON stores its media inside the document itself. Keep that
           // format readable alongside PMV3 and incremental PMV4.
-          document = JSON.parse((await readExactly(0, info.size)).toString('utf8'));
+          documentJSON = (await readExactly(0, info.size)).toString('utf8');
+          document = JSON.parse(documentJSON);
         }
         // A newer build may change the document's shape; say why it cannot open.
         // A worker-validated range is parsed only there; it reports the stamps.
@@ -310,7 +322,7 @@ export class ProjectFiles {
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
         const opened = { path: filePath, projectId, token, size: info.size };
         return rangeValidated ? { ...opened, media, documentRange: documentRange! }
-          : { ...opened, document, media, ...(documentRange ? { documentRange } : {}) };
+          : { ...opened, document, documentJSON, ...(documentMember ? { documentMember } : {}), media, ...(documentRange ? { documentRange } : {}) };
       } catch (error) { hashingAbort?.abort(); await hashing; await handle.close(); throw error; }
     });
   }

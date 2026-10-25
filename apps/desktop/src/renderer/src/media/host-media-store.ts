@@ -74,10 +74,13 @@ export async function hashBlob(blob: Blob, onChunk?: (data: Uint8Array, offset: 
 /** Streams a Blob into the store under `key`; main commits it only when
  *  the bytes it wrote hash to what was read here. */
 export async function streamToStore(host: MediaStoreBridge, key: string | null, blob: Blob,
-  options: { type?: string; revision?: string | null; origin?: MediaRecordSource } = {}): Promise<MediaStoreRecord & { sha256: string }> {
+  options: { type?: string; revision?: string | null; origin?: MediaRecordSource; onProgress?: (fraction: number) => void } = {}): Promise<MediaStoreRecord & { sha256: string }> {
   const token = await host.beginPut({ key, type: options.type ?? blob.type ?? '', size: blob.size, revision: options.revision ?? null, origin: options.origin ?? 'stream' });
   try {
-    const hash = await hashBlob(blob, (data, offset) => host.putChunk(token, offset, data));
+    const hash = await hashBlob(blob, async (data, offset) => {
+      await host.putChunk(token, offset, data);
+      options.onProgress?.(blob.size ? (offset + data.length) / blob.size : 1);
+    });
     return await host.finishPut(token, { blake3: hash });
   } catch (error) {
     await host.abortPut(token).catch(() => undefined);
@@ -148,7 +151,7 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
    * project opened on another Mac). Read the result with
    * `media.readPlaybackProxy`.
    */
-  convert(kind: ConversionKind, original: Blob, ref: { hash?: string | null; link?: MediaLink | null; name: string }): Promise<MediaConversion>;
+  convert(kind: ConversionKind, original: Blob | null, ref: { hash?: string | null; link?: MediaLink | null; name: string }): Promise<MediaConversion>;
   /**
    * Opening a project file with the new engine: main copies an embedded
    * media range from the open file (`readToken`) straight into the store,
@@ -159,7 +162,7 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
   putProjectRange(readToken: string, source: { id: string; type: string; offset: number; length: number; revision?: string; sha256?: string },
     meta: any, onBytes?: (bytes: number) => void): Promise<boolean>;
   /** Copies IndexedDB media under these assets into the store (verified). */
-  migrate(assets: any[]): Promise<{ copied: number; present: number; missing: number; failed: number }>;
+  migrate(assets: any[], onProgress?: (done: number, total: number) => void): Promise<{ copied: number; present: number; missing: number; failed: number }>;
   readonly host: MediaStoreBridge;
 };
 
@@ -199,7 +202,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
 
   /** Copies one IndexedDB blob into the store and verifies it by hash.
    *  IndexedDB is never written or deleted here. */
-  const migrateBlob = (key: string, blob: Blob, revision: string | null, hash: string | null = null): Promise<boolean> => {
+  const migrateBlob = (key: string, blob: Blob, revision: string | null, hash: string | null = null, onProgress?: (fraction: number) => void): Promise<boolean> => {
     let job = migrations.get(key);
     if (!job) {
       job = (async () => {
@@ -208,7 +211,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         /* The key already names other content that shares the sampled
            fingerprint: keep this asset's bytes by content alone. */
         const keep = existing && hash && existing.hash !== hash ? null : key;
-        const record = await streamToStore(host, keep, blob, { type: blob.type, revision, origin: 'indexeddb' });
+        const record = await streamToStore(host, keep, blob, { type: blob.type, revision, origin: 'indexeddb', onProgress });
         if (keep) remember(record);
         return !hash || record.hash === hash;
       })().catch((error) => { warn(`could not copy ${key} from IndexedDB`, error); return false; })
@@ -402,18 +405,28 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
       }
     },
 
-    async migrate(assets) {
+    async migrate(assets, onProgress) {
       const counts = { copied: 0, present: 0, missing: 0, failed: 0 };
-      for (const asset of assets) {
-        if (!asset || isLinked(asset)) continue;
-        const key = storageKeyOf(asset);
-        if (!key) continue;
-        if (await recordOf(asset).catch(() => null)) { counts.present++; continue; }
-        const saved = await legacy.getForSave?.(asset).catch(() => null);
-        const blob = saved?.blob ?? await legacy.get(asset).catch(() => null);
-        if (!blob) { counts.missing++; continue; }
-        if (await migrateBlob(key, blob, saved?.revision ?? null, contentHashOf(asset))) counts.copied++;
-        else counts.failed++;
+      const pending = assets.filter(asset => asset && !isLinked(asset) && storageKeyOf(asset));
+      let completed = 0;
+      let copying = false;
+      for (const asset of pending) {
+        try {
+          const key = storageKeyOf(asset)!;
+          const present = await recordOf(asset).catch(() => null);
+          if (present) { remember(present); counts.present++; continue; }
+          const saved = await legacy.getForSave?.(asset).catch(() => null);
+          const blob = saved?.blob ?? await legacy.get(asset).catch(() => null);
+          if (!blob) { counts.missing++; continue; }
+          copying = true;
+          onProgress?.(completed, pending.length);
+          if (await migrateBlob(key, blob, saved?.revision ?? null, contentHashOf(asset),
+            fraction => onProgress?.(completed + fraction, pending.length))) counts.copied++;
+          else counts.failed++;
+        } finally {
+          completed++;
+          if (copying) onProgress?.(completed, pending.length);
+        }
       }
       return counts;
     }
@@ -495,13 +508,13 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
     store,
     /** Imports await the host's binding before exposing a playable asset:
      * immediate exports must not mistake the debounce window for offline media. */
-    async flushBindings(project = PM.proj): Promise<void> {
+    async flushBindings(project = PM.proj, onProgress?: (done: number, total: number) => void): Promise<void> {
       if (!enabled || !project?.id || !/^[A-Za-z0-9_-]{1,120}$/.test(project.id)) return;
       // Imports already have cached records. Keep their original immediate
       // bind; an extra IPC read here lets the viewer outrun the acknowledgement.
       const pending = Object.values<any>(project.assets || {}).filter(meta =>
         !isLinked(meta) && !store.recordFor(storageKeyOf(meta)));
-      if (pending.length) await store.migrate(pending);
+      if (pending.length) await store.migrate(pending, onProgress);
       await host.bind(project.id, bindingsFor(project, store.recordFor));
     },
     decide: (input: Parameters<typeof decideImport>[1]) => decideImport(host, { ...input, enabled }),

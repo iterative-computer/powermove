@@ -99,8 +99,6 @@ export type EngineStatusMessage = {
   processes: Record<EngineProcess, { state: EngineProcessState; generation: number; attempts: number }>;
 };
 
-export type EngineCrashMessage = CrashReport;
-
 export type StageDocumentRequest = { process: EngineProcess; session: number; bytes: Uint8Array };
 
 /** The export sheet's settings for one export (exporter.ts), in composition
@@ -119,6 +117,8 @@ export type SheetExportOptions = {
   start: number;
   end: number;
   audio: boolean;
+  /** Seconds at the last audioLayers index build. */
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   quality: 'draft' | 'high' | 'max';
   delivery?: Partial<DeliveryOptions>;
@@ -136,6 +136,7 @@ export function validSheetExportOptions(value: unknown): value is SheetExportOpt
   if (!value || typeof value !== 'object') return false;
   const o = value as Record<string, unknown>;
   const finite = (k: string) => typeof o[k] === 'number' && Number.isFinite(o[k] as number);
+  if (o['audioIndexPlayhead'] !== undefined && (!finite('audioIndexPlayhead') || (o['audioIndexPlayhead'] as number) < 0)) return false;
   if (typeof o['format'] !== 'string' || migrateFormat(o['format'], 'web') === 'web' || o['format'] === 'json') return false;
   if (!['fps', 'scale', 'start', 'end'].every(finite)) return false;
   const fps = o['fps'] as number, scale = o['scale'] as number, start = o['start'] as number, end = o['end'] as number;
@@ -278,7 +279,7 @@ export type EngineSnapshotRequest = {
 /** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
 export type EngineCompatEvent = { type: 'compat'; compat: 'producers' | 'native' | 'reuse' | 'pixels' } & Record<string, unknown>;
 
-export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
+export type EngineSnapshotDocument = { id: string; revision: number; nativeKernel?: true; hash?: string | null; json?: Uint8Array | null };
 
 /** What a snapshot came back with. `data` is RGBA8, rows top-down, in
  *  `pixels`'s encoding. `empty`: a layer target that draws nothing then
@@ -353,6 +354,7 @@ export type EngineCompatAnswer =
  *  (`ENGINE_WINDOW_MESSAGE`) because a `MessagePort` cannot cross the
  *  context bridge. */
 export interface EngineBridge {
+  documentKernel?: import('./document-kernel').DocumentKernelBridge;
   status(): Promise<EngineStatusMessage>;
   /** Whether this launch runs the new engine (read once at launch). */
   enabledSync(): boolean;

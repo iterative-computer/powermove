@@ -233,6 +233,66 @@ test.describe('Use New Engine: J/K/L, play around, and audio scrub', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('a Play forwarded before the warm-up opened the device starts at the playhead', async ({ session }) => {
+    const { page } = session;
+    await openEngine(session);
+    await solidsProject(page);
+    await waitDriving(page);
+    await page.evaluate(() => {
+      const input = document.createElement('input');
+      input.id = 'a7-open-play'; input.type = 'file'; input.hidden = true;
+      document.body.appendChild(input);
+    });
+    await page.locator('#a7-open-play').setInputFiles(fixturePath('tone.wav'));
+    // The playhead moves to 1 s, and exact seeks keep reaching the audio
+    // thread faster than its 100 ms warm-up idle: the device stays closed
+    // while the audible edit's route is decided and the ingress forwards.
+    await page.evaluate(async () => {
+      const w = window as any;
+      const PM = w.PM;
+      const input = document.getElementById('a7-open-play') as HTMLInputElement;
+      const asset = await PM.assets.add(input.files![0], { newAsset: true, silent: true });
+      PM.proj.layers.push(PM.mkLayer('audio', { from: 0, dur: 1.5, d: { asset: asset.id, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 } }, PM.proj));
+      PM.touch(); PM.bus.emit('layers'); PM.bus.emit('project'); PM.bus.emit('assets'); PM.invalidate();
+      PM.setTime(1);
+      w.__a7Busy = setInterval(() => PM.EngineConnection.transport.seek(1, false), 20);
+    });
+    const audio = async (): Promise<any> => {
+      const report = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.report('interactive'));
+      return Object.values(report.presenter.audio ?? {})[0] ?? null;
+    };
+    await expect.poll(async () => (await audio()) !== null, { timeout: 10_000 }).toBe(true);
+    await expect.poll(async () => (await status(page)).route, { timeout: 10_000 }).toBe('engine');
+    await page.waitForTimeout(500);
+    const before = await audio();
+    expect(before, 'the viewer has its audio link').not.toBeNull();
+    expect(before.device, 'no device opened before Play').toBeNull();
+    const started = await page.evaluate(async () => {
+      const w = window as any;
+      const PM = w.PM;
+      clearInterval(w.__a7Busy);
+      PM.play();
+      const deadline = performance.now() + 5_000;
+      while (performance.now() < deadline) {
+        const clock = PM.EngineConnection.session()?.clock;
+        if (clock && clock.state === 'playing') return clock.mediaTime as number;
+        await new Promise(r => setTimeout(r, 1));
+      }
+      return null;
+    });
+    expect(started, 'the audio clock started').not.toBeNull();
+    // The run starts where the playhead is (1 s), not at a new transport's 0.
+    expect(started! / 705_600_000).toBeGreaterThanOrEqual(1 - 1 / 30);
+    expect(started! / 705_600_000).toBeLessThan(1.25);
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => (window as any).PM.time as number)).toBeGreaterThan(1);
+    await page.evaluate(() => (window as any).PM.pause());
+    const after = await audio();
+    expect(after.device, 'Play opened the device').not.toBeNull();
+    expect(after.problems).toEqual([]);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('audio scrub plays grains while scrubbing and stepping; meters and waveforms come from the engine', async ({ session }) => {
     const { page } = session;
     await openEngine(session);

@@ -5,8 +5,8 @@ import { DEPRECATION_GUIDANCE, formatDeprecationWarning, type ExtensionDeprecati
 export const AGENT_TASK_GUIDANCE = `TASK FOCUS
 Use the simplest supported workflow. Questions: no edits. Preserve decisions; newest corrections win. Recover omissions with thread_read.
 Inspect live targets/frames. get_project_state indexOnly/layerSearch/nextLayerOffset discovers targets; then read properties. Missing entries are not missing capabilities.
-Auto and Supervised support project edits and extension creation. Full access changes permissions only. Composition only needs Auto/Supervised for authoring.
-Relevant procedures only. Never replace effects with panels or simple keyframes with extensions; no test scenes in the user's project.`;
+Auto and Supervised support project edits and extension creation. Full access changes permissions only.
+Relevant procedures only. Never replace effects with panels or simple keyframes with extensions.`;
 
 export const AGENT_CREATIVE_GUIDANCE = `CREATIVE JUDGMENT
 Follow the brief/references/style with one clear visual idea: coherent type scale, restrained color, consistent spacing, focal point, legible text/readable holds. Make entrances/exits/easing/rhythm purposeful; avoid gratuitous motion/dead time. Inspect beginning/middle/end/transitions. Fix visible defects; valid source alone is not visual quality.`;

@@ -15,8 +15,8 @@ path = "src/main.rs"
 test = true
 
 [dependencies]
+pm-audio = { path = "../pm-audio" }
 pm-export = { path = "../pm-export" }
-pm-blender = { path = "../pm-blender" }
 pm-render = { path = "../pm-render" }
 pm-model = { path = "../pm-model" }
 pm-eval = { path = "../pm-eval" }

@@ -19,7 +19,6 @@
 //! current engine's.
 
 pub mod audio;
-pub mod blender;
 pub mod clock;
 pub mod compat;
 pub mod complete;
@@ -232,6 +231,7 @@ struct Meta {
 pub struct BridgePresenter {
     config: PresenterConfig,
     tx: Sender<Command>,
+    audio_ingress: audio::AudioIngress,
     thread: Option<JoinHandle<()>>,
     stats: Arc<Mutex<Stats>>,
     views: BTreeMap<Key, Meta>,
@@ -239,10 +239,6 @@ pub struct BridgePresenter {
     playing: BTreeSet<Key>,
     generations: Generations,
     told_no_source: bool,
-    /// The paused viewer's Blender jobs: host calls made from its worker
-    /// (`blender`), and the previews (document source only).
-    link: Option<Arc<crate::jobs::blender::HostLink>>,
-    blender: Option<Arc<blender::PreviewBlender>>,
     /// The viewer's frame cache: the share sent to the render thread and
     /// the bytes reserved for it in the lease.
     frame_cache: Option<usize>,
@@ -277,8 +273,10 @@ impl BridgePresenter {
         let thread_config = config.thread.clone();
         let generations = Generations::default();
         let thread_generations = generations.clone();
-        let thread_sink = sink.clone();
+        let thread_sink = sink;
         let back = tx.clone();
+        let audio_ingress = audio::AudioIngress::default();
+        let thread_audio_ingress = audio_ingress.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
             "pm-viewer-present",
@@ -290,79 +288,21 @@ impl BridgePresenter {
                     thread_sink,
                     thread_stats,
                     thread_generations,
+                    thread_audio_ingress,
                 )
             },
         )
         .map_err(|e| format!("could not start the viewer presenter: {e}"))?;
-        // Documents get Blender shading while paused: its host calls wake
-        // the utility process through the sink (it then calls `pump`).
-        let (link, blender) = if config.source == Some(FrameSource::Document) {
-            let wake_sink = sink.clone();
-            let link = crate::jobs::blender::HostLink::new(Arc::new(move || wake_sink(Vec::new())));
-            let ready = tx.clone();
-            let blender = blender::PreviewBlender::start(
-                link.clone(),
-                sink,
-                stats.clone(),
-                Box::new(move |notice| {
-                    let _ = ready.send(match notice {
-                        blender::Notice::Started {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        } => Command::BlenderStarted {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        },
-                        blender::Notice::Ready {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        } => Command::BlenderReady {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        },
-                        blender::Notice::Failed {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                            error,
-                        } => Command::BlenderFailed {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                            error,
-                        },
-                        blender::Notice::Captured { token, result } => {
-                            Command::BlenderCaptured { token, result }
-                        }
-                    });
-                }),
-            )?;
-            let _ = tx.send(Command::UseBlender(blender.clone()));
-            (Some(link), Some(blender))
-        } else {
-            (None, None)
-        };
         Ok(Self {
             config,
             tx,
+            audio_ingress,
             thread: Some(thread),
             stats,
             views: BTreeMap::new(),
             playing: BTreeSet::new(),
             generations,
             told_no_source: false,
-            link,
-            blender,
             frame_cache: None,
             frame_cache_reserved: 0,
         })
@@ -610,6 +550,13 @@ impl FramePresenter for BridgePresenter {
             return;
         }
         let key = (port, session);
+        if self
+            .views
+            .get(&key)
+            .is_some_and(|meta| meta.state.composition != state.composition)
+        {
+            self.audio_ingress.forget(key);
+        }
         // A new surface epoch: the viewer cannot read the surfaces it has
         // (its GPU process restarted), so both pools are made again.
         let renew = self
@@ -675,13 +622,21 @@ impl FramePresenter for BridgePresenter {
                 self.playing.remove(&key)
             }
         });
+        let at = pm_bridge::now_us();
+        if matches!(command, TransportCommand::Step { .. }) {
+            self.audio_ingress.forget(key);
+        }
+        // The audio prepares the run at once (PLAY-1); the render thread
+        // times its start.
+        let audio_forwarded = self.audio_ingress.transport(key, command);
         // The Play first: the run's start frames, rendered while paused,
         // go out from the paused pool before the playing pool replaces it
         // (the viewer draws them across the replacement).
         self.send(Command::Transport {
             key,
             command,
-            at: pm_bridge::now_us(),
+            at,
+            audio_forwarded,
         });
         if transition.is_some() {
             self.replan_transport_pool(ctx, key);
@@ -782,11 +737,15 @@ impl FramePresenter for BridgePresenter {
     }
 
     fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
+        if ctx.lease_reason() == Some(pm_protocol::lease::LeaseReason::MemoryPressure) {
+            self.send(Command::AudioMemoryPressure);
+        }
         self.sync_frame_cache(ctx);
     }
 
     fn session_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId, session: SessionId) {
         let key = (port, session);
+        self.audio_ingress.forget(key);
         self.forget(ctx, key);
         self.playing.remove(&key);
         self.send(Command::Close { key });
@@ -795,30 +754,11 @@ impl FramePresenter for BridgePresenter {
     fn port_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId) {
         let keys: Vec<Key> = self.views.keys().filter(|k| k.0 == port).copied().collect();
         for key in keys {
+            self.audio_ingress.forget(key);
             self.forget(ctx, key);
         }
         self.playing.retain(|key| key.0 != port);
         self.send(Command::ClosePort { port });
-    }
-
-    fn drain_host_requests(&mut self) -> Vec<pm_engine::jobs::HostRequest> {
-        self.link.as_ref().map(|l| l.drain()).unwrap_or_default()
-    }
-
-    fn host_answer(
-        &mut self,
-        token: u64,
-        answer: Result<pm_protocol::envelope::Response, EngineError>,
-    ) {
-        if let Some(link) = &self.link {
-            link.answer(token, answer);
-        }
-    }
-
-    fn host_event(&mut self, event: &pm_protocol::envelope::Event) {
-        if let Some(link) = &self.link {
-            link.event(event);
-        }
     }
 
     fn renders_documents(&self) -> bool {
@@ -831,11 +771,29 @@ impl FramePresenter for BridgePresenter {
         port: PortId,
         session: SessionId,
         update: pm_engine::document::DocumentUpdate,
+        provisional: bool,
     ) {
+        let key = (port, session);
+        let audio_forwarded = self.audio_ingress.document(key, &update);
         self.send(Command::Document {
-            key: (port, session),
+            key,
+            audio_forwarded,
             update,
+            provisional,
             posted: render::now_us(),
+        });
+    }
+
+    fn confirm(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        revision: Revision,
+    ) {
+        self.send(Command::Confirm {
+            key: (port, session),
+            revision,
         });
     }
 
@@ -865,6 +823,7 @@ impl FramePresenter for BridgePresenter {
         asset: &str,
         path: Option<std::path::PathBuf>,
     ) {
+        self.audio_ingress.forget((port, session));
         self.send(Command::Media {
             key: (port, session),
             asset: asset.to_owned(),
@@ -875,10 +834,6 @@ impl FramePresenter for BridgePresenter {
 
 impl Drop for BridgePresenter {
     fn drop(&mut self) {
-        // Blender first: a running preview job is cancelled.
-        if let Some(blender) = self.blender.take() {
-            blender.shutdown();
-        }
         let _ = self.tx.send(Command::Shutdown);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -943,14 +898,13 @@ mod tests {
         let presenter = BridgePresenter {
             config,
             tx,
+            audio_ingress: audio::AudioIngress::default(),
             thread: None,
             stats: Arc::default(),
             views: BTreeMap::new(),
             playing: BTreeSet::new(),
             generations: Generations::default(),
             told_no_source: false,
-            link: None,
-            blender: None,
             frame_cache: None,
             frame_cache_reserved: 0,
         };
@@ -958,11 +912,15 @@ mod tests {
     }
 
     fn grant(budget: &mut LeaseBudget, epoch: u64, bytes: u64) -> bool {
+        grant_reason(budget, epoch, bytes, LeaseReason::MemoryPressure)
+    }
+
+    fn grant_reason(budget: &mut LeaseBudget, epoch: u64, bytes: u64, reason: LeaseReason) -> bool {
         let lease = Lease {
             process: EngineProcess::Interactive,
             epoch: Seq::new(epoch).unwrap(),
             bytes: ByteSize::new(bytes).unwrap(),
-            reason: LeaseReason::MemoryPressure,
+            reason,
             ack_deadline_ms: 500,
         };
         budget
@@ -1005,6 +963,29 @@ mod tests {
     }
 
     #[test]
+    fn only_explicit_host_memory_pressure_flushes_the_audio_cache() {
+        let (mut p, rx) = presenter();
+        let mut budget = LeaseBudget::new(EngineProcess::Interactive);
+        let mut evict = NoEviction;
+        for (i, reason) in [
+            LeaseReason::Initial,
+            LeaseReason::PlaybackStarted,
+            LeaseReason::PlaybackStopped,
+            LeaseReason::MemoryPressure,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(grant_reason(&mut budget, i as u64 + 1, 4096 * MIB, reason));
+            p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+            let flush = rx
+                .try_iter()
+                .any(|command| matches!(command, Command::AudioMemoryPressure));
+            assert_eq!(flush, reason == LeaseReason::MemoryPressure, "{reason:?}");
+        }
+    }
+
+    #[test]
     fn paused_pools_expand_after_the_play_and_shrink_after_pause() {
         let (mut p, rx) = presenter();
         let mut budget = LeaseBudget::new(EngineProcess::Interactive);
@@ -1039,6 +1020,7 @@ mod tests {
             })
         ));
 
+        let audio = p.audio_ingress.test_endpoint(key);
         p.transport(
             &mut PresentContext::new(&mut budget, &mut evict),
             port,
@@ -1046,6 +1028,13 @@ mod tests {
             TransportCommand::Play {
                 rate: PlaybackRate::NORMAL,
             },
+        );
+        assert!(
+            matches!(
+                audio.try_recv().unwrap(),
+                audio::AudioCtl::Transport(TransportCommand::Play { .. })
+            ),
+            "audio receives Play independently of the queued surface work"
         );
         assert_eq!(p.views[&key].pool.unwrap().0.count, 8);
         assert_eq!(p.views[&key].depth.unwrap().0.count, 16);
@@ -1075,6 +1064,7 @@ mod tests {
             &commands[play_at],
             Command::Transport {
                 command: TransportCommand::Play { .. },
+                audio_forwarded: Some(_),
                 ..
             }
         ));

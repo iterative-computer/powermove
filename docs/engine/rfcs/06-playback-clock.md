@@ -26,6 +26,8 @@ from the renderer are notifications; the clock samples are the answer.
 | `AudioMessage` | One session-bound `audio` event between the renderer and the interactive engine: `monitor` (the mixer's monitor solo, renderer → engine), `levels` (`AudioLevels`: peak and RMS per bus channel of each strip and the master, with the media time heard; engine → renderer about 30 a second while playing, once silent when it stops), `peaksWanted` (renderer → engine) and `peaks` (`AudioPeaks`: an asset's 100-a-second envelope or why there is none) |
 | `HostMicros` (contract 9) | A monotonic host instant in microseconds shared by every process on the machine: `mach_absolute_time` converted to µs on macOS, `QueryPerformanceCounter` on Windows, `CLOCK_MONOTONIC` on Linux |
 
+Waveform requests carry an optional `request: Seq`. The worker echoes it on both successful and failed `AudioPeaks` replies, including cached envelopes. Consumers allocate a new generation after relink, replacement and full document resync, and reject a reply whose generation is no longer current. A request waiting for media resolution retains the latest generation for that session and asset. Omitted generations remain accepted by the engine for older wire clients.
+
 ## Invariants
 
 1. **One formula.** `ClockSample::media_time_at(at)` is the only way to

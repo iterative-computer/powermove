@@ -87,6 +87,7 @@ fn settings(
             end: Ticks::new(FRAMES as i64 * 1001 * TICKS_PER_SECOND / 24000).unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: if image {
             OutputColor::SrgbImage
@@ -166,6 +167,7 @@ fn renderer_for(path: &Path) -> Renderer {
     let mut r = Renderer::headless().unwrap();
     let mut c = r.video_color(path).unwrap();
     c.matrix = MatrixCoefficients::Bt709;
+    c.primaries = pm_protocol::color::Primaries::Bt709;
     r.interpret(path, Some(c));
     r
 }

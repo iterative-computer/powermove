@@ -28,7 +28,7 @@ use pm_protocol::host::{
 use pm_protocol::shader_fallback::HostShaderFallback;
 use pm_render::shader_layers::{FallbackFailure, FallbackHost, FallbackJob, FallbackPixels};
 
-use super::blender::HostPort;
+use super::HostPort;
 
 /// How long one request may take in the host (a window's runner compiles
 /// with a 10 s deadline and draws each pass under its own 10 s deadline;
@@ -216,7 +216,6 @@ impl<P: HostPort + ?Sized> FallbackHost for HostFallback<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_protocol::common::JobId;
     use pm_protocol::error::{EngineError, ErrorScope};
     use pm_protocol::host::HandleResolved;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -290,12 +289,6 @@ mod tests {
             let length = self.output_bytes.lock().unwrap().unwrap_or(input.len());
             std::fs::write(self.dir.join(&f.output), &input[..length.min(input.len())]).unwrap();
             Some(Ok(Response::Ack))
-        }
-
-        fn begin_blender_job(&self, _: &JobId) {}
-
-        fn take_blender_surfaces(&self, _: &JobId) -> Vec<pm_protocol::blender::BlenderSurface> {
-            vec![]
         }
     }
 

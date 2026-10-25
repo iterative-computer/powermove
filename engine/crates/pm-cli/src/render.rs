@@ -546,6 +546,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             end: seconds_to_ticks(end)?,
         },
         audio: !options.no_audio && !format.is_image(),
+        audio_index_playhead: None,
         motion_blur: false,
         color,
         precision,
@@ -580,31 +581,6 @@ fn member_array(doc: &Document, key: &str) -> Option<(f64, f64)> {
         _ => None,
     };
     Some((n(0)?, n(1)?)).filter(|(a, b)| b > a)
-}
-
-/// A Blender stage on the installed Blender when the job's composition
-/// renders with Blender (`render3d.enabled`): surfaces cached under the
-/// user's caches folder.
-fn blender_stage(
-    job: &ExportJob,
-) -> Result<Option<pm_export::blender::ExportBlender>, pm_blender::BlenderError> {
-    let needs = pm_render::unsupported_with_media(&job.document, &job.composition, &*job.media)
-        .iter()
-        .any(|u| u.feature == pm_render::Feature::Blender);
-    if !needs {
-        return Ok(None);
-    }
-    let caches = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Library/Caches/powermove-cli/Blender Surfaces");
-    let backend = pm_blender::job::LocalBackend::discover(&std::env::temp_dir())?;
-    let stage =
-        pm_blender::job::BlenderStage::new(pm_blender::SurfaceCache::new(512 << 20, Some(caches)));
-    Ok(Some(pm_export::blender::ExportBlender::new(
-        stage,
-        Box::new(backend),
-    )))
 }
 
 /// Runs `pm-cli render`. Returns the JSON summary printed on success.
@@ -646,6 +622,8 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         mode: None,
         seed: 1,
     };
+    let missing_media =
+        pm_export::render::offline_media(&job.document, &job.composition, &job.media);
     install_interrupt();
     let Headless {
         mut renderer,
@@ -674,13 +652,23 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
             );
         }
     };
-    // Blender compositions (contract 11): the CLI host runs the pinned
-    // worker in the installed Blender itself.
-    let mut blender = blender_stage(&job).map_err(|e| Failure::Failed(e.to_string()))?;
-    let delivered = pm_export::render::plan_export_for(&job, blender.is_some(), &renderer)
+    let mut decoder_notice = None;
+    let delivered = pm_export::render::plan_export_for(&job, &renderer)
         .and_then(|plan| {
+            if let Some(audio) = &plan.audio {
+                decoder_notice = pm_audio::chromium::fallback_notice(
+                    audio
+                        .graph
+                        .voices
+                        .iter()
+                        .map(|v| v.source.info.codec.as_str()),
+                );
+                if let Some(n) = &decoder_notice {
+                    eprintln!("pm-cli: warning: {n}");
+                }
+            }
             let sink = pm_export::render::sink_for(&plan)?;
-            pm_export::render::run_export_with_blender(
+            pm_export::render::run_export_into(
                 &mut renderer,
                 &job,
                 plan,
@@ -688,7 +676,6 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
                 &Unrestricted,
                 &INTERRUPTED,
                 &mut progress,
-                blender.as_mut(),
             )
         })
         .map_err(|e| match e {
@@ -704,7 +691,12 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     }
     Ok(serde_json::json!({
         "path": delivered.path,
+        "missingMedia": missing_media.iter().map(|clip| serde_json::json!({
+            "asset": clip.asset, "name": clip.name
+        })).collect::<Vec<_>>(),
         "approximateSvg": approximate,
+        "audioDecoder": if decoder_notice.is_some() { "powermove-ffmpeg" } else { "today" },
+        "audioDecoderNotice": decoder_notice,
         "codec": r.codec,
         "profile": r.profile,
         "pixelFormat": r.pixel_format,

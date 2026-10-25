@@ -100,9 +100,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('source checkout, package scripts, and Electron test harness are not available');
     expect(instructions).not.toMatch(/src\/extensions|npm run|bun run/u);
     expect(instructions).toContain('isolated temporary test data');
-    // Main tightened this to 9000 bytes; the extension deprecation guidance
-    // (amendment 23) needs integration's 10 KiB budget (owner decision pending).
-    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(10 * 1024);
+    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(9000);
   });
 
   it('explains pose preservation and safe group sibling ordering within the full prompt budget', () => {
@@ -115,9 +113,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('Join before animating the rig');
     expect(instructions).toContain('reorder_layer uses composition-wide indices and may change groups');
     expect(instructions).toContain('edit_layer_strips {operation:"reorder",layerIds,anchorId,placement:"before"|"after"}');
-    // Main tightened this to 9000 bytes; the extension deprecation guidance
-    // (amendment 23) needs integration's 10 KiB budget (owner decision pending).
-    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(10 * 1024);
+    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(9000);
   });
 
   it('holds every user-visible field to the shared response style', () => {

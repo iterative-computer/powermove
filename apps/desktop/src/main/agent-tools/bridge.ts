@@ -893,8 +893,8 @@ export class PowermoveAgentToolBridge {
     const compat = Array.isArray(context?.compat) ? context.compat : [];
     const result = await engine.exportVideo(session.owner.id, session.runId, project, input, onJobStarted, compat);
     const value = result.status === 'done'
-      ? { path: result.path, projectId: context.projectId, width: result.width, height: result.height, fps: result.fps, jobId: result.jobId }
-      : { status: 'queued', jobId: result.jobId, projectId: context.projectId };
+      ? { path: result.path, projectId: context.projectId, width: result.width, height: result.height, fps: result.fps, jobId: result.jobId, missingMedia: result.missingMedia }
+      : { status: 'queued', jobId: result.jobId, projectId: context.projectId, missingMedia: result.missingMedia };
     return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }] };
   }
 

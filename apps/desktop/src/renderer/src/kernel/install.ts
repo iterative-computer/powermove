@@ -428,7 +428,7 @@ function rasterHost(PM: LegacyPM): RasterHost {
  * is keyed by its composition and id as well; a detached copy a wrapper
  * rasterizes (a typed prefix) by its content alone, as today.
  */
-export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: number, crop?: { x: number; y: number; width: number; height: number } | null): string | null {
+export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: number, crop?: { x: number; y: number; width: number; height: number } | null): { key: string; persistent: boolean } | null {
   const d = layer?.d;
   if (!d || typeof d !== 'object') return null;
   if (layer.type === 'shape') { if (d.paths?.length) return null; }
@@ -439,7 +439,9 @@ export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: 
   const where = rasterHost(PM).locate(layer);
   const owner = where.own ? ['own', where.composition, String(layer.id ?? '')] : ['detached'];
   try {
-    return JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), scale, crop ?? null]);
+    // A plain shape's raster is its resolved content at a density: the key
+    // holds across revisions. Text depends on the fonts too.
+    return { key: JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), scale, crop ?? null]), persistent: layer.type === 'shape' };
   } catch {
     return null;
   }
@@ -1033,6 +1035,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
       return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
     },
     rasterKey: (layer, scale, time, crop) => rasterContentKey(PM, layer, scale, time, crop),
+    documentRevision: () => PM.EngineDoc?.barrier?.revision ?? null,
     engineRasterAsync: async (layer, scale, time, crop) => {
       const engine = engineRender(PM);
       if (!engine) return null;

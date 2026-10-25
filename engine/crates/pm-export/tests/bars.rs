@@ -99,6 +99,9 @@ fn full_frame_job_sized(
         )],
     );
     doc["fps"] = json!(23.976);
+    // The project's depth owns the working format: 32-bit carries 16-bit
+    // codes exactly.
+    doc["colorDepth"] = json!(32);
     asset(&mut doc, "clip", "video", "mov", w, h, dur);
     let mut media = MediaPaths::default();
     media.insert("clip", path.to_path_buf());
@@ -136,6 +139,7 @@ fn settings_sized(
             end: Ticks::new(frames as i64 * 1001 * TICKS_PER_SECOND / 24000).unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
@@ -153,6 +157,7 @@ fn renderer_for(path: &Path) -> Renderer {
     let mut r = Renderer::headless().unwrap();
     let mut c = r.video_color(path).unwrap();
     c.matrix = MatrixCoefficients::Bt709;
+    c.primaries = pm_protocol::color::Primaries::Bt709;
     r.interpret(path, Some(c));
     r
 }
@@ -418,9 +423,16 @@ fn generation(
         engine.clone(),
     );
     let mut r = renderer_for(&path);
-    let delivered = run_export(
+    // The generation bar measures the engine's VideoToolbox ProRes encoder.
+    // A job export of a level 1 document routes ProRes 4444 to today's
+    // 8-bit FFmpeg path instead (decision EXPORT-1; export.md).
+    let plan = plan_export(&job).unwrap();
+    let sink = OutputSink::new(&plan.spec).unwrap();
+    let delivered = run_export_into(
         &mut r,
         &job,
+        plan,
+        sink,
         &Unrestricted,
         &AtomicBool::new(false),
         &mut |_| {},

@@ -24,6 +24,54 @@ pub struct TaggedColor {
     pub source: Vec<String>,
 }
 
+/// A complete video colour reading as H.273 code points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoReading {
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+    pub full_range: bool,
+}
+
+/// The one video colour table shared by the source monitor, composition and
+/// export, for every codec: tags win field by field; an untagged matrix is
+/// BT.601 when the frame is at most 576 lines tall and under 1280 wide,
+/// otherwise BT.709 (the mpv/FFmpeg heuristic); untagged primaries follow
+/// the BT.601 system an SD frame comes from (owner decision VIDEO-SD-1):
+/// 576 active lines are the 625-line system's BT.470 System B/G (EBU)
+/// primaries, other SD sizes the 525-line system's SMPTE 170M, HD and above
+/// BT.709; an untagged transfer is
+/// BT.709, read as the sRGB curve; the range is limited unless tagged full.
+pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoReading {
+    let sd = height <= 576 && width < 1280;
+    let sd_primaries = if height == 576 { 5 } else { 6 };
+    VideoReading {
+        primaries: tagged
+            .primaries
+            .unwrap_or(if sd { sd_primaries } else { 1 }),
+        transfer: tagged.transfer.unwrap_or(1),
+        matrix: tagged.matrix.unwrap_or(if sd { 6 } else { 1 }),
+        full_range: tagged.full_range.unwrap_or(false),
+    }
+}
+
+/// What a decoded frame's code values mean, for the source monitor,
+/// composition and export alike: the probe's reading ([`interpret`], whose
+/// untagged fields follow [`video_reading`]), except that an image-sequence
+/// rendition's untagged matrix is BT.601 at any size and its untagged
+/// primaries Rec.709. The importer converts sRGB stills with FFmpeg's BT.601
+/// default; renditions written before it tagged them carry no colour tags.
+pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
+    let mut desc = color.interpreted;
+    if sequence && color.tagged.matrix.is_none() {
+        desc.matrix = MatrixCoefficients::Bt601;
+    }
+    if sequence && color.tagged.primaries.is_none() {
+        desc.primaries = Primaries::Bt709;
+    }
+    desc
+}
+
 /// SMPTE ST 2086 mastering display, chromaticities as (x, y).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,9 +154,9 @@ fn tag<T: Into<i64>>(v: T, unspecified: &[i64]) -> Option<u8> {
 /// Reads tags from FFmpeg's codec parameters and the MOV `colr` atom, then
 /// applies section 9 ("Per-source interpretation"):
 ///
-/// * untagged video at heights up to 576 uses BT.601 with 525- or 625-line
-///   primaries chosen by height; HD and above BT.709;
-/// * MJPEG, `yuvj`, and RGB codecs are full range; other Y′CbCr is limited;
+/// * untagged matrix, primaries, transfer and range follow [`video_reading`],
+///   the table the source monitor, composition and export share;
+/// * MJPEG, `yuvj`, and RGB codecs are full range;
 /// * untagged chroma siting is left (type 0);
 /// * BT.709, BT.601, BT.2020 SDR, and sRGB transfers read as display encoding E.
 pub fn interpret(
@@ -186,8 +234,11 @@ pub fn interpret(
     }
 
     let mut defaults = Vec::new();
-    let h = info.height;
-    let sd = h <= 576;
+    let (w, h) = (info.width, info.height);
+    let size = (w.max(0) as u32, h.max(0) as u32);
+    let table = video_reading(&tagged, size.0, size.1);
+    // The table's matrix for a matrix it cannot read (an untagged one).
+    let sd = video_reading(&TaggedColor::default(), size.0, size.1).matrix == 6;
     let primaries = match tagged.primaries {
         Some(1) => Primaries::Bt709,
         Some(5) => Primaries::Bt601_625,
@@ -196,22 +247,19 @@ pub fn interpret(
         Some(12) => Primaries::DisplayP3,
         Some(_) => Primaries::Unspecified,
         None => {
-            let p = if !sd {
-                Primaries::Bt709
-            } else if h > 480 {
-                Primaries::Bt601_625
-            } else {
-                Primaries::Bt601_525
+            let p = match table.primaries {
+                5 => Primaries::Bt601_625,
+                6 => Primaries::Bt601_525,
+                _ => Primaries::Bt709,
             };
-            defaults.push(format!("untagged primaries: {p:?} (height {h})"));
+            defaults.push(format!("untagged primaries: {p:?} ({w}×{h})"));
             from[0] = Some(Origin::Default {
-                rule: if sd {
-                    format!(
-                        "Untagged video {h} lines high reads as BT.601 {}-line",
-                        if h > 480 { 625 } else { 525 }
-                    )
-                } else {
-                    "Untagged HD and larger video reads as BT.709".into()
+                rule: match p {
+                    Primaries::Bt709 => "Untagged video reads as Rec.709 primaries".into(),
+                    Primaries::Bt601_625 => {
+                        format!("Untagged {w}×{h} (625-line) video reads as BT.470BG primaries")
+                    }
+                    _ => format!("Untagged {w}×{h} (525-line) video reads as SMPTE 170M primaries"),
                 },
             });
             p
@@ -247,10 +295,10 @@ pub fn interpret(
                 } else {
                     MatrixCoefficients::Bt709
                 };
-                defaults.push(format!("untagged matrix: {m:?} (height {h})"));
+                defaults.push(format!("untagged matrix: {m:?} ({w}×{h})"));
                 from[2] = Some(Origin::Default {
                     rule: if sd {
-                        format!("Untagged video {h} lines high uses BT.601 coefficients")
+                        format!("Untagged {w}×{h} video uses BT.601 coefficients")
                     } else {
                         "Untagged HD and larger video uses BT.709 coefficients".into()
                     },
@@ -474,5 +522,104 @@ impl SideData {
             }
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    #[test]
+    fn video_reading_applies_the_shared_table() {
+        let untagged = TaggedColor::default();
+        // PAL: 625-line BT.470BG primaries; NTSC and other SD: 170M.
+        let sd = video_reading(&untagged, 720, 576);
+        assert_eq!(
+            (sd.primaries, sd.transfer, sd.matrix, sd.full_range),
+            (5, 1, 6, false)
+        );
+        for (w, h) in [(720, 480), (720, 486), (640, 360), (256, 144)] {
+            assert_eq!(video_reading(&untagged, w, h).primaries, 6, "{w}×{h}");
+        }
+        assert_eq!(video_reading(&untagged, 1280, 576).primaries, 1);
+        assert_eq!(video_reading(&untagged, 1280, 576).matrix, 1);
+        assert_eq!(video_reading(&untagged, 480, 720).matrix, 1);
+        let partial = TaggedColor {
+            matrix: Some(1),
+            full_range: Some(true),
+            ..TaggedColor::default()
+        };
+        let read = video_reading(&partial, 320, 180);
+        assert_eq!(
+            (read.primaries, read.transfer, read.matrix, read.full_range),
+            (6, 1, 1, true)
+        );
+        let tagged = TaggedColor {
+            primaries: Some(6),
+            transfer: Some(6),
+            matrix: Some(5),
+            ..TaggedColor::default()
+        };
+        let read = video_reading(&tagged, 1920, 1080);
+        assert_eq!((read.primaries, read.transfer, read.matrix), (6, 6, 5));
+    }
+}
+
+#[cfg(test)]
+mod interpret_tests {
+    use super::*;
+
+    /// A probed stream's codec facts with chosen size and tags (FFmpeg enum
+    /// values: 2 is unspecified).
+    fn info(codec: &str, w: i32, h: i32, tags: [i32; 3]) -> CodecInfo {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+        let input = crate::ff::Input::open(&path).unwrap();
+        let mut info = input.codec_info(input.best_video().unwrap());
+        info.codec = codec.into();
+        (info.width, info.height) = (w, h);
+        info.color_primaries = tags[0] as _;
+        info.color_trc = tags[1] as _;
+        info.color_space = tags[2] as _;
+        info.color_range = ff::AVCOL_RANGE_UNSPECIFIED;
+        info
+    }
+
+    #[test]
+    fn the_probe_reading_is_the_shared_table_for_every_codec() {
+        use MatrixCoefficients::{Bt601, Bt709};
+        for codec in ["h264", "hevc", "vp9", "prores", "av1"] {
+            for (w, h, tags, matrix) in [
+                (720, 480, [2, 2, 2], Bt601),
+                (1024, 576, [2, 2, 2], Bt601),
+                (1280, 576, [2, 2, 2], Bt709),
+                (960, 640, [1, 1, 2], Bt709),
+                (640, 480, [1, 1, 2], Bt601),
+                (256, 144, [2, 2, 1], Bt709),
+                (1920, 1080, [2, 2, 2], Bt709),
+            ] {
+                let c = interpret(&info(codec, w, h, tags), None, &SideData::default(), None);
+                let table = video_reading(&c.tagged, w as u32, h as u32);
+                let i = c.interpreted;
+                assert_eq!(i.matrix, matrix, "{codec} {w}×{h} {tags:?}");
+                assert_eq!(table.matrix, if matrix == Bt601 { 6 } else { 1 });
+                assert_eq!(i.transfer, Transfer::DisplayE);
+                assert_eq!(i.range, Range::Limited);
+                let primaries = match (tags[0], h <= 576 && w < 1280, h) {
+                    (2, true, 576) => Primaries::Bt601_625,
+                    (2, true, _) => Primaries::Bt601_525,
+                    _ => Primaries::Bt709,
+                };
+                assert_eq!(
+                    i.primaries, primaries,
+                    "VIDEO-SD-1 {codec} {w}×{h} {tags:?}"
+                );
+                assert_eq!(
+                    frame_reading(&c, true).matrix,
+                    if tags[2] == 2 { Bt601 } else { matrix }
+                );
+                assert_eq!(frame_reading(&c, true).primaries, Primaries::Bt709);
+            }
+        }
     }
 }

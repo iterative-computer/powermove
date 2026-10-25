@@ -25,7 +25,7 @@
  * Patches canonicalized by `PM.Comps.canonicalize` address exactly this form
  * (`['comps', compId, 'layers', ...]`).
  */
-import { sha256Hex } from './sha256';
+import { Sha256 } from './sha256';
 
 /** Must equal COMP_FIELDS in legacy/core/compositions.ts and pm-model's list (tests check both). */
 export const CANONICAL_COMP_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain'] as const;
@@ -72,11 +72,122 @@ export function canonicalStringify(value: unknown): string | undefined {
   return serialize('', value, new Set());
 }
 
-/** SHA-256 of the canonical serialization, as lowercase hex. */
-export function canonicalHash(value: unknown): string {
-  const text = canonicalStringify(value);
-  if (text === undefined) throw new TypeError('The value has no JSON representation');
-  return sha256Hex(new TextEncoder().encode(text));
+/**
+ * `JSON.parse(JSON.stringify(value))`, without the string: the same tree
+ * (`toJSON` honored, boxed primitives unwrapped, `undefined`, functions and
+ * symbols dropped from objects and `null` in arrays, non-finite numbers
+ * `null`, `-0` as `0`, a `__proto__` key an own member, cycles and BigInts
+ * refused), built directly. String values are shared with `value` (strings
+ * are immutable), so the copy of a large document is a fraction of a parsed
+ * one: the engine's shadow of a 180 MB project (C1) took 601 MB parsed and
+ * 249 MB copied, in half the time.
+ */
+export function jsonClone(value: unknown): any {
+  const root = prepared('', value);
+  return root.written ? cloneWritten(root.value, new Set()) : undefined;
+}
+
+function cloneWritten(value: any, stack: Set<object>): any {
+  if (value === null) return null;
+  switch (typeof value) {
+    case 'boolean': case 'string': return value;
+    case 'number': return Number.isFinite(value) ? (value === 0 ? 0 : value) : null;
+    case 'bigint': throw new TypeError('Do not know how to serialize a BigInt');
+  }
+  if (stack.has(value)) throw new TypeError('Converting circular structure to JSON');
+  stack.add(value);
+  let out: any;
+  if (Array.isArray(value)) {
+    out = new Array(value.length);
+    for (let index = 0; index < value.length; index++) {
+      const item = prepared(String(index), value[index]);
+      out[index] = item.written ? cloneWritten(item.value, stack) : null;
+    }
+  } else {
+    out = {};
+    for (const name of Object.keys(value)) {
+      const member = prepared(name, value[name]);
+      if (!member.written) continue;
+      const copy = cloneWritten(member.value, stack);
+      if (name === '__proto__') Object.defineProperty(out, name, { value: copy, writable: true, enumerable: true, configurable: true });
+      else out[name] = copy;
+    }
+  }
+  stack.delete(value);
+  return out;
+}
+
+/** A value as serialization sees it (`toJSON`, boxed primitives), and
+ *  whether it is written at all (`undefined`, functions, symbols are not). */
+function prepared(key: string, value: any): { value: any; written: boolean } {
+  if (value && typeof value === 'object' && typeof value.toJSON === 'function') value = value.toJSON(key);
+  if (value instanceof Number || value instanceof String || value instanceof Boolean) value = value.valueOf();
+  const type = typeof value;
+  return { value, written: value === null || type === 'boolean' || type === 'number' || type === 'string' || type === 'bigint' || type === 'object' };
+}
+
+/** The canonical serialization of a prepared, written value, in pieces. */
+function stream(value: any, stack: Set<object>, emit: (text: string) => void): void {
+  if (value === null) return emit('null');
+  switch (typeof value) {
+    case 'boolean': return emit(value ? 'true' : 'false');
+    case 'number': return emit(Number.isFinite(value) ? JSON.stringify(value) : 'null');
+    case 'string': return emit(JSON.stringify(value));
+    case 'bigint': throw new TypeError('Do not know how to serialize a BigInt');
+  }
+  if (stack.has(value)) throw new TypeError('Converting circular structure to JSON');
+  stack.add(value);
+  if (Array.isArray(value)) {
+    emit('[');
+    for (let index = 0; index < value.length; index++) {
+      if (index) emit(',');
+      const item = prepared(String(index), value[index]);
+      if (item.written) stream(item.value, stack, emit);
+      else emit('null');
+    }
+    emit(']');
+  } else {
+    emit('{');
+    let first = true;
+    for (const name of Object.keys(value).sort()) {
+      const member = prepared(name, value[name]);
+      if (!member.written) continue;
+      emit((first ? '' : ',') + JSON.stringify(name) + ':');
+      first = false;
+      stream(member.value, stack, emit);
+    }
+    emit('}');
+  }
+  stack.delete(value);
+}
+
+/**
+ * SHA-256 of the canonical serialization, as lowercase hex. The text is
+ * hashed as it is produced, in pieces of whole JSON tokens (never splitting
+ * a surrogate pair), so a large project (C1: 180 MB) never becomes one
+ * string: the save-time consistency check used to build two of them.
+ */
+export function canonicalHash(value: unknown, prefix = ''): string {
+  const root = prepared('', value);
+  if (!root.written) throw new TypeError('The value has no JSON representation');
+  const hash = new Sha256();
+  const encoder = new TextEncoder();
+  if (prefix) hash.update(encoder.encode(prefix));
+  let pending: string[] = [];
+  let size = 0;
+  const flush = () => {
+    if (!pending.length) return;
+    hash.update(encoder.encode(pending.join('')));
+    pending = [];
+    size = 0;
+  };
+  stream(root.value, new Set(), (text) => {
+    pending.push(text);
+    size += text.length;
+    if (size >= 1 << 16) flush();
+  });
+  flush();
+  return hash.digest();
 }
 
 /**

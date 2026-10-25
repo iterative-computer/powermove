@@ -30,7 +30,6 @@ use crate::capability::{self, Feature, Unsupported};
 use crate::composite::{self, EffectHost};
 use crate::error::LayerFailure;
 use crate::js;
-use crate::request::VideoEnd;
 use crate::scene3d::Object3dPlan;
 
 /// One composition (or one group's members) rendered into a target.
@@ -219,8 +218,6 @@ pub enum Source {
     Comp(Box<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
-    /// A Blender surface of one 3D object layer (`crate::blender`).
-    Blender(Box<crate::blender::BlenderSource>),
     /// Shape content (`crate::vector`).
     Vector(Box<crate::vector::VectorSource>),
     /// A shader layer or an extension fragment layer
@@ -260,8 +257,6 @@ pub struct Build<'r> {
     shader_fallback: bool,
     /// Text layout and glyph caches (`None`: text layers are unsupported).
     text: Option<&'r mut crate::text::TextContext>,
-    /// Blender surfaces of 3D object layers (`crate::blender`).
-    pub(crate) blender: crate::blender::PlanState,
     /// Motion blur for layers with their switch on; `None` when the request
     /// has it off or inside a group's samples (today's `mblur: false`).
     pub(crate) blur: Option<crate::motion::Blur>,
@@ -270,8 +265,6 @@ pub struct Build<'r> {
     pub(crate) video_center: Option<f64>,
     /// The resampler of level 2 raster content.
     pub(crate) sampling: crate::sampling::Sampling,
-    /// `videoPlaybackTime`'s `endPadding` for this output ([`VideoEnd`]).
-    video_padding: f64,
     /// The output origin of the level being built (the request's at the
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
@@ -318,8 +311,6 @@ pub struct BuildOptions {
     /// cannot translate (`crate::shader_layers::fallback`); without one
     /// they route.
     pub shader_fallback: bool,
-    /// The end-of-clip padding of video sources ([`VideoEnd`]).
-    pub video_end: VideoEnd,
     /// The viewer's visible window when this is a viewer frame of the open
     /// root composition (today's preview source clipping, which a `raster`
     /// override sees as its `crop` argument: `crate::compat_crop`).
@@ -333,8 +324,7 @@ pub struct BuildOptions {
 pub const PRECOMP_MAX_DEPTH: u32 = 6;
 
 /// Builds the plan of `composition` at `time` (seconds) into a target of
-/// `width` × `height` at `scale` output pixels per composition pixel, with
-/// the video end padding of the output kind (`video_end`).
+/// `width` × `height` at `scale` output pixels per composition pixel.
 #[allow(clippy::too_many_arguments)]
 pub fn build<'r>(
     ev: &mut Evaluator,
@@ -344,7 +334,6 @@ pub fn build<'r>(
     width: u32,
     height: u32,
     scale: (f64, f64),
-    video_end: VideoEnd,
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
     build_with(
@@ -359,10 +348,7 @@ pub fn build<'r>(
         None,
         crate::scene3d::Options3d::default(),
         None,
-        BuildOptions {
-            video_end,
-            ..BuildOptions::default()
-        },
+        BuildOptions::default(),
         None,
     )
 }
@@ -418,17 +404,15 @@ pub fn build_with<'r>(
     options: BuildOptions,
     compat: Option<&'r dyn crate::compat::CompatRasters>,
 ) -> (CompPlan, Build<'r>) {
-    let blender = crate::blender::PlanState::new(options3d.blender.clone());
-    build_blender(
+    build_reusing(
         ev, root_comp, project, time, width, height, scale, assets, effects, options3d, text,
-        options, blender, compat, None,
+        options, compat, None,
     )
 }
 
-/// [`build_with`] with the Blender state of the build (collecting the
-/// snapshots a frame needs, `Renderer::blender_snapshots`).
+/// [`build_with`] with the renderer's draw reuse.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_blender<'r>(
+pub(crate) fn build_reusing<'r>(
     ev: &mut Evaluator,
     root_comp: &Comp<'_>,
     project: &Comp<'_>,
@@ -441,11 +425,9 @@ pub(crate) fn build_blender<'r>(
     options3d: crate::scene3d::Options3d,
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
-    blender: crate::blender::PlanState,
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     reuse: Option<&'r mut crate::reuse::DrawReuse>,
 ) -> (CompPlan, Build<'r>) {
-    let video_padding = video_padding(options.video_end, root_comp);
     let mut reuse = reuse;
     if let Some(r) = reuse.as_deref_mut() {
         r.begin(
@@ -455,7 +437,6 @@ pub(crate) fn build_blender<'r>(
             crate::reuse::BuildKey {
                 sampling: options.sampling,
                 blur: options.blur,
-                video_padding: video_padding.to_bits(),
                 view_override: options3d.view.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
             },
@@ -474,11 +455,9 @@ pub(crate) fn build_blender<'r>(
         forced_on: None,
         shader_fallback: options.shader_fallback,
         text,
-        blender,
         blur: options.blur,
         video_center: None,
         sampling: options.sampling,
-        video_padding,
         origin: options.origin.unwrap_or((0.0, 0.0)),
         passes: Vec::new(),
         compat,
@@ -1463,18 +1442,13 @@ fn native_content_quad<'d>(
                 let at = b.video_center.unwrap_or(time);
                 let st = scope.source_time(layer, at, Some(&mut b.retime))?;
                 let rate = interpret.as_ref().and_then(|i| i.frame_rate);
-                let time = match (
-                    (sequence && rate.is_none())
-                        .then(|| crate::media::sequence_playback_time(record, st))
-                        .flatten(),
-                    rate,
-                ) {
-                    (Some(t), _) => t,
-                    // The file's frames on the overridden grid; the last
-                    // frame clamps when the media is opened.
-                    (None, Some(_)) => js::max(0.0, st),
-                    (None, None) => playback_time(st, rec("dur").to_number(), b.video_padding),
-                };
+                // Native selection uses the source's PTS (or conformed
+                // grid) and holds its last frame. Browser seek padding
+                // hid valid frames and made preview differ from export.
+                let time = (sequence && rate.is_none())
+                    .then(|| crate::media::sequence_playback_time(record, st))
+                    .flatten()
+                    .unwrap_or_else(|| js::max(0.0, st));
                 Source::Video {
                     level2: crate::sampling::is_level2(layer),
                     sequence,
@@ -1555,7 +1529,6 @@ fn native_content_quad<'d>(
             // preview viewport applies only to the open composition's
             // canvas).
             let outer_origin = std::mem::replace(&mut b.origin, (0.0, 0.0));
-            b.blender.path.push(scope.comp.id().to_string_lossy());
             let project = scope.project;
             let inner = {
                 let mut inner_scope = Scope::new(&mut *scope.ev, &sub, project);
@@ -1573,7 +1546,6 @@ fn native_content_quad<'d>(
             };
             b.precomp_depth -= 1;
             b.origin = outer_origin;
-            b.blender.path.pop();
             b.video_center = outer_center;
             Ok(Some(Quad::Texture {
                 source: Source::Comp(Box::new(inner)),
@@ -1619,34 +1591,6 @@ fn native_content_quad<'d>(
             }
             match pm_eval::parenting::Role3d::of(layer) {
                 Some(pm_eval::parenting::Role3d::Object) => {
-                    match crate::blender::plan_object(
-                        scope,
-                        &mut b.blender,
-                        b.assets,
-                        layer,
-                        time,
-                        width,
-                        height,
-                        b.video_center.is_some(),
-                    )? {
-                        Some(crate::blender::Planned::Draw(mut source, rect)) => {
-                            source.scene_metadata =
-                                b.pass3d.last().and_then(|p| p.metadata_scene());
-                            return Ok(Some(Quad::Device {
-                                source: Source::Blender(Box::new(source)),
-                                rect,
-                            }));
-                        }
-                        Some(crate::blender::Planned::Fail(message)) => {
-                            b.failures.push(LayerFailure {
-                                composition: comp_id,
-                                layer: js::layer_id(layer),
-                                message,
-                            });
-                            return Ok(None);
-                        }
-                        None => {}
-                    }
                     match crate::scene3d::plan_layer(b.pass3d.last(), layer) {
                         Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),
@@ -2239,25 +2183,6 @@ pub fn fit_uv(fit: &str, sw: f64, sh: f64, bw: f64, bh: f64) -> [f64; 4] {
             }
         }
         _ => [0.0, 0.0, 1.0, 1.0],
-    }
-}
-
-/// `videoPlaybackTime(asset, time, endPadding)` for container sources:
-/// clamped to `[0, dur − endPadding]`. The engine then selects the frame by section 5 rule 7
-/// (today's microsecond rounding only steers Chromium's seek to the same
-/// frame).
-pub use crate::retime::playback_time;
-
-/// Today's `endPadding` for an output kind. The viewer's compositor seeks
-/// with the default 0.04 s; `prepareFrame`, which every export and agent
-/// still runs first, passes `1 / PM.proj.fps`, the exported composition's
-/// rate (`fps` of the composition rendered, as expressions see it; at the
-/// open composition that is `PM.proj.fps`). Precomps inside it keep that
-/// padding, as `prepareFrame` does.
-pub fn video_padding(video_end: VideoEnd, root_comp: &Comp<'_>) -> f64 {
-    match video_end {
-        VideoEnd::Preview => 0.04,
-        VideoEnd::Final => 1.0 / root_comp.expression_fps().to_number(),
     }
 }
 

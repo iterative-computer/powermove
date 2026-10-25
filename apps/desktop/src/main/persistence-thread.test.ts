@@ -79,7 +79,8 @@ describe('store on the persistence worker thread', () => {
     await reopened.load();
     expect(reopened.get!('projectHistory.demo')).toEqual(history);
     expect(JSON.parse(reopened.getSerialized!('projectHistory.demo')!)).toEqual(history);
-    expect(reopened.get!('project.demo')).toEqual({ v: '1', proj: { id: 'demo', layers: [] } });
+    // Main numbers and stamps a project slot (SAVE-1).
+    expect(reopened.get!('project.demo')).toEqual({ cp: expect.any(String), seq: 1, v: '1', proj: { id: 'demo', layers: [] } });
     expect(reopened.get!('theme')).toBeUndefined();
   });
 

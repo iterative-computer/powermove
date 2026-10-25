@@ -17,6 +17,8 @@
  * it.
  */
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import { limitUtf8 } from '../../../shared/protocol-strings';
+import { documentId } from '../../../shared/engine-document-id';
 import type { EngineConnection, Log } from './connection';
 import { ShaderFallbackError, type FallbackTexture, type ShaderFallbackPixels, type ShaderFallbackRequest } from './shader-fallback';
 import type { PreviewStatus } from './preview';
@@ -39,10 +41,14 @@ export interface DocumentStream {
   readonly ready: boolean;
   whenReady: Promise<boolean>;
   subscribe(fn: (batch: StreamBatch) => void): () => void;
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } | null;
+  /** `bytes`: the canonical JSON as UTF-8 (pm-wasm's, kept out of the
+   *  JavaScript heap); otherwise `json` is encoded. */
+  snapshot(options?: { checkpoint?: boolean }): { revision: number; encoding: 'canonicalJsonV1'; json: string; bytes?: Uint8Array; hash: string } | null;
+  resume?(): { revision: number; hash: string; batches: StreamBatch[] } | null;
+  refreshResume?(force?: boolean): Promise<{ revision: number; hash: string; batches: StreamBatch[] } | null>;
 }
 
-export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array };
+export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array; provisional?: boolean; confirmed?: boolean };
 
 /** Stages a large resync document with main (`nativeEngine.stageDocument`). */
 export type StageDocument = (session: number, bytes: Uint8Array) => Promise<{ handle: string; length: number }>;
@@ -125,6 +131,9 @@ export type SessionOptions = {
    * not, so the connection asks for that layout here.
    */
   onLoaded?: () => void;
+  /** The session id is bound, before definitions/resync can make it usable.
+   * Session-scoped producers must be posted before that first document. */
+  onOpened?: () => void;
   /** Before resyncing a replacement document, preserve its requested UI time. */
   onLoading?: () => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
@@ -156,11 +165,7 @@ export function hexBytes(hex: string): Uint8Array {
   return out;
 }
 
-/** A valid document id (contract: non-empty, at most 256 bytes). */
-export function documentId(id: unknown): string {
-  const text = typeof id === 'string' && id ? id : 'untitled';
-  return encoder.encode(text).length <= 256 ? text : text.slice(0, 64);
-}
+export { documentId } from '../../../shared/engine-document-id';
 
 export class DocumentSession {
   /** The engine's session id, once opened. */
@@ -177,6 +182,8 @@ export class DocumentSession {
   frames = 0;
   lastFrame: FrameDescriptor | null = null;
   resyncs = 0;
+  /** Checkpoint resyncs that needed no document body. */
+  resumes = 0;
   batches = 0;
   failures: string[] = [];
   closed = false;
@@ -187,6 +194,10 @@ export class DocumentSession {
   private offClose: (() => void) | null = null;
   /** Batches that wait for a resync in flight (a staged file resyncs asynchronously). */
   private queued: StreamBatch[] = [];
+  /** The last batch forwarded was provisional and is not confirmed yet. */
+  private provisionalForwarded = false;
+  /** A provisional revision that was not forwarded (`holdProvisional`). */
+  private heldProvisional: number | null = null;
   private resyncing: Promise<void> | null = null;
   private fallbackRunner: FallbackRunner | null = null;
   /** Effect and transition requests waiting for their textures, by key. */
@@ -235,6 +246,7 @@ export class DocumentSession {
     this.id = opened.session;
     this.unlisten = connection.listen(opened.session, (message, arrived) => this.receive(message, arrived));
     this.unsubscribe = this.options.stream.subscribe((batch) => this.onBatch(batch));
+    this.options.onOpened?.();
     // Definitions before the document, so the first frame has them
     // (contract 10, read-your-registrations).
     this.startDefinitions();
@@ -311,10 +323,69 @@ export class DocumentSession {
     const id = this.id;
     if (id === null || this.closed) return;
     this.documentAccepted = false;
-    const snapshot = this.options.stream.snapshot();
+    this.document = documentId(this.options.documentId());
+    const refreshingRevision = this.streamRevision, refreshingDocument = this.document;
+    const refreshSuperseded = () => this.resyncAgain || this.streamRevision !== refreshingRevision || documentId(this.options.documentId()) !== refreshingDocument;
+    let nativeResume: { revision: number; hash: string; batches: StreamBatch[] } | null | undefined;
+    try { nativeResume = await this.options.stream.refreshResume?.(); }
+    catch (error) {
+      if (this.closed || this.id !== id) return;
+      if (refreshSuperseded()) { this.resyncAgain = true; return; }
+      throw error;
+    }
+    if (this.closed || this.id !== id) return;
+    if (refreshSuperseded()) { this.resyncAgain = true; return; }
+    const resume = nativeResume ?? this.options.stream.resume?.();
+    if (resume) {
+      const streamRevision = this.streamRevision;
+      const document = this.document;
+      const superseded = (): boolean => this.resyncAgain || this.streamRevision !== streamRevision || documentId(this.options.documentId()) !== document;
+      try {
+        await this.options.connection.request({ type: 'resync', document: this.document, revision: resume.revision, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array() }, hash: hexBytes(resume.hash) } as Request, id);
+        if (this.closed) return;
+        if (superseded()) { this.resyncAgain = true; return; }
+        this.applied = this.streamRevision = resume.revision;
+        this.resyncs++;
+        this.resumes++;
+        this.documentAccepted = true;
+        // The journal bridges edits during the outage. Concurrent batches
+        // already queued here may duplicate it; forward skips older revisions.
+        const pending = [...resume.batches, ...this.queued];
+        this.queued = [];
+        this.replay(pending);
+        return;
+      } catch (error) {
+        // The process restarted, the bounded checkpoint expired, or its
+        // patch journal overflowed: send a fresh, complete snapshot.
+        if (this.closed) return;
+        // A load or another resync arrived while this checkpoint was in
+        // flight. Its replacement may already be prepared natively; let the
+        // queued attempt read that checkpoint instead of serializing it here.
+        if (superseded()) { this.resyncAgain = true; return; }
+        if (nativeResume) {
+          // A native root is already present in this process. Refresh its
+          // verified checkpoint off-thread rather than copying JSON through
+          // a synchronous renderer call after a refused/expired base.
+          const fresh = await this.options.stream.refreshResume!(true);
+          if (this.closed || this.id !== id) return;
+          if (superseded()) { this.resyncAgain = true; return; }
+          if (!fresh) throw error;
+          await this.options.connection.request({ type: 'resync', document: this.document, revision: fresh.revision, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array() }, hash: hexBytes(fresh.hash) } as Request, id);
+          if (this.closed || this.id !== id) return;
+          if (superseded()) { this.resyncAgain = true; return; }
+          this.applied = this.streamRevision = fresh.revision;
+          this.resyncs++; this.resumes++;
+          this.documentAccepted = true;
+          const pending = [...fresh.batches, ...this.queued]; this.queued = [];
+          this.replay(pending);
+          return;
+        }
+      }
+    }
+    const snapshot = this.options.stream.snapshot({ checkpoint: true });
     if (!snapshot) throw new Error('the document mirror has no snapshot');
     this.document = documentId(this.options.documentId());
-    const bytes = encoder.encode(snapshot.json);
+    const bytes = snapshot.bytes ?? encoder.encode(snapshot.json);
     const limit = this.options.inlineLimit ?? INLINE_RESYNC_LIMIT;
     let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
     if (bytes.length > limit && this.options.stage) {
@@ -325,6 +396,8 @@ export class DocumentSession {
     }
     // Batches after the snapshot follow it; earlier ones are in it.
     this.streamRevision = snapshot.revision;
+    this.provisionalForwarded = false;
+    this.heldProvisional = null;
     this.queued = this.queued.filter((b) => b.revision > snapshot.revision);
     const request = { type: 'resync', document: this.document, revision: snapshot.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(snapshot.hash) } as Request;
     try {
@@ -343,11 +416,52 @@ export class DocumentSession {
     // Batches that came while a staged resync was read follow it now.
     const queued = this.queued;
     this.queued = [];
-    for (const batch of queued) this.forward(batch);
+    this.replay(queued);
+  }
+
+  /** Stream items that waited for a resync (or bridge a reconnect: the
+   *  journal), in order: batches and the confirmations of provisional ones. */
+  private replay(items: StreamBatch[]): void {
+    for (const item of items) {
+      if (item.confirmed) this.confirm(item.revision);
+      else this.forward(item);
+    }
+  }
+
+  /**
+   * A provisional batch this session cannot forward (too large, or after a
+   * gap) is not a reason to resync now: the document would be read in a
+   * state that never existed. Its confirmation, or the next batch (a gap),
+   * resyncs from the settled document instead.
+   */
+  private holdProvisional(batch: StreamBatch): boolean {
+    if (!batch.provisional) return false;
+    this.heldProvisional = batch.revision;
+    return true;
+  }
+
+  /** A provisional batch this session forwarded was the whole change: the
+   *  engine may present its frames (after the batch: the same port). A
+   *  session that moved past it (a resync, a later batch) has nothing to do. */
+  private confirm(revision: number): void {
+    if (revision === this.heldProvisional) {
+      this.heldProvisional = null;
+      void this.resync('provisional batch not forwarded');
+      return;
+    }
+    const id = this.id;
+    if (id === null || this.closed || revision !== this.streamRevision || !this.provisionalForwarded) return;
+    this.provisionalForwarded = false;
+    this.options.connection.event({ type: 'confirmRevision', document: this.document, revision }, id);
   }
 
   private onBatch(batch: StreamBatch): void {
     if (this.closed || this.id === null) return;
+    if (batch.confirmed) {
+      if (this.resyncing) this.queued.push(batch);
+      else this.confirm(batch.revision);
+      return;
+    }
     if (batch.origin === 'load') {
       this.options.onLoading?.();
       const loaded = (): void => {
@@ -360,7 +474,7 @@ export class DocumentSession {
       return;
     }
     if (batch.body.length > MAX_PATCH_BODY_BYTES || batch.body.length === 0) {
-      void this.resync('large batch');
+      if (!this.holdProvisional(batch)) void this.resync('large batch');
       return;
     }
     if (this.resyncing) {
@@ -376,15 +490,16 @@ export class DocumentSession {
     if (batch.revision <= this.streamRevision) return;
     if (batch.baseRevision !== this.streamRevision) {
       // A batch we never saw sits between: the engine needs the document.
-      void this.resync('gap');
+      if (!this.holdProvisional(batch)) void this.resync('gap');
       return;
     }
     this.streamRevision = batch.revision;
+    this.provisionalForwarded = !!batch.provisional;
     this.batches++;
     // Held until the run ends, merged with the run's other batches (one
     // render per edit; patch-coalesce.ts).
     this.options.connection.patches(
-      { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body },
+      { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body, ...(batch.provisional ? { provisional: true } : {}) },
       id,
       MAX_PATCH_BODY_BYTES
     );
@@ -633,7 +748,7 @@ export class DocumentSession {
       const reason = error instanceof ShaderFallbackError ? error.reason : 'unavailable';
       const message = error instanceof Error ? error.message : String(error);
       this.options.log('warn', `engine: the shader fallback runner could not draw a program of layer ${request.layer} (${reason}: ${message})`);
-      send({ fallback: 'failed', key: request.key, reason, message: message.slice(0, 1024) });
+      send({ fallback: 'failed', key: request.key, reason, message: limitUtf8(message, 1024) });
     }
   }
 

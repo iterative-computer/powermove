@@ -50,8 +50,6 @@ pub struct Options3d {
     /// Definition snapshots of mesh layers (`renderer.kind === 'mesh'`), by
     /// definition id. The built-in OBJ model layer is known by default.
     pub mesh_definitions: Arc<std::collections::HashMap<String, legacy::MeshDefinition>>,
-    /// How Blender compositions render (`RenderRequest::blender`).
-    pub blender: crate::blender::BlenderRender,
 }
 
 impl Options3d {
@@ -65,7 +63,6 @@ impl Options3d {
                 .filter(|_| !request.export)
                 .map(View3d::from_override),
             mesh_definitions: self.mesh_definitions.clone(),
-            blender: request.blender.clone(),
         }
     }
 }
@@ -75,7 +72,6 @@ impl Default for Options3d {
         Options3d {
             view: None,
             mesh_definitions: Arc::new(legacy::builtin_mesh_definitions()),
-            blender: crate::blender::BlenderRender::Native,
         }
     }
 }

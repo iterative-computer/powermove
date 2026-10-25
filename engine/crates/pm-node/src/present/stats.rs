@@ -2,10 +2,14 @@
 //! contract 2's `RenderStats`): what presenting the session costs, sent to
 //! the session's renderer at most twice a second while it presents and
 //! once after it goes idle. They replace today's `GL.stats` and GPU timing
-//! for the status bar and the performance panel.
+//! for the status bar and the performance panel. They also carry the
+//! session's audio health (issue A5), sent when it changes even while
+//! nothing presents (a voice dropped by the bounded wait, A3, while paused).
 
 use pm_protocol::common::{Count, Revision};
-use pm_protocol::snapshot::RenderStats;
+use pm_protocol::snapshot::{AudioDiagnostics, RenderStats};
+
+use super::audio::AudioStatus;
 
 /// Shortest interval between two reports of one session (µs).
 pub const REPORT_INTERVAL_US: i64 = 500_000;
@@ -27,6 +31,8 @@ pub struct ViewStats {
     sent_at: Option<i64>,
     sent_frames: u64,
     sent_late: u64,
+    audio: Option<AudioDiagnostics>,
+    sent_audio: Option<AudioDiagnostics>,
 }
 
 fn us(v: i64) -> u32 {
@@ -72,10 +78,17 @@ impl ViewStats {
         self.late += 1;
     }
 
+    /// The session's audio status (`None`: no audio playback).
+    pub fn audio(&mut self, status: Option<&AudioStatus>) {
+        self.audio = status.map(diagnostics);
+    }
+
     /// Whether a report is due at host µs `now`: something changed since
     /// the last one, and the interval passed.
     pub fn due(&self, now: i64) -> bool {
-        (self.frames != self.sent_frames || self.late != self.sent_late)
+        (self.frames != self.sent_frames
+            || self.late != self.sent_late
+            || self.audio != self.sent_audio)
             && self.sent_at.is_none_or(|at| now - at >= REPORT_INTERVAL_US)
     }
 
@@ -91,6 +104,7 @@ impl ViewStats {
         self.sent_at = Some(now);
         self.sent_frames = self.frames;
         self.sent_late = self.late;
+        self.sent_audio = self.audio.clone();
         RenderStats {
             frames: count(self.frames),
             timed_frames: count(self.timed),
@@ -105,7 +119,19 @@ impl ViewStats {
             snapshots: count(snapshots),
             snapshot_us_max: us(snapshot_us_max),
             revision: Revision::new(self.revision).unwrap_or(Revision::ZERO),
+            audio: self.audio.clone(),
         }
+    }
+}
+
+/// What the status bar and the performance panel show of an audio status.
+fn diagnostics(status: &AudioStatus) -> AudioDiagnostics {
+    AudioDiagnostics {
+        error: status.error.clone(),
+        problems: status.problems.clone(),
+        starved_renders: count(status.starved_renders),
+        underruns: count(status.underruns),
+        device_overloads: count(status.device_overloads),
     }
 }
 
@@ -141,5 +167,54 @@ mod tests {
         assert!(!s.due(2_000_000));
         s.late();
         assert!(s.due(2_000_000));
+    }
+
+    /// A paused session presents nothing, yet a voice the bounded wait
+    /// dropped (A3) or a failed device reaches the status bar: audio
+    /// changes make a report due on their own, and unchanged audio does
+    /// not.
+    #[test]
+    fn audio_changes_report_while_nothing_presents() {
+        let mut s = ViewStats::default();
+        s.audio(None);
+        assert!(!s.due(0), "no audio, nothing to report");
+        let mut status = AudioStatus {
+            starved_renders: 2,
+            ..AudioStatus::default()
+        };
+        s.audio(Some(&status));
+        assert!(s.due(0));
+        let r = s.report(0, 0, 0, 0, 0);
+        let audio = r.audio.expect("audio diagnostics");
+        assert_eq!(audio.starved_renders.get(), 2);
+        assert!(audio.problems.is_empty() && audio.error.is_none());
+        assert_eq!(r.frames.get(), 0, "no frame was presented");
+        // The same status again (every render-thread turn): nothing new.
+        s.audio(Some(&status));
+        assert!(!s.due(1_000_000));
+        status
+            .problems
+            .push("Audio decode exceeded 120 ms; missing voice plays as silence: music".into());
+        status.underruns = 3;
+        status.device_overloads = 1;
+        s.audio(Some(&status));
+        assert!(!s.due(400_000), "within the interval");
+        assert!(s.due(1_000_000));
+        let audio = s.report(1_000_000, 0, 0, 0, 0).audio.unwrap();
+        assert_eq!(audio.problems, status.problems);
+        assert_eq!(
+            (audio.underruns.get(), audio.device_overloads.get()),
+            (3, 1)
+        );
+        // A device that does not open.
+        status.error = Some("no audio output: no default output device".into());
+        s.audio(Some(&status));
+        assert!(s.due(2_000_000));
+        let audio = s.report(2_000_000, 0, 0, 0, 0).audio.unwrap();
+        assert_eq!(audio.error.as_deref(), status.error.as_deref());
+        // The audio closed: the next report says so.
+        s.audio(None);
+        assert!(s.due(3_000_000));
+        assert_eq!(s.report(3_000_000, 0, 0, 0, 0).audio, None);
     }
 }

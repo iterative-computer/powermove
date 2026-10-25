@@ -3,9 +3,9 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod reference;
 pub mod reference_substitutions;
 pub mod text;
-pub mod text_residuals;
 
 use std::path::{Path, PathBuf};
 
@@ -322,6 +322,133 @@ pub fn ticks(seconds: f64) -> pm_protocol::common::Ticks {
         .unwrap()
 }
 
+/// Today's viewer's reading of a video where the engine corrects it
+/// (docs/engine/quality-ledger.md; each correction proven against an f64
+/// reference by tests/video_reading.rs): BT.601 primaries read as Rec.709
+/// (VIDEO-SD-1), chroma read as centered whatever its siting, and an SD
+/// H.264 stream without primaries and transfer tags read with BT.601
+/// coefficients even when it tags a matrix. Gates against legacy captures
+/// restate it so they keep judging everything else.
+pub fn restate_today(path: &Path, c: &mut pm_protocol::color::ColorDescription) {
+    use pm_protocol::color::{ChromaSiting, MatrixCoefficients, Primaries, Range};
+    c.siting = ChromaSiting::Center;
+    if matches!(c.primaries, Primaries::Bt601_525 | Primaries::Bt601_625) {
+        c.primaries = Primaries::Bt709;
+    }
+    let Ok(src) = pm_media::decode::service::MediaSource::open(path) else {
+        return;
+    };
+    let Some(v) = src.probe.video.as_ref() else {
+        return;
+    };
+    let t = &v.color.tagged;
+    if v.codec.codec == "h264"
+        && v.height <= 576
+        && v.codec.bit_depth == 8
+        && c.range == Range::Limited
+        && t.primaries.is_none()
+        && t.transfer.is_none()
+    {
+        c.matrix = MatrixCoefficients::Bt601;
+    }
+}
+
+/// [`restate_today`] for every video a project's resolver names.
+pub fn restate_today_for_videos(renderer: &mut pm_render::Renderer, resolver: &MapResolver) {
+    for path in resolver.paths.values() {
+        let Ok(read) = renderer.video_color(path) else {
+            continue;
+        };
+        let mut c = read;
+        restate_today(path, &mut c);
+        if c != read {
+            renderer.interpret(path, Some(c));
+        }
+    }
+}
+
+/// A reference rendition of an 8-bit subsampled clip for gates against
+/// legacy captures: 4:4:4 (YUV4MPEG2, in `dir`) whose chroma is today's
+/// reconstruction, linear and centered, computed in f64 and rounded once.
+/// Drawn by the engine it shows today's chroma filter with everything else
+/// the engine's, so the gate can hold the rest to its class; the filter is
+/// proven against 4:4:4 truth by tests/chroma_truth.rs.
+pub fn todays_chroma_rendition(path: &Path, dir: &Path) -> PathBuf {
+    use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
+    use pm_media::frame::Layout;
+    use std::io::Write;
+    let src = MediaSource::open(path).unwrap();
+    let service = DecodeService::new(ServiceConfig::default());
+    let mut session = service
+        .session(&src, 1, pm_media::vt::DecodePurpose::Export)
+        .unwrap();
+    let out = dir.join(format!(
+        "{}.y4m",
+        path.file_stem().unwrap().to_string_lossy()
+    ));
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&out).unwrap());
+    let rate = src.rate();
+    for n in 0..src.pts.len() {
+        let frame = session.frame(n).unwrap();
+        let f = frame.format.clone();
+        assert_eq!(f.bits, 8, "8-bit sources only");
+        let (w, h) = (f.width, f.height);
+        if n == 0 {
+            write!(
+                file,
+                "YUV4MPEG2 W{w} H{h} F{}:{} Ip A1:1 C444 XYSCSS=444\n",
+                rate.num(),
+                rate.den()
+            )
+            .unwrap();
+        }
+        let (fx, fy) = (1usize << f.log2_chroma_w, 1usize << f.log2_chroma_h);
+        let (cw, ch) = (w.div_ceil(fx), h.div_ceil(fy));
+        let planes = frame
+            .with_planes(|p| {
+                let at = |plane: usize, x: usize, yy: usize, bytes: usize, c: usize| unsafe {
+                    *p[plane].ptr.add(yy * p[plane].stride + x * bytes + c)
+                };
+                let luma: Vec<u8> = (0..w * h).map(|i| at(0, i % w, i / w, 1, 0)).collect();
+                let chroma = |k: usize| -> Vec<f64> {
+                    (0..cw * ch)
+                        .map(|i| {
+                            f64::from(match f.layout {
+                                Layout::Planar => at(1 + k, i % cw, i / cw, 1, 0),
+                                Layout::Biplanar => at(1, i % cw, i / cw, 2, k),
+                                other => panic!("{other:?}"),
+                            })
+                        })
+                        .collect()
+                };
+                (luma, chroma(0), chroma(1))
+            })
+            .unwrap();
+        let up = |p: &[f64]| -> Vec<u8> {
+            let at = |i: i64, j: i64| {
+                p[(j.clamp(0, ch as i64 - 1) as usize) * cw + i.clamp(0, cw as i64 - 1) as usize]
+            };
+            (0..w * h)
+                .map(|k| {
+                    let (x, yy) = (k % w, k / w);
+                    let u = (x as f64 - (fx as f64 - 1.0) / 2.0) / fx as f64;
+                    let v = (yy as f64 - (fy as f64 - 1.0) / 2.0) / fy as f64;
+                    let (i, j) = (u.floor() as i64, v.floor() as i64);
+                    let (tu, tv) = (u - u.floor(), v - v.floor());
+                    let row = |j| at(i, j) * (1.0 - tu) + at(i + 1, j) * tu;
+                    (row(j) * (1.0 - tv) + row(j + 1) * tv).round() as u8
+                })
+                .collect()
+        };
+        file.write_all(b"FRAME\n").unwrap();
+        file.write_all(&planes.0).unwrap();
+        file.write_all(&up(&planes.1)).unwrap();
+        file.write_all(&up(&planes.2)).unwrap();
+    }
+    file.flush().unwrap();
+    out
+}
+
 /// Pixels where the reference's 3×3 neighborhood is uniform within 1 CV
 /// (patch interiors, section 25's video class).
 pub fn interior(reference: &[u8], width: u32, height: u32) -> Vec<bool> {
@@ -491,7 +618,6 @@ pub fn extension_definitions(document: &Document) -> Vec<String> {
 /// motion.md): a corpus project routed for one of them fails the corpus
 /// tests. Bezier path masks are drawn on today's Canvas2D coverage route
 /// and no longer have a routing reason of their own.
-#[allow(dead_code)]
 pub fn routing_forbidden(feature: &pm_render::Feature) -> bool {
     use pm_render::Feature;
     match feature {

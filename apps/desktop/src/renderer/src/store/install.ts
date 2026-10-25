@@ -11,10 +11,12 @@ export function install(PM: PMRegistry): void {
   let screen: Screen | null = null;
   let host: HTMLElement | null = null;
   function ensure(target: HTMLElement): Screen {
-    if (screen && host !== target) void unmount(screen);
-    if (!screen || host !== target) screen = mount(StoreScreen, { target, props: { PM } });
+    if (screen && host === target) return screen;
+    if (screen) void unmount(screen);
+    const mounted = mount(StoreScreen, { target, props: { PM } }) as Screen;
+    screen = mounted;
     host = target;
-    return screen;
+    return mounted;
   }
   const surface: StoreUISurface & { attach(target: HTMLElement): void; setActive(on: boolean): void; setSearch(text: string): void } = {
     attach: (target) => { ensure(target); },

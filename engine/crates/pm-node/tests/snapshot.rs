@@ -15,11 +15,6 @@
 //!   snapshot (a renderer blocked in `sendSync` cannot deadlock it);
 //! * scheduling: during playback a `sync` snapshot is answered at once, an
 //!   `idle` one only after the transport stops;
-//! * Blender compositions: a synchronous capture draws a prepared frame or
-//!   fails with today's sentence; an async capture with a Blender wait has
-//!   Blender render the frame first (a stand-in for main's supervision) and
-//!   draws its surfaces, and Blender's failure, absence, and timeout are
-//!   named.
 #![cfg(target_os = "macos")]
 
 use std::process::{Command, Stdio};
@@ -34,22 +29,27 @@ use pm_engine::Action;
 use pm_engine::engine::testing::hello;
 use pm_node::EngineHost;
 use pm_node::present::{BRIDGE_ENV, HOST_CLOCK_ENV, SOURCE_ENV};
-use pm_protocol::clock::{TransportCommand, TransportState};
+use pm_protocol::clock::{SeekMode, TransportCommand, TransportState};
 use pm_protocol::codec;
 use pm_protocol::color::{ProjectColor, ViewerColorSpace};
 use pm_protocol::common::{
-    Bytes, ContentHash, PlaybackRate, RequestId, Revision, Seq, SessionId, Size, Ticks,
+    Bytes, ContentHash, PlaybackRate, Rect, RequestId, Revision, Seq, SessionId, Size, Ticks,
 };
 use pm_protocol::envelope::{
     Envelope, Event, Message, OpenSession, Request, Response, SessionRole,
 };
 use pm_protocol::error::{EngineProcess, ErrorCode};
-use pm_protocol::frame::{FrameRelease, MediaPreference, PreviewResolution, ViewerState};
+use pm_protocol::frame::{
+    EditorCamera, FrameRelease, MediaPreference, PreviewResolution, Projection, Shading3d,
+    ViewOverride, ViewerCanvas, ViewerState,
+};
 use pm_protocol::host::PortId;
-use pm_protocol::patch::{DocumentEncoding, Resync, ResyncSource};
+use pm_protocol::patch::{
+    ConfirmRevision, DocumentEncoding, PatchBatch, PatchEncoding, PatchOrigin, Resync, ResyncSource,
+};
 use pm_protocol::snapshot::{
     HostSnapshot, PixelPayload, SnapshotClass, SnapshotOutcome, SnapshotPixels, SnapshotRequest,
-    SnapshotResult, SnapshotTarget,
+    SnapshotResult, SnapshotTarget, SnapshotViewer,
 };
 use pm_protocol::version::PeerRole;
 use serde_json::{Value, json};
@@ -117,6 +117,21 @@ fn snapshots_render_the_session_document_at_its_revision() {
 }
 
 #[test]
+fn snapshots_wait_while_a_revision_is_provisional() {
+    run_child("child_provisional_snapshots");
+}
+
+#[test]
+fn viewer_snapshots_render_the_pinned_canvas_without_changing_the_live_view() {
+    run_child("child_viewer_snapshot");
+}
+
+#[test]
+fn viewer_snapshots_apply_the_pinned_editor_camera_and_local_view() {
+    run_child("child_viewer_camera_snapshot");
+}
+
+#[test]
 fn snapshots_render_actual_eight_bit_project_targets() {
     run_child("child_eight_bit_snapshots");
 }
@@ -144,11 +159,6 @@ fn snapshots_send_an_effects_textures_to_main_ahead_of_the_answer() {
 #[test]
 fn frames_carry_their_depth_and_id_surface_when_the_viewer_asks() {
     run_child("child_depth");
-}
-
-#[test]
-fn blender_compositions_are_captured_as_today() {
-    run_child("child_blender");
 }
 
 #[test]
@@ -447,6 +457,7 @@ fn frame_request(
         pixels,
         class,
         view_seq: Some(Seq::new(4).unwrap()),
+        viewer: None,
         wait_ms,
         blender_wait_ms: 0,
         captions_hidden: false,
@@ -892,6 +903,283 @@ fn child_snapshots() {
     // limit, in shared memory.
     assert_eq!(presenter["snapshots"], 15, "{presenter}");
     assert_eq!(presenter["snapshotShared"], 6, "{presenter}");
+    println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by viewer_snapshots_render_the_pinned_canvas_without_changing_the_live_view"]
+fn child_viewer_snapshot() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    c.resync(2, 1, &project(100.0));
+    c.event(Event::Viewer(viewer_state()));
+    let initial = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW => Some(d.clone()),
+            _ => None,
+        });
+    assert_eq!(initial.view_seq, Seq::new(1).unwrap());
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: initial.pool_index,
+        seq: initial.seq,
+    }));
+    let mut pinned = frame_request(
+        SnapshotClass::Sync,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        5_000,
+    );
+    pinned.view_seq = None;
+    pinned.viewer = Some(SnapshotViewer {
+        view: None,
+        canvas: ViewerCanvas {
+            width: 320,
+            height: 180,
+            crop: Rect {
+                x: 80.0,
+                y: 40.0,
+                width: 160.0,
+                height: 90.0,
+            },
+            css: Rect {
+                x: 17.0,
+                y: 23.0,
+                width: 640.0,
+                height: 360.0,
+            },
+        },
+        view_seq: Seq::new(5).unwrap(),
+    });
+    c.snapshot(50, pinned, Some(1), WINDOW, c.session);
+    let pinned = rendered(c.inbox.wait(Duration::from_secs(20), answer(50)));
+    assert_eq!(pinned.view_seq, Some(Seq::new(5).unwrap()));
+    assert_eq!((pinned.width, pinned.height), (320, 180));
+    let pixels = pixels_of(&pinned);
+    assert_eq!(at(&pixels, 320, 80, 60), BOX);
+    assert_eq!(at(&pixels, 320, 0, 0), BACKGROUND);
+
+    // A later live frame still belongs to the original viewer state.
+    c.event(Event::Transport(TransportCommand::Seek {
+        time: Ticks::from_whole_seconds(1),
+        mode: SeekMode::Exact,
+    }));
+    let later = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Frame(d),
+            } if port == WINDOW && d.seq != initial.seq => Some(d.clone()),
+            _ => None,
+        });
+    assert_eq!(later.view_seq, Seq::new(1).unwrap());
+    c.event(Event::ReleaseFrame(FrameRelease {
+        pool_index: later.pool_index,
+        seq: later.seq,
+    }));
+
+    // The next ordinary capture still uses the full composition and its
+    // legacy sequence.
+    c.snapshot(
+        51,
+        frame_request(
+            SnapshotClass::Sync,
+            Size::new(320, 180),
+            SnapshotPixels::Opaque,
+            5_000,
+        ),
+        Some(1),
+        WINDOW,
+        c.session,
+    );
+    let ordinary = rendered(c.inbox.wait(Duration::from_secs(20), answer(51)));
+    assert_eq!(ordinary.view_seq, Some(Seq::new(4).unwrap()));
+    let pixels = pixels_of(&ordinary);
+    assert_eq!(at(&pixels, 320, 120, 70), BOX);
+    assert_eq!(at(&pixels, 320, 80, 60), BACKGROUND);
+
+    // The pinned canvas uses the live viewer's top-down color pass. On a
+    // full canvas it must retain the same exact 8-bit colors as an ordinary
+    // snapshot, while keeping its own selected sequence.
+    let mut full = frame_request(
+        SnapshotClass::Sync,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        5_000,
+    );
+    full.view_seq = None;
+    full.viewer = Some(SnapshotViewer {
+        view: None,
+        canvas: ViewerCanvas {
+            width: 320,
+            height: 180,
+            crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+            css: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+        },
+        view_seq: Seq::new(6).unwrap(),
+    });
+    c.snapshot(52, full, Some(1), WINDOW, c.session);
+    let full = rendered(c.inbox.wait(Duration::from_secs(20), answer(52)));
+    assert_eq!(full.view_seq, Some(Seq::new(6).unwrap()));
+    assert_eq!(pixels_of(&full), pixels);
+
+    // Project Float32 raises render intermediates, while the live viewer
+    // still writes its composition into an F16 display working texture.
+    // At this opacity, ordinary Float32 rounds white on black to code 95;
+    // the viewer's F16 display texture rounds the same pixel to code 94.
+    let mut high_precision = project(100.0);
+    high_precision["color"] =
+        json!({ "mode": "standard", "linearBlending": false, "precision": "float32" });
+    high_precision["backgroundFill"]["stops"][0]["color"] = json!("#000000");
+    high_precision["layers"][0]["d"]["color"] = json!("#FFFFFF");
+    high_precision["layers"][0]["p"]["opacity"] = ch(json!(37.060));
+    c.resync(53, 2, &high_precision);
+    c.snapshot(
+        54,
+        frame_request(
+            SnapshotClass::Sync,
+            Size::new(320, 180),
+            SnapshotPixels::Opaque,
+            5_000,
+        ),
+        Some(2),
+        WINDOW,
+        c.session,
+    );
+    let ordinary_float32 = rendered(c.inbox.wait(Duration::from_secs(20), answer(54)));
+    assert_eq!(ordinary_float32.view_seq, Some(Seq::new(4).unwrap()));
+    let mut high_precision_pin = frame_request(
+        SnapshotClass::Sync,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        5_000,
+    );
+    high_precision_pin.viewer = Some(SnapshotViewer {
+        view: None,
+        canvas: ViewerCanvas {
+            width: 320,
+            height: 180,
+            crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+            css: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+        },
+        view_seq: Seq::new(7).unwrap(),
+    });
+    high_precision_pin.view_seq = None;
+    c.snapshot(55, high_precision_pin, Some(2), WINDOW, c.session);
+    let high_precision_viewer = rendered(c.inbox.wait(Duration::from_secs(20), answer(55)));
+    assert_eq!(high_precision_viewer.view_seq, Some(Seq::new(7).unwrap()));
+    assert_eq!(
+        at(&pixels_of(&ordinary_float32), 320, 120, 70),
+        [95, 95, 95, 255]
+    );
+    assert_eq!(
+        at(&pixels_of(&high_precision_viewer), 320, 120, 70),
+        [94, 94, 94, 255]
+    );
+    println!("CHILD-OK");
+}
+
+#[test]
+#[ignore = "run by viewer_snapshots_apply_the_pinned_editor_camera_and_local_view"]
+fn child_viewer_camera_snapshot() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    c.resync(2, 1, &scene3d_project());
+    let size = Size::new(320, 180);
+    let mut capture = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    capture.target = SnapshotTarget::Frame {
+        motion_blur_samples: 0,
+        background: true,
+        draft_3d: true,
+    };
+    capture.view_seq = None;
+    capture.viewer = Some(SnapshotViewer {
+        view: Some(ViewOverride {
+            camera: None,
+            shading: Shading3d::Solid,
+            xray: false,
+            local_view: vec![],
+        }),
+        canvas: ViewerCanvas {
+            width: size.width,
+            height: size.height,
+            crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+            css: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+        },
+        view_seq: Seq::new(7).unwrap(),
+    });
+    c.snapshot(60, capture.clone(), Some(1), WINDOW, c.session);
+    let default = rendered(c.inbox.wait(Duration::from_secs(20), answer(60)));
+    assert_eq!(default.view_seq, Some(Seq::new(7).unwrap()));
+    let default_pixels = pixels_of(&default);
+
+    let selected = capture.viewer.as_mut().unwrap();
+    selected.view_seq = Seq::new(8).unwrap();
+    selected.view.as_mut().unwrap().camera = Some(EditorCamera {
+        view: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -10.0, 1.0,
+        ],
+        projection: Projection::Orthographic {
+            half_height: 0.6,
+            near: 0.01,
+            far: 100.0,
+        },
+    });
+    c.snapshot(61, capture.clone(), Some(1), WINDOW, c.session);
+    let editor = rendered(c.inbox.wait(Duration::from_secs(20), answer(61)));
+    assert_eq!(editor.view_seq, Some(Seq::new(8).unwrap()));
+    assert_ne!(
+        pixels_of(&editor),
+        default_pixels,
+        "the editor camera changes the frame"
+    );
+
+    let selected = capture.viewer.as_mut().unwrap();
+    selected.view_seq = Seq::new(9).unwrap();
+    selected.view.as_mut().unwrap().local_view = vec!["cam".into()];
+    c.snapshot(62, capture, Some(1), WINDOW, c.session);
+    let local = rendered(c.inbox.wait(Duration::from_secs(20), answer(62)));
+    assert_ne!(
+        pixels_of(&local),
+        pixels_of(&editor),
+        "Local View hides the object"
+    );
     println!("CHILD-OK");
 }
 
@@ -1470,436 +1758,6 @@ fn child_depth() {
     );
     assert!(status["presenter"]["depthFrames"].as_u64().unwrap() >= 1);
     println!("CHILD-OK");
-}
-
-/// A 3D layer (`mkLayer`'s transform channels) of extension `definition`.
-fn layer3d(id: &str, definition: &str, data: Value, position: [f64; 3], w: u32, h: u32) -> Value {
-    json!({
-        "id": id, "type": "extension", "name": id, "from": 0, "dur": 2, "on": true, "lock": false,
-        "shy": false, "collapsed": true, "threeD": true, "solo": false, "color": "#4C8DFF",
-        "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
-        "p": {
-            "perspective": ch(json!(50)), "position.z": ch(json!(position[2])), "anchor.z": ch(json!(0)),
-            "scale.z": ch(json!(100)), "rotation.x": ch(json!(0)), "rotation.y": ch(json!(0)),
-            "orientation.x": ch(json!(0)), "orientation.y": ch(json!(0)), "orientation.z": ch(json!(0)),
-            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(position[0])),
-            "position.y": ch(json!(position[1])), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
-            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
-        },
-        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
-        "d": { "definition": definition, "version": 1, "w": w, "h": h, "params": {}, "data": data },
-        "locked_intent": {}
-    })
-}
-
-/// A composition Blender renders (`render3d.enabled`): a camera, a sun,
-/// and one box.
-fn blender_project() -> Value {
-    let camera = layer3d(
-        "cam",
-        "powermove.3d.camera",
-        json!({
-            "camera": { "projection": "perspective", "p": {
-                "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
-                "fov": ch(json!(45)), "zoom": ch(json!(1)), "near": ch(json!(0.01)), "far": ch(json!(1000))
-            } },
-            "environment": { "p": {
-                "ambient": ch(json!(0.5)), "ambientColor": ch(json!("#FFFFFF")), "exposure": ch(json!(1))
-            }, "background": null, "shadows": false }
-        }),
-        [0.0, 0.0, 4.0],
-        0,
-        0,
-    );
-    let sun = layer3d(
-        "sun",
-        "powermove.3d.light",
-        json!({ "light": { "type": "sun", "castShadow": false, "p": {
-            "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
-            "color": ch(json!("#FFFFFF")), "intensity": ch(json!(3)), "distance": ch(json!(0)),
-            "decay": ch(json!(2)), "angle": ch(json!(45)), "penumbra": ch(json!(0.4)),
-            "width": ch(json!(1)), "height": ch(json!(1))
-        } } }),
-        [-3.0, 5.0, 4.0],
-        0,
-        0,
-    );
-    let object = layer3d(
-        "o",
-        "powermove.3d.object",
-        json!({ "object": {
-            "source": { "primitive": "box", "parameters": {} },
-            "material": { "p": {
-                "color": ch(json!("#FF8040")), "roughness": ch(json!(0.4)), "metalness": ch(json!(0.1)),
-                "emissive": ch(json!("#000000")), "emissiveIntensity": ch(json!(1)), "opacity": ch(json!(1))
-            }, "maps": {}, "doubleSided": true },
-            "useSourceMaterials": false, "slots": [], "castShadow": true, "receiveShadow": true
-        } }),
-        [0.0, 0.0, 0.0],
-        320,
-        180,
-    );
-    let mut p = project(100.0);
-    p["layers"] = json!([camera, sun, object]);
-    p["render3d"] = json!({ "enabled": true, "engine": "eevee", "samples": 8 });
-    p
-}
-
-/// How the stand-in host services answer `blenderRender`.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum BlenderMode {
-    /// Every surface opaque magenta.
-    Render,
-    /// Blender failed.
-    Fail,
-    /// Blender is not installed.
-    Missing,
-    /// Never answers until cancelled.
-    Hold,
-}
-
-/// Main's Blender supervision as the engine sees it (contract 11 over the
-/// host port; `main/engine/blender.ts`): the Blender Surfaces area in a
-/// temporary directory, surfaces written as 16-bit PNGs before the answer.
-struct StandInHost {
-    area: std::path::PathBuf,
-    mode: BlenderMode,
-    renders: Vec<String>,
-    cancels: Vec<String>,
-    held: Vec<(RequestId, String)>,
-}
-
-const MAGENTA: [u8; 4] = [255, 0, 255, 255];
-
-impl StandInHost {
-    fn new() -> StandInHost {
-        let area = std::env::temp_dir().join(format!("pm-snapshot-blender-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&area);
-        std::fs::create_dir_all(&area).unwrap();
-        StandInHost {
-            area,
-            mode: BlenderMode::Render,
-            renders: Vec::new(),
-            cancels: Vec::new(),
-            held: Vec::new(),
-        }
-    }
-
-    fn reply(c: &mut Child, id: RequestId, answer: Result<Response, (ErrorCode, &str)>) {
-        use pm_protocol::error::{EngineError, ErrorScope};
-        let message = match answer {
-            Ok(body) => Message::Response { id, body },
-            Err((code, text)) => Message::Error {
-                id,
-                error: EngineError::new(code, ErrorScope::Request { id }, text),
-            },
-        };
-        c.host_sends(Envelope::new(message));
-    }
-
-    fn serve(&mut self, c: &mut Child, id: RequestId, session: Option<SessionId>, body: Request) {
-        use pm_protocol::blender::{BlenderStatus, BlenderSurface, ResolvedDevice};
-        use pm_protocol::common::{ByteSize, PixelRect};
-        use pm_protocol::host::{
-            CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved,
-        };
-        use pm_protocol::priority::{CancelJobs, JobsCancelled};
-        match body {
-            Request::BlenderStatus => Self::reply(
-                c,
-                id,
-                Ok(Response::BlenderStatus(BlenderStatus {
-                    available: true,
-                    version: Some("4.5.14".into()),
-                    error: None,
-                })),
-            ),
-            Request::MintHandle(mint) => Self::reply(
-                c,
-                id,
-                Ok(Response::Handle(HandleGrant {
-                    handle: CapabilityHandle::from_random_bytes([9; 16]),
-                    kind: mint.kind,
-                    content_hash: None,
-                })),
-            ),
-            Request::ResolveHandle(r) => Self::reply(
-                c,
-                id,
-                Ok(Response::HandleResolved(HandleResolved {
-                    handle: r.handle,
-                    kind: CapabilityKind::Cache {
-                        cache: CacheKind::BlenderSurfaces,
-                    },
-                    access: HandleAccess::ReadWrite,
-                    path: self.area.to_string_lossy().into_owned(),
-                })),
-            ),
-            Request::BlenderRender(job) => {
-                self.renders.push(job.job.0.clone());
-                match self.mode {
-                    BlenderMode::Fail => {
-                        Self::reply(c, id, Err((ErrorCode::BlenderFailed, "Blender crashed")))
-                    }
-                    BlenderMode::Missing => Self::reply(
-                        c,
-                        id,
-                        Err((ErrorCode::BlenderMissing, "Install Blender 4.5 or later.")),
-                    ),
-                    BlenderMode::Hold => self.held.push((id, job.job.0.clone())),
-                    BlenderMode::Render => {
-                        for (i, sr) in job.surfaces.iter().enumerate() {
-                            let (w, h) = (sr.size.width, sr.size.height);
-                            let rgba: Vec<u16> = (0..w * h)
-                                .flat_map(|_| [65_535, 0, 65_535, 65_535])
-                                .collect();
-                            let png = pm_blender::surface::encode_rgba16(w, h, &rgba, &[]);
-                            let name = format!("{}.png", pm_blender::key::hex(&sr.key));
-                            std::fs::write(self.area.join(name), &png).unwrap();
-                            let event = Event::BlenderSurface(BlenderSurface {
-                                job: job.job.clone(),
-                                request_index: i as u32,
-                                key: sr.key,
-                                size: sr.size,
-                                crop: PixelRect {
-                                    x: 0,
-                                    y: 0,
-                                    width: w,
-                                    height: h,
-                                },
-                                handle: job.output.clone(),
-                                bytes: ByteSize::new(png.len() as u64).unwrap(),
-                                device: ResolvedDevice::Cpu,
-                            });
-                            let mut envelope = Envelope::new(Message::Event { body: event });
-                            envelope.session = session;
-                            c.host_sends(envelope);
-                        }
-                        Self::reply(c, id, Ok(Response::Ack));
-                    }
-                }
-            }
-            Request::CancelJobs(CancelJobs::Job { job }) => {
-                self.cancels.push(job.0.clone());
-                if let Some(i) = self.held.iter().position(|(_, j)| *j == job.0) {
-                    let (held, _) = self.held.remove(i);
-                    Self::reply(
-                        c,
-                        held,
-                        Err((ErrorCode::Cancelled, "Blender request cancelled")),
-                    );
-                }
-                Self::reply(
-                    c,
-                    id,
-                    Ok(Response::JobsCancelled(JobsCancelled { jobs: vec![job] })),
-                );
-            }
-            other => {
-                eprintln!("stand-in host: unsupported {other:?}");
-                Self::reply(
-                    c,
-                    id,
-                    Err((ErrorCode::Unsupported, "not served by this test")),
-                );
-            }
-        }
-    }
-
-    /// Serves the engine's host requests until `done` matches.
-    fn serve_until<T>(
-        &mut self,
-        c: &mut Child,
-        timeout: Duration,
-        mut done: impl FnMut(PortId, &Envelope) -> Option<T>,
-    ) -> T {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let actions = c.host.pump();
-            c.inbox.push(actions);
-            let request = c
-                .inbox
-                .try_wait(Duration::ZERO, &mut |port, m| match &m.message {
-                    Message::Request { id, body } if port == HOST => {
-                        Some((*id, m.session, body.clone()))
-                    }
-                    _ => None,
-                });
-            if let Some((id, session, body)) = request {
-                self.serve(c, id, session, body);
-                continue;
-            }
-            if let Some(found) = c.inbox.try_wait(Duration::from_millis(5), &mut done) {
-                return found;
-            }
-            assert!(Instant::now() < deadline, "timed out serving Blender");
-        }
-    }
-}
-
-impl StandInHost {
-    /// Serves the engine's host requests while `waiting` holds.
-    fn serve_while(&mut self, c: &mut Child, timeout: Duration, waiting: impl Fn(&Self) -> bool) {
-        let deadline = Instant::now() + timeout;
-        while waiting(self) {
-            assert!(Instant::now() < deadline, "timed out serving Blender");
-            let actions = c.host.pump();
-            c.inbox.push(actions);
-            let request =
-                c.inbox
-                    .try_wait(Duration::from_millis(5), &mut |port, m| match &m.message {
-                        Message::Request { id, body } if port == HOST => {
-                            Some((*id, m.session, body.clone()))
-                        }
-                        _ => None,
-                    });
-            if let Some((id, session, body)) = request {
-                self.serve(c, id, session, body);
-            }
-        }
-    }
-}
-
-impl Drop for StandInHost {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.area);
-    }
-}
-
-fn blender_capture(wait_ms: u32, blender_wait_ms: u32) -> SnapshotRequest {
-    let mut r = frame_request(
-        SnapshotClass::Async,
-        Size::new(320, 180),
-        SnapshotPixels::Opaque,
-        wait_ms,
-    );
-    r.blender_wait_ms = blender_wait_ms;
-    r
-}
-
-fn with_samples(samples: u32) -> Value {
-    let mut p = blender_project();
-    p["render3d"]["samples"] = json!(samples);
-    p
-}
-
-#[test]
-#[ignore = "run by blender_compositions_are_captured_as_today"]
-fn child_blender() {
-    if std::env::var(CHILD_ENV).is_err() {
-        return;
-    }
-    // Blender is retired in the app; this child runs its stage.
-    pm_render::blender::enable_for_tests();
-    let mut c = Child::start();
-    let session = c.session;
-    let mut host = StandInHost::new();
-    c.resync(2, 1, &blender_project());
-    // Today's synchronous capture draws the frame Blender prepared or fails;
-    // there is none, so it fails with today's error, never native shading
-    // labelled final.
-    let small = Size::new(320, 180);
-    c.snapshot(
-        10,
-        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
-        Some(1),
-        WINDOW,
-        session,
-    );
-    let outcome = c.inbox.wait(Duration::from_secs(20), answer(10));
-    assert_eq!(outcome.err(), Some(ErrorCode::BlenderFailed));
-    // A draft 3D capture draws native shading and says so.
-    let mut draft = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
-    draft.target = SnapshotTarget::Frame {
-        motion_blur_samples: 0,
-        background: true,
-        draft_3d: true,
-    };
-    c.snapshot(11, draft, Some(1), WINDOW, session);
-    let native = rendered(c.inbox.wait(Duration::from_secs(20), answer(11)));
-    assert!(native.quality.draft_3d);
-    assert_ne!(at(&pixels_of(&native), 320, 160, 90), MAGENTA);
-    assert!(host.renders.is_empty(), "no Blender for those");
-
-    // Today's `snapshotAsync`: Blender renders the frame first (with a 1 s
-    // wait that Blender's time does not count against), then the capture
-    // draws Blender's surfaces.
-    let started = Instant::now();
-    c.snapshot(12, blender_capture(1_000, 60_000), Some(1), WINDOW, session);
-    let result = rendered(host.serve_until(&mut c, Duration::from_secs(30), answer(12)));
-    let elapsed = started.elapsed();
-    assert!(!result.quality.draft_3d);
-    assert_eq!(result.revision.get(), 1);
-    let px = pixels_of(&result);
-    assert_eq!(
-        at(&px, 320, 160, 90),
-        MAGENTA,
-        "Blender's surface, not native shading"
-    );
-    assert_eq!(host.renders.len(), 1);
-    assert!(
-        host.renders[0].starts_with(&format!("capture-{}-{}-", WINDOW.0, session.get())),
-        "{:?}",
-        host.renders
-    );
-    // A synchronous capture of the same frame now draws the prepared frame
-    // (today's prepared frame), without Blender.
-    c.snapshot(
-        13,
-        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
-        Some(1),
-        WINDOW,
-        session,
-    );
-    let again = rendered(host.serve_until(&mut c, Duration::from_secs(20), answer(13)));
-    assert_eq!(at(&pixels_of(&again), 320, 160, 90), MAGENTA);
-    // And an async capture of it asks Blender for nothing.
-    c.snapshot(14, blender_capture(1_000, 60_000), Some(1), WINDOW, session);
-    let cached = rendered(host.serve_until(&mut c, Duration::from_secs(20), answer(14)));
-    assert_eq!(at(&pixels_of(&cached), 320, 160, 90), MAGENTA);
-    assert_eq!(host.renders.len(), 1);
-
-    // Blender failing fails the capture with its reason.
-    c.resync(3, 2, &with_samples(16));
-    host.mode = BlenderMode::Fail;
-    c.snapshot(15, blender_capture(1_000, 60_000), Some(2), WINDOW, session);
-    assert_eq!(
-        host.serve_until(&mut c, Duration::from_secs(20), answer(15)),
-        Err(ErrorCode::BlenderFailed)
-    );
-    // Blender not installed: today's `blenderMissing`.
-    host.mode = BlenderMode::Missing;
-    c.snapshot(16, blender_capture(1_000, 60_000), Some(2), WINDOW, session);
-    assert_eq!(
-        host.serve_until(&mut c, Duration::from_secs(20), answer(16)),
-        Err(ErrorCode::BlenderMissing)
-    );
-    // Blender that never finishes: the capture fails at its Blender bound
-    // and Blender is stopped.
-    host.mode = BlenderMode::Hold;
-    let held = Instant::now();
-    c.snapshot(17, blender_capture(500, 1_500), Some(2), WINDOW, session);
-    assert_eq!(
-        host.serve_until(&mut c, Duration::from_secs(20), answer(17)),
-        Err(ErrorCode::Timeout)
-    );
-    let bounded = held.elapsed();
-    assert!(
-        bounded >= Duration::from_millis(1_400) && bounded < Duration::from_secs(5),
-        "{bounded:?}"
-    );
-    host.serve_while(&mut c, Duration::from_secs(10), |h| h.cancels.is_empty());
-    assert_eq!(host.cancels.len(), 1);
-    assert_eq!(host.cancels[0], host.renders[host.renders.len() - 1]);
-    assert!(
-        host.held.is_empty(),
-        "the held Blender request was answered as cancelled"
-    );
-    println!(
-        "CHILD-OK blender: refused when not prepared, native with draft 3D, prepared by Blender in {} ms, prepared frame reused, failure, missing and timeout ({} ms) named",
-        elapsed.as_millis(),
-        bounded.as_millis()
-    );
 }
 
 #[test]
@@ -2777,4 +2635,147 @@ fn child_svg_viewer_timeout() {
     assert_eq!(stats["externalWaitTimeouts"], json!(1), "{stats}");
     assert_eq!(stats["svgFailedFrames"], json!(1), "{stats}");
     println!("CHILD-OK svg viewer timeout (drawn after {waited:?})");
+}
+
+#[test]
+#[ignore = "run by snapshots_wait_while_a_revision_is_provisional"]
+fn child_provisional_snapshots() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    c.resync(2, 1, &project(100.0));
+    let small = Size::new(320, 180);
+    // The window's batch from `from` to `to`: provisional while the rest of
+    // the document is still being compared.
+    let batch = |c: &mut Child, base: u64, from: &Value, to: &Value, provisional: bool| {
+        let parse = |v: &Value| pm_model::json::parse(&v.to_string()).unwrap();
+        let ops = pm_model::ops::diff_ops(Some(&parse(from)), Some(&parse(to)));
+        c.event(Event::ApplyPatches(PatchBatch {
+            document: "Psnap".into(),
+            base_revision: Revision::new(base).unwrap(),
+            revision: Revision::new(base + 1).unwrap(),
+            origin: PatchOrigin::StructuralDiff,
+            encoding: PatchEncoding::CanonicalV1,
+            patch_count: ops.len() as u32,
+            body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+            provisional,
+        }));
+    };
+    let capture = |c: &mut Child, id: u64, at: u64| {
+        c.snapshot(
+            id,
+            frame_request(SnapshotClass::Async, small, SnapshotPixels::Opaque, 5_000),
+            Some(at),
+            WINDOW,
+            session,
+        );
+    };
+
+    // A capture asked at revision 1 while revision 2 is provisional waits:
+    // 2 may be part of an edit. The rest of the edit supersedes it (3), and
+    // the capture draws the whole edit, never 2.
+    batch(&mut c, 1, &project(100.0), &project(150.0), true);
+    capture(&mut c, 30, 1);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(300), &mut answer(30))
+            .is_none(),
+        "drew a provisional revision"
+    );
+    batch(&mut c, 2, &project(150.0), &project(200.0), false);
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(30)));
+    assert_eq!(result.revision.get(), 3);
+    let px = pixels_of(&result);
+    assert_eq!(at(&px, 320, 220, 70), BOX);
+    assert_eq!(at(&px, 320, 170, 70), BACKGROUND);
+
+    // Confirmed: the capture asked below it draws the provisional revision.
+    batch(&mut c, 3, &project(200.0), &project(120.0), true);
+    capture(&mut c, 31, 3);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(300), &mut answer(31))
+            .is_none(),
+        "drew a provisional revision"
+    );
+    c.event(Event::ConfirmRevision(ConfirmRevision {
+        document: "Psnap".into(),
+        revision: Revision::new(4).unwrap(),
+    }));
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(31)));
+    assert_eq!(result.revision.get(), 4);
+    assert_eq!(at(&pixels_of(&result), 320, 140, 70), BOX);
+    println!("CHILD-OK provisional snapshots");
+}
+
+fn layer3d(id: &str, definition: &str, data: Value, position: [f64; 3], w: u32, h: u32) -> Value {
+    json!({
+        "id": id, "type": "extension", "name": id, "from": 0, "dur": 2, "on": true, "lock": false,
+        "shy": false, "collapsed": true, "threeD": true, "solo": false, "color": "#4C8DFF",
+        "blend": "normal", "mblur": false, "parent": null, "group": null, "matteSource": null,
+        "p": {
+            "perspective": ch(json!(50)), "position.z": ch(json!(position[2])), "anchor.z": ch(json!(0)),
+            "scale.z": ch(json!(100)), "rotation.x": ch(json!(0)), "rotation.y": ch(json!(0)),
+            "orientation.x": ch(json!(0)), "orientation.y": ch(json!(0)), "orientation.z": ch(json!(0)),
+            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(position[0])),
+            "position.y": ch(json!(position[1])), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+        },
+        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
+        "d": { "definition": definition, "version": 1, "w": w, "h": h, "params": {}, "data": data },
+        "locked_intent": {}
+    })
+}
+
+/// A camera, a sun and a box, in native 3D (no render3d engine).
+fn scene3d_project() -> Value {
+    let camera = layer3d(
+        "cam",
+        "powermove.3d.camera",
+        json!({
+            "camera": { "projection": "perspective", "p": {
+                "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
+                "fov": ch(json!(45)), "zoom": ch(json!(1)), "near": ch(json!(0.01)), "far": ch(json!(1000))
+            } },
+            "environment": { "p": {
+                "ambient": ch(json!(0.5)), "ambientColor": ch(json!("#FFFFFF")), "exposure": ch(json!(1))
+            }, "background": null, "shadows": false }
+        }),
+        [0.0, 0.0, 4.0],
+        0,
+        0,
+    );
+    let sun = layer3d(
+        "sun",
+        "powermove.3d.light",
+        json!({ "light": { "type": "sun", "castShadow": false, "p": {
+            "targetX": ch(json!(0)), "targetY": ch(json!(0)), "targetZ": ch(json!(0)),
+            "color": ch(json!("#FFFFFF")), "intensity": ch(json!(3)), "distance": ch(json!(0)),
+            "decay": ch(json!(2)), "angle": ch(json!(45)), "penumbra": ch(json!(0.4)),
+            "width": ch(json!(1)), "height": ch(json!(1))
+        } } }),
+        [-3.0, 5.0, 4.0],
+        0,
+        0,
+    );
+    let object = layer3d(
+        "o",
+        "powermove.3d.object",
+        json!({ "object": {
+            "source": { "primitive": "box", "parameters": {} },
+            "material": { "p": {
+                "color": ch(json!("#FF8040")), "roughness": ch(json!(0.4)), "metalness": ch(json!(0.1)),
+                "emissive": ch(json!("#000000")), "emissiveIntensity": ch(json!(1)), "opacity": ch(json!(1))
+            }, "maps": {}, "doubleSided": true },
+            "useSourceMaterials": false, "slots": [], "castShadow": true, "receiveShadow": true
+        } }),
+        [0.0, 0.0, 0.0],
+        320,
+        180,
+    );
+    let mut p = project(100.0);
+    p["layers"] = json!([camera, sun, object]);
+    p
 }

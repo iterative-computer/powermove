@@ -26,7 +26,7 @@ import { HEIGHT, WIDTH, makeImages } from './images';
 import { BUILTIN_EFFECTS, BUILTIN_TRANSITION_DEFS, PREAMBLES, REPO, VERTEX, snapshots } from './preambles';
 import { probes, program } from './probes';
 
-const { GENERATED } = await import(join(REPO, 'engine', 'spikes', 's3-shaders', 'corpus', 'generated', 'index.ts'));
+const { GENERATED } = await import(join(REPO, 'engine', 'crates', 'pm-render', 'tools', 'agent-shaders', 'index.ts'));
 
 const args = process.argv.slice(2);
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');

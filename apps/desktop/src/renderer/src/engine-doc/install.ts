@@ -1,3 +1,8 @@
+import { canonicalProject } from '../../../shared/canonical-json';
+import { jsonCloneSliced } from '../../../shared/canonical-async';
+import { ConsistencyHash } from './consistency-hash';
+import { ingestDocumentText, RemotePmWasm, remoteCanonicalHash } from './remote';
+import { documentId } from '../../../shared/engine-document-id';
 /*
  * Installs the document mirror (pm-wasm), the write barrier, and the native
  * evaluator into the legacy registry (docs/rust-engine.md, section 6; section
@@ -85,6 +90,8 @@ export interface DocApi {
   /** Records a write to `object`, wherever it is in the document (its path
    *  is searched for; an object outside the document is not a document write). */
   wroteObject(object: unknown): void;
+  /** Built-in notification with exact paths (empty for runtime-only changes). */
+  notify(event: string, paths: readonly PathPart[][]): void;
   /** Flushes pending writes into the mirror now. */
   flush(): void;
 }
@@ -111,8 +118,14 @@ export interface EngineDoc {
    */
   settled(): Promise<boolean>;
   check(reason: string): ConsistencyResult | null;
-  beforeSave(reason?: string): void;
-  beforeExport(reason?: string): void;
+  checkAsync(reason: string): Promise<ConsistencyResult | null>;
+  prepare(project: any): void | Promise<void>;
+  /** Release an unused prepared project without canceling a newer request. */
+  discardPrepared?(project: any): void;
+  /** Restore a remote document before a new native engine launch opens sessions. */
+  reconnect(generation: number): Promise<void>;
+  beforeSave(reason?: string): void | Promise<void>;
+  beforeExport(reason?: string): void | Promise<void>;
   /**
    * The canonical patch stream (contract 5) for engine sessions: every batch
    * pm-wasm applied, in order. Receivers start from `snapshot()` and apply
@@ -131,7 +144,9 @@ export interface EngineDoc {
    */
   flushBeforeListeners(wanted: () => boolean): () => void;
   /** The flushed canonical document and its revision and hash (null until ready). */
-  snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
+  snapshot(options?: { checkpoint?: boolean }): ReturnType<DocumentBarrier['snapshot']> | null;
+  resume(): ReturnType<DocumentBarrier['resume']> | null;
+  refreshResume?(force?: boolean): Promise<ReturnType<DocumentBarrier['resume']> | null>;
   stats(): Record<string, unknown>;
   summary(): void;
   /** Named failures so far (strict mode), newest last. */
@@ -160,17 +175,44 @@ const noopDoc: DocApi = {
   touched: () => {},
   track: () => {},
   wroteObject: () => {},
+  notify: () => {},
   flush: () => {},
 };
+
+/** A bounded routing census; large values never enter the synchronous mirror. */
+function largeDocument(project: any): boolean {
+  const todo = [project];
+  const started = performance.now();
+  let visited = 0, members = 0, stringUnits = 0;
+  while (todo.length) {
+    if (++visited > 4096 || (visited % 64 === 0 && performance.now() - started >= 2)) return true;
+    const value = todo.pop();
+    if (typeof value === 'string') {
+      stringUnits += value.length;
+      if (stringUnits > 65536) return true;
+    } else if (value && typeof value === 'object') {
+      if (Array.isArray(value) && value.length > 4096) return true;
+      for (const key in value) {
+        if (++members > 4096 || (members % 64 === 0 && performance.now() - started >= 2)) return true;
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (todo.length >= 4096) return true;
+        stringUnits += key.length;
+        if (stringUnits > 65536) return true;
+        todo.push(value[key]);
+      }
+    }
+  }
+  return false;
+}
 
 export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {}): EngineDoc {
   const mode = options.mode ?? safeMode();
   if (!mode.evaluator) {
-    PM.doc = noopDoc;
+    PM.doc = { ...noopDoc, notify: (event: string) => PM.bus?.emit?.(event) };
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, edits: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false), strict: false, settled: () => Promise.resolve(false),
-      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
+      check: () => null, checkAsync: async () => null, prepare: () => {}, reconnect: async () => {}, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, onPending: () => () => {}, flushBeforeListeners: () => () => {}, snapshot: () => null, resume: () => null, stats: () => ({ enabled: false }), summary: () => {},
       failures: () => [], showFailure: () => {}, retry: () => Promise.resolve(false), onReady: () => () => {}, warmFonts: () => Promise.resolve(),
     };
     PM.EngineDoc = off;
@@ -186,6 +228,19 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   let coveredDepth = 0;
   let replacing = false;
   let current: any = PM.proj;
+  // Boot has no barrier yet, but writers must still invalidate an async
+  // snapshot made before they announced their edit.
+  let projectEpoch = 0;
+  let preparedProject: { project: any; instance: RemotePmWasm; shadow: any; integrity: ConsistencyHash } | null = null;
+  let preparation: Promise<void> = Promise.resolve();
+  let nativeGeneration = 0;
+  let remoteRecoveryRequested = false;
+  let diagnosticCheck: { project: any; promise: Promise<void> } | null = null;
+  const prepareSerial = <T,>(run: () => Promise<T>): Promise<T> => {
+    const result = preparation.catch(() => {}).then(run);
+    preparation = result.then(() => {}, () => {});
+    return result;
+  };
   let pendingReplace: 'resync' | 'diff' | null = null;
   /** No transaction diff has run yet in this synchronous run. */
   let runFresh = true;
@@ -216,6 +271,15 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       // (`rotateProject({ ...PM.proj })`): its members may be proxies.
       const raw = tracker ? tracker.unwrapDeep(next) : next;
       const previous = current;
+      if (previous !== raw) projectEpoch++;
+      if (preparedProject && preparedProject.project === raw) {
+        const prepared = preparedProject; preparedProject = null;
+        try { prepared.instance.activate((barrier?.revision ?? 0) + 1); }
+        catch (error) { try { prepared.instance.bridge.call('{"op":"cancel"}'); } catch {} throw error; }
+        current = raw;
+        attach(prepared.instance, prepared);
+        return;
+      }
       current = raw;
       if (previous === raw) return;
       // Another project resyncs (the only `load` batch); another version of
@@ -233,6 +297,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
 
   // ── writers ───────────────────────────────────────────────────────────
   const record = (paths: readonly PathPart[][], options: { canonical?: boolean; origin?: any } = {}) => {
+    if (paths.length) projectEpoch++;
     if (!barrier || !paths.length) return;
     if (options.canonical) barrier.touchedCanonical(paths, options.origin ?? 'edit');
     else barrier.touched(paths, options.origin ?? 'edit');
@@ -259,9 +324,23 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       record(paths);
     },
     wroteObject(object) {
-      if (!barrier || !object || typeof object !== 'object') return;
+      // A document replacement adopts every legacy keyframe it holds: finding
+      // each one's path walked the whole document per keyframe. The
+      // replacement's resync or whole diff has them.
+      if (!barrier && object && typeof object === 'object') projectEpoch++;
+      if (!barrier || !object || typeof object !== 'object' || barrier.coversDocument) return;
       const path = findPath(current, unwrap(object), 16);
       if (path) barrier.touched([path]);
+    },
+    notify(event, paths) {
+      record(paths);
+      // Consume the exemption before listeners run: an extension's touch()
+      // or nested announcement must still be observed as an unknown write.
+      const bus = PM.bus;
+      if (!bus) return;
+      const previous = bus.__engineDocKnownEvent;
+      bus.__engineDocKnownEvent = event;
+      try { bus.emit(event); } finally { bus.__engineDocKnownEvent = previous; }
     },
     flush: () => barrier?.flush(),
   };
@@ -274,6 +353,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
    *  not replace it: writers announce writes made through references the
    *  Proxy never handed out (a new layer from `PM.mkLayer`, edited after insertion). */
   const unknownWrite = () => {
+    if (coveredDepth === 0) projectEpoch++;
     if (!barrier || coveredDepth > 0) return;
     if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()]); return; }
     if (PM.hist?.busy?.()) { transactionDirty = true; return; }
@@ -331,8 +411,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (!bus.emit.__engineDoc) {
       const emit = bus.emit;
       const wrapped = function (this: unknown, event: unknown, ...args: unknown[]) {
+        // An announcement through PM.doc.notify carries its own paths.
+        const known = bus.__engineDocKnownEvent === event;
+        bus.__engineDocKnownEvent = undefined;
         if (announces(event, args[0])) {
-          bus.__engineDocAnnounce?.();
+          if (!known) bus.__engineDocAnnounce?.();
           bus.__engineDocEager?.();
         }
         return emit.call(this ?? bus, event, ...args);
@@ -466,6 +549,64 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
   const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
+  let preparationTiming: { cloneMs: number; ingestMs: number } | null = null;
+  function discardPrepared(project?: any): void {
+    if (!preparedProject || (project !== undefined && preparedProject.project !== unwrap(project))) return;
+    const unused = preparedProject; preparedProject = null;
+    try { unused.instance.bridge.call('{"op":"cancel"}'); }
+    catch (error) { console.warn('[engine-doc] unused preparation cleanup failed', error); }
+  }
+  async function prepareNative(project: any) {
+    const host = hostBridge()?.nativeEngine;
+    const native = host?.documentKernel;
+    if (!native) throw new Error('The native document transport is unavailable');
+    // Main starts the utility independently of EngineConnection. In
+    // particular, boot must not await that connection (which awaits us).
+    if (host && typeof host.status === 'function') {
+      const deadline = Date.now() + 120_000;
+      let requested = false;
+      for (;;) {
+        const status = await host.status();
+        if (!status.enabled) throw new Error('The native document engine is disabled');
+        if (status.processes.interactive.state === 'ready') {
+          nativeGeneration = status.processes.interactive.generation;
+          break;
+        }
+        if (!requested) { host.requestPorts?.(); requested = true; }
+        if (Date.now() >= deadline) throw new Error('The native document engine did not start');
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
+    const began = performance.now();
+    const shadow = await jsonCloneSliced(canonicalProject(project));
+    const cloned = performance.now();
+    // Main hashes the canonical stream as it arrives, and the utility derives
+    // the canonical hash of the tree it parsed from it; ingestion fails unless
+    // they agree, so the tree is exactly the shadow's canonical JSON. The
+    // renderer's integrity digests (a third pass over the whole document, and
+    // a round trip per batch) are no longer computed before publication: the
+    // first consistency check fills them and compares them with the tree's.
+    const receipt = await ingestDocumentText(native, shadow, documentId(project.id), Math.max(barrier?.revision ?? 0, barrier?.recoveryRevision ?? 0, wasm?.revision() ?? 0) + 1);
+    preparationTiming = { cloneMs: cloned - began, ingestMs: performance.now() - cloned };
+    return { shadow, integrity: new ConsistencyHash(), instance: new RemotePmWasm(native, receipt) };
+  }
+
+  async function rebuildNative(): Promise<void> {
+    discardPrepared();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const project = current, previous = barrier, epoch = previous?.changeEpoch, announced = projectEpoch;
+      const prepared = await prepareNative(project);
+      if (current !== project || previous !== barrier || epoch !== barrier?.changeEpoch || announced !== projectEpoch) {
+        prepared.instance.bridge.call('{"op":"cancel"}');
+        continue;
+      }
+      prepared.instance.activate((barrier?.revision ?? 0) + 1);
+      attach(prepared.instance, prepared);
+      return;
+    }
+    throw new Error('The document kept changing during native recovery');
+  }
+
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     strict: !!options.strict,
@@ -474,16 +615,99 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       if (!state.ready || !barrier) return null;
       try { return barrier.check(reason); } catch (error) { console.warn('[engine-doc] consistency check failed to run', error); return null; }
     },
-    beforeSave(reason = 'save') { state.check(reason); },
-    beforeExport(reason = 'export') { state.check(reason); },
+    async checkAsync(reason) {
+      if (wasm instanceof RemotePmWasm && loading && !await loading) throw new Error('The native document recovery failed');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const checked = barrier;
+        if (!state.ready || !checked) {
+          if (wasm instanceof RemotePmWasm) throw new Error('The native document is not ready to check');
+          return null;
+        }
+        const project = current;
+        const result = wasm instanceof RemotePmWasm
+          ? await checked.checkAsync(reason, (value, prefix) => remoteCanonicalHash((wasm as RemotePmWasm).bridge, value, prefix), () => prepareSerial(async () => {
+            if (checked !== barrier || project !== current) throw new Error('The project changed during its consistency check');
+            await rebuildNative();
+          }), instructions => (wasm as RemotePmWasm).bridge.digestBatch(instructions))
+          : state.check(reason);
+        if (checked === barrier || project === current) return result;
+      }
+      throw new Error('The project kept changing during its consistency check');
+    },
+    prepare(project) {
+      project = unwrap(project);
+      const native = hostBridge()?.nativeEngine?.documentKernel;
+      if (!options.strict || !native || options.headless) return;
+      if (!(wasm instanceof RemotePmWasm) && !largeDocument(project)) return;
+      const notReady = new Error('The native document is not ready to prepare');
+      const run = async () => {
+        // Never await recovery from inside this queue: a reconnect requested
+        // after this open may itself be queued behind it.
+        if (!state.ready) throw notReady;
+        discardPrepared();
+        preparedProject = { project, ...await prepareNative(project) };
+      };
+      return (async () => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (loading && !await loading) throw notReady;
+          try { await prepareSerial(run); return; }
+          catch (error) { if (error !== notReady || attempt !== 0) throw error; }
+        }
+      })();
+    },
+    discardPrepared(project) { discardPrepared(project); },
+    reconnect(generation) {
+      if (!Number.isSafeInteger(generation) || generation < 0) return Promise.reject(new Error('Invalid native engine generation'));
+      if (!(wasm instanceof RemotePmWasm)) { nativeGeneration = generation; return Promise.resolve(); }
+      if (generation === nativeGeneration && !wasm.dead) return Promise.resolve();
+      if (wasm.resumeAutomaticRecovery()) {
+        // Main owns crash recovery and preserves the owner's revision and
+        // handles. A generation notice must not clone the raw document or
+        // replace the shadow underneath a synchronous extension API loop.
+        const wasReady = state.ready;
+        nativeGeneration = generation;
+        remoteRecoveryRequested = false;
+        state.ready = true;
+        if (!wasReady) notifyReady();
+        return Promise.resolve();
+      }
+      const run = async () => {
+        state.ready = false;
+        preparedProject = null;
+        await rebuildNative();
+        nativeGeneration = generation;
+        notifyReady();
+      };
+      const ready = prepareSerial(run);
+      const settled = ready.then(() => true, () => false);
+      loading = settled;
+      void settled.then(() => { if (loading === settled) loading = null; });
+      return ready;
+    },
+    beforeSave(reason = 'save') {
+      if (wasm instanceof RemotePmWasm) {
+        // Saving serializes the authoritative live document. Diagnostic
+        // traversal and a possible repair must never delay persistence.
+        if (diagnosticCheck?.project === current) return;
+        const promise = state.checkAsync(reason).then(() => {}, error => console.warn('[engine-doc] background consistency check failed', error));
+        const check = diagnosticCheck = { project: current, promise };
+        void promise.then(() => { if (diagnosticCheck === check) diagnosticCheck = null; });
+        return;
+      }
+      state.check(reason);
+    },
+    beforeExport(reason = 'export') { if (wasm instanceof RemotePmWasm) return (async () => { if (diagnosticCheck) await diagnosticCheck.promise; await state.checkAsync(reason); })(); state.check(reason); },
     subscribe(fn) { subscribers.add(fn); return () => { subscribers.delete(fn); }; },
     onPending(fn) { pendingListeners.add(fn); return () => { pendingListeners.delete(fn); }; },
     flushBeforeListeners(wanted) { eager.add(wanted); return () => { eager.delete(wanted); }; },
-    snapshot() { return state.ready && barrier ? barrier.snapshot() : null; },
+    snapshot(options) { return state.ready && barrier ? barrier.snapshot(options) : null; },
+    resume() { return state.ready && barrier ? barrier.resume() : null; },
+    async refreshResume(force) { return state.ready && barrier ? barrier.refreshResume(force) : null; },
     stats() {
       return {
         mode: mode.name, ready: state.ready,
         startup: { ...startup, ...moduleCompileTiming() },
+        preparation: preparationTiming,
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
         fontCensus: typeof document === 'undefined' ? null : fontCensusStats(document),
@@ -507,6 +731,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       api.fonts?.retry();
       failed.clear();
       if (state.ready) return Promise.resolve(true);
+      if (loading) return loading;
       return start().then((ok) => {
         if (ok) {
           afterReady();
@@ -524,7 +749,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const loadModule = options.loadModule ?? compileEditorModule;
   let compiledModule: WebAssembly.Module | null = null;
   /** Puts a fresh instance in place and resyncs it (the barrier keeps its revisions). */
-  const attach = (instance: PmWasm): void => {
+  const attach = (instance: PmWasm, prepared?: { shadow: any; integrity: ConsistencyHash }): void => {
+    remoteRecoveryRequested = false;
     wasm = instance;
     barrier = new DocumentBarrier(wasm, () => current, {
       onMismatch, revision: barrier?.revision ?? 0,
@@ -540,7 +766,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     state.wasm = wasm;
     state.barrier = barrier;
     replacing = true;
-    try { barrier.resync(); } finally { replacing = false; }
+    try {
+      if (prepared) barrier.adopt(prepared.shadow, instance.revision(), instance.hash(), prepared.integrity);
+      else barrier.resync();
+    } finally { replacing = false; }
     pendingReplace = null;
     api.fonts?.applySeeds(wasm);
     state.ready = true;
@@ -556,13 +785,26 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const load = async (): Promise<boolean> => {
     try {
       const started = performance.now();
+      const nativeBoot = () => options.strict && !options.headless
+        && hostBridge()?.nativeEngine?.documentKernel && largeDocument(current);
+      if (wasm instanceof RemotePmWasm || nativeBoot()) {
+        const attached = performance.now();
+        await prepareSerial(rebuildNative);
+        startup.mirrorMs = performance.now() - attached;
+        performance.mark?.('powermove:document-ready');
+        startup.readyMs = performance.now() - started;
+        return true;
+      }
       compiledModule = await loadModule();
       const loaded = performance.now();
       startup.moduleMs = loaded - started;
       const instance = await instantiate(compiledModule);
       startup.instantiateMs = performance.now() - loaded;
       const attached = performance.now();
-      attach(instance);
+      // The app can publish its restored project while compilation or
+      // instantiation is in flight. Recheck before a synchronous resync.
+      if (nativeBoot()) await prepareSerial(rebuildNative);
+      else attach(instance);
       startup.mirrorMs = performance.now() - attached;
       performance.mark?.('powermove:document-ready');
       startup.readyMs = performance.now() - started;
@@ -577,6 +819,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   };
   /** Synchronous revival after a trap; false when there is no module to instantiate. */
   function reviveNow(): boolean {
+    if (wasm instanceof RemotePmWasm) return !wasm.dead;
     if (!compiledModule || (wasm && !wasm.dead)) return !!wasm && !wasm.dead;
     try {
       reporter.emit({ type: 'dead' });
@@ -617,6 +860,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   // A trap outside a query (a flush) leaves the instance dead: re-instantiate and resync.
   const revive = () => {
     if (!wasm?.dead || reviving) return;
+    if (wasm instanceof RemotePmWasm) {
+      if (!loading && !remoteRecoveryRequested) {
+        remoteRecoveryRequested = true;
+        state.ready = false;
+        hostBridge()?.nativeEngine?.requestPorts?.();
+      }
+      return;
+    }
     reviving = true;
     state.ready = false;
     if (reviveNow()) { reviving = false; notifyReady(); return; }
@@ -633,7 +884,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     const idle = (globalThis as any).requestIdleCallback as ((cb: () => void, o?: object) => number) | undefined;
     const run = () => {
       if (state.ready && barrier && barrier.revision !== lastCheckedRevision) {
-        state.check('idle');
+        if (wasm instanceof RemotePmWasm) state.beforeSave('idle');
+        else state.check('idle');
         lastCheckedRevision = barrier.revision;
       }
       setTimeout(() => (idle ? idle(run, { timeout: 30_000 }) : run()), 30_000);

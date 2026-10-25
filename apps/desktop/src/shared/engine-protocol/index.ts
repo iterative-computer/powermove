@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-88038005d40337f7";
+export const PROTOCOL_BUILD = "protocol-5f88b17acce289e3";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -16,6 +16,7 @@ export type { AgentRunId } from "./AgentRunId";
 export type { AlphaOutput } from "./AlphaOutput";
 export type { AssetId } from "./AssetId";
 export type { AudioCoding } from "./AudioCoding";
+export type { AudioDiagnostics } from "./AudioDiagnostics";
 export type { AudioFacts } from "./AudioFacts";
 export type { AudioLevels } from "./AudioLevels";
 export type { AudioMessage } from "./AudioMessage";
@@ -64,6 +65,7 @@ export type { CompatNeed } from "./CompatNeed";
 export type { CompatPixels } from "./CompatPixels";
 export type { CompatSource } from "./CompatSource";
 export type { CompositionId } from "./CompositionId";
+export type { ConfirmRevision } from "./ConfirmRevision";
 export type { ConsistencyCheck } from "./ConsistencyCheck";
 export type { ConsistencyResult } from "./ConsistencyResult";
 export type { Container } from "./Container";
@@ -89,6 +91,8 @@ export type { DocumentEncoding } from "./DocumentEncoding";
 export type { DocumentId } from "./DocumentId";
 export type { EditorCamera } from "./EditorCamera";
 export type { EffectInstanceId } from "./EffectInstanceId";
+export type { EncodeAudio } from "./EncodeAudio";
+export type { EncodeVideoCodec } from "./EncodeVideoCodec";
 export type { EngineError } from "./EngineError";
 export type { EngineFact } from "./EngineFact";
 export type { EngineProcess } from "./EngineProcess";
@@ -126,6 +130,7 @@ export type { HardwareSessionGrant } from "./HardwareSessionGrant";
 export type { HardwareSessionKind } from "./HardwareSessionKind";
 export type { HardwareSessionRequest } from "./HardwareSessionRequest";
 export type { Hello } from "./Hello";
+export type { HostEncode } from "./HostEncode";
 export type { HostMicros } from "./HostMicros";
 export type { HostShaderFallback } from "./HostShaderFallback";
 export type { HostSnapshot } from "./HostSnapshot";
@@ -254,6 +259,7 @@ export type { SnapshotRef } from "./SnapshotRef";
 export type { SnapshotRequest } from "./SnapshotRequest";
 export type { SnapshotResult } from "./SnapshotResult";
 export type { SnapshotTarget } from "./SnapshotTarget";
+export type { SnapshotViewer } from "./SnapshotViewer";
 export type { StripLevels } from "./StripLevels";
 export type { SubmitJob } from "./SubmitJob";
 export type { SurfaceDescriptor } from "./SurfaceDescriptor";

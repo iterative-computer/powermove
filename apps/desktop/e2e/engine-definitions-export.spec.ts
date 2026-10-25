@@ -17,11 +17,9 @@ import { ffmpegBinary } from './helpers/ffmpeg';
    kernel's definitions (kernel/engine-definitions.ts `settle`) and main
    pushes the window's set to the job's snapshot session and waits for the
    job engine's acknowledgment before submitting (main/engine/agent-jobs.ts).
-   The job engine's MP4 is muxed by AVAssetWriter, the current exporter's by
-   FFmpeg (encoder tag Lavf), which tells a routed export apart. */
+   Both exporters write the same file (EXPORT-1), so a routed export is told
+   apart by the reason the exporter records (`PM.Export.lastRouted`). */
 
-const ffprobe = ffmpegBinary.replace(/ffmpeg$/, 'ffprobe');
-const encoder = (file: string): string => JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'format_tags=encoder', '-of', 'json', file], { encoding: 'utf8' })).format.tags?.encoder ?? '';
 /** The first frame's pixel at (10, 10) as RGB. */
 const pixel = (file: string): number[] => [...execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'format=rgb24,crop=1:1:10:10', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
 
@@ -62,27 +60,27 @@ test('an effect registered just before an export is drawn by the job engine, wit
         } else {
           w.__e2eOverride.dispose();
         }
-        return PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+        PM.Export.lastRouted = null;
+        const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+        return { result, routed: PM.Export.lastRouted };
       }, register);
     };
+    const drawn = { result: { cancelled: false }, routed: null };
 
     const published = path.join(root, 'published.mp4');
-    expect(await exportTo(published, 'publish')).toEqual({ cancelled: false });
-    expect(encoder(published), 'drawn by the job engine, not routed').not.toMatch(/^Lavf/);
+    expect(await exportTo(published, 'publish'), 'drawn by the job engine, not routed').toEqual(drawn);
     const [r1, g1, b1] = pixel(published);
     expect(b1, 'the published effect is drawn').toBeGreaterThan(200);
     expect(r1! + g1!).toBeLessThan(80);
 
     const overridden = path.join(root, 'overridden.mp4');
-    expect(await exportTo(overridden, 'override')).toEqual({ cancelled: false });
-    expect(encoder(overridden)).not.toMatch(/^Lavf/);
+    expect(await exportTo(overridden, 'override'), 'drawn by the job engine, not routed').toEqual(drawn);
     const [r2, g2, b2] = pixel(overridden);
     expect(g2, 'the override by id wins').toBeGreaterThan(200);
     expect(r2! + b2!).toBeLessThan(80);
 
     const restored = path.join(root, 'restored.mp4');
-    expect(await exportTo(restored, 'dispose')).toEqual({ cancelled: false });
-    expect(encoder(restored)).not.toMatch(/^Lavf/);
+    expect(await exportTo(restored, 'dispose'), 'drawn by the job engine, not routed').toEqual(drawn);
     const [r3, g3, b3] = pixel(restored);
     expect(b3, 'disposing the override restores the earlier registration').toBeGreaterThan(200);
     expect(r3! + g3!).toBeLessThan(80);
@@ -132,10 +130,11 @@ test('an effect only the WebGL runner draws is exported through the window\'s fa
         ].join('\n')
       });
       PM.Edit.apply({ type: 'add_effect', target: PM.proj.layers[0].id, effect: 'e2e.volume' }, { origin: 'user', label: 'Add effect' });
-      return PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+      PM.Export.lastRouted = null;
+      const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+      return { result, routed: PM.Export.lastRouted };
     });
-    expect(result).toEqual({ cancelled: false });
-    expect(encoder(file), 'drawn by the job engine, not routed').not.toMatch(/^Lavf/);
+    expect(result, 'drawn by the job engine, not routed').toEqual({ result: { cancelled: false }, routed: null });
     const [r, g, b] = pixel(file);
     // The fallback runner drew the effect over the red solid: yellow.
     expect(r, 'the fallback program is drawn').toBeGreaterThan(200);

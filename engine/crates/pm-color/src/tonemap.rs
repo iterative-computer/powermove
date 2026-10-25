@@ -1,29 +1,20 @@
-//! HDR input tone mapping for Standard projects (plan section 9,
-//! "Per-source interpretation"): HDR sources (iPhone HLG, HDR10, Dolby
-//! Vision base layers) are mapped to SDR with ITU-R BT.2446-1 Method A.
+//! HDR input tone mapping (plan section 9; owner decision HDR-1): PQ and
+//! HLG sources are decoded per BT.2100 and mapped to SDR with the BT.2390
+//! EETF.
 //!
-//! The pipeline per pixel, in f64 here and in f32 in [`WGSL`]:
+//! Per pixel, in f64 here and in f32 in [`wgsl`]:
 //!
-//! 1. The HDR signal (BT.2020 R′G′B′, PQ or HLG) to display light
-//!    normalized to the content peak L_HDR: PQ through the ST 2084 EOTF
-//!    divided by L_HDR; HLG through the inverse OETF and the BT.2100 OOTF
-//!    for a 1000 cd/m² display (system gamma 1.2), which is already
-//!    normalized to the display peak.
-//! 2. BT.2446 Method A: R′G′B′ = RGB^(1/2.4); luma with BT.2020
-//!    coefficients; the luma curve (ρ_HDR, the three-piece knee, ρ_SDR for
-//!    100 cd/m²); the chroma scaling f = Y′_SDR / (1.1 Y′) and the luma
-//!    correction Y′_TMO = Y′_SDR − max(0.1 C′r, 0).
-//! 3. BT.2020 SDR R′G′B′ (gamma 2.4) to Rec.709: linearize with 2.4,
-//!    convert primaries in linear light, re-encode with 1/2.4 (BT.2407's
-//!    linear-light conversion, no clipping: out-of-gamut values stay
-//!    negative or above 1 until output, as section 9 requires).
-//!
-//! The result is a Rec.709 SDR code value, which Standard reads exactly as
-//! it reads a Rec.709 source: as display encoding E, passed through.
-//! Values above L_HDR continue the curve's last piece rather than being
-//! clipped (Method A is defined on 0..1; the continuation is monotonic).
+//! 1. The signal to display light in cd/m²: PQ through the ST 2084 EOTF;
+//!    HLG through its inverse OETF and the BT.2100 OOTF for a 1000 cd/m²
+//!    display (system gamma 1.2), BT.2408's route from HLG to PQ light.
+//! 2. The BT.2390 EETF on each component in the PQ domain, from the
+//!    content's peak (the mastering display's, else 1000 cd/m²) to SDR
+//!    reference white, 203 cd/m² (BT.2408), with black at zero.
+//! 3. Display light / 203: linear light with SDR white at 1.0, in the
+//!    source's primaries. The caller converts primaries in linear light and
+//!    encodes for the working space; out-of-gamut values are not clipped.
 
-use crate::primaries::{Mat3, apply, conversion};
+use crate::primaries::{Mat3, conversion};
 use pm_protocol::color::Primaries;
 
 /// BT.2020 luma coefficients (Kr, Kg, Kb).
@@ -31,8 +22,8 @@ pub const KR: f64 = 0.2627;
 pub const KG: f64 = 0.6780;
 pub const KB: f64 = 0.0593;
 
-/// The SDR reference peak of Method A, cd/m².
-pub const L_SDR: f64 = 100.0;
+/// SDR reference white in HDR display light (BT.2408): SDR 1.0.
+pub const SDR_WHITE: f64 = 203.0;
 
 /// HLG's nominal display peak and system gamma (BT.2100 for 1000 cd/m²).
 pub const HLG_PEAK: f64 = 1000.0;
@@ -111,49 +102,39 @@ pub fn to_normalized_display(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> [f6
     }
 }
 
-/// ρ for a peak luminance (BT.2446 eq. for ρ_HDR and ρ_SDR).
-pub fn rho(peak: f64) -> f64 {
-    1.0 + 32.0 * (peak / 10000.0).powf(1.0 / 2.4)
-}
-
-/// Method A's luma curve: HDR Y′ (0..1 for 0..L_HDR) to SDR Y′.
-pub fn luma_curve(y: f64, peak: f64) -> f64 {
-    let rh = rho(peak);
-    let yp = (1.0 + (rh - 1.0) * y.max(0.0)).ln() / rh.ln();
-    let yc = if yp <= 0.7399 {
-        1.0770 * yp
-    } else if yp < 0.9909 {
-        -1.1510 * yp * yp + 2.7811 * yp - 0.6302
-    } else {
-        0.5 * yp + 0.5
-    };
-    let rs = rho(L_SDR);
-    (rs.powf(yc) - 1.0) / (rs - 1.0)
-}
-
-/// Method A on normalized display light (BT.2020, 1.0 = L_HDR): the SDR
-/// BT.2020 R′G′B′ for a gamma 2.4 display.
-pub fn method_a(rgb: [f64; 3], peak: f64) -> [f64; 3] {
-    let p = rgb.map(|c| c.max(0.0).powf(1.0 / 2.4));
-    let y = KR * p[0] + KG * p[1] + KB * p[2];
-    if y <= 0.0 {
-        return [0.0; 3];
+/// The BT.2390 EETF on one PQ-encoded component (0..1, ST 2084), mapping
+/// content mastered at `source_peak` cd/m² to SDR white. Black stays at
+/// zero, so the toe term is zero.
+pub fn eetf(e: f64, source_peak: f64) -> f64 {
+    let pw = pq_inverse_eotf(source_peak);
+    let max_lum = pq_inverse_eotf(SDR_WHITE) / pw;
+    let e1 = (e / pw).clamp(0.0, 1.0);
+    if max_lum >= 1.0 {
+        return e1 * pw;
     }
-    let cb = (p[2] - y) / 1.8814;
-    let cr = (p[0] - y) / 1.4746;
-    let ysdr = luma_curve(y, peak);
-    let f = ysdr / (1.1 * y);
-    let (cb, cr) = (f * cb, f * cr);
-    let yt = ysdr - (0.1 * cr).max(0.0);
-    [
-        yt + 1.4746 * cr,
-        yt - 0.16455 * cb - 0.57135 * cr,
-        yt + 1.8814 * cb,
-    ]
+    let ks = 1.5 * max_lum - 0.5;
+    if e1 < ks {
+        return e1 * pw;
+    }
+    let t = (e1 - ks) / (1.0 - ks);
+    let (t2, t3) = (t * t, t * t * t);
+    let p = (2.0 * t3 - 3.0 * t2 + 1.0) * ks
+        + (t3 - 2.0 * t2 + t) * (1.0 - ks)
+        + (-2.0 * t3 + 3.0 * t2) * max_lum;
+    p * pw
 }
 
-fn spow(v: f64, e: f64) -> f64 {
-    v.signum() * v.abs().powf(e)
+/// HDR signal R′G′B′ (0..1) to tone-mapped linear light, SDR white 1.0, in
+/// the signal's primaries. `peak` is the content peak in cd/m² (PQ).
+pub fn to_sdr(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> [f64; 3] {
+    let (nits, peak) = match signal {
+        HdrSignal::Pq => (rgb.map(pq_eotf), peak),
+        HdrSignal::Hlg => (
+            to_normalized_display(HdrSignal::Hlg, rgb, HLG_PEAK).map(|c| c * HLG_PEAK),
+            HLG_PEAK,
+        ),
+    };
+    nits.map(|c| pq_eotf(eetf(pq_inverse_eotf(c), peak)) / SDR_WHITE)
 }
 
 /// The BT.2020 to Rec.709 matrix in linear light.
@@ -161,19 +142,12 @@ pub fn bt2020_to_709() -> Mat3 {
     conversion(Primaries::Bt2020, Primaries::Bt709).expect("known primaries")
 }
 
-/// The whole input transform: HDR signal R′G′B′ to Rec.709 SDR code values
-/// (read as E in Standard).
-pub fn hdr_to_sdr(signal: HdrSignal, rgb: [f64; 3], peak: f64) -> [f64; 3] {
-    let sdr2020 = method_a(to_normalized_display(signal, rgb, peak), peak);
-    let lin = sdr2020.map(|c| spow(c, 2.4));
-    apply(&bt2020_to_709(), lin).map(|c| spow(c, 1.0 / 2.4))
-}
-
-/// WGSL for the same transform. Defines
-/// `pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32, m: mat3x3<f32>) -> vec3<f32>`
-/// where `m` is [`bt2020_to_709`] as columns.
-pub const WGSL: &str = r#"
-fn pm_pq_eotf(e: vec3<f32>) -> vec3<f32> {
+/// WGSL defining `pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32)
+/// -> vec3<f32>`, [`to_sdr`] in f32.
+pub fn wgsl() -> String {
+    format!(
+        r#"
+fn pm_pq_eotf(e: vec3<f32>) -> vec3<f32> {{
     let m1 = 2610.0 / 16384.0;
     let m2 = 2523.0 / 4096.0 * 128.0;
     let c1 = 3424.0 / 4096.0;
@@ -181,9 +155,19 @@ fn pm_pq_eotf(e: vec3<f32>) -> vec3<f32> {
     let c3 = 2392.0 / 4096.0 * 32.0;
     let p = pow(max(e, vec3<f32>(0.0)), vec3<f32>(1.0 / m2));
     return 10000.0 * pow(max(p - c1, vec3<f32>(0.0)) / (c2 - c3 * p), vec3<f32>(1.0 / m1));
-}
+}}
 
-fn pm_hlg_inverse_oetf(e: vec3<f32>) -> vec3<f32> {
+fn pm_pq_inverse_eotf(nits: vec3<f32>) -> vec3<f32> {{
+    let m1 = 2610.0 / 16384.0;
+    let m2 = 2523.0 / 4096.0 * 128.0;
+    let c1 = 3424.0 / 4096.0;
+    let c2 = 2413.0 / 4096.0 * 32.0;
+    let c3 = 2392.0 / 4096.0 * 32.0;
+    let y = pow(max(nits / 10000.0, vec3<f32>(0.0)), vec3<f32>(m1));
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), vec3<f32>(m2));
+}}
+
+fn pm_hlg_inverse_oetf(e: vec3<f32>) -> vec3<f32> {{
     let a = 0.17883277;
     let b = 1.0 - 4.0 * a;
     let c = 0.55991073;
@@ -191,54 +175,50 @@ fn pm_hlg_inverse_oetf(e: vec3<f32>) -> vec3<f32> {
     let lo = x * x / 3.0;
     let hi = (exp((x - c) / a) + b) / 12.0;
     return select(hi, lo, x <= vec3<f32>(0.5));
-}
+}}
 
-fn pm_rho(peak: f32) -> f32 {
-    return 1.0 + 32.0 * pow(peak / 10000.0, 1.0 / 2.4);
-}
+fn pm_eetf(e: vec3<f32>, source_peak: f32) -> vec3<f32> {{
+    let pw = pm_pq_inverse_eotf(vec3<f32>(source_peak)).x;
+    let max_lum = pm_pq_inverse_eotf(vec3<f32>({white})).x / pw;
+    let e1 = clamp(e / pw, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (max_lum >= 1.0) {{
+        return e1 * pw;
+    }}
+    let ks = 1.5 * max_lum - 0.5;
+    let t = (e1 - ks) / (1.0 - ks);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let p = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks)
+        + (-2.0 * t3 + 3.0 * t2) * max_lum;
+    return select(p, e1, e1 < vec3<f32>(ks)) * pw;
+}}
 
-fn pm_spow3(v: vec3<f32>, e: f32) -> vec3<f32> {
-    return sign(v) * pow(abs(v), vec3<f32>(e));
-}
-
-fn pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32, m: mat3x3<f32>) -> vec3<f32> {
-    let k = vec3<f32>(0.2627, 0.6780, 0.0593);
-    var d: vec3<f32>;
-    if (hlg) {
+fn pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32) -> vec3<f32> {{
+    var nits: vec3<f32>;
+    var source_peak = peak;
+    if (hlg) {{
         let s = pm_hlg_inverse_oetf(signal);
-        let ys = dot(k, s);
-        let g = select(0.0, pow(ys, 0.2), ys > 0.0);
-        d = s * g;
-    } else {
-        d = pm_pq_eotf(signal) / peak;
-    }
-    let p = pow(max(d, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4));
-    let y = dot(k, p);
-    if (y <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    let cb = (p.z - y) / 1.8814;
-    let cr = (p.x - y) / 1.4746;
-    let rh = pm_rho(peak);
-    let yp = log(1.0 + (rh - 1.0) * y) / log(rh);
-    var yc: f32;
-    if (yp <= 0.7399) {
-        yc = 1.0770 * yp;
-    } else if (yp < 0.9909) {
-        yc = -1.1510 * yp * yp + 2.7811 * yp - 0.6302;
-    } else {
-        yc = 0.5 * yp + 0.5;
-    }
-    let rs = pm_rho(100.0);
-    let ysdr = (pow(rs, yc) - 1.0) / (rs - 1.0);
-    let f = ysdr / (1.1 * y);
-    let cbt = f * cb;
-    let crt = f * cr;
-    let yt = ysdr - max(0.1 * crt, 0.0);
-    let sdr = vec3<f32>(yt + 1.4746 * crt, yt - 0.16455 * cbt - 0.57135 * crt, yt + 1.8814 * cbt);
-    return pm_spow3(m * pm_spow3(sdr, 2.4), 1.0 / 2.4);
+        let ys = dot(vec3<f32>({kr}, {kg}, {kb}), s);
+        nits = {hlg_peak} * s * select(0.0, pow(ys, {gamma} - 1.0), ys > 0.0);
+        source_peak = {hlg_peak};
+    }} else {{
+        nits = pm_pq_eotf(signal);
+    }}
+    return pm_pq_eotf(pm_eetf(pm_pq_inverse_eotf(nits), source_peak)) / {white};
+}}
+"#,
+        white = f(SDR_WHITE),
+        hlg_peak = f(HLG_PEAK),
+        gamma = f(HLG_GAMMA),
+        kr = f(KR),
+        kg = f(KG),
+        kb = f(KB),
+    )
 }
-"#;
+
+fn f(v: f64) -> String {
+    format!("{v:.9e}")
+}
 
 #[cfg(test)]
 mod tests {
@@ -271,57 +251,52 @@ mod tests {
     }
 
     #[test]
-    fn luma_curve_endpoints_continuity_and_monotonicity() {
-        assert_eq!(luma_curve(0.0, 1000.0), 0.0);
-        assert!((luma_curve(1.0, 1000.0) - 1.0).abs() < 1e-12);
-        let mut last = -1.0;
-        for i in 0..=100_000 {
-            let y = i as f64 / 100_000.0;
-            let v = luma_curve(y, 1000.0);
-            assert!(v > last, "not increasing at {y}");
+    fn eetf_follows_bt2390() {
+        let pw = pq_inverse_eotf(1000.0);
+        let max_lum = pq_inverse_eotf(203.0) / pw;
+        let ks = 1.5 * max_lum - 0.5;
+        // Identity below the knee; the peak lands on the target maximum;
+        // continuous and increasing in between; above the peak it holds.
+        for i in 0..=1000 {
+            let e = i as f64 / 1000.0 * ks * pw;
+            assert!((eetf(e, 1000.0) - e).abs() < 1e-12);
+        }
+        assert!((eetf(pw, 1000.0) - max_lum * pw).abs() < 1e-12);
+        assert!((eetf(1.0, 1000.0) - max_lum * pw).abs() < 1e-12);
+        let mut last = 0.0;
+        for i in 0..=10_000 {
+            let v = eetf(i as f64 / 10_000.0 * pw, 1000.0);
+            assert!(v >= last - 1e-15, "{i}");
             last = v;
         }
-        // The knee's pieces meet within the published coefficients' precision.
-        let rs = rho(L_SDR);
-        let yc = |yp: f64| -1.1510 * yp * yp + 2.7811 * yp - 0.6302;
-        assert!((1.0770 * 0.7399 - yc(0.7399)).abs() < 1e-3);
-        assert!((0.5 * 0.9909 + 0.5 - yc(0.9909)).abs() < 1e-3);
-        assert!(rs > 1.0);
+        // Content no brighter than SDR white is not compressed.
+        let e = pq_inverse_eotf(150.0);
+        assert_eq!(eetf(e, 200.0), e);
     }
 
     #[test]
-    fn reference_white_maps_as_derived_from_the_equations() {
-        // HDR reference white (203 cd/m², BT.2408) through Method A for
-        // L_HDR = 1000: Y′ = 0.203^(1/2.4) = 0.51448, Y′p = 0.76950,
-        // Y′c = 0.82830, Y′SDR = 0.68679 (computed by hand from BT.2446-1).
-        let grey = pq_inverse_eotf(203.0);
-        let sdr = hdr_to_sdr(HdrSignal::Pq, [grey; 3], 1000.0);
-        for c in sdr {
-            assert!((c - 0.68679).abs() < 2e-4, "{sdr:?}");
+    fn sdr_white_peak_and_black() {
+        // PQ 1000 cd/m² maps to SDR white; black to black; a low grey is
+        // unchanged (below the knee), relative to 203 cd/m².
+        for c in to_sdr(HdrSignal::Pq, [pq_inverse_eotf(1000.0); 3], 1000.0) {
+            assert!((c - 1.0).abs() < 1e-9, "{c}");
         }
-        // Greys stay neutral through the gamut conversion.
-        assert!((sdr[0] - sdr[1]).abs() < 1e-9 && (sdr[1] - sdr[2]).abs() < 1e-9);
-    }
-
-    #[test]
-    fn peak_white_is_sdr_white_and_black_is_black() {
-        let peak = pq_inverse_eotf(1000.0);
-        for c in hdr_to_sdr(HdrSignal::Pq, [peak; 3], 1000.0) {
+        assert_eq!(to_sdr(HdrSignal::Pq, [0.0; 3], 1000.0), [0.0; 3]);
+        let grey = to_sdr(HdrSignal::Pq, [pq_inverse_eotf(50.0); 3], 1000.0);
+        assert!((grey[0] - 50.0 / 203.0).abs() < 1e-9, "{grey:?}");
+        // HLG peak white is the 1000 cd/m² display peak: SDR white.
+        for c in to_sdr(HdrSignal::Hlg, [1.0; 3], 1000.0) {
             assert!((c - 1.0).abs() < 1e-6, "{c}");
         }
-        for c in hdr_to_sdr(HdrSignal::Hlg, [1.0; 3], HLG_PEAK) {
-            assert!((c - 1.0).abs() < 1e-6, "{c}");
-        }
-        assert_eq!(hdr_to_sdr(HdrSignal::Pq, [0.0; 3], 1000.0), [0.0; 3]);
-        assert_eq!(hdr_to_sdr(HdrSignal::Hlg, [0.0; 3], 1000.0), [0.0; 3]);
     }
 
     #[test]
     fn saturated_bt2020_colors_stay_out_of_gamut_unclipped() {
-        // A BT.2020 green at 100 cd/m² lies outside Rec.709: the result keeps
-        // negative red and blue (no clip until output).
         let g = pq_inverse_eotf(100.0);
-        let sdr = hdr_to_sdr(HdrSignal::Pq, [0.0, g, 0.0], 1000.0);
+        let sdr = crate::primaries::apply(
+            &bt2020_to_709(),
+            to_sdr(HdrSignal::Pq, [0.0, g, 0.0], 1000.0),
+        );
         assert!(sdr[0] < 0.0 && sdr[2] < 0.0 && sdr[1] > 0.0, "{sdr:?}");
     }
 }

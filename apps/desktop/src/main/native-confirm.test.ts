@@ -15,7 +15,7 @@ function register(response: number, trusted = true) {
     isTrustedSender: () => trusted,
     showMessageBox: showMessageBox as any
   });
-  return { handle: handlers.get(IPC.dialogConfirm)!, showMessageBox };
+  return { handle: handlers.get(IPC.dialogConfirm)!, offline: handlers.get(IPC.dialogOfflineExport)!, showMessageBox };
 }
 
 describe('confirmOptions', () => {
@@ -45,5 +45,18 @@ describe('registerConfirmIpc', () => {
   it('rejects untrusted senders and empty messages', async () => {
     await expect(register(0, false).handle({ sender: {} }, { message: 'Go?' })).rejects.toThrow('Unauthorized');
     await expect(register(0).handle({ sender: {} }, { message: '   ' })).rejects.toThrow('message');
+  });
+
+  it('offers the three offline export choices to a trusted window', async () => {
+    const clips = [{ asset: 'missing', name: 'Missing.mov' }];
+    for (const [response, choice] of [[0, 'locate'], [1, 'without'], [2, 'cancel']] as const) {
+      const registered = register(response);
+      await expect(registered.offline({ sender: {} }, clips)).resolves.toBe(choice);
+      expect(registered.showMessageBox).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        buttons: ['Locate Media…', 'Export Without Missing Media', 'Cancel']
+      }));
+    }
+    await expect(register(1, false).offline({ sender: {} }, clips)).rejects.toThrow('Unauthorized');
+    await expect(register(1).offline({ sender: {} }, [])).rejects.toThrow('named clips');
   });
 });

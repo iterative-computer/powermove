@@ -72,6 +72,7 @@ import { type SheetExportOptions, validSheetExportOptions } from '../../shared/e
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../shared/frame-rate';
 import type { WindowDefinitions } from './definitions';
 import { RemoteError } from './protocol';
+import { offlineClips, type OfflineClip } from './offline-media';
 
 /** What the agent jobs need from the engine host (NativeEngine). */
 export interface AgentJobsEngine {
@@ -86,6 +87,8 @@ export interface AgentJobsEngine {
   /** A user-chosen destination as a write handle for `job` on `session`,
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
+  /** Starts only the hidden WebM encoder window while a user snapshot opens. */
+  warmExportEncoder?(): void;
   /** Marks a job session as a draft render (offline media from proxies). */
   setDraftSession?(session: number, draft: boolean): void;
 }
@@ -124,10 +127,10 @@ export type ExportVideoInput = {
 };
 
 export type ExportVideoResult =
-  | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number }
-  | { status: 'queued'; jobId: string };
+  | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number; missingMedia?: OfflineClip[] }
+  | { status: 'queued'; jobId: string; missingMedia?: OfflineClip[] };
 
-export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string };
+export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string; missingMedia?: OfflineClip[] };
 
 /** An export from the export sheet or the render queue, as the renderer asks
  *  for it (shared/engine-ipc.ts `SheetExportOptions`). */
@@ -213,6 +216,7 @@ export function wireSettings(input: {
   start: number;
   end: number;
   audio: boolean;
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   hideCaptions?: boolean;
   draft?: boolean;
@@ -234,6 +238,7 @@ export function wireSettings(input: {
     frameRate: { num: input.rate.num, den: input.rate.den },
     range: { start: toTicks(Math.max(0, input.start)), end: toTicks(input.end) },
     audio: input.audio && !image,
+    ...(input.audioIndexPlayhead !== undefined ? { audioIndexPlayhead: toTicks(input.audioIndexPlayhead) } : {}),
     motionBlur: input.motionBlur,
     color: wireColor(format, delivery),
     precision: 'float32',
@@ -307,7 +312,7 @@ export function userExportSettings(projectValue: unknown, options: UserExportOpt
   return wireSettings({
     format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
     start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
-    audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    audio: o.audio, audioIndexPlayhead: o.audioIndexPlayhead, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
     ...(Array.isArray(o.compat) ? { compat: compatSources(o.compat) } : {}),
     ...(extra.preview ? { preview: true } : {}),
     ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
@@ -374,6 +379,7 @@ type JobRecord = {
   size: { width: number; height: number };
   fps: number;
   changed: Array<() => void>;
+  missingMedia?: OfflineClip[];
   /** The project as the job's snapshot holds it (compatibility frames name its layers). */
   project?: Project;
 };
@@ -386,6 +392,8 @@ type FrameSession = {
 
 export type AgentJobsOptions = {
   engine: AgentJobsEngine;
+  /** Resolves a clip in the pinned job session for agent export reports. */
+  resolveAsset?(asset: string, context: { process: EngineProcess; session: number }): Promise<unknown>;
   /** Pins media for each export snapshot until its session closes. */
   bindMediaSession?(session: number, project: Project | null): Promise<void>;
   /** Status of an export sheet job, for its window. */
@@ -533,6 +541,9 @@ export class AgentJobs {
     const extension = extensionOf(format, delivery) ?? 'png';
     const jobId = `agent-export-${randomUUID()}`;
     const session = await this.openSnapshot(project, `agent-export-${jobId}`, owner, this.windowUpdates(owner));
+    const missingMedia = this.options.resolveAsset
+      ? await offlineClips(project, (asset) => this.options.resolveAsset!(asset, { process: 'job', session }))
+      : [];
     const record: JobRecord = {
       jobId, owner, run, session,
       status: { job: jobId, class: 'agentExport', state: 'queued', progress: 0, path: null, error: null },
@@ -540,7 +551,7 @@ export class AgentJobs {
       name: suggestedName(project, input.name),
       size: settings.size,
       fps: Number(project['fps']) || settings.frameRate.num / settings.frameRate.den,
-      changed: [],
+      changed: [], missingMedia,
       ...(settings.delivery?.compat?.length ? { project } : {})
     };
     this.jobs.set(jobId, record);
@@ -570,7 +581,7 @@ export class AgentJobs {
       switch (status.state) {
         case 'done':
           if (!status.path) throw new AgentJobError('The export finished without a path.', 'internal');
-          return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps };
+          return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps, missingMedia: record.missingMedia ?? [] };
         case 'failed':
           throw new AgentJobError(errorText(status.error), status.error?.code ?? 'exportFailed');
         case 'cancelled':
@@ -578,9 +589,9 @@ export class AgentJobs {
         default:
           break;
       }
-      if (mode === 'async') return { status: 'queued', jobId: record.jobId };
+      if (mode === 'async') return { status: 'queued', jobId: record.jobId, missingMedia: record.missingMedia ?? [] };
       const waiting = status.state === 'queued' || status.state === 'waitingForMedia';
-      if (waiting && this.now() - record.queuedAt > this.queueBoundMs) return { status: 'queued', jobId: record.jobId };
+      if (waiting && this.now() - record.queuedAt > this.queueBoundMs) return { status: 'queued', jobId: record.jobId, missingMedia: record.missingMedia ?? [] };
       await new Promise<void>((resolve) => {
         record.changed.push(resolve);
         // Re-check the queue bound while nothing changes.
@@ -601,6 +612,7 @@ export class AgentJobs {
       jobId,
       state: status.state,
       progress: Math.max(0, Math.min(1, status.progress)),
+      ...(record.missingMedia ? { missingMedia: record.missingMedia } : {}),
       ...(status.state === 'done' && status.path ? { path: status.path } : {}),
       ...(status.state === 'failed' ? { error: errorText(status.error) } : {})
     };
@@ -724,6 +736,7 @@ export class AgentJobs {
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
+    if (settings.format.kind === 'webm' && settings.alpha === 'none') this.options.engine.warmExportEncoder?.();
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
     // Queue ownership is for status delivery; seed ownership follows the
     // window that queued this snapshot while that renderer still exists.

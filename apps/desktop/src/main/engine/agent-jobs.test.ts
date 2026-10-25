@@ -23,6 +23,7 @@ class FakeEngine implements AgentJobsEngine {
   releases: string[] = [];
   holdJobRun(run: string): void { this.holds.push(run); }
   releaseJobRun(run: string): void { this.releases.push(run); }
+  warmExportEncoder = vi.fn();
   private nextSession = 10;
   private listeners: Array<{ jobStatus?(s: JobStatus): void; status?(s: unknown): void }> = [];
   /** How submitJob, agentFrames answer. */
@@ -162,7 +163,7 @@ it('binds export snapshot media before resync and releases it after success or s
   await tick();
   expect(bindMediaSession).toHaveBeenLastCalledWith(10, null);
   engine.submit = () => error('mediaOffline', 'offline');
-  await expect(jobs.exportVideo(1, 'run', project(), input)).rejects.toMatchObject({ code: 'mediaOffline' });
+  await expect(jobs.exportVideo(1, 'run', project(), input)).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline' });
   expect(bindMediaSession).toHaveBeenLastCalledWith(11, null);
   jobs.dispose();
 });
@@ -179,6 +180,27 @@ it('packs a save through host services with its own media scope even when render
   packProject.mockRejectedValueOnce(new Error('mediaOffline: clip'));
   await expect(jobs.saveProject(project())).rejects.toThrow('mediaOffline');
   expect(bindMediaSession).toHaveBeenLastCalledWith(-2, null);
+  jobs.dispose();
+});
+
+it('reports offline clips in unattended agent export replies and status', async () => {
+  const engine = new FakeEngine();
+  const resolveAsset = vi.fn(async (asset: string) => asset === 'online' ? { path: '/media/online' } : null);
+  const jobs = new AgentJobs({ engine, resolveAsset });
+  const p = project({
+    layers: [
+      { type: 'video', d: { asset: 'gone' } },
+      { type: 'image', d: { asset: 'online' } }
+    ],
+    assets: { gone: { name: 'Missing.mov' }, online: { name: 'Online.png' } }
+  });
+  const input = { format: 'mp4', range: 'all' as const, audio: false, motionBlur: false, alpha: false, mode: 'async' as const };
+  const result = await jobs.exportVideo(1, 'run', p, input);
+  expect(result).toMatchObject({ status: 'queued', missingMedia: [{ asset: 'gone', name: 'Missing.mov' }] });
+  expect(resolveAsset).toHaveBeenCalledWith('gone', { process: 'job', session: 10 });
+  if (result.status !== 'queued') throw new Error('expected queued export');
+  engine.status(result.jobId, 'done', { path: '/tmp/export.mp4' });
+  expect(jobs.status(1, result.jobId)).toMatchObject({ state: 'done', missingMedia: [{ asset: 'gone', name: 'Missing.mov' }] });
   jobs.dispose();
 });
 
@@ -246,10 +268,10 @@ describe('agent exports through the job engine', () => {
     engine.status(body.job, 'running');
     expect(onStarted).toHaveBeenCalledTimes(1);
     engine.status(body.job, 'done', { path: '/x/Cut.mp4' });
-    await expect(result).resolves.toEqual({ status: 'done', jobId: body.job, path: '/x/Cut.mp4', width: 1280, height: 720, fps: 29.97 });
+    await expect(result).resolves.toEqual({ status: 'done', jobId: body.job, path: '/x/Cut.mp4', width: 1280, height: 720, fps: 29.97, missingMedia: [] });
     // The snapshot session closes once the job ends.
     expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
-    expect(jobs.status(7, body.job)).toEqual({ jobId: body.job, state: 'done', progress: 1, path: '/x/Cut.mp4' });
+    expect(jobs.status(7, body.job)).toEqual({ jobId: body.job, state: 'done', progress: 1, path: '/x/Cut.mp4', missingMedia: [] });
     expect(() => jobs.status(8, body.job)).toThrow('No render job');
   });
 
@@ -266,6 +288,12 @@ describe('agent exports through the job engine', () => {
     await expect(jobs.exportVideo(1, 'r', project(), input)).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline' });
     // Real failures are errors, with the engine's sentence.
     engine.submit = (body) => ({ type: 'jobAccepted', job: (body as { job: string }).job, state: 'queued', position: 0 });
+    const offline = jobs.exportVideo(1, 'r', project(), input);
+    await tick(); await tick();
+    const offlineId = (engine.of('submitJob').at(-1)!.body as { job: string }).job;
+    engine.status(offlineId, 'failed', { error: error('mediaOffline', 'offline after acceptance') });
+    await expect(offline).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline after acceptance' });
+    // Real failures are errors, with the engine's sentence.
     const failing = jobs.exportVideo(1, 'r', project(), input);
     await tick(); await tick();
     const id = (engine.of('submitJob').at(-1)!.body as { job: string }).job;
@@ -511,6 +539,14 @@ describe('export sheet jobs through the job engine', () => {
     }
   });
 
+  it('carries the cached audio index playhead independently of the export range', () => {
+    expect(userExportSettings(project(), { ...options, audioIndexPlayhead: 2 }).audioIndexPlayhead).toBe(1_411_200_000);
+    expect(userExportSettings(project(), options).audioIndexPlayhead).toBeUndefined();
+    for (const value of [-1, NaN, Infinity]) {
+      expect(() => userExportSettings(project(), { ...options, audioIndexPlayhead: value })).toThrow(AgentJobError);
+    }
+  });
+
   it('submit a user job to the chosen file and send its statuses to the window', async () => {
     const engine = new FakeEngine();
     const statuses: Array<[number, UserExportStatus]> = [];
@@ -590,6 +626,29 @@ describe('Phase 3b delivery through the job engine', () => {
     expect(mp4).toMatchObject({ format: { kind: 'h264' }, dither: true, delivery: { timecode: null, audioCoding: null } });
     expect(() => userExportSettings(project(), sheet({ format: 'hevc', alpha: true }))).toThrow('transparency');
     expect(() => userExportSettings(project(), sheet({ format: 'json' }))).toThrow(AgentJobError);
+  });
+
+  it('warms only opaque user and queue WebM before opening their snapshots', async () => {
+    const engine = new FakeEngine();
+    const originalRequest = engine.request.bind(engine);
+    engine.request = async (...args) => {
+      if (args[1].type === 'openSession') {
+        const expected = engine.of('openSession').length + 1;
+        expect(engine.warmExportEncoder).toHaveBeenCalledTimes(expected);
+      }
+      return originalRequest(...args);
+    };
+    const jobs = new AgentJobs({ engine });
+    await jobs.exportUser(5, project(), sheet({ format: 'webm-vp9' }), '/Users/x/Web.webm');
+    await jobs.exportQueued(project(), sheet({ format: 'webm-vp8' }), '/Users/x/Queued.webm', 'replace');
+    expect(engine.warmExportEncoder).toHaveBeenCalledTimes(2);
+
+    // Other formats, alpha WebM, and the agent export lane do not warm it.
+    engine.request = originalRequest;
+    await jobs.exportUser(5, project(), sheet({ format: 'mp4' }), '/Users/x/Cut.mp4');
+    await jobs.exportUser(5, project(), sheet({ format: 'webm-vp9', alpha: true }), '/Users/x/Alpha.webm');
+    await jobs.exportVideo(5, 'agent', project(), { format: 'webm-vp9', range: 'all', audio: false, motionBlur: false, alpha: false, mode: 'async' });
+    expect(engine.warmExportEncoder).toHaveBeenCalledTimes(2);
   });
 
   it('streams previews and offline waits to the window, marks draft sessions, and closes them', async () => {

@@ -73,7 +73,7 @@ test.describe('@viewer direct resize', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }) => {
+  test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }, testInfo) => {
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
@@ -119,6 +119,8 @@ test.describe('@viewer direct resize', () => {
         axis: { x: matrix[0] / axisLength, y: matrix[1] / axisLength },
         eastCursor: viewer.resizeCursorForHandle(matrix, 'e'),
         content: { w: PM.resolveContent(text, 1).w, h: PM.resolveContent(text, 1).h },
+        size: [PM.resolveContent(text, 1).w, PM.resolveContent(text, 1).h],
+        widthKeys: text.d.w.kf.length,
         scaleX: text.p['scale.x'].v, scaleY: text.p['scale.y'].v,
         scaleXKeys: text.p['scale.x'].kf.length, scaleYKeys: text.p['scale.y'].kf.length,
         coverScaleX: cover.p['scale.x'].v,
@@ -148,7 +150,7 @@ test.describe('@viewer direct resize', () => {
         selected: [...PM.sel.layers],
         content: { w: PM.resolveContent(text, 1).w, h: PM.resolveContent(text, 1).h },
         scaleX: PM.ev(text, 'scale.x', 1), scaleY: PM.ev(text, 'scale.y', 1),
-        scaleYKeys: text.p['scale.y'].kf.length,
+        scaleXKeys: text.p['scale.x'].kf.length, scaleYKeys: text.p['scale.y'].kf.length,
         size: [PM.resolveContent(text, 1).w, PM.resolveContent(text, 1).h],
         widthKeys: text.d.w.kf.length,
         west: { x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] },
@@ -451,7 +453,7 @@ test.describe('@viewer direct resize', () => {
       };
     }, { shapeId: setup.shapeId, textId: setup.textId, textChildId: setup.textChildId });
     expect(resizeUndone).toEqual({
-      ok: true, shapeScale: setup.shapeScale, shapeSize: setup.shapeSize, shapeSizeKeys: setup.shapeSizeKeys, textSize: setup.textSize,
+      ok: true, shapeContent: setup.shapeContent, shapeScale: setup.shapeScale, shapeSize: setup.shapeSize, shapeSizeKeys: setup.shapeSizeKeys, textSize: setup.textSize,
       textScale: setup.textScale, textChildScale: setup.textChildScale, positions: setup.positions,
     });
 

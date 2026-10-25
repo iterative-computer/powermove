@@ -15,3 +15,5 @@ pub mod qos;
 pub mod slicing;
 
 pub use engine::{Action, Engine, EngineConfig, EngineStatus, LogLevel, PeerKind};
+
+mod resync;

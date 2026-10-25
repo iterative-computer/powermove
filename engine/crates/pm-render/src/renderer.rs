@@ -8,7 +8,9 @@ use std::time::Instant;
 
 mod chrome;
 mod layer_raster;
+mod media_prepare;
 pub use layer_raster::{LayerPixels, LayerRaster};
+pub use media_prepare::MediaPreparation;
 
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
@@ -224,7 +226,6 @@ fn build_options(
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
         shader_fallback,
-        video_end: request.video_end,
         preview: preview_window(comp, request),
         origin: request.origin,
     }
@@ -240,7 +241,7 @@ fn preview_window(
 ) -> Option<crate::compat_crop::PreviewWindow> {
     if request.export
         || !(comp.at_root() || comp.is_open_canonical())
-        || !matches!(request.video_end, crate::request::VideoEnd::Preview)
+        || !matches!(request.output_kind, crate::request::OutputKind::Preview)
     {
         return None;
     }
@@ -1373,6 +1374,17 @@ impl Renderer {
         }
     }
 
+    /// Compiles the pipelines every frame of `document` draws with at its
+    /// working format ([`Pipelines::prewarm`]). They are built on first use;
+    /// the presenter calls this when the viewer rests after an open, so the
+    /// next import, or the first layer of an empty project, does not.
+    pub fn prewarm(&self, document: &Document) {
+        let request =
+            RenderRequest::sized(pm_protocol::common::Size::new(1, 1), Precision::Float16);
+        self.pipelines
+            .prewarm(self.device_target_format(document, &request));
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,
@@ -1512,6 +1524,34 @@ impl Renderer {
             target,
             Some(copy),
         )
+    }
+
+    /// Renders a pinned viewer canvas through the same top-down color pass
+    /// as a live viewer frame, then records its staging copy. Standard
+    /// snapshots normally skip this pass and reverse GL rows on the CPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_viewer_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            SnapshotRows::TopDown,
+            Some(copy),
+        )
+        .map(|rendered| (rendered, SnapshotRows::TopDown))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1734,11 +1774,10 @@ impl Renderer {
             return Err(RenderError::Watchdog(why.to_owned()));
         }
         let options3d = self.options3d.for_request(request);
-        let blender = crate::blender::PlanState::new(options3d.blender.clone());
         // Channels found in this document are kept across its frames while
         // it is unchanged (`pm_eval` `channel_memo`).
         self.open_channel_memo(document);
-        let (mut plan, build) = plan::build_blender(
+        let (mut plan, build) = plan::build_reusing(
             &mut self.evaluator,
             &comp,
             &project,
@@ -1751,7 +1790,6 @@ impl Renderer {
             options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
-            blender,
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
@@ -1795,6 +1833,9 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
+        // Video sources this frame meets for the first time open together.
+        self.media
+            .open_cold(&media_prepare::planned_videos(&plan), request.export);
         // Exports never draw stand-ins (docs/engine/scrub.md).
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;
@@ -2290,63 +2331,6 @@ impl Renderer {
         )?)
     }
 
-    /// The Blender snapshots a frame needs (section 17's Blender stage):
-    /// the frame is planned without drawing, and every composition pass
-    /// with `render3d.enabled` (every one with 3D objects for `preview`)
-    /// gives the snapshot of its frame, at the plan's own times and sizes.
-    /// A frame whose snapshot cannot be built answers why
-    /// ([`crate::blender::BlenderSnapshots::errors`]).
-    #[allow(clippy::too_many_arguments)]
-    pub fn blender_snapshots(
-        &mut self,
-        document: &Document,
-        composition: &str,
-        time: Ticks,
-        request: &RenderRequest,
-        assets: &dyn AssetResolver,
-        preview: bool,
-        options: crate::blender::SnapshotOptions,
-    ) -> Result<crate::blender::BlenderSnapshots, RenderError> {
-        request.validate()?;
-        let comp = Comp::resolve(document, composition)
-            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
-        let root = document
-            .root()
-            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
-        let open = capability::open_composition_id(root);
-        let project = open
-            .as_deref()
-            .and_then(|id| Comp::resolve(document, id).ok())
-            .unwrap_or_else(|| comp.clone());
-        let seconds = comp.seconds_at(time.get());
-        let (w, h) = (request.output_size.width, request.output_size.height);
-        let scale = request
-            .scale
-            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        // Planned exactly as `render` plans it (effects, transitions, text,
-        // motion blur), so every 3D pass the render reaches is collected:
-        // without the effect host a layer with effects would be refused
-        // before its content is planned.
-        let (_, build) = plan::build_blender(
-            &mut self.evaluator,
-            &comp,
-            &project,
-            seconds,
-            w,
-            h,
-            scale,
-            assets,
-            effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
-            Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
-            crate::blender::PlanState::collecting(preview, options),
-            self.compat.as_deref(),
-            None,
-        );
-        Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
-    }
-
     /// The plan of a frame without rendering it (tests, `pm-cli parity`),
     /// with the draw reuse when it is on ([`Renderer::set_draw_reuse`]).
     pub fn plan(
@@ -2371,9 +2355,8 @@ impl Renderer {
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
-        let blender = crate::blender::PlanState::new(options3d.blender.clone());
         self.open_channel_memo(document);
-        let (plan, build) = plan::build_blender(
+        let (plan, build) = plan::build_reusing(
             &mut self.evaluator,
             &comp,
             &project,
@@ -2386,7 +2369,6 @@ impl Renderer {
             options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
-            blender,
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );

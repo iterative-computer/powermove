@@ -3,11 +3,12 @@ import type { PMRegistry } from '../registry';
 import { writeBlobChunks } from './blob-chunks';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { dropFrameTimecode, formatTimecode, parseTimecode } from './timecode';
+import { PM_VERSION } from './version';
 
 export function install(PM: PMRegistry): void {
 /* Powermove — util: dom, bus, math, time, persistence. */
 
-PM.version = '1.0.0';
+PM.version = PM_VERSION;
 PM.bootVersion = 20260816;
 
 /* ── dom ───────────────────────────────────────────────── */

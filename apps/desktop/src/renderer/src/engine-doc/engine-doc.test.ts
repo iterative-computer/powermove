@@ -244,6 +244,27 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
   });
 
+  it('hands the document to receivers as pm-wasm bytes, and encodes a load batch only when one is read', async () => {
+    // A 180 MB project (C1) must not become several JavaScript strings of
+    // the whole document: the renderer ran out of heap opening it.
+    const { PM, doc } = await editor('on');
+    populate(PM, rng(7), 4);
+    const snap = doc.snapshot()!;
+    expect(snap.bytes).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(snap.bytes)).toBe(canonicalStringify(canonicalProject(PM.proj)));
+    expect(snap.json).toBe(new TextDecoder().decode(snap.bytes));
+    const loads: any[] = [];
+    doc.subscribe(batch => { if (batch.origin === 'load') loads.push(batch); });
+    PM.replaceProject(PM.mkProject({ name: 'Another' }));
+    doc.barrier!.flush();
+    expect(loads).toHaveLength(1);
+    const described = Object.getOwnPropertyDescriptor(loads[0], 'body')!;
+    expect(typeof described.get).toBe('function');
+    const ops = decodePatchOps(loads[0].body);
+    expect(ops).toMatchObject([{ path: [], exists: true }]);
+    expect(loads[0].body).toBe(loads[0].body);
+  });
+
   it('carries load only on whole-document resyncs, so a receiver following the stream rules stays equal', async () => {
     const { PM, doc } = await editor('on');
     populate(PM, rng(21), 6);
@@ -817,6 +838,30 @@ describe.skipIf(!built)('the tracking Proxy', () => {
     expect(doc.barrier!.stats.structuralDiffs).toBe(diffs);
     expect(doc.auditor!.audit()).toBe(true);
     expect(doc.check('test')!.ok).toBe(true);
+  });
+
+  it('leaves keys adopted by a document replacement to its resync or whole diff, and keeps the mirror right', async () => {
+    const { PM, doc } = await editor('audit');
+    const legacyKeys = () => [
+      { t: 0, v: 0, eo: [0.4, 0], inInterp: 'bezier', outInterp: 'bezier' },
+      { t: 1, v: 90, ei: [0.6, 1], inInterp: 'bezier', outInterp: 'bezier' },
+    ];
+    for (const sameProject of [false, true]) {
+      const next = sameProject ? JSON.parse(JSON.stringify(PM.proj)) : PM.mkProject({ dur: 2 });
+      next.layers = Array.from({ length: 40 }, () => { const l = PM.mkLayer('solid', {}, next); l.p.rotation.kf = legacyKeys(); return l; });
+      // No path search per adopted key list: the replacement's resync or
+      // whole-document diff covers them (a search per list was quadratic).
+      const touched = vi.spyOn(doc.barrier!, 'touched');
+      PM.replaceProject(next);
+      expect(touched).not.toHaveBeenCalled();
+      touched.mockRestore();
+      // The replacement adopted every legacy key (a write per key list) while
+      // its resync or whole-document diff was pending.
+      expect(Object.prototype.propertyIsEnumerable.call(PM.proj.layers[39].p.rotation.kf[0], 'eo')).toBe(false);
+      doc.barrier!.flush();
+      expect(doc.check('test')!.ok).toBe(true);
+      expect(doc.auditor!.audit()).toBe(true);
+    }
   });
 
   it('treats legacy key adoption during evaluation as a known writer, and keeps the mirror right', async () => {

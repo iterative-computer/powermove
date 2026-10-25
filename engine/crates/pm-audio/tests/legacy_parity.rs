@@ -44,6 +44,24 @@ fn capture_dir() -> Option<PathBuf> {
     dirs.pop()
 }
 
+/// A captured media path, or the same file in this checkout: captures
+/// record repository fixtures by the absolute path of the worktree that made
+/// them (`apps/desktop/e2e/fixtures/…`), which may be gone; media the capture
+/// generated lives in its own `media/` directory.
+fn resolve_media(capture: &Path, file: &Path) -> PathBuf {
+    if file.is_file() {
+        return file.to_path_buf();
+    }
+    let Some(name) = file.file_name() else {
+        return file.to_path_buf();
+    };
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    [capture.join("media").join(name), fixtures.join(name)]
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| file.to_path_buf())
+}
+
 fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
         Value::Object(m) => m.get(key),
@@ -92,69 +110,55 @@ struct Measured {
 enum Ceiling {
     /// The whole mix.
     Mix(f64),
-    /// The mix with in-points rounded as today's export plays them
-    /// (allowed difference 9).
-    WholeSample(f64),
-    /// The mix outside spans (seconds) where an allowed difference sits.
-    Masked(f64, &'static [(f64, f64)]),
-    /// The mix below a frequency (Hz): an allowed difference lies above it.
-    Below(f64, f64),
-    /// Ours with a document edit that reproduces today's behavior where an
-    /// allowed difference changes it.
-    Adjusted(f64, fn(&mut Value) -> bool),
+    /// The mix outside spans (seconds) where a decided fix changes it.
+    Outside(f64, &'static [(f64, f64)]),
 }
 
-/// The composition frame (30 fps) today's envelope ramps a switch over,
-/// with a millisecond either side for the 16-sample control interpolation:
-/// the frame after a switch off (0.5 s, 1 s), the frame before a switch on
-/// (1.5 s).
-const SWITCH_FRAMES: &[(f64, f64)] = &[
-    (0.499, 0.5 + 1.0 / 30.0 + 0.001),
-    (0.999, 1.0 + 1.0 / 30.0 + 0.001),
-    (1.5 - 1.0 / 30.0 - 0.001, 1.501),
-];
-
-/// Today's bus while a 5.1 source plays: the mono layer folds at √½.
-fn mono_at_center_fold(doc: &mut Value) -> bool {
-    let Value::Object(root) = doc else {
-        return false;
-    };
-    let Some(Value::Array(layers)) = root.get_mut("layers") else {
-        return false;
-    };
-    let mut changed = false;
-    for layer in layers {
-        let Value::Object(l) = layer else { continue };
-        if !matches!(l.get("name"), Some(Value::String(n)) if n.to_string_lossy() == "mono22k.wav")
-        {
-            continue;
-        }
-        if let Some(Value::Object(d)) = l.get_mut("d")
-            && let Some(Value::Number(gain)) = d.get_mut("gain")
-        {
-            *gain *= std::f64::consts::FRAC_1_SQRT_2;
-            changed = true;
+/// Electron's own FFmpeg for AAC and Opus (`src/chromium.rs`): the app's
+/// engine processes find it loaded; this test finds the checkout's.
+fn locate_todays_ffmpeg() -> bool {
+    if std::env::var_os("POWERMOVE_CHROMIUM_FFMPEG").is_none() {
+        let modules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../node_modules/.bun");
+        let found = std::fs::read_dir(modules).ok().and_then(|d| {
+            d.flatten().find_map(|e| {
+                let lib = e.path().join("node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib");
+                (e.file_name().to_string_lossy().starts_with("electron@") && lib.is_file())
+                    .then_some(lib)
+            })
+        });
+        if let Some(lib) = found {
+            // SAFETY: set before any source opens in this test process.
+            unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", lib) };
         }
     }
-    changed
+    std::env::var_os("POWERMOVE_CHROMIUM_FFMPEG").is_some()
 }
 
-/// Each project's residual ceiling (dBFS).
-fn ceiling(name: &str) -> Ceiling {
+/// Each project's residual ceiling (dBFS). Today's export model
+/// (`pm_audio::today`, decisions AUDIO-5 and AUDIO-6) makes the mix
+/// bit-identical to today's (−240 dBFS here) wherever both decode the same
+/// samples and the bus stays stereo.
+fn ceiling(name: &str, todays_ffmpeg: bool) -> Ceiling {
     match name {
-        // Single-sample clicks resampled from 44.1 kHz: Chromium's resampler
-        // rolls off from about 17 kHz (difference 11).
-        "clicks-44k" => Ceiling::Below(-85.0, 15_000.0),
-        // One-frame switch ramps today (difference 10).
-        "mute-groups" => Ceiling::Masked(-85.0, SWITCH_FRAMES),
-        // A 5.1 source widens today's bus, mono folds at −3 dB (difference
-        // 12); the 22.05 and 44.1 kHz tones go through Chromium's resampler
-        // (difference 11).
-        "layouts" => Ceiling::Adjusted(-85.0, mono_at_center_fold),
-        // Keyframed levels: straight segments one frame apart today (difference 5).
-        "gain-fades" | "precomp-nesting" => Ceiling::Mix(-75.0),
-        n if n.starts_with("real-") => Ceiling::WholeSample(-65.0),
-        _ => Ceiling::Mix(-85.0),
+        // AAC and Opus decode through today's own FFmpeg when it is here;
+        // otherwise through ours, which rounds differently (−93 dBFS).
+        // `corpus-media-audio` mixes six clips at once: today's own
+        // summation order spreads it (below).
+        "corpus-media-audio" => Ceiling::Mix(if todays_ffmpeg { -145.0 } else { -90.0 }),
+        "embedded" if !todays_ffmpeg => Ceiling::Mix(-105.0),
+        "mono" if !todays_ffmpeg => Ceiling::Mix(-150.0),
+        // Today's bus sums its clips in the order of a pointer hash set
+        // (`AudioSummingJunction::outputs_`), so where three or more clips
+        // feed one bus channel at once its own captures differ by an ulp
+        // from run to run (−149 dBFS between two captures of
+        // `corpus-media-audio`): that spread is the ceiling there.
+        "wide-quad" => Ceiling::Mix(-145.0),
+        // Decision LAYOUT-1: a 7.1 clip folds by BS.775 instead of keeping
+        // only its first two channels; the mix differs from today by design
+        // while it is connected (1 s to 2 s), and only there.
+        "wide-71" => Ceiling::Outside(-145.0, &[(1.0, 2.01)]),
+        n if n.starts_with("real-") => Ceiling::Mix(-240.0),
+        _ => Ceiling::Mix(-240.0),
     }
 }
 
@@ -168,6 +172,10 @@ fn offline_mixes_match_todays_export_audio() {
         eprintln!("no audio parity capture (run tools/legacy-mix.ts); skipping");
         return;
     };
+    let todays_ffmpeg = locate_todays_ffmpeg();
+    if !todays_ffmpeg {
+        eprintln!("no Electron libffmpeg: AAC and Opus decode through our FFmpeg");
+    }
     let manifest = parse(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
     let mut results = Vec::new();
     let mut failures = Vec::new();
@@ -189,13 +197,14 @@ fn offline_mixes_match_todays_export_audio() {
                 if let (Some(id), Some(file)) =
                     (text(get(info, "assetId")), text(get(info, "file")))
                 {
-                    media.insert(id, PathBuf::from(file));
+                    media.insert(id, resolve_media(&dir, &PathBuf::from(file)));
                 }
             }
         }
         let rate = 48_000u32;
         let expected_len = (dur * rate as f64).round() as usize;
-        let (ours, problems) = render(loaded.clone(), &comp, &media, rate, expected_len);
+        let playhead = num(get(p, "playhead"));
+        let (ours, problems) = render(loaded.clone(), &comp, &media, rate, expected_len, playhead);
         if !problems.is_empty() {
             failures.push(format!("{name}: media problems {problems:?}"));
         }
@@ -206,7 +215,7 @@ fn offline_mixes_match_todays_export_audio() {
         // of the chain.
         let mut quantized = loaded;
         let whole_sample = quantize_in_points(&mut quantized, rate as f64)
-            .then(|| render(quantized, &comp, &media, rate, expected_len).0);
+            .then(|| render(quantized, &comp, &media, rate, expected_len, playhead).0);
         let (_, channels, legacy_rate, legacy) =
             read_wav(&std::fs::read(pdir.join("legacy.wav")).unwrap()).unwrap();
         assert_eq!(legacy_rate, rate);
@@ -335,34 +344,40 @@ fn offline_mixes_match_todays_export_audio() {
         }
         // Residual ceilings: what is left once the allowed differences
         // (docs/engine/pm-audio.md) are accounted for, as regression guards.
-        let (residual, ceiling) = match ceiling(&name) {
+        let (residual, ceiling) = match ceiling(&name, todays_ffmpeg) {
             Ceiling::Mix(db) => (m.rms_diff_db, db),
-            Ceiling::WholeSample(db) => (m.whole_sample_db.unwrap_or(m.rms_diff_db), db),
-            Ceiling::Masked(db, spans) => {
-                let masked = |i: usize| {
+            Ceiling::Outside(ceil, spans) => {
+                let mut e = 0f64;
+                let mut k = 0usize;
+                for i in 0..n {
                     let t = i as f64 / rate as f64;
-                    spans.iter().any(|(a, b)| t >= *a && t < *b)
-                };
-                (residual_db(&ours, &legacy, n, |i| !masked(i)), db)
-            }
-            Ceiling::Below(db, hz) => {
-                let low = |x: &[f32]| low_pass(&x[..n], hz / rate as f64);
-                let ours_low = [low(&ours[0]), low(&ours[1])];
-                let legacy_low: Vec<Vec<f32>> = legacy.iter().map(|c| low(c)).collect();
-                (residual_db(&ours_low, &legacy_low, n, |_| true), db)
-            }
-            Ceiling::Adjusted(db, edit) => {
-                let mut adjusted =
-                    parse(&std::fs::read_to_string(pdir.join("loaded.json")).unwrap()).unwrap();
-                assert!(
-                    edit(&mut adjusted),
-                    "{name}: the adjustment found nothing to edit"
-                );
-                let (adj, _) = render(adjusted, &comp, &media, rate, expected_len);
-                (residual_db(&adj, &legacy, n, |_| true), db)
+                    if spans.iter().any(|(a, b)| t >= *a && t < *b) {
+                        continue;
+                    }
+                    for c in 0..2 {
+                        let l = &legacy[c.min(lc - 1)];
+                        e += (ours[c][i] as f64 - l[i] as f64).powi(2);
+                    }
+                    k += 2;
+                }
+                (db((e / k.max(1) as f64).sqrt()), ceil)
             }
         };
         m.guarded_db = residual;
+        // Identical means the same bits, signed zeros included.
+        if ceiling <= -240.0 {
+            let unequal = (0..2)
+                .map(|c| {
+                    let l = &legacy[c.min(lc - 1)];
+                    (0..n)
+                        .filter(|&i| ours[c][i].to_bits() != l[i].to_bits())
+                        .count()
+                })
+                .sum::<usize>();
+            if unequal > 0 {
+                failures.push(format!("{name}: {unequal} samples differ in their bits"));
+            }
+        }
         if residual > ceiling {
             failures.push(format!(
                 "{name}: residual {residual:.1} dBFS above its {ceiling:.0} dBFS ceiling"
@@ -394,59 +409,6 @@ fn offline_mixes_match_todays_export_audio() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// The rms residual (dBFS) of the stereo mix over samples `[0, n)` where
-/// `keep` holds (a mono legacy capture counts for both channels).
-fn residual_db(
-    ours: &[Vec<f32>],
-    legacy: &[Vec<f32>],
-    n: usize,
-    keep: impl Fn(usize) -> bool,
-) -> f64 {
-    let lc = legacy.len();
-    let (mut e, mut k) = (0f64, 0usize);
-    for c in 0..2 {
-        let l = &legacy[c.min(lc - 1)];
-        for i in (0..n).filter(|&i| keep(i)) {
-            e += (ours[c][i] as f64 - l[i] as f64).powi(2);
-            k += 1;
-        }
-    }
-    db((e / k.max(1) as f64).sqrt())
-}
-
-/// A linear-phase low-pass at `cutoff` (a fraction of the sample rate):
-/// 1023 taps of a Blackman-windowed sinc, about −74 dB from 1 kHz above the
-/// cutoff at 48 kHz.
-fn low_pass(x: &[f32], cutoff: f64) -> Vec<f32> {
-    let taps = 1023usize;
-    let half = (taps / 2) as f64;
-    let h: Vec<f64> = (0..taps)
-        .map(|k| {
-            let t = k as f64 - half;
-            let sinc = if t == 0.0 {
-                2.0 * cutoff
-            } else {
-                (2.0 * std::f64::consts::PI * cutoff * t).sin() / (std::f64::consts::PI * t)
-            };
-            let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * k as f64 / (taps - 1) as f64).cos()
-                + 0.08 * (4.0 * std::f64::consts::PI * k as f64 / (taps - 1) as f64).cos();
-            sinc * w
-        })
-        .collect();
-    (0..x.len())
-        .map(|i| {
-            let mut acc = 0f64;
-            for (k, hk) in h.iter().enumerate() {
-                let j = i as i64 + k as i64 - half as i64;
-                if j >= 0 && (j as usize) < x.len() {
-                    acc += hk * x[j as usize] as f64;
-                }
-            }
-            acc as f32
-        })
-        .collect()
-}
-
 /// Media the graph could not open: (layer, asset, reason).
 type Problems = Vec<(String, String, String)>;
 
@@ -457,9 +419,11 @@ fn render(
     media: &HashMap<String, PathBuf>,
     rate: u32,
     len: usize,
+    playhead: Option<f64>,
 ) -> ([Vec<f32>; 2], Problems) {
     let doc = Document::new(Some(loaded), 1);
     let cache = SourceCache::new(128 << 20, 0);
+    cache.set_blocking_lengths(true);
     let media = media.clone();
     let resolver = move |id: &str| media.get(id).cloned();
     let graph = MixGraph::build(&doc, comp, &mut Evaluator::new(), &cache, &resolver).unwrap();
@@ -471,6 +435,8 @@ fn render(
         Evaluator::new(),
         cache,
     );
+    // Today reads a precomposition's animated trim at the playhead.
+    mixer.set_today_playhead(playhead);
     let mut ours = [Vec::new(), Vec::new()];
     offline::render(&mut mixer, 0, len as i64, 8192, |_, inter| {
         for (i, v) in inter.iter().enumerate() {

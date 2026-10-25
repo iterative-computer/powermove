@@ -117,8 +117,8 @@ was found on the corpus's real project and checked against Chromium itself
    shared 30 px key. Recording only the menu would instead use `opsz` 15
    and change the width visibly (roughly 3.7%).
 
-   **Decided (Phase 1 T1, by the orchestrator under amendment 22): measure
-   as the running app's renderer does.** The seeds are the font cache
+   **Decided (Phase 1 T1, by the orchestrator; layout is authored intent,
+   kept exact): measure as the running app's renderer does.** The seeds are the font cache
    entries the window's own UI text has created (2026-10-18, third pass;
    the second pass modelled only `--fs-sm` and `--fs-md` at 12 and 13 px,
    which missed the density setting and every other UI size and weight):

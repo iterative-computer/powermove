@@ -3,6 +3,20 @@
 
 #include "./fft.h"
 
+#ifndef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	define SIGNALSMITH_STRETCH_DIAG_SCOPE(category, step) ((void)0)
+#	define SIGNALSMITH_LINEAR_STFT_LOCAL_DIAG_SCOPE
+#endif
+
+#ifndef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	define SIGNALSMITH_STRETCH_SETUP_CHECKPOINT() ((void)0)
+#	define SIGNALSMITH_LINEAR_STFT_LOCAL_SETUP_CHECKPOINT
+#endif
+#ifndef SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT
+#	define SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT() false
+#	define SIGNALSMITH_LINEAR_STFT_LOCAL_HAS_SETUP_CHECKPOINT
+#endif
+
 namespace signalsmith { namespace linear {
 
 enum {
@@ -28,28 +42,39 @@ struct DynamicSTFT {
 	static constexpr Normalisation normSynthesis = Normalisation::synthesis;
 	static constexpr Normalisation normRoundTrip = Normalisation::roundTrip;
 
-	void configure(size_t inChannels, size_t outChannels, size_t blockSamples, size_t extraInputHistory=0, size_t intervalSamples=0, Sample asymmetry=0, size_t fftMinSize=0) {
+	void configure(size_t inChannels, size_t outChannels, size_t blockSamples, size_t extraInputHistory=0, size_t intervalSamples=0, Sample asymmetry=0, size_t fftMinSize=0, bool deferWindowSetup=false) {
 		_analysisChannels = inChannels;
 		_synthesisChannels = outChannels;
 		_blockSamples = blockSamples;
 		if (!fftMinSize) fftMinSize = blockSamples;
 		_fftSamples = fft.fastSizeAbove((fftMinSize + 1)/2)*2;
 		fft.resize(_fftSamples);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		_fftBins = _fftSamples/2 + (spectrumType == STFT_SPECTRUM_UNPACKED);
 		
 		_inputLengthSamples = _blockSamples + extraInputHistory;
 		input.buffer.resize(_inputLengthSamples*_analysisChannels);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		output.buffer.resize(_blockSamples*_synthesisChannels);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		output.windowProducts.resize(_blockSamples);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		spectrumBuffer.resize(_fftBins*std::max(_analysisChannels, _synthesisChannels));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		timeBuffer.resize(std::max(_fftSamples, _blockSamples));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		_analysisWindow.resize(_blockSamples);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		_synthesisWindow.resize(_blockSamples);
-		setInterval(intervalSamples ? intervalSamples : blockSamples/4, acg, asymmetry);
-
-		reset();
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+		// SignalsmithStretch::configure immediately replaces the ACG window
+		// with Kaiser and resets again. Defer only in that exact call chain.
+		if (!deferWindowSetup) {
+			setInterval(intervalSamples ? intervalSamples : blockSamples/4, acg, asymmetry);
+			reset();
+		}
 	}
 	
 	size_t blockSamples() const {
@@ -81,19 +106,60 @@ struct DynamicSTFT {
 	}
 
 	void reset(Sample productWeight=1) {
+		// outputSeek/flush also reset the STFT. Dispatch once so their normal
+		// path retains bulk clears and vectorised window arithmetic.
+		if (SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT()) {
+			resetImpl<true>(productWeight);
+		} else {
+			resetImpl<false>(productWeight);
+		}
+	}
+
+	template<bool setupCheckpoints>
+	void resetImpl(Sample productWeight) {
 		input.pos = _blockSamples;
 		output.pos = 0;
-		for (auto &v : input.buffer) v = 0;
-		for (auto &v : output.buffer) v = 0;
-		for (auto &v : spectrumBuffer) v = 0;
-		for (auto &v : output.windowProducts) v = 0;
+		if constexpr (setupCheckpoints) {
+			for (size_t i = 0; i < input.buffer.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				input.buffer[i] = 0;
+			}
+			for (size_t i = 0; i < output.buffer.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				output.buffer[i] = 0;
+			}
+			for (size_t i = 0; i < spectrumBuffer.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				spectrumBuffer[i] = 0;
+			}
+			for (size_t i = 0; i < output.windowProducts.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				output.windowProducts[i] = 0;
+			}
+		} else {
+			for (auto &v : input.buffer) v = 0;
+			for (auto &v : output.buffer) v = 0;
+			for (auto &v : spectrumBuffer) v = 0;
+			for (auto &v : output.windowProducts) v = 0;
+		}
 		if (norm != normNone) {
 			addWindowProduct();
 			for (int i = int(_blockSamples) - int(_defaultInterval) - 1; i >= 0; --i) {
+				if constexpr (setupCheckpoints) {
+					if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				}
 				output.windowProducts[i] += output.windowProducts[i + _defaultInterval];
 			}
 		}
-		for (auto &v : output.windowProducts) v = v*productWeight + almostZero;
+		if constexpr (setupCheckpoints) {
+			for (size_t i = 0; i < output.windowProducts.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
+				auto &v = output.windowProducts[i];
+				v = v*productWeight + almostZero;
+			}
+		} else {
+			for (auto &v : output.windowProducts) v = v*productWeight + almostZero;
+		}
 		moveOutput(_defaultInterval); // ready for first block immediately
 	}
 
@@ -302,15 +368,18 @@ struct DynamicSTFT {
 		} else if (asymmetry == 0) {
 			forcePerfectReconstruction(_synthesisWindow, _blockSamples, _defaultInterval);
 			for (size_t i = 0; i < _blockSamples; ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				_analysisWindow[i] = _synthesisWindow[i];
 			}
 		} else {
 			for (size_t i = 0; i < _blockSamples; ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				_analysisWindow[i] = _synthesisWindow[_blockSamples - 1 - i];
 			}
 		}
 		// Set offsets to peak's index
 		for (size_t i = 0; i < _blockSamples; ++i) {
+			if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			if (_analysisWindow[i] > _analysisWindow[_analysisOffset]) _analysisOffset = i;
 			if (_synthesisWindow[i] > _synthesisWindow[_synthesisOffset]) _synthesisOffset = i;
 		}
@@ -383,12 +452,14 @@ struct DynamicSTFT {
 		}
 		auto *spectrumPtr = spectrum(channel);
 		if (splitComputation) {
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, channel);
 			fft.fft(step, timeBuffer.data(), spectrumPtr);
 			if (unpacked && step == fft.steps() - 1) {
 				spectrumPtr[_fftBins - 1] = spectrumPtr[0].imag();
 				spectrumPtr[0].imag(0);
 			}
 		} else {
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(4, channel);
 			fft.fft(timeBuffer.data(), spectrum(channel));
 			if (unpacked) {
 				spectrumPtr[_fftBins - 1] = spectrumPtr[0].imag();
@@ -423,10 +494,12 @@ struct DynamicSTFT {
 
 		if (splitComputation) {
 			if (step < fftSteps) {
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(7, channel);
 				fft.ifft(step, spectrumPtr, timeBuffer.data());
 				return;
 			}
 		} else {
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(7, channel);
 			fft.ifft(spectrumPtr, timeBuffer.data());
 		}
 		
@@ -629,6 +702,7 @@ private:
 			double invSize = 1.0/size;
 			size_t offsetI = (size&1) ? 1 : (isForSynthesis ? 0 : 2);
 			for (size_t i = 0; i < size; ++i) {
+				if ((i & 31) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				double r = (2*i + offsetI)*invSize - 1;
 				r = (r + warp)/(1 + r*warp);
 				double arg = std::sqrt(1 - r*r);
@@ -637,6 +711,7 @@ private:
 			if (warp) {
 				// Warp window vertically as well, to restore some width
 				for (size_t i = 0; i < size; ++i) {
+					if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 					data[i] *= std::sqrt((warp + 1)/(1 + warp*(2*data[i] - 1)));
 				}
 			}
@@ -683,6 +758,7 @@ private:
 	template<typename Data>
 	void forcePerfectReconstruction(Data &&data, size_t windowLength, size_t interval) {
 		for (size_t i = 0; i < interval; ++i) {
+			if ((i & 31) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			double sum2 = 0;
 			for (size_t index = i; index < windowLength; index += interval) {
 				sum2 += data[index]*data[index];
@@ -697,4 +773,16 @@ private:
 
 }} // namespace
 
+#ifdef SIGNALSMITH_LINEAR_STFT_LOCAL_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_LINEAR_STFT_LOCAL_SETUP_CHECKPOINT
+#endif
+#ifdef SIGNALSMITH_LINEAR_STFT_LOCAL_HAS_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_HAS_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_LINEAR_STFT_LOCAL_HAS_SETUP_CHECKPOINT
+#endif
+#ifdef SIGNALSMITH_LINEAR_STFT_LOCAL_DIAG_SCOPE
+#	undef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	undef SIGNALSMITH_LINEAR_STFT_LOCAL_DIAG_SCOPE
+#endif
 #endif // include guard

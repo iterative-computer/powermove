@@ -26,8 +26,8 @@ resvg = { version = "0.48", default-features = false, features = ["text", "syste
 encoding_rs = "0.8"
 
 [dev-dependencies]
-proptest.workspace = true
 pm-color = { path = "../pm-color" }
+tempfile = "3.27"
 
 [build-dependencies]
 bindgen = "0.72"

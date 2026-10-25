@@ -2,6 +2,8 @@
 
 mod alpha;
 mod cf;
+mod legacy_audio;
+pub(crate) mod legacy_video;
 pub mod pixbuf;
 pub mod reader;
 mod vt;
@@ -16,6 +18,7 @@ use crate::pipeline::Sink;
 use crate::settings::{ExportSpec, Overwrite};
 use crate::timescale::VideoTiming;
 use crate::verify::{self, BlockSample, Expected};
+use std::sync::atomic::AtomicBool;
 
 /// The production sink: VideoToolbox → AVAssetWriter → verify → move into place.
 pub struct VideoToolboxSink {
@@ -23,6 +26,7 @@ pub struct VideoToolboxSink {
     // stop before `output` removes the temporary file.
     encoder: vt::Encoder,
     writer: Option<writer::Writer>,
+    legacy_audio: Option<legacy_audio::LegacyMux>,
     pool: pixbuf::Pool,
     output: AtomicOutput,
     spec: ExportSpec,
@@ -49,12 +53,28 @@ impl VideoToolboxSink {
             }
             _ => AtomicOutput::new(&spec.destination, spec.overwrite, spec.mode)?,
         };
+        let mut legacy_audio = spec
+            .audio
+            .filter(|audio| audio.ffmpeg_mux(spec.codec, spec.container))
+            .map(|audio| legacy_audio::LegacyMux::new(output.temp_path(), audio))
+            .transpose()?;
+        if let Some(mux) = legacy_audio.as_mut() {
+            mux.set_reel(spec.timecode.as_ref().and_then(|tc| tc.reel.as_deref()));
+            mux.set_video(spec.frames, spec.rate);
+        }
+        let video_path = legacy_audio
+            .as_ref()
+            .map_or(output.temp_path(), |mux| mux.video_path());
         let writer = writer::Writer::new(
-            output.temp_path(),
+            video_path,
             spec.container,
             timing,
             spec.frames,
-            spec.audio,
+            if legacy_audio.is_some() {
+                None
+            } else {
+                spec.audio
+            },
             spec.timecode.as_ref(),
         )?;
         Ok(Self {
@@ -63,6 +83,7 @@ impl VideoToolboxSink {
             pool: pixbuf::Pool::new(spec.input_format(), spec.width, spec.height)?,
             encoder: vt::Encoder::new(spec, timing)?,
             writer: Some(writer),
+            legacy_audio: legacy_audio.take(),
             output,
             sampled: verify::sampled_frames(spec.frames),
             blocks: vec![],
@@ -88,35 +109,20 @@ impl VideoToolboxSink {
             None => Ok(samples),
         }
     }
-}
 
-impl Sink for VideoToolboxSink {
-    type Output = Delivered;
-
-    fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
-        if self.sampled.contains(&index) {
-            self.blocks.extend(verify::block_means(input, index));
-        }
-        let buffer = self.pool.buffer()?;
-        buffer.write(input)?;
-        buffer.tag(self.spec.tags, self.spec.alpha);
-        self.encoder.encode(&buffer, index)?;
-        let samples = self.encoder.take()?;
-        let samples = self.described(samples)?;
-        self.writer().push_video(samples)
-    }
-
-    fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
-        self.writer().push_audio(interleaved)
-    }
-
-    fn finish(mut self) -> Result<Delivered, Error> {
+    fn finish_inner(mut self, cancel: Option<&AtomicBool>) -> Result<Delivered, Error> {
         let samples = self.encoder.complete()?;
         let samples = self.described(samples)?;
         let mut writer = self.writer.take().expect("writer lives until finish");
         writer.push_video(samples)?;
-        let audio_frames = writer.audio_frames();
+        let audio_frames = self
+            .legacy_audio
+            .as_ref()
+            .map_or_else(|| writer.audio_frames(), legacy_audio::LegacyMux::frames);
         writer.finish()?;
+        if let Some(mux) = self.legacy_audio.as_mut() {
+            mux.finish(cancel)?;
+        }
         let temp = self.output.temp_path().to_path_buf();
         let movie = Movie::read(&temp)?;
         let format = self.spec.input_format();
@@ -136,5 +142,38 @@ impl Sink for VideoToolboxSink {
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self.output.commit()?;
         Ok(Delivered { path, report })
+    }
+}
+
+impl Sink for VideoToolboxSink {
+    type Output = Delivered;
+
+    fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
+        if self.sampled.contains(&index) {
+            self.blocks.extend(verify::block_means(input, index));
+        }
+        let buffer = self.pool.buffer()?;
+        buffer.write(input)?;
+        buffer.tag(self.spec.tags, self.spec.alpha);
+        self.encoder.encode(&buffer, index)?;
+        let samples = self.encoder.take()?;
+        let samples = self.described(samples)?;
+        self.writer().push_video(samples)
+    }
+
+    fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
+        if let Some(mux) = self.legacy_audio.as_mut() {
+            mux.push(interleaved)
+        } else {
+            self.writer().push_audio(interleaved)
+        }
+    }
+
+    fn finish(self) -> Result<Delivered, Error> {
+        self.finish_inner(None)
+    }
+
+    fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<Delivered, Error> {
+        self.finish_inner(Some(cancel))
     }
 }

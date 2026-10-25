@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { randomPair } from '../../../../../../engine/crates/pm-model/tests/vectors/generate-patch-binary-vectors';
 import { applyOps, diffOps } from '../../../shared/patch-ids';
 import { canonicalStringify } from '../../../shared/canonical-json';
-import { diffJsonOps, sameJson } from './json-diff';
+import { diffJsonOps, JsonMemo, sameJson } from './json-diff';
 
 const json = (v: unknown) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
@@ -52,6 +52,47 @@ describe('diffJsonOps', () => {
     expect(sameJson({ a: 1, toString: 1 }, { a: 1 })).toBe(false);
     expect(sameJson({ constructor: 1 }, { valueOf: 1 })).toBe(false);
   });
+
+  it('applies toJSON once at its location, including self-returning hooks', () => {
+    const calls: string[] = [];
+    const self: any = { value: 1, nested: { toJSON(key: string) { calls.push(`nested:${key}`); return 'saved'; } } };
+    Object.defineProperty(self, 'toJSON', { value(key: string) { calls.push(`self:${key}`); return this; } });
+    const live = { channel: self };
+    const shadow = JSON.parse(JSON.stringify(live));
+    calls.length = 0;
+    expect(sameJson(shadow, live)).toBe(true);
+    expect(calls).toEqual(['self:channel', 'nested:nested']);
+    self.value = 2;
+    expect(sameJson(shadow, live)).toBe(false);
+
+    let returnedHookCalls = 0;
+    const returned = { value: 3, toJSON() { returnedHookCalls++; return { value: 4 }; } };
+    const outer = { toJSON() { return returned; } };
+    const output = JSON.parse(JSON.stringify({ channel: outer }));
+    expect(output).toEqual({ channel: { value: 3 } });
+    expect(sameJson(output, { channel: outer })).toBe(true);
+    expect(returnedHookCalls).toBe(0);
+
+    const arrayKeys: string[] = [];
+    const arrayLive = [0, 1, 2, { toJSON(key: string) { arrayKeys.push(key); return undefined; } }];
+    expect(sameJson(JSON.parse(JSON.stringify(arrayLive)), arrayLive)).toBe(true);
+    expect(arrayKeys).toEqual(['3', '3']); // Once for JSON.stringify, once for sameJson.
+
+    let prototypeCalls = 0;
+    const prototypeLive = Object.assign(Object.create({ custom: true }), {
+      omitted: undefined,
+      channel: { toJSON(key: string) { return { value: ++prototypeCalls, key }; } }
+    });
+    const prototypeShadow = JSON.parse(JSON.stringify(prototypeLive));
+    prototypeCalls = 0;
+    expect(sameJson(prototypeShadow, prototypeLive)).toBe(true);
+    expect(prototypeCalls).toBe(1);
+
+    const cycle: any = { value: 1 };
+    cycle.self = cycle;
+    Object.defineProperty(cycle, 'toJSON', { value() { return this; } });
+    expect(() => sameJson({ channel: { value: 1, self: {} } }, { channel: cycle })).toThrow(/circular/i);
+  });
 });
 
 describe('sameJson fast path', () => {
@@ -87,6 +128,61 @@ describe('sameJson fast path', () => {
     for (const [before, after, expected] of cases) {
       expect(sameJson(before, after), JSON.stringify(before)).toBe(expected);
       expect(sameJson(before, after)).toBe(diffJsonOps(before, after).length === 0);
+    }
+  });
+});
+
+describe('JsonMemo', () => {
+  /** The barrier's flush: diff with the memo, forget along each operation, apply it. */
+  const flush = (memo: JsonMemo, shadow: any, live: any) => {
+    const ops = diffJsonOps(shadow, live, ['layers'], [], memo);
+    expect(ops).toEqual(diffJsonOps(shadow, live, ['layers']));
+    let root: any = { layers: shadow };
+    for (const op of ops) { memo.forgetAlong(root, op.path); root = applyOps(root, [op]); }
+    return { ops, shadow: root.layers };
+  };
+
+  it('finds exactly the operations the plain diff finds as elements change in place', () => {
+    for (let seed = 1; seed <= 1000; seed++) {
+      const [before, after] = randomPair(seed);
+      const live: any[] = [{ id: 'a', value: json(before) }, { id: 'b', value: json(after) }];
+      const memo = new JsonMemo();
+      let { shadow } = flush(memo, [{ id: 'a', value: json(before) }, { id: 'b', value: json(before) }], live);
+      // Remembered now; the next changes happen in place.
+      expect(flush(memo, shadow, live).ops).toEqual([]);
+      live[0].value = json(after);
+      live[1].value = json(before);
+      ({ shadow } = flush(memo, shadow, live));
+      expect(canonicalStringify(shadow), `seed ${seed}`).toBe(canonicalStringify(live));
+    }
+  });
+
+  it('does not vouch for an element whose shadow changed since, or for values JSON reads differently', () => {
+    const memo = new JsonMemo();
+    const live: any[] = [{ id: 'a', p: { x: { v: 1 } } }];
+    let { shadow } = flush(memo, json(live), live);
+    // A scoped write moves the shadow to 2; the live value goes back to 1 unannounced.
+    live[0].p.x.v = 2;
+    memo.forgetAlong({ layers: shadow }, ['layers', 0, 'p', 'x', 'v']);
+    shadow[0].p.x.v = 2;
+    live[0].p.x.v = 1;
+    ({ shadow } = flush(memo, shadow, live));
+    expect(shadow[0].p.x.v).toBe(1);
+    const cases: Array<(layer: any) => void> = [
+      layer => { layer.p.x.v = NaN; },
+      layer => { layer.p.x = { v: 1, toJSON: () => ({ v: 3 }) }; },
+      layer => { layer.p.x = Object.assign(Object.create({ inherited: 1 }), { v: 4 }); },
+      layer => { layer.p.x = { v: new Number(5) }; },
+      layer => { layer.p.y = undefined; layer.p.x = { v: 6 }; },
+      layer => { delete layer.p.y; layer.p = { x: layer.p.x, extra: [] }; },
+      layer => { layer.p.extra.push(undefined); },
+      layer => { layer.p.extra[0] = null; },
+    ];
+    for (const change of cases) {
+      change(live[0]);
+      ({ shadow } = flush(memo, shadow, live));
+      expect(canonicalStringify(shadow)).toBe(canonicalStringify(live));
+      expect(flush(memo, shadow, live).ops).toEqual([]);
     }
   });
 });

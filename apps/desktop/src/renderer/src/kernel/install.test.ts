@@ -965,16 +965,20 @@ describe('the raster override base cache key (today\'s raster cache identity)', 
     return d;
   };
   const host = (layers: any[]) => ({ proj: { id: 'P', compId: 'P', layers, comps: {} }, EngineDoc: { enabled: true, api: { resolveContent: resolve } } });
+  const key = (...args: Parameters<typeof rasterContentKey>) => rasterContentKey(...args)?.key;
 
   it('keys plain text and shapes by resolved content and density, not time', () => {
     const title = { id: 'title', type: 'text', d: { text: 'Hello', size: 40 }, fx: [] };
     const box = { id: 'box', type: 'shape', d: { shape: 'rect', w: { v: 10, kf: [[0, 10], [2, 30]] }, h: 20 }, fx: [] };
     const PM = host([title, box]);
-    expect(rasterContentKey(PM, title, 2, 0.1)).toBe(rasterContentKey(PM, title, 2, 2.9));
-    expect(rasterContentKey(PM, title, 2, 0.1)).not.toBe(rasterContentKey(PM, title, 1, 0.1));
-    expect(rasterContentKey(PM, title, 2, 0.1, { x: 0, y: 0, width: 4, height: 4 })).not.toBe(rasterContentKey(PM, title, 2, 0.1));
+    expect(key(PM, title, 2, 0.1)).toBe(key(PM, title, 2, 2.9));
+    expect(key(PM, title, 2, 0.1)).not.toBe(key(PM, title, 1, 0.1));
+    expect(key(PM, title, 2, 0.1, { x: 0, y: 0, width: 4, height: 4 })).not.toBe(key(PM, title, 2, 0.1));
     // Content that changes with time changes the key.
-    expect(rasterContentKey(PM, box, 1, 0.5)).not.toBe(rasterContentKey(PM, box, 1, 1.5));
+    expect(key(PM, box, 1, 0.5)).not.toBe(key(PM, box, 1, 1.5));
+    // A plain shape's base holds across revisions; text depends on fonts too.
+    expect(rasterContentKey(PM, box, 1, 0.5)?.persistent).toBe(true);
+    expect(rasterContentKey(PM, title, 1, 0.5)?.persistent).toBe(false);
   });
 
   it('keys a detached copy by its content alone, never sharing a document layer\'s entry', () => {
@@ -982,8 +986,8 @@ describe('the raster override base cache key (today\'s raster cache identity)', 
     const PM = host([title]);
     const copyA = { ...title, id: 'title:typed:3', d: { text: 'Hel' } };
     const copyB = { ...title, id: 'title:typed:3', d: { text: 'Hel' } };
-    expect(rasterContentKey(PM, copyA, 1, 0)).toBe(rasterContentKey(PM, copyB, 1, 0.5));
-    expect(rasterContentKey(PM, { ...title }, 1, 0)).not.toBe(rasterContentKey(PM, title, 1, 0));
+    expect(key(PM, copyA, 1, 0)).toBe(key(PM, copyB, 1, 0.5));
+    expect(key(PM, { ...title }, 1, 0)).not.toBe(key(PM, title, 1, 0));
   });
 
   it('never caches what changes with time beyond its content, or without the native evaluator', () => {

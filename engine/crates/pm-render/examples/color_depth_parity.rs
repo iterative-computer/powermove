@@ -1,5 +1,7 @@
-//! Compare a fresh app capture; fails on any RGBA8 byte difference. All
-//! reference, result and difference images stay in the supplied external dir.
+//! Compare a fresh app capture; fails on any RGBA8 byte difference, except
+//! where a text layer's sampling is judged against an f64 reference
+//! (QUALITY-1, [`text_reference`]). All reference, result and difference
+//! images stay in the supplied external dir.
 #[path = "../tests/support/mod.rs"]
 mod support;
 
@@ -50,6 +52,7 @@ fn export_png(
                 end: Ticks::new(start.get() + TICKS_PER_SECOND / 30).unwrap(),
             },
             audio: false,
+            audio_index_playhead: None,
             motion_blur: false,
             color: OutputColor::SrgbImage,
             precision: Precision::Float32,
@@ -63,7 +66,7 @@ fn export_png(
         mode: Some(0o600),
         seed: 17,
     };
-    let plan = plan_export_for(&job, false, r).unwrap();
+    let plan = plan_export_for(&job, r).unwrap();
     let sink = sink_for(&plan).unwrap();
     run_export_into(
         r,
@@ -96,6 +99,77 @@ fn export_png(
         .zip(reference.chunks_exact(4))
         .filter(|(a, b)| a != b)
         .count()
+}
+
+/// QUALITY-1's reference for a text sample: the uploaded canvas (`source`,
+/// premultiplied RGBA8, top-down; the native raster must equal it) sampled
+/// bilinearly in f64 at every output pixel centre through the layer's quad
+/// (texel centres at i + 0.5, nothing outside the canvas, as the canvas
+/// upload samples it), times the layer's opacity, over the same project's
+/// background (the gradient capture at this depth). Returns RGBA per pixel
+/// and whether the text reaches the pixel (any tap with ink).
+fn text_reference(
+    doc: &pm_model::Document,
+    comp: &str,
+    raster: &pm_render::TextRaster,
+    source_layer: &str,
+    time: f64,
+    source: &[u8],
+    background: &[f32],
+    (w, h): (u32, u32),
+) -> (Vec<f64>, Vec<bool>) {
+    use pm_eval::transform::{apply, invert};
+    let c = pm_eval::Comp::resolve(doc, comp).unwrap();
+    let mut ev = pm_eval::Evaluator::new();
+    let mut scope = pm_eval::Scope::new(&mut ev, &c, &c);
+    let node = scope
+        .layers()
+        .iter()
+        .find(|l| {
+            pm_eval::node::string(pm_eval::node::member(Some(l), "id"))
+                .is_some_and(|id| id.to_string_lossy() == source_layer)
+        })
+        .unwrap();
+    let world = scope.world_matrix(node, time).unwrap();
+    let opacity = scope.world_opacity(node, time).unwrap();
+    let inverse = invert(&world).unwrap();
+    let (cw, ch) = (raster.canvas.0 as i64, raster.canvas.1 as i64);
+    let [x0, y0, x1, y1] = raster.plan.crop.map(f64::from);
+    // Layer px -> canvas px: the crop spans the quad's box.
+    let (sx, sy) = ((x1 - x0) / raster.box_size.0, (y1 - y0) / raster.box_size.1);
+    let texel = |x: i64, y: i64| -> [f64; 4] {
+        if x < 0 || y < 0 || x >= cw || y >= ch {
+            return [0.0; 4];
+        }
+        let i = ((y * cw + x) * 4) as usize;
+        std::array::from_fn(|k| f64::from(source[i + k]) / 255.0)
+    };
+    let mut out = vec![0.0; (w * h * 4) as usize];
+    let mut reached = vec![false; (w * h) as usize];
+    for py in 0..h {
+        for px in 0..w {
+            let (lx, ly) = apply(&inverse, f64::from(px) + 0.5, f64::from(py) + 0.5);
+            let u = x0 + (lx + raster.anchor.0) * sx - 0.5;
+            let v = y0 + (ly + raster.anchor.1) * sy - 0.5;
+            let (iu, iv) = (u.floor(), v.floor());
+            let (fu, fv) = (u - iu, v - iv);
+            let (iu, iv) = (iu as i64, iv as i64);
+            let taps = [
+                (texel(iu, iv), (1.0 - fu) * (1.0 - fv)),
+                (texel(iu + 1, iv), fu * (1.0 - fv)),
+                (texel(iu, iv + 1), (1.0 - fu) * fv),
+                (texel(iu + 1, iv + 1), fu * fv),
+            ];
+            let n = (py * w + px) as usize;
+            reached[n] = taps.iter().any(|(t, _)| t[3] > 0.0);
+            let s: [f64; 4] =
+                std::array::from_fn(|k| taps.iter().map(|(t, f)| t[k] * f).sum::<f64>() * opacity);
+            for k in 0..4 {
+                out[n * 4 + k] = s[k] + f64::from(background[n * 4 + k]) * (1.0 - s[3]);
+            }
+        }
+    }
+    (out, reached)
 }
 
 fn main() {
@@ -172,6 +246,9 @@ fn main() {
             .zip(ref_bytes.chunks_exact(4))
             .filter(|(a, b)| a != b)
             .count();
+        // Text sampling is judged against the f64 reference below; its
+        // export must equal the engine's own preview.
+        let text = s.get("source").is_some();
         let export_different =
             if s["exportReference"].is_string() || (s["depth"] == 8 && s["exportPng"] != false) {
                 let different = export_png(
@@ -180,7 +257,7 @@ fn main() {
                     &comp,
                     s,
                     dir.join(format!("{id}.export.png")),
-                    &ref_bytes,
+                    if text { &native } else { &ref_bytes },
                 );
                 println!("{id} exported PNG: different={different}");
                 Some(different)
@@ -192,8 +269,8 @@ fn main() {
             .zip(&reference)
             .map(|(a, b)| f64::from((a - b).abs()) * 255.0)
             .fold(0.0, f64::max);
-        // Pixel-exact is the DEPTH-1 bar, with no corpus exceptions.
-        let mut pass = different == 0 && export_different.is_none_or(|n| n == 0);
+        // Pixel-exact is the DEPTH-1 bar, except text sampling (below).
+        let mut pass = (text || different == 0) && export_different.is_none_or(|n| n == 0);
         let mut source_result = serde_json::Value::Null;
         if let Some(source) = s.get("source") {
             let source_w = source["width"].as_u64().unwrap() as usize;
@@ -247,7 +324,63 @@ fn main() {
             );
             println!("{id} source: different={source_different}, max={source_max} CV");
             pass &= source_different == 0;
-            source_result = json!({"differentPixels":source_different,"maxCv":source_max});
+            // The composed text against the f64 reference (gate-policy.md):
+            // pixels within 2 px of where it samples ink are Resampled; every
+            // other pixel stays byte-exact.
+            let background = std::fs::read(dir.join(format!("gradient-{}.rgba32f", s["depth"])))
+                .unwrap()
+                .chunks_exact(4)
+                .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            let (ideal, reached) = text_reference(
+                &doc,
+                &comp,
+                &raster,
+                source["layer"].as_str().unwrap(),
+                s["time"].as_f64().unwrap(),
+                &reference_source,
+                &background,
+                (w, h),
+            );
+            let classes = pm_reference::compare::classify(
+                &vec![false; reached.len()],
+                &reached,
+                w as usize,
+                h as usize,
+                2,
+            );
+            let outside = classes
+                .iter()
+                .enumerate()
+                .filter(|(i, c)| {
+                    **c != pm_reference::compare::Class::Resampled
+                        && native[i * 4..i * 4 + 4] != ref_bytes[i * 4..i * 4 + 4]
+                })
+                .count();
+            let wide = |v: &[f32]| v.iter().map(|&x| f64::from(x)).collect::<Vec<_>>();
+            let report =
+                pm_reference::compare::compare(&wide(&pixels), &wide(&reference), &ideal, &classes);
+            let bounds = if s["depth"] == 8 {
+                pm_reference::compare::Bounds::EIGHT_BIT
+            } else {
+                pm_reference::compare::Bounds::HALF_FLOAT
+            };
+            let mut why = report.failures(&bounds);
+            if outside > 0 {
+                why.push(format!(
+                    "{outside} pixels away from the text differ from today"
+                ));
+            }
+            println!("{id} vs the f64 reference:{report}");
+            for line in &why {
+                println!("{id} FAIL: {line}");
+            }
+            pass &= why.is_empty();
+            let r = report.class(pm_reference::compare::Class::Resampled);
+            source_result = json!({"differentPixels":source_different,"maxCv":source_max,
+                "reference":{"outsideDifferent":outside,"failures":why,
+                "engine":{"max":r.engine_vs_reference.max,"p999":r.engine_vs_reference.p999,"mean":r.engine_vs_reference.mean},
+                "today":{"max":r.today_vs_reference.max,"p999":r.today_vs_reference.p999,"mean":r.today_vs_reference.mean}}});
         }
         support::write_png(&dir.join(format!("{id}.native.png")), w, h, &native);
         let mut diff: Vec<u8> = native

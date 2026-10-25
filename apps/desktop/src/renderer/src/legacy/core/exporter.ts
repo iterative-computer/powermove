@@ -7,6 +7,7 @@ import { trackExportMedia } from './export-media';
 import { exportEffects, type EffectRef } from './export-effects';
 import { AlphaReadbackRetryError } from '../gl/half-readback';
 import { installRenderQueue, wavBytes } from './render-queue';
+import { WEBM_ENCODE_QUEUE_LIMIT, WEBM_VIDEO_CODECS, webmFrameTiming, webmKeyFrame, webmVideoConfig } from './webm-video';
 import { openRenderQueuePanel } from './render-queue-panel';
 import { muxWebM as muxEncodedWebM } from './webm-mux';
 import { writeBlobChunks } from './blob-chunks';
@@ -51,6 +52,7 @@ import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
 import { deliveryEngineOn, row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { captionSidecars } from '../../captions/sidecar';
+import { referencedClips } from '../../../../shared/offline-clips';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -66,6 +68,8 @@ const prepareExportFrame: typeof prepareFrame = (pm, time, project, options) =>
   prepareFrame(pm, time, project, { ...options, recoveryDecoders });
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
+/** How long an export waits for referenced media that is still loading (OFFLINE-1). */
+X.mediaWaitMs = 30_000;
 X.buildWeb = () => buildWebExport(PM);
 
 /* The project owns its delivery settings; the legacy global store only seeds
@@ -440,7 +444,7 @@ function range(opts: any) {
   return opts.range === 'work' && p.work && p.work[1] > p.work[0] ? [p.work[0], p.work[1]] : [0, p.dur];
 }
 
-function progressUI(total: any) {
+function progressUI(total: any, preparingMedia = false, operation: { cancel: boolean; busy?: boolean } = X) {
   const bar: any = h('i', { style: { width: '0%' } });
   const label: any = h('span', 'Preparing…');
   const eta: any = h('span');
@@ -452,9 +456,9 @@ function progressUI(total: any) {
   const mod: any = PM.modal({
     title: 'Exporting ' + (PM.proj.name || 'Untitled'), body, width: 580,
     dismissible: false,
-    onClose: () => { if (X.busy) X.cancel = true; stopPreview(); },
+    onClose: () => { if (preparingMedia || operation.busy) operation.cancel = true; stopPreview(); },
     actions: [{ label: 'Cancel', run: () => {
-      X.cancel = true;
+      operation.cancel = true;
       label.textContent = 'Cancelling…'; eta.textContent = '';
       const button = mod.el.querySelector('.mf button');
       if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
@@ -469,7 +473,7 @@ function progressUI(total: any) {
   return {
     mod, prev,
     set(i: any, extra: any) {
-      if (X.cancel) return;
+      if (operation.cancel) return;
       bar.parentElement.setAttribute('aria-valuenow', String(Math.round(i / total * 100)));
       bar.style.width = (i / total * 100).toFixed(1) + '%';
       label.textContent = `Frame ${i} / ${total}  ·  ${(i / total * 100).toFixed(0)}%` + (extra ? '  ·  ' + extra : '');
@@ -482,14 +486,22 @@ function progressUI(total: any) {
         eta.textContent = 'Finishing…';
       }
     },
+    preparing(done: number, total: number) {
+      if (operation.cancel) return;
+      const percent = Math.max(0, Math.min(100, done / total * 100));
+      bar.parentElement.setAttribute('aria-valuenow', String(Math.round(percent)));
+      bar.style.width = `${percent}%`;
+      label.textContent = 'Preparing media…';
+      eta.textContent = `${Math.floor(done)} / ${total}`;
+    },
     /** "Waiting for media · 2 clips offline" (section 14.8). */
     waiting(message: string) {
-      if (X.cancel) return;
+      if (operation.cancel) return;
       label.textContent = message;
       eta.textContent = '';
     },
     preview(frame: { width: number; height: number; jpeg: Uint8Array }) {
-      if (decoding || X.cancel || typeof window.createImageBitmap !== 'function') return;
+      if (decoding || operation.cancel || typeof window.createImageBitmap !== 'function') return;
       decoding = true;
       const blob = new window.Blob([frame.jpeg as BlobPart], { type: 'image/jpeg' });
       void window.createImageBitmap(blob).then((image: ImageBitmap) => {
@@ -500,6 +512,27 @@ function progressUI(total: any) {
       }).catch(() => undefined).finally(() => { decoding = false; });
     },
   };
+}
+
+/** Reuses the export sheet while old media is copied into the engine store.
+ * The host calls back only when there is migration work, so already-bound
+ * projects proceed straight to the destination dialog. */
+async function prepareMedia(project: any, operation: { cancel: boolean; busy?: boolean } = X): Promise<boolean> {
+  let ui: ReturnType<typeof progressUI> | null = null;
+  try {
+    await PM.HostMedia?.flushBindings(project, (done: number, total: number) => {
+      if (!(total > 0)) return;
+      ui ??= progressUI(1, true, operation);
+      ui.preparing(done, total);
+    });
+    return !operation.cancel;
+  } finally {
+    if (ui) {
+      const cancelled = operation.cancel;
+      (ui as ReturnType<typeof progressUI>).mod.close();
+      operation.cancel = cancelled;
+    }
+  }
 }
 
 let destinationToken: string | null = null;
@@ -513,20 +546,56 @@ async function run(opts: any) {
   if (PM.agentFrameCapture) return PM.toast('Wait for the current frame capture to finish.');
   // Today's ids (`prores`, `mp4`, `webm`, `rec`) are the new formats' names now.
   opts = { ...opts, format: migrateFormat(opts?.format), delivery: normalizeDelivery(opts?.delivery) };
-  // The native engine's consistency check (docs/rust-engine.md, section 6).
-  PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+  const requestedProject = PM.proj;
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);
   const releaseJob = isRenderFormat(opts.format) && !opts.reportPath ? holdExportJob() : () => {};
   try {
-    const p = PM.proj;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    await PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+    if (PM.proj !== requestedProject) return { cancelled: true };
+    const p = requestedProject;
     // With Use New Engine on, every render format runs in the job engine; a
     // project it cannot render yet comes back here and the current exporter
     // writes the file the user already chose (agent exports route in main).
     if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
       const engine = await exportThroughEngine(opts);
       if (engine) return engine;
+    }
+    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.offlineExport) {
+      const referenced = referencedClips(p);
+      /* Media still loading is not offline. The export waits for the
+         project's media restore and for referenced media still loading, 30 s
+         in all, showing the export sheet ("Waiting for media…", Cancel), and
+         then goes on as it always has: it is never refused for it. Media that
+         finishes in time is in the export; only media the restore found
+         missing is asked about. */
+      let restored = false;
+      void Promise.resolve(PM.projectAssetsReady).then(() => { restored = true; }, () => { restored = true; });
+      await Promise.resolve();
+      const loading = () => referenced.filter((clip) => PM.assets?.loading?.has(clip.asset));
+      let sheet: any = null;
+      try {
+        for (const deadline = Date.now() + X.mediaWaitMs; (!restored || loading().length) && Date.now() < deadline;) {
+          if (!sheet) { sheet = progressUI(1); sheet.waiting('Waiting for media…'); }
+          await new Promise(resolve => setTimeout(resolve, 100));
+          if (X.cancel || PM.proj !== p) return { cancelled: true };
+        }
+      } finally {
+        // Closing the sheet marks a running export cancelled; keep the outcome.
+        const cancelled = X.cancel;
+        sheet?.mod.close();
+        X.cancel = cancelled;
+      }
+      const pending = new Set(loading().map((clip) => clip.asset));
+      // A restore still running at the deadline has not found anything missing yet: as today, no question.
+      const clips = restored ? referenced.filter((clip) => !pending.has(clip.asset) && !PM.assets?.get(clip.asset)) : [];
+      if (clips.length) {
+        const choice = await bridge.offlineExport(clips);
+        if (choice === 'locate') locateMedia(clips.map((clip) => clip.asset));
+        if (choice !== 'without') return { cancelled: true };
+      }
     }
     const legacy = legacyFormatId(opts.format);
     if (!legacy) {
@@ -603,7 +672,7 @@ function sheetOptions(opts: any): any {
   return {
     format: opts.format, alpha: !!opts.alpha && supportsAlpha(opts.format, opts.delivery), fps: Number(opts.fps), scale: Number(opts.scale) || 1,
     start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
-    audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
+    audio: opts.audio !== false, audioIndexPlayhead: PM.Audio?.indexPlayhead?.() ?? PM.time, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
     delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false,
     // A raster override's layers are drawn by this window (kernel/raster-compat.ts),
     // and a WebM export's frames go through its compatibility context (compat-context.ts).
@@ -648,7 +717,7 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
     const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
-    await PM.HostMedia?.flushBindings(p);
+    if (!await prepareMedia(p)) return { cancelled: true };
     // Main captures this window's definitions for the job (contract 10):
     // pending registrations and extension reloads reach it first.
     await PM.EngineDefinitions?.settle?.();
@@ -728,9 +797,12 @@ X.addToQueue = async (rawOpts: any) => {
     ...(sidecars.length ? { sidecars } : {}),
     ...(opts.preset ? { preset: String(opts.preset) } : {})
   };
+  // Queue preparation can run alongside a foreground export. Its cancellation
+  // belongs to this add only; the foreground export owns X.busy and X.cancel.
+  const operation = { cancel: false };
   const releaseJob = holdExportJob();
   try {
-    await PM.HostMedia?.flushBindings(project);
+    if (!await prepareMedia(project, operation)) return { status: 'cancelled' };
     // The queued job keeps this window's definitions as they are now.
     await PM.EngineDefinitions?.settle?.();
     const result = await engine.queueAdd(request);
@@ -1234,13 +1306,9 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
   const retention = trackStaticExport(PM, opts.mblur !== false);
   let retained: VideoFrame | null = null, lastKey: string | null = null;
   try {
-  const cfgs: any = [
-    { codec: 'vp09.00.31.08', id: 'V_VP9' },
-    { codec: 'vp8', id: 'V_VP8' },
-  ];
   let chosen: any = null;
-  for (const c of cfgs) {
-    const cfg: any = { codec: c.codec, width: W, height: H, bitrate, framerate: opts.fps, latencyMode: 'quality' };
+  for (const c of WEBM_VIDEO_CODECS) {
+    const cfg: any = webmVideoConfig(c.codec, W, H, bitrate, opts.fps);
     const sup: any = await window.VideoEncoder.isConfigSupported(cfg).catch(() => null);
     if (sup && sup.supported) { enc.configure(cfg); chosen = c; configured = true; break; }
   }
@@ -1258,18 +1326,18 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
       if (X.cancel) break;
       cv = renderInto(T, W, H, opts.mblur);
     }
-    const frame: VideoFrame = new window.VideoFrame(retained || cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
+    const frame: VideoFrame = new window.VideoFrame(retained || cv, webmFrameTiming(i, opts.fps));
     try {
       if (key !== null && !retained) { retained = frame.clone(); lastKey = key; }
       if (encoderError) throw encoderError;
-      enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 });
+      enc.encode(frame, { keyFrame: webmKeyFrame(i, opts.fps) });
     } finally { frame.close(); }
     if (i % 3 === 0) {
       pctx.drawImage(retained || cv, 0, 0, ui.prev.width, ui.prev.height);
       ui.set(i + 1, 'Rendering');
       await new Promise((r: any) => window.setTimeout(r, 0));
     }
-    while (enc.encodeQueueSize > 12 && !X.cancel && !encoderError) {
+    while (enc.encodeQueueSize > WEBM_ENCODE_QUEUE_LIMIT && !X.cancel && !encoderError) {
       await new Promise((r: any) => window.setTimeout(r, 6));
     }
     if (encoderError) throw encoderError;

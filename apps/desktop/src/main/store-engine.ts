@@ -22,6 +22,7 @@ import { isRecord } from '../shared/guards';
 import { HistoryRecords, isHistoryDictionary, packStoredHistory } from '../shared/history-memory';
 import { IPC, LIMITS } from '../shared/ipc';
 import { parseStoreKey, storeFileName } from '../shared/store-keys';
+import { isJournalKey, isSlotKey, ProjectDurability, projectOf } from './project-durability';
 import type { StoreFileSystem } from './storage';
 
 // Takes retain up to 24 complete editable snapshots; large tracked projects
@@ -38,12 +39,16 @@ export type StoreRequest =
   | { op: 'set'; id: number; key: string; value: unknown }
   | { op: 'setSerialized'; id: number; key: string; serialized: string }
   | { op: 'delete'; id: number; key: string }
+  /** One entry for a project's journal (SAVE-1, project-durability.ts). */
+  | { op: 'append'; id: number; key: string; serialized: string }
   /** Re-persist bytes main already published, after a replacement engine starts. */
   | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null }
   /** Read a stored key: `sync` blocks this thread on the disk (main is waiting). */
   | { op: 'read'; id: number; key: string; sync: boolean }
   /** Main dropped a clean key from its cache; forget any copy kept here too. */
   | { op: 'evict'; key: string }
+  /** Main closes or reopens a project's journal (SAVE-1b, storage.ts). */
+  | { op: 'journal'; id: number; key: string; open: boolean }
   | { op: 'flush'; id: number };
 
 /** Engine to main. */
@@ -60,7 +65,8 @@ export type StoreReply =
   | { type: 'written'; id: number; key: string }
   | { type: 'flushed'; id: number }
   | { type: 'failed'; id: number; error: string }
-  | { type: 'error'; key: string; error: string };
+  /** `unsaved`: a write the engine committed did not reach disk. */
+  | { type: 'error'; key: string; error: string; unsaved?: true };
 
 export interface StoreEngineOptions {
   fs: StoreFileSystem;
@@ -68,6 +74,11 @@ export interface StoreEngineOptions {
   syncFs?: Pick<typeof nodeSyncFs, 'readFileSync' | 'renameSync'>;
   now: () => number;
   randomSuffix: () => string;
+  /** A project journal's byte limit (tests; default storeByteLimit). */
+  journalLimitBytes?: number;
+  /** Timers for the write debounce (a model check runs them itself). */
+  later?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
 type PendingWrite =
@@ -91,6 +102,10 @@ export function storeByteLimit(key: string): number {
 }
 
 const encoder = new TextEncoder();
+/* Windows flushes a file (FlushFileBuffers) only through a handle opened for
+   writing; a read-only one fails with EPERM. fsync works on a read-only
+   descriptor on macOS and Linux. */
+const SYNC_FLAGS = process.platform === 'win32' ? 'r+' : 'r';
 
 export class StoreEngine {
   private readonly pending = new Map<string, PendingWrite>();
@@ -108,9 +123,30 @@ export class StoreEngine {
   private busy = false;
   private directory = '';
   private writeDelayMs = 150;
+  private readonly later: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  private readonly cancel: (timer: ReturnType<typeof setTimeout>) => void;
+  private readonly projects: ProjectDurability;
+  /** Whether this engine read the store directory (a replacement reads projects on demand). */
+  private loaded = false;
 
   constructor(private readonly options: StoreEngineOptions, private readonly reply: (message: StoreReply, transfer?: ArrayBuffer[]) => void) {
     this.syncFs = options.syncFs ?? nodeSyncFs;
+    this.later = options.later ?? ((run, ms) => setTimeout(run, ms));
+    this.cancel = options.cancel ?? (timer => clearTimeout(timer));
+    this.projects = new ProjectDurability({
+      fs: options.fs as any,
+      directory: () => this.directory,
+      writeDelayMs: () => this.writeDelayMs,
+      loaded: () => this.loaded,
+      randomId: () => options.randomSuffix(),
+      persist: (key, data) => this.persist(key, data === null ? { id: 0, kind: 'delete' } : { id: 0, kind: 'set', data }),
+      barrier: key => this.barrier(key),
+      // id 0: a write no request waits for (a journal shrunk after its slot landed); it still tells main the key is on disk.
+      written: (id, key) => this.reply({ type: 'written', id, key }),
+      failed: (key, error) => this.reply({ type: 'error', key, error: errorText(error), unsaved: true }),
+      later: (run, ms) => this.later(run, ms),
+      cancel: timer => this.cancel(timer),
+    });
   }
 
   /** Requests run in arrival order; most finish synchronously inside this call. */
@@ -126,6 +162,31 @@ export class StoreEngine {
   }
 
   private run(request: StoreRequest): Promise<void> | undefined {
+    // A replacement engine reads a project's slot head and journal before touching it.
+    // Main's close or reopen applies at once, read or not.
+    if (request.op === 'journal') {
+      if (isJournalKey(request.key)) { if (request.open) this.projects.open(request.key); else this.projects.close(request.key); }
+      return undefined;
+    }
+    // Disk reads and evictions do not touch durability: main reads only what it holds no newer copy of.
+    const key = 'key' in request && request.op !== 'read' && request.op !== 'evict' ? request.key : null;
+    const reading = key === null ? undefined : this.projects.ready(key);
+    if (reading && key !== null) {
+      return reading.then(() => this.run(request), error => {
+        // A dropped restore is a write main had accepted that is not on disk: reported like a failed write.
+        if (request.op === 'restore') {
+          this.projects.replayedSeq(key, request.bytes);
+          // A journal it could not replay: entries already on their way are refused too.
+          if (isJournalKey(key)) this.projects.readFailed(key);
+          this.reply({ type: 'error', key, error: `not saved: the project could not be read: ${errorText(error)}`, unsaved: true });
+        }
+        else if (request.op !== 'evict') {
+          // An entry it could not take: later ones, already on their way, are refused too.
+          if (request.op === 'append') this.projects.readFailed(key);
+          this.reply({ type: 'rejected', id: request.id, key, channel: IPC.storeSet, detail: `the project could not be read: ${errorText(error)}` });
+        }
+      });
+    }
     switch (request.op) {
       case 'init':
         this.directory = request.directory;
@@ -138,17 +199,38 @@ export class StoreEngine {
           error => this.reply({ type: 'failed', id: request.id, error: errorText(error) })
         );
       case 'set':
+        if (isJournalKey(request.key)) { this.refuseJournal(request.id, request.key, IPC.storeSet); return undefined; }
         return this.encode(request.id, request.key, () => this.encodeValue(request.key, request.value));
       case 'setSerialized':
+        if (isJournalKey(request.key)) { this.refuseJournal(request.id, request.key, IPC.storeSetSerialized); return undefined; }
         return this.encode(request.id, request.key, () => this.encodeSerialized(request.key, request.serialized));
       case 'delete':
+        if (isJournalKey(request.key)) { this.refuseJournal(request.id, request.key, IPC.storeDelete); return undefined; }
         this.bump(request.key);
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, null);
         this.reply({ type: 'committed', id: request.id, key: request.key, bytes: null });
-        this.schedule(request.key, { id: request.id, kind: 'delete' });
+        if (isSlotKey(request.key)) this.projects.deleteSlot(request.id, request.key);
+        else this.schedule(request.key, { id: request.id, kind: 'delete' });
         return undefined;
+      case 'append': {
+        if (!isJournalKey(request.key)) {
+          this.reply({ type: 'rejected', id: request.id, key: request.key, channel: IPC.storeAppendJournal, detail: 'only a project journal is appended to' });
+          return undefined;
+        }
+        let bytes: Uint8Array;
+        try {
+          bytes = this.projects.append(request.id, request.key, request.serialized, this.options.journalLimitBytes ?? storeByteLimit(request.key));
+        } catch (error) {
+          this.reply({ type: 'rejected', id: request.id, key: request.key, channel: IPC.storeAppendJournal, detail: errorText(error) });
+          return undefined;
+        }
+        this.reply({ type: 'committed', id: request.id, key: request.key, bytes }, [bytes.buffer as ArrayBuffer]);
+        return undefined;
+      }
       case 'restore':
         this.bump(request.key);
+        if (isSlotKey(request.key)) { this.projects.restoreSlot(request.id, request.key, request.bytes); return undefined; }
+        if (isJournalKey(request.key)) { this.projects.restoreJournal(request.id, request.key, request.bytes); return undefined; }
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, request.bytes && Buffer.from(request.bytes).toString('utf8'));
         this.schedule(request.key, request.bytes ? { id: request.id, kind: 'set', data: request.bytes } : { id: request.id, kind: 'delete' });
         return undefined;
@@ -173,6 +255,11 @@ export class StoreEngine {
     const publish = (serialized: string) => {
       this.bump(key);
       if (key.startsWith('projectState.')) this.sessions.set(key, serialized);
+      if (isSlotKey(key)) {
+        const stored = this.projects.slot(id, key, serialized);
+        this.reply({ type: 'committed', id, key, bytes: stored }, [stored.buffer as ArrayBuffer]);
+        return;
+      }
       const bytes = encoder.encode(serialized);
       this.reply({ type: 'committed', id, key, bytes }, [bytes.buffer as ArrayBuffer]);
       this.schedule(key, { id, kind: 'set', data: serialized });
@@ -225,6 +312,11 @@ export class StoreEngine {
     try { value = JSON.parse(serialized); }
     catch { throw new Rejection(IPC.storeSetSerialized, 'invalid JSON'); }
     if (key.startsWith('projectState.')) return this.encodeValue(key, value);
+    // Main numbers and stamps every slot (project-durability.ts); a window's own stamp is dropped.
+    if (isSlotKey(key) && isRecord(value) && (Object.hasOwn(value, 'cp') || Object.hasOwn(value, 'seq'))) {
+      const { cp: _cp, seq: _seq, ...rest } = value;
+      return JSON.stringify(rest);
+    }
     const packed = packStored(key, value);
     return packed === value ? serialized : JSON.stringify(packed);
   }
@@ -319,6 +411,7 @@ export class StoreEngine {
     const names = await fs.readdir(this.directory);
     const entries: Array<[string, Uint8Array]> = [];
     const lazy: string[] = [];
+    const projectFiles = new Map<string, { slot: boolean; journal: boolean }>();
     const loadedProjectIds = new Set<string>();
     let registry: unknown;
     // Mirrors main, which replaces everything it held with what is on disk.
@@ -333,7 +426,18 @@ export class StoreEngine {
       // ever reaching a filesystem path.
       if (parsedKey === null || storeFileName(parsedKey) !== name) continue;
       if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') loadedProjectIds.add(parsedKey.id);
-      if (HEAVY_KEY.test(candidateKey)) { lazy.push(candidateKey); continue; }
+      if (HEAVY_KEY.test(candidateKey)) {
+        lazy.push(candidateKey);
+        // Durability numbers a project's writes against what is on disk:
+        // its slot's head and its journal, not the slot's body.
+        const projectId = projectOf(candidateKey);
+        if (projectId !== null) {
+          const present = projectFiles.get(projectId) ?? { slot: false, journal: false };
+          if (isSlotKey(candidateKey)) present.slot = true; else present.journal = true;
+          projectFiles.set(projectId, present);
+        }
+        continue;
+      }
 
       let serialized: string;
       try {
@@ -353,6 +457,18 @@ export class StoreEngine {
     }
 
     this.reportProjectReconciliation(registry, loadedProjectIds);
+    // Durability numbers a project's writes against what is on disk: its
+    // slot's head and its (small) journal, never the slot's body.
+    for (const [projectId, present] of projectFiles) {
+      try { await this.projects.loadFromDisk(projectId, present); }
+      catch (error) {
+        // Unknown: its journal stays closed until a slot holding every edit lands.
+        this.projects.readFailed(`projectJournal.${projectId}`);
+        this.emitError(`projectJournal.${projectId}`, `store file could not be read: ${errorText(error)}`);
+      }
+    }
+    this.loaded = true;
+    this.projects.loadFinished();
     return { entries, lazy };
   }
 
@@ -362,19 +478,27 @@ export class StoreEngine {
 
     // Writes can finish while this array is assembled, but every promise here
     // represents the tail of its key's queue at the flush boundary.
-    await Promise.all([...this.queues.values()]);
+    await Promise.all([...this.queues.values(), this.projects.flush()]);
+  }
+
+  /** A project's durability state (the model check, project-durability.model.test.ts). */
+  inspectProject(id: string): unknown { return this.projects.inspect(id); }
+
+  private refuseJournal(id: number, key: string, channel: string): void {
+    // SAVE-1: only main changes a project journal, by appends and after its own slot writes.
+    this.reply({ type: 'rejected', id, key, channel, detail: 'a project journal is only appended to' });
   }
 
   private schedule(key: string, operation: PendingWrite): void {
     this.pending.set(key, operation);
     const previousTimer = this.timers.get(key);
-    if (previousTimer !== undefined) clearTimeout(previousTimer);
-    this.timers.set(key, setTimeout(() => this.enqueuePending(key), this.writeDelayMs));
+    if (previousTimer !== undefined) this.cancel(previousTimer);
+    this.timers.set(key, this.later(() => this.enqueuePending(key), this.writeDelayMs));
   }
 
   private enqueuePending(key: string): void {
     const timer = this.timers.get(key);
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) this.cancel(timer);
     this.timers.delete(key);
 
     const operation = this.pending.get(key);
@@ -386,7 +510,7 @@ export class StoreEngine {
       .then(() => this.persist(key, operation))
       .then(() => { if (operation.id) this.reply({ type: 'written', id: operation.id, key }); })
       .catch((error: unknown) => {
-        this.emitError(key, errorText(error));
+        this.reply({ type: 'error', key, error: errorText(error), unsaved: true });
       });
     this.queues.set(key, current);
     void current.finally(() => {
@@ -411,7 +535,7 @@ export class StoreEngine {
       // Atomic replacement sequence: write a sibling temporary file, open and
       // fsync that file, close it, then rename it over the destination.
       await fs.writeFile(temporaryPath, operation.data, { encoding: 'utf8', flag: 'wx' });
-      const handle = await fs.open(temporaryPath, 'r');
+      const handle = await fs.open(temporaryPath, SYNC_FLAGS);
       try {
         await handle.sync();
       } finally {
@@ -428,6 +552,20 @@ export class StoreEngine {
       }
       throw error;
     }
+  }
+
+  /* An ordering barrier: the landed file and the directory entry the rename
+     made reach stable storage before anything that depends on them (a
+     project's journal shrinking after its slot). On macOS libuv's fsync is
+     fcntl(F_FULLFSYNC), falling back to F_BARRIERFSYNC, then fsync. Windows
+     cannot open a directory for syncing; NTFS journals the rename. */
+  private async barrier(key: string): Promise<void> {
+    const { fs } = this.options;
+    const file = await fs.open(path.join(this.directory, this.fileNameFor(key)), SYNC_FLAGS);
+    try { await file.sync(); } finally { await file.close(); }
+    if (process.platform === 'win32') return;
+    const directory = await fs.open(this.directory, 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
   }
 
   private async removeStaleTemporaryFiles(): Promise<void> {

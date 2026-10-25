@@ -17,7 +17,8 @@ import {
   type StoreChannel,
   type StoreFileSystem
 } from './storage';
-import type { StoreReply } from './store-engine';
+import { StoreEngine, type StoreReply } from './store-engine';
+import { recoverProject } from '../shared/project-journal';
 
 const temporaryDirectories: string[] = [];
 
@@ -33,7 +34,7 @@ afterEach(async () => {
 });
 
 describe('file store', () => {
-  it('indexes heavy filenames without reading them, and reads through every synchronous API', async () => {
+  it('indexes heavy filenames without reading their values (only a project journal, for durability), and reads through every synchronous API', async () => {
     const directory = await temporaryDirectory();
     const prefixes = ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads', 'agentAttachment'];
     for (const prefix of prefixes) await fs.writeFile(path.join(directory, `${prefix}.saved.json`), '{"saved":true}');
@@ -41,7 +42,8 @@ describe('file store', () => {
     const readFile = vi.fn(fs.readFile), readFileSync = vi.fn(syncFs.readFileSync);
     const store = createStore(directory, { fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }), syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
     await store.load();
-    expect(readFile).toHaveBeenCalledTimes(1);
+    // theme, and the journal SAVE-1 numbers the project's writes against.
+    expect(readFile.mock.calls.map(([file]) => path.basename(String(file))).sort()).toEqual(['projectJournal.saved.json', 'theme.json']);
     expect(readFileSync).not.toHaveBeenCalled();
     const snapshot = store.snapshot();
     expect(snapshot).toEqual({ theme: 'dark', __powermoveLazyKeys: prefixes.map(prefix => `${prefix}.saved`).sort() });
@@ -515,7 +517,7 @@ describe('file store', () => {
     await failing.flushAll();
 
     expect(JSON.parse(await fs.readFile(path.join(directory, 'theme.json'), 'utf8'))).toBe('old');
-    expect(events).toContainEqual({ key: 'theme', error: 'injected rename failure' });
+    expect(events).toContainEqual({ key: 'theme', error: 'injected rename failure', unsaved: true });
     await expect(fs.stat(path.join(directory, 'theme.json.tmp-failure'))).rejects.toMatchObject({
       code: 'ENOENT'
     });
@@ -662,7 +664,8 @@ describe('file store', () => {
     void store.setSerialized!('project.one', JSON.stringify({ v: '1', proj: { id: 'one', layers: [] } }));
     void store.delete('theme');
     expect(store.getSerialized!('projects')).toBe('[{"id":"one"}]');
-    expect(JSON.parse(store.getEncodedSerialized!('project.one')!)).toEqual({ v: '1', proj: { id: 'one', layers: [] } });
+    // Main numbers and stamps a project slot (SAVE-1).
+    expect(JSON.parse(store.getEncodedSerialized!('project.one')!)).toEqual({ cp: expect.any(String), seq: 1, v: '1', proj: { id: 'one', layers: [] } });
     expect(JSON.parse(store.bootstrapSerialized!().__powermoveLazyKeys!)).toEqual(['project.one']);
     void store.delete('project.one');
     expect(JSON.parse(store.bootstrapSerialized!().__powermoveLazyKeys!)).toEqual([]);
@@ -790,6 +793,601 @@ describe('file store', () => {
     expect(store.snapshot().__powermoveLazyKeys).toContain('project.orphan');
     await expect(fs.stat(path.join(directory, 'project.orphan.json'))).resolves.toBeDefined();
   });
+
+  /* SAVE-1 (project-durability.ts): main owns a project's durability. */
+  const numberedSlot = (cp: string, seq: number, name: string) => JSON.stringify({ cp, seq, v: '1', proj: { id: 'P', name } });
+  const entry = (name: string) => JSON.stringify({ revision: 1, patches: [{ path: ['name'], exists: true, value: name }] });
+  const enospc = () => Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  async function projectStore(options: { rename?: (to: string, count: number) => Promise<void> | void } = {}) {
+    const directory = await temporaryDirectory();
+    const slotFile = path.join(directory, 'project.P.json'), journalFile = path.join(directory, 'projectJournal.P.json');
+    await fs.writeFile(slotFile, numberedSlot('a', 1, 'A'));
+    await fs.writeFile(journalFile, JSON.stringify([{ revision: 1, patches: [{ path: ['name'], exists: true, value: 'A+edit' }], seq: 2, cp: 'a' }]));
+    let renames = 0;
+    const store = createStore(directory, { writeDelayMs: 0, fs: { ...fs, rename: async (from: any, to: any) => {
+      if (path.basename(String(to)) === 'project.P.json') await options.rename?.(String(to), ++renames);
+      return fs.rename(from, to);
+    } } });
+    const errors: Array<{ key: string; error: string }> = [];
+    store.onError(event => errors.push(event));
+    await store.load();
+    const disk = async () => ({
+      slot: JSON.parse(await fs.readFile(slotFile, 'utf8')),
+      journal: await fs.readFile(journalFile, 'utf8').then(JSON.parse, () => null) as any[] | null,
+    });
+    const recovered = async () => { const { slot, journal } = await disk(); return recoverProject(slot, journal)?.name; };
+    return { store, errors, disk, recovered };
+  }
+  const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+
+  it('changes a project journal only by appends and its own slot writes, numbering and tagging each entry', async () => {
+    const { store, disk, recovered } = await projectStore();
+    await expect(store.setSerialized!('projectJournal.P', '[]')).rejects.toThrow(/only appended to/);
+    await expect(store.delete('projectJournal.P')).rejects.toThrow(/only appended to/);
+    await store.appendJournal!('projectJournal.P', entry('A+edit+more'));
+    await store.flushAll();
+    expect((await disk()).journal!.map(item => [item.seq, item.cp])).toEqual([[2, 'a'], [3, 'a']]);
+    expect(await recovered()).toBe('A+edit+more');
+    // A slot that lands: the journal keeps only what follows it.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }));
+    await store.appendJournal!('projectJournal.P', entry('B+edit'));
+    await store.flushAll();
+    const { slot, journal } = await disk();
+    expect(slot).toMatchObject({ seq: 4, proj: { name: 'B' } });
+    expect(journal!.map(item => [item.seq, item.cp])).toEqual([[5, slot.cp]]);
+    expect(await recovered()).toBe('B+edit');
+  });
+
+  it('a slot write that fails changes nothing: the older slot and its journal stay, and appends continue', async () => {
+    const { store, errors, disk, recovered } = await projectStore({ rename: () => { throw enospc(); } });
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A+edit' } }));
+    await store.appendJournal!('projectJournal.P', entry('While full'));
+    await store.flushAll();
+    expect(errors.filter(event => event.error.includes('ENOSPC')).map(event => event.key)).toEqual(['project.P']);
+    expect((await disk()).slot.cp).toBe('a');
+    expect((await disk()).journal!.map(item => item.seq)).toEqual([2, 4]);
+    expect(await recovered()).toBe('While full');
+  });
+
+  it('keeps the journal when a checkpoint is refused while an earlier one is still being written (review probe 1)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { store, disk, recovered } = await projectStore({ rename: () => gate });
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A+edit' } }));
+    await tick();
+    await store.appendJournal!('projectJournal.P', entry('Against A'));
+    await expect(store.setSerialized!('project.P', '{not json')).rejects.toThrow();
+    await store.appendJournal!('projectJournal.P', entry('After B'));
+    await tick();
+    expect(await recovered()).toBe('After B');
+    release();
+    await store.flushAll();
+    expect((await disk()).slot.proj.name).toBe('A+edit');
+    expect(await recovered()).toBe('After B');
+  });
+
+  for (const newerFails of [false, true]) {
+    it(`two slot writes in flight, the older failing and the newer ${newerFails ? 'failing too' : 'landing later'}: no edit on disk is lost (review probe 2)`, async () => {
+      let releaseB!: () => void, releaseC!: () => void;
+      const gateB = new Promise<void>(resolve => { releaseB = resolve; }), gateC = new Promise<void>(resolve => { releaseC = resolve; });
+      const { store, disk, recovered } = await projectStore({ rename: async (_to, count) => {
+        if (count === 1) { await gateB; throw enospc(); }
+        await gateC;
+        if (newerFails) throw enospc();
+      } });
+      await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A+edit' } }));
+      await tick();
+      await store.appendJournal!('projectJournal.P', entry('After B'));
+      await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'After B' } }));
+      await store.appendJournal!('projectJournal.P', entry('After C'));
+      await tick();
+      releaseB();
+      await tick();
+      // B failed, C not on disk yet: A with every entry since.
+      expect((await disk()).slot.cp).toBe('a');
+      expect(await recovered()).toBe('After C');
+      releaseC();
+      await store.flushAll();
+      expect((await disk()).slot.proj.name).toBe(newerFails ? 'A' : 'After B');
+      expect(await recovered()).toBe('After C');
+    });
+  }
+
+  it('refuses every entry after a refused one, so a smaller later entry cannot leave a gap (review probe 3)', { timeout: 120_000 }, async () => {
+    const directory = await temporaryDirectory();
+    const slotFile = path.join(directory, 'project.P.json'), journalFile = path.join(directory, 'projectJournal.P.json');
+    await fs.writeFile(slotFile, JSON.stringify({ cp: 'a', seq: 1, v: '1', proj: { id: 'P', name: 'A', f: {} } }));
+    const store = createStore(directory, { writeDelayMs: 0 });
+    await store.load();
+    const big = (n: number) => 'x'.repeat(n);
+    // E0: the journal close to its 32 MiB limit (no checkpoint lands: slot writes fail or are refused).
+    await store.appendJournal!('projectJournal.P', JSON.stringify({ revision: 2, patches: [{ path: ['f', 'big'], exists: true, value: big(31 * 1024 * 1024) }] }));
+    // E1: a 2 MiB paste, refused; E2: a rename after it.
+    await expect(store.appendJournal!('projectJournal.P', JSON.stringify({ revision: 3, patches: [{ path: ['f', 'paste'], exists: true, value: big(2 * 1024 * 1024) }] }))).rejects.toThrow();
+    await expect(store.appendJournal!('projectJournal.P', JSON.stringify({ revision: 4, patches: [{ path: ['name'], exists: true, value: 'after paste' }] }))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    const project = recoverProject(JSON.parse(await fs.readFile(slotFile, 'utf8')), JSON.parse(await fs.readFile(journalFile, 'utf8')));
+    expect(project.name).toBe('A');
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('reopens a closed journal only when a slot posted after the last refused entry lands', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { store, recovered } = await projectStore({ rename: (_to, count) => count === 1 ? gate : undefined });
+    // Slot B posted, still renaming; then an entry is refused (malformed), closing the journal.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }));
+    await tick();
+    await expect(store.appendJournal!('projectJournal.P', '{not json')).rejects.toThrow();
+    release();
+    await store.flushAll();
+    // B was posted before the refusal: it does not hold that edit, so the journal stays closed.
+    await expect(store.appendJournal!('projectJournal.P', entry('After B'))).rejects.toThrow(/closed/);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+    // A slot posted after the last refusal lands: entries are accepted again.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'C' } }));
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+    await store.appendJournal!('projectJournal.P', entry('After C'));
+    await store.flushAll();
+    expect(await recovered()).toBe('After C');
+  });
+
+  it('keeps a journal closed across a storage worker replacement', async () => {
+    const directory = await temporaryDirectory();
+    await fs.writeFile(path.join(directory, 'project.P.json'), numberedSlot('a', 1, 'A'));
+    let restart!: () => void;
+    const channel: StoreChannel = (() => {
+      let engine: StoreEngine, listener: (reply: StoreReply) => void = () => {}, onRestart: () => void = () => {}, generation = 0;
+      const start = () => {
+        const mine = ++generation;
+        engine = new StoreEngine({ fs, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => { if (mine === generation) queueMicrotask(() => listener(reply)); });
+      };
+      start();
+      restart = () => { start(); onRestart(); };
+      return { post: request => engine.handle(structuredClone(request)), onReply: cb => { listener = cb; }, onRestart: cb => { onRestart = cb; }, waitSync: () => { throw new Error('unused'); } };
+    })();
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    await expect(store.appendJournal!('projectJournal.P', '{not json')).rejects.toThrow();
+    restart();
+    await tick();
+    await expect(store.appendJournal!('projectJournal.P', entry('After restart'))).rejects.toThrow(/closed/);
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }));
+    await store.flushAll();
+    await store.appendJournal!('projectJournal.P', entry('After B'));
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  /** A worker that can stop (dropping what it was sent) and be replaced, as persistence-thread.ts does. */
+  function restartableChannel(engineFs: any = fs) {
+    let engine!: StoreEngine, listener: (reply: StoreReply) => void = () => {}, onRestart: () => void = () => {}, generation = 0, dropping = false;
+    let held: StoreReply[] | null = null;
+    const start = () => {
+      const mine = ++generation;
+      engine = new StoreEngine({ fs: engineFs, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => {
+        if (mine !== generation) return;
+        if (held) held.push(reply); else queueMicrotask(() => listener(reply));
+      });
+    };
+    start();
+    const channel: StoreChannel = {
+      post: request => { if (!dropping) engine.handle(structuredClone(request)); },
+      onReply: cb => { listener = cb; }, onRestart: cb => { onRestart = cb; }, waitSync: () => { throw new Error('unused'); },
+    };
+    return {
+      channel, die: () => { dropping = true; },
+      // A stopped worker's held replies never arrive.
+      restart: () => { dropping = false; if (held) held = []; start(); onRestart(); },
+      hold: () => { held = []; },
+      release: () => { const queue = held ?? []; held = null; for (const reply of queue) listener(reply); },
+    };
+  }
+  const named = (revision: number, field: string, value: unknown) => JSON.stringify({ revision, patches: [{ path: field === 'name' ? ['name'] : ['f', field], exists: true, value }] });
+  async function gapProject() {
+    const directory = await temporaryDirectory();
+    await fs.writeFile(path.join(directory, 'project.P.json'), JSON.stringify({ cp: 'a', seq: 1, v: '1', proj: { id: 'P', name: 'A', f: {} } }));
+    const recovered = async () => {
+      const journal = await fs.readFile(path.join(directory, 'projectJournal.P.json'), 'utf8').then(JSON.parse, () => []);
+      return recoverProject(JSON.parse(await fs.readFile(path.join(directory, 'project.P.json'), 'utf8')), journal);
+    };
+    return { directory, recovered };
+  }
+  /** After a missing edit ('paste'), no later one may be recovered without it. */
+  const noGap = (project: any) => !(project.name === 'after paste' && !('paste' in project.f));
+
+  it('closes the journal at an entry main refuses for its size, before the engine sees it (review probe P2)', { timeout: 120_000 }, async () => {
+    const { directory, recovered } = await gapProject();
+    const store = createStore(directory, { writeDelayMs: 0 });
+    await store.load();
+    await expect(store.appendJournal!('projectJournal.P', named(2, 'paste', 'x'.repeat(33 * 1024 * 1024)))).rejects.toThrow(/size limit/);
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'name', 'after paste'))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    expect(noGap(await recovered())).toBe(true);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('closes the journal at an entry lost when the storage worker stopped (review probe P3)', async () => {
+    const { directory, recovered } = await gapProject();
+    const { channel, die, restart } = restartableChannel();
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    await store.flushAll();
+    die();
+    const lost = store.appendJournal!('projectJournal.P', named(3, 'paste', 'P'));
+    restart();
+    await expect(lost).rejects.toThrow(/stopped/);
+    await tick();
+    await expect(store.appendJournal!('projectJournal.P', named(4, 'name', 'after paste'))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    expect(noGap(await recovered())).toBe(true);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('closes the journal at an entry a replacement worker could not read the project for (review probe P4)', async () => {
+    const { directory, recovered } = await gapProject();
+    let failReads = false;
+    const flaky = { ...fs, open: (async (file: any, flags: any) => {
+      if (failReads && String(file).endsWith('project.P.json') && flags === 'r') { failReads = false; throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); }
+      return fs.open(file, flags);
+    }) };
+    const { channel, restart } = restartableChannel(flaky);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    await store.flushAll();
+    restart();
+    await tick();
+    failReads = true;
+    // Both posted before main hears of the first one's failure.
+    const paste = store.appendJournal!('projectJournal.P', named(3, 'paste', 'P'));
+    const after = store.appendJournal!('projectJournal.P', named(4, 'name', 'after paste'));
+    await expect(paste).rejects.toThrow(/could not be read/);
+    await expect(after).rejects.toThrow(/closed/);
+    await store.flushAll();
+    expect(noGap(await recovered())).toBe(true);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('reopens a closed journal when a replacement worker lands a slot posted after the refusal', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = { ...fs, rename: (async (from: any, to: any) => { if (String(to).endsWith('project.P.json')) await gate; return fs.rename(from, to); }) };
+    const { directory, recovered } = await gapProject();
+    const { channel, die, restart } = restartableChannel(held);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    await expect(store.appendJournal!('projectJournal.P', '{not json')).rejects.toThrow();
+    // A slot holding the refused edit, still renaming when the worker stops.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B', f: { paste: 1 } } }));
+    await tick();
+    die(); restart(); release();
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+    await store.appendJournal!('projectJournal.P', named(5, 'name', 'after B'));
+    await store.flushAll();
+    expect((await recovered()).name).toBe('after B');
+  });
+
+  it('never reuses the numbers of a slot a replacement worker could not replay (model check, two faults)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let failReads = false;
+    const disk = { ...fs,
+      rename: (async (from: any, to: any) => { if (String(to).endsWith('project.P.json')) await gate; return fs.rename(from, to); }),
+      open: (async (file: any, flags: any) => {
+        if (failReads && String(file).endsWith('project.P.json')) { failReads = false; throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); }
+        return fs.open(file, flags);
+      }) };
+    const { directory, recovered } = await gapProject();
+    const { channel, die, restart } = restartableChannel(disk);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // Slot B, still renaming when the worker stops; its replacement cannot read the project to replay it.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B', f: {} } }));
+    await tick();
+    die(); failReads = true; restart();
+    await tick();
+    await store.appendJournal!('projectJournal.P', named(3, 'one', 1));
+    await store.appendJournal!('projectJournal.P', named(4, 'name', 'two'));
+    await store.flushAll();
+    // Another replacement replays B: the entries after it must still follow it.
+    die(); restart(); release();
+    await store.flushAll();
+    const project = await recovered();
+    expect([project.name, project.f.one]).toEqual(['two', 1]);
+  });
+
+  it('judges a slot replayed by a second replacement worker by the write it first was (model check, two faults)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = { ...fs, rename: (async (from: any, to: any) => { if (String(to).endsWith('project.P.json')) await gate; return fs.rename(from, to); }) };
+    const { directory, recovered } = await gapProject();
+    const { channel, die, restart } = restartableChannel(held);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // Slot B, then an entry lost as the worker stops: the journal closes after B.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B', f: {} } }));
+    await tick();
+    die();
+    const lost = store.appendJournal!('projectJournal.P', named(3, 'paste', 'P'));
+    restart();
+    await expect(lost).rejects.toThrow(/stopped/);
+    await tick();
+    // A second replacement replays B again; B was posted before the lost entry, so it must not reopen.
+    die(); restart(); release();
+    await store.flushAll();
+    await expect(store.appendJournal!('projectJournal.P', named(4, 'name', 'after paste'))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    expect(noGap(await recovered())).toBe(true);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('refuses a slot from a window that does not have the project, so a stored copy never reopens its journal (review probe R5b)', async () => {
+    const { directory, recovered } = await gapProject();
+    const store = createStore(directory, { writeDelayMs: 0, journalEntryBytes: 4096 });
+    store.setOwnership!(() => 'A');
+    await store.load();
+    // Window A journals an edit, then a paste main refuses for its size (A's document has it).
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1), 'A');
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'paste', 'p'.repeat(5000)), 'A')).rejects.toThrow(/size limit/);
+    await store.flushAll();
+    // Window B renames from the stored copy (slot plus journal, without the paste).
+    const stored = recoverProject(JSON.parse(store.getSerialized!('project.P')!), JSON.parse(store.getSerialized!('projectJournal.P') ?? '[]'));
+    await expect(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { ...stored, name: 'renamed' } }), 'B')).rejects.toThrow(/open in another window/);
+    await store.flushAll();
+    // A's next edit, made on top of the paste, is still refused.
+    await expect(store.appendJournal!('projectJournal.P', named(4, 'pasteEdited', 'on top'), 'A')).rejects.toThrow(/closed/);
+    await store.flushAll();
+    const project = await recovered();
+    expect('pasteEdited' in project.f && !('paste' in project.f)).toBe(false);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+    // A's own checkpoint reopens it.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A', f: { one: 1, paste: 'p', pasteEdited: 'on top' } } }), 'A');
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('reopens a closed journal only by a slot from the window that has the project when it lands', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = { ...fs, rename: (async (from: any, to: any) => { if (String(to).endsWith('project.P.json')) await gate; return fs.rename(from, to); }) };
+    const { directory } = await gapProject();
+    let owner = 'A';
+    const store = createStore(directory, { writeDelayMs: 0, fs: held as any });
+    store.setOwnership!(() => owner);
+    await store.load();
+    await expect(store.appendJournal!('projectJournal.P', '{not json', 'A')).rejects.toThrow();
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A', f: {} } }), 'A');
+    await tick();
+    // The tab moves to window C before A's slot lands.
+    owner = 'C';
+    release();
+    await store.flushAll();
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'C', f: {} } }), 'C');
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('keeps the close point when a refusal reply arrives after main refused a later entry (review probe R5a)', async () => {
+    const { directory, recovered } = await gapProject();
+    let listener: (reply: StoreReply) => void = () => {};
+    let holding = false;
+    const queue: StoreReply[] = [];
+    const engine = new StoreEngine({ fs: fs as any, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => { if (holding) queue.push(reply); else queueMicrotask(() => listener(reply)); });
+    const channel: StoreChannel = { post: request => engine.handle(structuredClone(request)), onReply: cb => { listener = cb; }, onRestart: () => {}, waitSync: () => { throw new Error('unused'); } };
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0, journalEntryBytes: 4096 });
+    await store.load();
+    holding = true;
+    const refusedByWorker = store.appendJournal!('projectJournal.P', '{bad');
+    void Promise.resolve(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'S', f: { x: 1 } } }))).catch(() => {});
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'big', 'y'.repeat(5000)))).rejects.toThrow(/size limit/);
+    await tick();
+    holding = false;
+    for (const reply of queue.splice(0)) listener(reply);
+    await expect(refusedByWorker).rejects.toThrow();
+    await store.flushAll();
+    await expect(store.appendJournal!('projectJournal.P', named(4, 'name', 'after B'))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    const project = await recovered();
+    expect(project.name === 'after B' && !('big' in project.f)).toBe(false);
+  });
+
+  it('keeps an entry the stopped worker wrote although its reply never reached main (model check, hold and restart)', async () => {
+    const { directory, recovered } = await gapProject();
+    let releaseJournal!: () => void;
+    const journalGate = new Promise<void>(resolve => { releaseJournal = resolve; });
+    const gated = { ...fs, rename: (async (from: any, to: any) => { if (String(to).endsWith('projectJournal.P.json')) await journalGate; return fs.rename(from, to); }) };
+    const { channel, restart, hold, release } = restartableChannel(gated);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // E1 is committed; its journal write waits, so main still has it to replay.
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    // E2 is taken, and written together with E1, but its replies are held, then the worker stops.
+    hold();
+    void store.appendJournal!('projectJournal.P', named(3, 'two', 2)).catch(() => {});
+    await tick();
+    releaseJournal();
+    await tick();
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectJournal.P.json'), 'utf8')).map((entry: any) => entry.revision)).toEqual([2, 3]);
+    restart(); release();
+    await tick();
+    await store.flushAll();
+    // The replacement merges what it read from disk with main's older journal ([E1]): E2 stays.
+    expect((await recovered()).f).toEqual({ one: 1, two: 2 });
+  });
+
+  it('closes the journal in the worker when a replacement cannot replay it, before main hears (model check, hold and read failure)', async () => {
+    const { directory, recovered } = await gapProject();
+    let failReads = false, releaseJournal!: () => void;
+    const journalGate = new Promise<void>(resolve => { releaseJournal = resolve; });
+    const disk = { ...fs,
+      rename: (async (from: any, to: any) => { if (String(to).endsWith('projectJournal.P.json')) await journalGate; return fs.rename(from, to); }),
+      open: (async (file: any, flags: any) => {
+        if (failReads && /project(Journal)?\.P\.json$/.test(String(file))) { failReads = false; throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); }
+        return fs.open(file, flags);
+      }) };
+    const { channel, die, restart, hold, release } = restartableChannel(disk);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // An entry committed, its journal write still waiting when the worker stops; the replacement cannot read.
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    await tick();
+    hold(); die(); failReads = true; restart();
+    await tick();
+    // Posted before main hears that the replay failed.
+    const next = store.appendJournal!('projectJournal.P', named(3, 'name', 'after one'));
+    await tick();
+    release(); releaseJournal();
+    await expect(next).rejects.toThrow(/closed|could not be read/);
+    await store.flushAll();
+    const project = await recovered();
+    expect(project.name === 'after one' && !('one' in project.f)).toBe(false);
+  });
+
+  it('reports a restore a replacement worker could not apply as not saved', async () => {
+    const directory = await temporaryDirectory();
+    const replies: StoreReply[] = [];
+    const engine = new StoreEngine({ fs: { ...fs, open: async () => { throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); } } as any, now: Date.now, randomSuffix: () => 'x' }, reply => replies.push(reply));
+    engine.handle({ op: 'init', id: 1, directory, writeDelayMs: 0 });
+    engine.handle({ op: 'restore', id: 2, key: 'project.P', bytes: new TextEncoder().encode(numberedSlot('b', 3, 'B')) });
+    await tick();
+    expect(replies).toContainEqual({ type: 'error', key: 'project.P', error: expect.stringContaining('not saved'), unsaved: true });
+  });
+
+  it('syncs a landed slot and its directory before the journal shrinks', async () => {
+    const directory = await temporaryDirectory();
+    const calls: string[] = [];
+    const store = createStore(directory, { writeDelayMs: 0, fs: {
+      ...fs,
+      open: (async (file: any, flags: any) => {
+        const handle = await fs.open(file, flags);
+        const name = path.basename(String(file));
+        return Object.assign(Object.create(handle), { sync: async () => { calls.push(`sync ${name}`); return handle.sync(); }, close: () => handle.close() });
+      }) as any,
+      rename: (async (from: any, to: any) => { await fs.rename(from, to); calls.push(`rename ${path.basename(String(to))}`); }) as any,
+      unlink: (async (file: any) => { await fs.unlink(file); calls.push(`unlink ${path.basename(String(file))}`); }) as any,
+    } });
+    await store.load();
+    await store.appendJournal!('projectJournal.P', entry('Before'));
+    await store.flushAll();
+    calls.length = 0;
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'Slot' } }));
+    await store.flushAll();
+    const landed = calls.indexOf('rename project.P.json');
+    expect(calls.slice(landed, landed + 3)).toEqual(['rename project.P.json', 'sync project.P.json', `sync ${path.basename(directory)}`]);
+    expect(calls.indexOf('unlink projectJournal.P.json')).toBeGreaterThan(landed + 2);
+  });
+
+  it('keeps the entries after a bare (non-envelope) slot when it lands', async () => {
+    const { store, disk } = await projectStore({ rename: (_to, count) => count === 1 ? tick().then(() => undefined) : undefined });
+    await store.set('project.P', { id: 'P', name: 'Bare' });
+    await store.appendJournal!('projectJournal.P', entry('After bare'));
+    await store.flushAll();
+    const { slot, journal } = await disk();
+    expect(slot).toEqual({ id: 'P', name: 'Bare' });
+    expect(journal!.map(item => item.patches[0].value)).toEqual(['After bare']);
+    expect(recoverProject(slot, journal).name).toBe('After bare');
+  });
+
+  it('refuses a slot from a window that does not have the project while its journal is open (model mutant M1)', async () => {
+    const { directory, recovered } = await gapProject();
+    const store = createStore(directory, { writeDelayMs: 0, journalEntryBytes: 4096 });
+    store.setOwnership!(() => 'A');
+    await store.load();
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1), 'A');
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+    // Window B's stored copy lacks A's raw (unjournaled) changes: landing it would undo them under A's next entries.
+    await expect(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'renamed', f: { one: 1 } } }), 'B')).rejects.toThrow(/open in another window/);
+    await store.appendJournal!('projectJournal.P', named(3, 'two', 2), 'A');
+    await store.flushAll();
+    expect(await recovered()).toMatchObject({ name: 'A', f: { one: 1, two: 2 } });
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('numbers an entry after a replacement merged a journal that had an entry its disk lacked (model mutant M2)', async () => {
+    const { directory, recovered } = await gapProject();
+    // The first journal write never lands: the stopped worker's rename hangs.
+    let journalRenames = 0;
+    const disk = { ...fs, rename: (async (from: any, to: any) => {
+      if (String(to).endsWith('projectJournal.P.json') && ++journalRenames === 1) return new Promise(() => {});
+      return fs.rename(from, to);
+    }) };
+    const { channel, die, restart } = restartableChannel(disk);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // E1 is committed (seq 2) but not on disk when the worker stops; the replacement reads a disk without it.
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    await tick();
+    die(); restart();
+    await tick();
+    // The replay brings E1 back; the next entry must be numbered after it.
+    await store.appendJournal!('projectJournal.P', named(3, 'two', 2));
+    await store.flushAll();
+    const journal = JSON.parse(await fs.readFile(path.join(directory, 'projectJournal.P.json'), 'utf8'));
+    const seqs = journal.map((item: any) => item.seq);
+    expect(new Set(seqs).size).toBe(seqs.length);
+    expect(seqs).toEqual([...seqs].sort((a: number, b: number) => a - b));
+    expect((await recovered()).f).toEqual({ one: 1, two: 2 });
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('refuses a delete from a window that does not have the project, so its slot and journal stay (review recheck 6, R6e)', async () => {
+    const { directory, recovered } = await gapProject();
+    let owner: string | null = 'A';
+    const store = createStore(directory, { writeDelayMs: 0, journalEntryBytes: 4096 });
+    store.setOwnership!(() => owner);
+    await store.load();
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1), 'A');
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'paste', 'p'.repeat(5000)), 'A')).rejects.toThrow(/size limit/);
+    // Delete Forever from window B's Trash while A has the project open.
+    await expect(store.delete('project.P', 'B')).rejects.toThrow(/open in another window/);
+    await store.flushAll();
+    expect((await recovered()).f).toEqual({ one: 1 });
+    // A's own checkpoint and the edits after it land on the project it kept.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A', f: { one: 1, paste: 'P' } } }), 'A');
+    await store.flushAll();
+    await store.appendJournal!('projectJournal.P', named(4, 'five', 5), 'A');
+    await store.flushAll();
+    expect((await recovered()).f).toEqual({ one: 1, paste: 'P', five: 5 });
+    expect(store.failingKeys!()).toEqual([]);
+    // Once no window has it, anyone deletes it, the journal with the slot.
+    owner = null;
+    await store.delete('project.P', 'B');
+    await store.flushAll();
+    await expect(fs.stat(path.join(directory, 'project.P.json'))).rejects.toThrow();
+    await expect(fs.stat(path.join(directory, 'projectJournal.P.json'))).rejects.toThrow();
+  });
+
+  for (const order of ['journal first', 'slot first'] as const) {
+    it(`a replacement engine replays a slot and its journal in either order without losing an entry (review restart probe, ${order})`, async () => {
+      const directory = await temporaryDirectory();
+      await fs.writeFile(path.join(directory, 'project.P.json'), numberedSlot('a', 1, 'A'));
+      await fs.writeFile(path.join(directory, 'projectJournal.P.json'), JSON.stringify([{ revision: 1, patches: [{ path: ['name'], exists: true, value: 'A+edit' }], seq: 2, cp: 'a' }]));
+      const engine = new StoreEngine({
+        fs: { ...fs, rename: async (from: any, to: any) => { if (path.basename(String(to)) === 'project.P.json') throw enospc(); return fs.rename(from, to); } } as any,
+        now: Date.now, randomSuffix: () => String(Math.random()).slice(2),
+      }, () => {});
+      engine.handle({ op: 'init', id: 1, directory, writeDelayMs: 0 });
+      // Main's newest values: slot B (seq 3) and the journal with an entry after it (seq 4).
+      const journal = new TextEncoder().encode(JSON.stringify([
+        { revision: 1, patches: [{ path: ['name'], exists: true, value: 'A+edit' }], seq: 2, cp: 'a' },
+        { revision: 2, patches: [{ path: ['name'], exists: true, value: 'After B' }], seq: 4, cp: 'a' },
+      ]));
+      const slot = new TextEncoder().encode(numberedSlot('b', 3, 'A+edit'));
+      const restores = [{ op: 'restore' as const, id: 10, key: 'projectJournal.P', bytes: journal }, { op: 'restore' as const, id: 11, key: 'project.P', bytes: slot }];
+      for (const request of order === 'journal first' ? restores : restores.reverse()) engine.handle(request);
+      await tick();
+      await engine.flushAll();
+      const recoveredProject = recoverProject(JSON.parse(await fs.readFile(path.join(directory, 'project.P.json'), 'utf8')),
+        JSON.parse(await fs.readFile(path.join(directory, 'projectJournal.P.json'), 'utf8')));
+      expect(recoveredProject.name).toBe('After B');
+    });
+  }
 });
 
 describe('store IPC and quit integration', () => {
@@ -915,6 +1513,59 @@ describe('store IPC and quit integration', () => {
     expect(broadcastChange).toHaveBeenCalledWith(['projects'], sender);
     await expect(handlers.get(IPC.storeSetSerialized)?.({ sender }, { key: 'theme', serialized: '"x"' })).rejects.toThrow('serialised value is too large');
     expect(broadcastChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the window that wrote a key when that write did not reach disk, and nobody else', async () => {
+    const directory = await temporaryDirectory();
+    let failing = true;
+    const store = createStore(directory, { writeDelayMs: 0, fs: { ...fs, rename: async (from: any, to: any) => {
+      if (failing && path.basename(String(to)) === 'project.P.json') throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      return fs.rename(from, to);
+    } } });
+    await store.load();
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    const ipcMain = { handle: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler), on: () => ipcMain };
+    registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, { isTrustedSender: () => true });
+    const writer = { send: vi.fn(), isDestroyed: () => false }, other = { send: vi.fn(), isDestroyed: () => false };
+    await handlers.get(IPC.storeSetSerialized)?.({ sender: other }, { key: 'theme', serialized: '"dark"' });
+    await handlers.get(IPC.storeSetSerialized)?.({ sender: writer }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P' } }) });
+    await store.flushAll();
+    expect(writer.send).toHaveBeenCalledWith(IPC.storeError, { key: 'project.P', error: expect.stringContaining('ENOSPC'), unsaved: true });
+    // A flush names what is still not on disk.
+    expect(await handlers.get(IPC.storeFlush)?.({ sender: writer })).toEqual({ failing: ['project.P'] });
+    expect(other.send).not.toHaveBeenCalled();
+    failing = false;
+  });
+
+  it('tells the owner, not a window whose write was refused, when the owner\'s slot write does not reach disk (review recheck 6, R6h)', async () => {
+    const directory = await temporaryDirectory();
+    const held: Array<() => void> = [];
+    let gated = true;
+    const store = createStore(directory, { writeDelayMs: 0, fs: { ...fs, rename: async (from: any, to: any) => {
+      if (gated && path.basename(String(to)) === 'project.P.json') {
+        await new Promise<void>(resolve => held.push(resolve));
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      }
+      return fs.rename(from, to);
+    } } });
+    await store.load();
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    const ipcMain = { handle: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler), on: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler) };
+    registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, { isTrustedSender: () => true, ownerOf: () => 1 });
+    const owner = { id: 1, send: vi.fn(), isDestroyed: () => false }, other = { id: 2, send: vi.fn(), isDestroyed: () => false };
+    // The owner's checkpoint is accepted; its rename waits.
+    await handlers.get(IPC.storeSetSerialized)?.({ sender: owner }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P', name: 'A' } }) });
+    // Another window's write of the project is refused, and so is its delete (quietly).
+    await expect(handlers.get(IPC.storeSetSerialized)?.({ sender: other }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }) })).rejects.toThrow(/open in another window/);
+    handlers.get(IPC.storeDelete)?.({ sender: other }, { key: 'project.P' });
+    await vi.waitFor(() => expect(held.length).toBe(1));
+    held.splice(0).forEach(release => release());
+    gated = false;
+    await store.flushAll().catch(() => undefined);
+    await nextTurn();
+    expect(owner.send).toHaveBeenCalledWith(IPC.storeError, { key: 'project.P', error: expect.stringContaining('ENOSPC'), unsaved: true });
+    expect(other.send).not.toHaveBeenCalled();
+    expect(store.getSerialized!('project.P')).toContain('"name":"A"');
   });
 
   it('prevents the first quit until flushing completes, then quits once more', async () => {

@@ -1,5 +1,5 @@
 //! Layer rasters off the render thread (`render.raster()`'s base pixels:
-//! layer snapshots, RFC 16; docs/engine/extensions-compat.md, round seven).
+//! layer snapshots, RFC 16; docs/engine/extensions-compat.md, "Layer rasters").
 //!
 //! A raster override's base is a layer snapshot, and during playback the
 //! renderer asks for one on most frames (a typewriter's typed prefix, a
@@ -89,6 +89,9 @@ pub struct RasterDone {
     pub render_us: Option<i64>,
     /// Host µs the job waited between dispatch and its start.
     pub queued_us: i64,
+    /// Actual worker start on the host clock, independent of when the
+    /// render thread receives this completion.
+    pub started: i64,
     /// The composition frame the raster is of (ticks), for the trace.
     pub time: i64,
 }
@@ -303,6 +306,7 @@ fn run(
                             published,
                             render_us: Some(render_us),
                             queued_us: (started - dispatched).max(0),
+                            started,
                             time,
                         }
                     }
@@ -330,6 +334,7 @@ fn run(
                             published: None,
                             render_us: None,
                             queued_us: (started - dispatched).max(0),
+                            started,
                             time,
                         }
                     }
@@ -608,7 +613,9 @@ mod tests {
 
     fn replace(revision: u64, title: &str) -> DocumentUpdate {
         DocumentUpdate::Replace {
-            root: doc(revision, title).to_value().map(Arc::new),
+            root: doc(revision, title)
+                .to_value()
+                .map(|value| pm_model::Node::from_value(value, revision)),
             revision: Revision::new(revision).unwrap(),
         }
     }

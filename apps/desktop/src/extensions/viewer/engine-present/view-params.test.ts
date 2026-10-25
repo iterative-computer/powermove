@@ -61,7 +61,10 @@ describe('view parameters', () => {
     const sequencer = new ViewSequencer();
     const base = { composition: 'c', cssWidth: 100, cssHeight: 50, devicePixelRatio: 2, colorSpace: 'srgb' as const, edr: false };
     const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 50, near: 0.01, far: 1000 } };
-    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: camera }) });
+    const canvas = todaysCanvas(600, 338, { width: 600, height: 338 }, null, { x: -9, y: 60.5 }, 0.61)!;
+    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', canvas, editorCamera: camera }) });
+    // The SVG canvas contract and the 3D editor view must coexist.
+    expect(editor.state.canvas).toEqual(canvas);
     expect(editor.state.view).toEqual({ camera, shading: 'rendered', xray: false, localView: [] });
     const changedCamera = { ...camera, projection: { ...camera.projection, fovYDegrees: 65 } };
     const changed = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: changedCamera }) });

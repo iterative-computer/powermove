@@ -310,6 +310,224 @@ fn revisions_are_monotone_over_the_vectors() {
 }
 
 #[test]
+fn clones_share_subtrees_until_one_changes_them() {
+    // The interactive engine keeps a mirror per session, its presenter and
+    // audio threads one each, and every snapshot job one at its revision:
+    // clones must not copy a large document (C1, 1.2 million keyframes).
+    let original = doc(PROJECT);
+    let mut edited = original.clone();
+    let a = path!["comps", "C1", "layers", 0];
+    let b = path!["comps", "C1", "layers", 1];
+    assert!(std::ptr::eq(
+        original.lookup(&a).unwrap(),
+        edited.lookup(&a).unwrap()
+    ));
+    edited
+        .apply(&[Patch::set(
+            path!["comps", "C1", "layers", 0, "name"],
+            v(r#""A2""#),
+        )])
+        .unwrap();
+    // The edit copied the containers on its path only.
+    assert!(
+        to_canonical_string(&original.lookup(&a).unwrap().to_value()).contains(r#""name":"A""#)
+    );
+    assert!(to_canonical_string(&edited.lookup(&a).unwrap().to_value()).contains(r#""name":"A2""#));
+    assert!(!std::ptr::eq(
+        original.lookup(&a).unwrap(),
+        edited.lookup(&a).unwrap()
+    ));
+    let b_original = original.lookup(&b).unwrap();
+    let b_edited = edited.lookup(&b).unwrap();
+    let NodeKind::Object(left) = b_original.kind() else {
+        panic!()
+    };
+    let NodeKind::Object(right) = b_edited.kind() else {
+        panic!()
+    };
+    assert!(
+        std::ptr::eq(&**left, &**right),
+        "an untouched layer stays shared"
+    );
+    assert_eq!(rev(&original, &a), 1);
+    assert_eq!(rev(&edited, &a), 2);
+    assert_eq!(
+        hash::canonical_hash(original.root().unwrap()),
+        hash::canonical_hash(&parse(PROJECT).unwrap())
+    );
+    // A tree from an existing root keeps sharing it.
+    let rebuilt = Document::from_root(edited.root().cloned(), 9);
+    assert_eq!(rebuilt.revision(), 9);
+    assert!(std::ptr::eq(
+        match rebuilt.lookup(&b).unwrap().kind() {
+            NodeKind::Object(m) => &**m,
+            _ => panic!(),
+        },
+        &**right
+    ));
+}
+
+#[test]
+fn a_resync_reconciled_against_another_mirror_shares_what_did_not_change() {
+    // Two sessions (or two resyncs) of one large document hold one tree
+    // plus what differs, with unchanged nodes keeping their revisions.
+    let base = doc(PROJECT);
+    let same = Document::reconciled(&base, Some(v(PROJECT)), 4);
+    assert_eq!(same.revision(), 4);
+    let shared = |a: &Document, b: &Document, at: &[PathPart]| match (
+        a.lookup(at).unwrap().kind(),
+        b.lookup(at).unwrap().kind(),
+    ) {
+        (NodeKind::Object(x), NodeKind::Object(y)) => std::ptr::eq(&**x, &**y),
+        (NodeKind::Array(x), NodeKind::Array(y)) => std::ptr::eq(&**x, &**y),
+        _ => panic!("not a container"),
+    };
+    assert!(shared(&base, &same, &[]));
+    assert_eq!(rev(&same, layers()), 1);
+    let edited = PROJECT.replace(r#""name": "B""#, r#""name": "B2""#);
+    let next = Document::reconciled(&same, Some(v(&edited)), 5);
+    assert!(shared(&same, &next, &path!["comps", "C1", "layers", 0]));
+    assert!(shared(&same, &next, &path!["comps", "C1", "layers", 2]));
+    assert!(!shared(&same, &next, &path!["comps", "C1", "layers", 1]));
+    assert_eq!(rev(&next, path!["comps", "C1", "layers", 1]), 5);
+    assert_eq!(rev(&next, path!["comps", "C1", "layers", 0]), 1);
+    assert_eq!(
+        hash::canonical_hash(next.root().unwrap()),
+        hash::canonical_hash(&v(&edited))
+    );
+    assert_eq!(
+        hash::canonical_hash(same.root().unwrap()),
+        hash::canonical_hash(&v(PROJECT))
+    );
+}
+
+/// Seeded JSON documents shaped like projects: id-keyed arrays (reordered,
+/// inserted, removed), nested objects, every scalar kind, `-0`, duplicate
+/// keys, and keys whose byte order differs from their UTF-16 order.
+fn xorshift(seed: &mut u64) -> u64 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 7;
+    *seed ^= *seed << 17;
+    *seed
+}
+
+fn random_json(seed: &mut u64, depth: u32) -> String {
+    let pick = xorshift(seed) % if depth == 0 { 6 } else { 9 };
+    match pick {
+        0 => "null".into(),
+        1 => {
+            if xorshift(seed).is_multiple_of(2) {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
+        2 => ["0", "-0", "1.5", "1e21", "-3", "0.1"][(xorshift(seed) % 6) as usize].into(),
+        3 => format!("\"s{}\"", xorshift(seed) % 4),
+        4 => "\"\\ud800x\"".into(),
+        5 => "\"é😀\"".into(),
+        6 | 7 => {
+            let n = xorshift(seed) % 5;
+            let ids = xorshift(seed).is_multiple_of(2);
+            let mut items = Vec::new();
+            for i in 0..n {
+                let shift = xorshift(seed) % 3;
+                let inner = random_json(seed, depth - 1);
+                items.push(if ids {
+                    format!("{{\"id\":\"L{}\",\"v\":{inner}}}", (i + shift) % 4)
+                } else {
+                    inner
+                });
+            }
+            format!("[{}]", items.join(","))
+        }
+        _ => {
+            let n = xorshift(seed) % 4;
+            let mut members = Vec::new();
+            for _ in 0..n {
+                let key =
+                    ["a", "b", "id", "\u{ff61}", "\u{1f600}", "a"][(xorshift(seed) % 6) as usize];
+                members.push(format!("\"{key}\":{}", random_json(seed, depth - 1)));
+            }
+            format!("{{{}}}", members.join(","))
+        }
+    }
+}
+
+#[test]
+fn parsing_straight_into_a_tree_and_reconciling_trees_match_the_value_path() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..3000 {
+        let a = format!(
+            "{{\"layers\":{},\"x\":{}}}",
+            random_json(&mut seed, 4),
+            random_json(&mut seed, 3)
+        );
+        let b = format!(
+            "{{\"layers\":{},\"x\":{}}}",
+            random_json(&mut seed, 4),
+            random_json(&mut seed, 3)
+        );
+        // The same tree, revisions included.
+        assert_eq!(
+            Node::parse_bytes(a.as_bytes(), 3).unwrap(),
+            Node::from_value(v(&a), 3),
+            "{a}"
+        );
+        // Reconciling a parsed tree equals reconciling the parsed value.
+        let base = Document::new(Some(v(&a)), 1);
+        let mut by_value = base.clone();
+        by_value.resync(Some(v(&b)), 2);
+        let mut by_node = base.clone();
+        by_node.resync_node(Some(Node::parse_bytes(b.as_bytes(), 2).unwrap()), 2);
+        assert_eq!(by_value, by_node, "{a} -> {b}");
+        let shared_value = Document::reconciled(&base, Some(v(&b)), 2);
+        let shared_node =
+            Document::reconciled_node(&base, Some(Node::parse_bytes(b.as_bytes(), 2).unwrap()), 2);
+        assert_eq!(shared_value, shared_node, "{a} -> {b}");
+        assert_eq!(base, Document::new(Some(v(&a)), 1), "the base is untouched");
+    }
+    assert!(Node::parse_bytes(b"{\"a\":", 1).is_err());
+}
+
+#[test]
+fn cached_canonical_digest_survives_clones_and_invalidates_on_partial_failure() {
+    let mut d = doc(r#"{"a":1,"items":[{"id":"a"},{"id":"b"}]}"#);
+    let initial = d.canonical_digest();
+    let clone = d.clone();
+    assert_eq!(clone.canonical_digest(), initial);
+    d.apply(&[Patch::set(path!["a"].to_vec(), Value::from(2))])
+        .unwrap();
+    assert_ne!(d.canonical_digest(), initial);
+    assert_eq!(clone.canonical_digest(), initial);
+    // The first patch remains applied when a later patch fails.
+    let result = d.apply_ops(&[
+        pm_model::Op::Leaf(Patch::set(path!["a"].to_vec(), Value::from(3))),
+        pm_model::Op::Order {
+            path: path!["items"].to_vec(),
+            ids: vec!["missing".into()],
+        },
+    ]);
+    assert!(result.is_err());
+    assert_eq!(
+        d.canonical_digest(),
+        Some(hash::canonical_digest(&d.to_value().unwrap()))
+    );
+    let mut hasher = pm_model::consistency::ConsistencyHash::default();
+    let first = hasher.digest(d.root());
+    assert_eq!(first, hasher.digest(d.root()));
+    assert_eq!(hasher.hashed, 0);
+    d.apply(&[Patch::set(path!["a"].to_vec(), Value::from(4))])
+        .unwrap();
+    let incremental = hasher.digest(d.root());
+    assert_eq!(
+        incremental,
+        pm_model::consistency::ConsistencyHash::default().digest(d.root())
+    );
+    assert!(hasher.reused > 0);
+}
+
+#[test]
 fn every_new_value_and_change_takes_a_new_edition() {
     let mut d = doc(r#"{"comps":{"C":{"layers":[{"id":"a","p":{}}]}}}"#);
     let mut seen = std::collections::BTreeSet::from([d.edition()]);

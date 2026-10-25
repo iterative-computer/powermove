@@ -339,6 +339,8 @@ export function createBridge(link: ReconnectingLink, hello: WebHello, storeSnaps
       const detail = request.detail ? `\n\n${request.detail}` : '';
       return window.confirm(`${request.message}${detail}`);
     },
+    // Browser and headless exports retain their unattended missing-media behavior.
+    offlineExport: async () => 'without',
     clipboardWriteText: (text) => navigator.clipboard.writeText(text),
 
     render: {
@@ -488,6 +490,7 @@ export function createBridge(link: ReconnectingLink, hello: WebHello, storeSnaps
       snapshot: () => link.invoke(IPC.storeSnapshot),
       set: (key, value) => { bump(key); lazy.delete(key); serialized.set(key, JSON.stringify(value)); link.send(IPC.storeSet, { key, value }); },
       setSerialized: async (key, value) => { bump(key); lazy.delete(key); serialized.set(key, value); await link.invoke(IPC.storeSetSerialized, { key, serialized: value }); },
+      appendJournal: async (key, value) => { bump(key); serialized.delete(key); lazy.add(key); await link.invoke(IPC.storeAppendJournal, { key, serialized: value }); },
       delete: (key) => { bump(key); lazy.delete(key); serialized.delete(key); link.send(IPC.storeDelete, { key }); },
       flush: () => link.invoke(IPC.storeFlush),
       onError: (cb) => link.on(IPC.storeError, (error) => cb(error as StoreErrorEvent)),

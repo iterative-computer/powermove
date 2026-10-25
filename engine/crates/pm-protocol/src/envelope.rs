@@ -38,7 +38,8 @@ use crate::host::{
 use crate::interop::SurfacePool;
 use crate::lease::{Lease, LeaseRequest, LeaseUsage};
 use crate::patch::{
-    ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied, Resync,
+    ConfirmRevision, ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied,
+    Resync,
 };
 use crate::preview::{PreviewControl, PreviewStatus};
 use crate::priority::{
@@ -234,6 +235,9 @@ pub enum Request {
     CompatFrame(crate::snapshot::CompatFrameRequest),
     /// Job engine → host. Answer: `ack` once the output file is written.
     ShaderFallback(crate::shader_fallback::HostShaderFallback),
+    /// Job engine → host: one step of an export encoded by the host's
+    /// WebCodecs encoders (decision EXPORT-1). Answer: `ack`.
+    HostEncode(crate::host_encode::HostEncode),
 }
 
 /// Responses, one per request kind.
@@ -284,6 +288,9 @@ pub enum Response {
 pub enum Event {
     /// pm-wasm → engine (session-bound): canonical patches, in revision order.
     ApplyPatches(PatchBatch),
+    /// Renderer → engine (session-bound): a provisional batch was the whole
+    /// change; frames of its revision may be presented.
+    ConfirmRevision(ConfirmRevision),
     /// Engine → renderer: coalesced acknowledgement of applied patches.
     PatchesApplied(PatchesApplied),
     /// Engine → viewer, over the viewer's port (never through main,
@@ -385,6 +392,7 @@ impl Request {
             | Request::BlenderRender(_)
             | Request::BlenderModel(_)
             | Request::ShaderFallback(_)
+            | Request::HostEncode(_)
             | Request::CloseProject(_) => ResponseKind::Ack,
             Request::Resync(_) => ResponseKind::PatchesApplied,
             Request::CheckConsistency(_) => ResponseKind::Consistency,
@@ -431,7 +439,8 @@ impl Request {
             | Request::HardwareSessions(_)
             | Request::ProbeMedia(_)
             | Request::CompatFrame(_)
-            | Request::ShaderFallback(_) => ContractId::HostServices,
+            | Request::ShaderFallback(_)
+            | Request::HostEncode(_) => ContractId::HostServices,
             Request::Snapshot(_) => ContractId::Frame,
             Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => {
                 ContractId::Blender
@@ -494,7 +503,10 @@ impl Response {
 impl Event {
     pub const fn contract(&self) -> ContractId {
         match self {
-            Event::ApplyPatches(_) | Event::PatchesApplied(_) | Event::Fact(_) => ContractId::Patch,
+            Event::ApplyPatches(_)
+            | Event::ConfirmRevision(_)
+            | Event::PatchesApplied(_)
+            | Event::Fact(_) => ContractId::Patch,
             Event::Frame(_) | Event::ReleaseFrame(_) | Event::Viewer(_) => ContractId::Frame,
             Event::SurfacePool(_) => ContractId::GpuInterop,
             Event::Transport(_) | Event::Clock(_) | Event::Audio(_) => ContractId::Clock,
@@ -513,6 +525,7 @@ impl Event {
         matches!(
             self,
             Event::ApplyPatches(_)
+                | Event::ConfirmRevision(_)
                 | Event::PatchesApplied(_)
                 | Event::Frame(_)
                 | Event::ReleaseFrame(_)
@@ -570,6 +583,7 @@ impl Validate for Request {
             Request::Snapshot(snapshot) => snapshot.validate(),
             Request::CompatFrame(request) => request.validate(),
             Request::ShaderFallback(fallback) => fallback.validate(),
+            Request::HostEncode(encode) => encode.validate(),
             Request::CloseSession
             | Request::Resync(_)
             | Request::CheckConsistency(_)

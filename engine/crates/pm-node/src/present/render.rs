@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use pm_bridge::rendezvous::{Client, SendRight};
@@ -42,7 +42,7 @@ use pm_protocol::envelope::{Envelope, Event, Message, Response};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, FailureReport, Retry};
 use pm_protocol::frame::{
     FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, PoolLedger, PreviewResolution,
-    Representation, Shading3d, ViewOverride, ViewerState,
+    Representation, Shading3d, ViewerState,
 };
 use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
@@ -50,12 +50,14 @@ use pm_protocol::preview::{PreviewAction, PreviewControl, PreviewPhase, PreviewS
 use pm_render::effects::Effects;
 use serde::Serialize;
 
-use super::audio::{AudioCtl, AudioLink, AudioStatus};
+use super::audio::{AudioCtl, AudioIngress, AudioLink, AudioStatus, ForwardedAudio};
 use super::clock::{SAMPLE_INTERVAL_US, TransportClock};
 use super::compose::Composer;
 use super::document::{Route, ViewDocument};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
+
+mod media_prepare;
 
 /// Stand-in for the C′ prototype's layer in builds without it (feature
 /// `remote-layer`): uninhabited, so a pool never has a remote layer.
@@ -88,13 +90,6 @@ struct AutoPreview {
     time: Ticks,
     shading: Shading3d,
     phase: PreviewPhase,
-}
-
-#[derive(Clone, Copy)]
-struct CachePreview {
-    key: Key,
-    revision: Revision,
-    generation: Seq,
 }
 
 impl AutoPreview {
@@ -264,6 +259,7 @@ pub enum Command {
         release: FrameRelease,
     },
     Transport {
+        audio_forwarded: Option<ForwardedAudio>,
         key: Key,
         command: TransportCommand,
         at: i64,
@@ -303,9 +299,17 @@ pub enum Command {
     /// The session's document changed (document source). `posted`: host
     /// µs the engine handed it to the presenter (the per-frame trace).
     Document {
+        audio_forwarded: bool,
         key: Key,
         update: DocumentUpdate,
         posted: i64,
+        /// Frames of the update's revision wait for [`Command::Confirm`].
+        provisional: bool,
+    },
+    /// The provisional update that made `revision` was the whole change.
+    Confirm {
+        key: Key,
+        revision: Revision,
     },
     /// The session's definitions (contract 10), and those a delta
     /// registered again.
@@ -333,6 +337,9 @@ pub enum Command {
         key: Key,
         message: pm_protocol::shader_fallback::ShaderFallbackMessage,
     },
+    /// The engine's memory pressure grant reached the viewer: audio drops
+    /// its cold decoded blocks ([`super::audio::AudioCtl::MemoryPressure`]).
+    AudioMemoryPressure,
     /// The viewer's frame-cache share of the lease (bytes): the composer's
     /// decode service evicts down to it at once.
     FrameCache {
@@ -352,37 +359,9 @@ pub enum Command {
     /// The font service's generation moved (project fonts): views draw
     /// again with fresh fonts.
     FontsChanged,
-    /// The paused viewer's Blender previews (sent once, at start).
-    UseBlender(Arc<super::blender::PreviewBlender>),
     PreviewControl {
         key: Key,
         control: PreviewControl,
-    },
-    BlenderStarted {
-        key: Key,
-        revision: Revision,
-        generation: Option<Seq>,
-        shading: Shading3d,
-    },
-    /// Preview surfaces of the view arrived: draw it again when paused.
-    BlenderReady {
-        key: Key,
-        revision: Revision,
-        generation: Option<Seq>,
-        shading: Shading3d,
-    },
-    BlenderFailed {
-        key: Key,
-        revision: Revision,
-        generation: Option<Seq>,
-        shading: Shading3d,
-        error: String,
-    },
-    /// A snapshot's Blender frames are prepared, or why not
-    /// ([`super::blender::PreviewBlender::capture`]).
-    BlenderCaptured {
-        token: u64,
-        result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
     },
     /// The layer raster worker answered a layer snapshot
     /// ([`super::rasters`]).
@@ -441,11 +420,6 @@ pub struct ThreadConfig {
     /// thread holds a finished paused frame before sending it.
     pub send_delay: Option<Duration>,
 }
-
-/// Today's capture error for a Blender composition whose frame was not
-/// rendered by Blender first (`legacy/gl/compositor.ts`), word for word.
-pub const BLENDER_NOT_PREPARED: &str =
-    "The Blender frame is not prepared. Render this frame before capturing it.";
 
 /// The device's composer, keeping translated programs in the configured
 /// cache folder.
@@ -611,8 +585,6 @@ pub struct Stats {
     pub silent_runs: u64,
     /// Audio playback, per view.
     pub audio: BTreeMap<String, AudioStatus>,
-    /// The paused viewer's Blender previews.
-    pub blender_preview: super::blender::BlenderPreviewStats,
     /// Frames drawn with stand-ins while scrubbing, and the frames drawn
     /// again once the exact video arrived (docs/engine/scrub.md).
     pub stand_in_frames: u64,
@@ -638,9 +610,6 @@ pub struct Stats {
     pub snapshots: u64,
     pub snapshot_needs: u64,
     pub snapshot_failures: u64,
-    /// Snapshots whose Blender frames were sent to the Blender worker
-    /// first (today's `prepareFrame` before an async capture).
-    pub snapshot_blender: u64,
     pub snapshot_us_max: i64,
     pub snapshot_shared: u64,
     /// Compatibility rasters (the `raster` override, compatibility
@@ -662,6 +631,12 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Frames of provisional revisions: parked until confirmed, confirmed
+    /// revisions, and parked frames dropped because a later update
+    /// superseded their revision (never presented).
+    pub provisional_parked: u64,
+    pub provisional_confirmed: u64,
+    pub provisional_dropped: u64,
     /// Layer rasters the worker drew off this thread ([`super::rasters`]).
     pub layer_rasters_off_thread: u64,
     /// Times the worker's document mirror was seeded (a session's first
@@ -972,6 +947,10 @@ struct View {
     awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
     /// Latest Play intent while the document or media is not ready.
     deferred_transport: Option<TransportCommand>,
+    /// The deferred Play already reached the audio thread through the
+    /// ingress (PLAY-1): its run is going, so the replay once the route is
+    /// decided follows that run instead of starting the audio again.
+    deferred_forwarded: Option<ForwardedAudio>,
     /// The audio clock version last followed.
     audio_version: u64,
     /// Paused after a `seek {scrub}`: frames may show stand-ins for video
@@ -1029,6 +1008,32 @@ struct View {
     rate: Option<RatePreference>,
     #[cfg(feature = "remote-layer")]
     rate_tried: bool,
+}
+
+// Presenter transport decisions happen on its ordinary thread. Keep this
+// diagnostic out of audio's real-time producer and disabled in normal runs.
+fn trace_audio_transport(
+    event: &'static str,
+    key: Key,
+    view: &View,
+    command: Option<TransportCommand>,
+) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("PM_AUDIO_PROFILE").is_some()) {
+        return;
+    }
+    let host_us = now();
+    eprintln!(
+        "pm-audio-presenter event={event} host_us={host_us} key={}:{} composition={:?} route={:?} media_ticks={} playing={} awaiting={:?} deferred={:?} command={command:?}",
+        key.0.0,
+        key.1,
+        view.state.composition,
+        view.reported,
+        view.clock.media_at(host_us),
+        view.clock.is_playing(),
+        view.awaiting,
+        view.deferred_transport,
+    );
 }
 
 type PlaybackRateValue = pm_protocol::common::PlaybackRate;
@@ -1165,6 +1170,7 @@ struct Thread {
     docs: BTreeMap<Key, ViewDocument>,
     /// Each session's audio playback, from its first Play.
     audio: BTreeMap<Key, AudioLink>,
+    audio_ingress: AudioIngress,
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
@@ -1172,13 +1178,7 @@ struct Thread {
     peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
     generations: Generations,
-    /// The paused viewer's Blender previews (document source).
-    blender: Option<Arc<super::blender::PreviewBlender>>,
-    /// The last capture token handed to the Blender worker.
-    blender_token: u64,
     preview_controls: super::preview_control::PreviewControls,
-    cache_requested: BTreeMap<Key, PreviewControl>,
-    cache_previews: BTreeMap<u64, CachePreview>,
     preview_candidates: BTreeMap<(Key, u64), PreviewCandidate>,
     auto_preview: BTreeMap<Key, AutoPreview>,
     auto_generation: BTreeMap<Key, Seq>,
@@ -1204,7 +1204,7 @@ struct Thread {
     /// answers (shared with the renderer for the frame being drawn).
     compat: std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
     /// Waveform requests waiting for the host's media answer.
-    peaks_waiting: BTreeSet<(Key, String)>,
+    peaks_waiting: BTreeMap<(Key, String), Option<Seq>>,
     /// With the per-frame trace on: each session's revisions not shown yet
     /// (revision, posted, applied; host µs).
     doc_trace: BTreeMap<Key, Vec<[i64; 3]>>,
@@ -1212,6 +1212,12 @@ struct Thread {
     work_start: i64,
     /// Sends frames shown at the next refresh once their GPU work is done.
     completer: Option<super::complete::Completer>,
+    /// Per session, the revision of a provisional update not yet confirmed
+    /// or superseded: its frames are parked, not sent.
+    provisional: BTreeMap<Key, Revision>,
+    /// A finished paused frame of a provisional revision, waiting for
+    /// [`Command::Confirm`] (sent then) or the next update (dropped).
+    parked: BTreeMap<Key, super::complete::Pending>,
     /// Level 1 SVG rasters asked of the renderers (decision S1).
     svg: super::svg::SvgState,
     /// GPU work seen last (frames and snapshots) and when; the idle
@@ -1237,6 +1243,8 @@ struct Rest {
     since: i64,
     /// Idle memory was released since then.
     released: bool,
+    /// The open documents' frame pipelines were compiled since then.
+    prewarmed: bool,
 }
 
 /// Definition sets prepared on the presenter thread before a GPU device exists.
@@ -1309,6 +1317,10 @@ impl PreparedDefinitions {
 /// recreated by the next frame (docs/engine/memory.md, "At rest").
 pub const REST_RELEASE_US: i64 = 2_000_000;
 
+/// How long the viewer rests before the open documents' frame pipelines
+/// are compiled ([`Thread::prewarm_at_rest`]).
+pub const PREWARM_REST_US: i64 = 250_000;
+
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
 const SNAPSHOT_GPU_TIMEOUT_US: i64 = 2_000_000;
@@ -1349,6 +1361,7 @@ pub fn run(
     sink: Sink,
     stats: Arc<Mutex<Stats>>,
     generations: Generations,
+    audio_ingress: AudioIngress,
 ) {
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
@@ -1403,14 +1416,11 @@ pub fn run(
         views: BTreeMap::new(),
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
+        audio_ingress,
         audio_prefs: BTreeMap::new(),
         peaks,
         generations,
-        blender: None,
-        blender_token: 0,
         preview_controls: Default::default(),
-        cache_requested: BTreeMap::new(),
-        cache_previews: BTreeMap::new(),
         preview_candidates: BTreeMap::new(),
         auto_preview: BTreeMap::new(),
         auto_generation: BTreeMap::new(),
@@ -1423,10 +1433,12 @@ pub fn run(
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
         compat: Default::default(),
-        peaks_waiting: BTreeSet::new(),
+        peaks_waiting: BTreeMap::new(),
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
+        provisional: BTreeMap::new(),
+        parked: BTreeMap::new(),
         svg: super::svg::SvgState::default(),
         rest: Rest::default(),
         rasters,
@@ -1437,7 +1449,16 @@ pub fn run(
     let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
-        match rx.recv_timeout(timeout) {
+        let waiting_at = thread.config.trace.then(now);
+        let received = rx.recv_timeout(timeout);
+        if let Some(waiting_at) = waiting_at {
+            let woke_at = now();
+            let late_us = wake_lateness_us(waiting_at, woke_at, timeout);
+            if late_us >= 2_000 {
+                thread.trace_event("render wake late", woke_at - late_us, late_us, -1);
+            }
+        }
+        match received {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
                 let started = now();
@@ -1446,7 +1467,10 @@ pub fn run(
                     break;
                 }
                 thread.note_turn(what, started);
+                let drain_started = thread.config.trace.then(now);
+                let mut drained = 0;
                 while let Ok(command) = rx.try_recv() {
+                    drained += 1;
                     let started = now();
                     let what = command_name(&command);
                     if matches!(command, Command::Shutdown)
@@ -1456,6 +1480,12 @@ pub fn run(
                         return;
                     }
                     thread.note_turn(what, started);
+                }
+                if let Some(drain_started) = drain_started {
+                    let drain_us = now() - drain_started;
+                    if drain_us >= 2_000 {
+                        thread.trace_event("command drain", drain_started, drain_us, drained);
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1479,6 +1509,15 @@ pub fn run(
 /// status report and a warning in the engine log).
 pub const STALL_US: i64 = 250_000;
 
+/// Time the render thread woke after its requested deadline, distinct from
+/// work it did on that turn. A loaded OS can suspend an otherwise idle
+/// thread; attributing that gap to the next raster would be misleading.
+fn wake_lateness_us(started: i64, woke: i64, timeout: Duration) -> i64 {
+    (woke - started)
+        .saturating_sub(timeout.as_micros().min(i64::MAX as u128) as i64)
+        .max(0)
+}
+
 /// The lower bounds of the slow-turn bands in [`Stats::slow_turns`].
 pub const SLOW_TURN_BANDS_US: [i64; 4] = [50_000, 100_000, STALL_US, 1_000_000];
 
@@ -1499,9 +1538,11 @@ fn command_name(command: &Command) -> &'static str {
         Command::Close { .. } => "close",
         Command::ClosePort { .. } => "close port",
         Command::Document { .. } => "document",
+        Command::Confirm { .. } => "confirm",
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
         Command::ShaderFallback { .. } => "shader fallback",
+        Command::AudioMemoryPressure => "audio memory pressure",
         Command::FrameCache { .. } => "frame cache",
         Command::Snapshot(_) => "snapshot",
         Command::SnapshotMapReady => "snapshot map ready",
@@ -1517,6 +1558,41 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Whether any frame, snapshot or request is in progress or waiting.
+    fn busy(&self) -> bool {
+        !self.pending_snapshots.is_empty()
+            || self.snapshots.waiting()
+            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
+            || self.views.values().any(|v| {
+                v.clock.is_playing()
+                    || (v.dirty && v.state.headless != Some(true))
+                    || v.awaiting.is_some()
+                    || !v.requests.is_empty()
+            })
+    }
+
+    /// Compiles the frame pipelines of every viewed document once nothing
+    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]).
+    /// Pipelines are built on first use, so without this an import or the
+    /// first layer of an empty project pays for them in its frame. Once per
+    /// rest, never while anything is drawing.
+    fn prewarm_at_rest(&mut self) {
+        if self.busy() {
+            return;
+        }
+        self.rest.prewarmed = true;
+        let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) else {
+            return;
+        };
+        for (key, view) in &self.views {
+            if view.state.headless != Some(true)
+                && let Some(doc) = self.docs.get(key)
+            {
+                composer.renderer().prewarm(doc.document());
+            }
+        }
+    }
+
     /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
     /// the renderer's idle intermediate targets, viewer scratch textures,
     /// the cached snapshot attachment and staging buffers. Exported surface
@@ -1532,22 +1608,17 @@ impl Thread {
             self.rest = Rest {
                 seen,
                 since: now_us,
-                released: false,
+                ..Rest::default()
             };
             return;
+        }
+        if !self.rest.prewarmed && now_us - self.rest.since >= PREWARM_REST_US {
+            self.prewarm_at_rest();
         }
         if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
             return;
         }
-        let busy = !self.pending_snapshots.is_empty()
-            || self.snapshots.waiting()
-            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
-            || self.views.values().any(|v| {
-                v.clock.is_playing()
-                    || (v.dirty && v.state.headless != Some(true))
-                    || v.awaiting.is_some()
-                    || !v.requests.is_empty()
-            });
+        let busy = self.busy();
         let Some(gpu) = self.gpu.as_mut() else {
             self.rest.released = true;
             return;
@@ -1567,11 +1638,6 @@ impl Thread {
                         && view.external_wait.is_none()
                 }));
         if no_presenter {
-            // A queued headless capture may need this device on its next
-            // turn. Keep the rest pending rather than marking it released.
-            if !self.cache_requested.is_empty() || !self.cache_previews.is_empty() {
-                return;
-            }
             // Headless sessions keep their document and translated sources,
             // but no presentation surface needs this device. All submitted
             // frames and readbacks have finished at this point.
@@ -2146,7 +2212,6 @@ impl Thread {
                     composition: &candidate.composition,
                     time: candidate.time,
                     seq,
-                    all_surfaces: true,
                     generation,
                 },
             ) {
@@ -2163,15 +2228,10 @@ impl Thread {
     }
 
     fn cancel_preview(&mut self, key: Key) {
-        self.cancel_cache_preview(key);
         if let Some(status) = self.preview_controls.cancelled(key) {
             self.preview_status(key, status);
         }
         self.cancel_auto_preview(key);
-        if let Some(blender) = &self.blender {
-            let revision = self.views.get(&key).map_or(Revision::ZERO, |v| v.revision);
-            blender.submit(key, None, revision, None, None);
-        }
     }
 
     fn cancel_auto_preview(&mut self, key: Key) {
@@ -2182,21 +2242,6 @@ impl Thread {
             );
         }
         self.preview_candidates.retain(|(k, _), _| *k != key);
-    }
-
-    fn cancel_cache_preview(&mut self, key: Key) {
-        self.cache_requested.remove(&key);
-        let tokens: Vec<u64> = self
-            .cache_previews
-            .iter()
-            .filter_map(|(token, job)| (job.key == key).then_some(*token))
-            .collect();
-        for token in tokens {
-            self.cache_previews.remove(&token);
-            if let Some(blender) = &self.blender {
-                blender.cancel_capture(token);
-            }
-        }
     }
 
     fn error(&self, key: Key, id: RequestId, code: ErrorCode, message: &str) {
@@ -2228,9 +2273,11 @@ impl Thread {
                     self.cancel_preview(key);
                 }
                 self.configure(key, *state, revision, pool);
-                if self.views.get(&key).is_some_and(|view| {
-                    super::blender::blender_shading(view.state.view.as_ref()).is_none()
-                }) && let Some(auto) = self.auto_preview.remove(&key)
+                if self
+                    .views
+                    .get(&key)
+                    .is_some_and(|view| preview_shading(view.state.view.as_ref()).is_none())
+                    && let Some(auto) = self.auto_preview.remove(&key)
                 {
                     self.preview_status(
                         key,
@@ -2257,7 +2304,12 @@ impl Thread {
                     stats.release_mismatches += 1;
                 }
             }
-            Command::Transport { key, command, at } => {
+            Command::Transport {
+                key,
+                command,
+                at,
+                audio_forwarded,
+            } => {
                 let interrupts = match command {
                     TransportCommand::Play { .. }
                     | TransportCommand::Step { .. }
@@ -2287,28 +2339,32 @@ impl Thread {
                         self.cancel_preview(key);
                     }
                 }
-                self.transport(key, command, at);
+                self.transport(key, command, at, audio_forwarded);
+                self.refresh_audio_ingress(key);
             }
             Command::PreviewControl { key, control } => {
                 let Some(status) = self.preview_controls.control(key, control.clone()) else {
                     return true;
                 };
-                self.cancel_cache_preview(key);
                 if control.action == PreviewAction::Cancel {
-                    if let Some(blender) = &self.blender {
-                        blender.submit(key, None, control.revision, None, None);
-                    }
                     self.preview_candidates.retain(|(k, _), _| *k != key);
                     self.auto_preview.remove(&key);
                     self.preview_status(key, status);
                 } else {
                     self.preview_status(key, status);
                     if control.cache_only {
-                        self.cache_requested.insert(key, control);
+                        // Nothing to prepare: previews draw natively (Blender is
+                        // retired, as on main).
+                        if let Some(ready) = self.preview_controls.ready_cache(
+                            key,
+                            control.revision,
+                            control.generation,
+                        ) {
+                            self.preview_status(key, ready);
+                        }
                         return true;
                     }
                     let valid = self.config.document
-                        && self.blender.is_some()
                         && self.views.get(&key).is_some_and(|v| {
                             v.pool.is_some()
                                 && v.state.headless != Some(true)
@@ -2370,13 +2426,40 @@ impl Thread {
                 }
             }
             Command::Document {
+                audio_forwarded,
                 key,
                 update,
                 posted,
+                provisional,
             } => {
+                let revision = update.revision();
                 let mirrored = self.raster_mirrors.contains(&key).then(|| update.clone());
-                self.document(key, update, posted);
+                self.document(key, update, posted, audio_forwarded);
                 self.mirror_update(key, mirrored);
+                // Any update ends the previous provisional revision: a frame
+                // parked for it showed a state the renderer superseded.
+                self.drop_parked(key);
+                if provisional {
+                    self.provisional.insert(key, revision);
+                } else {
+                    self.provisional.remove(&key);
+                }
+            }
+            Command::Confirm { key, revision } => {
+                if self.provisional.get(&key) == Some(&revision) {
+                    self.provisional.remove(&key);
+                    self.stats().provisional_confirmed += 1;
+                    match (self.parked.remove(&key), self.completer.as_ref()) {
+                        (Some(pending), Some(completer)) => completer.submit(pending),
+                        // Not drawn yet (or held without a completion
+                        // thread): draw it now.
+                        _ => {
+                            if let Some(view) = self.views.get_mut(&key) {
+                                view.dirty = true;
+                            }
+                        }
+                    }
+                }
             }
             Command::FrameSent {
                 key,
@@ -2477,8 +2560,9 @@ impl Thread {
                 }
             }
             Command::Media { key, asset, path } => {
-                if self.peaks_waiting.remove(&(key, asset.clone())) {
-                    self.peaks.request(key, asset.clone(), path.clone());
+                if let Some(request) = self.peaks_waiting.remove(&(key, asset.clone())) {
+                    self.peaks
+                        .request(key, asset.clone(), path.clone(), request);
                 }
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -2486,11 +2570,18 @@ impl Thread {
                 if let Some(audio) = self.audio.get(&key) {
                     audio.send(AudioCtl::Media(media));
                 }
+                self.refresh_audio_ingress(key);
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
+                self.prepare_video_media(key);
             }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
+            Command::AudioMemoryPressure => {
+                for audio in self.audio.values() {
+                    audio.send(AudioCtl::MemoryPressure);
+                }
+            }
             Command::FrameCache { bytes } => {
                 self.frame_cache = bytes;
                 self.stats().frame_cache = bytes as u64;
@@ -2556,6 +2647,7 @@ impl Thread {
                     view.compat_blocked = None;
                     view.compat_paused_wait = None;
                 }
+                self.refresh_audio_ingress(key);
             }
             Command::LoseDevice => {
                 if let Some(gpu) = &self.gpu {
@@ -2564,56 +2656,6 @@ impl Thread {
                 }
             }
             Command::FontsChanged => self.sync_font_generation(),
-            Command::UseBlender(blender) => self.blender = Some(blender),
-            Command::BlenderStarted {
-                key,
-                revision,
-                generation,
-                shading,
-            } => {
-                if let Some(status) = self.preview_controls.running(key, revision, generation) {
-                    self.preview_status(key, status);
-                } else if generation.is_none()
-                    && let Some(auto) = self.auto_preview.get_mut(&key)
-                    && auto.revision == revision
-                    && auto.shading == shading
-                    && auto.phase == PreviewPhase::Queued
-                {
-                    auto.phase = PreviewPhase::Running;
-                    let status = Self::auto_status(auto, PreviewPhase::Running, None, None);
-                    self.preview_status(key, status);
-                }
-            }
-            Command::BlenderReady { key, .. } => {
-                if let Some(view) = self.views.get_mut(&key)
-                    && !view.clock.is_playing()
-                {
-                    view.dirty = true;
-                }
-            }
-            Command::BlenderFailed {
-                key,
-                revision,
-                generation,
-                shading,
-                error,
-            } => {
-                if let Some(status) =
-                    self.preview_controls
-                        .failed(key, revision, generation, error.clone())
-                {
-                    self.preview_status(key, status);
-                } else if generation.is_none()
-                    && let Some(auto) = self.auto_preview.get_mut(&key)
-                    && auto.revision == revision
-                    && auto.shading == shading
-                {
-                    auto.phase = PreviewPhase::Failed;
-                    let status = Self::auto_status(auto, PreviewPhase::Failed, None, Some(error));
-                    self.preview_status(key, status);
-                }
-            }
-            Command::BlenderCaptured { token, result } => self.blender_captured(token, result),
         }
         true
     }
@@ -2879,19 +2921,46 @@ impl Thread {
         super::wait::Bounds::new(self.config.external_wait_cap_us)
     }
 
+    /// Drops the frame parked for `key`'s provisional revision: a later
+    /// update superseded that revision, so it is never presented.
+    fn drop_parked(&mut self, key: Key) {
+        if let Some(pending) = self.parked.remove(&key) {
+            self.stats().provisional_dropped += 1;
+            self.release_parked(pending);
+        }
+    }
+
+    /// Returns a parked frame's surface to the pool (the viewer never got
+    /// it) and draws the view again.
+    fn release_parked(&mut self, pending: super::complete::Pending) {
+        let super::complete::Pending { key, meta, .. } = pending;
+        self.preview_candidates.remove(&(key, meta.seq));
+        if let Some(view) = self.views.get_mut(&key) {
+            if let (Some(live), Ok(seq)) = (view.pool.as_mut(), Seq::new(meta.seq))
+                && live.spec.generation == meta.generation
+            {
+                let _ = live.ledger.release(FrameRelease {
+                    pool_index: meta.index,
+                    seq,
+                });
+            }
+            view.dirty = true;
+        }
+    }
+
     fn forget_session(&mut self, key: Key) {
+        self.provisional.remove(&key);
+        if let Some(pending) = self.parked.remove(&key) {
+            self.release_parked(pending);
+        }
         self.prepared.forget(key);
-        self.cancel_cache_preview(key);
         self.preview_controls.forget(key);
         self.preview_candidates.retain(|(k, _), _| *k != key);
         self.auto_preview.remove(&key);
         self.auto_generation.remove(&key);
-        if let Some(blender) = &self.blender {
-            blender.forget(key);
-        }
         self.snapshot_costs.remove(&key);
         self.compat_store().forget_session(key);
-        self.peaks_waiting.retain(|(k, _)| *k != key);
+        self.peaks_waiting.retain(|(k, _), _| *k != key);
         // A frame already submitted for readback is no longer in the
         // scheduler. Cancel its mapping too, before the session disappears.
         let (ended, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_snapshots)
@@ -2937,6 +3006,7 @@ impl Thread {
         {
             rasters.forget(key);
         }
+        self.audio_ingress.forget(key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
         if self
@@ -2958,7 +3028,8 @@ impl Thread {
 
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
-    fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64) {
+    fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64, audio_forwarded: bool) {
+        let preparing = media_prepare::changes_video_sources(&update);
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         let copies = doc.copies();
@@ -2986,10 +3057,14 @@ impl Thread {
                 Some(revision),
             );
         }
-        if let Some(audio) = self.audio.get(&key) {
-            audio.send(AudioCtl::Document(update));
-        } else {
-            self.warm_audio(key);
+        if !audio_forwarded {
+            if let Some(audio) = self.audio.get(&key) {
+                let revision = update.revision().get();
+                audio.send(AudioCtl::Document(update));
+                self.audio_ingress.document_sent(key, revision);
+            } else {
+                self.warm_audio(key);
+            }
         }
         if self.config.trace {
             let pending = self.doc_trace.entry(key).or_default();
@@ -2998,6 +3073,10 @@ impl Thread {
             }
         }
         self.refresh_timing(key);
+        self.refresh_audio_ingress(key);
+        if preparing {
+            self.prepare_video_media(key);
+        }
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
             // A paused headless session has no frame to announce this
@@ -3172,7 +3251,16 @@ impl Thread {
     /// told to present the run's first sample then (pm-audio's scheduled
     /// start), and its first clock sample, on that line, only confirms it.
     /// Nothing to hear (or no device): the same line on the host clock.
-    fn start_play(&mut self, key: Key, rate: PlaybackRateValue, at: i64) {
+    /// `audio_forwarded`: the presenter already handed this Play to the
+    /// audio thread (PLAY-1), which prepares it and holds its first sample
+    /// for this start.
+    fn start_play(
+        &mut self,
+        key: Key,
+        rate: PlaybackRateValue,
+        at: i64,
+        audio_forwarded: Option<ForwardedAudio>,
+    ) {
         let host_clock = self.config.host_clock;
         let Some(view) = self.views.get_mut(&key) else {
             return;
@@ -3238,18 +3326,47 @@ impl Thread {
             self.event(key, Event::Frame(descriptor), Some(revision));
         }
         let view = self.views.get_mut(&key).expect("checked");
+        let link = self.audio.get(&key);
         if let Some(clock) = audio
-            && let Some(link) = self.audio.get(&key)
+            && let Some(link) = link
         {
-            let before = clock.and_then(|c| c.latest()).map(|s| s.epoch);
-            link.send(AudioCtl::Play {
-                from,
-                rate,
-                at: start,
+            let before = audio_forwarded.map_or_else(
+                || clock.and_then(|c| c.latest()).map(|s| s.epoch),
+                |f| f.before,
+            );
+            trace_audio_transport(
+                "play-send",
+                key,
+                view,
+                Some(TransportCommand::Play { rate }),
+            );
+            link.send(match audio_forwarded {
+                Some(_) => AudioCtl::StartAt(start),
+                None => AudioCtl::Play {
+                    from,
+                    rate,
+                    at: start,
+                },
             });
             view.awaiting = Some((start + AUDIO_START_TIMEOUT_US, before, rate));
+        } else if audio_forwarded.is_some()
+            && let Some(link) = link
+        {
+            // Held for a line this run does not follow: let it go.
+            link.send(AudioCtl::StartAt(start));
         }
         self.trace_event("play", at, start - at, -1);
+    }
+
+    /// A Play the presenter forwarded to the audio (PLAY-1) waits for its
+    /// start ([`Self::start_play`]); a Play this thread does not start lets
+    /// its audio start as soon as it is ready.
+    fn release_audio_start(&self, key: Key, forwarded: Option<ForwardedAudio>) {
+        if forwarded.is_some()
+            && let Some(link) = self.audio.get(&key)
+        {
+            link.send(AudioCtl::StartAt(0));
+        }
     }
 
     /// When a Play from host µs `now` shows its first media: the first new
@@ -3395,10 +3512,16 @@ impl Thread {
             }
             stats.preroll_us_max = stats.preroll_us_max.max(t - preroll.asked);
         }
-        self.start_play(key, preroll.rate, t);
+        self.start_play(key, preroll.rate, t, None);
     }
 
-    fn transport(&mut self, key: Key, command: TransportCommand, at: i64) {
+    fn transport(
+        &mut self,
+        key: Key,
+        command: TransportCommand,
+        at: i64,
+        audio_forwarded: Option<ForwardedAudio>,
+    ) {
         let document = self.config.document;
         let host_clock = self.config.host_clock;
         let Some(view) = self.views.get_mut(&key) else {
@@ -3429,19 +3552,34 @@ impl Thread {
                     // Not decided yet (document or media on its way): the
                     // latest Play waits for the route.
                     view.deferred_transport = Some(TransportCommand::Play { rate });
+                    view.deferred_forwarded = audio_forwarded;
+                    trace_audio_transport("play-deferred", key, view, view.deferred_transport);
+                    // The audio goes on as soon as it can; the picture joins
+                    // its clock once the route is decided.
+                    self.release_audio_start(key, audio_forwarded);
                     return;
                 }
                 view.deferred_transport = None;
+                view.deferred_forwarded = None;
                 if view.awaiting.is_some_and(|a| a.2 == rate)
                     || (view.clock.is_playing() && view.clock.rate() == rate)
                     || view.preroll.is_some_and(|p| p.rate == rate)
                 {
+                    self.release_audio_start(key, audio_forwarded);
                     return;
                 }
                 // The native preroll: a stopped line with compatibility
                 // producers starts once the window answered for the run's
                 // first frames (or at the bound).
-                if !view.clock.is_playing() && view.pool.is_some() && view.awaiting.is_none() {
+                // A Play the presenter already forwarded to the audio thread
+                // (PLAY-1) has started; the ingress stays off for sessions
+                // with producers, so only a producer that arrived after the
+                // Play skips the preroll.
+                if audio_forwarded.is_none()
+                    && !view.clock.is_playing()
+                    && view.pool.is_some()
+                    && view.awaiting.is_none()
+                {
                     let producers = self.compat_store().has_producers(key);
                     // Answered already (the paused warm-up filled them):
                     // the run starts at once.
@@ -3456,7 +3594,7 @@ impl Thread {
                         return;
                     }
                 }
-                self.start_play(key, rate, at);
+                self.start_play(key, rate, at, audio_forwarded);
             }
             TransportCommand::PlayAround {
                 pre_roll,
@@ -3467,19 +3605,32 @@ impl Thread {
                         pre_roll,
                         post_roll,
                     });
+                    view.deferred_forwarded = audio_forwarded;
+                    trace_audio_transport(
+                        "play-around-deferred",
+                        key,
+                        view,
+                        view.deferred_transport,
+                    );
                     return;
                 }
                 view.deferred_transport = None;
                 view.preroll = None;
+                view.deferred_forwarded = None;
                 let here = view.clock.media_at(at);
                 if !host_clock && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
-                    let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
-                    audio.send(AudioCtl::PlayAround {
-                        at: here,
-                        pre: pre_roll,
-                        post: post_roll,
-                    });
+                    let before = audio_forwarded.map_or_else(
+                        || audio.clock().and_then(|c| c.latest()).map(|s| s.epoch),
+                        |f| f.before,
+                    );
+                    if audio_forwarded.is_none() {
+                        audio.send(AudioCtl::PlayAround {
+                            at: here,
+                            pre: pre_roll,
+                            post: post_roll,
+                        });
+                    }
                     let view = self.views.get_mut(&key).expect("checked");
                     view.clock.hold(here, at);
                     view.schedule.reset();
@@ -3499,7 +3650,9 @@ impl Thread {
                 }
             }
             TransportCommand::Pause => {
+                trace_audio_transport("pause-explicit", key, view, None);
                 view.deferred_transport = None;
+                view.deferred_forwarded = None;
                 view.awaiting = None;
                 view.preroll = None;
                 if view.clock.apply(TransportCommand::Pause, at) {
@@ -3507,7 +3660,9 @@ impl Thread {
                     view.sample_due = true;
                     view.dirty = true;
                 }
-                if let Some(audio) = self.audio.get(&key) {
+                if let Some(audio) = self.audio.get(&key)
+                    && audio_forwarded.is_none()
+                {
                     audio.send(AudioCtl::Pause);
                 }
             }
@@ -3521,26 +3676,34 @@ impl Thread {
                     // The audio seeks and starts a new run; the line holds the
                     // target until its first sample.
                     view.clock.hold(time.get(), at);
-                    let before = self
-                        .audio
-                        .get(&key)
-                        .and_then(|a| a.clock())
-                        .and_then(|c| c.latest())
-                        .map(|s| s.epoch);
+                    let before = audio_forwarded.map_or_else(
+                        || {
+                            self.audio
+                                .get(&key)
+                                .and_then(|a| a.clock())
+                                .and_then(|c| c.latest())
+                                .map(|s| s.epoch)
+                        },
+                        |f| f.before,
+                    );
                     let rate = awaiting.map_or(PlaybackRateValue::NORMAL, |a| a.2);
                     let view = self.views.get_mut(&key).expect("checked");
                     view.awaiting = Some((at + AUDIO_START_TIMEOUT_US, before, rate));
-                    if let Some(audio) = self.audio.get(&key) {
+                    if let Some(audio) = self.audio.get(&key)
+                        && audio_forwarded.is_none()
+                    {
                         audio.send(AudioCtl::Seek(time.get()));
                     }
-                } else if mode == SeekMode::Scrub {
+                } else if mode == SeekMode::Scrub && audio_forwarded.is_none() {
                     self.scrub_grain(key, time.get());
                 } else if !host_clock
                     && engine
                     && let Some(audio) = self.audio_for(key)
                 {
                     // Paused exact seeks prepare the next audio start too.
-                    audio.send(AudioCtl::Seek(time.get()));
+                    if audio_forwarded.is_none() {
+                        audio.send(AudioCtl::Seek(time.get()));
+                    }
                 }
                 let view = self.views.get_mut(&key).expect("checked");
                 view.schedule.reset();
@@ -3550,13 +3713,17 @@ impl Thread {
             TransportCommand::SetLoop { range } => {
                 view.clock.apply(TransportCommand::SetLoop { range }, at);
                 view.sample_due = true;
-                if let Some(audio) = self.audio.get(&key) {
+                if let Some(audio) = self.audio.get(&key)
+                    && audio_forwarded.is_none()
+                {
                     audio.send(AudioCtl::SetLoop(range));
                 }
             }
             TransportCommand::AudioScrub { enabled } => {
                 self.audio_prefs.entry(key).or_default().scrub = enabled;
-                if let Some(audio) = self.audio.get(&key) {
+                if let Some(audio) = self.audio.get(&key)
+                    && audio_forwarded.is_none()
+                {
                     audio.send(AudioCtl::AudioScrub(enabled));
                 }
             }
@@ -3602,14 +3769,17 @@ impl Thread {
                     audio.send(AudioCtl::Solo(solo));
                 }
             }
-            AudioMessage::PeaksWanted { asset } => {
+            AudioMessage::PeaksWanted { asset, request } => {
                 // Asked before the host answered for the asset (a file just
                 // imported): wait for the answer rather than call it offline.
                 match self.docs.get(&key).and_then(|d| d.media().answer(&asset)) {
-                    Some(path) => self.peaks.request(key, asset, path),
+                    Some(path) => self.peaks.request(key, asset, path, request),
                     None => {
-                        if self.peaks_waiting.len() < MAX_PEAKS_WAITING {
-                            self.peaks_waiting.insert((key, asset));
+                        let pending = (key, asset);
+                        if self.peaks_waiting.contains_key(&pending)
+                            || self.peaks_waiting.len() < MAX_PEAKS_WAITING
+                        {
+                            self.peaks_waiting.insert(pending, request);
                         }
                     }
                 }
@@ -3657,6 +3827,9 @@ impl Thread {
                     if self.config.document {
                         link.send(AudioCtl::Warm);
                     }
+                    let enabled = self.ingress_enabled(key, &link);
+                    self.audio_ingress
+                        .register(key, &link, enabled, doc.revision());
                     self.audio.insert(key, link);
                 }
                 Err(error) => {
@@ -3667,6 +3840,29 @@ impl Thread {
         }
         let link = self.audio.get(&key)?;
         (!link.failed()).then_some(link)
+    }
+
+    fn refresh_audio_ingress(&self, key: Key) {
+        if let Some(link) = self.audio.get(&key) {
+            self.audio_ingress.register(
+                key,
+                link,
+                self.ingress_enabled(key, link),
+                self.docs.get(&key).map_or(0, |doc| doc.revision()),
+            );
+        }
+    }
+
+    /// Whether the presenter may hand `key`'s transport straight to its
+    /// audio thread (PLAY-1): an audible, routed view on the device clock.
+    /// A session with compatibility producers keeps its transport on this
+    /// thread, whose Play may first preroll the producers' answers.
+    fn ingress_enabled(&self, key: Key, link: &AudioLink) -> bool {
+        !self.config.host_clock
+            && !link.failed()
+            && self.audible(key)
+            && takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()))
+            && !self.compat_store().has_producers(key)
     }
 
     /// Whether the composition a view shows has anything to hear
@@ -3795,6 +3991,7 @@ impl Thread {
     ) {
         // A new state or pool comes after the frames of the old one.
         self.drain_frames();
+        let first_view = !self.views.contains_key(&key);
         let frame_ticks = self.frame_ticks;
         let view = self.views.entry(key).or_insert_with(|| View {
             key,
@@ -3815,6 +4012,7 @@ impl Thread {
             layer_reports: Default::default(),
             awaiting: None,
             deferred_transport: None,
+            deferred_forwarded: None,
             audio_version: 0,
             scrub: false,
             stand_in: None,
@@ -3859,6 +4057,7 @@ impl Thread {
         }
         let refresh = composition_changed || !view.clock.is_playing();
         if composition_changed {
+            self.audio_ingress.forget(key);
             view.reported = None;
         }
         match pool {
@@ -3880,12 +4079,11 @@ impl Thread {
             self.refresh_timing(key);
         }
         self.warm_audio(key);
+        if first_view || composition_changed || attached {
+            self.prepare_video_media(key);
+        }
         if self.views[&key].state.headless == Some(true) {
             self.rest = Rest::default();
-            if let Some(blender) = &self.blender {
-                // Presentation leaves; captures still belong to this session.
-                blender.submit(key, None, self.views[&key].revision, None, None);
-            }
             if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
                 self.retire_pool(key, old);
             }
@@ -4487,7 +4685,6 @@ impl Thread {
         {
             self.recover_gpu();
         }
-        self.work_cache_previews();
         // The GPU watchdog sees completions promptly and frames that run
         // away while they run (a turn is at most 50 ms apart); a frame it
         // held is drawn again once the suspect frame is judged.
@@ -4654,6 +4851,7 @@ impl Thread {
             {
                 // No playing sample from the device: the line goes on (or,
                 // held for a seek, starts) on the host clock.
+                trace_audio_transport("pause-fallback", key, view, None);
                 view.awaiting = None;
                 if !view.clock.is_playing() {
                     view.clock.apply(TransportCommand::Play { rate }, t);
@@ -4680,11 +4878,24 @@ impl Thread {
         let doc = self.docs.entry(key).or_default();
         doc.set_fonts(fonts);
         let route = doc.route(&composition);
+        let audio_revision = doc.revision();
+        let ingress_enabled = self
+            .views
+            .get(&key)
+            .is_some_and(|v| v.reported.as_ref() != Some(&route))
+            && !self.config.host_clock
+            && takes_transport(Some(&route))
+            && self.audible(key);
         let view = self.views.get_mut(&key).expect("checked");
         let changed = view.reported.as_ref() != Some(&route);
         let mut stop = false;
         if changed {
             view.reported = Some(route.clone());
+            if let Some(link) = self.audio.get(&key) {
+                self.audio_ingress
+                    .register(key, link, ingress_enabled, audio_revision);
+            }
+            trace_audio_transport("route-changed", key, view, None);
             match &route {
                 Route::Engine => {
                     view.dirty = true;
@@ -4705,11 +4916,14 @@ impl Thread {
             let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
             view.deferred_transport
                 .get_or_insert(TransportCommand::Play { rate });
+            // The audio pauses below: the replay starts it again.
+            view.deferred_forwarded = None;
             view.awaiting = None;
             view.clock.apply(TransportCommand::Pause, t);
             view.schedule.reset();
             view.sample_due = true;
             if let Some(link) = self.audio.get(&key) {
+                trace_audio_transport("pause-route-pending", key, view, None);
                 link.send(AudioCtl::Pause);
             }
         }
@@ -4752,16 +4966,29 @@ impl Thread {
             {
                 link.send(AudioCtl::Seek(view.clock.media_at(t)));
             }
-            let deferred = self
-                .views
-                .get_mut(&key)
-                .and_then(|v| v.deferred_transport.take());
-            if let Some(command) = deferred {
-                self.transport(key, command, t);
+            let deferred = self.views.get_mut(&key).and_then(|v| {
+                v.deferred_transport
+                    .take()
+                    .map(|c| (c, v.deferred_forwarded.take()))
+            });
+            if let Some((command, forwarded)) = deferred {
+                if let Some(view) = self.views.get(&key) {
+                    trace_audio_transport("deferred-replay", key, view, Some(command));
+                }
+                // A Play the ingress forwarded before the route was known
+                // already started its audio run: sending it again would
+                // restart what is being heard.
+                self.transport(key, command, t, forwarded);
+            } else if changed && let Some(view) = self.views.get(&key) {
+                trace_audio_transport("decided-without-deferred", key, view, None);
             }
         }
-        if let Some(link) = self.audio.get(&key) {
-            let status = link.status();
+        let status = self.audio.get(&key).map(AudioLink::status);
+        if let Some(view) = self.views.get_mut(&key) {
+            // The renderer's status bar and performance panel (A5).
+            view.costs.audio(status.as_ref());
+        }
+        if let Some(status) = status {
             self.stats().audio.insert(view_name(key), status);
         }
         route == Route::Engine
@@ -4946,6 +5173,7 @@ impl Thread {
             ) {
                 State::Waiting => {
                     view.external_wait = Some(wait);
+                    self.send_stats(key);
                     return;
                 }
                 State::Obsolete => {}
@@ -5011,10 +5239,22 @@ impl Thread {
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
+            // Without the completion thread nothing can hold a frame: a
+            // provisional revision is drawn once it is confirmed.
+            let held = !deferred
+                && self
+                    .views
+                    .get(&key)
+                    .is_some_and(|v| self.provisional.get(&key) == Some(&v.revision));
             if let Some(view) = self.views.get_mut(&key) {
                 view.render_failed = false;
             }
-            if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
+            if held {
+                // The confirmation draws it (`Command::Confirm`).
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = false;
+                }
+            } else if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
                 let seq = descriptor.seq;
                 self.queue_auto_preview(key, seq);
                 if let Some(view) = self.views.get_mut(&key) {
@@ -5041,12 +5281,20 @@ impl Thread {
             self.arm(key);
         }
         // Playback: render ahead while frames are due and slots are free.
+        // Never at a provisional revision: the renderer confirms or
+        // supersedes it before it plays (its frames could show a partial
+        // edit).
         loop {
+            if self.provisional.contains_key(&key) {
+                break;
+            }
             let Some(view) = self.views.get_mut(&key) else {
                 return;
             };
+            // Before its pool arrives a view draws nothing, but its audio
+            // status still reports (below).
             if view.pool.is_none() {
-                return;
+                break;
             }
             let t = now();
             let phase = Self::phase(&self.config, &view.state);
@@ -5059,7 +5307,7 @@ impl Thread {
                     {
                         self.stats().pool_waits += 1;
                         self.trace_event("pool wait", t, 0, k);
-                        return;
+                        break;
                     }
                     // Its answers are on their way and it can still be shown:
                     // it waits (an answer arriving wakes the thread).
@@ -5114,7 +5362,7 @@ impl Thread {
                     // frame follows when the raster arrives (never skip it
                     // merely because its asynchronous request was sent).
                     if rendered.is_none() && view.external_wait.is_some() {
-                        return;
+                        break;
                     }
                     // Waiting for the window's compatibility answers keeps
                     // this frame's slot too, rather than skipping a frame
@@ -5272,7 +5520,6 @@ impl Thread {
         let mut stand_in = false;
         let mut stand_in_shown = None;
         let mut preview_candidate: Option<PreviewCandidate> = None;
-        let mut preview_failure: Option<String> = None;
         // The frame's work on this thread (docs/engine/perfbench.md).
         let work = pm_perf::Scope::begin();
         if document {
@@ -5294,19 +5541,11 @@ impl Thread {
                     session: Some(key.1.get()),
                 });
             composer.set_playing(timing.is_some());
-            // Paused in Material Preview or Rendered: Blender surfaces
-            // (`super::blender`); playback and draft shadings draw natively.
+            // A paused frame in Material Preview or Rendered shading is a
+            // preview frame; every shading draws natively.
             let paused = timing.is_none() && !view.clock.is_playing();
             let render_state = view.state.clone();
-            let shading = super::blender::blender_shading(render_state.view.as_ref());
-            let preview = match (&self.blender, paused, shading, render_state.view.as_ref()) {
-                (Some(blender), true, Some(_), Some(v)) => Some(blender.host(v)),
-                _ => None,
-            };
-            composer.set_blender(match &preview {
-                Some(host) => pm_render::blender::BlenderRender::Preview(host.clone()),
-                None => pm_render::blender::BlenderRender::Native,
-            });
+            let shading = preview_shading(render_state.view.as_ref());
             // Stand-ins only for paused frames after a scrub seek; read the
             // counter first so a frame landing during the render is not
             // missed.
@@ -5337,24 +5576,10 @@ impl Thread {
             let consulted = Arc::new(Mutex::new(Vec::new()));
             let compat_view = compat_view(&self.compat, key, doc_revision, Some(consulted.clone()));
             composer.renderer().set_compat_rasters(compat_view);
-            let png_resolver = self.blender.as_ref().map(|blender| {
-                crate::jobs::blender_png::HostBlenderPng::new(
-                    Arc::new(doc.media().clone()),
-                    blender.host_link(),
-                    key.1,
-                    Revision::new(doc.revision()).unwrap_or(Revision::ZERO),
-                    doc.document(),
-                )
-            });
-            let assets: &dyn pm_render::AssetResolver = png_resolver
-                .as_ref()
-                .map_or(doc.media() as &dyn pm_render::AssetResolver, |resolver| {
-                    resolver
-                });
             let composed = composer.compose_with_depth(
                 doc.document(),
                 &composition,
-                assets,
+                doc.media(),
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &render_state,
                 working,
@@ -5368,8 +5593,6 @@ impl Thread {
                 std::mem::take(&mut *consulted.lock().unwrap_or_else(|e| e.into_inner()));
             view.compat_needs = Some((media.max(0), consulted));
             depth_surface = depth_slot.map(|(index, generation, _, _)| (index, generation));
-            composer.set_blender(pm_render::blender::BlenderRender::Native);
-            preview_failure = preview.as_ref().and_then(|host| host.failure());
             if viewer_frame
                 && paused
                 && composed.is_ok()
@@ -5382,27 +5605,9 @@ impl Thread {
                     composition: composition.clone(),
                     time: Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                     shading,
-                    complete: preview
-                        .as_ref()
-                        .is_some_and(|host| host.pending_count() == 0)
-                        && preview_failure.is_none(),
-                    failure: preview_failure.clone(),
+                    complete: true,
+                    failure: None,
                 });
-            }
-            // What the paused frame lacked (nothing in a draft shading); a
-            // frame that failed to render changes nothing.
-            if paused
-                && composed.is_ok()
-                && let Some(blender) = &self.blender
-            {
-                let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-                blender.submit(
-                    key,
-                    shading,
-                    revision,
-                    preview.as_deref(),
-                    explicit_generation,
-                );
             }
             composer.renderer().set_scrub(false);
             let scrub_stats = composer.renderer().scrub_stats();
@@ -5713,10 +5918,8 @@ impl Thread {
                             now(),
                         )
                     });
-                    if preview.is_some() {
-                        let why = preview_failure.take().unwrap_or_else(|| {
-                            format!("The Blender preview could not be prepared: {error}")
-                        });
+                    if paused && shading.is_some() {
+                        let why = format!("The preview could not be rendered: {error}");
                         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                         self.fail_preview_without_frame(
                             key,
@@ -5885,19 +6088,23 @@ impl Thread {
             if timing.is_none() {
                 self.last_interactive = Some(now());
             }
-            completer.submit(super::complete::Pending {
+            let pending = super::complete::Pending {
                 key,
                 device: gpu.device.clone(),
                 submission,
                 bytes,
                 meta,
-            });
-            self.fail_preview_snapshot(
-                key,
-                descriptor.revision,
-                explicit_generation,
-                preview_failure,
-            );
+            };
+            let replaced = if self.provisional.get(&key) == Some(&descriptor.revision) {
+                self.stats().provisional_parked += 1;
+                self.parked.insert(key, pending)
+            } else {
+                completer.submit(pending);
+                None
+            };
+            if let Some(old) = replaced {
+                self.release_parked(old);
+            }
             return Some(descriptor);
         }
         let done = gpu.device.poll(wgpu::PollType::Wait {
@@ -5929,12 +6136,6 @@ impl Thread {
         }
         meta.held = live.ledger.held_count() as u32;
         self.record_frame(key, &meta, gpu_done, now());
-        self.fail_preview_snapshot(
-            key,
-            descriptor.revision,
-            explicit_generation,
-            preview_failure,
-        );
         Some(descriptor)
     }
 
@@ -6025,231 +6226,6 @@ impl Thread {
         );
     }
 
-    /// The Blender worker answered a snapshot's capture: the job renders
-    /// with the prepared surfaces, or fails with Blender's reason (never
-    /// with native shading in their place).
-    fn blender_captured(
-        &mut self,
-        token: u64,
-        result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
-    ) {
-        if let Some(job) = self.cache_previews.remove(&token) {
-            let current = self.preview_controls.current(job.key);
-            if !current.is_some_and(|c| {
-                c.cache_only && c.revision == job.revision && c.generation == job.generation
-            }) {
-                return;
-            }
-            let revision = Revision::new(self.docs.get(&job.key).map_or(0, ViewDocument::revision))
-                .unwrap_or(Revision::ZERO);
-            if revision != job.revision {
-                if let Some(status) = self.preview_controls.cancelled(job.key) {
-                    self.preview_status(job.key, status);
-                }
-                return;
-            }
-            let status = match result {
-                Ok(_) => self
-                    .preview_controls
-                    .ready_cache(job.key, revision, job.generation),
-                Err(error) => self.preview_controls.failed(
-                    job.key,
-                    revision,
-                    Some(job.generation),
-                    format!("The Blender preview could not be prepared: {error}"),
-                ),
-            };
-            if let Some(status) = status {
-                self.preview_status(job.key, status);
-            }
-            return;
-        }
-        match result {
-            Ok(frames) => {
-                if let Some(job) = self.snapshots.preparing_mut(token) {
-                    job.blender_done(frames, now());
-                }
-            }
-            Err(error) => {
-                let Some(job) = self.snapshots.take_preparing(token) else {
-                    return;
-                };
-                let (code, message) = match error {
-                    pm_blender::BlenderError::Missing(m) => (ErrorCode::BlenderMissing, m),
-                    pm_blender::BlenderError::Failed(m) => (ErrorCode::BlenderFailed, m),
-                    pm_blender::BlenderError::Cancelled => (
-                        ErrorCode::Cancelled,
-                        "The Blender frame was cancelled.".to_owned(),
-                    ),
-                };
-                self.stats().snapshot_failures += 1;
-                self.snapshot_error(&job, code, &message);
-            }
-        }
-    }
-
-    /// Prepare Blender's interactive cache from the document mirror even if
-    /// no viewer surface exists. The transport clock and viewport are untouched.
-    fn work_cache_previews(&mut self) {
-        let ready: Vec<(Key, PreviewControl)> = self
-            .cache_requested
-            .iter()
-            .filter(|(key, control)| {
-                self.docs.get(key).is_some_and(|doc| {
-                    doc.has_document() && doc.revision() >= control.revision.get()
-                })
-            })
-            .map(|(key, control)| (*key, control.clone()))
-            .collect();
-        for (key, control) in ready {
-            self.cache_requested.remove(&key);
-            if self
-                .preview_controls
-                .current(key)
-                .is_none_or(|c| c.generation != control.generation)
-            {
-                continue;
-            }
-            let Some(blender) = self.blender.clone() else {
-                if let Some(status) = self.preview_controls.failed(
-                    key,
-                    control.revision,
-                    Some(control.generation),
-                    "The Blender capture worker is unavailable.".into(),
-                ) {
-                    self.preview_status(key, status);
-                }
-                continue;
-            };
-            if let Some(status) =
-                self.preview_controls
-                    .running(key, control.revision, Some(control.generation))
-            {
-                self.preview_status(key, status);
-            }
-            let result = self.cache_preview_snapshots(key, &control, &blender);
-            match result {
-                Ok(snapshots) if snapshots.is_empty() || blender.prepared(&snapshots).is_some() => {
-                    if let Some(status) =
-                        self.preview_controls
-                            .ready_cache(key, control.revision, control.generation)
-                    {
-                        self.preview_status(key, status);
-                    }
-                }
-                Ok(snapshots) => {
-                    self.blender_token += 1;
-                    let token = self.blender_token;
-                    self.cache_previews.insert(
-                        token,
-                        CachePreview {
-                            key,
-                            revision: control.revision,
-                            generation: control.generation,
-                        },
-                    );
-                    blender.capture(token, key, snapshots, true);
-                }
-                Err(error) => {
-                    if let Some(status) = self.preview_controls.failed(
-                        key,
-                        control.revision,
-                        Some(control.generation),
-                        error,
-                    ) {
-                        self.preview_status(key, status);
-                    }
-                }
-            }
-        }
-    }
-
-    fn cache_preview_snapshots(
-        &mut self,
-        key: Key,
-        control: &PreviewControl,
-        blender: &super::blender::PreviewBlender,
-    ) -> Result<Vec<pm_blender::snapshot::Snapshot>, String> {
-        // Headless sessions have no pool to initialize the device for us.
-        if self.gpu().is_none() {
-            return Err("The engine has no GPU device.".into());
-        }
-        let gpu = self.gpu.as_mut().ok_or("The engine has no GPU device.")?;
-        let doc = self
-            .docs
-            .get(&key)
-            .ok_or("The engine session has no document.")?;
-        if doc.revision() != control.revision.get() {
-            return Err("The preview document changed before Blender could start.".into());
-        }
-        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
-        let _ = composer.use_definitions(key, doc.definitions(), &[]);
-        let renderer = composer.renderer();
-        renderer.set_scrub(false);
-        renderer.set_captions_hidden(false);
-        renderer.set_text_seed_scope(pm_render::text::served::SeedScope {
-            port: Some(key.0.0),
-            session: Some(key.1.get()),
-        });
-        let request = pm_render::RenderRequest {
-            output_size: control.size.ok_or("The preview has no composition size.")?,
-            scale: None,
-            region: None,
-            preview_canvas: false,
-            origin: None,
-            precision: pm_protocol::color::Precision::Float16,
-            depth_id: false,
-            background: true,
-            export: false,
-            view: None,
-            blender: pm_render::blender::BlenderRender::Native,
-            motion_blur: pm_render::motion::MotionBlur::Off,
-            sampling: pm_render::sampling::Sampling::Final,
-            video_end: pm_render::VideoEnd::of(pm_protocol::frame::FramePurpose::Viewer),
-        };
-        let png = crate::jobs::blender_png::HostBlenderPng::new(
-            Arc::new(doc.media().clone()),
-            blender.host_link(),
-            key.1,
-            control.revision,
-            doc.document(),
-        );
-        let camera = control
-            .camera
-            .map(|camera| {
-                pm_render::scene3d::View3d::from_override(&ViewOverride {
-                    camera: Some(camera),
-                    shading: control.shading,
-                    xray: false,
-                    local_view: Vec::new(),
-                })
-            })
-            .and_then(|view| view.camera);
-        let snapshots = renderer
-            .blender_snapshots(
-                doc.document(),
-                control.composition.as_str(),
-                control.time,
-                &request,
-                &png,
-                true,
-                pm_render::blender::SnapshotOptions {
-                    force_eevee: control.shading == Shading3d::Material,
-                    camera,
-                    settings: None,
-                },
-            )
-            .map_err(|error| format!("The Blender preview could not be planned: {error}"))?;
-        if let Some((frame, why)) = snapshots.errors.first() {
-            return Err(format!(
-                "The Blender frame of {} at {} s could not be prepared: {why}",
-                frame.composition(),
-                frame.time
-            ));
-        }
-        Ok(snapshots.snapshots)
-    }
-
     /// What the views are doing, for the snapshot queue's scheduling.
     fn pressure(&self) -> super::snapshot::Pressure {
         let now = now();
@@ -6291,18 +6267,6 @@ impl Thread {
         let now = now();
         for job in self.snapshots.take_expired(now) {
             self.stats().snapshot_failures += 1;
-            if let Some(token) = job.preparing() {
-                // Blender did not finish within the snapshot's bound: stop it.
-                if let Some(blender) = &self.blender {
-                    blender.cancel_capture(token);
-                }
-                let message = format!(
-                    "Blender did not prepare the frame within {} s.",
-                    job.request.blender_wait_ms / 1_000
-                );
-                self.snapshot_error(&job, ErrorCode::Timeout, &message);
-                continue;
-            }
             let have = self.docs.get(&job.key).map(|d| d.revision());
             let message = match (job.min_revision, have) {
                 (Some(want), Some(have)) if have < want.get() => format!(
@@ -6323,12 +6287,16 @@ impl Thread {
         loop {
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             // A document whose media the host has not answered yet is not
             // ready: the snapshot waits (within its wait) rather than draw
-            // media missing that is on its way.
+            // media missing that is on its way. Nor is a provisional one: a
+            // capture asked earlier must not draw a partial edit.
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -6394,9 +6362,12 @@ impl Thread {
             }
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -6468,11 +6439,23 @@ impl Thread {
             self.snapshots.published(name, length);
         }
         let t = now();
+        self.trace_event(
+            "layer raster queue",
+            done.started - done.queued_us,
+            done.queued_us,
+            done.time,
+        );
         if let Some(render_us) = done.render_us {
             let costs = self.snapshot_costs.entry(done.key).or_default();
             costs.0 += 1;
             costs.1 = costs.1.max(render_us);
-            self.trace_event("layer raster", t - render_us, render_us, done.time);
+            self.trace_event("layer raster", done.started, render_us, done.time);
+            self.trace_event(
+                "layer raster completion delivery",
+                done.started + render_us,
+                (t - done.started - render_us).max(0),
+                done.time,
+            );
         } else {
             self.trace_event("layer raster failed", t, 0, done.time);
         }
@@ -6577,7 +6560,12 @@ impl Thread {
         costs.1 = costs.1.max(render_us);
         let result = SnapshotResult {
             revision,
-            view_seq: job.request.view_seq,
+            view_seq: job
+                .request
+                .viewer
+                .as_ref()
+                .map(|v| v.view_seq)
+                .or(job.request.view_seq),
             width,
             height,
             pixels: job.request.pixels,
@@ -6647,19 +6635,37 @@ impl Thread {
             );
             return;
         };
-        // Today's capture of a Blender composition draws Blender's surfaces
-        // for its frame, never native shading labelled final; native
-        // shading is only for `draft3d` captures (thumbnails, posters).
-        let needs_blender = !draft_3d
-            && pm_render::unsupported(doc.document(), job.request.composition.as_str())
-                .iter()
-                .any(|u| u.feature == pm_render::Feature::Blender);
+        let viewer_grid = if let Some(viewer) = &job.request.viewer {
+            let comp =
+                match pm_eval::Comp::resolve(doc.document(), job.request.composition.as_str()) {
+                    Ok(comp) => comp,
+                    Err(_) => {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::InvalidMessage,
+                            "The viewer snapshot has no composition.",
+                        );
+                        return;
+                    }
+                };
+            let number = |key: &str| {
+                let v = pm_eval::node::to_number(comp.member(key));
+                if v.is_finite() && v > 0.0 { v } else { 1.0 }
+            };
+            Some(super::compose::canvas_render_grid(
+                &viewer.canvas,
+                number("w"),
+                number("h"),
+            ))
+        } else {
+            None
+        };
         let (composer, readback, snapshot_target) =
             gpu.composer_and_snapshot_resources(&self.config, self.frame_cache, &mut self.prepared);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
-        composer.set_blender(pm_render::blender::BlenderRender::Native);
         composer.set_playing(false);
         let renderer = composer.renderer();
         renderer.set_scrub(false);
@@ -6672,73 +6678,54 @@ impl Thread {
             SnapshotClass::Idle => pm_protocol::frame::FramePurpose::Thumbnail,
             SnapshotClass::Sync | SnapshotClass::Async => pm_protocol::frame::FramePurpose::Export,
         };
-        let mut request = pm_render::RenderRequest {
+        let request = pm_render::RenderRequest {
             output_size: job.request.output_size,
             // Today's capture derives the scale from the composition size
             // (`W / comp.w`, `H / comp.h`).
-            scale: None,
+            scale: viewer_grid.and_then(|grid| grid.0),
             region: None,
-            preview_canvas: false,
+            // A pinned canvas is the live viewer's canvas: the same
+            // compatibility clip window and canvas density rules.
+            preview_canvas: job.request.viewer.is_some(),
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
-            background,
-            export: purpose == pm_protocol::frame::FramePurpose::Export,
-            view: None,
-            blender: pm_render::blender::BlenderRender::Native,
-            motion_blur: if motion_blur == 0 {
+            background: if job.request.viewer.is_some() {
+                true
+            } else {
+                background
+            },
+            export: job.request.viewer.is_none()
+                && purpose == pm_protocol::frame::FramePurpose::Export,
+            view: job.request.viewer.as_ref().and_then(|v| v.view.clone()),
+            motion_blur: if job.request.viewer.is_some() {
+                pm_render::motion::MotionBlur::Kind(
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused,
+                )
+            } else if motion_blur == 0 {
                 pm_render::motion::MotionBlur::Off
             } else {
                 pm_render::motion::MotionBlur::Samples(motion_blur)
             },
             sampling: pm_render::sampling::Sampling::Final,
-            video_end: pm_render::VideoEnd::of(purpose),
-            origin: None,
+            output_kind: if job.request.viewer.is_some() {
+                pm_render::OutputKind::Preview
+            } else {
+                pm_render::OutputKind::of(purpose)
+            },
+            origin: viewer_grid.and_then(|grid| grid.1),
         };
-        if needs_blender {
-            match blender_frames(renderer, doc, &job, &request, self.blender.as_deref()) {
-                BlenderFrames::Draw(surfaces) => {
-                    request.blender = pm_render::blender::BlenderRender::Final(surfaces);
-                }
-                BlenderFrames::Prepare(snapshots) => {
-                    let Some(blender) = self.blender.clone() else {
-                        self.stats().snapshot_failures += 1;
-                        self.snapshot_error(
-                            &job,
-                            ErrorCode::BlenderFailed,
-                            "The Blender capture worker is unavailable.",
-                        );
-                        return;
-                    };
-                    self.blender_token += 1;
-                    let token = self.blender_token;
-                    let mut job = job;
-                    job.start_blender(token, now());
-                    if job.expires_at() <= now() {
-                        self.stats().snapshot_failures += 1;
-                        self.snapshot_error(
-                            &job,
-                            ErrorCode::Timeout,
-                            "The Blender capture exceeded its time limit.",
-                        );
-                        return;
-                    }
-                    blender.capture(token, job.key, snapshots, false);
-                    self.stats().snapshot_blender += 1;
-                    self.snapshots.requeue(job);
-                    return;
-                }
-                BlenderFrames::Fail(code, message) => {
-                    self.stats().snapshot_failures += 1;
-                    self.snapshot_error(&job, code, &message);
-                    return;
-                }
-            }
-        }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        let format = renderer.device_target_format(doc.document(), &request);
+        // The live viewer renders its region at the project's format, then
+        // places it in the display working texture before color conversion.
+        // A pinned canvas captures those display pixels.
+        let format = if job.request.viewer.is_some() {
+            pm_gpu::bridge_out::display::WORKING_FORMAT
+        } else {
+            renderer.device_target_format(doc.document(), &request)
+        };
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),
@@ -6773,8 +6760,8 @@ impl Thread {
         // the window for them).
         let rendered = {
             let mut renderer = renderer.svg_waiting();
-            renderer
-                .render_snapshot_into_copy(
+            let rendered = if job.request.viewer.is_some() {
+                renderer.render_viewer_snapshot_into_copy(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
@@ -6783,7 +6770,18 @@ impl Thread {
                     &target,
                     &copy,
                 )
-                .map(|(_, rows)| (target.width(), target.height(), rows))
+            } else {
+                renderer.render_snapshot_into_copy(
+                    doc.document(),
+                    job.request.composition.as_str(),
+                    job.request.time,
+                    &request,
+                    doc.media(),
+                    &target,
+                    &copy,
+                )
+            };
+            rendered.map(|(_, rows)| (target.width(), target.height(), rows))
         };
         renderer.set_compat_rasters(None);
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
@@ -7152,13 +7150,13 @@ impl Thread {
     }
 }
 
-/// What a snapshot of a Blender composition draws.
-enum BlenderFrames {
-    /// The frame's surfaces, all prepared.
-    Draw(Arc<pm_blender::job::Surfaces>),
-    /// Blender renders these first (`blender_wait_ms` above 0).
-    Prepare(Vec<pm_blender::snapshot::Snapshot>),
-    Fail(ErrorCode, String),
+/// The shading of a paused preview frame: Material Preview or Rendered
+/// (drawn natively; Blender is retired, as on main).
+fn preview_shading(view: Option<&pm_protocol::frame::ViewOverride>) -> Option<Shading3d> {
+    match view.map(|v| v.shading) {
+        Some(s @ (Shading3d::Material | Shading3d::Rendered)) => Some(s),
+        _ => None,
+    }
 }
 
 /// Whether a view's route takes transport: the engine runs the clock and
@@ -7166,144 +7164,6 @@ enum BlenderFrames {
 /// playback to the legacy engine). Only an undecided route defers it.
 fn takes_transport(route: Option<&Route>) -> bool {
     matches!(route, Some(Route::Engine | Route::Legacy(_)))
-}
-
-/// Snapshot build failures the static check routes for exports
-/// (`pm_export::blender`): the engine cannot build these frames.
-fn blender_routed(why: &str) -> bool {
-    matches!(why, "imported models" | "model-group recipe parts")
-}
-
-/// The Blender frames a snapshot of `job` needs: planned exactly as the
-/// render plans them (sizes, times, shutter samples; today's
-/// `blenderFrameRequests`), with the composition's own settings, and drawn
-/// from this job's preparation or an earlier capture's (today's prepared
-/// frame). A synchronous capture (`blender_wait_ms` 0) of a frame nobody
-/// prepared fails with today's sentence.
-fn blender_frames(
-    renderer: &mut pm_render::Renderer,
-    doc: &super::document::ViewDocument,
-    job: &super::snapshot::SnapshotJob,
-    request: &pm_render::RenderRequest,
-    blender: Option<&super::blender::PreviewBlender>,
-) -> BlenderFrames {
-    use super::snapshot::BlenderPrep;
-    let composition = job.request.composition.as_str();
-    let png_resolver = blender.map(|blender| {
-        crate::jobs::blender_png::HostBlenderPng::new(
-            Arc::new(doc.media().clone()),
-            blender.host_link(),
-            job.key.1,
-            Revision::new(doc.revision()).unwrap_or(Revision::ZERO),
-            doc.document(),
-        )
-        .cached_only_if(job.request.blender_wait_ms == 0)
-    });
-    let assets: &dyn pm_render::AssetResolver = png_resolver
-        .as_ref()
-        .map_or(doc.media() as &dyn pm_render::AssetResolver, |resolver| {
-            resolver
-        });
-    let snaps = match renderer.blender_snapshots(
-        doc.document(),
-        composition,
-        job.request.time,
-        request,
-        assets,
-        false,
-        pm_render::blender::SnapshotOptions::default(),
-    ) {
-        Ok(snaps) => snaps,
-        Err(pm_render::RenderError::Unsupported(list)) => {
-            let reasons: Vec<String> = list.iter().map(super::document::describe).collect();
-            let mut message = format!(
-                "The new engine cannot draw this frame: {}.",
-                reasons.join("; ")
-            );
-            message.truncate(2_000);
-            return BlenderFrames::Fail(ErrorCode::Unsupported, message);
-        }
-        Err(e) => {
-            return BlenderFrames::Fail(
-                ErrorCode::Internal,
-                format!("The snapshot could not be rendered: {e}"),
-            );
-        }
-    };
-    if png_resolver
-        .as_ref()
-        .is_some_and(|resolver| resolver.cold_miss())
-    {
-        // A cold synchronous capture cannot block this IPC turn asking the
-        // window for Canvas2D bytes. Today's capture returns immediately
-        // until a preview/export has prepared the frame and its inputs.
-        return BlenderFrames::Fail(ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED.to_owned());
-    }
-    if let Some((frame, why)) = snaps.errors.first() {
-        return if blender_routed(why) {
-            BlenderFrames::Fail(
-                ErrorCode::Unsupported,
-                format!("The new engine cannot draw this frame: Blender-rendered 3D: {why}."),
-            )
-        } else {
-            BlenderFrames::Fail(
-                ErrorCode::BlenderFailed,
-                format!(
-                    "The Blender frame of {} at {} s could not be prepared: {why}",
-                    frame.composition(),
-                    frame.time
-                ),
-            )
-        };
-    }
-    if snaps.snapshots.is_empty() {
-        // No 3D object is active then: nothing for Blender to draw.
-        return BlenderFrames::Draw(Arc::new(pm_blender::job::Surfaces::new()));
-    }
-    let hashes: Vec<[u8; 32]> = snaps.snapshots.iter().map(|s| s.hash().0).collect();
-    let own = match &job.blender {
-        Some(BlenderPrep::Ready(frames))
-            if hashes
-                .iter()
-                .all(|h| frames.iter().any(|(fh, _, _)| fh == h)) =>
-        {
-            Some(frames.clone())
-        }
-        _ => None,
-    };
-    let prepared = own.or_else(|| {
-        blender
-            .and_then(|b| b.prepared(&snaps.snapshots))
-            .map(Arc::new)
-    });
-    if let Some(frames) = prepared {
-        let mut surfaces = pm_blender::job::Surfaces::new();
-        for (hash, frame, layers) in frames.iter() {
-            if hashes.contains(hash) {
-                surfaces.insert(frame.clone(), layers.clone());
-            }
-        }
-        return BlenderFrames::Draw(Arc::new(surfaces));
-    }
-    if job.request.blender_wait_ms == 0 {
-        return BlenderFrames::Fail(ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED.to_owned());
-    }
-    if blender.is_none() {
-        return BlenderFrames::Fail(
-            ErrorCode::BlenderFailed,
-            "This engine has no Blender worker for snapshots.".to_owned(),
-        );
-    }
-    if job.blender_attempts >= super::snapshot::MAX_BLENDER_ATTEMPTS {
-        return BlenderFrames::Fail(
-            ErrorCode::BlenderFailed,
-            format!(
-                "The Blender frame changed {} times while Blender rendered it.",
-                job.blender_attempts
-            ),
-        );
-    }
-    BlenderFrames::Prepare(snaps.snapshots)
 }
 
 /// The texture bands of the fallback requests that sample textures (effects
@@ -7375,6 +7235,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wake_lateness_excludes_the_requested_wait_and_early_commands() {
+        let wait = Duration::from_micros(1_000);
+        assert_eq!(wake_lateness_us(10, 510, wait), 0);
+        assert_eq!(wake_lateness_us(10, 1_010, wait), 0);
+        assert_eq!(wake_lateness_us(10, 330_010, wait), 329_000);
+    }
+
+    #[test]
     fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
         use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
 
@@ -7384,6 +7252,37 @@ mod tests {
         assert!(cache_snapshot_target(4096, 4096, Rgba8Unorm));
         assert!(!cache_snapshot_target(4096, 4096, Rgba16Float));
         assert!(!cache_snapshot_target(4096, 2048, Rgba32Float));
+    }
+
+    #[test]
+    fn raster_trace_uses_worker_timestamps_and_separates_queue_and_delivery() {
+        let (mut thread, _) = preview_thread();
+        thread.config.trace = true;
+        thread.raster_done(super::super::rasters::RasterDone {
+            key: preview_key(),
+            bytes: 0,
+            published: None,
+            render_us: Some(300),
+            queued_us: 200,
+            started: 1_000,
+            time: 42,
+        });
+        let stats = thread.stats();
+        let events: Vec<_> = stats.turn_trace.iter().collect();
+        assert_eq!(
+            (events[0].what, events[0].at, events[0].us),
+            ("layer raster queue", 800, 200)
+        );
+        assert_eq!(
+            (events[1].what, events[1].at, events[1].us),
+            ("layer raster", 1_000, 300)
+        );
+        assert_eq!(
+            (events[2].what, events[2].at),
+            ("layer raster completion delivery", 1_300)
+        );
+        assert!(events[2].us > 0);
+        assert!(events.iter().all(|event| event.k == 42));
     }
 
     fn preview_thread() -> (Thread, Arc<Mutex<Vec<PreviewStatus>>>) {
@@ -7432,15 +7331,12 @@ mod tests {
             views: BTreeMap::new(),
             docs: BTreeMap::new(),
             audio: BTreeMap::new(),
+            audio_ingress: AudioIngress::default(),
             audio_prefs: BTreeMap::new(),
             peaks,
             frame_ticks: TICKS_PER_SECOND / 60,
             generations: Generations::default(),
-            blender: None,
-            blender_token: 0,
             preview_controls: Default::default(),
-            cache_requested: BTreeMap::new(),
-            cache_previews: BTreeMap::new(),
             preview_candidates: BTreeMap::new(),
             auto_preview: BTreeMap::new(),
             auto_generation: BTreeMap::new(),
@@ -7454,10 +7350,12 @@ mod tests {
             last_interactive: None,
             snapshot_costs: BTreeMap::new(),
             compat: Default::default(),
-            peaks_waiting: BTreeSet::new(),
+            peaks_waiting: BTreeMap::new(),
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
+            provisional: BTreeMap::new(),
+            parked: BTreeMap::new(),
             svg: super::super::svg::SvgState::default(),
             rest: Rest::default(),
             rasters: None,
@@ -7494,6 +7392,137 @@ mod tests {
             canvas: None,
             surface_epoch: None,
         }
+    }
+
+    /// PLAY-1: the ingress forwards an edit and the Play after it before
+    /// the render thread decides the edit's route. When the route is then
+    /// pending (a new asset's media answer on its way), the Play waits for
+    /// it; its replay follows the audio run the forwarded Play started and
+    /// does not start (restart) the audio again. A Play the ingress did not
+    /// forward still starts the audio at the replay.
+    #[test]
+    fn deferred_forwarded_play_replays_without_restarting_the_audio() {
+        use super::super::audio::{AudioCtl, AudioLink, ForwardedAudio};
+        use pm_engine::document::DocumentUpdate;
+
+        let text = r#"{"id":"P","compId":"main","name":"T","w":320,"h":180,"fps":30,"dur":4,"layers":[{"id":"l","type":"audio","name":"l","from":0,"dur":4,"on":true,"solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],"d":{"asset":"a","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}],"comps":{},"assets":{"a":{"id":"a","name":"tone.wav","kind":"audio","format":"wav"}},"params":{}}"#;
+        let play = TransportCommand::Play {
+            rate: PlaybackRateValue::NORMAL,
+        };
+        for forwarded in [Some(ForwardedAudio { before: None }), None] {
+            let (mut thread, _) = preview_thread();
+            thread.config.host_clock = false;
+            let key = preview_key();
+            let (link, audio) = AudioLink::test_link();
+            thread.audio.insert(key, link);
+            let mut doc = ViewDocument::default();
+            doc.update(&DocumentUpdate::Replace {
+                root: Some(pm_model::Node::from_value(
+                    pm_model::json::parse(text).unwrap(),
+                    1,
+                )),
+                revision: Revision::new(1).unwrap(),
+            })
+            .unwrap();
+            thread.docs.insert(key, doc);
+            thread.configure(key, headless_test_state(true), None, None);
+            thread.document_step(key);
+            assert!(
+                matches!(thread.views[&key].reported, Some(Route::Pending(_))),
+                "{:?}",
+                thread.views[&key].reported
+            );
+            assert!(thread.audible(key));
+            let _ = audio.try_iter().count();
+
+            thread.transport(key, play, now(), forwarded);
+            assert_eq!(thread.views[&key].deferred_transport, Some(play));
+            // A deferred forwarded Play lets the audio start at once (the
+            // picture joins its clock); a deferred Play sends nothing.
+            let sent: Vec<AudioCtl> = audio.try_iter().collect();
+            assert_eq!(sent.len(), usize::from(forwarded.is_some()));
+            assert!(sent.iter().all(|c| matches!(c, AudioCtl::StartAt(0))));
+
+            thread
+                .docs
+                .get_mut(&key)
+                .unwrap()
+                .set_media("a", Some("/media/tone.wav".into()));
+            thread.document_step(key);
+            let view = &thread.views[&key];
+            assert_eq!(view.reported, Some(Route::Engine));
+            assert_eq!(view.deferred_transport, None);
+            assert!(view.deferred_forwarded.is_none());
+            assert!(
+                view.awaiting.is_some(),
+                "the line waits for the audio clock"
+            );
+            let sent: Vec<AudioCtl> = audio.try_iter().collect();
+            let plays = sent
+                .iter()
+                .filter(|c| matches!(c, AudioCtl::Play { .. }))
+                .count();
+            assert_eq!(
+                plays,
+                usize::from(forwarded.is_none()),
+                "forwarded {forwarded:?}: {} controls",
+                sent.len()
+            );
+            // The replay times the forwarded run (already let go: no effect).
+            let timed = sent
+                .iter()
+                .filter(|c| matches!(c, AudioCtl::StartAt(at) if *at > 0))
+                .count();
+            assert_eq!(timed, usize::from(forwarded.is_some()));
+        }
+    }
+
+    #[test]
+    fn compatibility_producers_keep_the_transport_off_the_audio_ingress() {
+        use super::super::audio::AudioLink;
+        use pm_engine::document::DocumentUpdate;
+        use pm_protocol::snapshot::{CompatMessage, CompatSource};
+
+        let text = r#"{"id":"P","compId":"main","name":"T","w":320,"h":180,"fps":30,"dur":4,"layers":[{"id":"l","type":"audio","name":"l","from":0,"dur":4,"on":true,"solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],"d":{"asset":"a","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}],"comps":{},"assets":{"a":{"id":"a","name":"tone.wav","kind":"audio","format":"wav"}},"params":{}}"#;
+        let play = TransportCommand::Play {
+            rate: PlaybackRateValue::NORMAL,
+        };
+        let (mut thread, _) = preview_thread();
+        thread.config.host_clock = false;
+        let key = preview_key();
+        let (link, _audio) = AudioLink::test_link();
+        thread.audio.insert(key, link);
+        let mut doc = ViewDocument::default();
+        doc.update(&DocumentUpdate::Replace {
+            root: Some(pm_model::Node::from_value(
+                pm_model::json::parse(text).unwrap(),
+                1,
+            )),
+            revision: Revision::new(1).unwrap(),
+        })
+        .unwrap();
+        doc.set_media("a", Some("/media/tone.wav".into()));
+        thread.docs.insert(key, doc);
+        thread.configure(key, headless_test_state(true), None, None);
+        thread.document_step(key);
+        assert_eq!(thread.views[&key].reported, Some(Route::Engine));
+        let producers = |sources| Command::Compat {
+            key,
+            message: CompatMessage::Producers { sources },
+        };
+
+        thread.refresh_audio_ingress(key);
+        assert!(
+            thread.audio_ingress.transport(key, play).is_some(),
+            "an audible routed view hands its Play to the audio thread"
+        );
+        thread.apply(producers(vec![CompatSource::RasterOverride]));
+        assert!(
+            thread.audio_ingress.transport(key, play).is_none(),
+            "a Play that may preroll stays on the render thread"
+        );
+        thread.apply(producers(vec![]));
+        assert!(thread.audio_ingress.transport(key, play).is_some());
     }
 
     #[test]
@@ -7558,18 +7587,7 @@ mod tests {
         for key in [a, b] {
             thread.configure(key, headless_test_state(true), None, None);
         }
-        thread.cache_previews.insert(
-            1,
-            CachePreview {
-                key: a,
-                revision: Revision::ZERO,
-                generation: Seq::new(1).unwrap(),
-            },
-        );
         thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
-        thread.release_at_rest(t0 + 4 * REST_RELEASE_US);
-        assert!(thread.gpu.is_some(), "pending preview keeps the device");
-        thread.cache_previews.clear();
         thread.release_at_rest(t0 + 4 * REST_RELEASE_US + 1);
         assert!(thread.gpu.is_none());
         thread.snapshot_allocations(t0 + 4 * REST_RELEASE_US + 1);
@@ -7713,6 +7731,23 @@ mod tests {
                 .source_key(valid.kind, valid.id.as_str())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn frame_pipelines_compile_once_per_rest_after_the_viewer_settles() {
+        let (mut thread, _) = preview_thread();
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + PREWARM_REST_US - 1);
+        assert!(!thread.rest.prewarmed, "too early");
+        thread.release_at_rest(t0 + PREWARM_REST_US);
+        assert!(thread.rest.prewarmed);
+        // A frame starts a new rest, which compiles again once it settles.
+        thread.stats().frames += 1;
+        thread.release_at_rest(t0 + PREWARM_REST_US + 1);
+        assert!(!thread.rest.prewarmed);
+        thread.release_at_rest(t0 + 2 * PREWARM_REST_US + 1);
+        assert!(thread.rest.prewarmed);
     }
 
     #[test]
@@ -7926,7 +7961,46 @@ mod tests {
     }
 
     #[test]
-    fn cache_only_control_queues_without_viewer_or_transport_change() {
+    fn pending_waveforms_keep_latest_generation_even_at_capacity() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        for index in 0..MAX_PEAKS_WAITING {
+            thread.audio_message(
+                key,
+                AudioMessage::PeaksWanted {
+                    asset: format!("clip-{index}"),
+                    request: Some(Seq::new(1).unwrap()),
+                },
+            );
+        }
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "clip-0".into(),
+                request: Some(Seq::new(2).unwrap()),
+            },
+        );
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "beyond-capacity".into(),
+                request: Some(Seq::new(3).unwrap()),
+            },
+        );
+        assert_eq!(thread.peaks_waiting.len(), MAX_PEAKS_WAITING);
+        assert_eq!(
+            thread.peaks_waiting[&(key, "clip-0".into())],
+            Some(Seq::new(2).unwrap())
+        );
+        assert!(
+            !thread
+                .peaks_waiting
+                .contains_key(&(key, "beyond-capacity".into()))
+        );
+    }
+
+    #[test]
+    fn cache_only_control_is_ready_without_viewer_or_frame() {
         use pm_protocol::common::CompositionId;
         let (mut thread, statuses) = preview_thread();
         let key = preview_key();
@@ -7945,24 +8019,15 @@ mod tests {
             key,
             control: control.clone(),
         });
+        // Nothing to prepare (Blender is retired): Queued, then Ready
+        // without a frame, and no viewer is created.
         assert!(thread.views.is_empty());
-        assert_eq!(thread.cache_requested.get(&key), Some(&control));
-        assert_eq!(statuses.lock().unwrap()[0].phase, PreviewPhase::Queued);
-        thread.apply(Command::PreviewControl {
-            key,
-            control: PreviewControl {
-                generation: Seq::new(8).unwrap(),
-                action: PreviewAction::Cancel,
-                cache_only: false,
-                size: None,
-                ..control
-            },
-        });
-        assert!(!thread.cache_requested.contains_key(&key));
-        assert_eq!(
-            statuses.lock().unwrap().last().unwrap().phase,
-            PreviewPhase::Cancelled
-        );
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].phase, PreviewPhase::Queued);
+        assert_eq!(statuses[1].phase, PreviewPhase::Ready);
+        assert!(statuses[1].cache_only && statuses[1].frame_seq.is_none());
+        assert!(thread.preview_controls.current(key).is_none());
     }
 
     fn candidate(shading: Shading3d, time: i64, complete: bool) -> PreviewCandidate {

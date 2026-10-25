@@ -522,127 +522,6 @@ unsafe fn canonicalize_trc(profile: &mut crate::sys::skcms::skcms_ICCProfile) {
     }
 }
 
-/// Chromium's software I420 video upload uses libyuv's nearest-chroma,
-/// clipped RGBA8 bitmap before the canvas filters it. Existing sequence
-/// renditions are 8-bit limited-range I420, optionally with straight alpha.
-/// Other source readings keep the native video conversion.
-pub fn video_bitmap(
-    frame: &crate::frame::DecodedFrame,
-    pool: &FramePool,
-) -> Result<Option<crate::frame::DecodedFrame>> {
-    use crate::frame::Layout;
-    use pm_protocol::color::Range;
-    let f = &frame.format;
-    if f.layout != Layout::Planar
-        || f.bits != 8
-        || f.range != Range::Limited
-        || f.log2_chroma_w != 1
-        || f.log2_chroma_h != 1
-        || !f.planes.iter().all(|p| p.format == PlaneFormat::R8)
-        || !matches!(f.planes.len(), 3 | 4)
-    {
-        return Ok(None);
-    }
-    // Signatures from Chromium 152's pinned libyuv/convert_argb.h. Those
-    // C entry points are included in CrabbyAvif's static dependency archive.
-    unsafe extern "C" {
-        fn I420ToABGR(
-            y: *const u8,
-            ys: i32,
-            u: *const u8,
-            us: i32,
-            v: *const u8,
-            vs: i32,
-            dst: *mut u8,
-            ds: i32,
-            w: i32,
-            h: i32,
-        ) -> i32;
-        fn I420AlphaToABGR(
-            y: *const u8,
-            ys: i32,
-            u: *const u8,
-            us: i32,
-            v: *const u8,
-            vs: i32,
-            a: *const u8,
-            as_: i32,
-            dst: *mut u8,
-            ds: i32,
-            w: i32,
-            h: i32,
-            attenuate: i32,
-        ) -> i32;
-    }
-    let w = i32::try_from(f.width).map_err(|_| MediaError::invalid("video bitmap width"))?;
-    let h = i32::try_from(f.height).map_err(|_| MediaError::invalid("video bitmap height"))?;
-    let stride = w
-        .checked_mul(4)
-        .ok_or_else(|| MediaError::invalid("video bitmap stride"))?;
-    let mut rgba = vec![
-        0u8;
-        (stride as usize)
-            .checked_mul(h as usize)
-            .filter(|n| *n <= 1 << 30)
-            .ok_or_else(|| MediaError::invalid("video bitmap size"))?
-    ];
-    frame.with_planes(|p| -> Result<()> {
-        let s: Vec<i32> = p
-            .iter()
-            .map(|p| {
-                i32::try_from(p.stride)
-                    .map_err(|_| MediaError::invalid("video bitmap plane stride"))
-            })
-            .collect::<Result<_>>()?;
-        let rc = unsafe {
-            if p.len() == 4 {
-                I420AlphaToABGR(
-                    p[0].ptr,
-                    s[0],
-                    p[1].ptr,
-                    s[1],
-                    p[2].ptr,
-                    s[2],
-                    p[3].ptr,
-                    s[3],
-                    rgba.as_mut_ptr(),
-                    stride,
-                    w,
-                    h,
-                    1,
-                )
-            } else {
-                I420ToABGR(
-                    p[0].ptr,
-                    s[0],
-                    p[1].ptr,
-                    s[1],
-                    p[2].ptr,
-                    s[2],
-                    rgba.as_mut_ptr(),
-                    stride,
-                    w,
-                    h,
-                )
-            }
-        };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(MediaError::decode(format!("libyuv video bitmap {rc}")))
-        }
-    })??;
-    Ok(Some(pool_rgba(
-        pool,
-        f.width,
-        f.height,
-        Rgba::U8(&rgba),
-        true,
-        8,
-        "Chromium I420 rgba8".into(),
-    )?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,10 +573,12 @@ mod tests {
     /// a Display P3 `cICP` selects P3.
     #[test]
     fn png_color_selects_gamma_like_blink() {
-        let dir = std::env::temp_dir().join(format!("pm-compat-png-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pm-compat-png-")
+            .tempdir()
+            .unwrap();
         let check = |name: &str, chunks: &[(&[u8; 4], Vec<u8>)]| {
-            let path = dir.join(format!("{name}.png"));
+            let path = dir.path().join(format!("{name}.png"));
             std::fs::write(&path, ramp_png(chunks)).unwrap();
             png_color(&path).unwrap()
         };
@@ -739,7 +620,6 @@ mod tests {
             check("p3", &[(b"cICP", vec![12, 13, 0, 1]), gama(70_000)]),
             Some(PngColor::Cicp(12, 13))
         ));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The level 1 bitmap of a gamma-only PNG decodes the stored samples
@@ -748,11 +628,13 @@ mod tests {
     /// gamma leaves the bytes unchanged.
     #[test]
     fn gamma_png_bitmap_applies_the_inverse_power() {
-        let dir = std::env::temp_dir().join(format!("pm-compat-gamma-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pm-compat-gamma-")
+            .tempdir()
+            .unwrap();
         let pool = FramePool::new(0);
         let bytes = |name: &str, chunks: &[(&[u8; 4], Vec<u8>)]| -> Vec<u8> {
-            let path = dir.join(format!("{name}.png"));
+            let path = dir.path().join(format!("{name}.png"));
             std::fs::write(&path, ramp_png(chunks)).unwrap();
             let still = super::super::read(&path, &pool).unwrap();
             let bitmap = bitmap_at(&path, &still, &pool).unwrap();
@@ -785,6 +667,5 @@ mod tests {
             }
             assert!(changed, "{gamma}");
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

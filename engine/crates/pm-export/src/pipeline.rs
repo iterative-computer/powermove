@@ -11,15 +11,46 @@
 use crate::Error;
 use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert};
 use crate::settings::ExportSpec;
+use std::sync::atomic::AtomicBool;
 
 /// Where encoder input goes.
 pub trait Sink {
     type Output;
+    /// A sink may consume the working frame before an engine YCbCr conversion.
+    /// Desktop-compatible encoders have their own pinned RGB conversion, which
+    /// must receive the original byte-quantized framebuffer, not reconstructed YUV.
+    fn video_rgba(&mut self, _index: u64, _frame: &WorkingFrame) -> Result<bool, Error> {
+        Ok(false)
+    }
+    /// Whether this sink accepts GPU-resident working frames.
+    fn gpu_frames(&self) -> bool {
+        false
+    }
+    /// A working texture and optional diagnostic/verification readback.
+    /// Complete all GPU reads of `texture` before returning: the producer
+    /// may reuse its target after a successful return.
+    fn video_gpu(
+        &mut self,
+        _index: u64,
+        _texture: &wgpu::Texture,
+        _frame: Option<&WorkingFrame>,
+    ) -> Result<(), Error> {
+        Err(Error::InvalidFrame(
+            "this encoder does not accept GPU frames".into(),
+        ))
+    }
     /// Frame `index` (0-based, in order).
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error>;
     /// Interleaved f32 PCM at the spec's sample rate.
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error>;
     fn finish(self) -> Result<Self::Output, Error>;
+    /// A job may be cancelled while a sink is finishing a long encoder or mux step.
+    fn finish_with_cancel(self, _cancel: &AtomicBool) -> Result<Self::Output, Error>
+    where
+        Self: Sized,
+    {
+        self.finish()
+    }
 }
 
 /// One export in progress.
@@ -28,7 +59,6 @@ pub struct Pipeline<S: Sink> {
     sink: S,
     next: u64,
     audio_frames: u64,
-    legacy_png: bool,
 }
 
 impl<S: Sink> Pipeline<S> {
@@ -39,17 +69,7 @@ impl<S: Sink> Pipeline<S> {
             sink,
             next: 0,
             audio_frames: 0,
-            // Level 1's PNG bytes unless the job's document has only level
-            // 2 content (`render.rs`): a caller that never selects keeps
-            // today's E1 conversion.
-            legacy_png: true,
         })
-    }
-
-    /// Select the PNG boundary from the frozen document, once per job
-    /// (default true: the E1 8-bit straight-alpha conversion of level 1).
-    pub fn set_legacy_png(&mut self, legacy_png: bool) {
-        self.legacy_png = legacy_png;
     }
 
     pub fn spec(&self) -> &ExportSpec {
@@ -86,8 +106,11 @@ impl<S: Sink> Pipeline<S> {
                 frame.width, frame.height, self.spec.width, self.spec.height
             )));
         }
+        if self.sink.video_rgba(index, frame)? {
+            self.next += 1;
+            return Ok(());
+        }
         let params = ConvertParams {
-            legacy_png: self.legacy_png,
             working: self.spec.working,
             alpha: self.spec.alpha,
             dither: self.spec.dither_enabled(),
@@ -95,6 +118,23 @@ impl<S: Sink> Pipeline<S> {
         };
         let input = convert(frame, self.spec.input_format(), &params)?;
         self.sink.video(index, &input)?;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Delivers a GPU working frame without a CPU pixel conversion.
+    pub fn push_gpu(
+        &mut self,
+        texture: &wgpu::Texture,
+        frame: Option<&WorkingFrame>,
+    ) -> Result<(), Error> {
+        let index = self.admit()?;
+        if texture.width() != self.spec.width || texture.height() != self.spec.height {
+            return Err(Error::InvalidFrame(
+                "GPU frame size does not match the export".into(),
+            ));
+        }
+        self.sink.video_gpu(index, texture, frame)?;
         self.next += 1;
         Ok(())
     }
@@ -142,6 +182,17 @@ impl<S: Sink> Pipeline<S> {
             )));
         }
         self.sink.finish()
+    }
+
+    /// Finishes a job while allowing its sink to interrupt blocking encoder work.
+    pub fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<S::Output, Error> {
+        if self.next != self.spec.frames {
+            return Err(Error::InvalidFrame(format!(
+                "{} frames delivered, expected {}",
+                self.next, self.spec.frames
+            )));
+        }
+        self.sink.finish_with_cancel(cancel)
     }
 
     /// Abandons the export; the sink discards partial output when dropped.
@@ -415,7 +466,6 @@ mod tests {
             },
             InputFormat::Y416,
             &ConvertParams {
-                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: false,
