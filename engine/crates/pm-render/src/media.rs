@@ -1028,7 +1028,9 @@ fn rgba8_bitmap(
         })
         .ok()??;
     let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
-    let target = Target::new(
+    // Level 0 is the bitmap; the levels below are its box mips, written
+    // once by the caller (`Resampler::fill_mips`).
+    let target = Target::with_mips(
         device,
         "pm still bitmap",
         w,
@@ -1036,7 +1038,8 @@ fn rgba8_bitmap(
         wgpu::TextureFormat::Rgba8Unorm,
         wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::STORAGE_BINDING,
     );
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -1056,13 +1059,6 @@ fn rgba8_bitmap(
             height: h,
             depth_or_array_layers: 1,
         },
-    );
-    debug_assert!(
-        target.format() == wgpu::TextureFormat::Rgba8Unorm
-            && !target.texture.usage().intersects(
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING
-            ),
-        "the still bitmap is sample-only"
     );
     Some(target)
 }
@@ -1252,6 +1248,7 @@ impl MediaCache {
             && working == WorkingEncoding::Standard
             && let Some(target) = rgba8_bitmap(device, queue, &still)
         {
+            pipelines.resample.fill_mips(device, encoder, &target.texture);
             self.images.retain(|k, _| {
                 k.path != key.path || k.precision != key.precision || k.linear != key.linear
             });
@@ -1303,6 +1300,20 @@ impl MediaCache {
         let normalized = importer
             .normalize(queue, encoder, &imported)
             .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        // A still carries its full mip chain, made once here, so minified
+        // draws never need separate pyramid storage.
+        let luma = match &normalized {
+            pm_gpu::decode_in::Normalized::Rgb { rgba } => rgba,
+            pm_gpu::decode_in::Normalized::YCbCr { luma, .. } => luma,
+        };
+        let stored = Target::with_mips(
+            device,
+            "pm still",
+            luma.width(),
+            luma.height(),
+            working_format(precision),
+            pm_gpu::target::working_usage(),
+        );
         let target = convert(
             device,
             queue,
@@ -1313,8 +1324,9 @@ impl MediaCache {
             working,
             precision,
             Factors { x: 1, y: 1 },
-            None,
+            Some(stored),
         );
+        pipelines.resample.fill_mips(device, encoder, &target.texture);
         // The decoded pixels must outlive the commands reading them; the
         // imported textures hold the frame until wgpu releases them.
         drop(imported);

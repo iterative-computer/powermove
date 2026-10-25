@@ -716,11 +716,11 @@ mod tests {
         times.extend(pipelines.ops.path_masks.probe_all());
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
-        // 18 2D, 21 composite (7 ops) and 6 resample draws over rgba16float,
-        // rgba32float and colordepth's rgba8unorm; 2 mip writers, 10 path
+        // 18 2D, 21 composite (7 ops), 6 resample draws and 3 mip writers
+        // over rgba16float, rgba32float and colordepth's rgba8unorm; 10 path
         // masks and 4 text paints.
-        assert_eq!(times.len(), 61);
-        assert_eq!(built(), 61);
+        assert_eq!(times.len(), 62);
+        assert_eq!(built(), 62);
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
         }

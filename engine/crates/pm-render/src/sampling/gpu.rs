@@ -66,6 +66,18 @@ impl Pyramid {
         }
     }
 
+    /// A still's own mip chain (`Resampler::fill_mips`): level 0 and every
+    /// level below it from the same texture.
+    fn own_mips(source: &wgpu::Texture) -> Self {
+        let mut pyramid = Self::base(source, None);
+        pyramid.tail_view = Some(source.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 1,
+            ..Default::default()
+        }));
+        pyramid.levels = source.mip_level_count();
+        pyramid
+    }
+
     /// Evaluate the first box-filtered mip in the sampling draw. Small
     /// minifications need no retained texture or separate copy/downsample passes.
     pub fn inline_first(source: &wgpu::Texture, view: Option<&wgpu::TextureView>) -> Self {
@@ -113,6 +125,9 @@ impl CachedPyramid {
 /// Revision-valid source pyramids and source-free tail storage.
 pub(crate) struct PyramidCache {
     entries: VecDeque<CachedPyramid>,
+    /// Views of stills' own mip chains, kept so their draws' bind groups
+    /// stay cached (the textures belong to the media cache).
+    own: VecDeque<Pyramid>,
     idle: VecDeque<IdleTail>,
     frame: u64,
     next_revision: u64,
@@ -126,6 +141,7 @@ impl PyramidCache {
     pub fn new() -> PyramidCache {
         PyramidCache {
             entries: VecDeque::new(),
+            own: VecDeque::new(),
             idle: VecDeque::new(),
             frame: 0,
             next_revision: 0,
@@ -265,9 +281,25 @@ impl PyramidCache {
         }
     }
 
+    /// `texture`'s own mip chain read to `levels`, its views kept.
+    fn own_mips(&mut self, texture: &wgpu::Texture, levels: u32) -> Pyramid {
+        let found = self.own.iter().position(|p| p.view.texture() == texture);
+        let pyramid = match found {
+            Some(i) => self.own.remove(i).expect("found"),
+            None => Pyramid::own_mips(texture),
+        };
+        self.own.push_front(pyramid.clone());
+        self.own.truncate(CACHED_PYRAMIDS);
+        Pyramid {
+            levels: levels.min(pyramid.levels),
+            ..pyramid
+        }
+    }
+
     /// Drops every kept pyramid.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.own.clear();
         self.idle.clear();
     }
 
@@ -332,11 +364,11 @@ pub(crate) struct Resampler {
     uniform_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
     /// Per [`MIP_FORMATS`] entry: the level above and the level written.
-    mip_layouts: [wgpu::BindGroupLayout; 2],
+    mip_layouts: [wgpu::BindGroupLayout; 3],
     trilinear: wgpu::Sampler,
     /// `[format][blend]`: rgba16float, rgba32float, rgba8unorm × over, additive.
     draw: [[crate::pipelines::LazyRenderPipeline; 2]; 3],
-    down: [crate::pipelines::Lazy<wgpu::ComputePipeline>; 2],
+    down: [crate::pipelines::Lazy<wgpu::ComputePipeline>; 3],
 }
 
 const FORMATS: [wgpu::TextureFormat; 3] = [
@@ -344,10 +376,7 @@ const FORMATS: [wgpu::TextureFormat; 3] = [
     wgpu::TextureFormat::Rgba32Float,
     wgpu::TextureFormat::Rgba8Unorm,
 ];
-const MIP_FORMATS: [wgpu::TextureFormat; 2] = [
-    wgpu::TextureFormat::Rgba16Float,
-    wgpu::TextureFormat::Rgba32Float,
-];
+const MIP_FORMATS: [wgpu::TextureFormat; 3] = FORMATS;
 
 fn format_index(format: wgpu::TextureFormat) -> usize {
     match format {
@@ -512,7 +541,10 @@ impl Resampler {
                     "rgba16float",
                     "fn store(c: vec4<f32>) -> vec4<f32> { return pm_scene_half_color(c); }",
                 ),
-                _ => ("rgba32float", "fn store(c: vec4<f32>) -> vec4<f32> { return c; }"),
+                wgpu::TextureFormat::Rgba32Float => {
+                    ("rgba32float", "fn store(c: vec4<f32>) -> vec4<f32> { return c; }")
+                }
+                _ => ("rgba8unorm", "fn store(c: vec4<f32>) -> vec4<f32> { return c; }"),
             };
             crate::pipelines::Lazy::new(move || {
                 let source = format!(
@@ -596,19 +628,52 @@ impl Resampler {
             });
             (texture, levels)
         });
-        let i = format_index(format);
+        let above = source.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        self.write_levels(device, encoder, above, &texture, 0, levels - 1);
+        let pyramid = Pyramid {
+            view: source.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }),
+            tail_view: Some(texture.create_view(&Default::default())),
+            tail: Some(texture),
+            width,
+            height,
+            levels,
+            inline_first: false,
+        };
+        cache.put(source.clone(), revision, pyramid.clone());
+        pyramid
+    }
+
+    /// Writes `count` box-filtered levels of `dest` from `dest_level` on,
+    /// each from the level above (`above` for the first), in one compute
+    /// pass with a dispatch per level.
+    fn write_levels(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mut above: wgpu::TextureView,
+        dest: &wgpu::Texture,
+        dest_level: u32,
+        count: u32,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let i = format_index(dest.format());
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("pm pyramid"),
             timestamp_writes: None,
         });
         pass.set_pipeline(self.down[i].get());
-        let mut above = source.create_view(&wgpu::TextureViewDescriptor {
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            ..Default::default()
-        });
-        for level in 0..levels - 1 {
-            let target = texture.create_view(&wgpu::TextureViewDescriptor {
+        for level in dest_level..dest_level + count {
+            let target = dest.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("pm pyramid level"),
                 base_mip_level: level,
                 mip_level_count: Some(1),
@@ -629,26 +694,29 @@ impl Resampler {
                 ],
             });
             pass.set_bind_group(0, &bind, &[]);
-            let (w, h) = ((width >> (level + 1)).max(1), (height >> (level + 1)).max(1));
+            let (w, h) = (
+                (dest.width() >> level).max(1),
+                (dest.height() >> level).max(1),
+            );
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             above = target;
         }
-        drop(pass);
-        let pyramid = Pyramid {
-            view: source.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: 0,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }),
-            tail_view: Some(texture.create_view(&Default::default())),
-            tail: Some(texture),
-            width,
-            height,
-            levels,
-            inline_first: false,
-        };
-        cache.put(source.clone(), revision, pyramid.clone());
-        pyramid
+    }
+
+    /// Fills every level below level 0 of a still's own mip chain, once at
+    /// upload: no separate pyramid storage for stills.
+    pub(crate) fn fill_mips(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+    ) {
+        let above = texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        self.write_levels(device, encoder, above, texture, 1, texture.mip_level_count() - 1);
     }
 
     pub fn pipeline(&self, format: wgpu::TextureFormat, blend: PassBlend) -> &wgpu::RenderPipeline {
@@ -997,6 +1065,10 @@ impl Resampler {
         revision: Option<u64>,
         cache: &mut PyramidCache,
     ) -> Pyramid {
+        // A still's draws all bind one kept pair of views.
+        if texture.mip_level_count() > 1 {
+            return cache.own_mips(texture, levels);
+        }
         match levels {
             1 => Pyramid::base(texture, view),
             2 => Pyramid::inline_first(texture, view),
@@ -1007,6 +1079,92 @@ impl Resampler {
 
 #[cfg(test)]
 mod tests {
+    /// A still's own mips are box means rounded to nearest at every
+    /// storage depth: 2×2 texels 0, 1, 1, 1 (in 1/255) average 0.75/255.
+    #[test]
+    fn still_mips_store_the_nearest_box_mean() {
+        let gpu = pm_gpu::Gpu::new("still mips").expect("GPU device");
+        let resampler = Resampler::new(&gpu.device);
+        for format in FORMATS {
+            let target = pm_gpu::Target::with_mips(
+                &gpu.device,
+                "still",
+                2,
+                2,
+                format,
+                pm_gpu::target::working_usage(),
+            );
+            assert_eq!(target.texture.mip_level_count(), 2);
+            let texel = |v: f32| -> Vec<u8> {
+                match format {
+                    wgpu::TextureFormat::Rgba8Unorm => vec![(v * 255.0) as u8; 4],
+                    wgpu::TextureFormat::Rgba16Float => {
+                        [v; 4].iter().flat_map(|c| pm_gpu::readback::f32_to_half(*c).to_le_bytes()).collect()
+                    }
+                    _ => [v; 4].iter().flat_map(|c| c.to_le_bytes()).collect(),
+                }
+            };
+            let bytes: Vec<u8> = [0.0, 1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0]
+                .into_iter()
+                .flat_map(texel)
+                .collect();
+            let bpp = format.block_copy_size(None).unwrap();
+            gpu.queue.write_texture(
+                target.texture.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(2 * bpp),
+                    rows_per_image: Some(2),
+                },
+                wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+            );
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            resampler.fill_mips(&gpu.device, &mut encoder, &target.texture);
+            let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target.texture,
+                    mip_level: 1,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &out,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+            gpu.queue.submit([encoder.finish()]);
+            out.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = out.slice(..).get_mapped_range().unwrap();
+            let red = match format {
+                wgpu::TextureFormat::Rgba8Unorm => f64::from(data[0]) / 255.0,
+                wgpu::TextureFormat::Rgba16Float => f64::from(pm_gpu::readback::half_to_f32(
+                    u16::from_le_bytes([data[0], data[1]]),
+                )),
+                _ => f64::from(f32::from_le_bytes([data[0], data[1], data[2], data[3]])),
+            };
+            let exact = 0.75 / 255.0;
+            let bound = match format {
+                wgpu::TextureFormat::Rgba8Unorm => 0.5 / 255.0,
+                wgpu::TextureFormat::Rgba16Float => 2f64.powi(-23),
+                _ => 1e-9,
+            };
+            assert!((red - exact).abs() <= bound, "{format:?}: {red} vs {exact}");
+        }
+    }
+
     use super::*;
 
     #[test]

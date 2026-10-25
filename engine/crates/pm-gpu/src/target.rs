@@ -63,6 +63,38 @@ impl Target {
         Target { texture, view }
     }
 
+    /// A target with its full mip chain in the same texture; `view` reads
+    /// and writes level 0 only (the levels below are filled separately).
+    pub fn with_mips(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Target {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: width.max(height).max(1).ilog2() + 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        Target { texture, view }
+    }
+
     /// A target over an existing texture (the presenter's working texture,
     /// an export buffer), with its default view.
     pub fn wrap(texture: wgpu::Texture) -> Target {
@@ -82,10 +114,15 @@ impl Target {
         self.texture.format()
     }
 
-    /// Bytes of texel storage.
+    /// Bytes of texel storage, every mip level included.
     pub fn bytes(&self) -> u64 {
         let bpp = u64::from(self.format().block_copy_size(None).unwrap_or(16));
-        u64::from(self.width()) * u64::from(self.height()) * bpp
+        (0..self.texture.mip_level_count())
+            .map(|l| {
+                u64::from((self.width() >> l).max(1)) * u64::from((self.height() >> l).max(1))
+            })
+            .sum::<u64>()
+            * bpp
     }
 }
 

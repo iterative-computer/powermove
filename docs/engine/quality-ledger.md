@@ -88,6 +88,12 @@ again to 8 bits.
 | Float sampling and analytic quad coverage | 10.10, 10.10, 0.063 | 0.02, 0.02, <0.001 | Transparent alpha still |
 | Same sampling through opaque output quantization | 9.08, 9.08, 0.057 | 0.27, 0.27, 0.002 | Same alpha still, opaque view |
 | Parametric mask coverage with float sampling | 144.06, 110.89, 10.156–10.621 | 0.25, 0.22–0.23, 0.068 | Three transparent rectangle/ellipse-mask frames |
+| Minified stills read their own box mip chain (declared Lanczos-3 / trilinear kernel) | zone plate min PSNR 17 dB (bilinear, no mips) | min 70.78 dB vs the declared kernel; 29.67 dB Final, 23.08 dB Playback vs the output-space low-pass | `antialiasing_bar_zone_plate`, level 1 and 2, Float16/32 (units: dB) |
+
+A still is uploaded with its full mip chain in the same texture, filled once by
+the compute downsampler with nearest-rounded box means. That costs a third more
+still memory and no extra texture; `export_120`'s texture-byte baseline was
+raised by the two stills' chains (174,760 bytes), the only ratchet change.
 
 The still subset passes all six frames and the mask subset all three. Broader
 blend cases expose the existing hard pixel-centre edges of level-1 solids; they
