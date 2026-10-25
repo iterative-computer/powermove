@@ -82,6 +82,14 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     assert_eq!(tags.primaries, "smpte170m");
     assert_eq!(tags.matrix, "smpte170m");
     assert_eq!(tags.transfer, "bt709");
+    // A stream larger than the planes budget is resampled by the engine
+    // instead; it is refused before the sink sees any bytes.
+    let oversized = renderer
+        .source_video_planes_with::<()>(&fixture, Ticks::ZERO, false, 160 * 90 - 1, |_, _| {
+            panic!("an oversized stream must not be packed")
+        })
+        .unwrap();
+    assert!(oversized.is_none());
     // A still cannot silently become a P3/Canvas RGBA compositor payload.
     let dir = tempfile::tempdir().unwrap();
     let still = dir.path().join("still.png");

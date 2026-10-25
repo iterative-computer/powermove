@@ -524,10 +524,14 @@ impl Thread {
         } else if color == SourceColor::Compositor {
             let planes = match footage {
                 Some(_) => Ok(None),
+                // Coded planes up to four times the shown pixels; beyond that
+                // (4K in a 720p monitor) the engine resamples first.
                 None => composer.renderer().source_video_planes_with(
                     &path,
                     time,
                     sequence,
+                    4 * u64::from(job.request.output_size.width)
+                        * u64::from(job.request.output_size.height),
                     |length, pack| {
                         Ok((
                             length,

@@ -31,7 +31,7 @@ impl Renderer {
         time: Ticks,
         sequence: bool,
     ) -> Result<Option<(Size, Vec<u8>, SourceVideoFrame)>, String> {
-        self.source_video_planes_with(path, time, sequence, |length, pack| {
+        self.source_video_planes_with(path, time, sequence, u64::MAX, |length, pack| {
             let mut bytes = vec![0; length];
             pack(&mut bytes).map(|()| bytes)
         })
@@ -42,11 +42,15 @@ impl Renderer {
     /// owns (for example a shared-memory segment), so the decoded frame is
     /// copied once. The packer runs while the decoded frame is locked. Nothing
     /// fails after a successful sink, so whatever it published is returned.
+    /// A stream with more than `max_pixels` coded pixels is `Ok(None)` before
+    /// decoding: the engine resamples it for the monitor instead of sending
+    /// planes many times larger than what is shown.
     pub fn source_video_planes_with<T>(
         &mut self,
         path: &Path,
         time: Ticks,
         sequence: bool,
+        max_pixels: u64,
         sink: impl FnOnce(usize, &mut dyn FnMut(&mut [u8]) -> Result<(), String>) -> Result<T, String>,
     ) -> Result<Option<(Size, T, SourceVideoFrame)>, String> {
         let tags = |source: &pm_media::decode::service::MediaSource| {
@@ -62,7 +66,12 @@ impl Renderer {
         }
         let Some((source, frame)) = self
             .media
-            .source_exact_decoded(path, time, |source| tags(source).is_some())
+            .source_exact_decoded(path, time, |source| {
+                tags(source).is_some()
+                    && source.probe.video.as_ref().is_some_and(|video| {
+                        u64::from(video.width) * u64::from(video.height) <= max_pixels
+                    })
+            })
             .map_err(|e| match e {
                 crate::media::MediaFailure::Unsupported(feature) => feature.to_string(),
                 crate::media::MediaFailure::Failed(message) => message,
