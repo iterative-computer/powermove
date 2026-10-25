@@ -32,6 +32,10 @@ pub(super) struct SourceReuse {
     target: Option<Target>,
     readback: pm_gpu::readback::ReadbackRing,
     batch_buffer: Option<(wgpu::Buffer, u64)>,
+    /// The last minified draw's mip pyramid, rebuilt in place by the next
+    /// draw of a source with the same extent (playback, scrubbing and each
+    /// frame of a batch), so neither allocates a pyramid per frame.
+    pyramid: Option<Pyramid>,
 }
 
 impl SourceReuse {
@@ -39,12 +43,21 @@ impl SourceReuse {
         self.target.as_ref().map_or(0, Target::bytes)
             + self.readback.capacity_bytes()
             + self.batch_buffer.as_ref().map_or(0, |(_, bytes)| *bytes)
+            + self.pyramid.as_ref().map_or(0, Pyramid::bytes)
     }
 
     pub(super) fn trim(&mut self, bytes: u64) {
         if self.bytes() > bytes {
+            self.pyramid = None;
+        }
+        if self.bytes() > bytes {
             *self = Self::default();
         }
+    }
+
+    /// Drops the kept pyramid (a monitor at rest); returns its bytes.
+    pub(super) fn release_pyramid(&mut self) -> u64 {
+        self.pyramid.take().map_or(0, |p| p.bytes())
     }
 }
 
@@ -529,15 +542,17 @@ impl Renderer {
         );
         // One GPU pyramid per decoded source draw, shared by playback's
         // trilinear filter and Final's bounded-support Lanczos-3. Never read
-        // back or build mips on the CPU, or retain mutable decoder textures.
+        // back or build mips on the CPU, or retain mutable decoder textures;
+        // the levels are rebuilt each draw into one kept texture.
         let pyramid = if f64::from(source.0.width()) > dw || f64::from(source.0.height()) > dh {
-            self.pipelines.resample.pyramid(
+            let pyramid = self.pipelines.resample.rebuild(
                 &self.device,
                 encoder,
                 &source.0.texture,
-                false,
-                &mut self.pyramids,
-            )
+                self.source_reuse.pyramid.take(),
+            );
+            self.source_reuse.pyramid = Some(pyramid.clone());
+            pyramid
         } else {
             Pyramid::base(&source.0.texture)
         };

@@ -1140,6 +1140,95 @@ fn source_batch_matches_individual_video_frames_in_order() {
     );
 }
 
+/// Minified source draws rebuild one kept mip pyramid: each frame of a
+/// batch reuses it within one submission, playback allocates no texture per
+/// frame, and a viewer at rest releases it.
+#[test]
+fn minified_source_draws_reuse_one_pyramid() {
+    use pm_render::sampling::Sampling;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("moving.mp4");
+    let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("source engine/env.sh")
+        .join("bin/ffmpeg");
+    let status = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=30:duration=1",
+            "-an",
+            "-c:v",
+            "h264_videotoolbox",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "30",
+            "-f",
+            "mp4",
+            "-y",
+        ])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let size = Size::new(80, 45);
+    let times = [0, 9, 18, 27]
+        .map(|frame| Ticks::new(frame * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap());
+    let mut individual = Renderer::headless().unwrap();
+    let expected: Vec<_> = times
+        .iter()
+        .map(|&time| {
+            individual
+                .source_rgba8(&path, time, size, SourceFit::Stretch, None, false)
+                .unwrap()
+        })
+        .collect();
+    assert_ne!(expected[0], expected[1], "the fixture must show motion");
+    let mut renderer = Renderer::headless().unwrap();
+    assert_eq!(
+        renderer
+            .source_rgba8_batch(&path, &times, size, SourceFit::Stretch, None, false)
+            .unwrap(),
+        expected,
+        "each batched frame samples its own levels"
+    );
+    let play = |renderer: &mut Renderer, frame: i64| {
+        renderer
+            .source_rgba8_composed(
+                &path,
+                Ticks::new(frame * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap(),
+                size,
+                SourceFit::Stretch,
+                &Default::default(),
+                false,
+                Sampling::Playback,
+            )
+            .unwrap()
+    };
+    play(&mut renderer, 1);
+    let scope = pm_perf::Scope::begin();
+    for frame in 2..6 {
+        play(&mut renderer, frame);
+    }
+    let counters = scope.finish();
+    assert_eq!(
+        counters.get(pm_perf::Counter::TextureAllocs),
+        0,
+        "playback rebuilds the kept pyramid: {}",
+        counters.to_json()
+    );
+    let pyramid = 320 * 180 * 8 * 4 / 3;
+    let kept = renderer.frame_reuse_bytes();
+    assert!(renderer.release_idle_targets() >= pyramid);
+    assert_eq!(renderer.frame_reuse_bytes(), kept - pyramid);
+}
+
 /// The source monitor shows Interpret Footage's reading exactly as the
 /// composition draws the same source: no coded planes (Chromium would apply
 /// the probe's tags), and the engine's composed frame equals a full-frame

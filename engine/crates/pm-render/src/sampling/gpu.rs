@@ -35,6 +35,12 @@ pub(crate) struct Pyramid {
 }
 
 impl Pyramid {
+    /// Nominal texel bytes of every level.
+    pub fn bytes(&self) -> u64 {
+        let texel = u64::from(self.texture.format().block_copy_size(None).unwrap_or(8));
+        u64::from(self.width) * u64::from(self.height) * texel * 4 / 3
+    }
+
     /// No pyramid allocation is needed when the draw never minifies.
     pub fn base(source: &wgpu::Texture) -> Self {
         Self {
@@ -83,17 +89,7 @@ impl PyramidCache {
 
     /// Bytes held (level 0 and the levels below it).
     pub fn bytes(&self) -> u64 {
-        self.entries
-            .iter()
-            .map(|(_, p)| {
-                let px = u64::from(p.width) * u64::from(p.height);
-                let texel = match p.texture.format() {
-                    wgpu::TextureFormat::Rgba32Float => 16,
-                    _ => 8,
-                };
-                px * texel * 4 / 3
-            })
-            .sum()
+        self.entries.iter().map(|(_, p)| p.bytes()).sum()
     }
 }
 
@@ -293,23 +289,50 @@ impl Resampler {
         if still && let Some(p) = cache.get(source) {
             return p;
         }
+        let pyramid = self.rebuild(device, encoder, source, None);
+        if still {
+            cache.put(source.clone(), pyramid.clone());
+        }
+        pyramid
+    }
+
+    /// Records `source`'s mip pyramid into `reuse` when it has the same
+    /// extent and format, else into a new texture. Queue order makes the
+    /// reuse safe: draws recorded earlier read the previous levels first.
+    pub fn rebuild(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        reuse: Option<Pyramid>,
+    ) -> Pyramid {
         let (width, height) = (source.width().max(1), source.height().max(1));
         let levels = 32 - width.max(height).leading_zeros();
         let format = source.format();
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pm level 2 pyramid"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: levels,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let texture = match reuse {
+            Some(p)
+                if p.levels == levels
+                    && (p.width, p.height) == (width, height)
+                    && p.texture.format() == format =>
+            {
+                p.texture
+            }
+            _ => device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm level 2 pyramid"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: levels,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }),
+        };
         let level_view = |level: u32| {
             texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("pm pyramid level"),
@@ -357,17 +380,13 @@ impl Resampler {
             drop(pass);
             above = target;
         }
-        let pyramid = Pyramid {
+        Pyramid {
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
             texture,
             width,
             height,
             levels,
-        };
-        if still {
-            cache.put(source.clone(), pyramid.clone());
         }
-        pyramid
     }
 
     pub fn pipeline(&self, format: wgpu::TextureFormat, blend: PassBlend) -> &wgpu::RenderPipeline {
