@@ -17,7 +17,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { expect, launchApp, repoRoot, test } from './helpers/app';
-import { fixturePath } from './helpers/media';
+import { fixturePath, importToMediaPool } from './helpers/media';
 import { sourceFfmpeg } from './helpers/source-media';
 import { commonSourceTargets, installSourcePerformanceDisplay, sourceFrameTimeline, sourceTimelineCorrespondence, type SourceFrameTimeline, type SourceDisplayProbe } from './helpers/source-performance-display';
 import { MAX_LOAD, MIN_RUNS, percentile, sourcePerformanceGate, type PerfSample } from './helpers/source-performance-gate';
@@ -64,16 +64,7 @@ type LaunchedSession = Awaited<ReturnType<typeof launchApp>>;
 /** A media-panel import has no timeline placement. Composition rendering
  * must not seek the elements this source benchmark owns. */
 async function importCopy(session: LaunchedSession, file: string, enabled: boolean) {
-  const chooser = session.page.waitForEvent('filechooser');
-  await session.page.evaluate(() => {
-    const input = document.createElement('input'); input.type = 'file';
-    input.onchange = async () => {
-      try { await (window as any).PM.importFiles([...input.files!], { placement: null }); }
-      finally { input.remove(); }
-    };
-    document.body.append(input); input.click();
-  });
-  await (await chooser).setFiles(file);
+  await importToMediaPool(session.page, file);
   await session.page.waitForFunction(name => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === name), path.basename(file));
   if (enabled) await session.page.waitForFunction(() => !!(window as any).PM.EngineRender?.ready);
 }

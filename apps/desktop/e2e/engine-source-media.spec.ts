@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
-import { fixturePath } from './helpers/media';
+import { fixturePath, importToMediaPool } from './helpers/media';
 import { capturedPixelDelta, decodedRenditionIdentity, renditionAudioFixture, sourcePcmComparison } from './helpers/source-media';
 import { readPngMatrixTrcProfile, referenceSrgbToDisplay, type ColourTriple } from './helpers/source-colour-reference';
 import { decodedSourceReference, solidCaptureError } from './helpers/source-snapshot-reference';
@@ -37,21 +37,12 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
           return (draw as any).apply(this, args);
         };
       }, enabled);
-      const importSource = async (file: string) => {
-        const chooser = page.waitForEvent('filechooser');
-        await page.evaluate(() => {
-          const input = document.createElement('input'); input.type = 'file';
-          input.onchange = () => { void (window as any).PM.importFiles([...input.files!], { placement: null }); };
-          input.click();
-        });
-        await (await chooser).setFiles(file);
-      };
       for (const file of ['still-red.png', 'h264-aac.mp4', 'tone.wav', 'prores422.mov', 'still.heic']) {
-        await importSource(fixturePath(file));
+        await importToMediaPool(page, fixturePath(file));
         await page.waitForFunction(name => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === name), file);
       }
       const audioFile = await renditionAudioFixture(directory);
-      await importSource(audioFile);
+      await importToMediaPool(page, audioFile);
       await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === 'rendition-audio.mov'));
       await page.evaluate(async () => {
         const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><style>text{font:31px system-ui;fill:rebeccapurple}</style><rect x="7.25" y="11.5" width="91.5" height="79.25" rx="13.5" fill="#f57c14"/><text x="18" y="145">Source &amp; type</text></svg>';
