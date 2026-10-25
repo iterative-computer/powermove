@@ -13,8 +13,9 @@
  * shape, a video, and a level 1 SVG image, at 25%, 50%, 61%, 100% and 237%
  * on a 2x display, with the preview resolution at Auto, Full and Half. Each
  * case must hold the corpus bound (section 25's render class: every
- * channel within 1 code value for 99.9% of pixels, none beyond 4), unless
- * it is a known difference listed in KNOWN.
+ * channel within 1 code value for 99.9% of pixels, none beyond 4) outside
+ * video. The untagged SD fixture's video uses an independent H.273 / SMPTE
+ * 170M reference instead (docs/engine/quality-ledger.md, Video).
  *
  * Both windows run with `--force-color-profile=srgb` (set
  * PM_VIEWER_CANVAS_PROFILE=display to keep the display's profile): on a
@@ -35,16 +36,16 @@
  * crop starts past 16,384 output pixels from the origin); the engine draws
  * them at today's full resolution.
  *
- * Every case asserts the corpus bound on the whole stage and outside the
- * video layer. Cases with a known visible difference are listed in KNOWN
- * with their issue (/tmp/ne-w5/issues.md, docs/engine/bridge.md) and must
- * fail it: if one starts passing, the test fails so the list is updated.
- * One known cause is the video's editing copy: with the preview resolution
+ * Every case asserts the corpus bound outside the video layer. Video cases
+ * compare the whole red interior with the f64 reference and the entire video
+ * box, including scaled edges, with today's original-video coverage after
+ * replacing only its nonstandard source colour. Uncropped content checks the
+ * native pixel against the f64 reference and today's pixel.
+ * The video's editing copy is a separate known difference: with the preview resolution
  * at Auto or a quality below 1, today's viewer draws a video's editing copy
  * (`previewVideoElement`, the intra-1280 derivative) where the engine draws
- * the original (no proxies yet, section 14). The control proves it: today's
- * viewer is captured again with the editing copy removed (it then draws the
- * original), and the engine must match that capture on the whole stage.
+ * the original (no proxies yet, section 14). Today's viewer is captured
+ * again with the editing copy removed to supply its original-video coverage.
  *
  * Evidence (today, engine, differences in red) goes to
  * $PM_VIEWER_CANVAS_EVIDENCE when set.
@@ -80,16 +81,57 @@ const BEYOND: View[] = [
   { zoom: 2.5, pan: 'right', resolution: '1', comp: [3840, 2160] },
 ];
 
-/** Cases with a known visible difference, and why. Each must fail the
- *  bound named (`stage`: the whole stage; `outside`: also outside the video). */
+/** Cases where today's viewer also selects a video editing copy. */
 const VIDEO_COPY = 'video editing copy at Auto or quality below 1 (Phase 4a proxies; issues.md)';
-const KNOWN: Record<string, { why: string; fails: 'stage' | 'outside' }> = {
-  '25% Auto': { why: VIDEO_COPY, fails: 'stage' },
-  '25% Half': { why: VIDEO_COPY, fails: 'stage' },
-  '50% Half': { why: VIDEO_COPY, fails: 'stage' },
-  '61% Half': { why: VIDEO_COPY, fails: 'stage' },
-  '100% Half': { why: VIDEO_COPY, fails: 'stage' },
+const KNOWN: Record<string, { why: string }> = {
+  '25% Auto': { why: VIDEO_COPY },
+  '25% Half': { why: VIDEO_COPY },
+  '50% Half': { why: VIDEO_COPY },
+  '61% Half': { why: VIDEO_COPY },
+  '100% Half': { why: VIDEO_COPY },
 };
+
+// Test-only f64 reference, independent of production colour code. The public
+// h264-aac.mp4 fixture's 0.5 s interior decodes Y'CbCr=(81,90,240). H.273
+// gives limited-range BT.601 Y'CbCr; VIDEO-SD-1 reads this untagged 160×90
+// source with SMPTE 170M primaries and an sRGB display curve. The fixture's
+// decoded codes can be checked independently with FFmpeg.
+type Vec3 = [number, number, number];
+type Mat3 = [Vec3, Vec3, Vec3];
+function referenceVideoColor(): Vec3 {
+  const xyToXyz = ([x, y]: [number, number]): Vec3 => [x / y, 1, (1 - x - y) / y];
+  const mv = (m: Mat3, v: Vec3): Vec3 => [0, 1, 2].map((row) =>
+    m[row as 0 | 1 | 2][0] * v[0] + m[row as 0 | 1 | 2][1] * v[1] + m[row as 0 | 1 | 2][2] * v[2]) as Vec3;
+  const inverse = (m: Mat3): Mat3 => {
+    const [[a, b, c], [d, e, f], [g, h, i]] = m;
+    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    return [
+      [(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+      [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+      [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det],
+    ];
+  };
+  const rgbToXyz = (red: [number, number], green: [number, number], blue: [number, number]): Mat3 => {
+    const r = xyToXyz(red), g = xyToXyz(green), b = xyToXyz(blue);
+    const primaries: Mat3 = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]];
+    const scales = mv(inverse(primaries), xyToXyz([0.3127, 0.3290]));
+    return [[r[0] * scales[0], g[0] * scales[1], b[0] * scales[2]],
+      [r[1] * scales[0], g[1] * scales[1], b[1] * scales[2]],
+      [r[2] * scales[0], g[2] * scales[1], b[2] * scales[2]]];
+  };
+  const y = (81 - 16) / 219, cb = (90 - 128) / 224, cr = (240 - 128) / 224;
+  const kr = 0.299, kb = 0.114;
+  const rp = y + 2 * (1 - kr) * cr, bp = y + 2 * (1 - kb) * cb;
+  const gp = (y - kr * rp - kb * bp) / (1 - kr - kb);
+  const eotf = (v: number) => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  const source = rgbToXyz([0.630, 0.340], [0.310, 0.595], [0.155, 0.070]);
+  const destination = rgbToXyz([0.640, 0.330], [0.300, 0.600], [0.150, 0.060]);
+  const linear = mv(inverse(destination), mv(source, [eotf(rp), eotf(gp), eotf(bp)]));
+  const oetf = (v: number) => v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+  return linear.map((value) => Math.max(0, Math.min(1, oetf(value))) * 255) as Vec3;
+}
+const VIDEO_REFERENCE = referenceVideoColor();
+const referenceError = (rgb: readonly number[]) => Math.max(...VIDEO_REFERENCE.map((v, i) => Math.abs(rgb[i]! - v)));
 
 const ART = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" viewBox="0 0 160 90">
 <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4C8DFF"/><stop offset="1" stop-color="#E83A5E"/></linearGradient></defs>
@@ -159,7 +201,7 @@ const ARGS = process.env.PM_VIEWER_CANVAS_PROFILE === 'display' ? [] : ['--force
 
 /** The frame's content without the scaling: the engine's snapshot and
  *  today's `renderToPixels` at the canvas size the viewer sent. */
-const content = (page: Page) => page.evaluate(() => {
+const content = (page: Page) => page.evaluate((reference: number[]) => {
   const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
   const canvas = V.enginePresentation?.states?.at?.(-1)?.canvas;
   if (!canvas) return null;
@@ -168,6 +210,23 @@ const content = (page: Page) => page.evaluate(() => {
   if (canvas.crop.x !== 0 || canvas.crop.y !== 0 || canvas.crop.width !== project.w || canvas.crop.height !== project.h) return { canvas, cropped: true };
   const { width, height } = canvas;
   const engine = PM.EngineRender.snapshotSync({ time: PM.time, width, height, pixels: 'opaque', motionBlurSamples: 0, background: true });
+  const sample = (data: Uint8Array, x: number, y: number) => Array.from(data.subarray((y * width + x) * 4, (y * width + x) * 4 + 3));
+  const videoCenter = project.layers.some((layer: any) => layer.type === 'video')
+    ? [Math.floor(530 * width / project.w), Math.floor(290 * height / project.h)] as const : null;
+  const videoReference = (() => {
+    if (!videoCenter) return;
+    const [x0, x1] = [Math.ceil(456 * width / project.w), Math.floor(604 * width / project.w)];
+    const [y0, y1] = [Math.ceil(251 * height / project.h), Math.floor(329 * height / project.h)];
+    let pixels = 0, withinOne = 0, max = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+      const i = (y * width + x) * 4;
+      const delta = Math.max(...reference.map((value, channel) => Math.abs(engine.data[i + channel]! - value)));
+      pixels++;
+      if (delta <= 1) withinOne++;
+      max = Math.max(max, delta);
+    }
+    return { pixels, withinOne, max, passes: pixels > 0 && withinOne / pixels >= 0.999 && max <= 4 };
+  })();
   // Today's renderToPixels twice: the first render of a size can differ
   // from the next (recorded, not hidden).
   const compare = () => {
@@ -179,11 +238,12 @@ const content = (page: Page) => page.evaluate(() => {
       if (m <= 1) within++;
       max = Math.max(max, m);
     }
-    return { fraction: within / (legacy.length / 4), max };
+    return { fraction: within / (legacy.length / 4), max,
+      ...(videoCenter ? { videoPixel: { engine: sample(engine.data, ...videoCenter), legacy: sample(legacy, ...videoCenter) } } : {}) };
   };
   const first = compare(), again = compare();
-  return { canvas, pixels: width * height, fraction: first.fraction, max: first.max, again };
-});
+  return { canvas, pixels: width * height, fraction: first.fraction, max: first.max, videoPixel: first.videoPixel, videoReference, again };
+}, VIDEO_REFERENCE.map(Math.round));
 
 /** The viewer in a state, settled, and the stage's pixels as the window shows them. */
 async function capture(session: LaunchedApp, view: View, engine: boolean): Promise<Capture> {
@@ -289,6 +349,70 @@ function compare(a: Capture, b: Capture): { stats: Stats; outside: Stats; diff: 
   return { stats: stats(withinOne, exact, max, pixels), outside: stats(oWithin, oExact, oMax, oPixels), diff };
 }
 
+/** The whole visible red field, six composition pixels inside the clip's
+ *  edges so crop and browser scaling cannot include the antialiased border. */
+function videoReference(c: Capture): { stats: Stats; center: number[] } | undefined {
+  const [left, top, right, bottom] = videoBox(c);
+  if (right <= left || bottom <= top) return;
+  const inset = 6 * (right - left) / 168;
+  const [x0, y0] = [Math.max(0, Math.ceil(left + inset)), Math.max(0, Math.ceil(top + inset))];
+  const [x1, y1] = [Math.min(c.width, Math.floor(right - inset)), Math.min(c.height, Math.floor(bottom - inset))];
+  if (x0 >= x1 || y0 >= y1) return;
+  let withinOne = 0, exact = 0, max = 0;
+  const expected = VIDEO_REFERENCE.map(Math.round);
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const i = (y * c.width + x) * 4;
+    const delta = Math.max(Math.abs(c.data[i + 2]! - expected[0]!), Math.abs(c.data[i + 1]! - expected[1]!), Math.abs(c.data[i]! - expected[2]!));
+    if (delta <= 1) withinOne++;
+    if (delta === 0) exact++;
+    max = Math.max(max, delta);
+  }
+  const x = Math.floor((x0 + x1) / 2), y = Math.floor((y0 + y1) / 2), i = (y * c.width + x) * 4;
+  return { stats: stats(withinOne, exact, max, (x1 - x0) * (y1 - y0)), center: [c.data[i + 2]!, c.data[i + 1]!, c.data[i]!] };
+}
+
+/** Decision V1 geometry reference, across the entire video box including its
+ *  border. Today's original-video capture has the same authored rectangle and
+ *  Chromium canvas scaling; its red channel gives the coverage at each stage
+ *  pixel. Replace only its nonstandard Rec.709 reading with the independent
+ *  SMPTE 170M -> Rec.709 colour reference. The clip lies over the uniform
+ *  authored background and is the project's last layer. */
+function videoBoxReference(todayOriginal: Capture, engine: Capture, errors?: {
+  today: Uint32Array; native: Uint32Array; regression: { pixels: number; withinOne: number; max: number };
+}): Stats {
+  expect([todayOriginal.width, todayOriginal.height]).toEqual([engine.width, engine.height]);
+  const [left, top, right, bottom] = videoBox(engine);
+  const background = [27, 36, 51] as const; // #1b2433
+  let pixels = 0, withinOne = 0, exact = 0, max = 0;
+  for (let y = Math.max(0, Math.ceil(top)); y < Math.min(engine.height, Math.ceil(bottom)); y++) {
+    for (let x = Math.max(0, Math.ceil(left)); x < Math.min(engine.width, Math.ceil(right)); x++) {
+      const i = (y * engine.width + x) * 4;
+      const coverage = Math.max(0, Math.min(1, (todayOriginal.data[i + 2]! - background[0]) / (254 - background[0])));
+      const expected = VIDEO_REFERENCE.map((value, channel) => Math.round(background[channel]! + coverage * (value - background[channel]!)));
+      let oldDelta = 0, delta = 0;
+      for (let channel = 0; channel < 3; channel++) {
+        const oldError = Math.abs(todayOriginal.data[i + 2 - channel]! - expected[channel]!);
+        const nativeError = Math.abs(engine.data[i + 2 - channel]! - expected[channel]!);
+        oldDelta = Math.max(oldDelta, oldError);
+        delta = Math.max(delta, nativeError);
+      }
+      if (errors) {
+        errors.today[oldDelta] = (errors.today[oldDelta] ?? 0) + 1;
+        errors.native[delta] = (errors.native[delta] ?? 0) + 1;
+        const excess = delta - oldDelta;
+        errors.regression.pixels++;
+        if (excess <= 1) errors.regression.withinOne++;
+        errors.regression.max = Math.max(errors.regression.max, excess);
+      }
+      pixels++;
+      if (delta <= 1) withinOne++;
+      if (delta === 0) exact++;
+      max = Math.max(max, delta);
+    }
+  }
+  return stats(withinOne, exact, max, pixels);
+}
+
 const rgba = (c: Capture) => { const out = new Uint8Array(c.data.length); for (let i = 0; i < c.data.length; i += 4) { out[i] = c.data[i + 2]!; out[i + 1] = c.data[i + 1]!; out[i + 2] = c.data[i]!; out[i + 3] = 255; } return out; };
 
 test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 800% and every preview resolution', async () => {
@@ -331,10 +455,17 @@ test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 
   const engine = await run(true);
   const evidence = process.env.PM_VIEWER_CANVAS_EVIDENCE;
   if (evidence) await mkdir(evidence, { recursive: true });
-  const results: Record<string, Stats & { content?: unknown; outsideVideo: Stats; geometry: unknown; known?: string }> = {};
+  const results: Record<string, Stats & { content?: unknown; outsideVideo: Stats; geometry: unknown; known?: string; videoPixel?: number[]; videoReference?: Stats; videoBoxReference?: Stats }> = {};
+  const aggregateErrors = { today: new Uint32Array(256), native: new Uint32Array(256),
+    regression: { pixels: 0, withinOne: 0, max: -Infinity } };
   const record = async (label: string, t: Capture, e: Capture) => {
     const { stats, outside, diff } = compare(t, e);
-    results[label] = { ...stats, outsideVideo: outside, content: e.content, geometry: { today: t.geometry, engine: e.geometry }, ...(KNOWN[label] ? { known: KNOWN[label]!.why } : {}) };
+    const reference = videoReference(e);
+    const original = KNOWN[label] ? today[`${label} original video`] : t;
+    results[label] = { ...stats, outsideVideo: outside, content: e.content, geometry: { today: t.geometry, engine: e.geometry },
+      ...(reference ? { videoPixel: reference.center, videoReference: reference.stats,
+        videoBoxReference: videoBoxReference(original!, e, MIXED.some((view) => name(view) === label) ? aggregateErrors : undefined) } : {}),
+      ...(KNOWN[label] ? { known: KNOWN[label]!.why } : {}) };
     console.log(`viewer canvas ${label}: ${t.width}×${t.height} ${JSON.stringify(t.geometry)} ${JSON.stringify(stats)} outside the video ${JSON.stringify(outside)} content ${JSON.stringify(e.content)}`);
     if (evidence) {
       const slug = label.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
@@ -352,16 +483,48 @@ test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 
     await record(label, t, e);
   }
   for (const label of Object.keys(today).filter((k) => k.endsWith(' original video'))) await record(label, today[label]!, engine[label.replace(' original video', '')]!);
+  const summarize = (bins: Uint32Array) => {
+    let samples = 0, sum = 0, max = 0;
+    for (let error = 0; error < bins.length; error++) {
+      const count = bins[error]!;
+      samples += count; sum += error * count;
+      if (count) max = error;
+    }
+    let seen = 0, p999 = 0;
+    for (let error = 0; error < bins.length; error++) {
+      seen += bins[error]!;
+      if (seen >= Math.ceil(samples * 0.999)) { p999 = error; break; }
+    }
+    return { samples, max, p999, mean: sum / samples };
+  };
+  const aggregate = { today: summarize(aggregateErrors.today), native: summarize(aggregateErrors.native),
+    regression: { ...aggregateErrors.regression, fraction: aggregateErrors.regression.withinOne / aggregateErrors.regression.pixels } };
+  console.log(`viewer video corrected-reference aggregate ${JSON.stringify(aggregate)}`);
+  expect(aggregate.native.samples).toBe(aggregate.today.samples);
+  expect(aggregate.regression.pixels).toBe(aggregate.native.samples);
+  expect.soft(aggregate.regression.fraction, 'full video box: native error exceeds today by at most 1 CV for 99.9% of pixels').toBeGreaterThanOrEqual(0.999);
+  expect.soft(aggregate.regression.max, 'full video box: native error exceeds today by at most 4 CV').toBeLessThanOrEqual(4);
+  for (const metric of ['max', 'p999', 'mean'] as const)
+    expect.soft(aggregate.native[metric], `full video box: native ${metric} no worse than today`).toBeLessThanOrEqual(aggregate.today[metric]);
   if (evidence) await writeFile(path.join(evidence, 'results.json'), JSON.stringify(results, null, 1));
   for (const [label, r] of Object.entries(results)) {
-    const known = KNOWN[label];
-    if (!known) {
-      expect.soft({ label, passes: r.passes, outsideVideo: r.outsideVideo.passes, r }).toMatchObject({ label, passes: true, outsideVideo: true });
-    } else if (known.fails === 'stage') {
-      // Known: the whole stage misses the bound; outside the video it holds.
-      expect.soft({ label, why: known.why, passes: r.passes, outsideVideo: r.outsideVideo.passes, r }).toMatchObject({ label, passes: false, outsideVideo: true });
-    } else {
-      expect.soft({ label, why: known.why, outsideVideo: r.outsideVideo.passes, r }).toMatchObject({ label, outsideVideo: false });
+    expect.soft(r.outsideVideo.passes, `${label}: nonvideo viewer parity`).toBe(true);
+    expect.soft(!!r.videoPixel, `${label}: video reference is present exactly in the mixed project`)
+      .toBe(!BEYOND.some((view) => name(view) === label));
+    if (!r.videoPixel) {
+      expect.soft(r.passes, `${label}: whole stage without video`).toBe(true);
+      continue;
+    }
+    // The browser-scaled stage is checked across the clip's uniform red interior.
+    expect.soft(r.videoReference?.passes, `${label}: displayed video interior vs f64 reference`).toBe(true);
+    expect.soft(r.videoBoxReference?.passes, `${label}: video border and viewport scaling vs corrected original-video coverage`).toBe(true);
+    expect.soft(referenceError(r.videoPixel), `${label}: displayed video center vs f64 reference`).toBeLessThanOrEqual(0.59);
+    const sampled = (r.content as any)?.videoPixel;
+    if (sampled) {
+      expect.soft((r.content as any).videoReference?.passes, `${label}: native snapshot video interior vs f64 reference`).toBe(true);
+      expect.soft(referenceError(sampled.engine), `${label}: native source colour vs f64 reference`).toBeLessThanOrEqual(0.59);
+      expect.soft(referenceError(sampled.engine), `${label}: native source no worse than today`).toBeLessThanOrEqual(referenceError(sampled.legacy));
+      expect.soft(sampled.engine, `${label}: displayed video and native snapshot agree`).toEqual(r.videoPixel);
     }
   }
 });

@@ -1162,7 +1162,10 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
     const state = fileState(project.id);
     state.path = association?.path;
-    state.savedHash = association ? await projectFingerprint(PM.Projects.writtenJSON?.(project) ?? await stringifyAsync(project)) : undefined;
+    // The checkpoint may already have JSON text. Otherwise hash the hydrated
+    // project in slices instead of materializing another whole-document string.
+    const writtenJSON = association && PM.Projects.writtenJSON?.(project);
+    state.savedHash = association ? await (writtenJSON ? projectFingerprint(writtenJSON) : fingerprintJSON(project)) : undefined;
     if (!current()) { opening.close(); return false; }
     rememberFile(project.id, state);
     await refreshFileDirty(project, current);

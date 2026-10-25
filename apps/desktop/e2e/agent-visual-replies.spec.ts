@@ -85,6 +85,7 @@ test('visual replies publish, interact, expand, replay and reopen in their durab
   expect((await publish(session,fixtures('storyboard'))).ok).toBe(true);
   const storyboard = session.page.frameLocator('iframe[title="Launch storyboard"]');
   await session.page.getByRole('button',{name:'Expand Launch storyboard',exact:true}).click();
+  await expect.poll(() => storyboard.getByRole('button',{name:'Next shot'}).evaluate((button:HTMLButtonElement) => typeof button.onclick)).toBe('function');
   await storyboard.getByRole('button',{name:'Next shot'}).click();
   await expect(storyboard.locator('output')).toContainText('Reveal');
   await session.page.getByRole('button',{name:'Close visualization',exact:true}).click();

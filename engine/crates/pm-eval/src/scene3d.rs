@@ -158,11 +158,15 @@ fn type_of(v: &JsValue) -> &'static str {
 
 /// A channel object `{ v, kf: [], expr: null }`.
 fn channel(v: Value) -> Value {
-    let mut m = Map::new();
-    m.insert("v", v);
-    m.insert("kf", Value::Array(Vec::new()));
-    m.insert("expr", Value::Null);
-    Value::Object(m)
+    Value::Object(
+        [
+            (JsString::from("expr"), Value::Null),
+            (JsString::from("kf"), Value::Array(Vec::new())),
+            (JsString::from("v"), v),
+        ]
+        .into_iter()
+        .collect(),
+    )
 }
 
 /// The evaluated scene (`compositionScene`'s answer).

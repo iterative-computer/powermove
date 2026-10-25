@@ -563,16 +563,20 @@ mod child {
             &painted.pixels,
             SnapshotPixels::Premultiplied,
         );
-        // Level 1 keeps the full Canvas2D quad: its transparent border is
-        // part of the source geometry even when the ink has a smaller crop.
-        assert_eq!(painted.plan.crop, [0, 0, raster.width, raster.height]);
-        let [ink_left, ink_top, _, _] = painted.plan.scene.ink().expect("the layer has ink");
+        // Level 1 retains only ink; the layer snapshot still places that crop
+        // in the whole Canvas2D raster with its transparent padding.
+        let [ink_left, ink_top, ink_right, ink_bottom] =
+            painted.plan.scene.ink().expect("the layer has ink");
+        assert_eq!(
+            painted.plan.crop,
+            [ink_left, ink_top, ink_right, ink_bottom]
+        );
         assert!(
-            ink_left > 0 && ink_top > 0,
+            ink_left > 0 && ink_top > 0 && ink_right < raster.width && ink_bottom < raster.height,
             "exercise transparent canvas padding"
         );
         // `place_raster` takes `[x, y, w, h]` from the plan's `[x0, y0, x1, y1]`
-        // crop (here the whole quad): the placed pixels are the raster's.
+        // ink crop: the placed full-canvas pixels are the raster's exactly.
         let [px0, py0, px1, py1] = painted.plan.crop;
         let placed = pm_node::present::snapshot::place_raster(
             &rgba,
@@ -586,11 +590,7 @@ mod child {
             placed.0,
             "the placed raster is the registry's raster"
         );
-        assert_eq!(
-            rgba.len(),
-            raster.width as usize * raster.height as usize * 4
-        );
-        assert_eq!(pixels(&raster), rgba, "the raster is the registry's raster");
+        assert_eq!(rgba.len(), (px1 - px0) as usize * (py1 - py0) as usize * 4);
         println!("layer raster: {}x{}", raster.width, raster.height);
         // Any scale, as today's `PM.raster` (`textRasterGeometry`): the
         // density is `min(scale, 8192 / w, 8192 / h)` of the same box, so

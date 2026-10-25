@@ -449,24 +449,38 @@ export default function activate(api: PowermoveAPI): void {
       /* ── scene3d ── */
       check('scene3d reads', () => {
         const s = api.scene3d;
-        const rendering: any = s.getRendering();
-        const state: any = s.previewState();
         const view = s.getView();
-        const auto = s.getAutoKey();
+        const navigation = s.getNavigationMode();
+        const mode = s.getMode();
+        const space = s.getSpace();
+        const otherView = view === 'camera' ? 'editor' : 'camera';
+        const otherNavigation = navigation === 'orbit' ? 'pan' : 'orbit';
+        const otherMode = mode === 'rotate' ? 'scale' : 'rotate';
+        const otherSpace = space === 'world' ? 'local' : 'world';
         const three = byId(fixture.three);
         const described: any = three ? s.describe(three.id) : null;
-        // The reads follow what they read, as today: the auto-key and view
-        // setters round-trip, rendering is the open composition's settings.
-        s.setAutoKey(!auto);
-        const flipped = s.getAutoKey();
-        s.setAutoKey(auto);
-        const other = view === 'camera' ? 'editor' : 'camera';
-        s.setView(other as any);
-        const switched = s.getView();
-        s.setView(view as any);
+        const selection = s.selection();
+        let switched: unknown, changedNavigation: unknown, changedMode: unknown, changedSpace: unknown;
+        try {
+          s.setView(otherView); switched = s.getView();
+          s.setView(view);
+          s.setNavigationMode(otherNavigation); changedNavigation = s.getNavigationMode();
+          s.setNavigationMode(navigation);
+          s.setMode(otherMode); changedMode = s.getMode();
+          s.setMode(mode);
+          s.setSpace(otherSpace); changedSpace = s.getSpace();
+        } finally {
+          s.setSpace(space); s.setMode(mode); s.setNavigationMode(navigation); s.setView(view);
+        }
         const comp: any = api.model.curComp();
-        const renderingOk = rendering === s.getRendering() || near(json(rendering), json(s.getRendering()));
-        return { ok: !!rendering && renderingOk && ['draft', 'rendered'].includes(state.mode) && ['camera', 'editor'].includes(view) && typeof auto === 'boolean' && flipped === !auto && s.getAutoKey() === auto && !!pm.autokey === auto && switched === other && s.getView() === view && (!three || described?.id === three.id) && !!comp, detail: { view, switched, mode: state.mode, auto, flipped, described: described?.id ?? null } };
+        return { ok: ['camera', 'editor'].includes(view) && switched === otherView && s.getView() === view
+          && ['select', 'orbit', 'pan', 'dolly'].includes(navigation) && changedNavigation === otherNavigation && s.getNavigationMode() === navigation
+          && ['translate', 'rotate', 'scale'].includes(mode) && changedMode === otherMode && s.getMode() === mode
+          && ['world', 'local'].includes(space) && changedSpace === otherSpace && s.getSpace() === space
+          && Array.isArray(selection.ids) && selection.layerId === (selection.ids[0] ?? null)
+          && typeof s.isGroup(fixture.group ?? '') === 'boolean'
+          && (!three || described?.id === three.id) && !!comp,
+          detail: { view, switched, navigation, changedNavigation, mode, changedMode, space, changedSpace, described: described?.id ?? null } };
       });
 
       /* ── EDITOR_HELPER_EXPORTS from this compiled bundle ── */

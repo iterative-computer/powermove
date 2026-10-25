@@ -150,30 +150,35 @@ test('preview memory limit is available in Settings and survives restarting the 
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('ordinary playback and backward scrubbing automatically reuse remembered frames', async ({ session }) => {
-  await session.openEditor();
-  await session.page.evaluate(async () => {
-    const PM = (window as any).PM;
-    PM.pause(); PM.perf.auto = false; PM.quality = 1;
-    await document.fonts.ready;
-    PM.proj = PM.mkProject({ name: 'Loop memory', w: 160, h: 90, dur: 1, fps: 10 });
-    PM.proj.work = [0, .3]; PM.loop = true;
-    PM.proj.layers = [PM.mkLayer('shape', { d: { w: 48, h: 32, color: '#ed5b32' } }, PM.proj)];
-    PM.touch(); PM.bus.emit('project');
-    const render = PM.GL.render;
-    (window as any).__previewHits = [];
-    PM.GL.render = (time: number, opt: any) => {
-      const result = render(time, opt);
-      if (PM.GL.stats.previewHit) (window as any).__previewHits.push({ time, playing: PM.playing });
-      return result;
-    };
-    PM.setTime(0); PM.play();
+// This case counts PM.GL.render cache hits during playback and scrubbing.
+// Native playback uses its engine presenter, so this is a legacy GL contract.
+test.describe('legacy GL playback preview reuse', () => {
+  test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: '0' } } });
+  test('ordinary playback and backward scrubbing automatically reuse remembered frames', async ({ session }) => {
+    await session.openEditor();
+    await session.page.evaluate(async () => {
+      const PM = (window as any).PM;
+      PM.pause(); PM.perf.auto = false; PM.quality = 1;
+      await document.fonts.ready;
+      PM.proj = PM.mkProject({ name: 'Loop memory', w: 160, h: 90, dur: 1, fps: 10 });
+      PM.proj.work = [0, .3]; PM.loop = true;
+      PM.proj.layers = [PM.mkLayer('shape', { d: { w: 48, h: 32, color: '#ed5b32' } }, PM.proj)];
+      PM.touch(); PM.bus.emit('project');
+      const render = PM.GL.render;
+      (window as any).__previewHits = [];
+      PM.GL.render = (time: number, opt: any) => {
+        const result = render(time, opt);
+        if (PM.GL.stats.previewHit) (window as any).__previewHits.push({ time, playing: PM.playing });
+        return result;
+      };
+      PM.setTime(0); PM.play();
+    });
+    await expect.poll(() => session.page.evaluate(() => (window as any).__previewHits.filter((hit: any) => hit.playing).length)).toBeGreaterThan(2);
+    await session.page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.pause(); (window as any).__previewHits = []; PM.setTime(0, { force: true });
+    });
+    await expect.poll(() => session.page.evaluate(() => (window as any).__previewHits.filter((hit: any) => !hit.playing && hit.time === 0).length)).toBeGreaterThan(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
   });
-  await expect.poll(() => session.page.evaluate(() => (window as any).__previewHits.filter((hit: any) => hit.playing).length)).toBeGreaterThan(2);
-  await session.page.evaluate(() => {
-    const PM = (window as any).PM;
-    PM.pause(); (window as any).__previewHits = []; PM.setTime(0, { force: true });
-  });
-  await expect.poll(() => session.page.evaluate(() => (window as any).__previewHits.filter((hit: any) => !hit.playing && hit.time === 0).length)).toBeGreaterThan(0);
-  expect(session.diagnostics.pageErrors).toEqual([]);
 });
