@@ -229,22 +229,40 @@ coverage and paint row above).
 
 ## SVG filters
 
-- **Reference:** analytic Gaussian/CDF integration and premultiplied f64 compositing,
-  following Filter Effects and SVG 1.1 filter regions, color domains and filterRes.
+- **Reference:** Filter Effects Level 1 primitives in f64 (`pm_reference::filter`):
+  exact source coverage, the box-reconstruction Gaussian, each primitive in its
+  `color-interpolation-filters` space, regions by pixel area; SVG 1.1 filterRes.
   Paint, filter, clip and mask share a grid within an image; each image resolves
   before layer compositing.
-- **Gate:** `pm-render/tests/svg_filters.rs`, four SHA-verified legacy-app witnesses,
-  plus transformed covariance and filter-grid cases; `e2e/engine-svg.spec.ts` checks
-  live placements, exact window/native byte endpoints and f32 geometry at 1e-3.
-- **Units:** CV, worst per-case max, p99.9 and mean across the four witnesses.
+- **Gate:** `pm-render/tests/svg_filters.rs` (four SHA-verified legacy-app witnesses,
+  transformed covariance, filter grids) and `tests/svg_filter_graphs.rs` (nine public
+  synthetic design-tool exports at 1× and 2×, Gaussians of 8 to 400 px, fractional
+  regions); `e2e/engine-svg.spec.ts` checks live placements, exact window/native byte
+  endpoints and f32 geometry at 1e-3.
+- **Units:** CV, worst per-case max, p99.9 and mean. Rows marked "resvg" compare the
+  declared RGBA8 fallback these documents drew with before (no legacy capture exists
+  for them); its error is the bound the float path must beat.
 
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
-| Float Gaussian and per-primitive linearRGB/sRGB domains, source halos and hard filter regions (Filter Effects, SVG 1.1) | 5.1233, 5.1233, 0.50966 | 0.7380, 0.7380, 0.01997 | Anisotropic blur, default linearRGB and explicit sRGB, hard region/source halo, zero blur |
+| Float Gaussian at device resolution and per-primitive linearRGB/sRGB domains, source halos and hard filter regions (Filter Effects, SVG 1.1) | 5.1233, 5.1233, 0.50966 | 0.0032, 0.0032, 0.00031 | Anisotropic blur, default linearRGB and explicit sRGB, hard region/source halo, zero blur |
+| Shadow, glow and layer-blur graphs (flood, composite incl. arithmetic, merge, blend, colour matrix, component transfer, drop shadow) in float instead of the RGBA8 resvg fallback | resvg: 73.47, 18.06, 1.918 | 0.028, 0.016, 0.0016 | Figma drop/inner shadow and layer blur, Illustrator and Sketch shadows, CSS feDropShadow, neon and tinted glows, every per-pixel primitive; 1× and 2× |
+| Gaussians of any size stay in float (the exact separable Gaussian, O(1) taps) instead of the over-budget resvg fallback from ~20 px | resvg: 3.70, 3.62, 1.327 (layer blur 25) | 0.0075, 0.0064, 0.00089 | σ 8, 25, 60, 150 and 400 px against the analytic Gaussian; Figma layer blur at 1× and 2× |
+| Sketch's `<rect …></rect>` rounded corners as exact cubics (SVG rx/ry), as `<rect …/>` already were | 0.52, 0.44, 0.0014 | 0.018, 0.014, 0.0001 | Sketch shadow export, 1× |
 
-Unsupported primitives and scenes beyond the checked device, memory or filter-work
-budget use the declared native resvg RGBA8 fallback with a runtime reason.
-Supported scenes within those bounds keep float intermediates.
+Scenes beyond the device or filter-memory bounds and the primitives the float path does
+not draw use the declared native resvg RGBA8 fallback, counted and named per layer.
+
+## Half-float stores
+
+- **Reference:** the nearest-even IEEE binary16 of each computed value.
+- **Gate:** `pm-render/tests/vector_half.rs` reads back values that a truncating
+  store keeps an ulp low.
+- **Units:** binary16 ulps.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Vector paint, path-mask coverage (r16float) and SVG float outputs store the nearest half instead of Metal's truncation (IEEE 754 round to nearest even) | 1 ulp low | exact | 9/255 grey paint, 0.3 coverage edge, SVG at 16-bit depth |
 
 ## Source monitor
 

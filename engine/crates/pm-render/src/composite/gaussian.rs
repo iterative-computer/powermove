@@ -1,6 +1,7 @@
 //! The exact separable Gaussian blur for path mask feathers
-//! ([`super::path_masks`]), on the GPU (`gaussian.wgsl`), with a CPU model
-//! of the same plan.
+//! ([`super::path_masks`]) and SVG filters (`vector::svg_filter`, a kernel
+//! per axis: [`Params::blur_xy`]), on the GPU (`gaussian.wgsl`), with a CPU
+//! model of the same plan.
 //!
 //! Pixels are squares, transparent outside the source. The blur of
 //! standard deviation σ px weighs the pixel `k` away by
