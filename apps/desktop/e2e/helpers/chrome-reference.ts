@@ -12,7 +12,7 @@
     backing: canvas ? [canvas.width, canvas.height] : null,
     frameViewSeq: presentation?.latest?.viewSeq ?? null,
     stateViewSeq: presentation?.state?.viewSeq ?? null,
-    camera: presentation?.state?.camera ?? null,
+    camera: presentation?.state?.view?.camera ?? null,
     presenting: !!presentation?.presenting,
   };
 };

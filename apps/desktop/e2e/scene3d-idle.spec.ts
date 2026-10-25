@@ -1,4 +1,40 @@
-import { expect, test } from './helpers/app';
+import { expect, test, launchApp } from './helpers/app';
+
+test('native drawing prepares while the viewer is absent and is claimed after reload', async () => {
+  const active = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
+  try {
+    await active.openEditor();
+    const { page } = active;
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting)).toBe(true);
+    const proof = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const warmup = PM.Kernel.services.get('engine.viewer')?.drawingWarmup;
+      if (!warmup) throw new Error('Native presentation warmup is unavailable');
+      const warm = warmup.warm, take = warmup.take;
+      let prepared = 0, claimed = 0, claimedCanvas: HTMLCanvasElement | null = null;
+      warmup.warm = function (...args: any[]) { prepared++; return warm.apply(warmup, args); };
+      warmup.take = function (...args: any[]) {
+        const drawing = take.apply(warmup, args);
+        if (drawing) { claimed++; claimedCanvas = drawing.canvas; }
+        return drawing;
+      };
+      try {
+        await PM.Kernel.loader.reload('viewer');
+        await PM.Kernel.loader.whenIdle();
+        PM.invalidate('render');
+        const viewer = PM.Kernel.services.get('viewer');
+        return { prepared, claimed, sameCanvas: viewer?.enginePresentation?.canvas === claimedCanvas };
+      } finally { warmup.warm = warm; warmup.take = take; }
+    });
+    expect(proof).toEqual({ prepared: 1, claimed: 1, sameCanvas: true });
+    await expect.poll(() => page.evaluate(() => {
+      const PM = (window as any).PM, presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+      return presentation?.presenting && !!presentation.latest && !presentation.latest.standIn;
+    }), { timeout: 30_000 }).toBe(true);
+    expect(active.diagnostics.pageErrors).toEqual([]);
+  } finally { await active.close(); }
+});
 
 test('2D playback leaves the unused 3D gizmo idle and selection wakes it again', async ({ session }) => {
   await session.openEditor();

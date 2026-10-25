@@ -11,13 +11,20 @@ test('preview resolution controls real pixels, survives layout changes and resta
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
   });
   const resolution = () => session.page.getByRole('combobox', { name: 'Preview resolution', exact: true });
+  const presentedSize = () => page.evaluate(() => {
+    const PM = (window as any).PM;
+    const presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+    if (PM.EngineConnection?.status()?.route === 'engine' && presentation?.presenting) {
+      const frame = presentation.latest;
+      const canvas = frame && presentation.stateFor(frame.viewSeq)?.canvas;
+      return canvas && !frame.standIn ? [canvas.width, canvas.height, PM.quality, PM.perf.auto] : null;
+    }
+    return [PM.GL.canvas.width, PM.GL.canvas.height, PM.quality, PM.perf.auto];
+  });
   for (const [mode, label, width, height] of [['1', 'Full', 1920, 1080], ['0.5', 'Half', 960, 540], ['0.25', 'Quarter', 480, 270]] as const) {
     await resolution().click();
     await session.page.getByRole('option', { name: label, exact: true }).click();
-    await expect.poll(() => page.evaluate(() => {
-      const PM = (window as any).PM;
-      return [PM.GL.canvas.width, PM.GL.canvas.height, PM.quality, PM.perf.auto];
-    })).toEqual([width, height, Number(mode), false]);
+    await expect.poll(presentedSize).toEqual([width, height, Number(mode), false]);
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.WS.restoreSnapshot(PM.WS.snapshot()); PM.play();
@@ -28,7 +35,9 @@ test('preview resolution controls real pixels, survives layout changes and resta
     const capture = await page.evaluate(() => {
       const PM = (window as any).PM;
       const quality = PM.quality;
-      const canvas = PM.renderFrameTo(.5, 1920, 1080, { mblur: false });
+      const canvas = PM.EngineConnection?.status()?.route === 'engine'
+        ? PM.EngineRender.renderFrameToCanvasSync(.5, 1920, 1080, { mblur: false })
+        : PM.renderFrameTo(.5, 1920, 1080, { mblur: false });
       return { width: canvas.width, height: canvas.height, quality: PM.quality, before: quality, pixel: Array.from(canvas.getContext('2d').getImageData(960, 540, 1, 1).data) };
     });
     expect(capture).toMatchObject({ width: 1920, height: 1080, quality: Number(mode), before: Number(mode) });

@@ -43,7 +43,6 @@ test('the export sheet renders solid, text, and ProRes outputs in the job engine
       const context = gl.gl;
       return { deferred, ready: !!context, same: context === gl.gl, firstUseMs: gl.compatFirstUseMs };
     });
-    expect(compatibility.deferred, 'the native viewer leaves the legacy WebGL context unallocated').toBe(true);
     expect(compatibility).toMatchObject({ ready: true, same: true });
     expect(compatibility.firstUseMs, 'first compatibility WebGL use').toBeLessThan(50);
     test.info().annotations.push({ type: 'compat-first-use-ms', description: String(compatibility.firstUseMs) });
@@ -71,7 +70,6 @@ test('the export sheet renders solid, text, and ProRes outputs in the job engine
     const mp4 = path.join(root, 'engine.mp4');
     expect(await exportTo(mp4, { format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false })).toEqual({ result: { cancelled: false }, asked: 1 });
     const engineMp4 = probe(mp4);
-    expect(engineMp4.format.tags?.encoder ?? '').not.toMatch(/^Lavf/);
     expect(engineMp4.streams[0]).toMatchObject({ codec_name: 'h264', pix_fmt: 'yuv420p', nb_frames: '24', color_transfer: 'iec61966-2-1' });
 
     const mov = path.join(root, 'engine.mov');
@@ -86,11 +84,15 @@ test('the export sheet renders solid, text, and ProRes outputs in the job engine
     const textFile = path.join(root, 'text.mp4');
     expect(await exportTo(textFile, { format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false })).toEqual({ result: { cancelled: false }, asked: 1 });
     const textMp4 = probe(textFile);
-    expect(textMp4.format.tags?.encoder ?? '').not.toMatch(/^Lavf/);
     expect(textMp4.streams[0]).toMatchObject({ codec_name: 'h264', nb_frames: '24' });
     expect((await stat(textFile)).size).toBeGreaterThan(1000);
     // No temporary or work files remain beside the outputs.
     expect((await readdir(root)).sort()).toEqual(['engine.mov', 'engine.mp4', 'text.mp4']);
+    expect.soft(engineMp4.format.tags?.encoder ?? '', 'MP4 is encoded by the native job engine').not.toMatch(/^Lavf/);
+    expect.soft(textMp4.format.tags?.encoder ?? '', 'text MP4 is encoded by the native job engine').not.toMatch(/^Lavf/);
+    // Keep the allocation contract, but exercise all export formats first so
+    // a viewer context regression cannot hide a job-rendering regression.
+    expect.soft(compatibility.deferred, 'the native viewer leaves the legacy WebGL context unallocated').toBe(true);
   } finally {
     await session?.close();
     await rm(root, { recursive: true, force: true });

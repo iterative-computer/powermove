@@ -56,7 +56,7 @@ async function waitActive(page: Page, ids: string[]): Promise<void> {
 async function todayApp(ids: string[]) {
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-today-'));
   await install(userData, ids);
-  const app = await launchApp({ userData, env: {} });
+  const app = await launchApp({ userData, env: { POWERMOVE_NEW_ENGINE: '0' } });
   await app.openEditor();
   await waitActive(app.page, ids);
   return app;
@@ -380,7 +380,8 @@ test.describe('Use New Engine: the customization moat, round two', () => {
         const state = viewer.enginePresentation.state;
         const crops = (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16);
         const typed = (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16);
-        return { state, latest: viewer.enginePresentation.latest, crops, typed, world: PM.worldMatrix(PM.L('plain'), PM.time),
+        const views = Array.from({ length: state.viewSeq }, (_, i) => viewer.enginePresentation.stateFor(i + 1)).filter(Boolean);
+        return { state, views, latest: viewer.enginePresentation.latest, crops, typed, world: PM.worldMatrix(PM.L('plain'), PM.time),
           geometry: PM.textRasterGeometry(PM.L('plain'), crops[crops.length - 1].scale, PM.time),
           size: [PM.proj.w, PM.proj.h], failures: PM.EngineConnection.status().failures };
       });
@@ -391,13 +392,17 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       expect(plan.crops.every((c: any) => c.scale === Math.min(32, zoom * 3))).toBe(true);
       // Today's compositor asks over its complete canvas, including its pan
       // buffer, rather than the screen-visible region the engine renders.
-      const canvas = state.canvas;
-      const sx = canvas.width / canvas.crop.width, sy = canvas.height / canvas.crop.height;
-      const visible = [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy,
-        world[4] * sx - canvas.crop.x * sx, world[5] * sy - canvas.crop.y * sy];
-      const crop = previewTextRaster(plan.geometry, visible, canvas.width, canvas.height) ?? null;
+      const plannedCrop = (canvas: any) => {
+        const sx = canvas.width / canvas.crop.width, sy = canvas.height / canvas.crop.height;
+        const visible = [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy,
+          world[4] * sx - canvas.crop.x * sx, world[5] * sy - canvas.crop.y * sy];
+        return previewTextRaster(plan.geometry, visible, canvas.width, canvas.height) ?? null;
+      };
+      const crop = plannedCrop(state.canvas);
       expect(crop, `zoom ${zoom}: a cropped source is exercised`).not.toBeNull();
-      for (const called of plan.crops) expect(called.crop, `zoom ${zoom}, density ${called.scale}`).toEqual(crop);
+      const validCrops = plan.views.map((view: any) => view.canvas && plannedCrop(view.canvas)).filter(Boolean);
+      for (const called of plan.crops) expect(validCrops, `zoom ${zoom}, density ${called.scale}: a planned view crop`).toContainEqual(called.crop);
+      expect(plan.crops.at(-1)?.crop, `zoom ${zoom}: the settled frame uses its exact crop`).toEqual(crop);
       // Today's typewriter definition is a renderable effect, so it keeps the full source.
       for (const called of plan.typed) expect(called.crop).toBeNull();
       expect(plan.failures).toEqual([]);

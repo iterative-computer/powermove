@@ -420,7 +420,7 @@ test.describe('Use New Engine: the customization corpus', () => {
       await materialize(commits[index]!, 'viewer', target);
       const manifest = JSON.parse(await readFile(path.join(target, 'manifest.json'), 'utf8'));
       await writeFile(path.join(target, 'manifest.json'), JSON.stringify({ ...manifest, id: 'viewer-fork', replaces: ['viewer'], forkedFrom: `viewer@${manifest.version}` }));
-      const app = await launchApp({ userData: profile, env: {} });
+      const app = await launchApp({ userData: profile, env: { POWERMOVE_NEW_ENGINE: '0' } });
       try {
         await app.openEditor();
         const result = await viewerShows(app.page, 'viewer-fork', false);
@@ -478,7 +478,7 @@ test.describe('Use New Engine: the customization corpus', () => {
       // Today's app, the same folder, "Use New Engine" off.
       const profile = await mkdtemp(path.join(os.tmpdir(), 'powermove-today-viewer-'));
       await shapes(path.join(profile, 'extensions'), shape);
-      const off = await launchApp({ userData: profile, env: {} });
+      const off = await launchApp({ userData: profile, env: { POWERMOVE_NEW_ENGINE: '0' } });
       let today: ViewerCheck;
       try {
         await off.openEditor();

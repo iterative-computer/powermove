@@ -104,6 +104,19 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     const desktopTranscript = normalizeMintedIds({ answers: desktop.answers.map((a) => answerOf(a as never)), document: documentBytes(JSON.parse(desktop.document)), documents: desktop.documents, workspace: workspaceDocumentFields(answerOf(desktop.workspace as never)), workspaceRaw: JSON.parse((desktop.workspace as any).content[0].text) }, contractProject());
     const workerTranscript = normalizeMintedIds(worker, contractProject());
     const desktopAnswers = desktopTranscript.answers;
+    // Compatibility producers belong to the window that can answer a native
+    // render request. The document worker has no canvas or raster override,
+    // so compare the shared document answer separately from that capability.
+    const contextWithoutWindowCapability = (answer: ContractTranscript['answers'][number]) => {
+      const copy = structuredClone(answer);
+      const content = copy.content?.[0] as { text?: string } | undefined;
+      if (content?.text) {
+        const context = JSON.parse(content.text);
+        delete context.compat;
+        content.text = JSON.stringify(context);
+      }
+      return copy;
+    };
     // Both transcripts, for a side-by-side when they differ (outside the repository).
     const evidence = process.env['POWERMOVE_CONTRACT_EVIDENCE'];
     if (evidence) {
@@ -113,14 +126,25 @@ test('the agent-tool contract leaves byte-identical documents on the desktop and
     }
     for (const [index, call] of CONTRACT_SEQUENCE.entries()) {
       expect(desktopAnswers[index], `${index}: ${call.tool} on the desktop`).toMatchObject({ ok: !call.fails });
-      expect(workerTranscript.answers[index], `${index}: ${call.tool} in the worker`).toEqual(desktopAnswers[index]);
+      if (call.tool === '__mcp_context') {
+        const capability = (answer: ContractTranscript['answers'][number]) =>
+          JSON.parse(String((answer.content?.[0] as { text?: string } | undefined)?.text ?? '{}')).compat;
+        expect(capability(desktopAnswers[index]!), 'desktop render capability').toEqual(['rasterOverride']);
+        expect(capability(workerTranscript.answers[index]!), 'document worker render capability').toEqual([]);
+        expect(contextWithoutWindowCapability(workerTranscript.answers[index]!), `${index}: shared document context`).toEqual(contextWithoutWindowCapability(desktopAnswers[index]!));
+      } else expect(workerTranscript.answers[index], `${index}: ${call.tool} in the worker`).toEqual(desktopAnswers[index]);
       expect(workerTranscript.documents?.[index], `${index}: ${call.tool} live document bytes`).toBe(desktopTranscript.documents?.[index]);
     }
     expect(workerTranscript.document).toBe(desktopTranscript.document);
     if (hidden) {
       const native = normalizeMintedIds(hidden, contractProject());
       for (const [index, call] of CONTRACT_SEQUENCE.entries()) {
-        expect(native.answers[index], `${index}: ${call.tool} through the native hidden host`).toEqual(desktopAnswers[index]);
+        if (call.tool === '__mcp_context') {
+          const context = JSON.parse(String((native.answers[index]?.content?.[0] as { text?: string } | undefined)?.text ?? '{}'));
+          expect(context.compat, 'native hidden host render capability').toEqual([]);
+        }
+        expect(call.tool === '__mcp_context' ? contextWithoutWindowCapability(native.answers[index]!) : native.answers[index],
+          `${index}: ${call.tool} through the native hidden host`).toEqual(call.tool === '__mcp_context' ? contextWithoutWindowCapability(desktopAnswers[index]!) : desktopAnswers[index]);
         expect(native.documents?.[index], `${index}: ${call.tool} native hidden document bytes`).toBe(desktopTranscript.documents?.[index]);
       }
       expect(native.document).toBe(desktopTranscript.document);

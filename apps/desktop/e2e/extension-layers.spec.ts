@@ -32,7 +32,8 @@ test.describe('@extensions structured programmable layers', () => {
         object: layer.d.data.objects[0],
         beforeLength: before.length,
         changedPixels: before !== after,
-        compileError: shaderKey ? PM.GL.compileError(shaderKey) ?? null : 'renderer did not run',
+        compileError: shaderKey ? PM.GL.compileError(shaderKey) ?? null
+          : PM.EngineConnection?.status()?.route === 'engine' ? PM.UIState.getShaderMeta(layer)?.sceneError ?? null : 'renderer did not run',
         savedDefinition: savedLayer.d.definition,
         savedObjectColor: savedLayer.d.params.objectColor.v,
         serializedHasRendererCode: JSON.stringify(savedLayer).includes('void main'),

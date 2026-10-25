@@ -66,6 +66,45 @@ test('paused zoom refines after settling and content or time changes bypass defe
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p })); PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   });
   await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
+  if (await page.evaluate(() => (window as any).PM.EngineConnection?.status().route === 'engine')) {
+    await page.evaluate(() => {
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+      PM.pause(); viewer.fit = false; viewer.setZoom(8); viewer.pan = [0, 0]; viewer.layout(); PM.invalidate('render');
+    });
+    const current = () => page.evaluate(() => {
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+      const presentation = viewer.enginePresentation, frame = presentation?.latest;
+      return { frame: frame?.seq ?? 0, frameView: frame?.viewSeq ?? 0,
+        stateView: presentation?.state.viewSeq ?? 0, zoom: presentation?.state.zoom,
+        revision: frame?.revision ?? 0, expectedRevision: PM.EngineConnection.status().revision,
+        pts: frame?.pts ?? -1, expectedPts: Math.round(PM.time * 705_600_000) };
+    });
+    await expect.poll(current, { timeout: 30_000 }).toMatchObject({ zoom: 8, expectedPts: 0 });
+    await expect.poll(async () => { const s = await current(); return s.frame > 0 && s.frameView === s.stateView && s.revision === s.expectedRevision; }, { timeout: 30_000 }).toBe(true);
+    const start = await current();
+    const gesture = await page.evaluate(() => {
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+      const r = viewer.stage.getBoundingClientRect();
+      viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true,
+        deltaY: 5, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+      return { deferred: viewer.deferNavigationRender(performance.now()), zoom: viewer.zoom };
+    });
+    expect(gesture.deferred).toBe(true);
+    await expect.poll(async () => { const s = await current(); return s.frame > start.frame && s.frameView === s.stateView && s.zoom === gesture.zoom; }, { timeout: 30_000 }).toBe(true);
+    const refined = await current();
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const layer = PM.proj.layers[0];
+      const edit = PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'c.color', value: '#2255dd', mode: 'static', preserveHandEdits: false });
+      if (!edit.ok) throw new Error('color edit did not apply');
+    });
+    await expect.poll(async () => { const s = await current(); return s.frame > refined.frame && s.revision === s.expectedRevision && s.revision > refined.revision; }, { timeout: 30_000 }).toBe(true);
+    const edited = await current();
+    await page.evaluate(() => (window as any).PM.setTime(.5));
+    await expect.poll(async () => { const s = await current(); return s.frame > edited.frame && s.pts === s.expectedPts && s.pts > edited.pts; }, { timeout: 30_000 }).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    return;
+  }
   const result = await page.evaluate(async () => {
     const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
     viewer.fit = false; viewer.zoom = 8; viewer.pan = [0, 0]; viewer.layout(); PM.GL.render(0, { mblur: false });
@@ -110,6 +149,49 @@ test('fractional pans reuse covered pixels while crop changes and independent re
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p })); PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   });
   await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
+  if (await page.evaluate(() => (window as any).PM.EngineConnection?.status().route === 'engine')) {
+    await page.evaluate(() => {
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+      PM.pause(); viewer.fit = false; viewer.setZoom(4.371588852276498); viewer.pan = [0, 0]; viewer.layout(); PM.invalidate('render');
+    });
+    const current = () => page.evaluate(() => {
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+      const presentation = viewer.enginePresentation, frame = presentation?.latest;
+      const state = frame && presentation.stateFor(frame.viewSeq);
+      return { frame: frame?.seq ?? 0, frameView: frame?.viewSeq ?? 0, stateView: presentation?.state.viewSeq ?? 0,
+        crop: state?.canvas?.crop ?? null, pan: [...viewer.pan],
+        revision: frame?.revision ?? 0, expectedRevision: PM.EngineConnection.status().revision,
+        pts: frame?.pts ?? -1, expectedPts: Math.round(PM.time * 705_600_000) };
+    });
+    await expect.poll(async () => { const s = await current(); return s.frame > 0 && s.frameView === s.stateView && !!s.crop; }, { timeout: 30_000 }).toBe(true);
+    const start = await current();
+    const pan = async (deltaX: number) => page.evaluate((dx) => {
+      const viewer = (window as any).PM.Kernel.services.get('viewer'), r = viewer.stage.getBoundingClientRect();
+      viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: dx,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+    }, deltaX);
+    for (let i = 0; i < 12; i++) await pan(3.25);
+    const covered = await current();
+    expect(covered.pan[0] - start.pan[0]).toBeCloseTo(-39, 0);
+    expect(covered.crop).toEqual(start.crop);
+    await page.evaluate(() => (window as any).PM.invalidate('render'));
+    await expect.poll(async () => (await current()).frame, { timeout: 30_000 }).toBeGreaterThan(start.frame);
+    const redraw = await current();
+    await pan(180);
+    await expect.poll(async () => { const s = await current(); return s.frame > redraw.frame && JSON.stringify(s.crop) !== JSON.stringify(start.crop); }, { timeout: 30_000 }).toBe(true);
+    const shifted = await current();
+    await page.evaluate(() => {
+      const PM = (window as any).PM, layer = PM.proj.layers[0];
+      const edit = PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'c.color', value: '#2255dd', mode: 'static', preserveHandEdits: false });
+      if (!edit.ok) throw new Error('color edit did not apply');
+    });
+    await expect.poll(async () => { const s = await current(); return s.frame > shifted.frame && s.revision === s.expectedRevision && s.revision > shifted.revision; }, { timeout: 30_000 }).toBe(true);
+    const edited = await current();
+    await page.evaluate(() => (window as any).PM.setTime(.5));
+    await expect.poll(async () => { const s = await current(); return s.frame > edited.frame && s.pts === s.expectedPts && s.pts > edited.pts; }, { timeout: 30_000 }).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    return;
+  }
   const result = await page.evaluate(async () => {
     const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
     viewer.fit = false; viewer.zoom = 4.371588852276498; viewer.pan = [0, 0]; viewer.layout();
