@@ -58,22 +58,56 @@ engine (150) are both 0.50 away.
 
 ## Text raster
 
-- **Reference:** the byte-exact uploaded Canvas raster, sampled bilinearly in f64
-  at output pixel centres through the authored quad, with its opacity over the
-  captured background. The quad and full-canvas placement remain exact.
-- **Gate:** `pm-render` example `color_depth_parity`, using the synthetic
-  `color-depth.ts` captures. Resampled text uses `pm_reference::compare` with
-  `EIGHT_BIT` at depth 8 and `HALF_FLOAT` at depths 16 and 32; other pixels stay
-  byte-exact. The depth-8 PNG export equals the preview. `pm-node`'s
-  `render_fonts` also requires exact full-canvas pixels after placing the ink crop.
-- **Units:** CV. The maximum can differ within the stated precision bound;
-  p99.9 and mean are no worse than today's full-quad sampling.
+- **Reference:** independent f64 outline coverage, starting at 32 × 32 cells and
+  refining to convergence, at exact
+  glyph positions, premultiplied Porter-Duff source-over in the project's
+  blend domain, pixel-integrated Gaussian weights, and source-texel area
+  integration for minified bitmap glyphs. Layout is a separate exact gate.
+- **Gate:** `text_raster` (G-T1), `text_corpus` (G-T2), and installed-app
+  `native-engine-text-app-parity` (G-T5) replace text byte equality with the
+  reference-closeness rule in [gate-policy.md](gate-policy.md). Captures are
+  today's witness. Unmodeled pixels retain their original bound.
+- **Units:** CV, maximum channel error per classified edge or image pixel.
+  G-T1 rows below use mapped sRGB8 display pixels; raw float errors are
+  reported separately where stated.
 
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
-| Retain only ink without reproducing full-quad f32 interpolation (bilinear pixel-centre reference) | 0.775, 0.748, 0.236 | 0.789, 0.707, 0.235 | Rotated text, depth 8 |
-| Same ink-only quad at half-float depth | 0.487, 0.400, 0.063 | 0.479, 0.366, 0.060 | Rotated text, depth 16 |
-| Same ink-only quad at float depth | 0.405, 0.366, 0.036 | 0.455, 0.304, 0.033 | Rotated text, depth 32 |
+| Geometric outline coverage without platform dilation or luminance preblend (TEXT-RASTER-1); float coverage and ordered paint | 162, 157, 19.802 | 0, 0, 0 | G-T1 small text case 0 at the sRGB8 boundary; raw float max 0.00016 CV; exact area/centroid gate passes |
+| Original emoji texels integrated over each inverse output pixel in the working domain | 131, 101, 2.68881 | 1, 1, 0.02170 | Minified bitmap glyphs, G-T1 case 519; authored Apple placement retained; raw float max 0.01084 CV |
+| COLR authored paint graph composited in float, with f64 area coverage | 212, 211, 24.82834 | 1, 1, 0.00998 | Palette-alpha glyph, G-T1 case 525; independent program interpreter; raw float max 0.03353 CV |
+| [CSS Color 4 local MINDE](https://www.w3.org/TR/css-color-4/#pseudo-binsearch) at the sRGB8 boundary, rather than channel clipping; extended RGB retained for float/P3 | 88, 88, 88 | 0, 0, 0 | 54 uniform glyph-interior pixels in the out-of-gamut OKLCh case; CPU and independent f64 mapping agree; shared WGSL max 0.0024 CV over 227 samples |
+
+Text placement reaches output pixels through its world matrix. G-T1 keeps
+layout exact and compares both raw float and mapped display pixels against
+independent references. The CSS rule is authored color intent: sRGB8 maps
+with deltaEOK JND 0.02; float and wide-gamut storage retain extended values.
+The compositing lane owns final display, snapshot and export integration of
+the shared mapper; out-of-gamut installed-app qualification remains pending
+that boundary.
+
+The rotated-text depth gates now use actual outline coverage rather than
+two samplings of a Canvas raster. At depth 8, engine/reference max is
+0.931 CV versus today's 75.437 CV; preview and PNG export are identical.
+At depths 16 and 32, maxima are 0.216 and 0.00068 CV versus 75.741 and
+75.807 CV. The per-pixel, p99.9 and mean rules also pass.
+
+Color-glyph ink (selection, bounds and typography anchoring) is the drawn
+image or COLR paint, measured by the painter's placement code; the
+reference is that drawn rectangle, which G-T1 case 519's pixels confirm.
+At 200 px Apple Color Emoji draws y -175..25 around the baseline. The
+previous engine measured the `glyf` box (y -200..0, up to 25 px off).
+Canvas reports y -177..26 and 2 px more on the right: Skia rounds
+CoreText's metric rectangle (1e-4 larger than the image) out to whole
+pixels and outsets it 1 px for anti-aliasing. The engine is exact
+(`pm-eval` `color_ink`, five sizes including enlarged small emoji). The
+installed-app case 519 selection is therefore 2 px tighter at the top and
+right and 1 px at the bottom than today's.
+
+Composed-text rows outside this lane's reference coverage retain their
+original bound and remain explicit owned failures: path masks with the
+vector lane, projection and mixed composition with compositing/3D, and
+layer effects with effects. They are rechecked after those owners integrate.
 
 ## Video
 

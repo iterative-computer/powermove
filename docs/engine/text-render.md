@@ -24,6 +24,16 @@ and density, preserving its geometry and crop contract.
 Layout is an exact gate independent of pixels. Raster improvements must
 never be accepted as a reason for changing an advance or line break.
 
+Ink boxes describe what is drawn, at both levels. Outline glyphs keep their
+control boxes; level 1 keeps Blink's canonical-path arithmetic for them. A
+color glyph's box comes from the painter's own placement
+(`scene::drawn_color_glyph_ink`, shared by native and WASM): the strike
+chosen at the full-em size with the authored Apple shift, or the COLR
+painted and clip bounds. A glyph with neither outline nor color source has
+no ink. Canvas measured emoji 1–2 px larger than drawn (Skia's whole-pixel
+round-out plus a 1 px outset of CoreText's metric rectangle); that slack is
+not reproduced. Advances and line breaks are unchanged.
+
 ## What is drawn
 
 Plain text paints every wrapped line with its layout alignment and baseline.
@@ -62,16 +72,20 @@ The outline is filled and framed with that width, using kurbo geometry.
 Caption strokes also use kurbo, rather than a fixed-point or A8-mask
 stroker. Path tolerances are measured in device pixels.
 
-The shared GPU area renderer integrates line edges into R32Float coverage
-cells. Curves are flattened within 1e-4 device pixels before integration;
-coordinates retain 1/16384 pixel precision. Cells align with device pixels
-and pack only the ink needed by the paint pass. Large items are tiled.
-A bounded 8 MiB cache retains transformed line paths independently of glyph
-translation, so centered typing reuses outlines. The explicit CPU comparison
-mode uses `vello_cpu`; its 8-bit coverage is not the production precision.
-Nonzero winding is resolved into disjoint contours before edge integration,
-so overlapping font components contribute their union once. Coverage is
-geometric area, with no luminance preblend or stem dilation.
+Eligible outlines paint their pixel area directly from cached glyph-local
+contours and a conservative row-to-edge index. Whole and fractional placement
+are separated before f32 upload. Curves are flattened within 1e-4 device
+pixels, or 1e-5 for outlines no larger than 32 device pixels. A geometric
+certificate preserves already disjoint nonzero boundaries; uncertain paths
+use the nonzero union resolver.
+
+Large or compound draws use the shared R32Float area renderer. Its cells
+align with device pixels, retain 1/16384 pixel coordinate precision and tile
+large items. Both paths use the same resolved f64 line geometry and ordered
+paint. A bounded 8 MiB path cache is independent of glyph translation, and
+an 8 MiB GPU geometry cache retains compact row-indexed contours. The explicit
+CPU comparison mode uses `vello_cpu`; its 8-bit coverage is not production
+precision. Coverage has no luminance preblend or stem dilation.
 
 **TEXT-RASTER-1:** exact outline coverage replaces the previous CoreText
 smoothing fit, CoreGraphics masks, Skia preblend tables and distance-field
@@ -80,9 +94,12 @@ it does not alter font selection, layout or synthetic-bold amount.
 
 ## Paint and blend domain
 
-CSS colors retain their parsed float values through painting. Out-of-range
-channels keep the parser's established semantics until the project's output
-boundary; this lane does not introduce a new gamut mapping policy.
+CSS colors retain their parsed float values through painting. The sRGB8
+output rule is CSS Color 4 binary-search gamut mapping with local MINDE:
+constant OKLCh lightness and hue, chroma reduction, deltaEOK JND 0.02.
+`pm_color::css_srgb` and `wgsl::CSS_GAMUT` provide that boundary operation.
+Float and wide-gamut working values remain extended. Alpha is applied after
+mapping the straight output color; ordinary in-gamut values stay exact.
 
 Coverage multiplies paint alpha. Ordered premultiplied source-over runs in
 float at working precision. It does not quantize after each glyph. The
@@ -128,10 +145,12 @@ into the same frame command encoder. A page returns to the target pool
 after submission; another layer cannot overwrite coverage still in use.
 
 Painted rasters retain only bounded ink crops, keyed by scene contents,
-crop and font generation. No full level 1 backing canvas, platform mask
-atlas, SDF field atlas or per-glyph colored N32 image is retained to imitate
-an earlier renderer. A cache hit must be independent of the order in which
-other text was drawn, including preview and export.
+crop, working encoding and font generation. A private target pool and 4 MiB
+raster cache reuse exact dimensions. Evicted targets can be recycled only
+at the next frame, after the prior submission; at most 2 MiB waits for that
+handoff. Explicit trimming releases handles without destroying textures that
+recorded commands may still reference. No full level 1 backing canvas,
+platform mask atlas, SDF atlas or per-glyph N32 paint image remains.
 
 The font registry retains its existing window/session seed scoping. Both
 preview and export use the originating window's layout seeds. Changing a
@@ -164,7 +183,11 @@ coverage from `pm-reference`, at exact layout positions. It judges engine
 and today against the same reference, including maximum, p99.9, mean and
 per-pixel regression bounds. Reference-unmodelled content keeps its prior
 bound against today; it must be reported rather than silently excluded.
-No case may hide a worse maximum behind a better mean.
+No case may hide a worse maximum behind a better mean. A 32-cell reference
+miss triggers whole-image refinement through 256–2048 cells. Consecutive
+references must converge within 1e-4 on geometry and 0.01 CV per modeled
+channel; the selected whole image faces the original gate bounds. G-T1
+records separate raw float and mapped sRGB8 results.
 
 - `pm-text` layout tests and the layout-only corpus comparison keep line
   breaks, advances and glyph positions exact.
@@ -174,6 +197,8 @@ No case may hide a worse maximum behind a better mean.
   text-isolated witnesses both counted.
 - `text_gpu`, `text_colors`, `text_level2` and `text_level2_semantics` check
   paint precision, color semantics, transformations and interaction.
+- `pm-eval`'s `color_ink` and `pm-text`'s bitmap tests hold color-glyph ink
+  to the painter's placement at several sizes, skin-tone sequences included.
 - G-C2 checks the complete frame and preview/export contract.
 - `pm-reference` tests the independent coverage, color and blend formulas.
 
@@ -192,6 +217,7 @@ cd engine
 cargo check --workspace
 cargo clippy --workspace --all-targets
 cargo test -p pm-text --features render,corpus-tools
+cargo test -p pm-eval --test color_ink
 cargo test -p pm-render
 cargo test -p pm-reference
 cargo run -p pm-protocol --bin pm-protocol-gen -- --check
