@@ -3340,20 +3340,25 @@ impl Thread {
                 view,
                 Some(TransportCommand::Play { rate }),
             );
-            link.send(match audio_forwarded {
-                Some(_) => AudioCtl::StartAt(start),
-                None => AudioCtl::Play {
+            match audio_forwarded {
+                // Nothing held when the audio already played this Play.
+                Some(forwarded) => {
+                    if let Some(play) = forwarded.play {
+                        link.send(AudioCtl::StartAt { play, at: start });
+                    }
+                }
+                None => link.send(AudioCtl::Play {
                     from,
                     rate,
                     at: start,
-                },
-            });
+                }),
+            }
             view.awaiting = Some((start + AUDIO_START_TIMEOUT_US, before, rate));
-        } else if audio_forwarded.is_some()
+        } else if let Some(play) = audio_forwarded.and_then(|f| f.play)
             && let Some(link) = link
         {
             // Held for a line this run does not follow: let it go.
-            link.send(AudioCtl::StartAt(start));
+            link.send(AudioCtl::StartAt { play, at: start });
         }
         self.trace_event("play", at, start - at, -1);
     }
@@ -3362,10 +3367,10 @@ impl Thread {
     /// start ([`Self::start_play`]); a Play this thread does not start lets
     /// its audio start as soon as it is ready.
     fn release_audio_start(&self, key: Key, forwarded: Option<ForwardedAudio>) {
-        if forwarded.is_some()
+        if let Some(play) = forwarded.and_then(|f| f.play)
             && let Some(link) = self.audio.get(&key)
         {
-            link.send(AudioCtl::StartAt(0));
+            link.send(AudioCtl::StartAt { play, at: 0 });
         }
     }
 
@@ -7409,7 +7414,13 @@ mod tests {
         let play = TransportCommand::Play {
             rate: PlaybackRateValue::NORMAL,
         };
-        for forwarded in [Some(ForwardedAudio { before: None }), None] {
+        for forwarded in [
+            Some(ForwardedAudio {
+                before: None,
+                play: Some(1),
+            }),
+            None,
+        ] {
             let (mut thread, _) = preview_thread();
             thread.config.host_clock = false;
             let key = preview_key();
@@ -7441,7 +7452,10 @@ mod tests {
             // picture joins its clock); a deferred Play sends nothing.
             let sent: Vec<AudioCtl> = audio.try_iter().collect();
             assert_eq!(sent.len(), usize::from(forwarded.is_some()));
-            assert!(sent.iter().all(|c| matches!(c, AudioCtl::StartAt(0))));
+            assert!(
+                sent.iter()
+                    .all(|c| matches!(c, AudioCtl::StartAt { play: 1, at: 0 }))
+            );
 
             thread
                 .docs
@@ -7471,7 +7485,7 @@ mod tests {
             // The replay times the forwarded run (already let go: no effect).
             let timed = sent
                 .iter()
-                .filter(|c| matches!(c, AudioCtl::StartAt(at) if *at > 0))
+                .filter(|c| matches!(c, AudioCtl::StartAt { play: 1, at } if *at > 0))
                 .count();
             assert_eq!(timed, usize::from(forwarded.is_some()));
         }
