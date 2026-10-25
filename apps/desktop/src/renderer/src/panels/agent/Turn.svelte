@@ -82,7 +82,7 @@
         type="button" class="agent-inline-attachment is-sent"
         aria-label={segment.attachment.dataUrl ? `View ${segment.attachment.name}` : `Reveal ${segment.attachment.name} in Finder`}
         title={segment.attachment.name}
-        onclick={(event) => void activatePromptAttachment(PM, segment.attachment, event.currentTarget)}
+        onclick={() => void activatePromptAttachment(PM, segment.attachment)}
       >{#if segment.attachment.dataUrl}<img src={segment.attachment.dataUrl} alt="" />{:else}<span class="agent-inline-attachment-type" aria-hidden="true">{(segment.attachment.name.split('.').pop() || 'file').slice(0, 5).toUpperCase()}</span>{/if}<span>{segment.attachment.name.replace(/\.[^.]+$/, '') || segment.attachment.name}</span></button>{/if}{/each}{:else}<Markdown text={displayPromptText(message.text || '') || (message.attachments?.length ? `Attached ${message.attachments.length} file${message.attachments.length === 1 ? '' : 's'}` : '')} />{/if}</div>
     </div>
   </div>
