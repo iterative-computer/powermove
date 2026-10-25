@@ -82,7 +82,8 @@ test('reduced motion disables chrome travel while preserving the authored viewpo
   await expect(library.locator('.library-stage-live #panel-notes')).toBeVisible();
   expect(await page.locator('.library-stage-frame').evaluate(el => el.getAnimations().length)).toBe(0);
   expect(await library.locator('.pm-back-title-chev').evaluate(el => getComputedStyle(el).transitionProperty)).toBe('none');
-  await library.press('Escape'); await library.press('Escape');
+  await library.press('Escape'); await expect(library.locator('.library-shell')).toBeVisible();
+  await library.press('Escape'); await expect(library).toBeHidden();
   await page.keyboard.press('Meta+k');
   expect(await page.locator('#palette').evaluate(el => el.getAnimations({ subtree: true }).flatMap(animation => (animation.effect as KeyframeEffect).getKeyframes()).filter(frame => 'transform' in frame || 'translate' in frame || 'scale' in frame))).toEqual([]);
   await page.keyboard.press('Escape');

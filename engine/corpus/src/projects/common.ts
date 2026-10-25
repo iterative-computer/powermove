@@ -24,11 +24,6 @@ export interface CorpusProject {
   notes?: string;
   /** e2e fixture extensions (apps/desktop/e2e/fixtures/<name>) installed in the capture profile. */
   extensions?: string[];
-  /**
-   * `render3d` settings for the Blender snapshot pass (`enabled` is forced on there).
-   * Documents keep Blender output off so the captured frames are the native renderer's.
-   */
-  blender?: Record<string, unknown>;
 }
 
 export function project(b: Builder, fields: Omit<CorpusProject, 'id' | 'doc'>): CorpusProject {

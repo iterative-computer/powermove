@@ -1,3 +1,4 @@
+import { ENGINE_IPC } from '../src/shared/engine-ipc';
 import { expect, test } from './helpers/app';
 
 test('live discovery reaches late layers and all keyframes in a large composition', async ({ session }) => {
@@ -113,6 +114,12 @@ test('a composition edit reviews final frames with the original settings after a
 
 test('capture failure preserves applied edits and reports the verification limit', async ({ session }) => {
   await session.openEditor(); await session.openAgent();
+  // Native observations use the job frame service; legacy observations use
+  // Export.snapshotAsync below. Fail the active capture path in either mode.
+  await session.app.evaluate(({ ipcMain }, channel) => {
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, () => { throw new Error('Preview capture failed'); });
+  }, ENGINE_IPC.agentFrames);
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;

@@ -37,7 +37,7 @@ it.each([
   { presentation: 'chip', activation: 'keyboard' },
   { presentation: 'inline', activation: 'keyboard' },
   { presentation: 'draft', activation: 'keyboard' },
-])('returns focus to a $presentation attachment after $activation preview activation and Escape', async ({ presentation, activation }) => {
+])('restores appropriate focus after $activation activation of a $presentation preview and Escape', async ({ presentation, activation }) => {
   const panel = document.createElement('div');
   panel.innerHTML = '<div class="attachments"></div><div class="spatial-input-row"><textarea class="agent-inline-prompt"></textarea></div>';
   document.body.append(panel);
@@ -71,5 +71,7 @@ it.each([
   expect(document.querySelector('.modal')).toBeNull();
   expect(shell.isOpen()).toBe(true);
   expect(trigger.isConnected).toBe(true);
-  expect(document.activeElement).toBe(trigger);
+  expect(document.activeElement).toBe(activation === 'keyboard' ? trigger
+    : activation === 'pointer' ? prompt : document.getElementById('app'));
+  if (activation !== 'keyboard') expect(document.activeElement).not.toBe(trigger);
 });

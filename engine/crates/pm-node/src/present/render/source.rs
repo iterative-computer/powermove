@@ -284,6 +284,9 @@ impl Thread {
             source.link.send(AudioCtl::Play {
                 from: time.get(),
                 rate: pm_protocol::common::PlaybackRate { num: 1, den: 1 },
+                // The monitor follows this audio's own clock (its status
+                // carries the heard time), so it starts once it is ready.
+                at: 0,
             });
         }
         self.source_status(key, asset, time, true, generation);

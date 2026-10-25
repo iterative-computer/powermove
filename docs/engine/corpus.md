@@ -10,7 +10,7 @@ The tooling lives in `engine/corpus/`; captured data never enters the repository
   more per appendix B feature group, plus the media they need that the e2e fixtures do not
   provide.
 - **Capture** (`src/capture.ts`): opens every project in the built legacy app and writes
-  frames, float frames, evaluation dumps, and Blender snapshots at chosen times; also the
+  frames, float frames and evaluation dumps at chosen times; also the
   12 pixel-hash scenarios of `e2e/rendering-performance.spec.ts` and Jude's real project.
 - **Verify** (`src/verify.ts`): checks a capture against its manifest.
 
@@ -75,7 +75,7 @@ the loader does to effect parameters on every open, are counted apart as
 **Rendering a sample** (`src/page.ts`, `capture`), with `PM.Export.busy` held as the
 exporter holds it and `PM.quality = 1`:
 
-1. `PM.prepareFrame(t)` (video frames, Blender frames). A throw is recorded as
+1. `PM.prepareFrame(t)` (video frames). A throw is recorded as
    `prepareError` and the sample is still rendered, as the compositor draws it.
 2. Pending GL errors are drained (recorded as warnings) so the errors recorded for the
    sample belong to its own renders.
@@ -90,9 +90,8 @@ exporter holds it and `PM.quality = 1`:
 **Legacy helpers.** Some functions the compositor uses are not on `PM`. The capture
 bundles them from the same commit's source and loads them beside the app
 (`src/inject.ts`): `text-animation.ts` (`textAnimationState`, `animatedGlyphs`),
-`retiming.ts` (`sourceTime`), and `frame-preparation.ts` (`blenderFrameRequests`; its
-renderer and video imports are stubbed). They take `PM` as an argument and share no
-module state with the app.
+`retiming.ts` (`sourceTime`). They take `PM` as an argument and share no
+module state with the app. The bundle uses a temporary directory removed in `finally`.
 
 ## Layout
 
@@ -175,8 +174,6 @@ can still read `sample.png`. Bounds and project selection are unchanged.
     frames/t<time>.rgba32f         float RGBA (transparent projects)
     frames/t<time>.rgba32f.json    its header
     eval/t<time>.json              evaluation dump
-    blender/t<time>.json           Blender snapshots (projects with 3D objects)
-    blender/assets/<sha256><ext>   asset bytes the snapshots reference
   scenarios/rendering-performance/
     <label>.rgba8, <label>.png, hashes.json, scenarios.json
   real/<slug>/                     the real project, same per-sample layout
@@ -225,35 +222,11 @@ and recursively for every active precomp at its source time:
 
 Non-finite numbers are written as strings (`"NaN"`, `"Infinity"`); `-0` is written as 0.
 
-**Blender snapshots** (`format: powermove-corpus-blender`, version 1). The capture never
-runs Blender. The main process's `blender:run` IPC handler is replaced by a recorder that
-keeps each job and answers with an empty render. After a project's frames, Blender
-output (`render3d`) is turned on in memory for every composition holding 3D objects,
-with the project's `blender` settings if it names any, and for each sample:
-
-- `final`: `PM.prepareFrame(t)` with its default options (composition size; 10 shutter
-  samples when a layer has motion blur, the RAM-preview count rather than export's 16 or
-  20, see appendix A item 4). One snapshot per entry of `blenderFrameRequests`, which
-  labels each with its composition, time, and size.
-- `preview`: `scene3d.renderFrame()` (the paused rendered preview) at t, labelled by the
-  same walk `renderBlenderPreview` does; `view` records the viewport mode.
-- `export`: `PM.prepareFrame(t, {width, height, mblur: true, mbSamples: 16})`, the
-  exporter's options for an opaque export at the sample's size, labelled by
-  `blenderFrameRequests` with the same options. `options` records them.
-- `exportAlpha` (transparent projects only): the same with `mbSamples: 20`, the
-  exporter's alpha sample count.
-
-Both export passes always use `mblur: true`. The exporter passes the export's own
-motion-blur setting, which can be false, so v1's export snapshots cover only the
-motion-blur path; each snapshot's `options` records what was used.
-
-`export` and `exportAlpha` exist from corpus v1: `PM.prepareFrame` forwards the
-exporter's options since then. On an older build the pass records an error instead of
-snapshots.
-
-Each snapshot is `renderSnapshot`'s output as Blender would receive it, with typed arrays
-written as JSON arrays and asset bytes stored content-addressed under `blender/assets/`.
-`mismatch` is set (and requests dropped) if jobs and requests do not pair one to one.
+**Historical Blender snapshots.** Earlier manifests can contain
+`powermove-corpus-blender` records and content-addressed assets. Verification
+continues to check those captures. Current captures use the app's 3D viewport
+and frame preparation; main no longer exposes the Blender snapshot recorder,
+so new manifests do not claim Blender snapshot coverage.
 
 **Scenarios.** `scenarios/rendering-performance/` reproduces the spec's twelve captures
 statement for statement up to its timing loop. `<label>.rgba8` is the exact

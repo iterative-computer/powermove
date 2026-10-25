@@ -22,11 +22,14 @@ type PageFunction<A, R> = (arg: A) => R | Promise<R>;
 
 // Cancel the losing timer so successful cleanup does not keep the harness alive.
 export async function withCleanupTimeout<T>(value: Promise<T>, ms: number): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelTimer: (() => void) | undefined;
   try {
-    return await Promise.race([value, new Promise<undefined>(resolve => { timer = setTimeout(resolve, ms); })]);
+    return await Promise.race([value, new Promise<undefined>(resolve => {
+      const timer = setTimeout(resolve, ms);
+      cancelTimer = () => clearTimeout(timer);
+    })]);
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    cancelTimer?.();
   }
 }
 

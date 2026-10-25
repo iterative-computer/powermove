@@ -139,11 +139,6 @@ export type PresenterOptions = {
    * frame anyway.
    */
   drawOnArrival?: boolean;
-  /** Submit timed canvas frames between compositor deadlines, avoiding a
-   * race with the page's frame for the same BeginFrame. Gestures still
-   * draw on arrival. Fraction of a refresh after the rAF timestamp. */
-  commitPhaseRefreshes?: number;
-  timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
 };
 
 type Payload = { frame: VideoFrame };
@@ -166,9 +161,24 @@ export type TraceRecord = {
   drops: [seq: number, reason: string, ms: number][];
   releases: [seq: number, submitMs: number, doneMs: number][];
   rafs: number[];
+  /** Per refresh: the fitted refresh grid and the decision it made. */
+  decisions: [rafMs: number, vsyncMs: number, periodMs: number, jumped: number, offsetUs: number, decisionMs: number][];
+  /** Each vsync hint sent to the engine. */
+  hints: [rafMs: number, hostTime: number, periodUs: number][];
 };
 
+/** Empties a trace into a copy (the S1 harness and the rig read it). */
+export function drainTrace(t: TraceRecord): TraceRecord {
+  return { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0), decisions: t.decisions.splice(0), hints: t.hints.splice(0) };
+}
+
 const PARK_TIMEOUT_MS = 1000;
+
+/** A pool's surface size and format (its surfaces share them). */
+function poolShape(pool: SurfacePool): string {
+  const s = pool.surfaces[0];
+  return s ? `${s.size.width}x${s.size.height}:${s.format}` : '';
+}
 /** How long after a live resize step its presentation delay is assumed. */
 export const RESIZE_HOLD_MS = 150;
 
@@ -203,7 +213,6 @@ export type PresenterMemory = { localVideoFrames: number; workerCloneUpperBound:
 export class EnginePresenter implements Presenter {
   private readonly buffer = new JitterBuffer<Payload>();
   private vsync: VsyncEstimator;
-  private nominalPeriodMs: number;
   private cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id);
   /** Bumped when the loop moves, so a stale loop's callbacks stop. */
   private loop = 0;
@@ -216,6 +225,9 @@ export class EnginePresenter implements Presenter {
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private offsetUs = 0;
   private offsetKey = '';
+  /** The last refresh's animation frame and the instant it decided for. */
+  private lastRafMs = 0;
+  private lastDecisionMs = 0;
   /** performance.now() of the last live resize step (`noteResize`). */
   private resizedAtMs: number | null = null;
   /** The last timed frame's duration (ticks), for the decision phase. */
@@ -225,8 +237,6 @@ export class EnginePresenter implements Presenter {
   private hint: VsyncHint | null = null;
   private hintSentMs = -Infinity;
   private raf = 0;
-  private refreshTimer: number | null = null;
-  private refreshDeadline: number | null = null;
   private disposed = false;
   private unsubscribe: () => void;
   private readonly now: () => number;
@@ -245,70 +255,33 @@ export class EnginePresenter implements Presenter {
 
   constructor(private readonly options: PresenterOptions) {
     this.vsync = new VsyncEstimator(options.displayHz ?? null);
-    this.nominalPeriodMs = 1000 / (options.displayHz ?? 60);
     this.now = options.now ?? (() => performance.now());
-    this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [] } : null;
+    this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [], decisions: [], hints: [] } : null;
     this.generation = options.generation ?? 0;
     this.stats.generation = this.generation;
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
   }
 
-  /** Starts presenting at every animation frame. */
+  /**
+   * Starts presenting at every animation frame. Timed frames are drawn in
+   * the animation frame itself: a worker canvas sends its frame to viz as
+   * the callback returns, while a frame drawn later in the refresh waits
+   * for the next BeginFrame and a timer that fires late loses a refresh
+   * (docs/engine/bridge.md, "Pacing at 120 Hz").
+   */
   start(
     requestFrame: (cb: (t: number) => void) => number = (cb) => requestAnimationFrame(cb),
     cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id)
   ): void {
     if (this.raf) this.cancelFrame(this.raf);
-    this.cancelRefresh();
-    this.raf = 0;
     this.cancelFrame = cancelFrame;
     const token = ++this.loop;
     const loop = (t: number): void => {
       if (this.disposed || token !== this.loop) return;
       this.raf = requestFrame(loop);
-      const fraction = this.options.commitPhaseRefreshes ?? 0;
-      if (!fraction) { this.refresh(t); return; }
-      // Fit on every BeginFrame, even if a not-yet-known faster display
-      // supersedes the initial deadline before it fires.
-      const fit = this.vsync.sample(t);
-      const period = fit?.periodMs ?? this.nominalPeriodMs;
-      const deadline = t + fraction * period;
-      if (this.refreshTimer !== null) {
-        if (this.refreshDeadline !== null && this.refreshDeadline <= this.now()) {
-          // Under load BeginFrame can overtake its commit timer. Fulfil
-          // that overdue turn now instead of canceling it forever.
-          this.cancelRefresh();
-          this.refresh(t, fit);
-          return;
-        }
-        // A newer refresh may move a deadline earlier (a faster display),
-        // but must never postpone a commit that is already queued.
-        if (this.refreshDeadline !== null && deadline >= this.refreshDeadline) return;
-        this.cancelRefresh();
-      }
-      const run = () => {
-        this.refreshTimer = null;
-        this.refreshDeadline = null;
-        if (this.disposed || token !== this.loop) return;
-        // A delayed task uses the current refresh, never a stale decision.
-        const current = t + Math.max(0, Math.floor((this.now() - t) / period)) * period;
-        this.refresh(current, fit);
-      };
-      const delay = deadline - this.now();
-      if (delay > 0) {
-        this.refreshDeadline = deadline;
-        this.refreshTimer = this.options.timers?.set(run, delay) ?? setTimeout(run, delay) as unknown as number;
-      } else run();
+      this.refresh(t);
     };
     this.raf = requestFrame(loop);
-  }
-
-  private cancelRefresh(): void {
-    if (this.refreshTimer === null) return;
-    if (this.options.timers) this.options.timers.clear(this.refreshTimer);
-    else clearTimeout(this.refreshTimer);
-    this.refreshTimer = null;
-    this.refreshDeadline = null;
   }
 
   /**
@@ -323,7 +296,6 @@ export class EnginePresenter implements Presenter {
   ): void {
     if (this.disposed) return;
     this.vsync = new VsyncEstimator(displayHz);
-    this.nominalPeriodMs = 1000 / (displayHz ?? 60);
     this.offsetKey = '';
     this.offsetUs = 0;
     // Another display: its grid replaces the old one as soon as it is fitted.
@@ -399,6 +371,8 @@ export class EnginePresenter implements Presenter {
 
   /** The depth and object-id pool's generation (`role: depthId`). */
   private depthGeneration = 0;
+  /** The color pool's surface size and format ([`poolShape`]). */
+  private poolShape = '';
 
   private onPool(pool: SurfacePool): void {
     if (pool.role === 'depthId') {
@@ -414,7 +388,13 @@ export class EnginePresenter implements Presenter {
     const previous = this.generation;
     this.generation = pool.generation;
     this.stats.generation = pool.generation;
-    for (const item of this.buffer.clear((i) => i.desc.poolGeneration !== pool.generation)) this.dropItem(item, 'generation');
+    // A pool of the same surfaces, more or fewer of them (Play grows it):
+    // frames of the old one already here still draw (a Play's start
+    // frames). Another size or format replaces them.
+    const shape = poolShape(pool);
+    const same = shape !== '' && shape === this.poolShape;
+    this.poolShape = shape;
+    if (!same) for (const item of this.buffer.clear((i) => i.desc.poolGeneration !== pool.generation)) this.dropItem(item, 'generation');
     this.parked = this.parked.filter((p) => {
       if (p.desc.poolGeneration === pool.generation) return true;
       this.releaseDesc(p.desc, 'generation');
@@ -489,13 +469,14 @@ export class EnginePresenter implements Presenter {
   }
 
   /** One refresh: called at requestAnimationFrame with its timestamp. */
-  refresh(rafMs: number, sampledFit?: VsyncFit | null): void {
+  refresh(rafMs: number): void {
     if (this.disposed) return;
     this.trace?.rafs.push(rafMs);
-    const fit = sampledFit === undefined ? this.vsync.sample(rafMs) : sampledFit;
+    const fit = this.vsync.sample(rafMs);
     this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
     const { decisionMs, displayMs } = this.decision(rafMs, fit);
+    this.trace?.decisions.push([rafMs, fit?.vsyncMs ?? 0, fit?.periodMs ?? 0, fit?.jumped ? 1 : 0, this.offsetUs, decisionMs]);
     const atUs = this.hostUs(decisionMs);
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
@@ -512,7 +493,7 @@ export class EnginePresenter implements Presenter {
 
   takeTrace(): Promise<TraceRecord | null> {
     const t = this.trace;
-    return Promise.resolve(t && { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0) });
+    return Promise.resolve(t && drainTrace(t));
   }
 
   /** The refresh grid on the host clock, for the engine (amendment 18). */
@@ -524,10 +505,13 @@ export class EnginePresenter implements Presenter {
     if (!fit || !this.options.onVsync) return;
     const host = this.hostUs(fit.vsyncMs);
     if (host === null) return;
-    const next: VsyncHint = { hostTime: Math.round(host), periodUs: fit.periodMs * 1000 };
+    // The display latency the decisions use (without a live resize's extra).
+    const latencyUs = ((this.options.latencyRefreshes ?? 1) * fit.periodMs + (this.options.presentOffsetMs ?? 0)) * 1000;
+    const next: VsyncHint = { hostTime: Math.round(host), periodUs: fit.periodMs * 1000, latencyUs };
     if (!hintChanged(this.hint, next)) return;
     if (this.hint && !fit.jumped && rafMs - this.hintSentMs < HINT_INTERVAL_MS) return;
     this.hint = next;
+    this.trace?.hints.push([rafMs, next.hostTime, next.periodUs]);
     this.hintSentMs = rafMs;
     this.options.onVsync(next);
   }
@@ -545,13 +529,30 @@ export class EnginePresenter implements Presenter {
     const decision = displayMs + (this.options.nearestRefresh ? periodMs / 2 : 0);
     const clock = this.clock;
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
-    if (fit && clock && head) {
-      const key = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${fit.vsyncMs.toFixed(1)}:${fit.jumped}:${resizing}`;
-      const host = this.hostUs(decision);
-      if (key !== this.offsetKey && host !== null) {
-        this.offsetKey = key;
-        this.offsetUs = decisionOffsetUs(periodMs * 1000, host, clock, head);
+    const host = this.hostUs(decision);
+    if (fit && clock && head && host !== null) {
+      // Decisions sit halfway between frame boundaries (`next`). Within a
+      // run each refresh decides one refresh after the last: as many as
+      // its animation frame says passed, a BeginFrame up to three quarters
+      // of a refresh late or early still being the next refresh. So a grid
+      // that moves by half a refresh (a display-link phase change, early
+      // BeginFrames on an idle machine) neither skips nor repeats a frame;
+      // a missed refresh skips its frame. Decisions a refresh away from the
+      // grid's by more than one and a half are centred on it again (one
+      // frame, after phase changes that added up).
+      const run = `${clock.epoch}:${resizing}`;
+      const next = decisionOffsetUs(periodMs * 1000, host, clock, head);
+      const periodUs = periodMs * 1000;
+      this.offsetUs = next;
+      if (run === this.offsetKey) {
+        const refreshes = Math.max(1, Math.round((rafMs - this.lastRafMs) / periodMs - 0.25));
+        const expected = this.lastDecisionMs + refreshes * periodMs;
+        const k = Math.round((expected - (decision + next / 1000)) / periodMs);
+        if (Math.abs(next + k * periodUs) <= 1.5 * periodUs) this.offsetUs = next + k * periodUs;
       }
+      this.offsetKey = run;
+      this.lastRafMs = rafMs;
+      this.lastDecisionMs = decision + this.offsetUs / 1000;
     }
     return { decisionMs: decision + this.offsetUs / 1000, displayMs };
   }
@@ -664,7 +665,6 @@ export class EnginePresenter implements Presenter {
     for (const { desc } of this.parked) this.releaseDesc(desc, 'disposed');
     this.parked = [];
     this.disposed = true;
-    this.cancelRefresh();
     if (this.raf) cancelFrame(this.raf);
     this.unsubscribe();
     this.listeners.clear();

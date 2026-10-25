@@ -13,4 +13,12 @@ hostTime: HostMicros,
 /**
  * The refresh period in µs (8,333.3 at 120 Hz).
  */
-periodUs: number, };
+periodUs: number, 
+/**
+ * How long after a refresh instant the frame the viewer draws at it
+ * reaches the display (µs; the viewer's own prediction, which picks
+ * timed frames). The engine starts a Play's line so that the first new
+ * frame shows at the first refresh it can be ready for. Optional on
+ * the wire: absent, the line starts after a fixed pre-roll.
+ */
+latencyUs?: number | null, };

@@ -131,7 +131,9 @@ export type ViewerState = {
 export type ViewerCanvas = { width: number; height: number; crop: Rect; css: Rect };
 
 /** Refreshes (BeginFrame times) fall at `hostTime + n × periodUs` (host µs). */
-export type VsyncHint = { hostTime: number; periodUs: number };
+/** `latencyUs`: refresh instant to display, the presenter's own prediction
+ *  (the engine starts a Play's line on it). */
+export type VsyncHint = { hostTime: number; periodUs: number; latencyUs?: number | null };
 
 export type FrameRelease = { poolIndex: number; seq: number };
 

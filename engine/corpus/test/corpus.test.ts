@@ -134,7 +134,10 @@ describe('synthetic documents', () => {
     const definitions = collect(node => isLayer(node) && node.type === 'extension' ? [node.d.definition] : undefined);
     for (const id of [...Object.values(scene3d.definitions), scene3d.sceneDefinition]) expect(definitions.has(id)).toBe(true);
     const lights = collect(node => isLayer(node) && node.d?.data?.light ? [node.d.data.light.type] : undefined);
-    expect([...lights].sort()).toEqual(['area', 'point', 'spot', 'sun']);
+    expect([...lights].sort()).toEqual(['point', 'spot', 'sun']);
+    const shadowLights = projects.find(item => item.id === '3d/lights')!.doc.layers
+      .filter((layer: any) => layer.d?.data?.light?.castShadow);
+    expect(shadowLights).toHaveLength(5);
     const primitives = collect(node => node.source?.primitive ? [node.source.primitive] : undefined);
     for (const kind of ['box', 'sphere', 'plane', 'cylinder', 'cone', 'torus', 'capsule', 'icosahedron']) expect(primitives.has(kind)).toBe(true);
     const sources = collect(node => node.source && typeof node.source === 'object' ? Object.keys(node.source) : undefined);
@@ -332,7 +335,7 @@ describe('renderer injection', () => {
   });
 });
 
-describe('bundled retiming and Blender requests', () => {
+describe('bundled retiming', () => {
   /** A stub PM: channels evaluate linearly between their keys, as the evaluator does for linear keys. */
   const evaluate = (p: any, t: number) => {
     if (!p || typeof p !== 'object' || !('v' in p)) return p;
@@ -362,31 +365,11 @@ describe('bundled retiming and Blender requests', () => {
     }
   });
 
-  test('blenderFrameRequests lists nested compositions and shutter samples in order', async () => {
-    const bundled = await bundle();
-    const object = (id: string, extra: any = {}) => ({ id, type: 'extension', from: 0, dur: 3, mblur: false, d: { definition: scene3d.definitions.object, data: { object: {} } }, ...extra });
-    const inner = { compId: 'inner', w: 320, h: 180, fps: 24, render3d: { enabled: true }, layers: [object('a')] };
-    const proj = {
-      compId: 'root', w: 640, h: 360, fps: 30, shutter: .5, render3d: { enabled: true }, comps: { inner },
-      layers: [object('b', { mblur: true }), { id: 'p', type: 'precomp', from: 0, dur: 3, d: { comp: 'inner', w: 320, h: 180 } }],
-    };
-    const requests = bundled.blenderFrameRequests(makePM(proj), 1, proj, { shutter: .5 });
-    const roots = requests.filter((request: any) => request.comp === proj);
-    // The frame time, then ten shutter samples spread over 0.5 / 30 s.
-    expect(roots.map((request: any) => request.time)).toEqual([1, ...Array.from({ length: 10 }, (_, i) => 1 + ((i + .5) / 10 - .5) * (.5 / 30))]);
-    expect(roots.every((request: any) => request.width === 640 && request.height === 360)).toBe(true);
-    const nested = requests.filter((request: any) => request.comp === inner);
-    expect(nested).toHaveLength(11);
-    expect(nested.every((request: any) => request.width === 320 && request.height === 180)).toBe(true);
-    proj.render3d.enabled = false;
-    expect(bundled.blenderFrameRequests(makePM(proj), 1, proj, {}).every((request: any) => request.comp === inner)).toBe(true);
-  });
-
   test('the bundle carries the legacy sources and none of the renderer or media modules', async () => {
     const script = await legacyScript();
     const modules = [...script.matchAll(/^ {2}\/\/ (.+)$/gm)].map(match => match[1]!).filter(file => !file.endsWith('legacy-entry.ts'));
     expect(modules.map(file => file.replace(/^.*\/src\/renderer\/src\//, ''))).toEqual([
-      'legacy/core/text-animation.ts', 'legacy/core/content-properties.ts', 'legacy/core/retiming.ts', 'legacy/core/frame-preparation.ts',
+      'legacy/core/text-animation.ts', 'legacy/core/content-properties.ts', 'legacy/core/retiming.ts',
     ]);
   });
 });

@@ -17,11 +17,19 @@ import { ffmpegBinary } from './helpers/ffmpeg';
    kernel's definitions (kernel/engine-definitions.ts `settle`) and main
    pushes the window's set to the job's snapshot session and waits for the
    job engine's acknowledgment before submitting (main/engine/agent-jobs.ts).
-   Both exporters write the same file (EXPORT-1), so a routed export is told
-   apart by the reason the exporter records (`PM.Export.lastRouted`). */
+   Both exporters write the same file (EXPORT-1), so completion and routing
+   are checked through the native job's export-status reports. */
 
 /** The first frame's pixel at (10, 10) as RGB. */
 const pixel = (file: string): number[] => [...execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'format=rgb24,crop=1:1:10:10', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
+type JobEvidence = { result: { cancelled: boolean }; routed: unknown; statuses: Array<{ state: string; routed: boolean }> };
+function expectNativeJob(evidence: JobEvidence): void {
+  expect(evidence.result).toEqual({ cancelled: false });
+  expect(evidence.routed, 'the exporter did not hand the job to the legacy path').toBeNull();
+  expect(evidence.statuses.some(status => status.state === 'done' && !status.routed), 'the native job reported completion').toBe(true);
+  expect(evidence.statuses.some(status => status.routed), 'the native job never reported routing').toBe(false);
+  expect(evidence.statuses.filter(status => status.state === 'failed'), 'no native job failure').toEqual([]);
+}
 
 test('an effect registered just before an export is drawn by the job engine, with overrides by id', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-definitions-'));
@@ -41,7 +49,7 @@ test('an effect registered just before an export is drawn by the job engine, wit
       PM.bus.emit('project');
       PM.Edit.apply([{ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 }], { label: 'Red', origin: 'user' });
     });
-    const exportTo = async (file: string, register: 'publish' | 'override' | 'dispose'): Promise<unknown> => {
+    const exportTo = async (file: string, register: 'publish' | 'override' | 'dispose'): Promise<JobEvidence> => {
       await session.app.evaluate(({ dialog }, filePath) => {
         dialog.showSaveDialog = async () => ({ canceled: false, filePath });
       }, file);
@@ -50,37 +58,40 @@ test('an effect registered just before an export is drawn by the job engine, wit
       return session.page.evaluate(async (step) => {
         const PM = (window as any).PM;
         const w = window as any;
-        const effect = (frag: string) => ({ id: 'e2e.tint', label: 'E2E tint', group: 'Color', params: [], frag });
-        if (step === 'publish') {
-          w.__e2eTint = PM.Kernel.registerEffect('e2e.publisher', effect('vec4 c = src(v_st); o = vec4(0.0, 0.0, c.a, c.a);'));
-          const layer = PM.proj.layers[0];
-          PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'e2e.tint' }, { origin: 'user', label: 'Add effect' });
-        } else if (step === 'override') {
-          w.__e2eOverride = PM.Kernel.registerEffect('e2e.override', effect('vec4 c = src(v_st); o = vec4(0.0, c.a, 0.0, c.a);'));
-        } else {
-          w.__e2eOverride.dispose();
-        }
-        PM.Export.lastRouted = null;
-        const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
-        return { result, routed: PM.Export.lastRouted };
+        const statuses: JobEvidence['statuses'] = [];
+        const off = w.__powermoveTestBridge.nativeEngine.onExportStatus((status: any) => statuses.push({ state: status.state, routed: status.routed === true }));
+        try {
+          const effect = (frag: string) => ({ id: 'e2e.tint', label: 'E2E tint', group: 'Color', params: [], frag });
+          if (step === 'publish') {
+            w.__e2eTint = PM.Kernel.registerEffect('e2e.publisher', effect('vec4 c = src(v_st); o = vec4(0.0, 0.0, c.a, c.a);'));
+            const layer = PM.proj.layers[0];
+            PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'e2e.tint' }, { origin: 'user', label: 'Add effect' });
+          } else if (step === 'override') {
+            w.__e2eOverride = PM.Kernel.registerEffect('e2e.override', effect('vec4 c = src(v_st); o = vec4(0.0, c.a, 0.0, c.a);'));
+          } else {
+            w.__e2eOverride.dispose();
+          }
+          PM.Export.lastRouted = null;
+          const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+          return { result, routed: PM.Export.lastRouted, statuses };
+        } finally { off(); }
       }, register);
     };
-    const drawn = { result: { cancelled: false }, routed: null };
 
     const published = path.join(root, 'published.mp4');
-    expect(await exportTo(published, 'publish'), 'drawn by the job engine, not routed').toEqual(drawn);
+    expectNativeJob(await exportTo(published, 'publish'));
     const [r1, g1, b1] = pixel(published);
     expect(b1, 'the published effect is drawn').toBeGreaterThan(200);
     expect(r1! + g1!).toBeLessThan(80);
 
     const overridden = path.join(root, 'overridden.mp4');
-    expect(await exportTo(overridden, 'override'), 'drawn by the job engine, not routed').toEqual(drawn);
+    expectNativeJob(await exportTo(overridden, 'override'));
     const [r2, g2, b2] = pixel(overridden);
     expect(g2, 'the override by id wins').toBeGreaterThan(200);
     expect(r2! + b2!).toBeLessThan(80);
 
     const restored = path.join(root, 'restored.mp4');
-    expect(await exportTo(restored, 'dispose'), 'drawn by the job engine, not routed').toEqual(drawn);
+    expectNativeJob(await exportTo(restored, 'dispose'));
     const [r3, g3, b3] = pixel(restored);
     expect(b3, 'disposing the override restores the earlier registration').toBeGreaterThan(200);
     expect(r3! + g3!).toBeLessThan(80);
@@ -113,28 +124,32 @@ test('an effect only the WebGL runner draws is exported through the window\'s fa
     }, file);
     const result = await session.page.evaluate(async () => {
       const PM = (window as any).PM;
-      PM.proj = PM.mkProject({ name: 'Fallback export', w: 320, h: 180, fps: 24, dur: 1 });
-      PM.proj.work = [0, 1];
-      PM.bus.emit('project');
-      PM.Edit.apply([{ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 }], { label: 'Red', origin: 'user' });
-      PM.Kernel.registerEffect('e2e.fallback', {
-        id: 'e2e.volume', label: 'E2E volume', group: 'Color', params: [], rawShader: true, keepOrig: true,
-        frag: [
-          '#version 300 es',
-          'precision highp float;',
-          'in vec2 v_uv; in vec2 v_st; in vec2 v_px;',
-          'uniform sampler2D u_tex;',
-          'uniform highp sampler3D u_orig;',
-          'out vec4 o;',
-          'void main(){ vec4 c = texture(u_tex, v_st); o = vec4(c.a, c.a, 0.0, c.a) * texture(u_orig, vec3(0.5)).a; }'
-        ].join('\n')
-      });
-      PM.Edit.apply({ type: 'add_effect', target: PM.proj.layers[0].id, effect: 'e2e.volume' }, { origin: 'user', label: 'Add effect' });
-      PM.Export.lastRouted = null;
-      const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
-      return { result, routed: PM.Export.lastRouted };
+      const statuses: JobEvidence['statuses'] = [];
+      const off = (window as any).__powermoveTestBridge.nativeEngine.onExportStatus((status: any) => statuses.push({ state: status.state, routed: status.routed === true }));
+      try {
+        PM.proj = PM.mkProject({ name: 'Fallback export', w: 320, h: 180, fps: 24, dur: 1 });
+        PM.proj.work = [0, 1];
+        PM.bus.emit('project');
+        PM.Edit.apply([{ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 }], { label: 'Red', origin: 'user' });
+        PM.Kernel.registerEffect('e2e.fallback', {
+          id: 'e2e.volume', label: 'E2E volume', group: 'Color', params: [], rawShader: true, keepOrig: true,
+          frag: [
+            '#version 300 es',
+            'precision highp float;',
+            'in vec2 v_uv; in vec2 v_st; in vec2 v_px;',
+            'uniform sampler2D u_tex;',
+            'uniform highp sampler3D u_orig;',
+            'out vec4 o;',
+            'void main(){ vec4 c = texture(u_tex, v_st); o = vec4(c.a, c.a, 0.0, c.a) * texture(u_orig, vec3(0.5)).a; }'
+          ].join('\n')
+        });
+        PM.Edit.apply({ type: 'add_effect', target: PM.proj.layers[0].id, effect: 'e2e.volume' }, { origin: 'user', label: 'Add effect' });
+        PM.Export.lastRouted = null;
+        const result = await PM.Export.run({ format: 'mp4', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false });
+        return { result, routed: PM.Export.lastRouted, statuses };
+      } finally { off(); }
     });
-    expect(result, 'drawn by the job engine, not routed').toEqual({ result: { cancelled: false }, routed: null });
+    expectNativeJob(result);
     const [r, g, b] = pixel(file);
     // The fallback runner drew the effect over the red solid: yellow.
     expect(r, 'the fallback program is drawn').toBeGreaterThan(200);

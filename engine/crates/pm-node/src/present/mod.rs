@@ -111,8 +111,9 @@ pub const DEFAULT_PHASE_PERMILLE: u32 = 500;
 
 /// Frames being rendered or waiting for their command buffer.
 pub const RING: u32 = 2;
-/// Default render-ahead: S1 found a lead of 4 enough once main is off the
-/// per-frame path (121 ms of slack at lead 10).
+/// Default render-ahead in frames: S1 found a lead of 4 enough once main is
+/// off the per-frame path (121 ms of slack at lead 10). A floor: high frame
+/// rates render further ahead in frames (`Schedule::lead_frames`).
 pub const DEFAULT_LEAD: u32 = 4;
 
 /// What produces viewer frames.
@@ -161,7 +162,7 @@ impl PresenterConfig {
         Some(Self {
             thread: ThreadConfig {
                 bridge_name: Some(bridge_name),
-                lead: number(LEAD_ENV, DEFAULT_LEAD, 28).max(1),
+                lead: number(LEAD_ENV, DEFAULT_LEAD, schedule::MAX_LEAD).max(1),
                 fps: number(FPS_ENV, 60, 240).max(1),
                 extra_passes: number(LOAD_ENV, 0, 8),
                 trace: env(TRACE_ENV).as_deref() == Some("1"),
@@ -489,9 +490,10 @@ impl BridgePresenter {
         }
     }
 
-    /// Replan after a transport transition. A pool generation is replaced
-    /// before timed playback starts and after the pause has reached the
-    /// render thread, so a playing jitter queue never sees the smaller ring.
+    /// Replan after a transport transition, once it reached the render
+    /// thread: a Play's start frames leave from the paused pool, and the
+    /// render-ahead fills the playing one (a frame or two at the start of a
+    /// run fit the paused pool's free slots); a pause shrinks it.
     fn replan_transport_pool(&mut self, ctx: &mut PresentContext<'_>, key: Key) {
         let Some(state) = self.views.get(&key).map(|meta| meta.state.clone()) else {
             return;
@@ -625,19 +627,19 @@ impl FramePresenter for BridgePresenter {
         if matches!(command, TransportCommand::Step { .. }) {
             self.audio_ingress.forget(key);
         }
+        // The audio prepares the run at once (PLAY-1); the render thread
+        // times its start.
         let audio_forwarded = self.audio_ingress.transport(key, command);
-        // Audio is already starting. Keep the video pool generation ahead
-        // of its render command; video catches up to the device clock.
-        if transition == Some(true) {
-            self.replan_transport_pool(ctx, key);
-        }
+        // The Play first: the run's start frames, rendered while paused,
+        // go out from the paused pool before the playing pool replaces it
+        // (the viewer draws them across the replacement).
         self.send(Command::Transport {
             key,
             command,
             at,
             audio_forwarded,
         });
-        if transition == Some(false) {
+        if transition.is_some() {
             self.replan_transport_pool(ctx, key);
         }
     }
@@ -1008,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_pools_expand_before_play_and_shrink_after_pause() {
+    fn paused_pools_expand_after_the_play_and_shrink_after_pause() {
         let (mut p, rx) = presenter();
         let mut budget = LeaseBudget::new(EngineProcess::Interactive);
         let mut evict = NoEviction;
@@ -1080,7 +1082,8 @@ mod tests {
             .iter()
             .position(|c| matches!(c, Command::Transport { .. }))
             .unwrap();
-        assert!(config_at < play_at);
+        // The Play goes first: its start frames leave from the paused pool.
+        assert!(play_at < config_at);
         assert!(matches!(
             &commands[play_at],
             Command::Transport {

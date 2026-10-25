@@ -81,11 +81,8 @@ function attachmentBytes(item: Partial<PromptAttachment>): Uint8Array | null {
   return null;
 }
 
-export async function activatePromptAttachment(PM: Record<string, any>, item: Record<string, any>, opener?: HTMLElement): Promise<void> {
+export async function activatePromptAttachment(PM: Record<string, any>, item: Record<string, any>): Promise<void> {
   if (item.dataUrl && isPreviewableImageType(item.type || item.dataUrl.slice(5, item.dataUrl.indexOf(';')))) {
-    // A pointer press may leave focus on the composer or body. Give the modal
-    // its actual opener so Escape returns to the attachment that was viewed.
-    opener?.focus({ preventScroll: true });
     openImagePreview(PM, item.name, item.dataUrl);
     return;
   }
@@ -135,7 +132,7 @@ export function mountPromptAttachments(PM: Record<string, any>, card: HTMLElemen
       const open = document.createElement('button'); open.type = 'button'; open.className = 'agent-attachment-open';
       open.setAttribute('aria-label', item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`);
       open.title = open.getAttribute('aria-label') || '';
-      open.onclick = () => { void activatePromptAttachment(PM, item, open); };
+      open.onclick = () => { void activatePromptAttachment(PM, item); };
       if (item.dataUrl) { const img = document.createElement('img'); img.src = item.dataUrl; img.alt = item.name; open.append(img); }
       else { const type = document.createElement('span'); type.className = 'agent-attachment-type'; type.textContent = (item.name.split('.').pop() || 'file').slice(0, 5).toUpperCase(); open.append(type); }
       const name = document.createElement('span'); name.className = 'agent-attachment-name'; name.textContent = item.name; name.title = item.name;

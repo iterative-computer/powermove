@@ -350,7 +350,7 @@
         "gpu.draw_calls": 96,
         "gpu.pipeline_binds": 142,
         "gpu.render_passes": 72,
-        "gpu.texture_alloc_bytes": 57600,
+        "gpu.texture_alloc_bytes": 115200,
         "gpu.texture_allocs": 1,
         "gpu.upload_bytes": 26640,
         "gpu.uploads": 118
@@ -367,7 +367,7 @@
         "gpu.draw_calls": 96,
         "gpu.pipeline_binds": 142,
         "gpu.render_passes": 72,
-        "gpu.texture_alloc_bytes": 57600,
+        "gpu.texture_alloc_bytes": 115200,
         "gpu.texture_allocs": 1,
         "gpu.upload_bytes": 26640,
         "gpu.uploads": 118
