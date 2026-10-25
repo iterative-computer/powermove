@@ -2995,9 +2995,8 @@ impl Thread {
             || view.preroll.is_some()
             || !view.requests.is_empty()
             || view.external_wait.is_some()
-            // The paused frame lacks something (an SVG bucket, the
-            // window's answers, decoding video): not before it is whole.
-            || !view.svg_without.is_empty()
+            // The paused frame lacks something (the window's answers,
+            // decoding video): not before it is whole.
             || view.compat_paused_wait.is_some()
             || view.stand_in.is_some()
             || view.watchdog_held
