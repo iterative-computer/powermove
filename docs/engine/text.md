@@ -217,7 +217,7 @@ was found on the corpus's real project and checked against Chromium itself
    resolver diagnostics and can capture failures outside Git with
    `PM_FONT_SEEDS_CAPTURE`. Its failing rows must not be described as T1
    closure. Playback cost and the separate typing measurement are in
-   `text-render.md`, round 4 verification.
+   [text-render.md](text-render.md), “Reproduction”.
 
    **Seeds per window (2026-10-18).** Each BrowserWindow is its own
    renderer with its own Chromium font cache, so the engines measure a
@@ -351,8 +351,8 @@ the utility process's main thread (AppKit). Both meet in
   sources, a new generation base after a restart) or when the seeds change.
   `ServedFonts::sync`, called before each text layer, then starts over with
   a fresh resolver and measurer, and the generation enters every raster's
-  content key. The text context drops every glyph cache then (outlines,
-  color bitmaps, CoreGraphics masks, path masks and their CTFonts), and
+  content key. The text context drops every glyph cache then (outlines and
+  color bitmaps), and
   every glyph cache keys a face by `FontBytes::id`, a process-unique id
   that new bytes never reuse (never by the buffer's address, which a
   replaced font of the same size can land on).
@@ -440,7 +440,7 @@ public name). In `pm-wasm` the bytes are subsets.
 `pm_eval::text_level2` evaluates range typography, Parley layout, selector
 weights, shaped glyph poses and typography anchors as one frame. Rendering,
 `textRaster`, bounds, picks, glyph units and the editor's caret layout all
-consume it. Level 1 retains its original measurement and raster paths.
+consume it. Level 1 retains its original measurement and layout paths.
 
 `TextMeasure::level2` resolves base and range typography through the existing
 registry/replay boundary and resolves the needed script fallback faces before
@@ -494,7 +494,8 @@ applied to each:
   box that ends in spaces.
 
 Anchor edits (`anchor_reference`, `capture_font_anchor`, `font_offset`)
-share `Scope::text_anchor_box`: today's raster selection at level 1 and the
+share `Scope::text_anchor_box`: today's raster selection as Canvas measured
+it at level 1 (color glyphs by their metrics, not their drawn ink) and the
 resting styled box at level 2, the box `level2_text` anchors against. Pan
 Behind on font-anchored level 2 text therefore keeps the resting text in
 place whatever the animators do at that time.
@@ -534,7 +535,7 @@ Range-position, anchor and styled-wrap values are keyframed so their four
 samples differ. The semantic gate invokes the actual
 `support::routing_forbidden` predicate and refuses any escape. Level 2 uses
 its CoreText comparison and semantic invariants; the level 1 Canvas2D
-references and FONTS-R fixture remain unchanged.
+references remain witnesses under the reference quality policy.
 Generate their standalone corpus with
 `bun engine/corpus/src/generate.ts --native-text --out <outside-repo-dir>`.
 `textLevel2Projects` is also included in `allProjects`, so default corpus
@@ -543,8 +544,7 @@ validation and generation see every native case.
 Legacy captures leave them out (`engine/corpus/src/legacy-capture.ts`,
 `capture.ts`; the manifest lists them under `nativeOnly`): today's engine
 ignores `compat` and draws level 2 text at level 1, so its picture is no
-level 2 reference, and the level 1 gates (`text_corpus`, the FONTS-R
-ratchet, `pm-eval`'s evaluation corpus) would fail it by design. A capture
+level 2 reference, and the level 1 gates (`text_corpus` and `pm-eval`'s evaluation corpus) would fail it by design. A capture
 that still holds a level 2 text document (any text layer with `compat` ≥ 2,
 `pm_eval::text_level2::level2_text_layers`) is routed in `text_corpus`
 after its routing check, and in the evaluation corpus, to the semantic
@@ -591,7 +591,7 @@ query-bundle, GPU-complete frame and typing-mutation percentiles plus cache
 use. It measures engine work; browser key-event/bridge/presentation latency
 requires the separate `native-engine-text-typing.spec.ts` pair with
 `PM_TEXT_TYPING_LEVEL2=1 PM_TEXT_TYPING_PAIRED=1 PM_TEXT_TYPING_MEASURE=1`.
-Run both under the Electron lock. `TextFonts::level2`/`Level2Fonts` remain for
+Run only the Electron app pair under the Electron lock. `TextFonts::level2`/`Level2Fonts` remain for
 standalone tests only.
 
 ## Gates and how to run them
@@ -631,55 +631,15 @@ Recapture the fixture (`capture/run.ts`, then `pm-text-corpus fixture`) after
 a macOS update changes the fonts; `tests/corpus.rs` detects font drift and
 says so.
 
-## Round 6 integration
+## Rendering contract
 
-Canonical glyph paths and animator image filters now reuse pm-vector's
-Canvas2D renderer and Graphite filter executor; the source trace and raster
-results are in `text-render.md`, “Round 6”. Font selection and the full
-platform-cache identity retain the round 5 behavior. With the document-host
-integration, attaching or reviving a pm-wasm instance reapplies the latest
-received window seeds after synchronizing the document and before declaring
-it ready. An initial reply or notification arriving later still applies
-the seeds and invalidates cached answers through `FontLoader.applySeeds`.
-The paired typing harness remains committed and documented for the
-performance lane; round 6 does not attempt an edit-to-present optimization.
+Both compatibility levels use exact outline coverage and float paint.
+Compatibility selects the layout engine; the level 1 Blink/HarfRust layout,
+font-cache seeds, baselines and wrapping remain unchanged. The raster design
+and reference quality gates are in [text-render.md](text-render.md).
 
-The synchronous whole-face font provider carries the same initial seed
-callback and seeds-changed subscription as the asynchronous provider.
-The document-host integration introduced the synchronous branch; dropping
-these callbacks left the first 26 px/400 layout at opsz 26 instead of the
-window's seeded opsz 13. The provider regression test checks the initial
-application and a later notification against the actual pm-wasm wrapper.
-
-The fresh round 6 app matrix passes 22/22. Its live seed comparison includes
-23 rows and the first 26 px/400 query, with maximum native/Canvas2D width
-error 0.00001525879 px (unchanged bound 0.001 px). This validates the
-census-derived table as applied through the synchronous provider, in
-addition to the earlier static-startup parity run.
-
-## Round 7 gate policy
-
-Orchestrator decision **FONTS-R** (2026-10-19) places the 23 measured Round 6
-pixel residuals in an explicit downward-only ratchet; see `text-render.md`,
-“Round 7”. The ratchet leaves font selection, layout and the existing
-1-CV raster / 2-CV composition bounds unchanged. Unlisted failures and stale budgets after
-an improvement fail. The textexact follow-up owns the CPU AAA/SkStroke,
-Graphite stroke tessellation and Fontations COLR ports. The ratchet changes
-gate policy only; no glyph-rasterization port is started in this round.
-
-The bridge integration retains the scoped served-font provider for views
-and snapshots. Main-owned fallback snapshot sessions bind to their window's
-font seeds before resync, fail on a rejected binding and clear stale bindings
-before session ids are reused after a restart. Per-capture caption visibility
-is carried through the typed protocol and restored for later captures and
-viewer frames. See `text-render.md` and RFC 16. The fresh Round 7 app matrix
-passed 22/22; the 23 measured residuals then matched their FONTS-R budgets
-in debug and release, with every other case on its original strict bound.
-
-Since textexact (10 retired) and textexact2 (the remaining 13), the FONTS-R
-ratchet holds no residuals: its fixture and approved ceilings are empty, and
-every case, including the 23 historical identities, is held to its original
-strict bound (1 CV raster, 2 CV composed). Eight of the 13 cases retired by
-textexact2 are byte-exact; five are within those bounds but not exact
-(`path-stroke-0001` and the composed and text-only frames of one private
-project at two times). See `text-render.md`, “Textexact2”.
+Snapshot sessions retain their originating window's seed binding before
+resynchronizing a document. A rejected binding fails the capture; restarting
+the engine clears stale bindings. The synchronous whole-face provider and
+asynchronous provider both reapply the latest seeds before reporting ready.
+Per-capture caption visibility is restored after each request (RFC 16).

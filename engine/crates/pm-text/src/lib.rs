@@ -14,9 +14,8 @@
 //! - `served`: a resolver answered synchronously by a registry on another
 //!   thread, over full fonts (the engines' render threads).
 //! - `corpus`: the S4 corpus and its comparison with Canvas2D captures.
-//! - `render` (feature `render`): glyph rendering with the engine-owned
-//!   stem-darkening profiles, the text scene, and the CPU coverage and paint
-//!   paths (`docs/engine/text-render.md`).
+//! - `render` (feature `render`): unhinted glyph outlines, color glyphs,
+//!   the ordered text scene, and float CPU paint (`docs/engine/text-render.md`).
 //!
 //! Layout never calls a platform API; native and WASM builds run the same
 //! code over the same answers and produce bit-identical results.

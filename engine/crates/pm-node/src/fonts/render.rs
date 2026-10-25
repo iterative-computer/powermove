@@ -396,6 +396,19 @@ impl FontResolver for BrokerResolver {
         self.inner.clear_reports();
         self.inner.em_advance(face, size)
     }
+    fn sbix_metric_rect(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+        // As `em_advance`: `None` is a real answer (CoreText has a path).
+        self.inner.clear_reports();
+        let first = self.inner.sbix_metric_rect(face, glyph, size);
+        if first.is_some() || self.inner.misses.is_empty() {
+            return first;
+        }
+        if !self.fill() {
+            return None;
+        }
+        self.inner.clear_reports();
+        self.inner.sbix_metric_rect(face, glyph, size)
+    }
 }
 
 /// The fonts a renderer lays text out with, over a broker (the interactive
@@ -619,6 +632,7 @@ mod tests {
                     query: q.clone(),
                     face: None,
                     advance: None,
+                    rect: None,
                 });
             }
             Ok(answers)
@@ -818,6 +832,7 @@ mod tests {
                             query: q.clone(),
                             face: Some(0),
                             advance: None,
+                            rect: None,
                         })
                         .collect(),
                 })

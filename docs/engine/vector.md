@@ -64,9 +64,9 @@ plane; interior pixels take 1 at once. No texture, no cache.
 
 ## Text ownership
 
-Text keeps L2's platform glyph rasterizer and text-local blur executor. The retained
-`canvas2d::text` dependencies serve that caller only; shapes, masks and SVG use the
-native coverage paths described here.
+Text shares the exact area coverage (`pm_render::coverage`) with shapes, masks and
+SVG; its raster and blur are described in [text-render.md](text-render.md). The
+Canvas2D/Skia emulation (`pm-vector` `canvas2d`) is gone.
 
 ## Gates
 

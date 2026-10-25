@@ -224,6 +224,7 @@ pub struct CoreTextRegistry {
     /// Every blob a face reads, by key.
     blobs: HashMap<String, FontBytes>,
     em_advances: HashMap<(FaceId, u32), Option<f32>>,
+    sbix_metrics: HashMap<(FaceId, u32, u32), Option<[f64; 4]>>,
     variable: HashMap<String, Option<FaceId>>,
     project: Vec<ProjectFace>,
     /// `PM.fontSource(family)` sources (project font bytes the variable-font
@@ -288,6 +289,7 @@ impl CoreTextRegistry {
             table_fonts: HashMap::new(),
             blobs: HashMap::new(),
             em_advances: HashMap::new(),
+            sbix_metrics: HashMap::new(),
             variable: HashMap::new(),
             project: Vec::new(),
             sources: HashMap::new(),
@@ -726,7 +728,9 @@ impl CoreTextRegistry {
     ) -> Result<crate::answers::Answers, RegistryError> {
         use crate::answers::Query;
         for q in queries {
-            if let Query::Fallback { primary: id, .. } | Query::EmAdvance { face: id, .. } = q
+            if let Query::Fallback { primary: id, .. }
+            | Query::EmAdvance { face: id, .. }
+            | Query::SbixMetric { face: id, .. } = q
                 && *id as usize >= self.faces.len()
             {
                 return Err(RegistryError::UnknownFace(*id));
@@ -1452,6 +1456,21 @@ impl FontResolver for CoreTextRegistry {
         self.em_advances.insert(key, v);
         v
     }
+
+    fn sbix_metric_rect(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+        let key = (face, glyph, size.to_bits());
+        if let Some(v) = self.sbix_metrics.get(&key) {
+            return *v;
+        }
+        let f = &self.faces[face as usize];
+        let v = if f.info.facts.has_sbix {
+            sbix_metric_rect(&f.ct, glyph, size)
+        } else {
+            None
+        };
+        self.sbix_metrics.insert(key, v);
+        v
+    }
 }
 
 /// `BuildIdentifierKey` (character_fallback_cache.mm).
@@ -1491,18 +1510,7 @@ fn sbix_em_advance(ct: &CTFont, data: &[u8], index: u32, size: f32) -> Option<f3
     let n = font.maxp().ok()?.num_glyphs();
     let glyph =
         (0..n).find(|&g| hmtx.advance(read_fonts::types::GlyphId::new(g as u32)) == Some(upem))?;
-    let base = unsafe { ct.copy_with_attributes(size as f64, std::ptr::null(), None) };
-    let opsz = CFNumber::new_f64(size as f64);
-    let zero = CFNumber::new_i32(0);
-    let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
-        &[
-            &*cfstr("NSCTFontOpticalSizeAttribute"),
-            &*cfstr("NSCTFontUnscaledTrackingAttribute"),
-        ],
-        &[opsz.as_ref() as &CFType, zero.as_ref() as &CFType],
-    );
-    let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
-    let exact = unsafe { base.copy_with_attributes(size as f64, std::ptr::null(), Some(&desc)) };
+    let exact = skia_exact_copy(ct, size);
     let glyphs = [glyph];
     let mut adv = [objc2_core_foundation::CGSize {
         width: 0.0,
@@ -1517,6 +1525,50 @@ fn sbix_em_advance(ct: &CTFont, data: &[u8], index: u32, size: f32) -> Option<f3
         )
     };
     Some(adv[0].width as f32)
+}
+
+/// `CTFontGetBoundingRectsForGlyphs` for a glyph CoreText has no path for
+/// (`CTFontCreatePathForGlyph` is null: Skia's `getPath` fails and Blink
+/// falls back to the glyph's metrics), on the exact copy Skia's scaler
+/// makes. `None` when CoreText has a path.
+fn sbix_metric_rect(ct: &CTFont, glyph: u32, size: f32) -> Option<[f64; 4]> {
+    let glyph = u16::try_from(glyph).ok()?;
+    let exact = skia_exact_copy(ct, size);
+    if unsafe { exact.path_for_glyph(glyph, std::ptr::null()) }.is_some() {
+        return None;
+    }
+    let glyphs = [glyph];
+    let rect = unsafe {
+        exact.bounding_rects_for_glyphs(
+            objc2_core_text::CTFontOrientation::Horizontal,
+            std::ptr::NonNull::new(glyphs.as_ptr() as *mut u16).unwrap(),
+            std::ptr::null_mut(),
+            1,
+        )
+    };
+    Some([
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    ])
+}
+
+/// `SkCTFontCreateExactCopy` as Skia's scaler uses it: optical size = the
+/// base font's size, tracking off.
+fn skia_exact_copy(ct: &CTFont, size: f32) -> CFRetained<CTFont> {
+    let base = unsafe { ct.copy_with_attributes(size as f64, std::ptr::null(), None) };
+    let opsz = CFNumber::new_f64(size as f64);
+    let zero = CFNumber::new_i32(0);
+    let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
+        &[
+            &*cfstr("NSCTFontOpticalSizeAttribute"),
+            &*cfstr("NSCTFontUnscaledTrackingAttribute"),
+        ],
+        &[opsz.as_ref() as &CFType, zero.as_ref() as &CFType],
+    );
+    let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
+    unsafe { base.copy_with_attributes(size as f64, std::ptr::null(), Some(&desc)) }
 }
 
 fn nsfont_to_ct(f: &NSFont) -> CFRetained<CTFont> {

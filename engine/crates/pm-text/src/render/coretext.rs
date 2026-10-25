@@ -1,9 +1,8 @@
 //! The CoreText reference rasterizer (macOS): glyphs through
 //! `CTFontDrawGlyphs` into a 32-bit float premultiplied sRGB bitmap, with
-//! font smoothing on (the macOS look, level 2's target) or off, at exact
-//! subpixel positions. It draws what the engine is compared against in the
-//! level 2 gate and in Jude's side-by-side review sheets; the engine never
-//! renders with it (S4: coverage comes from Skrifa outlines on every host).
+//! font smoothing on or off, at exact subpixel positions. This optional
+//! diagnostic supplies a platform witness for review; quality gates use
+//! independent outline coverage. Production never renders with it.
 //!
 //! Ported from spike S4 (`docs/engine/spikes/S4.md`).
 
@@ -40,9 +39,6 @@ enum Source {
     /// A caller's buffer by address (the reference renderer: the caller
     /// keeps its fonts alive and unchanged while this renderer lives).
     Address(usize),
-    /// A [`crate::font::FontBytes::id`]: unique in the process, so new
-    /// bytes at a reused address never reach an old font.
-    Font(u64),
 }
 
 /// Font identity: source, face index, size bits, variation coordinates.
@@ -62,18 +58,6 @@ impl CoreTextReference {
 
     pub(crate) fn font(&mut self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
         self.font_from(Source::Address(run.data.as_ptr() as usize), run)
-    }
-
-    /// [`Self::font`] for bytes with a [`crate::font::FontBytes::id`]
-    /// (glyph masks of served fonts).
-    pub(crate) fn font_of(&mut self, font: u64, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
-        self.font_from(Source::Font(font), run)
-    }
-
-    /// Forget every font (the fonts behind the ids changed).
-    pub(crate) fn clear(&mut self) {
-        self.descriptors.clear();
-        self.fonts.clear();
     }
 
     fn font_from(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {

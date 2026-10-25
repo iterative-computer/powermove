@@ -1,37 +1,30 @@
-//! The float paint pass on the CPU: the reference the GPU pass is tested
-//! against, the CPU fallback's paint, and the fitting tool's renderer.
-//!
-//! Items composite in order with premultiplied source-over into a float
-//! RGBA target (E-encoded, premultiplied). A coverage item paints
-//! `color × alpha × curve(coverage)`; an image item paints its bilinear
-//! sample (transparent outside the image) times the color's alpha. A
-//! blurred item is first painted alone, then blurred with a separable
-//! Gaussian of radius 3σ, then composited.
+//! Ordered float source-over paint for text scenes. Blurs use the exact
+//! pixel-integrated Gaussian at authored sigma times world scale.
 
-use kurbo::Point;
+use kurbo::{Affine, Point};
+use pm_color::contract::WorkingEncoding;
+use pm_color::transfer::display_decode_f32;
 
 use super::atlas::Atlas;
-use super::profile::curve_at;
-use super::scene::{Item, ItemContent, TextScene, blur_radius};
+use super::scene::{ImagePixels, Item, ItemContent, TextScene, blur_radius};
 
-/// A premultiplied float RGBA image.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
+    /// Premultiplied float RGBA in the renderer's working encoding.
     pub data: Vec<f32>,
 }
 
 impl Image {
-    pub fn new(width: u32, height: u32) -> Image {
-        Image {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
             width,
             height,
             data: vec![0.0; width as usize * height as usize * 4],
         }
     }
 
-    /// Rounded to RGBA8 (premultiplied).
     pub fn to_rgba8(&self) -> Vec<u8> {
         self.data
             .iter()
@@ -40,372 +33,514 @@ impl Image {
     }
 }
 
-/// Gaussian weights for a blur of `sigma` px, radius `blur_radius(sigma)`.
-pub fn gaussian(sigma: f64) -> Vec<f32> {
-    let r = blur_radius(sigma) as i64;
-    let w: Vec<f64> = (-r..=r)
-        .map(|i| (-(i * i) as f64 / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let sum: f64 = w.iter().sum();
-    w.iter().map(|v| (v / sum) as f32).collect()
+fn phi(x: f64) -> f64 {
+    0.5 * libm::erfc(-x / std::f64::consts::SQRT_2)
 }
 
-fn bilinear(img: &super::bitmap::Rgba8, u: f64, v: f64) -> [f32; 4] {
-    let x = u - 0.5;
-    let y = v - 0.5;
-    let x0 = x.floor();
-    let y0 = y.floor();
-    let fx = (x - x0) as f32;
-    let fy = (y - y0) as f32;
-    let at = |xi: i64, yi: i64| -> [f32; 4] {
-        if xi < 0 || yi < 0 || xi >= i64::from(img.width) || yi >= i64::from(img.height) {
+/// Gaussian weights integrate the continuous kernel over each pixel square.
+/// The tails stop at 8 sigma and are never renormalized.
+pub fn gaussian(sigma: f64) -> Vec<f64> {
+    assert!(sigma >= 0.0 && sigma.is_finite());
+    if sigma == 0.0 {
+        return vec![1.0];
+    }
+    let r = blur_radius(sigma) as i64;
+    (-r..=r)
+        .map(|k| {
+            let k = k as f64;
+            if k >= 0.0 {
+                phi(-(k - 0.5) / sigma) - phi(-(k + 0.5) / sigma)
+            } else {
+                phi((k + 0.5) / sigma) - phi((k - 0.5) / sigma)
+            }
+        })
+        .collect()
+}
+
+fn to_working(mut pixel: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
+    if working == WorkingEncoding::LinearLight {
+        let alpha = pixel[3];
+        if alpha > 0.0 {
+            for channel in &mut pixel[..3] {
+                *channel = display_decode_f32(*channel / alpha) * alpha;
+            }
+        } else {
+            pixel[..3].fill(0.0);
+        }
+    }
+    pixel
+}
+
+fn inverse_major(inv: Affine) -> f64 {
+    let [a, b, c, d, _, _] = inv.as_coeffs();
+    let xx = a * a + c * c;
+    let xy = a * b + c * d;
+    let yy = b * b + d * d;
+    ((xx + yy + ((xx - yy).powi(2) + 4.0 * xy * xy).sqrt()) * 0.5).sqrt()
+}
+
+fn polygon_area(poly: &[(f64, f64)]) -> f64 {
+    if poly.len() < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        sum += a.0 * b.1 - b.0 * a.1;
+    }
+    sum.abs() * 0.5
+}
+
+/// Clip a convex inverse pixel quad to a source texel without allocations.
+fn clipped_area(quad: &[(f64, f64); 4], sx: i64, sy: i64) -> f64 {
+    let mut current = [(0.0, 0.0); 8];
+    let mut next = [(0.0, 0.0); 8];
+    current[..4].copy_from_slice(quad);
+    let mut len = 4;
+    for (axis, bound, keep_above) in [
+        (0, sx as f64, true),
+        (0, sx as f64 + 1.0, false),
+        (1, sy as f64, true),
+        (1, sy as f64 + 1.0, false),
+    ] {
+        let inside = |p: (f64, f64)| {
+            let value = if axis == 0 { p.0 } else { p.1 };
+            if keep_above {
+                value >= bound
+            } else {
+                value <= bound
+            }
+        };
+        let mut count = 0;
+        for i in 0..len {
+            let (a, b) = (current[i], current[(i + 1) % len]);
+            let (av, bv) = if axis == 0 { (a.0, b.0) } else { (a.1, b.1) };
+            if inside(a) != inside(b) {
+                let t = (bound - av) / (bv - av);
+                next[count] = (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
+                count += 1;
+            }
+            if inside(b) {
+                next[count] = b;
+                count += 1;
+            }
+        }
+        if count < 3 {
+            return 0.0;
+        }
+        std::mem::swap(&mut current, &mut next);
+        len = count;
+    }
+    polygon_area(&current[..len])
+}
+
+struct ImageSampler {
+    image: Image,
+    inv: Affine,
+    minify: bool,
+}
+
+impl ImageSampler {
+    fn new(image: &ImagePixels, transform: Affine, working: WorkingEncoding) -> Self {
+        let base = match image {
+            ImagePixels::Rgba8(i) => {
+                let mut base = Image::new(i.width, i.height);
+                for (source, pixel) in i.data.chunks_exact(4).zip(base.data.chunks_exact_mut(4)) {
+                    pixel.copy_from_slice(&to_working(
+                        std::array::from_fn(|c| f32::from(source[c]) / 255.0),
+                        working,
+                    ));
+                }
+                base
+            }
+            ImagePixels::WorkingF32(i) => Image {
+                width: i.width,
+                height: i.height,
+                data: i.data.clone(),
+            },
+            ImagePixels::Colr(program) => {
+                let pixels = program.rasterize(working);
+                Image {
+                    width: pixels.width,
+                    height: pixels.height,
+                    data: pixels.data,
+                }
+            }
+        };
+        let inv = transform.inverse();
+        Self {
+            image: base,
+            inv,
+            minify: inverse_major(inv) > 1.0,
+        }
+    }
+
+    fn texel(&self, x: i64, y: i64) -> [f32; 4] {
+        if x < 0 || y < 0 || x >= i64::from(self.image.width) || y >= i64::from(self.image.height) {
             return [0.0; 4];
         }
-        let o = (yi as usize * img.width as usize + xi as usize) * 4;
-        std::array::from_fn(|c| f32::from(img.data[o + c]) / 255.0)
+        let o = (y as usize * self.image.width as usize + x as usize) * 4;
+        self.image.data[o..o + 4].try_into().expect("RGBA pixel")
+    }
+
+    fn bilinear(&self, p: Point) -> [f32; 4] {
+        let x = p.x - 0.5;
+        let y = p.y - 0.5;
+        let (ix, iy) = (x.floor() as i64, y.floor() as i64);
+        let (fx, fy) = (x - x.floor(), y - y.floor());
+        let a = self.texel(ix, iy);
+        let b = self.texel(ix + 1, iy);
+        let c = self.texel(ix, iy + 1);
+        let d = self.texel(ix + 1, iy + 1);
+        std::array::from_fn(|k| {
+            let top = f64::from(a[k]) * (1.0 - fx) + f64::from(b[k]) * fx;
+            let bottom = f64::from(c[k]) * (1.0 - fx) + f64::from(d[k]) * fx;
+            (top * (1.0 - fy) + bottom * fy) as f32
+        })
+    }
+
+    fn sample(&self, x: i64, y: i64) -> [f32; 4] {
+        if !self.minify {
+            return self.bilinear(self.inv * Point::new(x as f64 + 0.5, y as f64 + 0.5));
+        }
+        let (x, y) = (x as f64, y as f64);
+        let corners = [
+            Point::new(x, y),
+            Point::new(x + 1.0, y),
+            Point::new(x + 1.0, y + 1.0),
+            Point::new(x, y + 1.0),
+        ];
+        let quad = corners.map(|point| {
+            let p = self.inv * point;
+            (p.x, p.y)
+        });
+        let whole = polygon_area(&quad);
+        if whole <= 0.0 {
+            return [0.0; 4];
+        }
+        let x0 = quad
+            .iter()
+            .map(|p| p.0)
+            .fold(f64::INFINITY, f64::min)
+            .floor() as i64;
+        let x1 = quad
+            .iter()
+            .map(|p| p.0)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil() as i64;
+        let y0 = quad
+            .iter()
+            .map(|p| p.1)
+            .fold(f64::INFINITY, f64::min)
+            .floor() as i64;
+        let y1 = quad
+            .iter()
+            .map(|p| p.1)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil() as i64;
+        let mut out = [0.0f64; 4];
+        for sy in y0.max(0)..y1.min(i64::from(self.image.height)) {
+            for sx in x0.max(0)..x1.min(i64::from(self.image.width)) {
+                let weight = clipped_area(&quad, sx, sy) / whole;
+                let texel = self.texel(sx, sy);
+                for c in 0..4 {
+                    out[c] += f64::from(texel[c]) * weight;
+                }
+            }
+        }
+        out.map(|v| v as f32)
+    }
+}
+
+fn over(dst: &mut [f32], src: [f32; 4]) {
+    let keep = 1.0 - src[3];
+    for c in 0..4 {
+        dst[c] = src[c] + dst[c] * keep;
+    }
+}
+
+fn paint_item(
+    item: &Item,
+    coverage: &dyn Fn(i64, i64) -> f32,
+    rect: [i64; 4],
+    layer: &mut Image,
+    working: WorkingEncoding,
+) {
+    let alpha = (item.color[3] * item.opacity) as f32;
+    let rgb: [f32; 3] = if working == WorkingEncoding::LinearLight {
+        std::array::from_fn(|c| display_decode_f32(item.color[c] as f32))
+    } else {
+        std::array::from_fn(|c| item.color[c] as f32)
     };
-    let (xi, yi) = (x0 as i64, y0 as i64);
-    let a = at(xi, yi);
-    let b = at(xi + 1, yi);
-    let c = at(xi, yi + 1);
-    let d = at(xi + 1, yi + 1);
-    std::array::from_fn(|k| {
-        let top = a[k] + (b[k] - a[k]) * fx;
-        let bot = c[k] + (d[k] - c[k]) * fx;
-        top + (bot - top) * fy
-    })
-}
-
-/// Paints `item` alone into `layer` (premultiplied), over the device rect
-/// `[x0, y0, x1, y1)` of a target `width` px wide.
-fn paint_item(item: &Item, coverage: &dyn Fn(i64, i64) -> f32, rect: [i64; 4], layer: &mut Image) {
-    let [x0, y0, x1, y1] = rect;
-    let a = (item.color[3] * item.opacity) as f32;
-    match &item.content {
-        ItemContent::Coverage { curve, .. } => {
-            let rgb = [
-                item.color[0] as f32,
-                item.color[1] as f32,
-                item.color[2] as f32,
-            ];
-            for y in y0.max(0)..y1.min(i64::from(layer.height)) {
-                for x in x0.max(0)..x1.min(i64::from(layer.width)) {
-                    let c = coverage(x, y);
-                    if c <= 0.0 {
-                        continue;
-                    }
-                    let k = curve_at(curve, f64::from(c)) as f32 * a;
-                    let o = (y as usize * layer.width as usize + x as usize) * 4;
-                    let s = [rgb[0] * k, rgb[1] * k, rgb[2] * k, k];
-                    for (d, v) in layer.data[o..o + 4].iter_mut().zip(s) {
-                        *d = v + *d * (1.0 - k);
-                    }
-                }
-            }
+    let sampler = match &item.content {
+        ItemContent::Image { image, transform } => {
+            Some(ImageSampler::new(image, *transform, working))
         }
-        ItemContent::Image { image, transform }
-        | ItemContent::GlyphMask {
-            image, transform, ..
-        }
-        | ItemContent::Graphite {
-            image, transform, ..
-        } => {
-            let inv = transform.inverse();
-            for y in y0.max(0)..y1.min(i64::from(layer.height)) {
-                for x in x0.max(0)..x1.min(i64::from(layer.width)) {
-                    let p = inv * Point::new(x as f64 + 0.5, y as f64 + 0.5);
-                    let mut s = bilinear(image, p.x, p.y);
-                    if matches!(item.content, ItemContent::GlyphMask { .. }) {
-                        s = [
-                            item.color[0] as f32 * s[3],
-                            item.color[1] as f32 * s[3],
-                            item.color[2] as f32 * s[3],
-                            s[3],
-                        ];
-                    }
-                    if s[3] <= 0.0 {
-                        continue;
-                    }
-                    let o = (y as usize * layer.width as usize + x as usize) * 4;
-                    let sa = s[3] * a;
-                    for (d, v) in layer.data[o..o + 4].iter_mut().zip(s) {
-                        *d = v * a + *d * (1.0 - sa);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn blur(img: &mut Image, rect: [i64; 4], sigma: f64) {
-    let k = gaussian(sigma);
-    let r = (k.len() / 2) as i64;
-    let (w, h) = (i64::from(img.width), i64::from(img.height));
-    let [x0, y0, x1, y1] = [
-        rect[0].max(0),
-        rect[1].max(0),
-        rect[2].min(w),
-        rect[3].min(h),
-    ];
-    if x1 <= x0 || y1 <= y0 {
-        return;
-    }
-    let get = |d: &[f32], x: i64, y: i64, c: usize| -> f32 {
-        if x < 0 || y < 0 || x >= w || y >= h {
-            0.0
-        } else {
-            d[(y as usize * w as usize + x as usize) * 4 + c]
-        }
+        ItemContent::Coverage { .. } => None,
     };
-    let src = img.data.clone();
-    let mut tmp = vec![0.0f32; img.data.len()];
-    for y in y0..y1 {
-        for x in x0..x1 {
-            for c in 0..4 {
-                let mut acc = 0.0;
-                for (i, kv) in k.iter().enumerate() {
-                    acc += kv * get(&src, x + i as i64 - r, y, c);
+    for y in rect[1].max(0)..rect[3].min(i64::from(layer.height)) {
+        for x in rect[0].max(0)..rect[2].min(i64::from(layer.width)) {
+            let mut src = match &item.content {
+                ItemContent::Coverage { .. } => {
+                    let a = coverage(x, y) * alpha;
+                    [rgb[0] * a, rgb[1] * a, rgb[2] * a, a]
                 }
-                tmp[(y as usize * w as usize + x as usize) * 4 + c] = acc;
+                ItemContent::Image { .. } => {
+                    let mut s = sampler.as_ref().expect("image sampler").sample(x, y);
+                    for v in &mut s {
+                        *v *= alpha;
+                    }
+                    s
+                }
+            };
+            if src[3] <= 0.0 {
+                continue;
+            }
+            src[3] = src[3].clamp(0.0, 1.0);
+            let o = (y as usize * layer.width as usize + x as usize) * 4;
+            over(&mut layer.data[o..o + 4], src);
+        }
+    }
+}
+
+fn blur(image: &mut Image, sigma: f64) {
+    let kernel = gaussian(sigma);
+    let radius = (kernel.len() / 2) as i64;
+    let (w, h) = (image.width as i64, image.height as i64);
+    let mut intermediate = vec![0.0f32; image.data.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let o = (y * w + x) as usize * 4;
+            for (j, weight) in kernel.iter().enumerate() {
+                let sx = x + j as i64 - radius;
+                if sx < 0 || sx >= w {
+                    continue;
+                }
+                let source = (y * w + sx) as usize * 4;
+                for c in 0..4 {
+                    intermediate[o + c] += (image.data[source + c] as f64 * weight) as f32;
+                }
             }
         }
     }
-    for y in y0..y1 {
-        for x in x0..x1 {
-            for c in 0..4 {
-                let mut acc = 0.0;
-                for (i, kv) in k.iter().enumerate() {
-                    acc += kv * get(&tmp, x, y + i as i64 - r, c);
+    image.data.fill(0.0);
+    for y in 0..h {
+        for x in 0..w {
+            let o = (y * w + x) as usize * 4;
+            for (j, weight) in kernel.iter().enumerate() {
+                let sy = y + j as i64 - radius;
+                if sy < 0 || sy >= h {
+                    continue;
                 }
-                img.data[(y as usize * w as usize + x as usize) * 4 + c] = acc;
+                let source = (sy * w + x) as usize * 4;
+                for c in 0..4 {
+                    image.data[o + c] += (intermediate[source + c] as f64 * weight) as f32;
+                }
             }
         }
     }
 }
 
-/// The host's image filter, with an N32 save-layer source origin and the
-/// full canvas dimensions. The result is clipped to that canvas.
-pub type ImageFilter<'a> = dyn Fn(&Image, [i32; 2], (u32, u32), f64) -> Image + 'a;
-
-/// Paints `scene` with the coverage pages of `atlas` (RGBA8 rows, alpha is
-/// coverage) into a new float target.
 pub fn paint(scene: &TextScene, atlas: &Atlas, pages: &[(u32, u32, Vec<u8>)]) -> Image {
-    paint_with_filter(scene, atlas, pages, None)
+    paint_in_working(scene, atlas, pages, WorkingEncoding::Standard)
 }
 
-/// The host can provide its Canvas2D image filter without creating a
-/// dependency from pm-text back to the vector renderer.
-pub fn paint_with_filter(
+pub fn paint_in_working(
     scene: &TextScene,
     atlas: &Atlas,
     pages: &[(u32, u32, Vec<u8>)],
-    filter: Option<&ImageFilter<'_>>,
+    working: WorkingEncoding,
 ) -> Image {
-    paint_with_format(scene, atlas, pages, filter, false)
-}
-
-fn paint_with_format(
-    scene: &TextScene,
-    atlas: &Atlas,
-    pages: &[(u32, u32, Vec<u8>)],
-    filter: Option<&ImageFilter<'_>>,
-    n32: bool,
-) -> Image {
-    let quantize = |target: &mut Image| {
-        if n32 {
-            for v in &mut target.data {
-                *v = (*v * 255.0).round().clamp(0.0, 255.0) / 255.0;
-            }
-        }
-    };
     let mut target = Image::new(scene.width, scene.height);
     let mut cells: std::collections::HashMap<usize, Vec<&super::atlas::Cell>> =
         std::collections::HashMap::new();
-    for c in &atlas.cells {
-        cells.entry(c.item).or_default().push(c);
+    for cell in &atlas.cells {
+        cells.entry(cell.item).or_default().push(cell);
     }
-    for (i, item) in scene.items.iter().enumerate() {
-        let tiles = cells.get(&i).map(Vec::as_slice).unwrap_or(&[]);
+    for (index, item) in scene.items.iter().enumerate() {
+        let tiles = cells.get(&index).map(Vec::as_slice).unwrap_or(&[]);
+        if matches!(item.content, ItemContent::Coverage { .. }) && tiles.is_empty() {
+            continue;
+        }
         let coverage = |x: i64, y: i64| -> f32 {
-            for c in tiles {
-                let (px, py) = (x - c.device_x, y - c.device_y);
-                if px < 0 || py < 0 || px >= i64::from(c.width) || py >= i64::from(c.height) {
+            for cell in tiles {
+                let (px, py) = (x - cell.device_x, y - cell.device_y);
+                if px < 0 || py < 0 || px >= cell.width as i64 || py >= cell.height as i64 {
                     continue;
                 }
-                let (pw, _, data) = &pages[c.page];
-                let o =
-                    ((c.y as usize + py as usize) * *pw as usize + c.x as usize + px as usize) * 4;
+                let (pw, _, data) = &pages[cell.page];
+                let o = ((cell.y as usize + py as usize) * *pw as usize
+                    + cell.x as usize
+                    + px as usize)
+                    * 4;
                 return f32::from(data[o + 3]) / 255.0;
             }
             0.0
         };
-        let rect = match &item.content {
-            ItemContent::Coverage { .. } if tiles.is_empty() => continue,
-            ItemContent::Coverage { .. } => {
-                tiles
-                    .iter()
-                    .fold([i64::MAX, i64::MAX, i64::MIN, i64::MIN], |r, c| {
-                        [
-                            r[0].min(c.device_x),
-                            r[1].min(c.device_y),
-                            r[2].max(c.device_x + i64::from(c.width)),
-                            r[3].max(c.device_y + i64::from(c.height)),
-                        ]
-                    })
-            }
-            ItemContent::Image { .. }
-            | ItemContent::GlyphMask { .. }
-            | ItemContent::Graphite { .. } => {
-                let b = item.bounds.inflate(1.0, 1.0);
-                [
-                    b.x0.floor() as i64,
-                    b.y0.floor() as i64,
-                    b.x1.ceil() as i64,
-                    b.y1.ceil() as i64,
-                ]
-            }
-        };
-        if item.blur > 0.0
-            && let Some(filter) = filter
-        {
-            // A filter may read beyond the canvas. Paint the save layer
-            // first, then clip its filtered result to the canvas.
-            let r = i64::from(blur_radius(item.blur));
-            let origin = [(rect[0] - r) as i32, (rect[1] - r) as i32];
-            let mut layer = Image::new(
-                (rect[2] - rect[0] + 2 * r) as u32,
-                (rect[3] - rect[1] + 2 * r) as u32,
-            );
-            let mut shifted = item.clone();
-            if let ItemContent::Image { transform, .. }
-            | ItemContent::GlyphMask { transform, .. }
-            | ItemContent::Graphite { transform, .. } = &mut shifted.content
-            {
-                *transform = kurbo::Affine::translate((-(origin[0] as f64), -(origin[1] as f64)))
-                    * *transform;
-            }
-            let coverage = |x, y| coverage(x + i64::from(origin[0]), y + i64::from(origin[1]));
-            let moved = [
-                rect[0] - i64::from(origin[0]),
-                rect[1] - i64::from(origin[1]),
-                rect[2] - i64::from(origin[0]),
-                rect[3] - i64::from(origin[1]),
-            ];
-            paint_item(&shifted, &coverage, moved, &mut layer);
-            let filtered = filter(&layer, origin, (scene.width, scene.height), item.blur);
-            for (d, s) in target
-                .data
-                .chunks_exact_mut(4)
-                .zip(filtered.data.chunks_exact(4))
-            {
-                for c in 0..4 {
-                    d[c] = d[c].mul_add(1.0 - s[3], s[c]);
-                }
-            }
-            quantize(&mut target);
-            continue;
-        }
+        let b = item.bounds.inflate(1.0, 1.0);
+        let rect = [
+            b.x0.floor() as i64,
+            b.y0.floor() as i64,
+            b.x1.ceil() as i64,
+            b.y1.ceil() as i64,
+        ];
         if item.blur > 0.0 {
-            let mut layer = Image::new(scene.width, scene.height);
-            paint_item(item, &coverage, rect, &mut layer);
-            let r = i64::from(blur_radius(item.blur));
-            let reach = [rect[0] - r, rect[1] - r, rect[2] + r, rect[3] + r];
-            blur(&mut layer, reach, item.blur);
-            let (w, h) = (i64::from(scene.width), i64::from(scene.height));
-            for y in reach[1].max(0)..reach[3].min(h) {
-                for x in reach[0].max(0)..reach[2].min(w) {
-                    let o = (y as usize * w as usize + x as usize) * 4;
-                    let sa = layer.data[o + 3];
-                    for ch in 0..4 {
-                        target.data[o + ch] = layer.data[o + ch] + target.data[o + ch] * (1.0 - sa);
-                    }
+            // Preserve source pixels outside the canvas until after the
+            // convolution. Source farther than the kernel radius from the
+            // canvas cannot affect a visible pixel.
+            let r = blur_radius(item.blur) as i64;
+            let rect = [
+                rect[0].max(-r),
+                rect[1].max(-r),
+                rect[2].min(i64::from(scene.width) + r),
+                rect[3].min(i64::from(scene.height) + r),
+            ];
+            if rect[2] <= rect[0] || rect[3] <= rect[1] {
+                continue;
+            }
+            let origin = (rect[0] - r, rect[1] - r);
+            let width = (rect[2] - rect[0] + 2 * r).max(0) as u32;
+            let height = (rect[3] - rect[1] + 2 * r).max(0) as u32;
+            let mut layer = Image::new(width, height);
+            let mut shifted = item.clone();
+            if let ItemContent::Image { transform, .. } = &mut shifted.content {
+                *transform =
+                    kurbo::Affine::translate((-(origin.0 as f64), -(origin.1 as f64))) * *transform;
+            }
+            let local_coverage = |x, y| coverage(x + origin.0, y + origin.1);
+            paint_item(
+                &shifted,
+                &local_coverage,
+                [r, r, r + rect[2] - rect[0], r + rect[3] - rect[1]],
+                &mut layer,
+                working,
+            );
+            blur(&mut layer, item.blur);
+            for y in origin.1.max(0)..(origin.1 + i64::from(height)).min(scene.height as i64) {
+                for x in origin.0.max(0)..(origin.0 + i64::from(width)).min(scene.width as i64) {
+                    let source =
+                        ((y - origin.1) as usize * width as usize + (x - origin.0) as usize) * 4;
+                    let target_offset = (y as usize * scene.width as usize + x as usize) * 4;
+                    over(
+                        &mut target.data[target_offset..target_offset + 4],
+                        layer.data[source..source + 4].try_into().unwrap(),
+                    );
                 }
             }
         } else {
-            paint_item(item, &coverage, rect, &mut target);
+            paint_item(item, &coverage, rect, &mut target, working);
         }
-        quantize(&mut target);
     }
     target
 }
 
-/// Renders `scene` entirely on the CPU (`vello_cpu` coverage, float paint).
 pub fn render_cpu(scene: &TextScene) -> Image {
-    render_cpu_with_filter(scene, None)
+    render_cpu_in_working(scene, WorkingEncoding::Standard)
 }
 
-pub fn render_cpu_with_filter(scene: &TextScene, filter: Option<&ImageFilter<'_>>) -> Image {
-    render_cpu_with_format(scene, filter, false)
-}
-
-/// CPU reference for an N32 canvas, rounded after each canvas draw, or a
-/// floating-point level 2 target.
-pub fn render_cpu_with_format(
-    scene: &TextScene,
-    filter: Option<&ImageFilter<'_>>,
-    n32: bool,
-) -> Image {
+pub fn render_cpu_in_working(scene: &TextScene, working: WorkingEncoding) -> Image {
     let atlas = super::atlas::pack(scene, 4096);
     let pages: Vec<_> = (0..atlas.pages.len())
-        .map(|p| super::cpu::render_page(scene, &atlas, p))
+        .map(|page| super::cpu::render_page(scene, &atlas, page))
         .collect();
-    paint_with_format(scene, &atlas, &pages, filter, n32)
+    paint_in_working(scene, &atlas, &pages, working)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::scene::{fill_path, rounded_rect};
-    use kurbo::Affine;
 
     #[test]
-    fn gaussian_weights_sum_to_one() {
-        for s in [0.5, 1.0, 3.7] {
-            let k = gaussian(s);
-            assert_eq!(k.len(), 2 * blur_radius(s) as usize + 1);
-            assert!((k.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    fn emoji_area_is_integrated_after_working_decode() {
+        use crate::render::bitmap::Rgba8;
+        use std::sync::Arc;
+        let source = ImagePixels::Rgba8(Arc::new(Rgba8 {
+            width: 2,
+            height: 2,
+            data: [128, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 0, 0, 255].to_vec(),
+        }));
+        let transform = Affine::scale(0.5);
+        let standard =
+            ImageSampler::new(&source, transform, WorkingEncoding::Standard).sample(0, 0);
+        let linear =
+            ImageSampler::new(&source, transform, WorkingEncoding::LinearLight).sample(0, 0);
+        assert!((standard[0] - 128.0 / 510.0).abs() < 1e-6);
+        assert!((linear[0] - display_decode_f32(128.0 / 255.0) * 0.5).abs() < 1e-6);
+        assert!(linear[0] < standard[0]);
+        assert_eq!(standard[3], 1.0);
+    }
+
+    #[test]
+    fn inverse_pixel_quad_clips_to_source_texels() {
+        let diamond = [(0.0, 1.0), (1.0, 0.0), (2.0, 1.0), (1.0, 2.0)];
+        assert_eq!(polygon_area(&diamond), 2.0);
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            assert!((clipped_area(&diamond, x, y) - 0.5).abs() < 1e-12);
         }
+        assert_eq!(clipped_area(&diamond, 2, 2), 0.0);
+        assert!(inverse_major(Affine::scale_non_uniform(8.0, 2.0)) > 1.0);
     }
 
     #[test]
-    fn a_filled_rect_paints_its_color() {
-        let scene = TextScene {
-            width: 20,
-            height: 20,
-            items: vec![
-                fill_path(
-                    rounded_rect(4.0, 4.0, 10.0, 10.0, 0.0),
-                    Affine::IDENTITY,
-                    [1.0, 0.5, 0.0, 1.0],
-                    0.5,
-                )
-                .unwrap(),
-            ],
-        };
-        let img = render_cpu(&scene);
-        let at = |x: usize, y: usize| &img.data[(y * 20 + x) * 4..(y * 20 + x) * 4 + 4];
-        assert_eq!(at(8, 8), &[0.5, 0.25, 0.0, 0.5]);
-        assert_eq!(at(1, 1), &[0.0; 4]);
+    fn rotated_emoji_minification_integrates_original_texel_area() {
+        use crate::render::bitmap::Rgba8;
+        use std::sync::Arc;
+        let source = ImagePixels::Rgba8(Arc::new(Rgba8 {
+            width: 2,
+            height: 2,
+            data: [255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255].to_vec(),
+        }));
+        // The inverse output pixel is a diamond with area 2: each of the
+        // four original texels contributes area 1/2 to the output pixel.
+        let inverse = Affine::new([1.0, -1.0, 1.0, 1.0, 0.0, 1.0]);
+        let pixel =
+            ImageSampler::new(&source, inverse.inverse(), WorkingEncoding::Standard).sample(0, 0);
+        assert!((pixel[0] - 0.25).abs() < 1e-7);
+        assert_eq!(pixel[3], 1.0);
     }
 
     #[test]
-    fn blur_spreads_and_keeps_mass() {
+    fn offcanvas_ink_blurs_into_visible_pixels() {
+        use crate::render::scene::{fill_path, rounded_rect};
         let mut item = fill_path(
-            rounded_rect(8.0, 8.0, 4.0, 4.0, 0.0),
-            Affine::IDENTITY,
+            rounded_rect(-3.0, 2.0, 2.0, 2.0, 0.0),
+            kurbo::Affine::IDENTITY,
             [1.0; 4],
             1.0,
         )
         .unwrap();
-        item.blur = 1.5;
+        item.blur = 2.0;
         let scene = TextScene {
-            width: 24,
-            height: 24,
+            width: 8,
+            height: 8,
             items: vec![item],
         };
-        let img = render_cpu(&scene);
-        let mass: f32 = img.data.chunks_exact(4).map(|p| p[3]).sum();
-        assert!((mass - 16.0).abs() < 0.05, "{mass}");
-        assert!(img.data[(5 * 24 + 10) * 4 + 3] > 0.0);
+        let image = render_cpu(&scene);
+        assert!(image.data[(2 * 8) * 4 + 3] > 0.0);
+    }
+
+    #[test]
+    fn translucent_overlapping_glyphs_build_alpha_in_order() {
+        use crate::render::scene::{fill_path, rounded_rect};
+        let path = rounded_rect(1.0, 1.0, 3.0, 3.0, 0.0);
+        let glyph = fill_path(path, kurbo::Affine::IDENTITY, [0.8, 0.2, 0.0, 0.5], 1.0).unwrap();
+        let scene = TextScene {
+            width: 6,
+            height: 6,
+            items: vec![glyph.clone(), glyph],
+        };
+        let image = render_cpu(&scene);
+        let o = (2 * 6 + 2) * 4;
+        assert!((image.data[o + 3] - 0.75).abs() < 0.01);
+        assert!((image.data[o] - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn integrated_gaussian_preserves_mass_without_normalization() {
+        for sigma in [0.3, 1.0, 2.5, 17.0] {
+            let weights = gaussian(sigma);
+            assert_eq!(weights.len(), 2 * blur_radius(sigma) as usize + 1);
+            assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1e-14);
+        }
     }
 }

@@ -99,4 +99,7 @@ impl<R: FontResolver> FontResolver for FallbackCached<R> {
     fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
         self.inner.em_advance(face, size)
     }
+    fn sbix_metric_rect(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+        self.inner.sbix_metric_rect(face, glyph, size)
+    }
 }
