@@ -366,7 +366,8 @@ export class SourceMonitor extends EventTarget {
   paintedSize: { width: number; height: number } | null = null;
   readonly surface: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement;
   private readonly videoPresenter: SourceVideoPresenter | null;
-  duration: number;
+  /** Unknown until the engine reads the original; never written to asset metadata. */
+  duration = 0;
   private at = 0;
   private arrived = performance.now();
   private advancing = false;
@@ -393,7 +394,6 @@ export class SourceMonitor extends EventTarget {
   constructor(private readonly source: EngineSourceMedia, readonly asset: string, private readonly host: Host) {
     super();
     const meta = host.project().assets?.[asset];
-    this.duration = Number(meta?.dur) || 0;
     // Still images used to paint as an <img> below the transport. A canvas
     // changes Chromium's shadow compositing even when its RGBA bytes match.
     // Keep that presentation while every pixel still comes from the engine.
@@ -430,6 +430,7 @@ export class SourceMonitor extends EventTarget {
     this.error = null;
     const request = ++this.requested;
     const generation = this.generation = this.source.nextGeneration();
+    if (!playing && this.host.project().assets?.[this.asset]?.kind === 'image') return;
     const time = ticks(this.currentTime);
     try {
       await this.source.bindSource(this.asset); await this.host.wake();
@@ -457,25 +458,36 @@ export class SourceMonitor extends EventTarget {
   invalidate(): void {
     if (this.disposed) return;
     const time = this.currentTime;
-    this.duration = Number(this.host.project().assets?.[this.asset]?.dur) || 0;
-    this.at = Math.min(this.duration || Infinity, time);
+    const hadDuration = this.duration > 0;
+    this.duration = 0;
+    this.at = time;
     this.arrived = performance.now();
     this.frameAbort?.abort();
     // Retire both a pending paint and an in-flight source-status reply while
     // preserving the transport's current time and play state.
     void this.command(this.advancing);
+    if (hadDuration) this.dispatchEvent(new Event('durationchange'));
     void this.paint();
   }
 
   receive(message: Extract<AudioMessage, { audio: 'sourceStatus' }>): void {
     if (message.asset !== this.asset || message.generation !== this.generation || this.disposed) return;
     const was = this.advancing, before = this.currentTime;
-    this.at = message.time / TICKS_PER_SECOND;
+    const oldDuration = this.duration;
+    if (message.duration !== undefined && Number.isFinite(message.duration) && message.duration > 0) {
+      this.duration = message.duration / TICKS_PER_SECOND;
+    }
+    this.at = Math.max(0, Math.min(this.duration || Infinity, message.time / TICKS_PER_SECOND));
     this.arrived = performance.now();
     this.advancing = message.playing;
     this.levels = message.levels;
+    if (this.duration !== oldDuration) {
+      this.dispatchEvent(new Event('durationchange'));
+      if (!oldDuration) this.dispatchEvent(new Event('loadedmetadata'));
+    }
     this.dispatchEvent(new Event('timeupdate'));
-    if (was && !this.advancing) this.dispatchEvent(new Event(this.at >= this.duration ? 'ended' : 'pause'));
+    if (was && !this.advancing) this.dispatchEvent(new Event(
+      !message.error && this.duration > 0 && this.at >= this.duration ? 'ended' : 'pause'));
     if (!was && this.advancing) this.dispatchEvent(new Event('play'));
     if (message.error) this.fail(new Error(message.error));
     if (this.advancing) this.follow();

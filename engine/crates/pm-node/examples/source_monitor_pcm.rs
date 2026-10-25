@@ -13,7 +13,7 @@ use std::sync::Arc;
 use pm_audio::offline;
 use pm_audio::{MixFormat, MixGraph, Mixer, SourceCache};
 use pm_eval::Evaluator;
-use pm_node::present::source_audio::source_monitor_document;
+use pm_node::present::source_audio::{SourceMonitorTiming, source_monitor_document};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
@@ -27,9 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.next().is_some() || !(8_000..=192_000).contains(&rate) {
         return Err("usage: source_monitor_pcm <source> <output.f32le> [rate 8000..192000]".into());
     }
-    let decoder = pm_media::audio::AudioDecoder::open(&source, None)?;
-    let duration = decoder.info().duration().unwrap_or(86_400.0).max(0.001);
-    let doc = source_monitor_document("source", duration)?;
+    let timing = SourceMonitorTiming::open(&source)?;
+    let duration = timing.duration;
+    let doc = source_monitor_document("source", &timing)?;
     let cache = SourceCache::new(128 << 20, 0);
     let media = source.clone();
     let resolver = move |asset: &str| (asset == "source").then(|| media.clone());

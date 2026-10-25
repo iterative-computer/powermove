@@ -190,6 +190,10 @@ pub enum AudioMessage {
         time: Ticks,
         playing: bool,
         generation: u32,
+        /// Original media's presentation endpoint; absent when unavailable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        duration: Option<Ticks>,
         levels: ChannelLevels,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
@@ -276,10 +280,14 @@ impl Validate for AudioMessage {
             AudioMessage::SourceStatus {
                 asset,
                 time,
+                duration,
                 levels,
                 ..
             } => ensure(
-                asset.is_valid() && time.get() >= 0 && finite(levels),
+                asset.is_valid()
+                    && time.get() >= 0
+                    && duration.is_none_or(|duration| duration.get() > 0)
+                    && finite(levels),
                 C,
                 || "invalid source status".into(),
             ),
@@ -365,6 +373,7 @@ mod tests {
             time: Ticks::from_whole_seconds(2),
             playing: true,
             generation: 4,
+            duration: Some(Ticks::from_whole_seconds(5)),
             levels: ChannelLevels {
                 peak: vec![0.5, 0.25],
                 rms: vec![0.2, 0.1],
@@ -377,6 +386,37 @@ mod tests {
             rmp_serde::from_slice::<AudioMessage>(&bytes).unwrap(),
             status
         );
+    }
+
+    #[test]
+    fn source_audio_status_accepts_unknown_duration_but_rejects_invalid_endpoint() {
+        let mut status = AudioMessage::SourceStatus {
+            asset: "a".into(),
+            time: Ticks::ZERO,
+            playing: false,
+            generation: 1,
+            duration: None,
+            levels: ChannelLevels {
+                peak: vec![],
+                rms: vec![],
+            },
+            error: None,
+        };
+        assert!(status.validate().is_ok());
+        let value = serde_json::to_value(&status).unwrap();
+        assert!(value.get("duration").is_none());
+        assert_eq!(
+            serde_json::from_value::<AudioMessage>(value).unwrap(),
+            status
+        );
+        if let AudioMessage::SourceStatus { duration, .. } = &mut status {
+            *duration = Some(Ticks::ZERO);
+        }
+        assert!(status.validate().is_err());
+        if let AudioMessage::SourceStatus { duration, .. } = &mut status {
+            *duration = Some(Ticks::from_whole_seconds(-1));
+        }
+        assert!(status.validate().is_err());
     }
 
     fn sample(rate: PlaybackRate) -> ClockSample {

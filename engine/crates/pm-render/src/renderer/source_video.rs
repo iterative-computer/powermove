@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use pm_media::frame::{DecodedFrame, Layout, PixelFormat, PlaneFormat, PlaneView};
+use pm_media::frame::{Layout, PixelFormat, PlaneFormat, PlaneView};
 use pm_media::probe::color::frame_reading;
 use pm_protocol::color::{
     ColorDescription, MatrixCoefficients, Primaries, Range, SampleAlignment, Transfer,
@@ -32,6 +32,24 @@ impl Renderer {
         time: Ticks,
         sequence: bool,
     ) -> Result<Option<(Size, Vec<u8>, SourceVideoFrame)>, String> {
+        self.source_video_planes_with(path, time, sequence, |length, pack| {
+            let mut bytes = vec![0; length];
+            pack(&mut bytes).map(|()| bytes)
+        })
+    }
+
+    /// [`Self::source_video_planes`], packing in place: `sink` is given the
+    /// packed length and a packer that writes it into zeroed storage the sink
+    /// owns (for example a shared-memory segment), so the decoded frame is
+    /// copied once. The packer runs while the decoded frame is locked. Nothing
+    /// fails after a successful sink, so whatever it published is returned.
+    pub fn source_video_planes_with<T>(
+        &mut self,
+        path: &Path,
+        time: Ticks,
+        sequence: bool,
+        sink: impl FnOnce(usize, &mut dyn FnMut(&mut [u8]) -> Result<(), String>) -> Result<T, String>,
+    ) -> Result<Option<(Size, T, SourceVideoFrame)>, String> {
         let tags = |source: &pm_media::decode::service::MediaSource| {
             source
                 .probe
@@ -74,8 +92,12 @@ impl Renderer {
         if size.width > MAX_OUTPUT_DIMENSION || size.height > MAX_OUTPUT_DIMENSION {
             return Err("The coded source video exceeds the snapshot dimension limit".into());
         }
-        let input_format = packed_format(&frame)?;
-        let (format, bytes) = frame
+        let Some(input_format) = packed_format(&frame.format)? else {
+            // Original production formats (for example ProRes v216/y416)
+            // retain their precision through the native conversion path.
+            return Ok(None);
+        };
+        frame
             .with_planes(|planes| {
                 let format = if input_format == "i420a"
                     && video.codec.codec != "vp9"
@@ -85,28 +107,30 @@ impl Renderer {
                 } else {
                     input_format
                 };
-                pack_planes(&frame.format, planes, format, coded_width as usize)
-                    .map(|bytes| (format, bytes))
+                let tags = SourceVideoFrame {
+                    format: format.into(),
+                    primaries: primaries.into(),
+                    transfer: transfer.into(),
+                    matrix: matrix.into(),
+                    // The decoded planes' own range: what these bytes mean.
+                    range: if frame.format.range == Range::Full {
+                        "full"
+                    } else {
+                        "limited"
+                    }
+                    .into(),
+                    visible_width: (coded_width != visible_width).then_some(visible_width),
+                };
+                let length = packed_length(&frame.format, planes, format, coded_width as usize)?;
+                if Some(length as u64) != tags.byte_len(size.width, size.height) {
+                    return Err("The decoded source planes have an unexpected length".into());
+                }
+                let mut pack = |out: &mut [u8]| {
+                    pack_planes(&frame.format, planes, format, coded_width as usize, out)
+                };
+                sink(length, &mut pack).map(|packed| Some((size, packed, tags)))
             })
-            .map_err(|e| e.to_string())??;
-        let tags = SourceVideoFrame {
-            format: format.into(),
-            primaries: primaries.into(),
-            transfer: transfer.into(),
-            matrix: matrix.into(),
-            // The decoded planes' own range: what these bytes mean.
-            range: if frame.format.range == Range::Full {
-                "full"
-            } else {
-                "limited"
-            }
-            .into(),
-            visible_width: (coded_width != visible_width).then_some(visible_width),
-        };
-        if Some(bytes.len() as u64) != tags.byte_len(size.width, size.height) {
-            return Err("The decoded source planes have an unexpected length".into());
-        }
-        Ok(Some((size, bytes, tags)))
+            .map_err(|e| e.to_string())?
     }
 }
 
@@ -124,85 +148,109 @@ fn vp9_coded_width(width: u32) -> Result<u32, String> {
     Ok(coded)
 }
 
-fn packed_format(frame: &DecodedFrame) -> Result<&'static str, String> {
-    let f = &frame.format;
-    if f.log2_chroma_w != 1 || f.width == 0 || f.height == 0 {
-        return Err(format!(
-            "Chromium source video cannot import {} plane layout",
-            f.label
-        ));
+/// Check descriptors before deciding whether presentation needs native RGBA.
+/// An unsupported layout is a fallback; a broken layout is a decoder error.
+fn validate_source_planes(f: &PixelFormat) -> Result<(), String> {
+    let invalid = || format!("The decoded source {} has malformed planes", f.label);
+    if f.width == 0 || f.height == 0 || f.bits == 0 {
+        return Err(invalid());
     }
-    let supported = match (f.layout, f.bits, f.alignment, f.log2_chroma_h) {
-        (Layout::Biplanar, 8, _, 1)
-            if f.planes.len() == 2
-                && f.planes[0].format == PlaneFormat::R8
-                && f.planes[1].format == PlaneFormat::Rg8 =>
-        {
-            Some("nv12")
-        }
-        (Layout::Biplanar, 8, _, 0)
-            if f.planes.len() == 2
-                && f.planes[0].format == PlaneFormat::R8
-                && f.planes[1].format == PlaneFormat::Rg8 =>
-        {
-            Some("nv16")
-        }
-        (Layout::Planar, 8, _, 1)
-            if f.planes.len() == 3
-                && !f.has_alpha()
-                && f.planes.iter().all(|p| p.format == PlaneFormat::R8) =>
-        {
-            Some("nv12")
-        }
-        (Layout::Planar, 8, _, 1)
-            if f.planes.len() == 4
-                && f.alpha_bits == 8
-                && f.planes.iter().all(|p| p.format == PlaneFormat::R8) =>
-        {
-            Some("i420a")
-        }
-        (Layout::Planar, 8, _, 0)
-            if f.planes.len() == 3
-                && !f.has_alpha()
-                && f.planes.iter().all(|p| p.format == PlaneFormat::R8) =>
-        {
-            Some("nv16")
-        }
-        (Layout::Biplanar, 10, SampleAlignment::MsbIn16, 1)
-            if f.planes.len() == 2
-                && f.planes[0].format == PlaneFormat::R16
-                && f.planes[1].format == PlaneFormat::Rg16 =>
-        {
-            Some("p010le")
-        }
-        (Layout::Planar, 10, SampleAlignment::Lsb, 1)
-            if f.planes.len() == 3 && f.planes.iter().all(|p| p.format == PlaneFormat::R16) =>
-        {
-            Some("p010le")
-        }
-        _ => None,
+    let count = match f.layout {
+        Layout::Biplanar => 2,
+        Layout::BiplanarAlpha => 3,
+        Layout::Planar | Layout::PlanarRgb => 3 + usize::from(f.has_alpha()),
+        Layout::Ayuv16 | Layout::Cbycry16 | Layout::Rgba => 1,
     };
-    supported.ok_or_else(|| {
-        format!(
-            "Chromium source video cannot import {} plane layout",
-            f.label
-        )
-    })
+    if f.planes.len() != count {
+        return Err(invalid());
+    }
+    let chroma = || -> Result<(usize, usize), String> {
+        let x = 1usize
+            .checked_shl(u32::from(f.log2_chroma_w))
+            .ok_or_else(invalid)?;
+        let y = 1usize
+            .checked_shl(u32::from(f.log2_chroma_h))
+            .ok_or_else(invalid)?;
+        Ok((f.width.div_ceil(x), f.height.div_ceil(y)))
+    };
+    let scalar = if f.bits <= 8 {
+        PlaneFormat::R8
+    } else {
+        PlaneFormat::R16
+    };
+    for (i, plane) in f.planes.iter().enumerate() {
+        let expected = match f.layout {
+            Layout::Biplanar | Layout::BiplanarAlpha if i == 1 => {
+                let (w, h) = chroma()?;
+                (
+                    if f.bits <= 8 {
+                        PlaneFormat::Rg8
+                    } else {
+                        PlaneFormat::Rg16
+                    },
+                    w,
+                    h,
+                )
+            }
+            Layout::BiplanarAlpha if i == 2 => (PlaneFormat::R8, f.width, f.height),
+            Layout::Planar if i == 1 || i == 2 => {
+                let (w, h) = chroma()?;
+                (scalar, w, h)
+            }
+            Layout::Ayuv16 => (PlaneFormat::Rgba16, f.width, f.height),
+            Layout::Cbycry16 => (PlaneFormat::Rgba16, f.width.div_ceil(2), f.height),
+            Layout::Rgba => {
+                let valid = matches!(
+                    (plane.format, f.bits),
+                    (PlaneFormat::Rgba8, 1..=8)
+                        | (PlaneFormat::Rgba16, 9..=16)
+                        | (PlaneFormat::Rgba16Float, 16)
+                        | (PlaneFormat::Rgba32Float, 32)
+                );
+                if !valid {
+                    return Err(invalid());
+                }
+                (plane.format, f.width, f.height)
+            }
+            _ => (scalar, f.width, f.height),
+        };
+        if (plane.format, plane.width, plane.height) != expected {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
-fn pack_planes(
+fn packed_format(f: &PixelFormat) -> Result<Option<&'static str>, String> {
+    validate_source_planes(f)?;
+    if f.log2_chroma_w != 1 {
+        return Ok(None);
+    }
+    let supported = match (f.layout, f.bits, f.alignment, f.log2_chroma_h) {
+        (Layout::Biplanar, 8, _, 1) => Some("nv12"),
+        (Layout::Biplanar, 8, _, 0) => Some("nv16"),
+        (Layout::Planar, 8, _, 1) if !f.has_alpha() => Some("nv12"),
+        (Layout::Planar, 8, _, 1) if f.alpha_bits == 8 => Some("i420a"),
+        (Layout::Planar, 8, _, 0) if !f.has_alpha() => Some("nv16"),
+        (Layout::Biplanar, 10, SampleAlignment::MsbIn16, 1) => Some("p010le"),
+        (Layout::Planar, 10, SampleAlignment::Lsb, 1) if !f.has_alpha() => Some("p010le"),
+        _ => None,
+    };
+    Ok(supported)
+}
+
+/// Plane byte lengths of the packed `format`: (Y, interleaved UV, total).
+fn packed_lengths(
     source: &PixelFormat,
-    planes: &[PlaneView<'_>],
     format: &str,
     coded_width: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<(usize, usize, usize), String> {
     let width = coded_width;
     if width < source.width {
         return Err("The coded source row is narrower than its visible pixels".into());
     }
     let height = source.height;
     let chroma_width = width.div_ceil(2);
-    let visible_chroma_width = source.width.div_ceil(2);
     let chroma_height = if format == "nv16" {
         height
     } else {
@@ -232,10 +280,50 @@ fn pack_planes(
     if total > MAX_PACKED_SOURCE_VIDEO_BYTES {
         return Err("The coded source video exceeds the source-surface byte limit".into());
     }
-    if source.has_alpha() && format != "i420a" && !alpha_is_opaque(planes, width, height)? {
+    Ok((y_bytes, uv_bytes, total))
+}
+
+/// The packed length, once the frame is known to be presentable as `format`.
+fn packed_length(
+    source: &PixelFormat,
+    planes: &[PlaneView<'_>],
+    format: &str,
+    coded_width: usize,
+) -> Result<usize, String> {
+    let (.., total) = packed_lengths(source, format, coded_width)?;
+    if source.has_alpha()
+        && format != "i420a"
+        && !alpha_is_opaque(planes, source.width, source.height)?
+    {
         return Err("The source video has translucent alpha; it needs an I420A presenter".into());
     }
-    let mut out = vec![0; total];
+    Ok(total)
+}
+
+/// Packs the decoded planes into `out` (zeroed, `packed_length` bytes): tight
+/// Y then interleaved UV (then I420A's planar U, V and A), rows padded to the
+/// coded width.
+fn pack_planes(
+    source: &PixelFormat,
+    planes: &[PlaneView<'_>],
+    format: &str,
+    coded_width: usize,
+    out: &mut [u8],
+) -> Result<(), String> {
+    let (y_bytes, uv_bytes, total) = packed_lengths(source, format, coded_width)?;
+    if out.len() != total {
+        return Err("The packed source planes have an unexpected length".into());
+    }
+    let width = coded_width;
+    let height = source.height;
+    let chroma_width = width.div_ceil(2);
+    let visible_chroma_width = source.width.div_ceil(2);
+    let chroma_height = if format == "nv16" {
+        height
+    } else {
+        height.div_ceil(2)
+    };
+    let sample_bytes = if format == "p010le" { 2 } else { 1 };
     copy_rows_padded(
         &planes[0],
         source.width * sample_bytes,
@@ -302,7 +390,7 @@ fn pack_planes(
             sample.copy_from_slice(&code.to_le_bytes());
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 fn alpha_is_opaque(planes: &[PlaneView<'_>], width: usize, height: usize) -> Result<bool, String> {
@@ -385,6 +473,17 @@ fn chromium_tags(desc: &ColorDescription) -> Option<(&'static str, &'static str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a sink sees: the checked length, then the frame packed into zeroed storage.
+    fn packed(
+        source: &PixelFormat,
+        planes: &[PlaneView<'_>],
+        format: &str,
+        coded_width: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut out = vec![0; packed_length(source, planes, format, coded_width)?];
+        pack_planes(source, planes, format, coded_width, &mut out).map(|()| out)
+    }
     use pm_media::frame::PlaneDesc;
 
     fn format(
@@ -408,6 +507,160 @@ mod tests {
             label: "unit".into(),
             rgba_premultiplied: false,
         }
+    }
+
+    fn plane(format: PlaneFormat, width: usize, height: usize) -> PlaneDesc {
+        PlaneDesc {
+            format,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn valid_production_layouts_need_native_conversion() {
+        for (layout, bits, cw, ch, alpha, planes) in [
+            (
+                Layout::Cbycry16,
+                16,
+                1,
+                0,
+                0,
+                vec![plane(PlaneFormat::Rgba16, 3, 3)],
+            ),
+            (
+                Layout::Ayuv16,
+                16,
+                0,
+                0,
+                16,
+                vec![plane(PlaneFormat::Rgba16, 5, 3)],
+            ),
+            (
+                Layout::Planar,
+                12,
+                0,
+                0,
+                0,
+                vec![plane(PlaneFormat::R16, 5, 3); 3],
+            ),
+            (
+                Layout::Biplanar,
+                10,
+                1,
+                0,
+                0,
+                vec![
+                    plane(PlaneFormat::R16, 5, 3),
+                    plane(PlaneFormat::Rg16, 3, 3),
+                ],
+            ),
+            (
+                Layout::BiplanarAlpha,
+                8,
+                1,
+                1,
+                8,
+                vec![
+                    plane(PlaneFormat::R8, 5, 3),
+                    plane(PlaneFormat::Rg8, 3, 2),
+                    plane(PlaneFormat::R8, 5, 3),
+                ],
+            ),
+        ] {
+            let mut source = format(layout, bits, 5, 3, planes);
+            source.log2_chroma_w = cw;
+            source.log2_chroma_h = ch;
+            source.alpha_bits = alpha;
+            source.alignment = match layout {
+                Layout::Cbycry16 | Layout::Ayuv16 => SampleAlignment::Full16,
+                Layout::Biplanar if bits == 10 => SampleAlignment::MsbIn16,
+                _ => SampleAlignment::Lsb,
+            };
+            assert_eq!(packed_format(&source).unwrap(), None, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_presenter_planes_are_errors_instead_of_fallbacks() {
+        let source = format(
+            Layout::Biplanar,
+            8,
+            5,
+            3,
+            vec![plane(PlaneFormat::R8, 5, 3), plane(PlaneFormat::Rg8, 3, 2)],
+        );
+        assert_eq!(packed_format(&source).unwrap(), Some("nv12"));
+        let mut malformed = Vec::new();
+        let mut missing = source.clone();
+        missing.planes.pop();
+        malformed.push(missing);
+        let mut extra = source.clone();
+        extra.planes.push(plane(PlaneFormat::R8, 5, 3));
+        malformed.push(extra);
+        let mut wrong_type = source.clone();
+        wrong_type.planes[1].format = PlaneFormat::R8;
+        malformed.push(wrong_type);
+        let mut truncated_chroma = source.clone();
+        truncated_chroma.planes[1].width = 2;
+        malformed.push(truncated_chroma);
+        let mut zero_size = source.clone();
+        zero_size.height = 0;
+        malformed.push(zero_size);
+        let mut missing_alpha = format(
+            Layout::Planar,
+            8,
+            5,
+            3,
+            vec![
+                plane(PlaneFormat::R8, 5, 3),
+                plane(PlaneFormat::R8, 3, 2),
+                plane(PlaneFormat::R8, 3, 2),
+            ],
+        );
+        missing_alpha.alpha_bits = 8;
+        malformed.push(missing_alpha);
+        for source in malformed {
+            assert!(
+                packed_format(&source)
+                    .unwrap_err()
+                    .contains("malformed planes")
+            );
+        }
+    }
+
+    #[test]
+    fn native_fallback_does_not_hide_malformed_packed_or_444_planes() {
+        let mut packed = format(
+            Layout::Cbycry16,
+            16,
+            5,
+            3,
+            vec![plane(PlaneFormat::Rgba16, 2, 3)],
+        );
+        packed.log2_chroma_h = 0;
+        assert!(
+            packed_format(&packed).is_err(),
+            "v216 needs ceil(width / 2) texels"
+        );
+        packed.planes[0] = plane(PlaneFormat::Rgba8, 3, 3);
+        assert!(
+            packed_format(&packed).is_err(),
+            "v216 needs 16-bit components"
+        );
+        let mut planar = format(
+            Layout::Planar,
+            12,
+            5,
+            3,
+            vec![plane(PlaneFormat::R16, 5, 3); 2],
+        );
+        planar.log2_chroma_w = 0;
+        planar.log2_chroma_h = 0;
+        assert!(
+            packed_format(&planar).is_err(),
+            "4:4:4 still needs all three planes"
+        );
     }
 
     #[test]
@@ -474,7 +727,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            pack_planes(&source, &planes, "nv12", source.width).unwrap(),
+            packed(&source, &planes, "nv12", source.width).unwrap(),
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 11, 21, 12, 22, 13, 23]
         );
     }
@@ -519,7 +772,7 @@ mod tests {
                 desc: &source.planes[2],
             },
         ];
-        let bytes = pack_planes(&source, &planes, "p010le", source.width).unwrap();
+        let bytes = packed(&source, &planes, "p010le", source.width).unwrap();
         let codes: Vec<u16> = bytes
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -569,7 +822,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            pack_planes(&source, &planes, "nv16", source.width).unwrap(),
+            packed(&source, &planes, "nv16", source.width).unwrap(),
             [1, 2, 3, 4, 10, 20, 11, 21]
         );
     }
@@ -628,23 +881,23 @@ mod tests {
         ];
         assert!(alpha_is_opaque(&planes, 2, 2).unwrap());
         assert_eq!(
-            pack_planes(&source, &planes, "nv12", source.width).unwrap(),
+            packed(&source, &planes, "nv12", source.width).unwrap(),
             [1, 2, 3, 4, 10, 20]
         );
         let translucent = [255, 254, 255, 255];
         planes[3].ptr = translucent.as_ptr();
         assert!(!alpha_is_opaque(&planes, 2, 2).unwrap());
         assert!(
-            pack_planes(&source, &planes, "nv12", source.width)
+            packed(&source, &planes, "nv12", source.width)
                 .unwrap_err()
                 .contains("I420A")
         );
         assert_eq!(
-            pack_planes(&source, &planes, "i420a", source.width).unwrap(),
+            packed(&source, &planes, "i420a", source.width).unwrap(),
             [1, 2, 3, 4, 10, 20, 255, 254, 255, 255]
         );
         assert_eq!(
-            pack_planes(&source, &planes, "i420a", 4).unwrap(),
+            packed(&source, &planes, "i420a", 4).unwrap(),
             [
                 1, 2, 0, 0, 3, 4, 0, 0, // Y, zero-coded border
                 10, 0, 20, 0, // U and V each have one visible chroma sample
@@ -686,7 +939,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            pack_planes(&source, &planes, "nv12", 4).unwrap(),
+            packed(&source, &planes, "nv12", 4).unwrap(),
             [1, 2, 0, 0, 3, 4, 0, 0, 10, 20, 0, 0]
         );
     }
@@ -718,7 +971,7 @@ mod tests {
                 desc: &source.planes[1],
             },
         ];
-        let error = pack_planes(&source, &planes, "p010le", source.width).unwrap_err();
+        let error = packed(&source, &planes, "p010le", source.width).unwrap_err();
         assert!(error.contains("byte limit"), "{error}");
     }
 }

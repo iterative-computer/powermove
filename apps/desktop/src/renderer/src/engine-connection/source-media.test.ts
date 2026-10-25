@@ -33,6 +33,103 @@ function fixture(frameBridge?: FrameBridgeApi) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('engine source consumers', () => {
+  it.each(['png', 'svg'])('does not request paused transport timing for a %s still', async format => {
+    const f = fixture(); Object.assign(f.project.assets.clip, { kind: 'image', format });
+    const monitor = f.source.monitor('clip');
+    try {
+      await Promise.resolve(); await Promise.resolve();
+      expect(monitor.duration).toBe(0);
+      expect(f.audio).not.toHaveBeenCalled();
+      expect(f.error).not.toHaveBeenCalled();
+      monitor.pause();
+      await Promise.resolve();
+      expect(f.audio).not.toHaveBeenCalled();
+    } finally { f.source.dispose(); }
+  });
+
+  it.each([5, 30])('learns original duration %s while paused and uses it for seeking', async duration => {
+    const f = fixture(); f.project.assets.clip.kind = 'audio';
+    const monitor = f.source.monitor('clip');
+    const changed = vi.fn(), loaded = vi.fn(), ended = vi.fn();
+    monitor.addEventListener('durationchange', changed);
+    monitor.addEventListener('loadedmetadata', loaded);
+    monitor.addEventListener('ended', ended);
+    try {
+      expect(monitor.duration).toBe(0);
+      await vi.waitFor(() => expect(f.audio).toHaveBeenCalledOnce());
+      const paused = f.audio.mock.calls[0]![0];
+      expect(paused).toMatchObject({ playing: false, time: 0 });
+      const status = { audio: 'sourceStatus' as const, asset: 'clip', generation: paused.generation,
+        time: 0, playing: false, duration: ticks(duration), levels: { peak: [], rms: [] } };
+      f.source.receive(status);
+      f.source.receive(status);
+      expect(monitor.duration).toBe(duration);
+      expect(monitor.paused).toBe(true);
+      expect(changed).toHaveBeenCalledOnce(); expect(loaded).toHaveBeenCalledOnce();
+      monitor.currentTime = duration + 10;
+      await vi.waitFor(() => expect(f.audio.mock.calls.at(-1)![0]).toMatchObject({ time: ticks(duration), playing: false }));
+      const seeking = f.audio.mock.calls.at(-1)![0];
+      f.source.receive({ ...status, generation: seeking.generation, time: ticks(duration) });
+      expect(monitor.currentTime).toBe(duration);
+      expect(ended).not.toHaveBeenCalled();
+      expect(f.project.assets.clip.dur).toBe(20);
+    } finally { f.source.dispose(); }
+  });
+
+  it('keeps a seek beyond imported duration while original timing is pending', async () => {
+    const f = fixture(); f.project.assets.clip.kind = 'audio';
+    const monitor = f.source.monitor('clip');
+    try {
+      monitor.currentTime = 25;
+      await vi.waitFor(() => expect(f.audio.mock.calls.at(-1)![0]).toMatchObject({ time: ticks(25), playing: false }));
+      const command = f.audio.mock.calls.at(-1)![0];
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', generation: command.generation,
+        time: ticks(25), playing: false, duration: ticks(30), levels: { peak: [], rms: [] } });
+      expect(monitor.currentTime).toBe(25);
+      expect(monitor.duration).toBe(30);
+      expect(f.project.assets.clip.dur).toBe(20);
+    } finally { f.source.dispose(); }
+  });
+
+  it.each([5, 30])('emits ended at original endpoint %s rather than imported duration', async duration => {
+    const f = fixture(); f.project.assets.clip.kind = 'audio';
+    const monitor = f.source.monitor('clip');
+    const ended = vi.fn(), paused = vi.fn();
+    monitor.addEventListener('ended', ended); monitor.addEventListener('pause', paused);
+    try {
+      await monitor.play();
+      const playing = f.audio.mock.calls.at(-1)![0];
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', generation: playing.generation,
+        time: 0, playing: true, duration: ticks(duration), levels: { peak: [], rms: [] } });
+      monitor.currentTime = duration - 1;
+      await vi.waitFor(() => expect(f.audio.mock.calls.at(-1)![0].generation).toBeGreaterThan(playing.generation));
+      const seeking = f.audio.mock.calls.at(-1)![0];
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', generation: seeking.generation,
+        time: ticks(duration), playing: false, duration: ticks(duration), levels: { peak: [], rms: [] } });
+      expect(ended).toHaveBeenCalledOnce(); expect(paused).not.toHaveBeenCalled();
+      expect(monitor.currentTime).toBe(duration); expect(monitor.paused).toBe(true);
+      expect(f.project.assets.clip.dur).toBe(20);
+    } finally { f.source.dispose(); }
+  });
+
+  it('does not infer ended from imported metadata or an error status', async () => {
+    const f = fixture(); f.project.assets.clip.kind = 'audio';
+    const monitor = f.source.monitor('clip');
+    const ended = vi.fn(), paused = vi.fn();
+    monitor.addEventListener('ended', ended); monitor.addEventListener('pause', paused);
+    try {
+      await monitor.play();
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', generation: f.audio.mock.calls.at(-1)![0].generation,
+        time: ticks(20), playing: false, levels: { peak: [], rms: [] } });
+      expect(ended).not.toHaveBeenCalled(); expect(paused).toHaveBeenCalledOnce();
+      await monitor.play();
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', generation: f.audio.mock.calls.at(-1)![0].generation,
+        time: ticks(5), playing: false, duration: ticks(5), error: 'Source unavailable', levels: { peak: [], rms: [] } });
+      expect(ended).not.toHaveBeenCalled(); expect(paused).toHaveBeenCalledTimes(2);
+      expect(f.error).toHaveBeenCalledOnce();
+    } finally { f.source.dispose(); }
+  });
+
   it('runs source audio on the engine and rejects older status generations after a seek', async () => {
     const f = fixture(); f.project.assets.clip.kind = 'audio';
     const monitor = f.source.monitor('clip');
@@ -339,7 +436,7 @@ describe('engine source consumers', () => {
 
   it('repaints an open paused still after interpretation changes and drops its old paint', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ putImageData: vi.fn() } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => ({ putImageData: vi.fn() })) as unknown as HTMLCanvasElement['getContext']);
     vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => callback(new Blob(['frame'], { type: 'image/png' })));
     vi.spyOn(HTMLImageElement.prototype, 'decode').mockResolvedValue();
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:frame');
@@ -374,7 +471,7 @@ describe('engine source consumers', () => {
 
   it('does not wait for a cancelled image encode before painting the new reading', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ putImageData: vi.fn() } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => ({ putImageData: vi.fn() })) as unknown as HTMLCanvasElement['getContext']);
     const encodes: Array<(blob: Blob | null) => void> = [];
     vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => { encodes.push(callback); });
     vi.spyOn(HTMLImageElement.prototype, 'decode').mockResolvedValue();
@@ -446,11 +543,16 @@ describe('engine source consumers', () => {
       const fresh = f.audio.mock.calls.at(-1)![0];
       expect(fresh).toMatchObject({ asset: 'clip', playing: true });
       expect(fresh.time).toBeGreaterThanOrEqual(ticks(3));
-      expect(monitor.duration).toBe(10);
+      expect(monitor.duration).toBe(0);
       f.source.receive({ audio: 'sourceStatus', asset: 'clip', time: 0, playing: false,
-        generation: old.generation, levels: { peak: [], rms: [] } });
+        generation: old.generation, duration: ticks(1), levels: { peak: [], rms: [] } });
       expect(monitor.paused).toBe(false);
+      expect(monitor.duration).toBe(0);
       expect(monitor.currentTime).toBeGreaterThanOrEqual(3);
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', time: ticks(3), playing: true,
+        generation: fresh.generation, duration: ticks(30), levels: { peak: [], rms: [] } });
+      expect(monitor.duration).toBe(30);
+      expect(f.project.assets.clip.dur).toBe(10);
     } finally { f.source.dispose(); vi.unstubAllGlobals(); }
   });
 

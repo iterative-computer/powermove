@@ -321,7 +321,7 @@ export type EngineSnapshotReply =
       /** Native video texture already transferred to this window's preload. */
       videoSurface?: { token: string; width: number; height: number };
       /** Native alpha planes use WebCodecs I420A; Electron has no alpha YUV import. */
-      videoPlanes?: import('./engine-protocol').SourceVideoFrame;
+      videoPlanes?: import('./engine-protocol').SourceVideoFrame & { timestamp: number };
       origin: [number, number];
       /** A layer raster's box in layer pixels (`RasterSurface` w, h). */
       layerBox: [number, number] | null;

@@ -1157,7 +1157,8 @@ struct Thread {
     /// Independent source-monitor audio, never mixed into a composition.
     source_audio: BTreeMap<Key, SourceAudio>,
     source_silent: BTreeMap<Key, SourceSilent>,
-    source_intent: BTreeMap<Key, (pm_protocol::common::AssetId, Ticks, u32)>,
+    source_timing: BTreeMap<Key, super::source_audio::SourceMonitorTimingCache>,
+    source_intent: BTreeMap<Key, (pm_protocol::common::AssetId, Ticks, bool, u32)>,
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
@@ -1406,6 +1407,7 @@ pub fn run(
         audio_ingress,
         source_audio: BTreeMap::new(),
         source_silent: BTreeMap::new(),
+        source_timing: BTreeMap::new(),
         source_intent: BTreeMap::new(),
         audio_prefs: BTreeMap::new(),
         peaks,
@@ -2567,6 +2569,9 @@ impl Thread {
                 self.prepare_video_media(key);
             }
             Command::SourceMedia { key, asset, path } => {
+                if let Some(timing) = self.source_timing.get_mut(&key) {
+                    timing.invalidate(&asset);
+                }
                 self.docs
                     .entry(key)
                     .or_default()
@@ -2585,7 +2590,7 @@ impl Thread {
                 {
                     self.source_silent.remove(&key);
                 }
-                if let Some((wanted, time, generation)) = self.source_intent.get(&key).cloned()
+                if let Some((wanted, time, playing, generation)) = self.source_intent.get(&key).cloned()
                     && wanted.as_str() == asset
                 {
                     self.audio_message(
@@ -2593,7 +2598,7 @@ impl Thread {
                         AudioMessage::SourceMonitor {
                             asset: Some(wanted),
                             time,
-                            playing: true,
+                            playing,
                             generation,
                         },
                     );
@@ -2628,8 +2633,15 @@ impl Thread {
             }
             Command::CancelSnapshot { host, id } => {
                 self.snapshots.take_request(host, id);
-                self.pending_snapshots
-                    .retain(|pending| pending.job.host != host || pending.job.id != id);
+                let gpu = &mut self.gpu;
+                self.pending_snapshots.retain(|pending| {
+                    let keep = pending.job.host != host || pending.job.id != id;
+                    if !keep && let Some(gpu) = gpu.as_mut() {
+                        gpu.snapshot_readback
+                            .cancel(pending.ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+                    }
+                    keep
+                });
             }
             Command::Compat {
                 key,
@@ -3043,6 +3055,7 @@ impl Thread {
         self.audio.remove(&key);
         self.source_audio.remove(&key);
         self.source_silent.remove(&key);
+        self.source_timing.remove(&key);
         self.source_intent.remove(&key);
         self.audio_prefs.remove(&key);
         if self
@@ -6898,29 +6911,47 @@ impl Thread {
         job: &super::snapshot::SnapshotJob,
         pixels: Vec<u8>,
     ) -> Option<pm_protocol::snapshot::PixelPayload> {
-        use pm_protocol::snapshot::PixelPayload;
-        let length = pixels.len();
-        if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
-            return Some(PixelPayload::Inline {
+        if pixels.len() <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+            return Some(pm_protocol::snapshot::PixelPayload::Inline {
                 bytes: pm_protocol::common::Bytes(pixels),
             });
         }
-        match pm_bridge::shm::publish(&pixels) {
-            Ok(name) => {
-                self.segments.add(name.clone());
-                self.snapshots.published(name.clone(), length as u64);
-                self.stats().snapshot_shared += 1;
-                Some(PixelPayload::SharedMemory {
-                    name,
-                    length: pm_protocol::common::ByteSize::new(length as u64)
-                        .unwrap_or(pm_protocol::common::ByteSize::MAX),
-                })
+        let length = pixels.len();
+        let payload = write_payload(length, |segment| {
+            segment.copy_from_slice(&pixels);
+            Ok(())
+        });
+        self.track_payload(job, length, payload)
+    }
+
+    /// Records a written payload's segment for orphan cleanup, or answers the
+    /// job with the error. `None` after answering.
+    fn track_payload(
+        &mut self,
+        job: &super::snapshot::SnapshotJob,
+        length: usize,
+        payload: std::io::Result<pm_protocol::snapshot::PixelPayload>,
+    ) -> Option<pm_protocol::snapshot::PixelPayload> {
+        use pm_protocol::snapshot::PixelPayload;
+        match payload {
+            Ok(payload) => {
+                if let PixelPayload::SharedMemory { name, .. } = &payload {
+                    self.segments.add(name.clone());
+                    self.snapshots.published(name.clone(), length as u64);
+                    self.stats().snapshot_shared += 1;
+                }
+                Some(payload)
             }
             Err(error) => {
                 self.stats().snapshot_failures += 1;
+                let code = if error.kind() == std::io::ErrorKind::Other {
+                    ErrorCode::Internal
+                } else {
+                    ErrorCode::BudgetExceeded
+                };
                 self.snapshot_error(
                     job,
-                    ErrorCode::BudgetExceeded,
+                    code,
                     &format!("The snapshot's pixels could not be shared: {error}"),
                 );
                 None
@@ -6938,6 +6969,30 @@ impl Thread {
             let _ = bridge.goodbye();
         }
     }
+}
+
+/// A snapshot payload of `length` bytes that `fill` writes in place: inline
+/// when small, otherwise straight into a fresh shared-memory segment (no
+/// staging copy). A failed fill is `ErrorKind::Other`; anything else is the
+/// segment's own failure.
+pub(super) fn write_payload(
+    length: usize,
+    fill: impl FnOnce(&mut [u8]) -> std::io::Result<()>,
+) -> std::io::Result<pm_protocol::snapshot::PixelPayload> {
+    use pm_protocol::snapshot::PixelPayload;
+    if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+        let mut bytes = vec![0; length];
+        fill(&mut bytes)?;
+        return Ok(PixelPayload::Inline {
+            bytes: pm_protocol::common::Bytes(bytes),
+        });
+    }
+    let name = pm_bridge::shm::publish_with(length, fill)?;
+    Ok(PixelPayload::SharedMemory {
+        name,
+        length: pm_protocol::common::ByteSize::new(length as u64)
+            .unwrap_or(pm_protocol::common::ByteSize::MAX),
+    })
 }
 
 /// The shading of a paused preview frame: Material Preview or Rendered
@@ -7033,6 +7088,140 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_pending_snapshots_releases_only_their_gpu_slots() {
+        use pm_protocol::snapshot::{
+            SnapshotClass, SnapshotPixels, SnapshotRequest, SnapshotTarget,
+        };
+        let (mut thread, _) = preview_thread();
+        assert!(thread.gpu().is_some());
+        let request_id = RequestId::new(7).unwrap();
+        for host in [PortId(1), PortId(2)] {
+            let gpu = thread.gpu.as_mut().unwrap();
+            let target = snapshot_output_target(
+                &mut gpu.snapshot_target,
+                &gpu.device,
+                4,
+                4,
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            let (ticket, _) = gpu
+                .snapshot_readback
+                .reserve(
+                    &gpu.device,
+                    &target.texture,
+                    MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+                )
+                .unwrap()
+                .unwrap();
+            gpu.snapshot_readback.start_map(ticket, || {});
+            thread.pending_snapshots.push(PendingSnapshot {
+                job: super::super::snapshot::SnapshotJob::new(
+                    host,
+                    request_id,
+                    preview_key(),
+                    SnapshotRequest {
+                        composition: "main".into(),
+                        time: Ticks::ZERO,
+                        output_size: Size::new(4, 4),
+                        target: SnapshotTarget::Frame {
+                            motion_blur_samples: 0,
+                            background: true,
+                            draft_3d: false,
+                        },
+                        pixels: SnapshotPixels::Opaque,
+                        class: SnapshotClass::Async,
+                        view_seq: None,
+                        viewer: None,
+                        wait_ms: 1_000,
+                        blender_wait_ms: 0,
+                        captions_hidden: false,
+                        uploaded: Vec::new(),
+                        compat_uploaded: Vec::new(),
+                    },
+                    None,
+                    0,
+                ),
+                ticket,
+                started: 0,
+                map_deadline: SNAPSHOT_GPU_TIMEOUT_US,
+                revision: Revision::new(1).unwrap(),
+                width: 4,
+                height: 4,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                rows: pm_render::SnapshotRows::TopDown,
+                draft_3d: false,
+            });
+        }
+        assert!(
+            !thread
+                .gpu
+                .as_ref()
+                .unwrap()
+                .snapshot_readback
+                .can_reserve(1024, MAX_CACHED_SNAPSHOT_TARGET_BYTES)
+        );
+        thread.apply(Command::CancelSnapshot {
+            host: PortId(1),
+            id: request_id,
+        });
+        assert_eq!(thread.pending_snapshots.len(), 1);
+        assert_eq!(thread.pending_snapshots[0].job.host, PortId(2));
+        assert!(
+            thread
+                .gpu
+                .as_ref()
+                .unwrap()
+                .snapshot_readback
+                .can_reserve(1024, MAX_CACHED_SNAPSHOT_TARGET_BYTES)
+        );
+        // A repeated cancellation cannot free the other host's identical ID.
+        thread.apply(Command::CancelSnapshot {
+            host: PortId(1),
+            id: request_id,
+        });
+        assert!(thread.gpu.as_ref().unwrap().snapshot_readback.in_flight());
+        thread.apply(Command::CancelSnapshot {
+            host: PortId(2),
+            id: request_id,
+        });
+        assert!(thread.pending_snapshots.is_empty());
+        let gpu = thread.gpu.as_mut().unwrap();
+        assert!(!gpu.snapshot_readback.in_flight());
+        // Both slots can accept the next captures after their map was cancelled.
+        let target = snapshot_output_target(
+            &mut gpu.snapshot_target,
+            &gpu.device,
+            4,
+            4,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let a = gpu
+            .snapshot_readback
+            .reserve(
+                &gpu.device,
+                &target.texture,
+                MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+            )
+            .unwrap()
+            .unwrap()
+            .0;
+        let b = gpu
+            .snapshot_readback
+            .reserve(
+                &gpu.device,
+                &target.texture,
+                MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+            )
+            .unwrap()
+            .unwrap()
+            .0;
+        gpu.snapshot_readback
+            .cancel(a, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+        gpu.snapshot_readback
+            .cancel(b, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+    }
+
+    #[test]
     fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
         use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
 
@@ -7124,6 +7313,7 @@ mod tests {
             audio_ingress: AudioIngress::default(),
             source_audio: BTreeMap::new(),
             source_silent: BTreeMap::new(),
+            source_timing: BTreeMap::new(),
             source_intent: BTreeMap::new(),
             audio_prefs: BTreeMap::new(),
             peaks,
@@ -8240,6 +8430,117 @@ mod tests {
             path: Some(None),
         });
         assert!(!thread.source_silent.contains_key(&key));
+    }
+
+    #[test]
+    fn source_audio_paused_monitor_publishes_original_duration_after_binding_and_relink() {
+        use pm_audio::offline::{PcmFormat, WavWriter};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        let write = |seconds: usize| {
+            let mut writer = WavWriter::new(
+                std::fs::File::create(&path).unwrap(),
+                PcmFormat::F32,
+                2,
+                48_000,
+            )
+            .unwrap();
+            writer.write(0, &vec![0.125; seconds * 48_000 * 2]).unwrap();
+            writer.finish().unwrap();
+        };
+        write(2);
+        let (mut thread, _) = preview_thread();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let received = statuses.clone();
+        thread.sink = Arc::new(move |actions| {
+            for action in actions {
+                if let Action::Send { bytes, .. } = action
+                    && let Message::Event {
+                        body:
+                            Event::Audio(AudioMessage::SourceStatus {
+                                generation,
+                                time,
+                                duration,
+                                playing,
+                                ..
+                            }),
+                    } = codec::decode(&bytes).unwrap().message
+                {
+                    received
+                        .lock()
+                        .unwrap()
+                        .push((generation, time, duration, playing));
+                }
+            }
+        });
+        let key = preview_key();
+        // A paused first request arrives before main has resolved the file.
+        thread.handle_source_monitor(
+            key,
+            Some("source".into()),
+            Ticks::from_whole_seconds(8),
+            false,
+            7,
+        );
+        assert!(statuses.lock().unwrap().is_empty());
+        assert!(thread.source_intent.contains_key(&key));
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "source".into(),
+            path: Some(Some(path.clone())),
+        });
+        assert_eq!(
+            statuses.lock().unwrap().last(),
+            Some(&(
+                7,
+                Ticks::from_whole_seconds(2),
+                Some(Ticks::from_whole_seconds(2)),
+                false,
+            ))
+        );
+        assert!(
+            thread.source_audio.is_empty(),
+            "metadata never opens an audio device"
+        );
+        assert!(thread.source_silent.is_empty());
+        // A subsequent paused seek uses the warm source and retains its endpoint.
+        thread.handle_source_monitor(
+            key,
+            Some("source".into()),
+            Ticks::from_whole_seconds(1),
+            false,
+            8,
+        );
+        assert_eq!(
+            statuses.lock().unwrap().last(),
+            Some(&(
+                8,
+                Ticks::from_whole_seconds(1),
+                Some(Ticks::from_whole_seconds(2)),
+                false,
+            ))
+        );
+        // Rebinding while still paused refreshes timing without a Play request.
+        write(3);
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "source".into(),
+            path: Some(Some(path)),
+        });
+        assert_eq!(
+            statuses.lock().unwrap().last(),
+            Some(&(
+                8,
+                Ticks::from_whole_seconds(1),
+                Some(Ticks::from_whole_seconds(3)),
+                false,
+            ))
+        );
+        assert!(thread.source_audio.is_empty());
+        assert!(thread.source_silent.is_empty());
+        thread.handle_source_monitor(key, None, Ticks::ZERO, false, 9);
+        assert!(!thread.source_intent.contains_key(&key));
+        assert!(!thread.source_timing.contains_key(&key));
     }
 
     #[test]

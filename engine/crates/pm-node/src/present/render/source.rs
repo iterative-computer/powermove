@@ -1,5 +1,6 @@
 //! Source-only presenter audio, status, and frame rendering.
 
+use super::super::source_audio::SourceMonitorTiming;
 use super::*;
 
 pub(super) struct SourceAudio {
@@ -49,20 +50,62 @@ pub(super) fn audio_source_end(
     }
 }
 
+#[cfg(test)]
+mod source_audio_tests {
+    use super::*;
+    use pm_protocol::clock::ClockSample;
+    use pm_protocol::common::{HostMicros, PlaybackRate, Seq};
+
+    #[test]
+    fn source_audio_clock_runs_through_short_audio_and_holds_media_end() {
+        let duration = Ticks::from_whole_seconds(10);
+        let sample = ClockSample {
+            seq: Seq::new(1).unwrap(),
+            epoch: 1,
+            state: TransportState::Playing,
+            host_time: HostMicros::new(1_000_000).unwrap(),
+            // The soundtrack has ended, but the document still has video.
+            media_time: Ticks::from_whole_seconds(4),
+            rate: PlaybackRate { num: 1, den: 1 },
+            output_latency_us: 0,
+            sample_rate: 48_000,
+            loop_range: None,
+        };
+        assert_eq!(
+            audio_source_end(&sample, duration, true, sample.host_time),
+            None
+        );
+        assert_eq!(
+            audio_source_end(&sample, duration, true, HostMicros::new(6_999_999).unwrap()),
+            None
+        );
+        assert_eq!(
+            audio_source_end(&sample, duration, true, HostMicros::new(7_000_000).unwrap()),
+            Some(duration)
+        );
+        let stopped = ClockSample {
+            state: TransportState::Stopped,
+            media_time: duration,
+            ..sample
+        };
+        assert_eq!(
+            audio_source_end(&stopped, duration, true, stopped.host_time),
+            Some(duration)
+        );
+    }
+}
+
 impl SourceAudio {
     pub(super) fn start(
         key: Key,
         asset: pm_protocol::common::AssetId,
         generation: u32,
         path: PathBuf,
+        timing: &SourceMonitorTiming,
         sink: Sink,
     ) -> Result<Self, String> {
-        let decoder =
-            pm_media::audio::AudioDecoder::open(&path, None).map_err(|e| e.to_string())?;
-        let duration = decoder.info().duration().unwrap_or(86_400.0).max(0.001);
-        let duration_ticks = Ticks::new((duration * TICKS_PER_SECOND as f64).round() as i64)
-            .unwrap_or(Ticks::from_whole_seconds(86_400));
-        let doc = super::super::source_audio::source_monitor_document(asset.as_str(), duration)?;
+        let duration_ticks = timing.duration_ticks()?;
+        let doc = super::super::source_audio::source_monitor_document(asset.as_str(), timing)?;
         let mut media = BTreeMap::new();
         media.insert(asset.as_str().to_owned(), Some(path));
         let playing = Arc::new(AtomicBool::new(false));
@@ -75,6 +118,7 @@ impl SourceAudio {
                     time: levels.media_time,
                     playing: heard.load(Ordering::Relaxed),
                     generation,
+                    duration: Some(duration_ticks),
                     levels: levels.master,
                     error: None,
                 }),
@@ -111,8 +155,9 @@ impl Thread {
         playing: bool,
         generation: u32,
     ) {
-        if asset.is_none() {
+        let Some(asset) = asset else {
             self.source_intent.remove(&key);
+            self.source_timing.remove(&key);
             if let Some(source) = self.source_audio.remove(&key) {
                 self.source_status(key, source.asset, time, false, generation);
             }
@@ -120,151 +165,128 @@ impl Thread {
                 self.source_status(key, source.asset, time, false, generation);
             }
             return;
-        }
-        if let Some(asset) = asset.as_ref() {
-            if playing {
-                self.source_intent
-                    .insert(key, (asset.clone(), time, generation));
-            } else {
-                self.source_intent.remove(&key);
-            }
-        }
+        };
+        // Paused monitors also wait for the binding and refresh on relink.
+        self.source_intent
+            .insert(key, (asset.clone(), time, playing, generation));
         if self.source_audio.get(&key).is_some_and(|current| {
-            Some(&current.asset) != asset.as_ref() || current.generation != generation || !playing
+            current.asset != asset || current.generation != generation || !playing
         }) {
             self.source_audio.remove(&key);
         }
         if self.source_silent.get(&key).is_some_and(|current| {
-            Some(&current.asset) != asset.as_ref() || current.generation != generation || !playing
+            current.asset != asset || current.generation != generation || !playing
         }) {
             self.source_silent.remove(&key);
         }
-        if let Some(asset) = asset {
-            if playing
-                && !self.source_audio.contains_key(&key)
-                && !self.source_silent.contains_key(&key)
-            {
-                let path = self
-                    .docs
-                    .get(&key)
-                    .and_then(|d| d.source_media(asset.as_str()))
-                    .flatten();
-                if path.is_none() {
-                    if self
-                        .docs
-                        .get(&key)
-                        .and_then(|d| d.source_media(asset.as_str()))
-                        .is_none()
-                    {
-                        return;
-                    }
+        // Stills have no transport, but their paused monitor requests status.
+        let image = self.docs.get(&key).is_some_and(|doc| {
+            let record = pm_eval::node::member(doc.document().root(), "assets")
+                .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
+            pm_eval::node::is_str(pm_eval::node::member(record, "kind"), "image")
+        });
+        if image && !playing {
+            self.source_timing.remove(&key);
+            self.source_status(key, asset, time, false, generation);
+            return;
+        }
+        let path = match self
+            .docs
+            .get(&key)
+            .and_then(|doc| doc.source_media(asset.as_str()))
+        {
+            None => return, // The host has not answered this source binding yet.
+            Some(Some(path)) => path,
+            Some(None) => {
+                self.source_intent.remove(&key);
+                if let Some(cache) = self.source_timing.get_mut(&key) {
+                    cache.invalidate(asset.as_str());
+                }
+                self.source_status_error(
+                    key,
+                    asset,
+                    time,
+                    generation,
+                    "The source media is unavailable".into(),
+                );
+                return;
+            }
+        };
+        let timing = match self
+            .source_timing
+            .entry(key)
+            .or_default()
+            .open(asset.as_str(), &path)
+        {
+            Ok(timing) => timing,
+            Err(error) => {
+                self.source_intent.remove(&key);
+                self.source_status_error(
+                    key,
+                    asset,
+                    time,
+                    generation,
+                    format!("The source media could not start: {error}"),
+                );
+                return;
+            }
+        };
+        let duration = timing.duration_ticks().expect("validated source duration");
+        let time = time.min(duration);
+        let playing = playing && time < duration;
+        self.source_intent
+            .insert(key, (asset.clone(), time, playing, generation));
+        if !playing {
+            self.source_audio.remove(&key);
+            self.source_silent.remove(&key);
+            self.source_status(key, asset, time, false, generation);
+            return;
+        }
+        if timing.audio_start.is_none() && !self.source_silent.contains_key(&key) {
+            self.source_silent.insert(
+                key,
+                SourceSilent {
+                    asset: asset.clone(),
+                    generation,
+                    from: time,
+                    started: now(),
+                    duration,
+                    last_sent: 0,
+                },
+            );
+        } else if timing.audio_start.is_some() && !self.source_audio.contains_key(&key) {
+            match SourceAudio::start(
+                key,
+                asset.clone(),
+                generation,
+                path,
+                &timing,
+                self.sink.clone(),
+            ) {
+                Ok(source) => {
+                    self.source_audio.insert(key, source);
+                }
+                Err(error) => {
                     self.source_intent.remove(&key);
                     self.source_status_error(
                         key,
                         asset,
                         time,
                         generation,
-                        "The source media or browser-playable copy is unavailable".into(),
+                        format!("The source audio could not start: {error}"),
                     );
                     return;
                 }
-                if let Some(path) = path {
-                    let record = self.docs.get(&key).and_then(|d| {
-                        pm_eval::node::member(d.document().root(), "assets")
-                            .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()))
-                    });
-                    let video =
-                        pm_eval::node::is_str(pm_eval::node::member(record, "kind"), "video");
-                    let has_audio =
-                        pm_eval::node::truthy(pm_eval::node::member(record, "hasAudio"));
-                    let rendition =
-                        pm_eval::node::truthy(pm_eval::node::member(record, "rendition"));
-                    let original = self
-                        .docs
-                        .get(&key)
-                        .and_then(|d| d.media().path(asset.as_str()));
-                    if rendition && original.as_ref() == Some(&path) {
-                        self.source_intent.remove(&key);
-                        self.source_status_error(
-                            key,
-                            asset,
-                            time,
-                            generation,
-                            "The browser-playable copy is not available yet".into(),
-                        );
-                        return;
-                    }
-                    let duration_seconds =
-                        pm_eval::node::finite_number(pm_eval::node::member(record, "dur"))
-                            .unwrap_or(86_400.0)
-                            .clamp(0.001, 86_400.0);
-                    let duration =
-                        Ticks::new((duration_seconds * TICKS_PER_SECOND as f64).round() as i64)
-                            .unwrap_or(Ticks::from_whole_seconds(86_400));
-                    if video && !has_audio {
-                        self.source_silent.insert(
-                            key,
-                            SourceSilent {
-                                asset: asset.clone(),
-                                generation,
-                                from: time,
-                                started: now(),
-                                duration,
-                                last_sent: 0,
-                            },
-                        );
-                    } else {
-                        match SourceAudio::start(
-                            key,
-                            asset.clone(),
-                            generation,
-                            path,
-                            self.sink.clone(),
-                        ) {
-                            Ok(source) => {
-                                self.source_audio.insert(key, source);
-                            }
-                            Err(error) => {
-                                self.source_intent.remove(&key);
-                                self.source_status_error(
-                                    key,
-                                    asset,
-                                    time,
-                                    generation,
-                                    format!("The source audio could not start: {error}"),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(source) = self.source_audio.get(&key) {
-                source.playing.store(playing, Ordering::Relaxed);
-                if playing {
-                    source.link.send(AudioCtl::Play {
-                        from: time.get(),
-                        rate: pm_protocol::common::PlaybackRate { num: 1, den: 1 },
-                    });
-                } else {
-                    source.link.send(AudioCtl::Pause);
-                    source.link.send(AudioCtl::Seek(time.get()));
-                }
-            }
-            if playing
-                && time
-                    >= self
-                        .source_silent
-                        .get(&key)
-                        .map_or(Ticks::from_whole_seconds(86_400), |s| s.duration)
-            {
-                self.source_silent.remove(&key);
-                self.source_intent.remove(&key);
-                self.source_status(key, asset, time, false, generation);
-            } else {
-                self.source_status(key, asset, time, playing, generation);
             }
         }
+        if let Some(source) = self.source_audio.get(&key) {
+            source.playing.store(true, Ordering::Relaxed);
+            source.link.send(AudioCtl::Play {
+                from: time.get(),
+                rate: pm_protocol::common::PlaybackRate { num: 1, den: 1 },
+            });
+        }
+        self.source_status(key, asset, time, true, generation);
     }
 
     pub(super) fn source_status(
@@ -298,6 +320,11 @@ impl Thread {
         generation: u32,
         error: Option<String>,
     ) {
+        let duration = self
+            .source_timing
+            .get(&key)
+            .and_then(|cache| cache.get(asset.as_str()))
+            .and_then(|timing| timing.duration_ticks().ok());
         self.send(
             key.0,
             Envelope::new(Message::Event {
@@ -306,6 +333,7 @@ impl Thread {
                     time,
                     playing,
                     generation,
+                    duration,
                     levels: pm_protocol::clock::ChannelLevels {
                         peak: vec![0.0, 0.0],
                         rms: vec![0.0, 0.0],
@@ -429,7 +457,7 @@ impl Thread {
             self.snapshot_error(
                 &job,
                 ErrorCode::MediaOffline,
-                "The source media is offline or its browser rendition is unavailable.",
+                "The source media is offline.",
             );
             return;
         };
@@ -444,24 +472,14 @@ impl Thread {
             );
             return;
         }
-        if !reads_original
-            && record
-                .is_some_and(|r| pm_eval::node::truthy(pm_eval::node::member(Some(r), "rendition")))
-            && original.as_ref() == Some(&path)
-        {
-            self.stats().snapshot_failures += 1;
-            self.snapshot_error(
-                &job,
-                ErrorCode::MediaOffline,
-                "The browser-playable copy is not available yet.",
-            );
-            return;
-        }
         let interpretation = if color == SourceColor::Interpreted {
             footage.clone()
         } else {
             None
         };
+        let sequence = record.is_some_and(pm_render::footage::is_sequence);
+        let time = pm_render::footage::source_time(record, job.request.time,
+            if color == SourceColor::Compositor { footage.as_ref() } else { interpretation.as_ref() });
         let svg_request = match pm_render::Renderer::source_is_svg(&path) {
             Ok(true) if color != SourceColor::Compositor => {
                 let intrinsic = (
@@ -493,6 +511,9 @@ impl Thread {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let mut coded_video = None;
+        // Coded planes are packed straight into their payload (a shared
+        // segment for any real frame): one copy from the decoder's buffer.
+        let mut written = None;
         let painted = if let Some(request) = &svg_request {
             composer.renderer().source_svg_rgba8(
                 &request.key,
@@ -501,19 +522,27 @@ impl Thread {
                 interpretation.as_ref(),
             )
         } else if color == SourceColor::Compositor {
-            let sequence = record.is_some_and(|r| {
-                pm_eval::node::truthy(pm_eval::node::member(Some(r), "imageSequence"))
-            });
             let planes = match footage {
                 Some(_) => Ok(None),
-                None => composer
-                    .renderer()
-                    .source_video_planes(&path, job.request.time, sequence),
+                None => composer.renderer().source_video_planes_with(
+                    &path,
+                    time,
+                    sequence,
+                    |length, pack| {
+                        Ok((
+                            length,
+                            super::write_payload(length, |out| {
+                                pack(out).map_err(std::io::Error::other)
+                            }),
+                        ))
+                    },
+                ),
             };
             match planes {
-                Ok(Some((size, pixels, video))) => {
+                Ok(Some((size, payload, video))) => {
                     coded_video = Some((size, video));
-                    Ok(Some(pixels))
+                    written = Some(payload);
+                    Ok(Some(Vec::new())) // already in `written`
                 }
                 // Interpret Footage, or a reading Chromium cannot apply
                 // exactly (wide gamut, HDR, other curves, or geometry such as
@@ -523,7 +552,7 @@ impl Thread {
                     .renderer()
                     .source_rgba8_composed(
                         &path,
-                        job.request.time,
+                        time,
                         job.request.output_size,
                         fit,
                         footage.as_ref().unwrap_or(&Default::default()),
@@ -547,11 +576,11 @@ impl Thread {
                 .renderer()
                 .source_rgba8(
                     &path,
-                    job.request.time,
+                    time,
                     job.request.output_size,
                     fit,
                     interpretation.as_ref(),
-                )
+                 sequence)
                 .map(Some)
         };
         if let (Some(request), Ok(None)) = (&svg_request, &painted) {
@@ -605,7 +634,11 @@ impl Thread {
                 return;
             }
         };
-        let Some(payload) = self.share_pixels(&job, pixels) else {
+        let payload = match written {
+            Some((length, payload)) => self.track_payload(&job, length, payload),
+            None => self.share_pixels(&job, pixels),
+        };
+        let Some(payload) = payload else {
             return;
         };
         let (size, video) = match coded_video {
