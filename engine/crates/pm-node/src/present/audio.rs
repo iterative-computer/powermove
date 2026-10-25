@@ -23,12 +23,13 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pm_audio::playback::{ClockHandle, CommandReceipt, Playback, PlaybackConfig};
+use pm_audio::playback::{ClockHandle, CommandReceipt, Playback, PlaybackConfig, Start};
 use pm_audio::{MixFormat, SourceCache};
 use pm_engine::document::DocumentUpdate;
 use pm_protocol::clock::{AudioLevels, SeekMode, TransportCommand, TransportState};
@@ -43,6 +44,11 @@ pub const PROJECT_INTERVAL: Duration = Duration::from_millis(30);
 /// Levels go to the renderer this often while playing (the mixer panel
 /// draws at the display rate and steps its own ballistics in between).
 pub const LEVELS_INTERVAL: Duration = Duration::from_millis(33);
+
+/// How long a Play forwarded at ingress waits for the render thread to
+/// time its start ([`AudioCtl::StartAt`], normally within milliseconds)
+/// before it starts on its own.
+const HELD_START_MAX_US: u64 = 150_000;
 
 /// Bound queued transport answers when a producer stalls behind an earlier command.
 const MAX_PENDING_COMMANDS: usize = 64;
@@ -62,6 +68,62 @@ fn default_device_opener() -> DeviceOpener {
 /// How long the controls must rest before a warmed thread checks whether
 /// the composition is audible and opens the device.
 pub const WARM_IDLE: Duration = Duration::from_millis(100);
+
+/// `1`: play into a simulated output device instead of the system's (a
+/// machine whose audio output does not run, measurements of the audio
+/// clock's start and A/V sync): 48 kHz stereo, 512-frame buffers called
+/// back one buffer ahead of their output, and [`SIM_LATENCY_US`] to the
+/// speaker.
+pub const SIM_AUDIO_ENV: &str = "POWERMOVE_ENGINE_SIM_AUDIO";
+pub const SIM_LATENCY_US: u32 = 10_000;
+
+/// A simulated output device on its own thread ([`SIM_AUDIO_ENV`]).
+struct SimDevice {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SimDevice {
+    const RATE: u32 = 48_000;
+    const BUFFER: usize = 512;
+
+    fn start(mut side: pm_audio::playback::DeviceSide) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("pm-sim-audio".into())
+            .spawn(move || {
+                use pm_audio::clock::host_now_us;
+                let buffer_us = Self::BUFFER as u64 * 1_000_000 / u64::from(Self::RATE);
+                let first = host_now_us() + 2 * buffer_us;
+                let mut out = vec![0f32; Self::BUFFER * 2];
+                let mut frames = 0u64;
+                while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    // The buffer's first frame reaches the output here; the
+                    // device asks for it a buffer before.
+                    let at = first + frames * 1_000_000 / u64::from(Self::RATE);
+                    let call = at.saturating_sub(buffer_us);
+                    let now = host_now_us();
+                    if call > now {
+                        std::thread::sleep(Duration::from_micros(call - now));
+                    }
+                    side.callback(&mut out, 2, at);
+                    frames += Self::BUFFER as u64;
+                }
+            })
+            .ok();
+        Self { stop, thread }
+    }
+}
+
+impl Drop for SimDevice {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 /// Decoded audio kept per viewer.
 const SOURCE_BUDGET: usize = 128 * 1024 * 1024;
@@ -95,13 +157,23 @@ pub enum AudioCtl {
     Document(DocumentUpdate),
     MemoryPressure,
     /// Transport forwarded at presenter ingress, before render/document work.
+    /// A Play is prepared and held for its [`AudioCtl::StartAt`].
     Transport(TransportCommand),
+    /// When the held Play `play` ([`ForwardedAudio::play`]) presents its
+    /// first sample: host µs `at` (0: as soon as it is queued), the line the
+    /// picture starts on. A later forwarded Play makes it stale: ignored.
+    StartAt {
+        play: u64,
+        at: i64,
+    },
     Media(MediaMap),
     Composition(String),
-    /// Seek to `from` (ticks) and play at `rate`.
+    /// Seek to `from` (ticks) and play at `rate`, the first frame heard at
+    /// host µs `at` (the line the picture starts on too).
     Play {
         from: i64,
         rate: PlaybackRate,
+        at: i64,
     },
     Pause,
     /// Open the device ahead of the first Play once the composition is
@@ -159,11 +231,16 @@ struct Endpoint {
     sent_revision: u64,
     pending_revision: u64,
     last_play: Option<(PlaybackRate, Option<u32>)>,
+    /// Plays forwarded on this link ([`AudioLink::plays`]).
+    plays: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ForwardedAudio {
     pub before: Option<u32>,
+    /// The forwarded Play's number on its link, when one went to the audio:
+    /// it holds its start for the [`AudioCtl::StartAt`] naming it.
+    pub play: Option<u64>,
 }
 
 impl AudioIngress {
@@ -182,6 +259,7 @@ impl AudioIngress {
                     sent_revision: revision,
                     pending_revision: revision,
                     last_play: None,
+                    plays: link.plays.clone(),
                 },
             );
         }
@@ -227,7 +305,7 @@ impl AudioIngress {
                                 .as_ref()
                                 .is_some_and(|s| s.state != TransportState::Stopped))
                 }) {
-                    return Some(ForwardedAudio { before });
+                    return Some(ForwardedAudio { before, play: None });
                 }
                 endpoint.last_play = Some((rate, before));
             }
@@ -244,8 +322,15 @@ impl AudioIngress {
                 .unwrap_or_else(|e| e.into_inner())
                 .ingress_request_us = Some(pm_audio::clock::host_now_us());
         }
+        // Numbered as the control thread counts what it receives, in this
+        // FIFO (the lock orders the sends).
+        let play = matches!(command, TransportCommand::Play { .. })
+            .then(|| endpoint.plays.load(Ordering::Relaxed) + 1);
         endpoint.tx.send(AudioCtl::Transport(command)).ok()?;
-        Some(ForwardedAudio { before })
+        if let Some(play) = play {
+            endpoint.plays.store(play, Ordering::Relaxed);
+        }
+        Some(ForwardedAudio { before, play })
     }
     pub fn document(&self, key: super::Key, update: &DocumentUpdate) -> bool {
         let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -288,6 +373,7 @@ impl AudioIngress {
                 sent_revision: 0,
                 pending_revision: 0,
                 last_play: None,
+                plays: Arc::default(),
             },
         );
         rx
@@ -296,6 +382,8 @@ impl AudioIngress {
 
 pub struct AudioLink {
     tx: Sender<AudioCtl>,
+    /// Plays the presenter forwarded at ingress ([`ForwardedAudio::play`]).
+    plays: Arc<AtomicU64>,
     clock: Arc<Mutex<Option<ClockHandle>>>,
     status: Arc<Mutex<AudioStatus>>,
     thread: Option<JoinHandle<()>>,
@@ -326,6 +414,8 @@ impl AudioLink {
                     composition,
                     media,
                     playback: None,
+                    sim: None,
+                    plays: 0,
                     pending_commands: VecDeque::new(),
                     dirty: true,
                     broken: false,
@@ -349,6 +439,7 @@ impl AudioLink {
         .map_err(|e| format!("could not start the audio thread: {e}"))?;
         Ok(AudioLink {
             tx,
+            plays: Arc::default(),
             clock,
             status,
             thread: Some(thread),
@@ -361,6 +452,7 @@ impl AudioLink {
         let (tx, rx) = channel();
         let link = AudioLink {
             tx,
+            plays: Arc::default(),
             clock: Arc::default(),
             status: Arc::default(),
             thread: None,
@@ -430,6 +522,11 @@ struct Control {
     composition: String,
     media: MediaMap,
     playback: Option<Playback>,
+    /// The simulated device driving `playback` ([`SIM_AUDIO_ENV`]).
+    sim: Option<SimDevice>,
+    /// Forwarded Plays received ([`ForwardedAudio::play`]): the newest is
+    /// the one a held start belongs to.
+    plays: u64,
     /// Individually answered Pause, SetLoop, and exact Seek commands. Their
     /// FIFO application is guaranteed by the producer queue even across
     /// separate control-thread receive batches.
@@ -595,6 +692,7 @@ impl Control {
 
     fn shutdown(&mut self) {
         *self.clock.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.sim = None;
         if let Some(mut playback) = self.playback.take() {
             playback.shutdown();
         }
@@ -607,6 +705,10 @@ impl Control {
     fn apply(&mut self, ctl: AudioCtl, received_us: Option<u64>) -> bool {
         match ctl {
             AudioCtl::Transport(command) => {
+                // Counted before anything can fail, as the ingress numbers them.
+                if matches!(command, TransportCommand::Play { .. }) {
+                    self.plays += 1;
+                }
                 match command {
                     TransportCommand::Play { .. } | TransportCommand::PlayAround { .. } => {
                         let opening = self.playback.is_none();
@@ -627,17 +729,27 @@ impl Control {
                         let set_loop = TransportCommand::SetLoop {
                             range: self.loop_range,
                         };
-                        if opening {
-                            self.commands(&[
-                                set_loop,
-                                TransportCommand::Seek {
-                                    time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
-                                    mode: SeekMode::Exact,
-                                },
-                                command,
-                            ]);
+                        // The render thread times the Play's start (picture
+                        // and sound on one line); a play-around starts at once.
+                        let start = if matches!(command, TransportCommand::Play { .. }) {
+                            Start::Held(pm_audio::clock::host_now_us() + HELD_START_MAX_US)
                         } else {
-                            self.commands(&[set_loop, command]);
+                            Start::Ready
+                        };
+                        if opening {
+                            self.commands(
+                                &[
+                                    set_loop,
+                                    TransportCommand::Seek {
+                                        time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                                        mode: SeekMode::Exact,
+                                    },
+                                    command,
+                                ],
+                                start,
+                            );
+                        } else {
+                            self.commands(&[set_loop, command], start);
                         }
                     }
                     TransportCommand::Seek {
@@ -662,6 +774,15 @@ impl Control {
                         return self.apply(AudioCtl::AudioScrub(enabled), received_us);
                     }
                     _ => self.enqueue_simple_command(command),
+                }
+            }
+            AudioCtl::StartAt { play, at } => {
+                // A stale start (a newer Play was forwarded since) would
+                // time that Play's held start on another line.
+                if play == self.plays
+                    && let Some(playback) = &self.playback
+                {
+                    playback.time_held_start(at.max(0) as u64);
                 }
             }
             AudioCtl::Shutdown => return false,
@@ -754,7 +875,7 @@ impl Control {
                     playback.set_monitor_solo(solo);
                 }
             }
-            AudioCtl::Play { from, rate } => {
+            AudioCtl::Play { from, rate, at } => {
                 self.transport_running = true;
                 let profiled = received_us.is_some();
                 let begin_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
@@ -767,16 +888,23 @@ impl Control {
                 let dirty = self.dirty;
                 let project = dirty.then(|| self.set_project()).flatten();
                 let dispatch_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
-                self.commands(&[
-                    TransportCommand::SetLoop {
-                        range: self.loop_range,
+                self.commands(
+                    &[
+                        TransportCommand::SetLoop {
+                            range: self.loop_range,
+                        },
+                        TransportCommand::Seek {
+                            time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
+                            mode: SeekMode::Exact,
+                        },
+                        TransportCommand::Play { rate },
+                    ],
+                    if at > 0 {
+                        Start::At(at as u64)
+                    } else {
+                        Start::Ready
                     },
-                    TransportCommand::Seek {
-                        time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
-                        mode: SeekMode::Exact,
-                    },
-                    TransportCommand::Play { rate },
-                ]);
+                );
                 if let Some(received_us) = received_us {
                     let ack_us = pm_audio::clock::host_now_us();
                     let project = project.unwrap_or_default();
@@ -816,7 +944,7 @@ impl Control {
     }
 
     fn command(&mut self, command: TransportCommand) {
-        self.commands(&[command]);
+        self.commands(&[command], Start::Ready);
     }
 
     fn enqueue_simple_command(&mut self, command: TransportCommand) {
@@ -869,7 +997,9 @@ impl Control {
         }
     }
 
-    fn commands(&mut self, commands: &[TransportCommand]) {
+    /// Commands in order; a Play among them presents its first sample at
+    /// `start`.
+    fn commands(&mut self, commands: &[TransportCommand], start: Start) {
         let Some(playback) = &self.playback else {
             return;
         };
@@ -886,7 +1016,7 @@ impl Control {
         }) {
             self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
         }
-        let result = playback.commands(commands.iter().copied());
+        let result = playback.commands_at(commands.iter().copied(), start);
         // This ACK is a FIFO barrier for all earlier queued simple controls;
         // report their individual failures before this command's failure.
         self.drain_pending_commands();
@@ -897,16 +1027,38 @@ impl Control {
     fn open(&mut self) -> bool {
         let rate = pm_audio::mixer::project_sample_rate(&self.doc);
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
-        match (self.open_device)(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
+        let started = if std::env::var(SIM_AUDIO_ENV).as_deref() == Ok("1") {
+            Playback::start_headless(
+                MixFormat::stereo(rate),
+                cache,
+                PlaybackConfig::default(),
+                SimDevice::RATE,
+                2,
+                SIM_LATENCY_US,
+            )
+            .map(|(playback, side)| {
+                self.sim = Some(SimDevice::start(side));
+                playback
+            })
+        } else {
+            (self.open_device)(MixFormat::stereo(rate), cache, PlaybackConfig::default())
+        };
+        match started {
             Ok(playback) => {
                 playback.set_standard_evaluator(|| {
                     pm_eval::Evaluator::new()
                         .with_expressions(Arc::new(pm_render::expr::PmExprEngine))
                 });
                 let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-                status.device = playback.device().map(|d| d.name.clone());
+                status.device = playback
+                    .device()
+                    .map(|d| d.name.clone())
+                    .or(self.sim.as_ref().map(|_| "simulated".into()));
                 status.device_rate = Some(playback.device_rate());
-                status.latency_us = playback.device().map(|d| d.latency_us());
+                status.latency_us = playback
+                    .device()
+                    .map(|d| d.latency_us())
+                    .or(self.sim.as_ref().map(|_| SIM_LATENCY_US));
                 status.error = None;
                 drop(status);
                 *self.clock.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -1115,6 +1267,8 @@ mod tests {
             composition: "C".into(),
             media: MediaMap::default(),
             playback: Some(playback),
+            sim: None,
+            plays: 0,
             pending_commands: VecDeque::new(),
             dirty: false,
             broken: false,
@@ -1145,9 +1299,12 @@ mod tests {
         assert!(control.apply(AudioCtl::Scrub(Ticks::from_whole_seconds(1).get()), None));
         assert_eq!(control.paused_at, Ticks::from_whole_seconds(1).get());
         control.enqueue_simple_command(invalid_loop);
-        control.commands(&[TransportCommand::Play {
-            rate: PlaybackRate { num: 3, den: 1 },
-        }]);
+        control.commands(
+            &[TransportCommand::Play {
+                rate: PlaybackRate { num: 3, den: 1 },
+            }],
+            Start::Ready,
+        );
 
         assert!(control.pending_commands.is_empty());
         let problems = status.lock().unwrap().problems.clone();
@@ -1236,6 +1393,8 @@ mod tests {
                 composition: "C".into(),
                 media,
                 playback: None,
+                sim: None,
+                plays: 0,
                 pending_commands: VecDeque::new(),
                 dirty: true,
                 broken: false,
@@ -1305,6 +1464,118 @@ mod tests {
             for cache in caches.lock().unwrap().drain(..) {
                 cache.shutdown();
             }
+        }
+    }
+
+    /// A held Play is timed only by the start naming it: a start the render
+    /// thread sent for an earlier Play (Play, Pause and Play again while it
+    /// was busy) reaches the audio after the newer Play and is ignored, and
+    /// the newer Play is heard at its own start.
+    #[test]
+    fn a_stale_start_never_times_a_newer_held_play() {
+        use pm_audio::playback::DeviceSide;
+
+        let rate = 48_000u32;
+        let directory = tempfile::Builder::new()
+            .prefix("pm-node-audio-held-start-")
+            .tempdir()
+            .unwrap();
+        let file = directory.path().join("tone.wav");
+        write_wav(
+            &file,
+            rate,
+            &[vec![0.5; rate as usize * 2], vec![0.0; rate as usize * 2]],
+        );
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":2,"layers":[{}],"comps":{{}},"assets":{{}},"params":{{}}}}"#,
+            clip("tone", "a").replace(r#""dur":1"#, r#""dur":2"#),
+        );
+        let sides: Arc<Mutex<Vec<DeviceSide>>> = Arc::default();
+        let caches: Arc<Mutex<Vec<Arc<SourceCache>>>> = Arc::default();
+        let (opened_sides, opened_caches) = (sides.clone(), caches.clone());
+        let (_tx, rx) = channel();
+        let mut control = Control {
+            rx,
+            clock: Arc::new(Mutex::new(None)),
+            status: Arc::new(Mutex::new(AudioStatus::default())),
+            doc: Arc::new(pm_model::Document::new(Some(parse(&text).unwrap()), 1)),
+            composition: "C".into(),
+            media: MediaMap(Arc::new(BTreeMap::from([(
+                "a".to_string(),
+                Some(file.clone()),
+            )]))),
+            playback: None,
+            sim: None,
+            plays: 0,
+            pending_commands: VecDeque::new(),
+            dirty: true,
+            broken: false,
+            loop_range: None,
+            last_project: None,
+            audio_scrub: false,
+            solo: None,
+            levels: Box::new(|_| {}),
+            last_levels: None,
+            levels_running: false,
+            watch_until: None,
+            warm: false,
+            warm_due: None,
+            paused_at: 0,
+            transport_running: false,
+            open_device: Box::new(move |format, cache, config| {
+                opened_caches.lock().unwrap().push(cache.clone());
+                let (playback, side) = Playback::start_headless(format, cache, config, rate, 2, 0)?;
+                opened_sides.lock().unwrap().push(side);
+                Ok(playback)
+            }),
+        };
+        let play = TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        };
+        assert!(control.apply(AudioCtl::Transport(play), None));
+        assert!(control.apply(AudioCtl::Transport(TransportCommand::Pause), None));
+        assert!(control.apply(AudioCtl::Transport(play), None));
+        let host_start = pm_audio::clock::host_now_us();
+        // The first Play's start, now stale, then the second's.
+        let at = host_start + 400_000;
+        assert!(control.apply(
+            AudioCtl::StartAt {
+                play: 1,
+                at: host_start as i64,
+            },
+            None,
+        ));
+        assert!(control.apply(
+            AudioCtl::StartAt {
+                play: 2,
+                at: at as i64,
+            },
+            None,
+        ));
+        let mut side = sides.lock().unwrap().pop().unwrap();
+        let mut out = vec![0.0; 256 * 2];
+        let (mut frame, mut heard) = (0u64, None);
+        // Paced like a device (no output latency): the frame whose
+        // callback host time plus its index is when it is heard.
+        while frame < u64::from(rate) && heard.is_none() {
+            let host = host_start + frame * 1_000_000 / u64::from(rate);
+            side.callback(&mut out, 2, host);
+            heard = out
+                .chunks_exact(2)
+                .position(|p| p[0] != 0.0)
+                .map(|i| host + (i as u64 * 1_000_000).div_ceil(u64::from(rate)));
+            frame += 256;
+            std::thread::sleep(Duration::from_micros(256 * 1_000_000 / u64::from(rate)));
+        }
+        let heard = heard.expect("the second Play is heard");
+        assert!(
+            heard.abs_diff(at) <= 50,
+            "heard at {heard}, its start {at} (the stale one {host_start})"
+        );
+        control.shutdown();
+        drop(side);
+        for cache in caches.lock().unwrap().drain(..) {
+            cache.shutdown();
         }
     }
 

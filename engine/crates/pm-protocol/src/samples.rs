@@ -1327,6 +1327,7 @@ pub fn events() -> Vec<Envelope> {
             vsync: Some(VsyncHint {
                 host_time: HostMicros::new(123_456_700_000).expect("micros"),
                 period_us: 8_333.333_333_333_334,
+                latency_us: Some(15_700.0),
             }),
             depth_id: Some(true),
             chrome_selection: None,

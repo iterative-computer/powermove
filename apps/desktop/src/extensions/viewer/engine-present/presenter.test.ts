@@ -263,6 +263,23 @@ describe('EnginePresenter', () => {
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
   });
 
+  it('a larger pool of the same surfaces keeps the frames already here (a Play\'s start frames)', () => {
+    const { source, painter, link, presenter } = setup();
+    const surfaces = (n: number, width = 640) => Array.from({ length: n }, (_, poolIndex) => ({ poolIndex, size: { width, height: 360 }, format: 'bgra8Unorm' as const }));
+    presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: surfaces(4) } });
+    source.arrive(2, 1);
+    presenter.receive({ type: 'frame', frame: desc(1, { poolGeneration: 2 }) });
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: surfaces(8) } });
+    expect(link.releases).toEqual([]);
+    presenter.refresh(16.7);
+    expect(painter.draws).toHaveLength(1);
+    // Another size replaces them.
+    source.arrive(3, 2);
+    presenter.receive({ type: 'frame', frame: desc(2, { poolGeneration: 3 }) });
+    presenter.receive({ type: 'surfacePool', pool: { generation: 4, surfaces: surfaces(8, 1280) } });
+    expect(link.releases.map((r) => r.seq)).toEqual([2]);
+  });
+
   it('reports a color GPU completion after its pool was retired', async () => {
     const { source, painter, link, presenter } = setup();
     source.arrive(1, 1);
@@ -538,69 +555,146 @@ describe('EnginePresenter', () => {
 });
 
 
-it('keeps gesture arrival immediate while timed commits wait for their deadline and cancel on disposal', () => {
+it('draws every frame once when the frame boundaries sit at the decisions and the BeginFrames jitter (an idle machine)', () => {
+  // The worst phase for the decision offset: frame boundaries exactly where
+  // the undecided decisions fall, BeginFrames jittered and a third of them
+  // up to 2 ms early. Re-centring the offset at every grid update flipped
+  // it by a refresh, skipping or repeating a frame.
   let now = 0;
-  let tick: ((t:number)=>void) | null = null;
-  let deadline: {run:()=>void; at:number} | null = null;
+  const P = 1000 / 120;
+  const F120 = TICKS_PER_SECOND / 120;
   const source = new Source(), painter = new Painter(), link = new Link();
-  const presenter = new EnginePresenter({link, source, painter, displayHz:120, drawOnArrival:true, commitPhaseRefreshes:.75, now:()=>now,
-    timers:{set:(run,ms)=>{deadline={run,at:now+ms};return 1;},clear:()=>{deadline=null;}}});
-  presenter.start(cb=>{tick=cb;return 1;},()=>{});
-  tick!(0);
-  expect(deadline!.at).toBeCloseTo(6.25);
-  source.arrive(1,1);
-  presenter.receive({type:'frame',frame:desc(1)});
-  expect(painter.draws).toHaveLength(1);
-  expect(deadline).not.toBeNull();
-  presenter.dispose();
-  expect(deadline).toBeNull();
-});
-
-it('fits an unknown 120 Hz clock even when the initial 60 Hz commit deadline is superseded', () => {
-  let now = 0;
-  let tick: ((t:number)=>void) | null = null;
-  let deadline: {run:()=>void; at:number} | null = null;
-  const source = new Source(), painter = new Painter(), link = new Link();
-  const presenter = new EnginePresenter({link, source, painter, commitPhaseRefreshes:.75, now:()=>now,
-    timers:{set:(run,ms)=>{deadline={run,at:now+ms};return 1;},clear:()=>{deadline=null;}}});
-  presenter.receive({type:'clock',sample:{epoch:1,seq:1,state:'playing',hostTime:0,mediaTime:0,rate:{num:1,den:1},outputLatencyUs:0,sampleRate:48000,loopRange:null}},0);
-  source.arrive(1,1);
-  presenter.receive({type:'frame',frame:desc(1,{duration:TICKS_PER_SECOND})});
-  presenter.start(cb=>{tick=cb;return 1;},()=>{});
-  for (let i=0;i<40;i++) {
-    now=i*1000/120;
-    tick!(now);
-    const task = deadline as {run:()=>void;at:number} | null;
-    if (task && task.at < (i+1)*1000/120) {
-      now=task.at;
-      task.run();
-    }
+  const latency = 1.5 * P + 3.2;
+  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+  // Host µs = page ms × 1000; frame k starts where the decision of refresh k lands.
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: Math.round((latency + P / 2) * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, 0);
+  // A sample that arrived as it was made: host µs = page ms × 1000.
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 2, state: 'playing', hostTime: Math.round((latency + P / 2) * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, latency + P / 2);
+  const shown: number[] = [];
+  presenter.onPresented((f) => shown.push(Math.round(f.pts / F120)));
+  let seed = 11;
+  for (let i = 0; i < 2400; i++) {
+    seed = (seed * 1103515245 + 12345) % 2 ** 31;
+    const u = seed / 2 ** 31;
+    // The display link wanders by ±0.6 ms over eight seconds.
+    const raf = i * P + 0.6 * Math.sin((2 * Math.PI * i) / 960) + (u < 0.33 ? -2 * u * 3 : (u - 0.66) * 0.6);
+    const k = i + 6;
+    source.arrive(1, k % 12);
+    presenter.receive({ type: 'frame', frame: desc(k + 1, { poolIndex: k % 12, pts: k * F120, duration: F120 }) }, raf - 1);
+    now = raf;
+    presenter.refresh(Math.round(raf * 10) / 10);
+    painter.finishGpu();
   }
-  expect(painter.draws).toHaveLength(1);
-  presenter.dispose();
+  const steady = shown.slice(60);
+  const steps = steady.slice(1).map((k, i) => k - steady[i]!);
+  expect(steps.filter((d) => d !== 1)).toEqual([]);
 });
 
-it('presents timed frames when commit timers are delayed past the following animation frame', () => {
+it('draws every frame once across half-refresh BeginFrame phase changes; a missed refresh skips its frame', () => {
+  // Under load the BeginFrame phase moved by half a refresh for about a
+  // second and back; the grid relocked each time and a decision that
+  // followed it skipped or repeated a frame at every relock.
+  let now = 0;
+  const P = 1000 / 120;
+  const F120 = TICKS_PER_SECOND / 120;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const latency = 1.5 * P + 3.2;
+  const presenter = new EnginePresenter({ link, source, painter, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: Math.round(latency * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, latency);
+  const shown: number[] = [];
+  presenter.onPresented((f) => shown.push(Math.round(f.pts / F120)));
+  const missed = 1500;
+  for (let i = 0; i < 2400; i++) {
+    const k = i + 6;
+    source.arrive(1, k % 12);
+    presenter.receive({ type: 'frame', frame: desc(k + 1, { poolIndex: k % 12, pts: k * F120, duration: F120 }) }, i * P - 1);
+    if (i === missed) continue;
+    const shift = (i >= 600 && i < 720) || (i >= 1800 && i < 1950) ? P / 2 : i >= 1200 && i < 1300 ? -P / 2 : 0;
+    const raf = i * P + shift + ((i * 7919) % 11) / 10 - 0.5;
+    now = raf;
+    presenter.refresh(Math.round(raf * 10) / 10);
+    painter.finishGpu();
+  }
+  const steady = shown.slice(60);
+  const steps = steady.slice(1).map((k, i) => k - steady[i]!);
+  expect(steps.filter((d) => d !== 1)).toEqual([2]);
+});
+
+it('draws each refresh\'s timed frame inside its animation frame, one per refresh at 120 Hz', () => {
+  // A worker canvas sends what the animation frame drew as the callback
+  // returns; a draw deferred past it waits for the next BeginFrame.
   let now = 0;
   let tick: ((t: number) => void) | null = null;
-  const pending = new Map<number, () => void>();
-  let nextTimer = 0;
+  const P = 1000 / 120;
+  const F120 = TICKS_PER_SECOND / 120;
   const source = new Source(), painter = new Painter(), link = new Link();
-  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120,
-    drawOnArrival: true, commitPhaseRefreshes: .75, now: () => now,
-    timers: { set: run => { pending.set(++nextTimer, run); return nextTimer; }, clear: id => { pending.delete(id); } }
-  });
+  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120, drawOnArrival: true, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
   presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: 0, mediaTime: 0,
     rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, 0);
-  source.arrive(1, 1);
-  presenter.receive({ type: 'frame', frame: desc(1, { duration: TICKS_PER_SECOND }) });
   presenter.start(cb => { tick = cb; return 1; }, () => {});
+  const shown: number[] = [];
+  presenter.onPresented((f) => shown.push(Math.round(f.pts / F120)));
   try {
-    // CPU contention lets BeginFrame overtake timer callbacks repeatedly.
-    // Timed frames must still draw; a later rAF must not erase an overdue commit.
-    for (let i = 0; i < 12; i++) { now = i * 1000 / 120; tick!(now); }
-    expect(painter.draws).toHaveLength(1);
-    expect(pending.size).toBeLessThanOrEqual(1);
+    for (let i = 0; i < 60; i++) {
+      // Frames arrive well ahead of their refresh (the engine's render-ahead).
+      const k = i + 6;
+      source.arrive(1, k % 12);
+      presenter.receive({ type: 'frame', frame: desc(k + 1, { poolIndex: k % 12, pts: k * F120, duration: F120 }) }, now);
+      now = i * P;
+      const before = painter.draws.length;
+      tick!(now);
+      if (i >= 30) expect(painter.draws.length).toBe(before + 1);
+      painter.finishGpu();
+    }
+    const steady = shown.slice(-30);
+    expect(steady.slice(1).map((k, i) => k - steady[i]!)).toEqual(Array(29).fill(1));
+    expect(presenter.stats.dropped['late'] ?? 0).toBeLessThanOrEqual(3);
   } finally { presenter.dispose(); }
-  expect(pending.size).toBe(0);
+});
+
+it('keeps an even cadence when the window moves from a 60 Hz to a 120 Hz display', () => {
+  // No nominal rate: the period is estimated. Within a dozen refreshes of
+  // the faster display, 60 fps frames show for two refreshes each; a
+  // decision that kept stepping by the old period ran ahead and snapped
+  // back for as long as the 60 Hz estimate stood.
+  let now = 0;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const latency = 1.5 * 1000 / 60 + 3.2;
+  const presenter = new EnginePresenter({ link, source, painter, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: Math.round(latency * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, latency);
+  const draws: [refresh: number, k: number][] = [];
+  let refresh = 0;
+  presenter.onPresented((f) => draws.push([refresh, Math.round(f.pts / F)]));
+  let pushed = 0;
+  const switchAt = 600 * 1000 / 60;
+  const rafs: number[] = [];
+  for (let i = 0; i < 600; i++) rafs.push(i * 1000 / 60);
+  for (let i = 0; i < 1200; i++) rafs.push(switchAt + i * 1000 / 120);
+  for (const [i, t] of rafs.entries()) {
+    // The engine renders 100 ms ahead.
+    for (; pushed * 1000 / 60 < t + 100; pushed++) {
+      source.arrive(1, pushed % 12);
+      presenter.receive({ type: 'frame', frame: desc(pushed + 1, { poolIndex: pushed % 12, pts: pushed * F, duration: F }) }, t);
+    }
+    refresh = i;
+    now = t;
+    presenter.refresh(Math.round(t * 10) / 10 + ((i * 7919) % 5) / 10 - 0.2);
+    painter.finishGpu();
+  }
+  const gaps = (from: number, to: number) => {
+    const d = draws.filter(([r]) => r >= from && r < to);
+    return d.slice(1).map(([r, k], j) => [r - d[j]![0], k - d[j]![1]]);
+  };
+  // 60 Hz: one frame per refresh.
+  expect(gaps(60, 600).filter(([r, k]) => r !== 1 || k !== 1)).toEqual([]);
+  // 120 Hz, a dozen refreshes after the move: one frame every two refreshes.
+  expect(gaps(600 + 24, 1800).filter(([r, k]) => r !== 2 || k !== 1)).toEqual([]);
 });

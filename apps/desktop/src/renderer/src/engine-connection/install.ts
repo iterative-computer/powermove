@@ -179,7 +179,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const follower = followOpenComposition({ session: () => current, open: openComposition, bus: PM.bus });
   const transport = new EngineTransport(() => current, hostClock, {
     exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
-    prepare: follower.follow
+    prepare: follower.follow,
+    // Today's Play draws the frame at the playhead first; the engine shows
+    // it already, so its `frame:rendered` comes again at the next frame.
+    fromRest: () => { presentedEvents.replay(shownState()); }
   });
   const preview = new EnginePreview(
     () => current, openComposition, () => Number(PM.time) || 0,
@@ -222,12 +225,16 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   /** A paused redraw request with nothing new for the engine to present:
    *  today's frame loop announces the frame it draws again
    *  (`PresentedEvents.redraw`). Called by the frame loop on `draw`. */
-  (PM as any).EngineRedraw = (): boolean => {
+  /** What the engine shows now: revision, view, and playhead time. */
+  function shownState(): { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number } {
     const doc = PM.EngineDoc;
     doc?.barrier?.flush();
     const fps = Number((PM.curComp?.() ?? PM.proj)?.fps) || 30;
+    return { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps };
+  }
+  (PM as any).EngineRedraw = (): boolean => {
     return presentedEvents.redraw(
-      { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps },
+      shownState(),
       (frame, quality) => {
         // Today's redraw calls the raster wrappers again: an output that
         // changed is the engine's to draw and present (once, as today).

@@ -229,6 +229,7 @@ mod tests {
                 rate: PlaybackRate::NORMAL,
             },
             offset,
+            at_frame: 0,
         }
     }
 
