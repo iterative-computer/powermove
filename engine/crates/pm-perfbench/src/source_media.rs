@@ -77,7 +77,7 @@ pub fn source_scrub_24() -> BenchReport {
     assert!(path.is_file(), "public H.264 fixture is present");
     let mut renderer = Renderer::headless().expect("source renderer");
     renderer
-        .source_rgba8(&path, Ticks::ZERO, MONITOR, SourceFit::Contain, None)
+        .source_rgba8(&path, Ticks::ZERO, MONITOR, SourceFit::Contain, None, false)
         .expect("warm source frame");
     let scope = Scope::begin();
     let mut wall_ms = Vec::with_capacity(FRAMES);
@@ -85,7 +85,14 @@ pub fn source_scrub_24() -> BenchReport {
     for k in 0..FRAMES {
         let began = Instant::now();
         let frame = renderer
-            .source_rgba8(&path, time(k, true), MONITOR, SourceFit::Contain, None)
+            .source_rgba8(
+                &path,
+                time(k, true),
+                MONITOR,
+                SourceFit::Contain,
+                None,
+                false,
+            )
             .expect("source scrub frame");
         wall_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
         assert_eq!(
@@ -221,7 +228,7 @@ fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
     let mut renderer = Renderer::headless().expect("filmstrip renderer");
     if prepared {
         renderer
-            .source_rgba8(&path, Ticks::ZERO, STRIP, SourceFit::Stretch, None)
+            .source_rgba8(&path, Ticks::ZERO, STRIP, SourceFit::Stretch, None, false)
             .expect("prepare real source frame");
         renderer.trim(64 << 20);
     }
@@ -237,7 +244,7 @@ fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
             let ticks: Vec<_> = (start..end).map(|k| time(k, false)).collect();
             let began = Instant::now();
             let frames = renderer
-                .source_rgba8_batch(&path, &ticks, STRIP, SourceFit::Stretch, None)
+                .source_rgba8_batch(&path, &ticks, STRIP, SourceFit::Stretch, None, false)
                 .expect("bounded source batch");
             for (offset, frame) in frames.into_iter().enumerate() {
                 let straight = straight_source_pixels(frame);
@@ -258,7 +265,14 @@ fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
         for k in 0..FRAMES {
             let began = Instant::now();
             let frame = renderer
-                .source_rgba8_export(&path, time(k, false), STRIP, SourceFit::Stretch, None)
+                .source_rgba8_export(
+                    &path,
+                    time(k, false),
+                    STRIP,
+                    SourceFit::Stretch,
+                    None,
+                    false,
+                )
                 .expect("filmstrip source frame");
             let straight = straight_source_pixels(frame);
             assert_eq!(straight.len(), frame_bytes);

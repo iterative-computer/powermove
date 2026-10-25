@@ -152,14 +152,16 @@ fn level2_gamma_only_png_uses_the_file_curve() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Interpret Footage reads the file's facts; a PNG gamma it would ignore is
-/// an explicit unsupported reason unless a transfer override replaces it.
+/// Nonempty Interpret Footage overrides must not ignore a PNG gamma;
+/// they need an explicit transfer override. Empty readings keep the curve.
 #[test]
 fn interpreted_gamma_png_needs_a_transfer_override() {
     let d = dir();
     let path = d.join("interp.png");
     write_png(&path, false, Some(70_000), &stored());
     let mut interp = pm_media::interpret::Interpretation::default();
+    assert_eq!(probe_interpreted_image(&path, &interp), Ok(()));
+    interp.alpha = Some(pm_media::interpret::AlphaChoice::Straight);
     match probe_interpreted_image(&path, &interp) {
         Err(ProbeIssue::Unsupported(f)) => assert!(f.to_string().contains("gAMA"), "{f}"),
         other => panic!("{other:?}"),

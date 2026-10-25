@@ -388,41 +388,6 @@ export class MediaStoreService {
     return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
   }
 
-  /** The copy today's browser source monitor displays, pinned to the original hash. */
-  async resolveSource(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null } | null> {
-    const job = context?.process === 'job' ? this.jobBindings.get(context.session) : undefined;
-    if (job) {
-      const frozen = job.assets.get(asset);
-      if (frozen) {
-        const original = await this.resolveBindings([frozen]);
-        if (original) return this.sourceCopy(original, frozen.rendition === true);
-      }
-      if (job.projectId === null) return null;
-      const candidates = [...this.bindings.values()].filter(b => b.projectId === job.projectId).map(b => b.assets.get(asset));
-      return this.resolveSourceBindings(candidates, frozen ? frozen.rendition === true : undefined);
-    }
-    if (context?.process === 'interactive' && !this.bound(asset)) await this.bindingOf(asset, this.options.bindWaitMs ?? 1000);
-    return this.resolveSourceBindings([...this.bindings.values()].map(b => b.assets.get(asset)));
-  }
-
-  private async resolveSourceBindings(candidates: (MediaBinding | undefined)[], frozenChoice?: boolean): Promise<{ path: string; contentHash: ContentHash | null } | null> {
-    const choices = new Set(candidates.filter((b): b is MediaBinding => !!b).map(b => b.rendition === true));
-    if (choices.size !== 1) return null;
-    const choice = choices.values().next().value!;
-    if (frozenChoice !== undefined && choice !== frozenChoice) return null;
-    return this.sourceCopy(await this.resolveBindings(candidates), choice);
-  }
-
-  private async sourceCopy(original: { path: string; contentHash: ContentHash | null } | null, renditionRequired: boolean): Promise<{ path: string; contentHash: ContentHash | null } | null> {
-    if (!renditionRequired || !original?.contentHash) return original;
-    const hash = Buffer.from(original.contentHash).toString('hex');
-    const rendition = await this.store.record(`rendition:${hash}`);
-    if (rendition && await this.store.hasObject(rendition.hash)) {
-      return { path: this.store.objectPath(rendition.hash), contentHash: hashBytes(rendition.hash) };
-    }
-    return original;
-  }
-
   private async resolveBindings(candidates: (MediaBinding | undefined)[]): Promise<{ path: string; contentHash: ContentHash | null } | null> {
     const bound = candidates.filter((b): b is MediaBinding => !!b);
     if (!bound.length) return null;

@@ -125,7 +125,6 @@ export type InstallNativeEngineOptions = {
   windows: () => BrowserWindow[];
   /** The media store's asset resolution for `mediaRead` handles. */
   resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
-  resolveSource?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
   /** Keeps job snapshot media available after its window changes or closes. */
   snapshotMedia?(project: Record<string, any>): Promise<Record<string, any>>;
   bindMediaSession?(session: number, project: Record<string, any> | null): Promise<void>;
@@ -451,7 +450,6 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     physicalMemory: os.totalmem(),
     hostNow: engineNowUs,
     ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
-    ...(options.resolveSource ? { resolveSource: options.resolveSource } : {}),
     ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
     shaderFallback: (session, request, textures) => fallbackRelay.run(session, request, textures),
     log
@@ -479,7 +477,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
     windowSessions,
-    sourceSurface: sourceSurfaces ? (id, width, height, video, data) => sourceSurfaces.present(id, width, height, video, data) : undefined,
+    sourceSurface: sourceSurfaces ? (id, width, height, video, data, timestamp) => sourceSurfaces.present(id, width, height, video, data, timestamp) : undefined,
     log
   });
 

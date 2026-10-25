@@ -122,11 +122,12 @@ pub fn check(path: &Path, still: &StillImage, reader: StillReader) -> Result<(),
     match still.format {
         ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP => {}
         ImageFormat::Heif => {
-            if still.bit_depth != 8 {
-                return unsupported("HEIF stills deeper than 8 bits");
-            }
-            if still.color.alpha != AlphaMode::Opaque {
-                return unsupported("HEIF stills with alpha");
+            // ImageIO supplies oriented integer RGBA with its ICC profile
+            // and alpha reading intact. Both native conversion and the
+            // compatibility bitmap support these samples; a browser PNG
+            // rendition is not required to make them drawable.
+            if !matches!(still.bit_depth, 8 | 16) {
+                return unsupported("HEIF stills outside the integer 8/16-bit decoder layouts");
             }
         }
         ImageFormat::Tiff => {
@@ -242,6 +243,29 @@ pub fn container_transform(path: &Path, format: ImageFormat) -> Result<Option<St
 
 fn orientation_message(what: &str) -> String {
     format!("oriented stills ({what}; not compared with the legacy renderer)")
+}
+
+/// Native interpretations bypass the legacy still-class checks, but must
+/// retain HEIF's container transfer guard: ImageIO labels its decoded
+/// integer samples DisplayE even when nclx requests PQ or HLG. Other still
+/// formats keep their existing interpreted readers and colour resolution.
+pub(crate) fn check_native_source_header(path: &Path) -> Result<(), Feature> {
+    let mut file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
+    let mut head = [0; 512];
+    let n = file
+        .read(&mut head)
+        .map_err(|e| feature(format!("{}: {e}", path.display())))?;
+    if pm_media::image::sniff(&head[..n]) != ImageFormat::Heif {
+        return Ok(());
+    }
+    file.rewind()
+        .map_err(|e| feature(format!("{}: {e}", path.display())))?;
+    parse(
+        &mut BufReader::new(file),
+        ImageFormat::Heif,
+        StillReader::Native,
+    )
+    .map(|_| ())
 }
 
 /// Parses the container header of a format [`check`] draws. Reads only
@@ -761,6 +785,7 @@ fn heif<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     let end = r.seek(SeekFrom::End(0))?;
     r.seek(SeekFrom::Start(0))?;
     let mut header = Header::default();
+    let mut hdr = false;
     boxes(r, end, &mut |r, ty, body_end| {
         if &ty != b"meta" {
             return Ok(());
@@ -774,7 +799,7 @@ fn heif<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
                 if &ty != b"ipco" {
                     return Ok(());
                 }
-                boxes(r, body_end, &mut |r, ty, _| {
+                boxes(r, body_end, &mut |r, ty, property_end| {
                     let t = match &ty {
                         b"irot" => {
                             let angle = (array::<1, _>(r)?[0] & 3) as u16 * 90;
@@ -782,6 +807,23 @@ fn heif<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
                         }
                         b"imir" => Some("HEIF imir mirror".to_string()),
                         b"clap" => Some("HEIF clap clean aperture".to_string()),
+                        b"colr" => {
+                            if property_end - r.stream_position()? < 4 {
+                                return Err(malformed("HEIF colr type"));
+                            }
+                            if &array::<4, _>(r)? == b"nclx" {
+                                if property_end - r.stream_position()? < 7 {
+                                    return Err(malformed("HEIF nclx color description"));
+                                }
+                                let color = array::<7, _>(r)?;
+                                let transfer = u16::from_be_bytes([color[2], color[3]]);
+                                // ImageIO's reader labels integer samples as
+                                // DisplayE; it does not propagate PQ/HLG to
+                                // the still tone-mapping path.
+                                hdr |= matches!(transfer, 16 | 18);
+                            }
+                            None
+                        }
                         _ => None,
                     };
                     if let Some(t) = t {
@@ -792,7 +834,12 @@ fn heif<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
             })
         })
     })?;
-    Ok(Ok(header))
+    Ok(if hdr {
+        unsupported("HEIF PQ/HLG stills (native HDR transfer reading is unavailable)")
+            .map(|_| header)
+    } else {
+        Ok(header)
+    })
 }
 
 /// A visitor of one ISO BMFF box: `(reader at the body, type, body end)`.
@@ -948,7 +995,13 @@ mod tests {
                 assert!(native(ImageFormat::Png, &cicp([p, t, 0, 1])).is_err());
             }
         }
-        for tag in [[9, 16, 0, 0], [9, 16, 9, 1], [2, 16, 0, 1], [9, 1, 0, 1], [9, 14, 0, 1]] {
+        for tag in [
+            [9, 16, 0, 0],
+            [9, 16, 9, 1],
+            [2, 16, 0, 1],
+            [9, 1, 0, 1],
+            [9, 14, 0, 1],
+        ] {
             assert!(png(cicp(tag)).is_err(), "{tag:?}");
         }
         // The native readers read neither cICP nor cHRM nor HDR metadata.
@@ -1306,9 +1359,15 @@ mod tests {
             (&[(262, 3, 5), (277, 3, 4)][..], "photometric"),
             (&[(262, 3, 5), (277, 3, 5), (338, 3, 2)][..], "photometric"),
             (&[(262, 3, 6), (277, 3, 3), (259, 3, 7)][..], "compression"),
-            (&[(262, 3, 2), (277, 3, 3), (322, 3, 16), (323, 3, 16)][..], "tiled"),
+            (
+                &[(262, 3, 2), (277, 3, 3), (322, 3, 16), (323, 3, 16)][..],
+                "tiled",
+            ),
             (&[(262, 3, 2), (277, 3, 3), (284, 3, 2)][..], "planar"),
-            (&[(262, 3, 2), (277, 3, 3), (258, 3, 16), (339, 3, 3)][..], "unsigned"),
+            (
+                &[(262, 3, 2), (277, 3, 3), (258, 3, 16), (339, 3, 3)][..],
+                "unsigned",
+            ),
             (&[(262, 3, 2), (277, 3, 3), (317, 3, 3)][..], "predictor"),
             (&[(262, 3, 8), (277, 3, 3)][..], "photometric"),
         ] {
@@ -1378,6 +1437,32 @@ mod tests {
         let meta_at = bad.windows(4).position(|w| w == b"meta").unwrap() - 4;
         bad[meta_at..meta_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(run(ImageFormat::Heif, &bad).is_err());
+    }
+
+    #[test]
+    fn heif_hdr_transfers_stay_explicit_and_truncated_color_is_malformed() {
+        for transfer in [1u16, 13, 16, 18] {
+            let color = [
+                b"nclx".as_slice(),
+                &1u16.to_be_bytes(),
+                &transfer.to_be_bytes(),
+                &1u16.to_be_bytes(),
+                &[0x80],
+            ]
+            .concat();
+            let result = run(ImageFormat::Heif, &heif_with(&[bmff(b"colr", &color)]));
+            if matches!(transfer, 16 | 18) {
+                assert!(result.unwrap_err().to_string().contains("PQ/HLG"));
+            } else {
+                assert!(result.is_ok(), "SDR transfer {transfer}");
+            }
+        }
+        let error = run(
+            ImageFormat::Heif,
+            &heif_with(&[bmff(b"colr", b"nclx\0\x01\0")]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("malformed HEIF headers"));
     }
 
     #[test]

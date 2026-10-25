@@ -63,8 +63,9 @@ impl Renderer {
         output: Size,
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
+        sequence: bool,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, true, false)
+        self.source_rgba8_with_decode(path, time, output, fit, interpretation, true, sequence)
     }
 
     /// The source as composition reads it: Interpret Footage's
@@ -100,8 +101,9 @@ impl Renderer {
         output: Size,
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
+        sequence: bool,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, false, false)
+        self.source_rgba8_with_decode(path, time, output, fit, interpretation, false, sequence)
     }
 
     fn source_rgba8_with_decode(
@@ -150,7 +152,12 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         exact_worker: bool,
         sequence: bool,
-    ) -> Result<Target, String> {
+    ) -> Result<(Target, (f64, f64)), String> {
+        // Source surfaces always read the native samples and resolved file
+        // interpretation. The compatibility bitmap belongs to authored
+        // level-1 layers, not to posters or other source-only consumers.
+        let default_interpretation = Interpretation::default();
+        let interpretation = Some(interpretation.unwrap_or(&default_interpretation));
         if kind != pm_media::image::ImageFormat::Other {
             self.media
                 .image(
@@ -162,49 +169,39 @@ impl Renderer {
                     WorkingEncoding::Standard,
                     Precision::Float16,
                     interpretation,
-                    interpretation.is_none(),
+                    false,
                 )
+                .map(|target| {
+                    let size = (target.width() as f64, target.height() as f64);
+                    (target, size)
+                })
                 .map_err(media_error)
         } else {
-            let video = if exact_worker {
-                self.media.source_exact_video(
-                    &self.device,
-                    &self.queue,
-                    &self.pipelines,
-                    encoder,
-                    path,
-                    0,
-                    time.get() as f64 / TICKS_PER_SECOND as f64,
-                    WorkingEncoding::Standard,
-                    Precision::Float16,
-                    interpretation,
-                    pm_time::Rate::new(30, 1).expect("30 fps"),
-                    sequence,
-                    interpretation.is_none(),
-                    true,
-                )
-            } else {
-                self.media.video(
-                    &self.device,
-                    &self.queue,
-                    &self.pipelines,
-                    encoder,
-                    path,
-                    0,
-                    time.get() as f64 / TICKS_PER_SECOND as f64,
-                    true,
-                    WorkingEncoding::Standard,
-                    Precision::Float16,
-                    interpretation,
-                    pm_time::Rate::new(30, 1).expect("30 fps"),
-                    sequence,
-                    interpretation.is_none(),
-                    true,
-                )
-            };
-            video
+            // A source display reads original geometry too: rotation, pixel
+            // aspect, clean aperture and fields are native media operations.
+            let video = self.media.source_video(
+                &self.device,
+                &self.queue,
+                &self.pipelines,
+                encoder,
+                path,
+                0,
+                time.get() as f64 / TICKS_PER_SECOND as f64,
+                WorkingEncoding::Standard,
+                Precision::Float16,
+                interpretation,
+                sequence,
+                exact_worker,
+            );
+            let target = video
                 .map_err(media_error)?
-                .ok_or_else(|| "No source frame at this time".to_owned())
+                .ok_or_else(|| "No source frame at this time".to_owned())?;
+            let size = self.media.source_display_size(
+                path,
+                interpretation,
+                (target.width(), target.height()),
+            );
+            Ok((target, size))
         }
     }
 
@@ -235,6 +232,7 @@ impl Renderer {
         output: Size,
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
+        sequence: bool,
     ) -> Result<Vec<Vec<u8>>, String> {
         if times.is_empty() || times.len() > Self::source_batch_limit(output) {
             return Err("The source batch exceeds its bounded readback size".into());
@@ -277,8 +275,15 @@ impl Renderer {
                 label: Some("pm source batch"),
             });
         for (index, &time) in times.iter().enumerate() {
-            let source =
-                self.source_texture(path, time, interpretation, kind, &mut encoder, false, false)?;
+            let source = self.source_texture(
+                path,
+                time,
+                interpretation,
+                kind,
+                &mut encoder,
+                false,
+                sequence,
+            )?;
             self.record_source_draw(&source, output, fit, &target, &mut encoder);
             encoder.copy_texture_to_buffer(
                 target.texture.as_image_copy(),
@@ -395,7 +400,7 @@ impl Renderer {
 
     fn draw_source_target(
         &mut self,
-        source: Target,
+        source: (Target, (f64, f64)),
         output: Size,
         fit: SourceFit,
         mut encoder: wgpu::CommandEncoder,
@@ -465,14 +470,14 @@ impl Renderer {
 
     fn record_source_draw(
         &self,
-        source: &Target,
+        source: &(Target, (f64, f64)),
         output: Size,
         fit: SourceFit,
         target: &Target,
         encoder: &mut wgpu::CommandEncoder,
     ) {
         let (w, h) = (output.width, output.height);
-        let (sw, sh) = (source.width() as f64, source.height() as f64);
+        let (sw, sh) = source.1;
         let (ow, oh) = (w as f64, h as f64);
         let ratio = match fit {
             SourceFit::Stretch => None,
@@ -515,7 +520,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
+                    resource: wgpu::BindingResource::TextureView(&source.0.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

@@ -92,18 +92,6 @@ pub(super) fn run(
         };
         let record = pm_eval::node::member(document.document.root(), "assets")
             .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
-        if matches!(
-            &submit.spec,
-            JobSpec::SourceFilmstrip {
-                color: SourceColor::Display,
-                ..
-            }
-        ) && record
-            .is_some_and(|r| pm_eval::node::truthy(pm_eval::node::member(Some(r), "rendition")))
-            && &source == original
-        {
-            return Err("The browser-playable copy is not available yet".into());
-        }
         let choice = submit
             .output
             .as_ref()
@@ -291,6 +279,11 @@ fn filmstrip(
     } else {
         None
     };
+    let sequence = record.is_some_and(pm_render::footage::is_sequence);
+    let times: Vec<_> = times
+        .iter()
+        .map(|&time| pm_render::footage::source_time(record, time, interpretation.as_ref()))
+        .collect();
     let svg = if Renderer::source_is_svg(source)? {
         if interpretation.is_some() {
             return Err(
@@ -361,7 +354,14 @@ fn filmstrip(
                 // Export decoder/cache used by interactive source seeks.
                 // A playback slice of a larger strip remains direct: its
                 // CPU look-ahead must not escape the job's admission.
-                renderer.source_rgba8(source, times[index], size, fit, interpretation.as_ref())
+                renderer.source_rgba8(
+                    source,
+                    times[index],
+                    size,
+                    fit,
+                    interpretation.as_ref(),
+                    sequence,
+                )
             } else {
                 renderer.source_rgba8_export(
                     source,
@@ -369,6 +369,7 @@ fn filmstrip(
                     size,
                     fit,
                     interpretation.as_ref(),
+                    sequence,
                 )
             };
             frame.map(|pixels| vec![pixels])
@@ -379,6 +380,7 @@ fn filmstrip(
                 size,
                 fit,
                 interpretation.as_ref(),
+                sequence,
             )
         };
         gate.finished(pass, count as u32, started.elapsed().as_micros() as f64);
