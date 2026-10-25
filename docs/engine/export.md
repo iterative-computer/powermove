@@ -620,11 +620,10 @@ performance result.
 The macOS native hidden host now embeds host services and the production
 per-project document workers. Its render jobs, batches and saves use the same
 `NativeEngine` and `AgentJobs` as the desktop, over Node child-process ports.
-The desktop persists its probe namespace beside the per-machine shader cache;
-the hidden host, Node render command and direct bundled `pm-cli` read it, read
-only: their first-use decisions stay in memory (hidden-host.md). Unknown
-and pinned user programs request the desktop's WebGL runner in on-demand
-Chromium. This is the shader runner only; composition frames remain native.
+User programs draw natively on every host (E-R1); only programs the native
+pipeline cannot translate request the desktop's WebGL runner in on-demand
+Chromium (hidden-host.md). This is the shader runner only; composition frames
+remain native.
 The hidden tabs present CPU snapshots from `pm-node`.
 
 See [hidden-host.md](hidden-host.md) for runtime wiring, reproducible gates and

@@ -80,11 +80,10 @@ The desktop and hidden host also atomically persist their winning definitions in
 caller provides `--definitions`; direct `pm-cli` accepts the same snapshot.
 
 `pm-cli render` and `pm-cli scope` share one renderer setup
-(`pm-cli/src/render.rs` `headless_renderer`): the read-only probe store,
-`require_shader_reference`, the helper's Chromium as the fallback host and the
-`--definitions` snapshot (else the built-in set with the same warning). Without a helper,
-both commands report a pinned, unverified or untranslatable user program as not
-headless-renderable (exit 4) and write nothing.
+(`pm-cli/src/render.rs` `headless_renderer`): the helper's Chromium as the
+fallback host and the `--definitions` snapshot (else the built-in set with the
+same warning). Without a helper, both commands report a user program the native
+pipeline cannot translate as not headless-renderable (exit 4) and write nothing.
 
 Missing native addons are `native-runtime-unavailable`; missing Chromium is
 `chromium-unavailable` at the first browser-dependent call. Corrupt persisted

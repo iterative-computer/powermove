@@ -1,6 +1,5 @@
-//! The Node CLI's on-demand Chromium service. The renderer's existing
-//! FallbackHost contract keeps unknown/pinned programs off the unverified
-//! native path.
+//! The Node CLI's on-demand Chromium service: the renderer's FallbackHost
+//! for user programs the native pipeline cannot translate (E-K6).
 use pm_render::shader_layers::{FallbackFailure, FallbackHost, FallbackJob, FallbackPixels};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};

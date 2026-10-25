@@ -502,10 +502,9 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                     .map_err(|_| Failure::Usage(format!("--motion-blur {n:?}")))?,
             ),
         };
-        // The same setup as `render` (crate::render::headless_renderer): the
-        // desktop's shader pins read and honored, pinned or unverified user
-        // GLSL through the helper's Chromium runner, and the --definitions
-        // snapshot.
+        // The same setup as `render` (crate::render::headless_renderer): user
+        // GLSL the native pipeline cannot translate through the helper's
+        // Chromium runner, and the --definitions snapshot.
         let crate::render::Headless {
             mut renderer,
             angle_host,
@@ -535,8 +534,8 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
         let frame = renderer
             .render(doc, &loaded.composition, ticks, &request, &loaded.media)
             .map_err(|e| match e {
-                // A user program the frame found only the WebGL runner may
-                // draw (unverified, pinned, or untranslatable) and no helper.
+                // A user program only the WebGL runner can draw (one the
+                // native pipeline cannot translate) and no helper.
                 pm_render::RenderError::Unsupported(u)
                     if u.iter()
                         .any(|u| matches!(u.feature, pm_render::Feature::ShaderFallback(_))) =>

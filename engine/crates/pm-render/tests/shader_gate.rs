@@ -143,8 +143,8 @@ struct Metrics {
     /// Pixels WebGL itself moves at (not judged).
     unstable: usize,
     pixels: usize,
-    /// WebGL against its own perturbed runs outside the unstable pixels'
-    /// neighbourhood: (pixels past the bound, largest 8-bit difference).
+    /// WebGL against its own perturbed runs, the largest over the runs at
+    /// every pixel: (pixels past the bound, largest 8-bit difference).
     spread: (usize, u32),
 }
 
@@ -202,8 +202,8 @@ struct WebGl {
     precise: Option<Vec<f32>>,
     /// Pixels WebGL moves at under a perturbation, grown by one pixel.
     unstable: Option<Vec<bool>>,
-    /// WebGL against its perturbed runs where they disagree beyond the
-    /// unstable set itself: counted the way `compare` counts the engine.
+    /// WebGL against its perturbed runs at every pixel, the largest over the
+    /// runs: counted the way `compare` counts the engine.
     spread: (usize, u32),
 }
 
