@@ -649,6 +649,99 @@ fn raster_edges_are_the_exact_pixel_coverage_at_every_level() {
 }
 
 #[test]
+fn simultaneous_minified_sources_keep_distinct_pyramid_tails() {
+    use pm_perf::Counter;
+
+    let dir = scratch("simultaneous_pyramid_tails");
+    let mut resolver = MapResolver::default();
+    let mut layers = Vec::new();
+    for (name, x, value, start) in [
+        ("left", 64.0, 0.2, 0.0),
+        ("right", 192.0, 0.8, 0.0),
+        ("next-left", 64.0, 0.4, 1.0),
+        ("next-right", 192.0, 0.6, 1.0),
+    ] {
+        let path = dir.join(format!("{name}.png"));
+        write_rgb(&path, 129, 65, |_, _| value);
+        resolver.paths.insert(name.into(), path);
+        let mut image = layer(
+            name,
+            "image",
+            json!({ "asset": name, "fit": "fill", "w": 129, "h": 65 }),
+            x,
+            64.0,
+            1.0,
+        );
+        image["from"] = json!(start);
+        set(&mut image, "scale.x", json!(15));
+        set(&mut image, "scale.y", json!(15));
+        image["compat"] = json!(2);
+        layers.push(image);
+    }
+    let mut doc = project(256, 128, 30.0, no_fill(), layers);
+    for name in ["left", "right", "next-left", "next-right"] {
+        asset(&mut doc, name, "image", "png", 129, 65, 0.0);
+    }
+    let doc = load(&doc);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut request = RenderRequest::sized(Size::new(256, 128), Precision::Float16);
+    request.background = false;
+    request.sampling = Sampling::Playback;
+    let draw = |renderer: &mut Renderer, at| {
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(at), &request, &resolver)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        renderer.recycle(frame);
+        pixels
+    };
+    let before = pm_perf::snapshot();
+    let pixels = draw(&mut renderer, 0.5);
+    let allocations = pm_perf::snapshot()
+        .since(&before)
+        .get(Counter::PyramidAllocs);
+    assert_eq!(
+        allocations, 2,
+        "both simultaneously read tails need storage"
+    );
+    for (x, expected) in [(64usize, 0.2f32), (192, 0.8)] {
+        let px = &pixels[(64 * 256 + x) * 4..][..4];
+        assert!((px[0] - expected).abs() < 0.03, "{x}: {px:?}");
+        assert!(px[3] > 0.99, "{x}: {px:?}");
+    }
+    let before = pm_perf::snapshot();
+    let next = draw(&mut renderer, 1.5);
+    assert_eq!(
+        pm_perf::snapshot()
+            .since(&before)
+            .get(Counter::PyramidAllocs),
+        0,
+        "two new source allocations reuse the prior frame's tails"
+    );
+    for (x, expected) in [(64usize, 0.4f32), (192, 0.6)] {
+        let px = &next[(64 * 256 + x) * 4..][..4];
+        assert!((px[0] - expected).abs() < 0.03, "{x}: {px:?}");
+    }
+    let before = pm_perf::snapshot();
+    assert_eq!(next, draw(&mut renderer, 1.5));
+    assert_eq!(
+        pm_perf::snapshot()
+            .since(&before)
+            .get(Counter::PyramidAllocs),
+        0,
+        "held source revisions reuse filtered texels"
+    );
+    assert!(renderer.pyramid_bytes() > 0);
+    renderer.release_idle_targets();
+    assert_eq!(renderer.pyramid_bytes(), 0, "rest releases the tail pool");
+    draw(&mut renderer, 1.5);
+    assert!(renderer.pyramid_bytes() > 0);
+    renderer.trim(0);
+    assert_eq!(renderer.pyramid_bytes(), 0, "trim releases the tail pool");
+}
+
+#[test]
 fn level2_regions_and_determinism() {
     let dir = scratch("level2_regions_and_determinism");
     let path = dir.join("zone2.png");

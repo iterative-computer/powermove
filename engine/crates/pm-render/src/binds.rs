@@ -126,6 +126,14 @@ impl BindCache {
         buffer: &wgpu::Buffer,
         size: u64,
     ) -> wgpu::BindGroup {
+        // A recycled mip tail has a new source. Retire groups that still
+        // hold the former source view; the pyramid pool only reassigns a
+        // tail after the previous encoder has been submitted.
+        if tail != view {
+            self.resamples.retain(|(old_source, old_tail, _), _| {
+                old_tail.texture() != tail.texture() || old_source == view
+            });
+        }
         let key = (view.clone(), tail.clone(), buffer.clone());
         let frame = self.frame;
         let entry = self.resamples.entry(key).or_insert_with(|| {

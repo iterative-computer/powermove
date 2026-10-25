@@ -37,12 +37,6 @@ pub(crate) struct Pyramid {
     pub height: u32,
     pub levels: u32,
     inline_first: bool,
-    steps: Option<std::sync::Arc<Vec<MipStep>>>,
-}
-
-struct MipStep {
-    target: wgpu::TextureView,
-    bind: wgpu::BindGroup,
 }
 
 impl Pyramid {
@@ -63,7 +57,6 @@ impl Pyramid {
             height: source.height(),
             levels: 1,
             inline_first: false,
-            steps: None,
         }
     }
 
@@ -77,9 +70,45 @@ impl Pyramid {
     }
 }
 
-/// Pyramid storage and texels kept by texture identity and source revision.
+struct CachedPyramid {
+    source: wgpu::Texture,
+    revision: Option<u64>,
+    pyramid: Pyramid,
+    used_frame: u64,
+}
+
+/// Tail storage without a source handle, source view, or first downsample
+/// binding. These are rebuilt if a different source takes the allocation.
+struct IdleTail {
+    texture: wgpu::Texture,
+    width: u32,
+    height: u32,
+    levels: u32,
+}
+
+impl CachedPyramid {
+    fn into_idle(self) -> IdleTail {
+        let Pyramid {
+            tail,
+            width,
+            height,
+            levels,
+            ..
+        } = self.pyramid;
+        IdleTail {
+            texture: tail.expect("physical pyramid"),
+            width,
+            height,
+            levels,
+        }
+    }
+}
+
+/// Revision-valid source pyramids and source-free tail storage.
 pub(crate) struct PyramidCache {
-    entries: VecDeque<(wgpu::Texture, Option<u64>, Pyramid)>,
+    entries: VecDeque<CachedPyramid>,
+    idle: VecDeque<IdleTail>,
+    frame: u64,
     next_revision: u64,
 }
 
@@ -91,8 +120,27 @@ impl PyramidCache {
     pub fn new() -> PyramidCache {
         PyramidCache {
             entries: VecDeque::new(),
+            idle: VecDeque::new(),
+            frame: 0,
             next_revision: 0,
         }
+    }
+
+    /// The previous frame has been submitted; writes in the next submission
+    /// follow its reads on the same queue. Unknown revisions cannot skip
+    /// regeneration, so release their source handles and reuse their tails.
+    pub fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        let mut i = 0;
+        while i < self.entries.len() {
+            if self.entries[i].revision.is_none() {
+                self.idle
+                    .push_back(self.entries.remove(i).unwrap().into_idle());
+            } else {
+                i += 1;
+            }
+        }
+        self.enforce_budget();
     }
 
     /// A new write to a pooled composition texture changes its contents even
@@ -103,50 +151,168 @@ impl PyramidCache {
         self.next_revision
     }
 
-    fn get(&mut self, source: &wgpu::Texture) -> Option<(Option<u64>, Pyramid)> {
-        let i = self.entries.iter().position(|(t, _, _)| t == source)?;
+    fn get(
+        &mut self,
+        source: &wgpu::Texture,
+        revision: Option<u64>,
+        levels: u32,
+    ) -> Option<Pyramid> {
+        let revision = revision?;
+        let i = self.entries.iter().position(|entry| {
+            entry.source == *source
+                && entry.revision == Some(revision)
+                && entry.pyramid.levels >= levels
+        })?;
         let entry = self.entries.remove(i)?;
-        let p = (entry.1, entry.2.clone());
+        let p = entry.pyramid.clone();
+        let mut entry = entry;
+        entry.used_frame = self.frame;
         self.entries.push_front(entry);
         Some(p)
     }
 
+    fn take_tail(
+        &mut self,
+        source: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        levels: u32,
+        format: wgpu::TextureFormat,
+    ) -> Option<(wgpu::Texture, u32)> {
+        let fits = |w: u32, h: u32, n: u32, f: wgpu::TextureFormat| {
+            w == width && h == height && n >= levels && f == format
+        };
+        // A tail already read by this encoder cannot be written again.
+        // Prefer a stale association with this source, then any idle tail.
+        let entry = self.entries.iter().rposition(|entry| {
+            entry.used_frame != self.frame
+                && entry.source == *source
+                && fits(
+                    entry.pyramid.width,
+                    entry.pyramid.height,
+                    entry.pyramid.levels,
+                    entry
+                        .pyramid
+                        .tail
+                        .as_ref()
+                        .expect("physical pyramid")
+                        .format(),
+                )
+        });
+        if let Some(i) = entry {
+            let idle = self.entries.remove(i).unwrap().into_idle();
+            return Some((idle.texture, idle.levels));
+        }
+        if let Some(i) = self
+            .idle
+            .iter()
+            .position(|tail| fits(tail.width, tail.height, tail.levels, tail.texture.format()))
+        {
+            let idle = self.idle.remove(i).unwrap();
+            return Some((idle.texture, idle.levels));
+        }
+        let entry = self.entries.iter().rposition(|entry| {
+            entry.used_frame != self.frame
+                && fits(
+                    entry.pyramid.width,
+                    entry.pyramid.height,
+                    entry.pyramid.levels,
+                    entry
+                        .pyramid
+                        .tail
+                        .as_ref()
+                        .expect("physical pyramid")
+                        .format(),
+                )
+        });
+        let idle = self.entries.remove(entry?).unwrap().into_idle();
+        Some((idle.texture, idle.levels))
+    }
+
     fn put(&mut self, source: wgpu::Texture, revision: Option<u64>, pyramid: Pyramid) {
-        self.entries.retain(|(t, _, _)| *t != source);
-        self.entries.push_front((source, revision, pyramid));
-        self.entries.truncate(CACHED_PYRAMIDS);
-        while self.bytes() > CACHED_PYRAMID_BYTES {
-            self.entries.pop_back();
+        self.entries.push_front(CachedPyramid {
+            source,
+            revision,
+            pyramid,
+            used_frame: self.frame,
+        });
+        self.enforce_budget();
+    }
+
+    fn enforce_budget(&mut self) {
+        while self.entries.len() + self.idle.len() > CACHED_PYRAMIDS
+            || self.retained_bytes() > CACHED_PYRAMID_BYTES
+        {
+            if self.idle.pop_front().is_some() {
+                continue;
+            }
+            let Some(i) = self
+                .entries
+                .iter()
+                .rposition(|entry| entry.used_frame != self.frame)
+            else {
+                // All tails are referenced by draws in the current encoder.
+                // Revisit the cap at the next frame boundary.
+                break;
+            };
+            self.entries.remove(i);
         }
     }
 
     /// Drops every kept pyramid.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.idle.clear();
     }
 
-    /// Bytes held by the downsample tail. The borrowed source is not owned by
-    /// this cache and is not counted a second time.
+    /// Retained downsample storage (the source belongs to its content cache).
     pub fn bytes(&self) -> u64 {
         self.entries
             .iter()
-            .map(|(_, _, p)| {
-                let px: u64 = (1..p.levels)
-                    .map(|level| {
-                        u64::from((p.width >> level).max(1)) * u64::from((p.height >> level).max(1))
-                    })
-                    .sum();
-                let texel = p
-                    .tail
-                    .as_ref()
-                    .expect("cached pyramid has a downsample tail")
-                    .format()
-                    .block_copy_size(None)
-                    .expect("uncompressed raster format");
-                px * u64::from(texel)
+            .map(|entry| {
+                tail_bytes(
+                    entry.pyramid.width,
+                    entry.pyramid.height,
+                    entry.pyramid.levels,
+                    entry
+                        .pyramid
+                        .tail
+                        .as_ref()
+                        .expect("physical pyramid")
+                        .format(),
+                )
             })
+            .chain(self.idle.iter().map(|tail| {
+                tail_bytes(tail.width, tail.height, tail.levels, tail.texture.format())
+            }))
             .sum()
     }
+
+    /// The source handle also keeps an otherwise retired allocation alive.
+    /// Include it in the retention cap even while another cache shares it.
+    fn retained_bytes(&self) -> u64 {
+        self.bytes()
+            + self
+                .entries
+                .iter()
+                .map(|entry| {
+                    u64::from(entry.source.width())
+                        * u64::from(entry.source.height())
+                        * u64::from(entry.source.format().block_copy_size(None).unwrap())
+                })
+                .sum::<u64>()
+    }
+}
+
+fn tail_bytes(width: u32, height: u32, levels: u32, format: wgpu::TextureFormat) -> u64 {
+    let px: u64 = (1..levels)
+        .map(|level| u64::from((width >> level).max(1)) * u64::from((height >> level).max(1)))
+        .sum();
+    px * u64::from(
+        format
+            .block_copy_size(None)
+            .expect("uncompressed raster format"),
+    )
 }
 
 impl Default for PyramidCache {
@@ -344,16 +510,10 @@ impl Resampler {
         revision: Option<u64>,
         cache: &mut PyramidCache,
     ) -> Pyramid {
-        let kept = cache.get(source).filter(|(_, p)| p.levels >= levels);
-        if let Some((at, p)) = &kept
-            && revision.is_some()
-            && *at == revision
-        {
-            return p.clone();
+        if let Some(pyramid) = cache.get(source, revision, levels) {
+            return pyramid;
         }
-        let kept = kept.map(|(_, p)| p);
         let (width, height) = (source.width().max(1), source.height().max(1));
-        let levels = kept.as_ref().map_or(levels, |p| p.levels);
         // RGBA8 source texels must not quantize each box mean back to eight
         // bits. Half precision is sufficient storage for that source; float
         // sources retain their original precision.
@@ -364,60 +524,50 @@ impl Resampler {
             wgpu::TextureFormat::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
             other => panic!("unsupported pyramid source format: {other:?}"),
         };
-        // Dynamic composition targets reuse storage but regenerate texels.
-        // Static source texels can reuse both storage and content.
-        let texture = kept
-            .as_ref()
-            .and_then(|p| p.tail.clone())
-            .unwrap_or_else(|| {
-                device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("pm raster pyramid"),
-                    size: wgpu::Extent3d {
-                        width: (width >> 1).max(1),
-                        height: (height >> 1).max(1),
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: levels - 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                })
+        // Multiple draws in one encoder must keep distinct tails unless
+        // they read the same revision. Prior-frame storage can change source
+        // identity after its old source bindings are dropped.
+        let reused = cache.take_tail(source, width, height, levels, format);
+        let (texture, levels) = reused.unwrap_or_else(|| {
+            pm_perf::bump(pm_perf::Counter::PyramidAllocs);
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm raster pyramid"),
+                size: wgpu::Extent3d {
+                    width: (width >> 1).max(1),
+                    height: (height >> 1).max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: levels - 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
             });
+            (texture, levels)
+        });
         let i = format_index(format);
-        let steps = kept
-            .as_ref()
-            .and_then(|p| p.steps.clone())
-            .unwrap_or_else(|| {
-                let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut steps = Vec::with_capacity((levels - 1) as usize);
-                for level in 0..levels - 1 {
-                    let target = texture.create_view(&wgpu::TextureViewDescriptor {
-                        label: Some("pm pyramid level"),
-                        base_mip_level: level,
-                        mip_level_count: Some(1),
-                        ..Default::default()
-                    });
-                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("pm pyramid"),
-                        layout: &self.mip_layout,
-                        entries: &[wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&above),
-                        }],
-                    });
-                    above = target.clone();
-                    steps.push(MipStep { target, bind });
-                }
-                std::sync::Arc::new(steps)
+        let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
+        for level in 0..levels - 1 {
+            let target = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("pm pyramid level"),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
             });
-        for step in steps.iter() {
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pm pyramid"),
+                layout: &self.mip_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&above),
+                }],
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm pyramid level"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &step.target,
+                    view: &target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -431,29 +581,23 @@ impl Resampler {
                 multiview_mask: None,
             });
             pass.set_pipeline(self.down[i].get());
-            pass.set_bind_group(0, &step.bind, &[]);
+            pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..4, 0..1);
             drop(pass);
+            above = target;
         }
         let pyramid = Pyramid {
-            view: kept.as_ref().map(|p| p.view.clone()).unwrap_or_else(|| {
-                source.create_view(&wgpu::TextureViewDescriptor {
-                    base_mip_level: 0,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                })
+            view: source.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                ..Default::default()
             }),
-            tail_view: Some(
-                kept.as_ref()
-                    .and_then(|p| p.tail_view.clone())
-                    .unwrap_or_else(|| texture.create_view(&Default::default())),
-            ),
+            tail_view: Some(texture.create_view(&Default::default())),
             tail: Some(texture),
             width,
             height,
             levels,
             inline_first: false,
-            steps: Some(steps),
         };
         cache.put(source.clone(), revision, pyramid.clone());
         pyramid

@@ -88,6 +88,7 @@ pub fn correlation() -> Vec<(String, BoxedBench)> {
 pub fn all() -> Vec<Bench> {
     vec![
         ("playback_500", playback_500),
+        ("pyramid_playback_30", pyramid_playback_30),
         ("drag_500", drag_500),
         ("edit_playback_500", edit_playback_500),
         ("inspector_edit_500", inspector_edit_500),
@@ -291,6 +292,45 @@ fn leaf_set(index: usize, path: &[&str], value: pm_model::Value) -> pm_model::Pa
 /// Playback: 120 consecutive frames of the 500-layer synthetic project.
 pub fn playback_500(ctx: &Ctx) -> BenchReport {
     playback(ctx, "playback_500", 500, 120)
+}
+
+/// Thirty changing video frames after the first two have established tail
+/// storage. This bench's hard zero allocation bar is checked per frame.
+pub fn pyramid_playback_30(ctx: &Ctx) -> BenchReport {
+    use pm_perf::Counter;
+
+    let doc = fixtures::pyramid_video_doc();
+    let media = std::collections::BTreeMap::from([("clip".to_owned(), fixtures::video_fixture())]);
+    let mut v = Viewer::new(ctx, &doc, &media);
+    v.composer.set_playing(true);
+    let fps = 30.0;
+    let warm_allocations = pm_perf::snapshot().get(Counter::PyramidAllocs);
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    assert!(
+        pm_perf::snapshot().get(Counter::PyramidAllocs) > warm_allocations,
+        "warmup must exercise a physical video pyramid"
+    );
+    let scope = Scope::begin();
+    let mut wall = Vec::with_capacity(30);
+    for k in 2..32 {
+        let before = pm_perf::snapshot().get(Counter::PyramidAllocs);
+        wall.push(v.frame(ticks(f64::from(k) / fps)));
+        assert_eq!(
+            pm_perf::snapshot().get(Counter::PyramidAllocs) - before,
+            0,
+            "frame {k} allocated a pyramid after warmup"
+        );
+    }
+    let m = measured(scope);
+    report(
+        "pyramid_playback_30",
+        "frames",
+        m,
+        wall,
+        json!({ "source": "public h264-aac.mp4", "source_px": [320, 180], "draw_px": [64, 36] }),
+    )
 }
 
 /// Playback of `frames` consecutive frames of the `layers`-layer synthetic

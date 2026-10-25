@@ -1304,8 +1304,10 @@ impl Renderer {
     /// frame (`crate::frame_prefix`), and every content cache stay; the
     /// next frame takes fresh targets from the device.
     pub fn release_idle_targets(&mut self) -> u64 {
-        let before = self.pool.bytes();
+        let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);
+        self.pyramids.clear();
+        self.binds.clear();
         before - self.pool.bytes()
     }
 
@@ -1855,6 +1857,7 @@ impl Renderer {
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             self.binds.begin_frame();
+            self.pyramids.begin_frame();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,

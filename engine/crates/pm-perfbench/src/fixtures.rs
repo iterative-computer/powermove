@@ -509,6 +509,14 @@ pub fn video_doc() -> Value {
     doc
 }
 
+/// The public video drawn small enough to require a physical raster pyramid.
+pub fn pyramid_video_doc() -> Value {
+    let mut doc = video_doc();
+    doc["layers"][1]["d"]["w"] = json!(64);
+    doc["layers"][1]["d"]["h"] = json!(36);
+    doc
+}
+
 /// The public H.264 fixture the scrub bench seeks in.
 pub fn video_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4")

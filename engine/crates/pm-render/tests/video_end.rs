@@ -266,9 +266,16 @@ fn minified_video_reuses_only_the_same_source_revision() {
     };
     for source in [0, 1, 2, 8, 19] {
         let time = source as f64 / 24.0;
+        let before = pm_perf::snapshot();
         let frame = renderer
             .render(&doc, "Ptest-root", ticks(time), &request, &assets)
             .unwrap();
+        let allocations = pm_perf::snapshot()
+            .since(&before)
+            .get(Counter::PyramidAllocs);
+        if source > 0 {
+            assert_eq!(allocations, 0, "source {source} should reuse an idle tail");
+        }
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
         let actual = renderer.read_rgba(&frame).unwrap();
         renderer.recycle(frame);
@@ -295,6 +302,7 @@ fn minified_video_reuses_only_the_same_source_revision() {
             "held source {source} regenerated mip texels: {} passes",
             work.get(Counter::RenderPasses)
         );
+        assert_eq!(work.get(Counter::PyramidAllocs), 0);
     }
 }
 
