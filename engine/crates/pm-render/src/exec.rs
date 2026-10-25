@@ -11,6 +11,7 @@ use crate::error::LayerFailure;
 use crate::media::{MediaCache, MediaFailure};
 use crate::pipelines::{FillUniform, PassBlend, Pipelines, QuadUniform, UNIFORM_STRIDE, bytes_of};
 use crate::plan::{Background, CompPlan, Content, Draw, Source};
+use crate::sampling::gpu::DRAW_UNIFORM_SIZE;
 use crate::scene3d::Scene3dRenderer;
 
 pub use crate::composite::region::Region;
@@ -935,21 +936,17 @@ impl Exec<'_> {
         }
         let buffer = self.uniforms.take(self.device, data.len() as u64);
         self.queue.write_buffer(&buffer, 0, &data);
-        let quad_bind = self.binds.quads(
-            self.device,
-            &self.pipelines.quad_layout,
-            &buffer,
-            size_of::<QuadUniform>() as u64,
-        );
+        let quad_bind = self
+            .pipelines
+            .resample
+            .bind_uniform(self.device, self.binds, &buffer);
         let sample_binds: Vec<Option<wgpu::BindGroup>> = resolved
             .iter()
             .zip(&level2)
             .map(|(r, u)| {
-                u.as_ref().and(r.pyramid.as_ref()).map(|p| {
-                    self.pipelines
-                        .resample
-                        .bind(self.device, self.binds, p, &buffer)
-                })
+                u.as_ref()
+                    .and(r.pyramid.as_ref())
+                    .map(|p| self.pipelines.resample.bind(self.device, self.binds, p))
             })
             .collect();
         let fill_bind = match &plan.background {
@@ -1068,7 +1065,8 @@ impl Exec<'_> {
                 // content is in front of the camera and in the frame.
                 if let Some(bind) = &sample_binds[i] {
                     pass.set_pipeline(self.pipelines.resample.pipeline(format, blend));
-                    pass.set_bind_group(0, bind, &[offset]);
+                    pass.set_bind_group(0, &quad_bind, &[offset]);
+                    pass.set_bind_group(1, bind, &[]);
                     pass.draw(0..4, 0..1);
                 }
             } else if r.solid.is_some() {
@@ -1133,7 +1131,7 @@ impl Exec<'_> {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<QuadUniform>() as u64),
+                    size: wgpu::BufferSize::new(DRAW_UNIFORM_SIZE),
                 }),
             }],
         });
@@ -1238,7 +1236,7 @@ impl Exec<'_> {
             self.device,
             &self.pipelines.quad_layout,
             &buffer,
-            size_of::<QuadUniform>() as u64,
+            DRAW_UNIFORM_SIZE,
         );
         let tex = self.binds.texture(
             self.device,

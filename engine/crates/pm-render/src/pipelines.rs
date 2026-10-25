@@ -158,15 +158,8 @@ impl Pipelines {
             },
             count: None,
         };
-        let quad_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("pm quad"),
-            entries: &[uniform(
-                0,
-                wgpu::ShaderStages::VERTEX_FRAGMENT,
-                true,
-                size_of::<QuadUniform>() as u64,
-            )],
-        });
+        let resample = crate::sampling::gpu::Resampler::new(device);
+        let quad_layout = wgpu::BindGroupLayout::clone(resample.uniform_layout());
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm texture"),
             entries: &[
@@ -491,7 +484,6 @@ impl Pipelines {
             &layout_with(&[&quad_layout, &texture_layout, &depth_layout]),
             "fs_id_3d",
         );
-        let resample = crate::sampling::gpu::Resampler::new(device);
         Pipelines {
             ops: crate::composite::gpu::OpPipelines::new(device),
             resample,

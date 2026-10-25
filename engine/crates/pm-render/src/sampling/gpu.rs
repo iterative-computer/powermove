@@ -22,8 +22,14 @@ pub(crate) struct ResampleUniform {
     pub bounds: [f32; 4],
 }
 
+/// Both quad and resample draws use one dynamic-uniform binding per 256-byte
+/// slot. The resample uniform is the larger of the two structures.
+pub(crate) const DRAW_UNIFORM_SIZE: u64 = size_of::<ResampleUniform>() as u64;
+const _: () = assert!(DRAW_UNIFORM_SIZE == 224);
+const _: () = assert!(DRAW_UNIFORM_SIZE <= crate::pipelines::UNIFORM_STRIDE);
+
 /// A quad clipped at the camera plane has at most 5 edges.
-pub(crate) const MAX_EDGES: usize = 6;
+pub(crate) const MAX_EDGES: usize = 5;
 
 /// A source with its mip pyramid.
 #[derive(Clone)]
@@ -323,6 +329,7 @@ impl Default for PyramidCache {
 
 /// The level 2 pipelines.
 pub(crate) struct Resampler {
+    uniform_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
     mip_layout: wgpu::BindGroupLayout,
     trilinear: wgpu::Sampler,
@@ -352,6 +359,19 @@ fn format_index(format: wgpu::TextureFormat) -> usize {
 
 impl Resampler {
     pub fn new(device: &wgpu::Device) -> Resampler {
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm draw uniform"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(DRAW_UNIFORM_SIZE),
+                },
+                count: None,
+            }],
+        });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render resample"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/resample.wgsl").into()),
@@ -370,32 +390,19 @@ impl Resampler {
             },
             count: None,
         };
-        let layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("pm resample"),
-                entries: &[
-                    texture(0),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: true,
-                            min_binding_size: wgpu::BufferSize::new(
-                                size_of::<ResampleUniform>() as u64
-                            ),
-                        },
-                        count: None,
-                    },
-                    texture(3),
-                ],
-            });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm resample source"),
+            entries: &[
+                texture(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                texture(2),
+            ],
+        });
         let mip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm mips"),
             entries: &[texture(0)],
@@ -412,7 +419,7 @@ impl Resampler {
         });
         let draw_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pm resample"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&uniform_layout), Some(&layout)],
             immediate_size: 0,
         });
         let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -491,6 +498,7 @@ impl Resampler {
         let down = MIP_FORMATS
             .map(|f| pipeline(&mip_pipeline_layout, &mips, "vs_full", "fs_down", f, None));
         Resampler {
+            uniform_layout,
             layout,
             mip_layout,
             trilinear,
@@ -642,13 +650,27 @@ impl Resampler {
         times
     }
 
-    /// The source binding over the pass's shared dynamic-uniform buffer.
+    /// The dynamic uniform layout shared with quad draws.
+    pub(crate) fn uniform_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.uniform_layout
+    }
+
+    /// The draw uniform at group zero, shared with quad draws.
+    pub(crate) fn bind_uniform(
+        &self,
+        device: &wgpu::Device,
+        cache: &mut crate::binds::BindCache,
+        buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        cache.quads(device, &self.uniform_layout, buffer, DRAW_UNIFORM_SIZE)
+    }
+
+    /// The source binding at group one.
     pub fn bind(
         &self,
         device: &wgpu::Device,
         cache: &mut crate::binds::BindCache,
         pyramid: &Pyramid,
-        buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         cache.resample(
             device,
@@ -656,8 +678,6 @@ impl Resampler {
             &self.trilinear,
             &pyramid.view,
             pyramid.tail_view.as_ref().unwrap_or(&pyramid.view),
-            buffer,
-            size_of::<ResampleUniform>() as u64,
         )
     }
 }
@@ -918,5 +938,14 @@ mod tests {
         // Entirely behind: nothing.
         let m = [100.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, -1.0];
         assert!(placement(m, [0.0, 0.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn clipping_one_corner_uses_all_five_uniform_edges() {
+        // w = u + v − 0.2 puts only the first corner behind the camera.
+        let m = [100.0, 0.0, 1.0, 0.0, 100.0, 1.0, 0.0, 0.0, -0.2];
+        let p = placement(m, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(p.polygon.len(), 5);
+        assert_eq!(p.edges.len(), MAX_EDGES);
     }
 }

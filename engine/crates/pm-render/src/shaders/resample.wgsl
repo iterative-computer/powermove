@@ -29,14 +29,14 @@ struct Resample {
     origin: vec4<f32>,
     // Content polygon edges, unit normals: a·x + b·y + c ≥ 0 inside, with
     // (x, y) relative to `origin`.
-    edges: array<vec4<f32>, 6>,
+    edges: array<vec4<f32>, 5>,
     bounds: vec4<f32>,
 };
 
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var trilinear: sampler;
-@group(0) @binding(2) var<uniform> r: Resample;
-@group(0) @binding(3) var tail: texture_2d<f32>;
+@group(0) @binding(0) var<uniform> r: Resample;
+@group(1) @binding(0) var src: texture_2d<f32>;
+@group(1) @binding(1) var trilinear: sampler;
+@group(1) @binding(2) var tail: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,

@@ -20,8 +20,7 @@ use std::collections::HashMap;
 pub(crate) struct BindCache {
     textures: HashMap<wgpu::TextureView, (wgpu::BindGroup, u64)>,
     quads: HashMap<(wgpu::Buffer, u64), (wgpu::BindGroup, u64)>,
-    resamples:
-        HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer), (wgpu::BindGroup, u64)>,
+    resamples: HashMap<(wgpu::TextureView, wgpu::TextureView), (wgpu::BindGroup, u64)>,
     frame: u64,
 }
 
@@ -123,18 +122,16 @@ impl BindCache {
         sampler: &wgpu::Sampler,
         view: &wgpu::TextureView,
         tail: &wgpu::TextureView,
-        buffer: &wgpu::Buffer,
-        size: u64,
     ) -> wgpu::BindGroup {
         // A recycled mip tail has a new source. Retire groups that still
         // hold the former source view; the pyramid pool only reassigns a
         // tail after the previous encoder has been submitted.
         if tail != view {
-            self.resamples.retain(|(old_source, old_tail, _), _| {
+            self.resamples.retain(|(old_source, old_tail), _| {
                 old_tail.texture() != tail.texture() || old_source == view
             });
         }
-        let key = (view.clone(), tail.clone(), buffer.clone());
+        let key = (view.clone(), tail.clone());
         let frame = self.frame;
         let entry = self.resamples.entry(key).or_insert_with(|| {
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -151,14 +148,6 @@ impl BindCache {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(size),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
                         resource: wgpu::BindingResource::TextureView(tail),
                     },
                 ],
