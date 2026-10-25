@@ -275,8 +275,8 @@ fn depth8_project_exports_every_shipped_format() {
         .unwrap();
     assert_eq!(
         frame.color.format(),
-        wgpu::TextureFormat::Rgba8Unorm,
-        "the actual project frame must use the 8-bit working target"
+        wgpu::TextureFormat::Rgba16Float,
+        "an 8-bit project keeps float working storage until its 8-bit output"
     );
     let prores = |profile| ExportFormat::ProRes { profile };
     let hevc = |ten_bit, container| ExportFormat::Hevc { ten_bit, container };
@@ -492,7 +492,7 @@ fn depth8_project_exports_every_shipped_format() {
         );
         assert_eq!(
             renderer.device_target_format(&document, &plan.request),
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
             "{}: project depth must override the precision hint",
             case.name
         );
@@ -797,16 +797,20 @@ fn depth8_project_exports_every_shipped_format() {
         let narrow = &rgba8[at..at + 4];
         let wide = &rgba16[at..at + 4];
         eprintln!("MEASURE raw PNG at ({x},{y}): rgba8={narrow:?} rgba16={wide:?}");
+        // Half-float working storage: the 16-bit file carries the stored
+        // value, the 8-bit file its rounding.
+        let stored = pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(
+            f32::from(narrow[3]) / 255.0,
+        ));
         assert_eq!(
             wide[3],
-            u16::from(narrow[3]) * 257,
+            (f64::from(stored) * 65535.0).round_ties_even() as u16,
             "16-bit PNG alpha at ({x},{y})"
         );
         for channel in 0..3 {
-            assert_eq!(
-                wide[channel],
-                u16::from(narrow[channel]) * 257,
-                "8-bit working RGB expanded to raw 16-bit PNG at ({x},{y}) channel {channel}"
+            assert!(
+                wide[channel].abs_diff(u16::from(narrow[channel]) * 257) <= 128,
+                "16-bit RGB within half an 8-bit code of the 8-bit file at ({x},{y}) channel {channel}"
             );
         }
     }
@@ -827,7 +831,7 @@ fn depth8_png_keeps_translucent_and_overlap_witnesses() {
             &MediaPaths::default(),
         )
         .unwrap();
-    assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba8Unorm);
+    assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba16Float);
     let destination = scratch.path().join("sensitive.png");
     let job = ExportJob {
         document: Arc::clone(&document),
@@ -892,7 +896,15 @@ fn depth8_png_keeps_translucent_and_overlap_witnesses() {
     let wide_input = wide_input.unwrap();
     let wide = wide_input.planes[0].u16().unwrap();
     let half_wide = &wide[((72 * W + 92) * 4) as usize..((72 * W + 92) * 4 + 4) as usize];
-    assert_eq!(half_wide[3], u16::from(half[3]) * 257);
+    // An 8-bit project keeps alpha in half-float working storage: the 16-bit
+    // file carries that stored value, the 8-bit file its rounding.
+    let stored = pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(
+        f32::from(half[3]) / 255.0,
+    ));
+    assert_eq!(
+        half_wide[3],
+        (f64::from(stored) * 65535.0).round_ties_even() as u16
+    );
     for channel in 0..3 {
         assert!(
             half_wide[channel].abs_diff(u16::from(half[channel]) * 257) <= 128,
