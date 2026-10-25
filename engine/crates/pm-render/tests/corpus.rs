@@ -669,7 +669,26 @@ fn prove_nested_own_layers(
         &mut Vec::new(),
         &mut Vec::new(),
     );
-    if proof.painted == 0 {
+    // A project with no shape or solid anywhere (generated layers only)
+    // has no L3 source to prove.
+    let has_l3_source = || {
+        let root = project.document.root().expect("project root");
+        let lists = std::iter::once(root).chain(
+            match node::member(Some(root), "comps").map(pm_model::Node::kind) {
+                Some(pm_model::NodeKind::Object(comps)) => comps.values().collect::<Vec<_>>(),
+                _ => Vec::new(),
+            },
+        );
+        lists
+            .flat_map(|c| node::array(node::member(Some(c), "layers")).unwrap_or(&[]))
+            .any(|l| {
+                matches!(
+                    pm_render::js::member_string(l, "type").as_deref(),
+                    Some("shape" | "solid")
+                )
+            })
+    };
+    if proof.painted == 0 && has_l3_source() {
         proof.failures.push(format!(
             "{} t={}: pending precomp has no painted nested L3 source proof",
             project.name, sample.time
@@ -1437,6 +1456,7 @@ fn corpus_render_parity() {
                             &p.resolver,
                         );
                         let (engine, today) = (unit32(&ours), unit32(&today));
+                        let r = r.resolved(&engine);
                         let report = compare(&engine, &today, &r.rgba, &r.classes());
                         let mut problems = reference_problems(
                             &report,
@@ -1614,10 +1634,26 @@ fn corpus_render_parity() {
                     complete += usize::from(modelled == 1.0);
                     partial += usize::from(modelled > 0.0 && modelled < 1.0);
                     let (engine, today) = (unit8(&ours), unit8(&reference));
-                    let opaque = reference::Reference {
-                        rgba: r.opaque(),
-                        ..r.clone()
-                    };
+                    let opaque = r.opaque_resolved(&engine);
+                    if let Some(dir) = &diffs {
+                        // The reference beside the engine's and today's
+                        // frames; unreferenced pixels in magenta.
+                        std::fs::create_dir_all(dir).unwrap();
+                        let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
+                        let bytes: Vec<u8> = opaque
+                            .rgba
+                            .chunks_exact(4)
+                            .flat_map(|c| {
+                                if c[3].is_nan() {
+                                    [255, 0, 255, 255]
+                                } else {
+                                    let b = |v: f64| (v * 255.0).round() as u8;
+                                    [b(c[0]), b(c[1]), b(c[2]), 255]
+                                }
+                            })
+                            .collect();
+                        write_png(&dir.join(format!("{stem}-reference.png")), w, h, &bytes);
+                    }
                     let report = compare(&engine, &today, &opaque.rgba, &opaque.classes());
                     let problems = reference_problems(
                         &report,

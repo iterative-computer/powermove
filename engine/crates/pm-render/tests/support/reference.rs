@@ -13,7 +13,9 @@
 //! Modelled so far: the composition background (solid, linear and radial
 //! gradients, none), 2D solid layers (world matrix, size anchor, opacity,
 //! blend mode, radius) and 2D shape layers (shapes and editable paths:
-//! fills and strokes) in projects that composite in E.
+//! fills and strokes) in projects that composite in E, with their built-in
+//! effects (`pm_reference::effects`, from the kernel's GLSL; Grain and
+//! Displace excepted).
 //! SVG paths, gradients, normal groups and clips use independent f64 paint
 //! on a 16× grid. Unsupported SVG constructs use separate resvg 32× samples;
 //! their RGBA8 paint quantization remains a reference limitation. Other image
@@ -29,6 +31,7 @@ use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
 use pm_reference::compare::{Class, classify};
 use pm_reference::composite::{Blend, Rgba, blend, scale};
 use pm_reference::coverage::{FillRule, fill};
+use pm_reference::effects::Open;
 use pm_render::AssetResolver;
 use pm_vector::kurbo::{Affine, Point};
 
@@ -103,6 +106,49 @@ fn isolate_layer_list(layers: &mut [pm_model::Value], index: usize) {
     }
 }
 
+/// A proof variant for one layer's effects (L6): only the layer at `index`
+/// draws, at full opacity, normal blend, without motion blur, transitions
+/// or matte, at float depth; with its effects or (`effects` false)
+/// without them. Content, masks and transforms stay authored.
+pub fn isolated_effect_layer(document: &Document, index: usize, effects: bool) -> Document {
+    use pm_model::Value;
+    let mut root = isolated_own_layer(document, index)
+        .to_value()
+        .expect("isolated project");
+    let original = document.to_value().expect("project root");
+    let fx = match &original {
+        Value::Object(fields) => match fields.get("layers") {
+            Some(Value::Array(layers)) => match &layers[index] {
+                Value::Object(layer) => layer.get("fx").cloned(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    let Value::Object(fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    let Some(Value::Array(layers)) = fields.get_mut("layers") else {
+        panic!("open composition layers are not an array");
+    };
+    let Value::Object(layer) = &mut layers[index] else {
+        panic!("layer is not an object");
+    };
+    if effects && let Some(fx) = fx {
+        layer.insert("fx", fx);
+    }
+    layer.insert("mblur", Value::Bool(false));
+    if let Some(Value::Object(properties)) = layer.get_mut("p")
+        && let Some(Value::Object(channel)) = properties.get_mut("opacity")
+    {
+        channel.insert("v", Value::Number(100.0));
+        channel.insert("kf", Value::Array(Vec::new()));
+        channel.insert("expr", Value::Null);
+    }
+    Document::new(Some(root), document.revision())
+}
+
 /// The intrinsic solid source before a 2.5D plane projects it. Content,
 /// opacity, masks and motion channels remain authored. Its 3D placement and
 /// 2D pose are deliberately canonical: those belong to the projection gate.
@@ -154,6 +200,11 @@ pub struct Reference {
     pub rgba: Vec<f64>,
     /// Pixels where modelled content is partially covered.
     pub edge: Vec<bool>,
+    /// Pixels an effect took from fractional texture positions.
+    pub resampled: Vec<bool>,
+    /// Pixels whose value the formula leaves open (a Posterize level at a
+    /// storage boundary, Gradient's hash dither), composited like `rgba`.
+    pub open: Vec<Option<Open>>,
     /// What the frame holds that is not modelled (empty when nothing).
     pub unmodelled: Vec<String>,
     /// An unmodelled layer's footprint could not be bounded: the whole
@@ -162,10 +213,60 @@ pub struct Reference {
 }
 
 impl Reference {
-    /// Pixel classes: edges grown by 2 pixels; interior elsewhere.
+    /// Pixel classes: edges and resampled pixels grown by 2 pixels;
+    /// interior elsewhere.
     pub fn classes(&self) -> Vec<Class> {
-        let none = vec![false; self.edge.len()];
-        classify(&self.edge, &none, self.width, self.height, 2)
+        classify(&self.edge, &self.resampled, self.width, self.height, 2)
+    }
+
+    /// The reference with each open pixel at the value its formula allows
+    /// nearest to `engine` (E-R3: the nearest level of the reference).
+    pub fn resolved(&self, engine: &[f64]) -> Reference {
+        let mut out = self.clone();
+        for (i, open) in self.open.iter().enumerate() {
+            // An unreferenced pixel stays unreferenced.
+            if self.rgba[i * 4 + 3].is_nan() {
+                continue;
+            }
+            if let Some(open) = open {
+                let e = [
+                    engine[i * 4],
+                    engine[i * 4 + 1],
+                    engine[i * 4 + 2],
+                    engine[i * 4 + 3],
+                ];
+                out.rgba[i * 4..][..4].copy_from_slice(&open.nearest(e));
+            }
+        }
+        out
+    }
+
+    /// [`Reference::opaque`] of the frame resolved against an opaque
+    /// engine frame.
+    pub fn opaque_resolved(&self, engine: &[f64]) -> Reference {
+        let mut opaque = Reference {
+            rgba: self.opaque(),
+            ..self.clone()
+        };
+        let over_black = |c: Rgba| -> Rgba {
+            [
+                c[0].clamp(0.0, 1.0),
+                c[1].clamp(0.0, 1.0),
+                c[2].clamp(0.0, 1.0),
+                1.0,
+            ]
+        };
+        opaque.open = self
+            .open
+            .iter()
+            .map(|o| {
+                o.as_ref().map(|o| match o {
+                    Open::Points(p) => Open::Points(p.iter().map(|c| over_black(*c)).collect()),
+                    Open::Range(lo, hi) => Open::Range(over_black(*lo), over_black(*hi)),
+                })
+            })
+            .collect();
+        opaque.resolved(engine)
     }
 
     /// The capture's opaque view: color over black clamped to 0…1, alpha 1.
@@ -287,6 +388,8 @@ pub fn render(
         height: h,
         rgba: vec![0.0; w * h * 4],
         edge: vec![false; w * h],
+        resampled: vec![false; w * h],
+        open: vec![None; w * h],
         unmodelled: Vec::new(),
         whole_frame: false,
     };
@@ -302,6 +405,14 @@ pub fn render(
     ) {
         out.unmodelled.push(why);
         out.rgba.fill(f64::NAN);
+    }
+    for (i, open) in out.open.iter_mut().enumerate() {
+        if out.rgba[i * 4 + 3].is_nan() {
+            *open = None;
+        }
+        // A value the formula leaves open is judged against the reference,
+        // like a resampled one: today's is one value of it.
+        out.resampled[i] |= open.is_some();
     }
     out
 }
@@ -405,6 +516,11 @@ fn draw(
         // What this reference does not model: the layer's footprint, grown
         // by its effects' padding, is unreferenced (and anything drawn over
         // it); the rest of the frame keeps its reference.
+        let chain = if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+            effect_chain(&mut scope, effects, layer, seconds)?
+        } else {
+            Some(Vec::new())
+        };
         let unmodelled = if group || ty == "precomp" {
             Some("groups and precomps")
         } else if !matches!(ty.as_str(), "solid" | "image" | "shape") {
@@ -419,11 +535,12 @@ fn draw(
             .is_some()
         {
             Some("transitions")
-        } else if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+        } else if chain.is_none() {
             Some("effects")
         } else {
             None
         };
+        let chain = chain.unwrap_or_default();
         let world = scope.world_matrix(layer, seconds).map_err(fail)?;
         let offset = scope.size_anchor_offset(layer, seconds).map_err(fail)?;
         let scaled = kurbo::Affine::new([
@@ -473,6 +590,20 @@ fn draw(
                 .any(|reason| reason == "resampled image content")
             {
                 out.unmodelled.push("resampled image content".into());
+            }
+            if !chain.is_empty() {
+                // Its effects reach as far as their padding.
+                footprint(
+                    &mut scope,
+                    effects,
+                    layer,
+                    &ty,
+                    &[seconds],
+                    seconds,
+                    (sx, sy),
+                    out,
+                )?;
+                continue;
             }
             let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
             let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
@@ -527,17 +658,224 @@ fn draw(
                 p.1 |= band[i];
             }
         }
+        // Effects (after masks, before the composite), on the frame-sized
+        // effect buffer the compositor gives a full-frame pass; a blurred
+        // layer's accumulated samples are its input, at the center time
+        // (docs/engine/motion.md).
+        let mut layer_open: Vec<Option<Open>> = vec![None; w * h];
+        if !chain.is_empty() {
+            let applied = apply_effects(&chain, &layer_px, w, h, seconds, color.precision);
+            let Some((image, open, resampled)) = applied else {
+                if !out.unmodelled.iter().any(|u| u == "effects") {
+                    out.unmodelled.push("effects".into());
+                }
+                footprint(
+                    &mut scope,
+                    effects,
+                    layer,
+                    &ty,
+                    &[seconds],
+                    seconds,
+                    (sx, sy),
+                    out,
+                )?;
+                continue;
+            };
+            for (i, p) in layer_px.iter_mut().enumerate() {
+                let was = p.0;
+                p.0 = image.at(i % w, i / w);
+                if resampled && (p.0.iter().any(|v| *v != 0.0) || was.iter().any(|v| *v != 0.0)) {
+                    out.resampled[i] = true;
+                }
+            }
+            layer_open = open;
+        }
         for (i, (px, edge)) in layer_px.iter().enumerate() {
-            if px[3] <= 0.0 && !edge {
+            if px[3] <= 0.0 && !edge && layer_open[i].is_none() && px.iter().all(|v| *v == 0.0) {
                 continue;
             }
             out.edge[i] |= *edge;
-            let at = &mut out.rgba[i * 4..][..4];
-            let dst = [at[0], at[1], at[2], at[3]];
-            at.copy_from_slice(&clamp(blend(mode, scale(*px, opacity), dst)));
+            let dst = [
+                out.rgba[i * 4],
+                out.rgba[i * 4 + 1],
+                out.rgba[i * 4 + 2],
+                out.rgba[i * 4 + 3],
+            ];
+            // Normal is source-over on premultiplied values, which also adds
+            // the light an effect writes at zero alpha (Chroma's fringes);
+            // the W3C form drops it there and is equal everywhere else.
+            let over = |src: Rgba, dst: Rgba| {
+                let src = scale(src, opacity);
+                clamp(if mode == Blend::Normal {
+                    pm_reference::composite::porter_duff(
+                        pm_reference::composite::Operator::SourceOver,
+                        src,
+                        dst,
+                    )
+                } else {
+                    blend(mode, src, dst)
+                })
+            };
+            // An open pixel below stays open; this layer's open values
+            // composite over every value open below.
+            // A range's extremes after compositing lie at its corners:
+            // color and alpha each at either end (source-over is bilinear
+            // in them; the blend modes are monotone per channel).
+            let corners = |lo: &Rgba, hi: &Rgba| -> Vec<Rgba> {
+                [lo, hi]
+                    .iter()
+                    .flat_map(|c| [lo[3], hi[3]].map(|a| [c[0], c[1], c[2], a]))
+                    .collect()
+            };
+            let below: Vec<Rgba> = match &out.open[i] {
+                Some(Open::Points(points)) => points.clone(),
+                Some(Open::Range(lo, hi)) => corners(lo, hi),
+                None => vec![dst],
+            };
+            let mine: Vec<Rgba> = match &layer_open[i] {
+                Some(Open::Points(points)) => points.clone(),
+                Some(Open::Range(lo, hi)) => corners(lo, hi),
+                None => vec![*px],
+            };
+            let ranged = matches!(out.open[i], Some(Open::Range(..)))
+                || matches!(layer_open[i], Some(Open::Range(..)));
+            let values: Vec<Rgba> = mine
+                .iter()
+                .flat_map(|m| below.iter().map(move |b| (*m, *b)))
+                .map(|(m, b)| over(m, b))
+                .collect();
+            out.rgba[i * 4..][..4].copy_from_slice(&over(*px, dst));
+            if values.len() > 1 {
+                out.open[i] = Some(if ranged {
+                    let lo = std::array::from_fn(|k| {
+                        values.iter().map(|v| v[k]).fold(f64::INFINITY, f64::min)
+                    });
+                    let hi = std::array::from_fn(|k| {
+                        values
+                            .iter()
+                            .map(|v| v[k])
+                            .fold(f64::NEG_INFINITY, f64::max)
+                    });
+                    Open::Range(lo, hi)
+                } else {
+                    Open::Points(values)
+                });
+            }
         }
     }
     Ok(())
+}
+
+/// A built-in effect chain: each step's definition and parameters.
+pub type Chain = Vec<(String, Vec<pm_reference::effects::Param>)>;
+
+/// A layer's built-in effect chain as `(definition, parameters)`, when the
+/// reference models every step (`pm_reference::effects::model`) and each is
+/// the kernel's own definition; `None` otherwise.
+pub fn effect_chain<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &pm_render::effects::Effects,
+    layer: &'d Node,
+    seconds: f64,
+) -> Result<Option<Chain>, String> {
+    use pm_reference::effects::Param;
+    use pm_render::effects::plan::Binding;
+    let steps = pm_render::effects::plan::effect_steps(scope, effects, layer, seconds)
+        .map_err(|e| format!("evaluation: {e:?}"))?;
+    let Ok(steps) = steps else {
+        return Ok(None);
+    };
+    let builtins = pm_render::builtin_definitions();
+    let mut chain = Vec::new();
+    for step in steps {
+        let kernel = builtins.definitions.iter().find(|d| {
+            d.id.as_str() == step.definition
+                && d.kind == pm_protocol::definitions::DefinitionKind::Effect
+        });
+        let drawn = effects.get(
+            pm_protocol::definitions::DefinitionKind::Effect,
+            &step.definition,
+        );
+        // A fork or an override by id is a user program: its formula is
+        // its own GLSL, not the built-in's.
+        let builtin = match (kernel, drawn) {
+            (Some(k), Some(d)) => {
+                k.glsl.as_ref().map(|g| &g.source) == d.glsl.as_ref().map(|g| &g.source)
+            }
+            _ => false,
+        };
+        if !builtin || step.clamp || pm_reference::effects::model(&step.definition).is_none() {
+            return Ok(None);
+        }
+        let params = step
+            .params
+            .iter()
+            .map(|p| match p.value {
+                Binding::Float(v) => Param::Float(v),
+                Binding::Color(c) => Param::Color(c),
+            })
+            .collect();
+        chain.push((step.definition, params));
+    }
+    Ok(Some(chain))
+}
+
+/// The chain over a `w × h` effect buffer holding the layer's pixels, as
+/// the full-frame pass runs it: each effect's output stored at the
+/// project's precision (8-bit storage holds 0…1). The image, what is open
+/// at each pixel, and whether any step resampled; `None` when a step
+/// leaves values open that a later step would transform.
+#[allow(clippy::type_complexity)]
+pub fn apply_effects(
+    chain: &Chain,
+    layer: &[(Rgba, bool)],
+    w: usize,
+    h: usize,
+    seconds: f64,
+    precision: Precision,
+) -> Option<(pm_reference::effects::Image, Vec<Option<Open>>, bool)> {
+    use pm_reference::effects::{Frame, Image, run};
+    let mut image = Image {
+        width: w,
+        height: h,
+        rgba: layer.iter().flat_map(|(p, _)| *p).collect(),
+    };
+    // The storage error of a value going into an effect.
+    let storage = match precision {
+        Precision::Unorm8 => 0.5 / 255.0,
+        Precision::Float16 => 1.0 / 2048.0,
+        _ => 1e-7,
+    };
+    let mut open = vec![None; w * h];
+    let mut resampled = false;
+    for (n, (id, params)) in chain.iter().enumerate() {
+        if open.iter().any(Option::is_some) {
+            return None;
+        }
+        let frame = Frame::full(&image, seconds);
+        let out = run(id, params, &image, &frame, storage)?;
+        resampled |= out.resampled;
+        image = out.image;
+        if precision == Precision::Unorm8 {
+            for v in &mut image.rgba {
+                *v = v.clamp(0.0, 1.0);
+            }
+        }
+        open = out.open;
+        if n + 1 == chain.len() && precision == Precision::Unorm8 {
+            for o in open.iter_mut().flatten() {
+                *o = match o {
+                    Open::Points(p) => {
+                        Open::Points(p.iter().map(|c| c.map(|v| v.clamp(0.0, 1.0))).collect())
+                    }
+                    Open::Range(lo, hi) => {
+                        Open::Range(lo.map(|v| v.clamp(0.0, 1.0)), hi.map(|v| v.clamp(0.0, 1.0)))
+                    }
+                };
+            }
+        }
+    }
+    Some((image, open, resampled))
 }
 
 struct SvgSource {

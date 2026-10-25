@@ -18,32 +18,14 @@
     "measurement_sha256": "5618053895ed98f973d03cd1cf558f23e16a0adc0dffcd03388ef897eb9bee5f"
   },
   {
-    "frame": "096df2b314b6820f79d2343fc74d59a809e0a0727235948514f71bfb9d09a998",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 131.00 mean 0.901 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "1882522dfe9bd3c0b6247a59359da588215d4cddf03373950571538dffbbaa44"
-  },
-  {
     "frame": "0bf48b4a0577edb1203f1eecf2b17fef5fa4aabe597b73606cb67039ce23ca40",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 3 pixels over 2 CV; max 4; outside independent mask band 3",
-      "paired isolated text passes 2 CV; measurement af615732027c583faee06063a41174d25b488b6fd9d01ae280c3fc7a05dfac36"
+      "paired isolated text passes 2 CV; measurement 84a3be5eb2a42675c136f814526f445f85057af7bef032e367c63af74c06a629"
     ],
-    "measurement_sha256": "9c3612e51bcfd74abe621c0df17a9af18e83e27e606fe30bdbf0e62281107f1e"
-  },
-  {
-    "frame": "0d5e5cadb5a661e9e95a04163ad9dbbd11679da2351b21dcffe710faedb5fdb7",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 54.00 mean 0.936 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "8d3cc96d2308c39c74a94cf31d7b25b269ae25352c2b1be94a98586c316d509d"
+    "measurement_sha256": "485ec76b30abcc218302bef8b5e7d84c023bed52d7db9c902b786faf0b7b1bb0"
   },
   {
     "frame": "115ce0fff9ad5ffd9df8038ec0d9402313d94cad6517ffd264cac6190d2f2f4f",
@@ -64,22 +46,13 @@
     "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
   },
   {
-    "frame": "12a9198f1e0116cd671986d21c7c16c040f580a0fe9d146fa1c6d1e23411ba81",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 196.00 p99.9 63.00 mean 0.825 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "ee39b091ef72f8bf613581583daf14e783decd1123ccb05da263ea94a687a676"
-  },
-  {
     "frame": "15bb7fa9f64f16e351b9fc970e7d66387844f31b74119ee00b5c6c25ef372242",
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.634 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 120.00 mean 0.637 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "b67bb3d8fe4fc3d4b146e66716161b1afffe1ff2cb8e46ccafa213ef8102bdae"
+    "measurement_sha256": "aab87b28be5bb4371a13f431fb5c0c4939d1dff0e39d49824eb3147ac5d96da2"
   },
   {
     "frame": "1a79248cf368168881ce0c51d91869156754bc4cf9e42e357fe77b997bb6100e",
@@ -92,13 +65,13 @@
   },
   {
     "frame": "1b389b9afb914318805e75c5612c84eaa00c02f0a97aa95af4a60d88d359c79e",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 62 pixels over 2 CV; max 16; outside independent mask band 62",
       "paired isolated text passes 2 CV; measurement 325140dec12e28932cd12f500f8d19446d8c57396b99af5f6501ae10f8a51ba7"
     ],
-    "measurement_sha256": "495ad455f159cfbe000ec4b56720a4c8285b490a0dad263752a406f326761300"
+    "measurement_sha256": "158408b96f0dafe50ee99ae474816bd1c2f02f54645fe40a055dd713379ab624"
   },
   {
     "frame": "1c751024e910742b261844a53f6900fc43d51c55ff1d7df9c9426b3f65335390",
@@ -120,13 +93,13 @@
   },
   {
     "frame": "1ff8be110e98237ee0fd1541bc78b66ff791f31f192abd519eb216292592a300",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 9 pixels over 2 CV; max 6; outside independent mask band 9",
       "paired isolated text passes 2 CV; measurement e43c78ce0edf857721c28edb359f925308ea7b01ba1ff77538092b487d98a345"
     ],
-    "measurement_sha256": "a2c29e00d5b1cf39a707c8f1aff19b614eb4d28afc6449df96c3d3c228c44efc"
+    "measurement_sha256": "765ff508ca01384ef1af4524c4f75c1f6874b9d5d66fbe30c3793566be688c44"
   },
   {
     "frame": "21681b45fb810b68588cee20c604cb336c1a9dc721652e23a32b46dc60468f57",
@@ -140,13 +113,13 @@
   },
   {
     "frame": "219641faaafcb0a8973a48a8c2bf143a3bb5a74dfecd60695be55ce5443820ba",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 28 pixels over 2 CV; max 5; outside independent mask band 28",
-      "paired isolated text passes 2 CV; measurement 641d602ed77e5bee15c3409b00bc316cf662aff258b9061d3475c8ac948bfdc4"
+      "paired isolated text passes 2 CV; measurement e2e9f8ce0912f2770f38b6d5a3fafafa24e0dd6d740b618321d2be2e9ce1dd28"
     ],
-    "measurement_sha256": "88de30379aba58151e5d5c858f1620649edc75afd9a15a05588a0bee782a2507"
+    "measurement_sha256": "3a7355367eda6e9237a64ddef284e7fe54ad8a5a8d951ce2505f7a29b2812f3a"
   },
   {
     "frame": "224dccf3610bb75701fd36927ccd2088f25533be894543641eaa2804f0873a55",
@@ -156,15 +129,6 @@
       "unreferenced: max 132.00 p99.9 39.00 mean 0.365 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "53836e0f73ab713428cf2b0e4e45bc798c92f128eed25af15c9646e1d69479a7"
-  },
-  {
-    "frame": "26c251e640ec7b4d030d2d7a58317c2d6fcfd7704f9d77f400af0359b02aeb36",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 152.00 p99.9 73.00 mean 1.175 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "6091be716e3f4df6e910aa568a37bba105f5e418b3e8653cac4d7a1fe11fb780"
   },
   {
     "frame": "28b9736a8cf59efdc8099de56f7fd1d0ca6edaf2cd33dd2408fe0cb807c22bb9",
@@ -191,16 +155,7 @@
     "checks": [
       "unreferenced: max 189.00 p99.9 0.00 mean 0.027 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "186d27b45badc6e868ba73bd69f19069b343ff9d1e8efd0b846b6f35db494ee8"
-  },
-  {
-    "frame": "3052c294069cb5d3977461e9eb03c48da606abe85f56e5a6e02e3dca74edb1a7",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 196.00 p99.9 75.00 mean 0.448 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "2ce13fe6764c726529db88e5c47f3334ccb0b3572b1134ea3b061836bc713d6a"
+    "measurement_sha256": "9a946b26d6aea459cfefe77f81ceca7ca14b152d08a1b57d1d97373cb131c88e"
   },
   {
     "frame": "306737551ea496cf24cb0cfe0e033d00566a302bb9a5529db27b67f7ca2baaf7",
@@ -210,15 +165,6 @@
       "unreferenced: max 69.00 p99.9 19.00 mean 0.108 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "7154f4792ad1333697ee2ecb79e21a7c416ed8b689a78deb7aceb83d13dbde89"
-  },
-  {
-    "frame": "32b0a53b73e50cf7bea97feb31c82560e2f65cd8bad950c50539296a1eee2d4b",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 127.00 mean 0.770 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "f9589445f3fd44e6db8ae239344eb83dacc3d9d21e83a982f7a3817a692300e1"
   },
   {
     "frame": "33863765cc7002b812b0d0390ce34c105f8a690ccc0d29001f2fc87912cd9b94",
@@ -240,13 +186,13 @@
   },
   {
     "frame": "3c9795748e607f4b615f923e0ae9f73258612dd85a863fc58a7b166cb6754a64",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
-      "text: 51 pixels over 2 CV; max 23; outside independent mask band 51",
-      "paired isolated text passes 2 CV; measurement 797b5446be0bb7aee8c4f83c9d1788354130b048bc9e094277996534cfc481a8"
+      "text: 50 pixels over 2 CV; max 23; outside independent mask band 50",
+      "paired isolated text passes 2 CV; measurement d9e73abc8d7a95244c78ba4f658d1155e59d94ad065a0121200df1b4985b7979"
     ],
-    "measurement_sha256": "bd3f93afd660d9ee048914db56d56048d93a7e89c97c492aa610c94f89e5d3f1"
+    "measurement_sha256": "3d5c11fbccc3cdfc246202b0b9d7e33d2a0d7b0f4ffdb39a2b9dde59225abce0"
   },
   {
     "frame": "411b7b79f08f7dd7ab65a2386e015807f3167782cbcd03d7772ae67c2d30ca26",
@@ -256,15 +202,6 @@
       "unreferenced: max 132.00 p99.9 38.00 mean 0.352 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "09a63dc77144bea75dbc6c0ea8da6a99494b82101ab17b873ca8fae0f3d13576"
-  },
-  {
-    "frame": "4168fe4db73f79e7b1b40be962383d0821aa037c390f64942ae2f1733cda6bbd",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 213.00 p99.9 99.00 mean 0.738 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "f1557fd4b725c38911a3058a3ff3da0630e02393be7262afc58fa30a4ba752f2"
   },
   {
     "frame": "4289d3f3bb92b275fd4fc95c2c8c5ee026caef5dcb017243e27975279d64716e",
@@ -286,13 +223,13 @@
   },
   {
     "frame": "448037d513557c971b4ff18a22f04e3678686e0852cfd730ecbd2886c87921bb",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
-      "text: 25 pixels over 2 CV; max 25; outside independent mask band 25",
-      "paired isolated text passes 2 CV; measurement 1e89e75778afbab48215ef4b3a0c9b059ca2bfc2dc367ff9b212aecbb440f0b9"
+      "text: 29 pixels over 2 CV; max 25; outside independent mask band 29",
+      "paired isolated text passes 2 CV; measurement 97683310730e46cecbea583250340f9b29489e7e022cf1519f311fd8dfadf547"
     ],
-    "measurement_sha256": "b33fbd69623f2d32ef76581d0143951acf3bfd14fb8fb70cf874b5c55fceeb35"
+    "measurement_sha256": "1b0093729d31e2397ac5fb95183d172dd1d17c9c8417aabffc3e511e5e4a2cc3"
   },
   {
     "frame": "456bf434e8fc9fe2a3a22db307fcb789a88393c5ce8dcf7ba416d0f3466f1493",
@@ -327,56 +264,29 @@
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.656 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 120.00 mean 0.657 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "b88dc6b4c8a94b0f2010d166222477dbfcc8392ac3795702ad3b5bb9149071f3"
+    "measurement_sha256": "c485e37c1c36d4f8933b63e22c72bf41d90ef6b088cc8bec09be7468db6c85b0"
   },
   {
     "frame": "5031e8e41740995213665b7adb53aa5a0f7cedc39355cd6aae0e9cf6d995c0a3",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
-      "text: 13 pixels over 2 CV; max 4; outside independent mask band 13",
-      "paired isolated text passes 2 CV; measurement 80dfe2986ca51e8731c70e4045894310d2a2094cfc6bc1b65cc3175f74e457b0"
+      "text: 12 pixels over 2 CV; max 4; outside independent mask band 12",
+      "paired isolated text passes 2 CV; measurement 4718a2cc0f6047f10034b4ea02bee1a66f15e86597bb54b50ca1a4a4ee0d387e"
     ],
-    "measurement_sha256": "2738bba08e58c0787cfde56948e76e1b5dffb248c87e834cffcddc58595156d9"
+    "measurement_sha256": "5ae10670a06db0222e368a52a65f8b5e25b75df4539b44353427696d64738514"
   },
   {
     "frame": "51b17a8ec551192411c12e0c04c1183ca27d45480fbb67eaf54436bbe1cf2e55",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
-      "text: 240 pixels over 2 CV; max 46; outside independent mask band 240",
-      "paired isolated text passes 2 CV; measurement ee14d3ca566ecc9ef8f909d7949e81648262ac3c8a0ebb9b7a3bb16966ec5b72"
+      "text: 237 pixels over 2 CV; max 46; outside independent mask band 237",
+      "paired isolated text passes 2 CV; measurement 596961c6d68652a329d83b7a8528bd9f039c3a5694805738db1e937de71b2550"
     ],
-    "measurement_sha256": "dbb5e0d18aa3b630ff8ed65e7491b35e7612ec81f72c6c23eba65a325c1389bf"
-  },
-  {
-    "frame": "539d68e580ca91fc7c9b297d7550253e33b019da5be3b41a024f24401a48e344",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 132.00 mean 0.917 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "b8fe07439f0e82258a443162d4423c832c87a6c1cd116cb0ad60cd8e62c2aa1e"
-  },
-  {
-    "frame": "54513bc858d0ae3033c2da44fcd18c341d0e58fc877372b95bca402bb9f459d2",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 198.00 p99.9 84.00 mean 1.508 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "07817b2a25afec7bd2690ead1b1b2c581c0a39142b4d47b7168bc3dbf4ab7ef9"
-  },
-  {
-    "frame": "5591c633bc4740968736083a880ab82ccd35316adfd9e6befe57b4dfb50236e6",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 44.00 mean 0.701 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "30dab230607e6fb1430dcf2691e6e6d6194d43f3300b8e1ae588c4075012189d"
+    "measurement_sha256": "76985c86d43338cdf014bab217dce69ea9dbf3c74fc5886b96a8c5a03ae047d2"
   },
   {
     "frame": "56cd3dcc5a44f466b28d6e5c9168804b81bb3d54bc8c396e5cae335bf76d42fa",
@@ -409,13 +319,13 @@
   },
   {
     "frame": "599c62e9cde684207a3592c8a770715304c84cb8d57d98fa2ae4abfe8230886d",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 8 pixels over 2 CV; max 27; outside independent mask band 8",
-      "paired isolated text passes 2 CV; measurement ae616536cbdfb7e3f282472c82916a83b1595abc06a2ce03dcb3406f7b7e4aad"
+      "paired isolated text passes 2 CV; measurement 692be84f858738e6b70b1d020bf2a45f4b1c6a565e5d8aba842f5cc577c86457"
     ],
-    "measurement_sha256": "c0c6bada4752844813cd81288c496f977db74c33a6165498b975a7a97c92719c"
+    "measurement_sha256": "5782d8288bcfb000fb7938f251aa43531728d2370c89c2226188f3a7f793deb4"
   },
   {
     "frame": "5db10fbc1aa1a0d60be5664d733b6648f45bc9e71c50c7beab2072e99bffe61a",
@@ -428,13 +338,13 @@
   },
   {
     "frame": "6257dff1cee55ba1bcf30138c70c6f4f056b744ce8de1038d4782dd01084289d",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 19 pixels over 2 CV; max 3; outside independent mask band 19",
-      "paired isolated text passes 2 CV; measurement 4beb1441a8711a54a04b6e8ec68c3ff00b948e41dad30948ddc6927ea1185523"
+      "paired isolated text passes 2 CV; measurement 25f17a95eb73eee8dc37bf0e58cb1dc7d18b9ee248b72fefc29e65ca008e4975"
     ],
-    "measurement_sha256": "cb198a59c696b73c85842b7fcf14ceb8719bc109f57f3de6722bacfeefb66c12"
+    "measurement_sha256": "af6a0c0cd1cca7df05b99495bf2bc95520800af58a72e2cf0c8a97d519d50d10"
   },
   {
     "frame": "639370fd1e958887069f1e994690c913b85423fec66090fd3c289839004fa5d9",
@@ -444,7 +354,7 @@
       "text: 146 pixels over 2 CV; max 51; outside independent mask band 111",
       "paired isolated text passes 2 CV; measurement 2946a07ed03c382a026ff5265370407ca32a4ea56dfb086ed2508d68146858e4"
     ],
-    "measurement_sha256": "ce36d923a445a650614c4fdc7cb2effec5c6136c3c50418a5a4769d61f6a31b7"
+    "measurement_sha256": "3cf0d4597e0d981db9f609fd35a50d74fbc6f0e69d929e0425cebb898101c9d6"
   },
   {
     "frame": "63b97c1cd2c3c9aeead67d233347f4737a346404de3fbc12cc16906dfa4174c1",
@@ -474,15 +384,6 @@
     "measurement_sha256": "5fd2270d3d904928b89e78f1ec4e7b285ab5f16322e01b94bc03ab38c6d57f66"
   },
   {
-    "frame": "668505fa31f8dbf72b4c57ebd8f0edf814190727f8da39aca70469e588960f04",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 45.00 mean 0.699 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "aac7bf501417dec7cb9ab9766bf924ce53baed95a14923f6d958bc44c7ba4cab"
-  },
-  {
     "frame": "66aec1af12e9cc395525769f3155ffb360f98c712fc3acc1b00a5af8b75e1b3a",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -505,18 +406,9 @@
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.454 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 120.00 mean 0.458 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "7821e4170860ec79e20e74dd16246df222e6de9e4638a2a4844b5af232af26ca"
-  },
-  {
-    "frame": "689e86ca39ae4789ab83f97ef2259267e9325a1c07efced293cdef8561df37e4",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 32.00 mean 0.411 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "3a15f74151745cae9b139ec4c73404d0b4a2c0270b3092e7e38166997c7648c1"
+    "measurement_sha256": "43f53ee9191ca2b343977c8dd1e892d5985dc4254c8331513a2d8d2e04344b1c"
   },
   {
     "frame": "6d4ae6a3a4ca3ddd1931face33115fbf884dd0d08d267a89d00013cf8f6f516f",
@@ -532,64 +424,28 @@
     "owner": "L4",
     "reason": "other layer types",
     "checks": [
-      "unreferenced: max 226.00 p99.9 121.00 mean 0.589 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 121.00 mean 0.596 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "0df9324e5d9e8c7bcb8844224f44e9ff0f8c45f07ad57222b1e0c8a46260ab08"
+    "measurement_sha256": "6d150521a895d8fbb016e2e23ac58e57adf34a33e5361bd601a22df1404c3901"
   },
   {
     "frame": "6d8052707ce32a88f1e8cb325617f85af38e7f0e13bc02de834b40b70cc35dad",
     "owner": "L4",
     "reason": "text composition with passing authored-isolation projection; transitions",
     "checks": [
-      "text: 5799 pixels over 2 CV; max 140; outside independent mask band 5799",
-      "paired isolated text passes 2 CV; measurement 552badcb0e7343361784f727eb68f08733eb28fa7be1f374765e5bc146ead05b"
+      "text: 5789 pixels over 2 CV; max 140; outside independent mask band 5789",
+      "paired isolated text passes 2 CV; measurement d6cc115b2fbcdb556a7c0daab91c78d41a2a0e9508c11cb1475acedd89e62484"
     ],
-    "measurement_sha256": "8f2a8631a5ea39fd0ac902bf2dab6d975b59d8f8cf0959ea006b39f61804eaf6"
-  },
-  {
-    "frame": "6e4e48fd3b65d6d68efe2a9da514201160b914b570f874130269f9755861a568",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 64.00 mean 1.044 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "07f7962727e22b2c38577b3e33f4df4a7a058358787868847c9c1568b6764aa7"
-  },
-  {
-    "frame": "6f735441c0440cff70119ed882e0f2c19436a5722eb11627934ee31c2dbf9950",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 48.00 mean 0.887 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "73c65b7f8a868cb87fbf463b7c39f6a371099136cefe6f079de59712b5af4470"
+    "measurement_sha256": "2aedea55714f02eab7d5cb414f2564aec8b8e9c29fd04b8d48fa0f92a93bc548"
   },
   {
     "frame": "6fcb23d1ac0b2d4d67bc22cf0ff9b8f0df06b56847862b1a5a12a3418bb703f8",
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 224.00 p99.9 119.00 mean 0.500 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 224.00 p99.9 119.00 mean 0.515 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "422ebecfff7599eee5d01781cbdbb9bdf6580c8d1e878b5e01d837ee53654d0e"
-  },
-  {
-    "frame": "700535b05b59a25b289eb2460bc7de8b23cc6f67064b98e04771239a1b99e89e",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 196.00 p99.9 67.00 mean 0.278 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "3d88051d92380c769922660d57f0f8e34c85601fb1706858e6e7bb270d10de2a"
-  },
-  {
-    "frame": "700c549a387bc5539cdb80077e06a76928cb229842fd1c3900dff8f0a92ed183",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 85.00 mean 1.022 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "fba237851113007f8ebb05994146f7b5e03246cd6a92f780e7adfee44dc183dc"
+    "measurement_sha256": "74406b5f83592e1fc71d08a5b5b19cd760ed7accbb268c52119df990fb2914a1"
   },
   {
     "frame": "70e0d8807abbb29640a46a6f417caff6c62db428518507b27f105279272cc314",
@@ -626,7 +482,7 @@
       "text: 32 pixels over 2 CV; max 30; outside independent mask band 32",
       "paired isolated text passes 2 CV; measurement 5987a19e751032fdddecae883a9adceae1e9b519226a512cea10ba7b70bc9972"
     ],
-    "measurement_sha256": "38d3a7494478b007febb03b053dd9df24c0066904f0e53b54455be6fe469aa7a"
+    "measurement_sha256": "9e0c7adf3cc54c9419130a3eba55811552fe42bd91c3a70bed7d206009f6b87b"
   },
   {
     "frame": "77365e5fad1b21d5f258a7c761fdfcfec133b5ec171c969ae9dece81c6fd74e7",
@@ -636,7 +492,7 @@
       "text: 32 pixels over 2 CV; max 29; outside independent mask band 32",
       "paired isolated text passes 2 CV; measurement 6f966bcc9e43c7c450b895b7b2742352cdd15759ecff34493aff7006485455a7"
     ],
-    "measurement_sha256": "6eaf951fb7284e912c7214d59e6b32ac51c2916831e05008bbf39cfd93d3f243"
+    "measurement_sha256": "38f1fdf0c794fa92737b437ea07fd4b1e16fd5afa1f7213e783fadff59d38a4e"
   },
   {
     "frame": "7907f346f6ab2f8a2c3f52112b2d47a7233ceafb86a318b0af551edb47b147b2",
@@ -664,34 +520,7 @@
       "text: 22 pixels over 2 CV; max 29; outside independent mask band 22",
       "paired isolated text passes 2 CV; measurement 0f77d3182675cdab33c7ee873bf9fd836c66b94c3bb72e91a5d8d352d27da67d"
     ],
-    "measurement_sha256": "b581bab6a0c82c986d7dd17f48b748c34a54b4eb478fe379008bfac1b78f2386"
-  },
-  {
-    "frame": "79fd0264793aa6275aa3874f7e6a3b90c368c0e2a0c6acdc46c29f81c22b487e",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 196.00 p99.9 80.00 mean 0.604 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "eed2d58e9ec4b0bc8a6d6c1d7876f439bc610c6fd2e483af2ad00692c5f3026f"
-  },
-  {
-    "frame": "7ac7fe8e9ad05626d8d9e87eab241563e159bcd5411a9fcdd54a7d694cf339cb",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 45.00 mean 0.737 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "dd28663a9a56970ce2ae3ff6ce76e344908e65cea30744bda348c9f885b1a827"
-  },
-  {
-    "frame": "7ad83d39a984279736e65ad2c1ca7464af2fc17025ca3aef2f67fd31bbfdcc23",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 135.00 p99.9 54.00 mean 0.806 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "ecc32396cb2fad8cab475805594e5b4633a0667a82bc80ebf069df65dc504250"
+    "measurement_sha256": "8001e8db6552cd460f10ccc6851164aaaa6bfaeb09d194655cf1b0e33e4d01ae"
   },
   {
     "frame": "7f2e59b8e4aaa0079156d61c0569b2efdb71bfbcc5de54fcfce92307f32599d2",
@@ -707,9 +536,9 @@
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.577 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 120.00 mean 0.581 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "69040d7ccb22a0642acbcd7f312045b14ad0dfb37191b83a0af16c3503bbe421"
+    "measurement_sha256": "ad5d0d57e418b714cb2b540c836595bfb4bd925e88439c5ea743a0b5604be10a"
   },
   {
     "frame": "7f3f6c94d551ea3014cb494b8b6e4b898b99c59492d53cfc2db6962a94493d21",
@@ -721,88 +550,24 @@
     "measurement_sha256": "81774b694d418efa23956981a5d7e6ef3fe0ddea01586beabc9e4a7cff273a14"
   },
   {
-    "frame": "8142683c428971f05eaa1c3845e2ecd02979d6e38617dad25d7abf55588f9cd9",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 131.00 mean 0.854 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "84ea19667faad631a546974c7cc6ca3df60d3418c5a4d27c133758d9ccd92ac0"
-  },
-  {
     "frame": "82526c92e7912ddadfff004f5e045baa59729e55fc671f444dac68ed5f0af0c3",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 8 pixels over 2 CV; max 85; outside independent mask band 8",
       "paired isolated text passes 2 CV; measurement 325140dec12e28932cd12f500f8d19446d8c57396b99af5f6501ae10f8a51ba7"
     ],
-    "measurement_sha256": "a22f26911bb1091979eb6bb769d82d9165e6bc7a2fc4c214f6f1139896c3cfce"
-  },
-  {
-    "frame": "828977ec3b7cd3caef8ac6349ae17112c4d487d6a14eec2e453fa1b28cdef249",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 64.00 mean 1.200 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "fe6df6bac32465a60b6dc9bda11220e81f6e52fc2fd80e62c9b8601e97980226"
-  },
-  {
-    "frame": "8476b85f9328f7dea23ef8c177fb493d17a8fc00e8505a5009c6cb54eab362c1",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 29.00 mean 0.122 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "b824f508ff183adc2f36dc41f78c48ef4977bea9c2a16b533c938e64a36ff43b"
-  },
-  {
-    "frame": "86130dd1ee73fb8aee601301355274b93aa25abef0db643ceae4d64da059fbcd",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 44.00 mean 0.761 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "fb00ae0cc9b790e6b67f8bd64445b2ac860fc003504ab913e07d83bc02b52392"
-  },
-  {
-    "frame": "862c360300ef4819c3ed5d39062a4b05e7cd793b596e1c5425451c2c0f346ce9",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
-    "checks": [
-      "text: 1 pixels over 2 CV; max 3; outside independent mask band 1",
-      "paired isolated text passes 2 CV; measurement 0c478976ed2da8a6ff5c35b4a0ea71e0829f948cbb82f028595653f5a5ca5d4e"
-    ],
-    "measurement_sha256": "feb6c0e7f1aced8ea84c0e600366e695b40543ee04ac8c2611f1df551e06c9a5"
-  },
-  {
-    "frame": "86f5cc5ad92af9cf3181b3f8660528a9f992233fa42b5cadf1e65519fd859dda",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 39.00 mean 0.566 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "3995c59db9df101b23783d214ec0ec63365578dd91cfefcc468b7b0b4aa7e4aa"
+    "measurement_sha256": "ad98254728c7a13f484aac638942b2061cff43847b2eef63fa8b31b89e249413"
   },
   {
     "frame": "880b09085b38dff1ac5e8246fc5f16fc5909ff74de1fc1418f5c3f9e2dc5236f",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 5 pixels over 2 CV; max 12; outside independent mask band 5",
-      "paired isolated text passes 2 CV; measurement 94d3dfa8242abc98edd4a9c51b19510b629d9eb4246be6824249bddd6ec37451"
+      "paired isolated text passes 2 CV; measurement bbad9082ed1a5e13626e29ff1ff7f4268785dc668d3bde3c1292f7ae7835ec63"
     ],
-    "measurement_sha256": "939963bd6ccb0394d7ed83c18464a3a1bbdae418cff685508a95646828de9a65"
-  },
-  {
-    "frame": "889a4bdec21f90b10b7c4b97bc746a770a04058c09f01b2821757323a68164fb",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 135.00 p99.9 51.00 mean 0.581 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "a05903e867682306c39b0a0b2930f847d41efd67e1746e9f6d604b393eab4f2d"
+    "measurement_sha256": "b9b76c70d466593304471a7945af48405d77cea0bc8cd1b299d5be1858d53a47"
   },
   {
     "frame": "892b56df7888e4f0c351bfc327f157d89018bd6ee34f70acb4f3407a336e9956",
@@ -821,16 +586,16 @@
       "text: 136 pixels over 2 CV; max 51; outside independent mask band 136",
       "paired isolated text passes 2 CV; measurement 2946a07ed03c382a026ff5265370407ca32a4ea56dfb086ed2508d68146858e4"
     ],
-    "measurement_sha256": "ed51324cf0b120f058f6ed89df3f9d712f4ef91fbca6537082e6de312c826140"
+    "measurement_sha256": "6645ebb04de9a74962bb0dae31b259b31620e456017af2bbd8029a242d9963de"
   },
   {
     "frame": "8abe9ac7d683eb26d6b788bed4abb3510a5ba40a10e04f5ef9517437f9a0c1a5",
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 225.00 p99.9 119.00 mean 0.667 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 225.00 p99.9 119.00 mean 0.686 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "fef47c27e3cd6e74caf8a441be7cc05deb7b7b5d6ac52f14f8d61ce0ec9011ac"
+    "measurement_sha256": "9418d258c43e37375550d5f42d687ae4c9dcdc8fdbf244b5cb9cf7af62167cdf"
   },
   {
     "frame": "8b0e6b6495b7e2696fc24b6d476354baf41bec1d7688c31ca4d1ea2eb839d4bf",
@@ -843,15 +608,6 @@
     "measurement_sha256": "b86ca0fbec026ab3c1e279861f364565916f75c5146ec8176f5e7f1b41450f50"
   },
   {
-    "frame": "8fbc7bebae29a5eb58d2ee27cc227094cc4f7533f82a79e0574b3f397791ba89",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 31.00 mean 0.413 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "634533a287b952c65857d394fb74d1e8622b072914a2a65fa90a729b657f7cf0"
-  },
-  {
     "frame": "945f8c01f904e2b42c13a4e3b7ea400f2a2eb5bdc697965b86b8fcaacd95433d",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -862,23 +618,23 @@
   },
   {
     "frame": "96cc394378e4c9d6e6b4f7b3e752e685c75c0c42a73764a48e1dc785eeaa9148",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 13 pixels over 2 CV; max 3; outside independent mask band 13",
-      "paired isolated text passes 2 CV; measurement af615732027c583faee06063a41174d25b488b6fd9d01ae280c3fc7a05dfac36"
+      "paired isolated text passes 2 CV; measurement 84a3be5eb2a42675c136f814526f445f85057af7bef032e367c63af74c06a629"
     ],
-    "measurement_sha256": "b94146248efe4944daefcd90575b3457061aa17f78a195631df4d2e3b0856653"
+    "measurement_sha256": "36e4df63f12557381c5e6fc34c74329e97de6974fc40546d2911411554ecb87e"
   },
   {
     "frame": "98dec082aa0d0d9a74f763395593b8cb4060e79099fcb20f3bb2b409a94f4d00",
     "owner": "L4",
     "reason": "text composition with passing authored-isolation projection; transitions",
     "checks": [
-      "text: 4698 pixels over 2 CV; max 97; outside independent mask band 4698",
-      "paired isolated text passes 2 CV; measurement cc744477cd3a99aec2d38b4d279d4fee8a9400ac6621bab113aac33d7d31a97c"
+      "text: 4691 pixels over 2 CV; max 97; outside independent mask band 4691",
+      "paired isolated text passes 2 CV; measurement fdc3122248333cae2634f589c3057dd8da49cb40a989425eab8929fc52248807"
     ],
-    "measurement_sha256": "54ab7dbba8cdd88c6b89c7f10448831854ace9f596a15ce0dc3a3ee14dc9127f"
+    "measurement_sha256": "82654db5175d05b7cd2b046d9b5b71f67704508d3e65d8219ea4720eaf481703"
   },
   {
     "frame": "992dad4d512bcf5865511cfc2031440da2cbe24124f81d7fb45fd20eedda6a1a",
@@ -890,15 +646,6 @@
     "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
   },
   {
-    "frame": "9ba3093e4b620b9ceb954afb524745d81c283de02d3c89b29f045086bb37e838",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 196.00 p99.9 84.00 mean 0.713 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "4aa5f7cc27525cd0a3974b802328c2ec363ba7aae0b9b14cf3088f061952cfdc"
-  },
-  {
     "frame": "9e437c939142b88621274891559773822c1b074fe0daef6fdd2adbe534ff92cf",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -906,15 +653,6 @@
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "a1e49a94e475201e1ffef6a0c6da33bf5f27b8db5fd720a8e60226b55c03c9ab",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 44.00 mean 0.700 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "143678b38cfbd230f15e795c6cfbc0aacab494e9d106bc376e99d9f1812c8dfe"
   },
   {
     "frame": "a42b3d5c0926020ea0fb0a421c14f7b93c95857830e3c29b62fcdfca66b6da9c",
@@ -945,15 +683,6 @@
     "measurement_sha256": "7d26eca31511be622eebab69de541621de843e6533f4e9863d267934912fe37c"
   },
   {
-    "frame": "a4c3f976185fe66c0ef1cf3d0885e4819a3369aecc60691d3b05e84feb0a6c3d",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 31.00 mean 0.414 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "59a2fda221663d931a9c20a5a51a5bb992d3c6cb43edb8133875e24cd6793c2c"
-  },
-  {
     "frame": "a7cb6310198de2ce6ea38e1e0d662db6eb50e3d981ccba3790c485b6c956ed07",
     "owner": "L4",
     "reason": "text composition with passing authored-isolation projection; transitions",
@@ -968,19 +697,19 @@
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.438 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 120.00 mean 0.444 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "06e19f048c79d90adbb7fdf4d1df94fc46e0ce0c80f5fa418cf19a861f0b7ad2"
+    "measurement_sha256": "e18bbd2dfd2b26465a53c202b370a157551385d260d04597a2bcea15d90ecfb8"
   },
   {
     "frame": "aa10e779a07e90ce3fa4d80a18eafbdca83be65cbd368491141eac902ab77eec",
     "owner": "L4",
     "reason": "text composition with passing authored-isolation projection; transitions",
     "checks": [
-      "text: 3418 pixels over 2 CV; max 140; outside independent mask band 3418",
-      "paired isolated text passes 2 CV; measurement d92566aab1616d3d201d9966a5ef1136494bbeae48e406cee7d0556bf0475a6e"
+      "text: 3423 pixels over 2 CV; max 140; outside independent mask band 3423",
+      "paired isolated text passes 2 CV; measurement 261556e85c413ce1c01a711d0def4356e2a27af3933ec918f35b9339e6b38b44"
     ],
-    "measurement_sha256": "f24e5c490bc26ef6b801601514bf8c50156e5330ee827ffce4156ef660d2380f"
+    "measurement_sha256": "439626314d95e58d3a30b3916ddf56b5471ca15a852e1988dff07e31a76663ee"
   },
   {
     "frame": "aa4557f0a2028a1696107aaf23074ce56f7b605aab9b94ea9326f140b37d9b89",
@@ -1001,33 +730,6 @@
     "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
   },
   {
-    "frame": "b0ffdcf3fe7d0bfa4a132d50fa1b277b2d360b8d292b7c75384d56347a1afdf4",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 44.00 mean 0.725 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "c6ae9d3616c4c8830f03d4ca52ba1a8d1bc17003147f97bc940839d4fed07ef6"
-  },
-  {
-    "frame": "b20340b1fc61c11418f314682770e747b458885cb55c5c770ca5ab2da3ae9d77",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 64.00 mean 0.996 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "5f813b7aec729c00154d5542044265b5eed0c860edb67fbb45767a4477d3aab7"
-  },
-  {
-    "frame": "b23f6ad38feb48d46fefb1e0c24d8f64c2378ea496ce908202acc755c8582dc0",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 53.00 mean 0.933 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "8bcb67b25a045468b705fbe79010b4af25cbb3cb47e1d627aedfed77b33feba9"
-  },
-  {
     "frame": "b4fca968507c9d85237ba8e88241c33c7b0c56599297a62b9745520a1d4797dd",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -1046,24 +748,6 @@
     "measurement_sha256": "b60973f64204651da4bb3c852551ddf7bac52953676ec46a768353a70e9c0d8f"
   },
   {
-    "frame": "b79593610b334d7869551d016a1e98e2568f8bc2413e01d1986745764e46c266",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 45.00 mean 0.699 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "2ca41e3c54a6a8d154f7cfc1562c0495020c784b84f3bdbea5511dc02d8ed164"
-  },
-  {
-    "frame": "ba871a6779d0909cd9b44bede5455c0a1ebed278e49d9a41d376e82e840c2043",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 146.00 p99.9 60.00 mean 0.438 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "02929046e1a826e985ab6dfa1d7bc26deef08628171312f0ddb13f58b44cb33f"
-  },
-  {
     "frame": "bac225d5ebc62d1237c94422cd9b1fd31bde65fd9e7ae79bf6ef1de53ffff9c1",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -1080,25 +764,7 @@
       "text: 32 pixels over 2 CV; max 29; outside independent mask band 32",
       "paired isolated text passes 2 CV; measurement e0463dfebf3bf297a9ea9046bf25ff6b12e3b2669729d680d18b149f0ba55cf9"
     ],
-    "measurement_sha256": "54a76cc8ef7ed525330c9dbd65bf39a34619952229de54e6984adc17d9252466"
-  },
-  {
-    "frame": "bc69f3597d5ddb6f4e8d4c8623f857f2a34ec89ef98cd30b7cbaa31f9bdb69dc",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 132.00 mean 0.933 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "0224c92671a4a028918081c0f137f567c065bca4a47ac983b193bbcd584d37e7"
-  },
-  {
-    "frame": "bc845911df68f4f99a33e26d96cd85f219a47132eb3cf423a5e238bb8eef6b94",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 37.00 mean 0.438 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "897d5ccc310f9e4ef2a42352723aa6988cf2a0422eecb74de974791647610971"
+    "measurement_sha256": "7f2736d7c4916fa7f69bd953b24dbca521eb352085483958e46c6769992341e6"
   },
   {
     "frame": "be866f9d8870d695bc3717e6584aaea0942e0265a2da513d64b1201583e5a2d0",
@@ -1108,15 +774,6 @@
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "c1177098e7a67068b1011ac4f9b0a8cdc9bdf100a87629306829db2270619f48",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 39.00 mean 0.566 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "3995c59db9df101b23783d214ec0ec63365578dd91cfefcc468b7b0b4aa7e4aa"
   },
   {
     "frame": "c180b8c8f1fd1c3aef2819d80b8a601aa92fc16fffcce95ac9c104367af9a623",
@@ -1144,26 +801,17 @@
       "text: 31 pixels over 2 CV; max 30; outside independent mask band 31",
       "paired isolated text passes 2 CV; measurement 5987a19e751032fdddecae883a9adceae1e9b519226a512cea10ba7b70bc9972"
     ],
-    "measurement_sha256": "584bb04869cc407dea15ccd13ffe76ff7638e618e07fd349d774cd7a4a0e33a4"
+    "measurement_sha256": "c957ea189b27bd4883b3bdecb8f12d9a4daef09611b9a9cde8021671a0af3a5c"
   },
   {
     "frame": "c8927962e07aabeac60dd3ec5b1968477c66b268368039c1cbf961a771d9a5cc",
-    "owner": "L6",
-    "reason": "text composition with passing authored-isolation projection; effects",
+    "owner": "L4",
+    "reason": "text composition with passing authored-isolation projection; ",
     "checks": [
       "text: 3 pixels over 2 CV; max 3; outside independent mask band 3",
-      "paired isolated text passes 2 CV; measurement 8d804a1cacf7240edfbcec4d33c8a75d98bd9d4cd6f74806658136c48dba5d30"
+      "paired isolated text passes 2 CV; measurement 9c6562f1bdc2a0e8ee0a5af39c332cfe698d578264e67d899d022c2ac7a8fc95"
     ],
-    "measurement_sha256": "9ee9ac50d88b76ac4378c74d9b8d8572c0d5ba8a8e4281ed6247997b8d0015ca"
-  },
-  {
-    "frame": "ca1dc429885d81498ec1cd846edf15d49b1da86ce545d373474a2ab791d9dc47",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 44.00 mean 0.701 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "b4bb4d6aebd57bb859595ef5a3d29ab31bab3007daa205c5ce5e0dd72f531c20"
+    "measurement_sha256": "7431b8a473b44c007129eeec3d5345e9d392a6e5b1c11e94410f82c2776df3bc"
   },
   {
     "frame": "cb619cd2e94d252ea5b084ade72a3e59e8122befd8462e95a9b5a5f1ffc099ab",
@@ -1173,34 +821,16 @@
       "text: 22 pixels over 2 CV; max 30; outside independent mask band 22",
       "paired isolated text passes 2 CV; measurement 5987a19e751032fdddecae883a9adceae1e9b519226a512cea10ba7b70bc9972"
     ],
-    "measurement_sha256": "5dd0a4012f3f1ccd2f83ffc3eec24ebe9584446d254541cdafbcc7050a02a9d6"
-  },
-  {
-    "frame": "cddee0107cfb6d89c1f959e967fb4e9530c9a396a9ab324ca51795cff5571e6c",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 129.00 mean 0.711 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "6cea583c3291ad6931efa9ccc32e2a78b6c2b3f1d03c723dddcc60bbfdf14dcd"
-  },
-  {
-    "frame": "cf7a98467a2aad5c92cbe5f303d88c63ac8d052b234d2eef363a465b418c4666",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 48.00 mean 0.968 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "3c9477b11cb97c8c4eec941c38efd0b09deb425ad2265bde46f00aea1e1ba9c3"
+    "measurement_sha256": "94f159d36bd4a0dab16f4a454b68d030b5fc424531cc441684f330f951ca8c4e"
   },
   {
     "frame": "d11beed62eba776775754a8c195a17d4e6842dba039c0373a7ea940e62950064",
     "owner": "L4",
     "reason": "other layer types",
     "checks": [
-      "unreferenced: max 226.00 p99.9 121.00 mean 0.566 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 121.00 mean 0.578 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "a996427089aef935b23e1513c4f2d005e056876674a07c7cbebc5cb4f8656d4c"
+    "measurement_sha256": "96c84652fb2206903ab63a2fbec4842b80d045194bcad838db5286a8f7af95b6"
   },
   {
     "frame": "d22baed355244d28a64c768859585538c802cfdb8ae88274b534e6b003f9ba52",
@@ -1219,15 +849,6 @@
       "text: 16 pixels over 2 CV; max 4; outside independent mask band 0"
     ],
     "measurement_sha256": "2be25d95d76f50f44c9d0b5e98bca94ca3245be6222a80607b04a43860f8bdf6"
-  },
-  {
-    "frame": "d60ca69201a03da361398438abfe642452d1495bfd3dbf906386cde022d7872e",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 129.00 mean 0.655 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "7d931d880e838b0d28660608086e3ee3fb0453bf618162760540977a58eead7e"
   },
   {
     "frame": "d69823b03827d04c6af290051e9dee619ad0c6765d272db98acd3d19052998ec",
@@ -1250,49 +871,13 @@
     "measurement_sha256": "c9a3f1e763e33e061693ef819c363410b0448466ae3591d46ef3c97e39680a4b"
   },
   {
-    "frame": "e3a07ad5253f60f4a89102a21f6cc2ba5da7685bd60f2a9aa78f6a6b0c290ae0",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 38.00 mean 0.559 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "4eed4fe4d6bce65a528b91e92074a05c9bcecd44393ebcd64e820bb99c4b02ca"
-  },
-  {
-    "frame": "e8357403efd6fde5e1dcf2e5266ebfda39e9cd2165a7675dd571f6b9ddef9547",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 128.00 mean 0.726 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "c2f475df1abba49dd7e5ce54bc50742ef2226ef01efde319258b112224302627"
-  },
-  {
     "frame": "e869f16049a4994ea9d4e2574c91fe63010cc15ba9918221afb97afbe8475880",
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.699 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 120.00 mean 0.704 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "66cbde7bde3bf3517a778731978bf0a726c03c0d9cf194f3782df7218a7c0a94"
-  },
-  {
-    "frame": "e9151708dbed17ec9f3efa7956e3ccadd986589560fa7342ab5e4f916e5bcf6d",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 60.00 mean 0.986 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "46ced790c48e2f3ba47904a65ac910f7def62224fcbd71248eea87096362e005"
-  },
-  {
-    "frame": "eb1ce7ca05ddfb06972e343bdcb8ca9c4df8a2f4645c5543fd7a2b3d5c974899",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 45.00 mean 0.767 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "47cff93be98b7c300b233d407eda2fcbcf5d3e61c90b1084b9f1e19bcf6fcb9a"
+    "measurement_sha256": "95865c8ddb8c9a2f047ef7fe14049c3f0ddbb41a8010ec141edcbd348b13eff8"
   },
   {
     "frame": "ec132c448b7a065cb8f002eeffabb40e20d552943e5ba2a68853d0b28ba0f344",
@@ -1302,7 +887,7 @@
       "text: 145 pixels over 2 CV; max 51; outside independent mask band 111",
       "paired isolated text passes 2 CV; measurement 2946a07ed03c382a026ff5265370407ca32a4ea56dfb086ed2508d68146858e4"
     ],
-    "measurement_sha256": "e606fee8edd2963dda4d2540f45ad87b7a203b7b8c36d1566cada91b38e045a4"
+    "measurement_sha256": "7fae8255811c6d14c416f5ab283a107e124c89f57ce23d23f028682b2089ceae"
   },
   {
     "frame": "ec21e3261b95211c16d97e6767644cefcef2633ff1c596c3d76c5e600318bae7",
@@ -1329,7 +914,7 @@
     "checks": [
       "unreferenced: max 226.00 p99.9 119.00 mean 0.681 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "0ec32865d58033b1463c03f0d7b95097c233015fbfcb43ee23b3e86e6b616c63"
+    "measurement_sha256": "b579bc28cb89c705cd847fb3110f1eab9e23a2f0c2146f2b145d3070c62cec89"
   },
   {
     "frame": "efc8d172e9b4fe6d8ac0b3b72c76fe0cb1a734af89453216586ed86c0496e68f",
@@ -1339,15 +924,6 @@
       "unreferenced: max 132.00 p99.9 39.00 mean 0.357 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "822937c202116fb8b01fe45c5661bb9533266811cc663d5bb245694b3b3a212e"
-  },
-  {
-    "frame": "f25487560fe5f39d87514ed2a70da1c2854c2cfc9d641cb3e0686a3e0f898436",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 134.00 p99.9 55.00 mean 0.853 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "09d3a85ec20896afdbeabd28c8013bf5575d9c3fafa803981af680f3a8c6e3cc"
   },
   {
     "frame": "f390def9b59108cb0d00c19199ec392a0a56dd188a68c367e758b7ef6df9ae79",
@@ -1365,16 +941,7 @@
     "checks": [
       "unreferenced: max 75.00 p99.9 34.00 mean 0.342 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "d655fadfa17d8af474b07efd749aae4a1c586a8feccf787fd519b45eb5f70cfd"
-  },
-  {
-    "frame": "f519bf377a6b7cacbbe4739a4acb2edbb555d854c9fbb9e097122265f4c93c36",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 131.00 mean 0.602 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "ece102aaf1fe7a381abe667b4cc0f91483ba2b58787eeb7548e723e900ec8f30"
+    "measurement_sha256": "39ab237e087745d556d00e27f693bcdcb1bf273c85ba5cd800f12f06f27cb751"
   },
   {
     "frame": "f60784642d1d9ea476e29d6b5ec9367dde3a8c33e5400926b29906dca54814e3",
@@ -1390,17 +957,8 @@
     "owner": "L4",
     "reason": "transitions",
     "checks": [
-      "unreferenced: max 226.00 p99.9 118.00 mean 0.580 from today (bound p99.9 1, max 4)"
+      "unreferenced: max 226.00 p99.9 118.00 mean 0.583 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "f63879bd0c13a3ce382d35caa1a1892aabd1fd4d6d1c4d2dd90b3f79b9305722"
-  },
-  {
-    "frame": "ffa102536bd136879773ccc03c87adf900216fce0ccff1a2d11f8368de6115c7",
-    "owner": "L6",
-    "reason": "effects",
-    "checks": [
-      "unreferenced: max 135.00 p99.9 36.00 mean 0.465 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "d142408040f4ae2e1f29873586d6e75cb861211f347f5c7f6e644e20e588057b"
+    "measurement_sha256": "12872b7f811811b21283b7366e09934d5d7d63109147997bb7b58b3e1894d060"
   }
 ]

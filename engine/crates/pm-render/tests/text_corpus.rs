@@ -291,10 +291,12 @@ fn main() {
                     renderer.effects(),
                     &p.resolver,
                 );
-                let opaque = support::reference::Reference {
-                    rgba: r.opaque(),
-                    ..r.clone()
-                };
+                let opaque = r.opaque_resolved(
+                    &ours
+                        .iter()
+                        .map(|v| f64::from(*v) / 255.0)
+                        .collect::<Vec<_>>(),
+                );
                 let classes = opaque.classes();
                 let selected = |values: &[f64]| {
                     values
@@ -444,6 +446,20 @@ fn main() {
                         }
                     }
                     write_png(&dir.join(format!("{stem}-rest.png")), w, h, &rest_diff);
+                    // The non-text reference; unreferenced pixels in magenta.
+                    let wanted: Vec<u8> = opaque
+                        .rgba
+                        .chunks_exact(4)
+                        .flat_map(|c| {
+                            if c[3].is_nan() {
+                                [255, 0, 255, 255]
+                            } else {
+                                let b = |v: f64| (v * 255.0).round() as u8;
+                                [b(c[0]), b(c[1]), b(c[2]), 255]
+                            }
+                        })
+                        .collect();
+                    write_png(&dir.join(format!("{stem}-reference.png")), w, h, &wanted);
                 }
             }
         }

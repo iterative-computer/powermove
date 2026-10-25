@@ -67,6 +67,11 @@ name = "text_corpus"
 harness = false
 
 [[test]]
+# Runs on the main thread (the CoreText font registry for text layers).
+name = "effect_proof"
+harness = false
+
+[[test]]
 # Runs on the main thread (the CoreText font registry).
 name = "space25d_picks"
 harness = false
