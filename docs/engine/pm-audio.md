@@ -847,6 +847,15 @@ bun install && bun run --cwd apps/desktop build
 cargo test --release -p pm-audio --test legacy_parity -- --nocapture   # PM_AUDIO_PARITY=<capture dir> picks one
 ```
 
+The source monitor's decoded-PCM probe,
+`cargo build --manifest-path engine/Cargo.toml --release -p pm-node --example source_monitor_pcm`, renders
+`<source-read-path> <output.f32le> <rate>` (the frozen browser rendition when an
+asset has one) through the same isolated unity-gain source document as live
+`SourceAudio`, then the real `MixGraph` and `Mixer` offline. Output is
+headerless interleaved stereo little-endian float32; stderr reports the frame
+count. `e2e/engine-source-media.spec.ts` compares it with Chromium's
+`decodeAudioData` of the same bytes.
+
 ## Tests
 
 ```sh

@@ -21,6 +21,7 @@ use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
 use pm_media::decode::service::{
     DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
 };
+use pm_media::frame::DecodedFrame;
 use pm_media::image::icc::IccClass;
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
@@ -31,6 +32,7 @@ use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer,
     WorkingEncoding,
 };
+use pm_protocol::common::Ticks;
 
 use crate::capability::Feature;
 use crate::footage::{Geometry, Orient, Pick, Timing};
@@ -167,14 +169,9 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
                 "an ICC profile other than sRGB or Display P3".into(),
             )));
         }
-        // CMYK, Lab, and indexed stills ImageIO converted to sRGB: never
-        // compared with the legacy renderer's conversion.
-        Some(IccClass::ConvertedToSrgb) => {
-            return Err(ProbeIssue::Unsupported(Feature::Media(
-                "stills in a color model other than RGB or gray (converted to sRGB by ImageIO)"
-                    .into(),
-            )));
-        }
+        // ImageIO has already converted these samples to sRGB. The original
+        // profile is retained as provenance, not applied a second time.
+        Some(IccClass::ConvertedToSrgb) => Primaries::Bt709,
     };
     if let Some(ch) = c.chromaticities {
         let rec709 = [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290];
@@ -232,6 +229,7 @@ fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), Probe
     static CACHE: StampCache<Result<(pm_media::image::ImageColor, bool), ProbeIssue>> =
         OnceLock::new();
     per_stamp(&CACHE, path, || {
+        crate::stills::check_native_source_header(path).map_err(ProbeIssue::Unsupported)?;
         if let Ok(Some(a)) = pm_media::image::animation(path)
             && a.frames > 1
         {
@@ -254,9 +252,11 @@ fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), Probe
 /// ([`still_facts`]); each interpretation is then resolved from its facts.
 pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
     let (color, float) = still_facts(path)?;
-    // A PNG gamma is the file's transfer; only a transfer override replaces
-    // it. Interpretations of it are not implemented.
-    if interp.transfer.is_none()
+    // An empty interpretation keeps the native PNG gamma decode. Nonempty
+    // overrides that retain that curve are not implemented; an explicit
+    // transfer override can still replace it.
+    if !interp.is_empty()
+        && interp.transfer.is_none()
         && pm_media::image::png_gamma::imageio_gamma(path)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?
             .is_some()
@@ -1106,6 +1106,9 @@ pub struct MediaCache {
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
     viewer: ViewerDecode,
+    /// Interactive source frames use exact Export-purpose decode on a warm
+    /// worker. Batch jobs continue to decode on their caller's thread.
+    source_viewer: ViewerDecode,
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
@@ -1154,6 +1157,7 @@ impl MediaCache {
         MediaCache {
             pool: FramePool::new(64 << 20),
             viewer: ViewerDecode::new(service.clone()),
+            source_viewer: ViewerDecode::with_purpose(service.clone(), DecodePurpose::Export),
             service,
             background: None,
             scrub: false,
@@ -1253,6 +1257,19 @@ impl MediaCache {
             self.recount();
             return Ok(target);
         }
+        // Empty interpretations retain the native file reading, including
+        // PNG's pure power curve. Resolve colour only after decoding that
+        // curve into linear samples. Compatibility bitmaps already applied
+        // their own transfer reading and must not be decoded again.
+        if !compat
+            && interpret.is_none_or(Interpretation::is_empty)
+            && still.format == pm_media::image::ImageFormat::Png
+            && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
+                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
+        {
+            still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
+                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
+        }
         let color = match interpret {
             Some(i) => {
                 let read = interpreted_image_color(&still, i).map_err(issue)?;
@@ -1266,16 +1283,6 @@ impl MediaCache {
                 read.color
             }
             None => {
-                // Level 2 reads a gamma-only PNG as ImageIO does; level 1's
-                // bitmap above already applied Chromium's reading.
-                if !compat
-                    && still.format == pm_media::image::ImageFormat::Png
-                    && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
-                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
-                {
-                    still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
-                        .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-                }
                 if still.color.icc_class == Some(IccClass::Other) {
                     still = pm_media::image::imageio::convert_to_linear_srgb(
                         &still,
@@ -1329,6 +1336,7 @@ impl MediaCache {
                 // Replaced on disk: drop the stale index and frames.
                 if let Some((_, old)) = self.sources.remove(path) {
                     self.viewer.release(Some(old.id));
+                    self.source_viewer.release(Some(old.id));
                     self.service.release(None, Some(old.id));
                 }
                 self.frames.retain(|k, _| k.path != path);
@@ -1341,6 +1349,31 @@ impl MediaCache {
         self.sources
             .insert(path.to_path_buf(), (stamp, src.clone()));
         Ok(src)
+    }
+
+    /// Display dimensions of an already converted source texture. Crop and
+    /// rotation are in the texture; pixel aspect remains a presentation scale.
+    /// Uses the source just decoded, without another file stat or probe.
+    pub(crate) fn source_display_size(
+        &self,
+        path: &Path,
+        interpret: Option<&Interpretation>,
+        size: (u32, u32),
+    ) -> (f64, f64) {
+        let Some((_, source)) = self.sources.get(path) else {
+            return (size.0 as f64, size.1 as f64);
+        };
+        let Some(video) = source.probe.video.as_ref() else {
+            return (size.0 as f64, size.1 as f64);
+        };
+        let reading = resolve_video(video, interpret.unwrap_or(&Interpretation::default()));
+        let (n, d) = reading.pixel_aspect.value;
+        let ratio = n as f64 / d as f64;
+        if reading.quarter_turns() % 2 == 1 {
+            (size.0 as f64, (size.1 as f64 * ratio).round().max(1.0))
+        } else {
+            ((size.0 as f64 * ratio).round().max(1.0), size.1 as f64)
+        }
     }
 
     /// The working texture of the video picture showing at `seconds` (source
@@ -1367,6 +1400,113 @@ impl MediaCache {
         composition: pm_time::Rate,
         sequence: bool,
     ) -> Result<Option<Target>, MediaFailure> {
+        self.video_inner(
+            device,
+            queue,
+            pipelines,
+            encoder,
+            path,
+            instance,
+            seconds,
+            export,
+            working,
+            precision,
+            interpret,
+            Some(composition),
+            sequence,
+            false,
+        )
+    }
+
+    /// Source-only conversion has no composition cadence: select all source
+    /// fields. Interactive requests keep the exact Export worker warm;
+    /// admitted job batches decode directly without worker look-ahead.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn source_video(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        instance: u64,
+        seconds: f64,
+        working: WorkingEncoding,
+        precision: Precision,
+        interpret: Option<&Interpretation>,
+        sequence: bool,
+        exact_worker: bool,
+    ) -> Result<Option<Target>, MediaFailure> {
+        self.video_inner(
+            device,
+            queue,
+            pipelines,
+            encoder,
+            path,
+            instance,
+            seconds,
+            true,
+            working,
+            precision,
+            interpret,
+            None,
+            sequence,
+            exact_worker,
+        )
+    }
+
+    /// The original decoded code planes for the source monitor's video
+    /// presenter, from the exact Export worker shared with RGBA source
+    /// frames. Composition decode is unaffected. `None` when the source needs
+    /// the engine's own conversion instead (`presentable` refuses it, or it
+    /// needs more than a matrix and tags: rotation, fields, pixel aspect,
+    /// cropping, HDR or wide gamut).
+    pub(crate) fn source_exact_decoded(
+        &mut self,
+        path: &Path,
+        time: Ticks,
+        presentable: impl FnOnce(&MediaSource) -> bool,
+    ) -> Result<Option<(Arc<MediaSource>, DecodedFrame)>, MediaFailure> {
+        let source = self.source(path)?;
+        // What the engine cannot draw at all fails as composition would.
+        video_drawable(&source, &Interpretation::default())
+            .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
+        if video_supported(&source).is_err() || !presentable(&source) {
+            return Ok(None);
+        }
+        let frame = source
+            .select(time.get())
+            .ok_or_else(|| MediaFailure::Failed("No source frame at this time".into()))?;
+        let fetched = self
+            .source_viewer
+            .fetch(&source, 0, frame, Want::Exact)
+            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        if !fetched.exact || fetched.shown != frame {
+            return Err(MediaFailure::Failed(
+                "The source decoder returned a non-exact frame".into(),
+            ));
+        }
+        Ok(Some((source, fetched.frame)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn video_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        instance: u64,
+        seconds: f64,
+        export: bool,
+        working: WorkingEncoding,
+        precision: Precision,
+        interpret: Option<&Interpretation>,
+        composition: Option<pm_time::Rate>,
+        sequence: bool,
+        source_exact: bool,
+    ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
         match interpret {
@@ -1381,7 +1521,10 @@ impl MediaCache {
             .as_ref()
             .ok_or_else(|| MediaFailure::Failed("no video stream".into()))?;
         let reading = resolve_video(v, interp);
-        let timing = Timing::new(&src, &reading, composition);
+        let timing = match composition {
+            Some(rate) => Timing::new(&src, &reading, rate),
+            None => Timing::source(&reading),
+        };
         let ticks = (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
         let Some(Pick { frame: n, second }) = timing.pick(&src, ticks) else {
             return Ok(None);
@@ -1413,7 +1556,13 @@ impl MediaCache {
         // Both decode the same pixels: one decoder policy serves playback,
         // pause, scrub and export.
         let deinterlaced = timing.deinterlaced();
-        let (n, frame, fields) = if export || deinterlaced {
+        let (n, frame, fields) = if source_exact && !deinterlaced {
+            let fetched = self
+                .source_viewer
+                .fetch(&src, instance, n, Want::Exact)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            (n, fetched.frame, None)
+        } else if export || deinterlaced {
             let purpose = if export {
                 DecodePurpose::Export
             } else {
@@ -1568,6 +1717,11 @@ impl MediaCache {
         Ok(Some(target))
     }
 
+    /// Whether a per-file colour override ([`Self::interpret`]) reads `path`.
+    pub(crate) fn overrides_color(&self, path: &Path) -> bool {
+        self.interpretations.contains_key(path)
+    }
+
     /// Reads `path` with `color` instead of the probe's interpretation (or
     /// restores the probe's with `None`). Converted frames of the file are
     /// dropped.
@@ -1623,6 +1777,12 @@ impl MediaCache {
     /// The display decode workers' counters.
     pub fn scrub_stats(&self) -> ScrubStats {
         self.viewer.stats()
+    }
+
+    /// Exact Export-purpose source decoder counters, separate from the
+    /// composition viewer and its Display-purpose cache.
+    pub fn source_scrub_stats(&self) -> ScrubStats {
+        self.source_viewer.stats()
     }
 
     /// Applies the renderer's shares of the engine's lease to its decode

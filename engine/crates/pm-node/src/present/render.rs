@@ -57,6 +57,10 @@ use super::document::{Route, ViewDocument};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
 
+mod source;
+use source::{SourceAudio, SourceSilent};
+#[cfg(test)]
+use source::{audio_source_end, silent_source_position};
 mod media_prepare;
 
 /// Stand-in for the C′ prototype's layer in builds without it (feature
@@ -160,11 +164,7 @@ pub const RENDER_RETRY_US: [i64; 3] = [100_000, 500_000, 2_000_000];
 pub fn transient_render_error(error: &pm_render::RenderError) -> bool {
     use pm_render::RenderError as E;
     match error {
-        E::Device(_)
-        | E::Readback(_)
-        | E::Gpu(_)
-        | E::Media(_)
-        | E::Fallback(_) => true,
+        E::Device(_) | E::Readback(_) | E::Gpu(_) | E::Media(_) | E::Fallback(_) => true,
         E::Unsupported(_)
         | E::Composition(_)
         | E::Request(_)
@@ -325,6 +325,11 @@ pub enum Command {
         asset: String,
         path: Option<PathBuf>,
     },
+    SourceMedia {
+        key: Key,
+        asset: String,
+        path: Option<Option<PathBuf>>,
+    },
     /// The mix's monitor and data for the renderer (contract 6).
     Audio {
         key: Key,
@@ -346,6 +351,10 @@ pub enum Command {
     /// A host snapshot of a session's document (the Phase 3c render
     /// transport, [`super::snapshot`]).
     Snapshot(Box<super::snapshot::SnapshotJob>),
+    CancelSnapshot {
+        host: PortId,
+        id: RequestId,
+    },
     /// Compatibility pixels the session's renderer uploaded
     /// ([`super::compat`]).
     Compat {
@@ -1163,6 +1172,11 @@ struct Thread {
     /// Each session's audio playback, from its first Play.
     audio: BTreeMap<Key, AudioLink>,
     audio_ingress: AudioIngress,
+    /// Independent source-monitor audio, never mixed into a composition.
+    source_audio: BTreeMap<Key, SourceAudio>,
+    source_silent: BTreeMap<Key, SourceSilent>,
+    source_timing: BTreeMap<Key, super::source_audio::SourceMonitorTimingCache>,
+    source_intent: BTreeMap<Key, (pm_protocol::common::AssetId, Ticks, bool, u32)>,
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
@@ -1407,6 +1421,10 @@ pub fn run(
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
         audio_ingress,
+        source_audio: BTreeMap::new(),
+        source_silent: BTreeMap::new(),
+        source_timing: BTreeMap::new(),
+        source_intent: BTreeMap::new(),
         audio_prefs: BTreeMap::new(),
         peaks,
         generations,
@@ -1530,10 +1548,12 @@ fn command_name(command: &Command) -> &'static str {
         Command::Confirm { .. } => "confirm",
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
+        Command::SourceMedia { .. } => "sourceMedia",
         Command::ShaderFallback { .. } => "shader fallback",
         Command::AudioMemoryPressure => "audio memory pressure",
         Command::FrameCache { .. } => "frame cache",
         Command::Snapshot(_) => "snapshot",
+        Command::CancelSnapshot { .. } => "cancel snapshot",
         Command::SnapshotMapReady => "snapshot map ready",
         Command::SnapshotPollFailed { .. } => "snapshot poll failed",
         Command::Compat { .. } => "compat",
@@ -2565,9 +2585,51 @@ impl Thread {
                 }
                 self.prepare_video_media(key);
             }
+            Command::SourceMedia { key, asset, path } => {
+                if let Some(timing) = self.source_timing.get_mut(&key) {
+                    timing.invalidate(&asset);
+                }
+                self.docs
+                    .entry(key)
+                    .or_default()
+                    .set_source_media(&asset, path);
+                if self
+                    .source_audio
+                    .get(&key)
+                    .is_some_and(|source| source.asset.as_str() == asset)
+                {
+                    self.source_audio.remove(&key);
+                }
+                if self
+                    .source_silent
+                    .get(&key)
+                    .is_some_and(|source| source.asset.as_str() == asset)
+                {
+                    self.source_silent.remove(&key);
+                }
+                if let Some((wanted, time, playing, generation)) =
+                    self.source_intent.get(&key).cloned()
+                    && wanted.as_str() == asset
+                {
+                    self.audio_message(
+                        key,
+                        AudioMessage::SourceMonitor {
+                            asset: Some(wanted),
+                            time,
+                            playing,
+                            generation,
+                        },
+                    );
+                }
+            }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
             Command::AudioMemoryPressure => {
-                for audio in self.audio.values() {
+                // Source-monitor voices hold decoded blocks too.
+                for audio in self
+                    .audio
+                    .values()
+                    .chain(self.source_audio.values().map(|source| &source.link))
+                {
                     audio.send(AudioCtl::MemoryPressure);
                 }
             }
@@ -2586,6 +2648,18 @@ impl Thread {
                     self.stats().snapshot_failures += 1;
                     self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
                 }
+            }
+            Command::CancelSnapshot { host, id } => {
+                self.snapshots.take_request(host, id);
+                let gpu = &mut self.gpu;
+                self.pending_snapshots.retain(|pending| {
+                    let keep = pending.job.host != host || pending.job.id != id;
+                    if !keep && let Some(gpu) = gpu.as_mut() {
+                        gpu.snapshot_readback
+                            .cancel(pending.ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+                    }
+                    keep
+                });
             }
             Command::Compat { key, message } => {
                 let (applied, rasters, bytes, answers, evicted) = {
@@ -2840,6 +2914,10 @@ impl Thread {
         }
         self.audio_ingress.forget(key);
         self.audio.remove(&key);
+        self.source_audio.remove(&key);
+        self.source_silent.remove(&key);
+        self.source_timing.remove(&key);
+        self.source_intent.remove(&key);
         self.audio_prefs.remove(&key);
         if self
             .views
@@ -3598,6 +3676,14 @@ impl Thread {
     /// The mixer's monitor solo and waveform requests from the renderer.
     fn audio_message(&mut self, key: Key, message: AudioMessage) {
         match message {
+            AudioMessage::SourceMonitor {
+                asset,
+                time,
+                playing,
+                generation,
+            } => {
+                self.handle_source_monitor(key, asset, time, playing, generation);
+            }
             AudioMessage::Monitor { solo } => {
                 let solo = (!solo.is_empty()).then(|| solo.into_iter().collect());
                 self.audio_prefs.entry(key).or_default().solo = solo.clone();
@@ -3620,7 +3706,9 @@ impl Thread {
                     }
                 }
             }
-            AudioMessage::Levels(_) | AudioMessage::Peaks(_) => self.log(
+            AudioMessage::Levels(_)
+            | AudioMessage::Peaks(_)
+            | AudioMessage::SourceStatus { .. } => self.log(
                 LogLevel::Warn,
                 "the renderer sent an engine-to-renderer audio message".into(),
             ),
@@ -4506,6 +4594,7 @@ impl Thread {
     }
 
     fn work(&mut self) {
+        self.work_source_monitor();
         self.sync_font_generation();
         if self
             .gpu
@@ -6010,12 +6099,21 @@ impl Thread {
             let provisional = &self.provisional;
             // A document whose media the host has not answered yet is not
             // ready: the snapshot waits (within its wait) rather than draw
-            // media missing that is on its way. Nor is a provisional one: a
-            // capture asked earlier must not draw a partial edit.
-            let revision = |key: Key| {
-                docs.get(&key)
+            // media missing that is on its way, or a provisional partial edit.
+            let revision = |job: &super::snapshot::SnapshotJob| {
+                docs.get(&job.key)
                     .filter(|d| {
-                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                        d.has_document()
+                            && d.media_ready()
+                            && !provisional.contains_key(&job.key)
+                            && match &job.request.target {
+                                pm_protocol::snapshot::SnapshotTarget::Source {
+                                    asset,
+                                    color: pm_protocol::snapshot::SourceColor::Display,
+                                    ..
+                                } => d.source_media(asset.as_str()).is_some(),
+                                _ => true,
+                            }
                     })
                     .map(|d| d.revision())
             };
@@ -6288,6 +6386,7 @@ impl Thread {
             height,
             pixels: job.request.pixels,
             payload,
+            video: None,
             origin: [0.0, 0.0],
             layer_box: None,
             raster: None,
@@ -6318,6 +6417,10 @@ impl Thread {
             self.snapshot_error(&job, ErrorCode::DeviceLost, "The engine has no GPU device.");
             return;
         }
+        if let SnapshotTarget::Source { .. } = &job.request.target {
+            self.run_source_snapshot(job, started);
+            return;
+        }
         let (layer_target, motion_blur, background, draft_3d) = match &job.request.target {
             SnapshotTarget::Frame {
                 motion_blur_samples,
@@ -6325,6 +6428,7 @@ impl Thread {
                 draft_3d,
             } => (false, *motion_blur_samples, *background, *draft_3d),
             SnapshotTarget::Layer { .. } => (true, 0, true, false),
+            SnapshotTarget::Source { .. } => unreachable!("handled above"),
         };
         if layer_target {
             self.run_layer_snapshot(job, started);
@@ -6769,29 +6873,47 @@ impl Thread {
         job: &super::snapshot::SnapshotJob,
         pixels: Vec<u8>,
     ) -> Option<pm_protocol::snapshot::PixelPayload> {
-        use pm_protocol::snapshot::PixelPayload;
-        let length = pixels.len();
-        if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
-            return Some(PixelPayload::Inline {
+        if pixels.len() <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+            return Some(pm_protocol::snapshot::PixelPayload::Inline {
                 bytes: pm_protocol::common::Bytes(pixels),
             });
         }
-        match pm_bridge::shm::publish(&pixels) {
-            Ok(name) => {
-                self.segments.add(name.clone());
-                self.snapshots.published(name.clone(), length as u64);
-                self.stats().snapshot_shared += 1;
-                Some(PixelPayload::SharedMemory {
-                    name,
-                    length: pm_protocol::common::ByteSize::new(length as u64)
-                        .unwrap_or(pm_protocol::common::ByteSize::MAX),
-                })
+        let length = pixels.len();
+        let payload = write_payload(length, |segment| {
+            segment.copy_from_slice(&pixels);
+            Ok(())
+        });
+        self.track_payload(job, length, payload)
+    }
+
+    /// Records a written payload's segment for orphan cleanup, or answers the
+    /// job with the error. `None` after answering.
+    fn track_payload(
+        &mut self,
+        job: &super::snapshot::SnapshotJob,
+        length: usize,
+        payload: std::io::Result<pm_protocol::snapshot::PixelPayload>,
+    ) -> Option<pm_protocol::snapshot::PixelPayload> {
+        use pm_protocol::snapshot::PixelPayload;
+        match payload {
+            Ok(payload) => {
+                if let PixelPayload::SharedMemory { name, .. } = &payload {
+                    self.segments.add(name.clone());
+                    self.snapshots.published(name.clone(), length as u64);
+                    self.stats().snapshot_shared += 1;
+                }
+                Some(payload)
             }
             Err(error) => {
                 self.stats().snapshot_failures += 1;
+                let code = if error.kind() == std::io::ErrorKind::Other {
+                    ErrorCode::Internal
+                } else {
+                    ErrorCode::BudgetExceeded
+                };
                 self.snapshot_error(
                     job,
-                    ErrorCode::BudgetExceeded,
+                    code,
                     &format!("The snapshot's pixels could not be shared: {error}"),
                 );
                 None
@@ -6809,6 +6931,30 @@ impl Thread {
             let _ = bridge.goodbye();
         }
     }
+}
+
+/// A snapshot payload of `length` bytes that `fill` writes in place: inline
+/// when small, otherwise straight into a fresh shared-memory segment (no
+/// staging copy). A failed fill is `ErrorKind::Other`; anything else is the
+/// segment's own failure.
+pub(super) fn write_payload(
+    length: usize,
+    fill: impl FnOnce(&mut [u8]) -> std::io::Result<()>,
+) -> std::io::Result<pm_protocol::snapshot::PixelPayload> {
+    use pm_protocol::snapshot::PixelPayload;
+    if length <= pm_protocol::snapshot::INLINE_PIXEL_BYTES {
+        let mut bytes = vec![0; length];
+        fill(&mut bytes)?;
+        return Ok(PixelPayload::Inline {
+            bytes: pm_protocol::common::Bytes(bytes),
+        });
+    }
+    let name = pm_bridge::shm::publish_with(length, fill)?;
+    Ok(PixelPayload::SharedMemory {
+        name,
+        length: pm_protocol::common::ByteSize::new(length as u64)
+            .unwrap_or(pm_protocol::common::ByteSize::MAX),
+    })
 }
 
 /// The shading of a paused preview frame: Material Preview or Rendered
@@ -6904,6 +7050,140 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_pending_snapshots_releases_only_their_gpu_slots() {
+        use pm_protocol::snapshot::{
+            SnapshotClass, SnapshotPixels, SnapshotRequest, SnapshotTarget,
+        };
+        let (mut thread, _) = preview_thread();
+        assert!(thread.gpu().is_some());
+        let request_id = RequestId::new(7).unwrap();
+        for host in [PortId(1), PortId(2)] {
+            let gpu = thread.gpu.as_mut().unwrap();
+            let target = snapshot_output_target(
+                &mut gpu.snapshot_target,
+                &gpu.device,
+                4,
+                4,
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            let (ticket, _) = gpu
+                .snapshot_readback
+                .reserve(
+                    &gpu.device,
+                    &target.texture,
+                    MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+                )
+                .unwrap()
+                .unwrap();
+            gpu.snapshot_readback.start_map(ticket, || {});
+            thread.pending_snapshots.push(PendingSnapshot {
+                job: super::super::snapshot::SnapshotJob::new(
+                    host,
+                    request_id,
+                    preview_key(),
+                    SnapshotRequest {
+                        composition: "main".into(),
+                        time: Ticks::ZERO,
+                        output_size: Size::new(4, 4),
+                        target: SnapshotTarget::Frame {
+                            motion_blur_samples: 0,
+                            background: true,
+                            draft_3d: false,
+                        },
+                        pixels: SnapshotPixels::Opaque,
+                        class: SnapshotClass::Async,
+                        view_seq: None,
+                        viewer: None,
+                        wait_ms: 1_000,
+                        blender_wait_ms: 0,
+                        captions_hidden: false,
+                        uploaded: Vec::new(),
+                        compat_uploaded: Vec::new(),
+                    },
+                    None,
+                    0,
+                ),
+                ticket,
+                started: 0,
+                map_deadline: SNAPSHOT_GPU_TIMEOUT_US,
+                revision: Revision::new(1).unwrap(),
+                width: 4,
+                height: 4,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                rows: pm_render::SnapshotRows::TopDown,
+                draft_3d: false,
+            });
+        }
+        assert!(
+            !thread
+                .gpu
+                .as_ref()
+                .unwrap()
+                .snapshot_readback
+                .can_reserve(1024, MAX_CACHED_SNAPSHOT_TARGET_BYTES)
+        );
+        thread.apply(Command::CancelSnapshot {
+            host: PortId(1),
+            id: request_id,
+        });
+        assert_eq!(thread.pending_snapshots.len(), 1);
+        assert_eq!(thread.pending_snapshots[0].job.host, PortId(2));
+        assert!(
+            thread
+                .gpu
+                .as_ref()
+                .unwrap()
+                .snapshot_readback
+                .can_reserve(1024, MAX_CACHED_SNAPSHOT_TARGET_BYTES)
+        );
+        // A repeated cancellation cannot free the other host's identical ID.
+        thread.apply(Command::CancelSnapshot {
+            host: PortId(1),
+            id: request_id,
+        });
+        assert!(thread.gpu.as_ref().unwrap().snapshot_readback.in_flight());
+        thread.apply(Command::CancelSnapshot {
+            host: PortId(2),
+            id: request_id,
+        });
+        assert!(thread.pending_snapshots.is_empty());
+        let gpu = thread.gpu.as_mut().unwrap();
+        assert!(!gpu.snapshot_readback.in_flight());
+        // Both slots can accept the next captures after their map was cancelled.
+        let target = snapshot_output_target(
+            &mut gpu.snapshot_target,
+            &gpu.device,
+            4,
+            4,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let a = gpu
+            .snapshot_readback
+            .reserve(
+                &gpu.device,
+                &target.texture,
+                MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+            )
+            .unwrap()
+            .unwrap()
+            .0;
+        let b = gpu
+            .snapshot_readback
+            .reserve(
+                &gpu.device,
+                &target.texture,
+                MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+            )
+            .unwrap()
+            .unwrap()
+            .0;
+        gpu.snapshot_readback
+            .cancel(a, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+        gpu.snapshot_readback
+            .cancel(b, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+    }
+
+    #[test]
     fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
         use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
 
@@ -6993,6 +7273,10 @@ mod tests {
             docs: BTreeMap::new(),
             audio: BTreeMap::new(),
             audio_ingress: AudioIngress::default(),
+            source_audio: BTreeMap::new(),
+            source_silent: BTreeMap::new(),
+            source_timing: BTreeMap::new(),
+            source_intent: BTreeMap::new(),
             audio_prefs: BTreeMap::new(),
             peaks,
             frame_ticks: TICKS_PER_SECOND / 60,
@@ -8073,5 +8357,205 @@ mod tests {
         let wrap = Generations(Arc::new(AtomicU32::new(u32::MAX)));
         assert_eq!(wrap.next(), u32::MAX);
         assert_eq!(wrap.next(), 1);
+    }
+
+    #[test]
+    fn silent_source_uses_host_time_and_stops_at_duration() {
+        let source = SourceSilent {
+            asset: "a".into(),
+            generation: 3,
+            from: Ticks::new(3 * TICKS_PER_SECOND / 4).unwrap(),
+            started: 1_000_000,
+            duration: Ticks::from_whole_seconds(1),
+            last_sent: 0,
+        };
+        assert_eq!(
+            silent_source_position(&source, 1_100_000),
+            (Ticks::new(85 * TICKS_PER_SECOND / 100).unwrap(), true)
+        );
+        assert_eq!(
+            silent_source_position(&source, 1_300_000),
+            (Ticks::from_whole_seconds(1), false)
+        );
+    }
+
+    #[test]
+    fn unrelated_source_answer_keeps_silent_monitor_clock() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.source_silent.insert(
+            key,
+            SourceSilent {
+                asset: "video".into(),
+                generation: 7,
+                from: Ticks::ZERO,
+                started: 1_000_000,
+                duration: Ticks::from_whole_seconds(2),
+                last_sent: 0,
+            },
+        );
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "unrelated".into(),
+            path: Some(None),
+        });
+        assert_eq!(
+            thread.source_silent.get(&key).unwrap().asset.as_str(),
+            "video"
+        );
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "video".into(),
+            path: Some(None),
+        });
+        assert!(!thread.source_silent.contains_key(&key));
+    }
+
+    #[test]
+    fn source_audio_paused_monitor_publishes_original_duration_after_binding_and_relink() {
+        use pm_audio::offline::{PcmFormat, WavWriter};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        let write = |seconds: usize| {
+            let mut writer = WavWriter::new(
+                std::fs::File::create(&path).unwrap(),
+                PcmFormat::F32,
+                2,
+                48_000,
+            )
+            .unwrap();
+            writer.write(0, &vec![0.125; seconds * 48_000 * 2]).unwrap();
+            writer.finish().unwrap();
+        };
+        write(2);
+        let (mut thread, _) = preview_thread();
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let received = statuses.clone();
+        thread.sink = Arc::new(move |actions| {
+            for action in actions {
+                if let Action::Send { bytes, .. } = action
+                    && let Message::Event {
+                        body:
+                            Event::Audio(AudioMessage::SourceStatus {
+                                generation,
+                                time,
+                                duration,
+                                playing,
+                                ..
+                            }),
+                    } = codec::decode(&bytes).unwrap().message
+                {
+                    received
+                        .lock()
+                        .unwrap()
+                        .push((generation, time, duration, playing));
+                }
+            }
+        });
+        let key = preview_key();
+        // A paused first request arrives before main has resolved the file.
+        thread.handle_source_monitor(
+            key,
+            Some("source".into()),
+            Ticks::from_whole_seconds(8),
+            false,
+            7,
+        );
+        assert!(statuses.lock().unwrap().is_empty());
+        assert!(thread.source_intent.contains_key(&key));
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "source".into(),
+            path: Some(Some(path.clone())),
+        });
+        assert_eq!(
+            statuses.lock().unwrap().last(),
+            Some(&(
+                7,
+                Ticks::from_whole_seconds(2),
+                Some(Ticks::from_whole_seconds(2)),
+                false,
+            ))
+        );
+        assert!(
+            thread.source_audio.is_empty(),
+            "metadata never opens an audio device"
+        );
+        assert!(thread.source_silent.is_empty());
+        // A subsequent paused seek uses the warm source and retains its endpoint.
+        thread.handle_source_monitor(
+            key,
+            Some("source".into()),
+            Ticks::from_whole_seconds(1),
+            false,
+            8,
+        );
+        assert_eq!(
+            statuses.lock().unwrap().last(),
+            Some(&(
+                8,
+                Ticks::from_whole_seconds(1),
+                Some(Ticks::from_whole_seconds(2)),
+                false,
+            ))
+        );
+        // Rebinding while still paused refreshes timing without a Play request.
+        write(3);
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "source".into(),
+            path: Some(Some(path)),
+        });
+        assert_eq!(
+            statuses.lock().unwrap().last(),
+            Some(&(
+                8,
+                Ticks::from_whole_seconds(1),
+                Some(Ticks::from_whole_seconds(3)),
+                false,
+            ))
+        );
+        assert!(thread.source_audio.is_empty());
+        assert!(thread.source_silent.is_empty());
+        thread.handle_source_monitor(key, None, Ticks::ZERO, false, 9);
+        assert!(!thread.source_intent.contains_key(&key));
+        assert!(!thread.source_timing.contains_key(&key));
+    }
+
+    #[test]
+    fn source_audio_clock_end_requires_play_and_holds_final_time() {
+        let duration = Ticks::from_whole_seconds(1);
+        let sample = pm_protocol::clock::ClockSample {
+            seq: Seq::new(1).unwrap(),
+            epoch: 1,
+            state: TransportState::Playing,
+            host_time: pm_protocol::common::HostMicros::new(1_000_000).unwrap(),
+            media_time: Ticks::ZERO,
+            rate: pm_protocol::common::PlaybackRate { num: 1, den: 1 },
+            output_latency_us: 0,
+            sample_rate: 48_000,
+            loop_range: None,
+        };
+        assert_eq!(
+            audio_source_end(
+                &sample,
+                duration,
+                true,
+                pm_protocol::common::HostMicros::new(2_000_000).unwrap()
+            ),
+            Some(duration)
+        );
+        let stopped = pm_protocol::clock::ClockSample {
+            state: TransportState::Stopped,
+            media_time: Ticks::new(TICKS_PER_SECOND / 2).unwrap(),
+            rate: pm_protocol::common::PlaybackRate { num: 0, den: 1 },
+            ..sample
+        };
+        let at = pm_protocol::common::HostMicros::new(2_000_000).unwrap();
+        assert_eq!(audio_source_end(&stopped, duration, false, at), None);
+        assert_eq!(
+            audio_source_end(&stopped, duration, true, at),
+            Some(stopped.media_time)
+        );
     }
 }

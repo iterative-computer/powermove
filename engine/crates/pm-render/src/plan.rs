@@ -1304,10 +1304,12 @@ fn native_content_quad<'d>(
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
                 // The document parsed above; a planning error is one there.
                 let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                    Ok(crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
-                        .ok()
-                        .flatten()
-                        .map(|q| *q))
+                    Ok(
+                        crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
+                            .ok()
+                            .flatten()
+                            .map(|q| *q),
+                    )
                 };
                 if scope.is_3d_layer(layer)? {
                     return local_level2(scope, layer, time, scale, b.origin, target, &mut plan);
@@ -1325,9 +1327,7 @@ fn native_content_quad<'d>(
                     }
                 };
             }
-            let sequence = ty == "video"
-                && (rec("imageSequence").truthy()
-                    || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"));
+            let sequence = crate::footage::is_sequence(record);
             if sequence {
                 match crate::media::sequence_rendition(&path) {
                     Ok(true) => {}

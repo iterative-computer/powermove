@@ -3,10 +3,11 @@
 //!
 //! The interactive engine writes a snapshot's pixels into a segment it
 //! creates exclusively (mode 0600, a random 96-bit name, `/pm.` and 24 hex
-//! digits) and names it in its answer to main. Main maps the segment once,
-//! copies the pixels into a `Buffer` it hands to the window, and unlinks it
-//! ([`take`]). A segment nobody takes is unlinked by the engine after
-//! [`ORPHAN_AFTER`] ([`Segments::reap`]) and at shutdown.
+//! digits) and names it in its answer to main. Producers that can write in
+//! place fill the mapping directly ([`publish_with`]). Main maps the segment
+//! once, copies the pixels into a `Buffer` it hands to the window, and
+//! unlinks it ([`take`]). A segment nobody takes is unlinked by the engine
+//! after [`ORPHAN_AFTER`] ([`Segments::reap`]) and at shutdown.
 //!
 //! The reader runs in main, so it trusts nothing about the segment: the
 //! name must have the engine's exact shape, the segment must be a regular
@@ -52,12 +53,25 @@ fn c_name(name: &str) -> io::Result<CString> {
 /// Creates a segment holding `bytes` and returns its name. The caller
 /// records it in a [`Segments`] so it is unlinked if nobody takes it.
 pub fn publish(bytes: &[u8]) -> io::Result<String> {
-    if bytes.is_empty() || bytes.len() > MAX_SEGMENT {
+    publish_with(bytes.len(), |segment| {
+        segment.copy_from_slice(bytes);
+        Ok(())
+    })
+}
+
+/// Creates a `length`-byte segment, lets `fill` write it in place (it starts
+/// zeroed), and returns its name; a failed fill unlinks the segment.
+pub fn publish_with(
+    length: usize,
+    fill: impl FnOnce(&mut [u8]) -> io::Result<()>,
+) -> io::Result<String> {
+    if length == 0 || length > MAX_SEGMENT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("a {}-byte pixel segment", bytes.len()),
+            format!("a {length}-byte pixel segment"),
         ));
     }
+    let mut fill = Some(fill);
     for _ in 0..4 {
         let name = format!("/pm.{}", random_hex()?);
         let c = c_name(&name)?;
@@ -76,7 +90,7 @@ pub fn publish(bytes: &[u8]) -> io::Result<String> {
             }
             return Err(error);
         }
-        let written = write_into(fd, bytes);
+        let written = write_into(fd, length, fill.take().expect("filled once"));
         // SAFETY: fd is ours.
         unsafe { libc::close(fd) };
         if let Err(error) = written {
@@ -92,16 +106,20 @@ pub fn publish(bytes: &[u8]) -> io::Result<String> {
     ))
 }
 
-fn write_into(fd: libc::c_int, bytes: &[u8]) -> io::Result<()> {
+fn write_into(
+    fd: libc::c_int,
+    length: usize,
+    fill: impl FnOnce(&mut [u8]) -> io::Result<()>,
+) -> io::Result<()> {
     // SAFETY: fd is a fresh shared-memory object; the size fits off_t.
-    if unsafe { libc::ftruncate(fd, bytes.len() as libc::off_t) } != 0 {
+    if unsafe { libc::ftruncate(fd, length as libc::off_t) } != 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: mapping the whole object we just sized, shared and writable.
     let map = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            bytes.len(),
+            length,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             fd,
@@ -111,12 +129,12 @@ fn write_into(fd: libc::c_int, bytes: &[u8]) -> io::Result<()> {
     if map == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the mapping is `bytes.len()` long and does not overlap `bytes`.
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), map.cast::<u8>(), bytes.len());
-        libc::munmap(map, bytes.len());
-    }
-    Ok(())
+    // SAFETY: the fresh mapping is `length` zeroed bytes, ours alone until
+    // the name is returned; it is unmapped below on every path.
+    let result = fill(unsafe { std::slice::from_raw_parts_mut(map.cast::<u8>(), length) });
+    // SAFETY: the mapping made above.
+    unsafe { libc::munmap(map, length) };
+    result
 }
 
 /// Maps the segment `name`, copies its first `length` bytes out, and
@@ -277,6 +295,29 @@ mod tests {
         assert!(!exists(&name).unwrap());
         assert!(exists("/etc/passwd").is_err());
         assert!(take(&name, bytes.len()).is_err());
+    }
+
+    #[test]
+    fn segments_are_written_in_place() {
+        let name = publish_with(5, |segment| {
+            assert_eq!(segment, [0; 5], "a fresh segment starts zeroed");
+            segment[1..4].copy_from_slice(&[7, 8, 9]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(take(&name, 5).unwrap(), [0, 7, 8, 9, 0]);
+        assert!(!exists(&name).unwrap(), "taking unlinks");
+        // A failed fill reports its own error (publish unlinks the segment).
+        let mut made = None;
+        let error = publish_with(5, |segment| {
+            made = Some(segment.len());
+            Err(io::Error::other("packing failed"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            (error.to_string().as_str(), made),
+            ("packing failed", Some(5))
+        );
     }
 
     #[test]

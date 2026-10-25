@@ -1200,6 +1200,7 @@ pub fn responses() -> Vec<Envelope> {
                     payload: crate::snapshot::PixelPayload::Inline {
                         bytes: crate::common::Bytes(vec![0, 0, 0, 255, 255, 255, 255, 255]),
                     },
+                    video: None,
                     origin: [0.0, 0.0],
                     layer_box: None,
                     raster: None,

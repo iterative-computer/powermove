@@ -7,6 +7,73 @@ decode-in half of `engine/crates/pm-gpu` (zero-copy import, normalization,
 deinterlacing). This file records how the code meets the plan and where it
 departs from the spike; the plan stays the authority.
 
+## Source media surfaces
+
+`SnapshotTarget::Source` (RFC 16) draws one frozen asset at a source time,
+independent of the composition, with `stretch`, `contain` or `cover` fit.
+`display` reads the original through the host's `SourceRead` capability;
+legacy browser renditions do not replace it. `interpreted` applies the source
+interpretation to that original, and `compositor` is the source
+monitor's video request. Source jobs (filmstrips, browser renditions) and
+their frozen sessions are specified in RFC 12.
+
+Decoding uses an exact Export-purpose worker that keeps its session warm,
+prefetches neighbouring frames during drags and fills at most 64 frames of
+the same GOP after a jump, within half its decoded-frame lease. It never
+returns a stand-in frame; new requests preempt prefetch. Source SVGs use the
+Chromium raster exchange at the final output size and fractional fit
+rectangle, without a second filter. Monitor audio is a separate `pm-audio`
+link (`AudioMessage::SourceMonitor`) at unity gain; `source_monitor_pcm`
+renders its decoded mix offline for comparison with Chromium.
+
+The monitor presents video without a browser decoder. For readings Chromium
+can express, the engine sends the exact decoder's coded planes with H.273 tags; the renderer
+writes them as WebCodecs `VideoFrame`s to a private generated track on a
+muted, URL-less `<video>`, and Chromium's compositor scales and converts
+them. Frames travel as buffers in WebCodecs layouts: NV12, I420A, I422
+(4:2:2) and I420P10 (10-bit 4:2:0, de-interleaved from P010). Electron
+shared-texture imports are not used: one wedged the renderer's main thread on
+the next import. A stream with more than four times the monitor's pixels (4K
+in a 720p monitor) is resampled by the engine first and presented like a
+converted reading, so the window never receives planes many times larger
+than what it shows. Main stamps each delivery before the frame is created; replay
+clones retain that stamp, which is separate from source time. The
+presenter writes a frame only after
+`requestVideoFrameCallback` reports the previous one presented (at most
+250 ms for an element that never reports), so two frames never compete for
+one vsync; a paint resolves once its frame is written. Stills present
+through an `<img>` holding a lossless PNG of engine pixels.
+
+Colour has one function, `pm_media::probe::color::frame_reading` (over
+`video_reading`): tags win field by field; untagged matrices are BT.601 up to
+576 lines and under 1280 wide, else BT.709; untagged transfer is BT.709,
+shown with the sRGB curve; untagged SD primaries follow the line standard
+(VIDEO-SD-1): 576 lines read EBU/BT.470BG, other SD sizes SMPTE 170M; range
+is limited
+unless tagged full. Image sequences (encoded BT.601 by `media-proxy.ts`,
+which now also tags them) read BT.601 at any size. Composition and export use the same reading. Corrections and measured display
+limitations are recorded in `quality-ledger.md`. When Chromium can express
+a reading exactly (Rec.709, 170M and 470BG primaries; BT.709 or linear
+transfer; BT.709, 601 and BT.2020 NCL matrices) the monitor sends tags.
+Otherwise (BT.2020 or other primaries, PQ, HLG, other curves, and sources
+composition draws only as interpreted: rotation, fields, pixel aspect,
+cropping) the engine draws the source and sends sRGB RGBA, so the monitor
+never fails on a tag. Interpret Footage (any member, and the renderer's
+per-file colour override) takes the same engine route on the original file,
+so the monitor shows the reading composition draws; an interpreted still
+asks for the `interpreted` reading. SVG rasters carry no interpretation.
+
+Posters, filmstrips and the monitor share a 64 MiB renderer cache (40 MiB
+frames, 16 MiB filmstrips, 8 MiB posters). Import commits without waiting for
+the engine poster. With the new engine, poster store writes and the legacy
+editing preview's publication wait for media to be quiet for 500 ms and an
+idle callback, at most 2 s (`media/activity.ts`); nothing the user or an agent
+awaits (import, replace, restore) waits on that publication.
+
+Superwhites and sub-blacks survive the engine's float reading; the 8-bit
+monitor clips them only at the display encode, and the gate's reference does
+the same. Heard-PCM equality is gated on decoded mixes, not device output.
+
 ## Building
 
 `source engine/env.sh` sets `PM_FFMPEG_DIR` to our LGPL FFmpeg build
@@ -336,29 +403,12 @@ explicit file and Interpret Footage matrices take precedence. This source
 reading is part of the converted-frame cache key and disables YUV pass-through
 whose generic file interpretation would differ.
 
-Existing level-1 renditions also reproduce Chromium's software video upload:
-pinned libyuv I420 → clipped/premultiplied RGBA8 with nearest chroma before
-texture filtering. The generic native chroma filter alone smeared color
-into pixels counted as patch interiors at the historical projects' 2×
-scale. The RGBA8 path makes all nine historical frames exact on their
-55,892 video-class interior pixels and exact in alpha. The capture manifest
-binds import hashes to original GIF/APNG/WebP files, so the test resolves
-those unchanged asset IDs to the actual app-persisted rendition, leaving the
-historical documents, transforms and sample times unchanged. Hidden app
-comparisons also cover all three sources through import, seek and export.
-[Chromium's video conversion](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.cc)
-and its [default nearest filter](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.h)
-define that software upload.
-
-Level 2 keeps the native chroma conversion; it compares to FFmpeg + zimg
-with the same filter within 1 CV, including chroma edges. The level-1
-libyuv bitmap itself differs from nearest-filter zimg by up to 2 CV in
-saturated blue: that independent ≤1 CV line is still a gap, not a relaxed
-threshold. Its failed measurement and side-by-sides are in the lane report.
-The oracle strips alpha before zimg and compares alpha separately; zimg
-has no `yuva422p16le`, which would silently insert swscale chroma conversion.
-Original animation APIs remain available for new-import work. Today's conversion and storage policy
-is unchanged; preserving originals for new imports is outside this round.
+All project levels use the native colour reading, chroma reconstruction and
+project-depth storage. Image-sequence compatibility preserves authored slots,
+geometry and extension behavior; it does not restore Chromium's clipped
+RGBA8 upload or nearest-chroma artifacts. The independent video reference and
+intentional corrections are described in `video-parity.md` and
+`quality-ledger.md`.
 
 ### Container transforms, AVIF structure and SVG encodings (review round 3)
 

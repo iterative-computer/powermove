@@ -194,6 +194,11 @@ pub trait FramePresenter: Send {
         )))
     }
 
+    /// Cancel a host snapshot that may still be queued on the presenter.
+    fn cancel_snapshot(&mut self, _host: PortId, _id: RequestId) -> bool {
+        false
+    }
+
     /// A viewer or scrub frame request. The presenter answers later on the
     /// port with `Response::Frame` (or an error) for `id`; an `Err` here is
     /// sent at once.
@@ -297,6 +302,18 @@ pub trait FramePresenter: Send {
         _session: SessionId,
         _asset: &str,
         _path: Option<std::path::PathBuf>,
+    ) {
+    }
+
+    /// The browser-visible source path for a source monitor. `None` clears a
+    /// stale answer while the host resolves it; `Some(None)` means unavailable.
+    fn source_media(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _asset: &str,
+        _path: Option<Option<std::path::PathBuf>>,
     ) {
     }
 }

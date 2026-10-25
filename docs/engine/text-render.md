@@ -1074,8 +1074,8 @@ The svgcompat merge (integration `c3c5f8b7`) lifted the SVG image refusal,
 so `text_corpus` now compares the corpus projects with SVG images in full
 instead of only through their text in isolation (576 frames, up from 477).
 Without an SVG source those images drew wrong and 94 frames failed on the
-background around their text; `text_corpus` now draws them from Chromium's
-rasters (`svg-rasters-*`), as `tests/corpus.rs` does.
+background around their text. At that time `text_corpus` drew them through
+Chromium. The current SVG path paints natively at output resolution.
 
 Round 8 measurements (integration `c3c5f8b7` merged; release with
 `CARGO_PROFILE_RELEASE_LTO=false`):
@@ -2011,7 +2011,7 @@ qualified; those viewports remain an open gap, unchanged by this round.
 
 - `pm-gpu/src/readback.rs` and `tests/readback.rs`: BGRA N32 readback
   returns RGBA channels; a two-pixel test covers both storage formats.
-- `pm-render/src/vector/{svg,svg_rasters}.rs`: test-only scoped fixture
+- `pm-render/src/vector/svg.rs`: test-only scoped fixture
   cleanup. Product SVG rendering is unchanged.
 - `apps/desktop/e2e/helpers/app.ts`: the `session` fixture has its own
   60 s timeout, separate from the test's deadline. This applies to every

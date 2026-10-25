@@ -19,6 +19,22 @@ function fixture() {
 }
 
 describe('portable web export', () => {
+  it('requests frozen original renditions from the job engine without consulting browser or host converters', async () => {
+    const PM = fixture();
+    PM.proj.assets = { clip: { id: 'clip', kind: 'video', name: 'A001.mov', contentHash: 'c'.repeat(64), rendition: true } };
+    PM.proj.layers.push(PM.mkLayer('video', { d: { asset: 'clip' } }, PM.proj));
+    const rendition = vi.fn(async (project: any) => {
+      PM.proj.assets.clip.contentHash = 'replacement';
+      expect(project.assets.clip.contentHash).toBe('c'.repeat(64));
+      return new Blob(['engine-vp9'], { type: 'video/webm' });
+    });
+    PM.EngineSourceMedia = { rendition };
+    PM.MediaStore.get = vi.fn(async () => { throw new Error('original reader should not run'); });
+    const result = await buildWebExport(PM);
+    expect(rendition).toHaveBeenCalledWith(expect.any(Object), 'clip', 'webm');
+    expect(new TextDecoder().decode(result.files.get(result.scene.assets.clip!))).toBe('engine-vp9');
+    expect(PM.MediaStore.get).not.toHaveBeenCalled();
+  });
   it('exports owned scene source, a standalone runtime, and safe preview markup', async () => {
     const PM = fixture(), before = PM.serialize();
     const result = await buildWebExport(PM);

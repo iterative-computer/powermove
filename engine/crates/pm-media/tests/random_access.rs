@@ -23,6 +23,52 @@ fn e2e_fixtures() {
     run_all(&videos(&fixtures_dir(), &|_| true), DecodePurpose::Display);
 }
 
+/// Cancellation can stop a seek after reset, before any picture is fed.
+/// EOS must also finish when the next operation is another reset or teardown.
+#[test]
+fn videotoolbox_reset_without_a_following_picture() {
+    use pm_media::decode::service::MediaSource;
+    use pm_media::ff::PacketReader;
+    use pm_media::vt::{VtConfig, VtDecoder};
+
+    for file in ["h264-aac.mp4", "hevc.mp4"] {
+        let src = MediaSource::open(&fixtures_dir().join(file)).unwrap();
+        let cfg =
+            VtConfig::new(&src.info, &src.index, &src.extradata, DecodePurpose::Export).unwrap();
+        for warm in [false, true] {
+            for next in ["reset", "sync", "drop"] {
+                watchdog::watch(
+                    || format!("{file}: reset -> {next}, warm={warm}"),
+                    || {
+                        let mut decoder = VtDecoder::new(&cfg, src.index.timebase, true).unwrap();
+                        assert!(
+                            decoder.hardware(),
+                            "{file}: this regression requires hardware decode"
+                        );
+                        let mut output = Vec::new();
+                        if warm {
+                            let mut reader = PacketReader::new(src.path(), src.stream).unwrap();
+                            let packets = reader.read(&src.index, &[0]).unwrap();
+                            decoder.send(&packets[0], &mut output).unwrap();
+                            decoder.sync(&mut output).unwrap();
+                            assert!(!output.is_empty(), "{file}: warm decoder produced no frame");
+                            output.clear();
+                        }
+                        decoder.start_sequence().unwrap();
+                        match next {
+                            "reset" => decoder.start_sequence().unwrap(),
+                            "sync" => decoder.sync(&mut output).unwrap(),
+                            _ => {}
+                        }
+                        assert!(output.is_empty(), "EOS produced a picture");
+                        drop(decoder);
+                    },
+                );
+            }
+        }
+    }
+}
+
 /// The corpus files whose names start with `PM_MEDIA_ONLY` (comma
 /// separated prefixes), for looking into one file.
 #[test]

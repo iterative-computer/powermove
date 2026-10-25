@@ -53,6 +53,7 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
   const bytes = (value: unknown): Uint8Array | null => (value instanceof Uint8Array ? new Uint8Array(value) : null);
   const target = request?.snapshot?.target as { kind?: string; content?: unknown } | undefined;
   const plain = JSON.parse(JSON.stringify({
+    requestId: request?.requestId,
     generation: request?.generation,
     session: request?.session ?? null,
     revision: request?.revision ?? null,
@@ -611,6 +612,12 @@ const bridge: PowermoveBridge = {
     agentFrames: (request) => ipcRenderer.invoke(ENGINE_IPC.agentFrames, {
       project: String(request.project), revision: request.revision, width: request.width, times: [...request.times]
     }),
+    sourceFilmstrip: (request) => ipcRenderer.invoke(ENGINE_IPC.sourceFilmstrip, { ...request, times: [...request.times] }),
+    prepareSource: (request) => ipcRenderer.invoke(ENGINE_IPC.prepareSource, { ...request }),
+    releasePreparedSources: () => ipcRenderer.invoke(ENGINE_IPC.releasePreparedSources),
+    cancelSnapshot: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelSnapshot, String(requestId)),
+    browserRendition: (request) => ipcRenderer.invoke(ENGINE_IPC.browserRendition, { ...request }),
+    cancelMediaJob: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelMediaJob, String(requestId)),
     exportSheet: (sheet, open) => ipcRenderer.send(ENGINE_IPC.exportSheet, sheet, open === true),
     exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
       project: String(request.project),

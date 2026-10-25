@@ -61,8 +61,14 @@ export const ENGINE_IPC = {
   /** renderer → main (invoke): the same, asynchronously (async siblings,
    *  thumbnails, library cards, posters, the project thumbnail). */
   snapshot: 'engine:snapshot',
+  cancelSnapshot: 'engine:snapshot-cancel',
   /** renderer → main: one revision-pinned agent frame batch, without stopping playback. */
   agentFrames: 'engine:agent-frames',
+  prepareSource: 'engine:prepare-source',
+  releasePreparedSources: 'engine:release-prepared-sources',
+  sourceFilmstrip: 'engine:source-filmstrip',
+  browserRendition: 'engine:browser-rendition',
+  cancelMediaJob: 'engine:cancel-media-job',
   /** main → renderer: the job engine needs a layer's compatibility pixels
    *  for an export frame (`EngineCompatAsk`); the window answers with
    *  `compatAnswer`. */
@@ -82,6 +88,19 @@ export type EngineAgentFramesReply = {
   status: 'rendered'; revision: number; queuedMs: number;
   images: Array<{ time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number }>;
 };
+
+/** Frozen original media for a source job; request ids are scoped to the window. */
+export type EngineMediaJobRequest = { project: string; revision: number; asset: string; requestId: string };
+export type EngineSourceFilmstripRequest = EngineMediaJobRequest & {
+  times: number[]; width: number; height: number;
+  fit: 'stretch' | 'contain' | 'cover'; color: 'display' | 'interpreted' | 'compositor';
+};
+/** Starts a frozen source session and draws one real frame ahead of a strip. */
+export type EngineSourcePrepareRequest = Omit<EngineSourceFilmstripRequest, 'times'> & { time: number };
+export type EngineBrowserRenditionRequest = EngineMediaJobRequest & { format: 'png' | 'webm' };
+/** One packed top-down straight RGBA8 buffer; frame i begins at i*width*height*4. */
+export type EngineSourceFilmstripReply = { data: Uint8Array; count: number; width: number; height: number };
+export type EngineBrowserRenditionReply = { data: Uint8Array; type: 'image/png' | 'video/webm' };
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
 export const ENGINE_WINDOW_MESSAGE = {
@@ -250,6 +269,8 @@ export type EngineProbeResult =
  *  (main refuses another window's session and a stale launch's);
  *  `revision` is the document revision the caller has (read-your-writes). */
 export type EngineSnapshotRequest = {
+  /** Optional cancellation identity, scoped to the IPC sender. */
+  requestId?: string;
   generation: number;
   /** The window's engine session, or null with `document` (main serves the
    *  snapshot from a session of its own for the window). */
@@ -292,6 +313,8 @@ export type EngineSnapshotReply =
       height: number;
       pixels: import('./engine-protocol').SnapshotPixels;
       data: Uint8Array;
+      /** Decoded source planes (`data`) for a WebCodecs VideoFrame, stamped once by main. */
+      videoPlanes?: import('./engine-protocol').SourceVideoFrame & { timestamp: number };
       origin: [number, number];
       /** A layer raster's box in layer pixels (`RasterSurface` w, h). */
       layerBox: [number, number] | null;
@@ -380,8 +403,15 @@ export interface EngineBridge {
   snapshotSync?(request: EngineSnapshotRequest): EngineSnapshotReply;
   /** A snapshot, asynchronously. Never rejects: failures are `status: 'failed'`. */
   snapshot?(request: EngineSnapshotRequest): Promise<EngineSnapshotReply>;
+  cancelSnapshot?(requestId: string): Promise<void>;
   /** Agent observations use the job engine at a pinned document revision. */
   agentFrames?(request: EngineAgentFramesRequest): Promise<EngineAgentFramesReply>;
+  sourceFilmstrip?(request: EngineSourceFilmstripRequest): Promise<EngineSourceFilmstripReply>;
+  prepareSource?(request: EngineSourcePrepareRequest): Promise<void>;
+  /** Retires this window's source-frame sessions when its project closes. */
+  releasePreparedSources?(): Promise<void>;
+  browserRendition?(request: EngineBrowserRenditionRequest): Promise<EngineBrowserRenditionReply>;
+  cancelMediaJob?(requestId: string): Promise<void>;
   /** Compatibility pixels the job engine needs for an export frame; the
    *  listener answers with `answerCompat`. Returns an unsubscribe. */
   onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;
