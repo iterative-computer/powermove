@@ -117,6 +117,8 @@ the cold work is the point.
 | `import_3d_600k` | frame | the first frame of a lit, shadowed scene placing the 600k-vertex model, then 10 frames turning it |
 | `playback_shapes_200` | frame | 60 playing frames of the synthetic project with 200 animated shape layers (rectangles, ellipses, polygons and stars, some stroked) |
 | `playback_svg_animated` | frame | 60 playing frames of one translating, rotating SVG image (gradient, clip path, blur, 120 motifs); every frame reuses its playback source raster. Notes carry resvg's CPU time for the same document at its device size |
+| `paused_svg_drop_shadow` | frame | 30 paused frames of Figma's drop-shadow card export at 4×, its scale rising each frame so every frame repaints the filtered SVG in float. Notes carry resvg's CPU time at the same device size |
+| `paused_svg_large_blur` | frame | 30 paused frames of a full-frame Figma layer blur (stdDeviation 40), repainted each frame as above |
 
 `examples/source_media.rs` is a diagnostic, not a ratcheted bench: it reports
 these counters and GPU-complete wall times for 24 scattered source-monitor
