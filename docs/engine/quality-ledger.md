@@ -208,3 +208,13 @@ synthesized reference encoded at the shipped WebP quality exactly; inline
 thumbnails retain that poster. Theme captures additionally compare layout and
 ICC-transformed reference colours. This gate requires half-code snapshot
 rounding accuracy, not equality with Chromium's Canvas2D colour bug.
+
+Frame identity at open-GOP boundaries. Reference: FFmpeg's sequential decode
+in presentation order; the shown frame is the one whose interval holds the
+time. Gate: `pm-media/tests/random_access.rs` (`s6_corpus`: every frame of
+open-GOP H.264 and HEVC by random access equals the sequential decode). Units
+are source frames.
+
+| Correction | Today vs reference | Engine vs reference | Cases |
+|---|---|---|---|
+| A seek to a leading picture of a CRA shows that picture (today: the CRA, the next keyframe) | 1 frame (frame 30, the CRA, for frame 29) | 0 | 4K HEVC Main10, keyint 30, open GOP |
