@@ -56,6 +56,25 @@ The raw camera frame's one interior pixel, `(799, 448)`, is a rounding-midpoint 
 a surface fit over 2,805 face pixels gives 150.50 ± 0.02, and today (151) and the
 engine (150) are both 0.50 away.
 
+## Text raster
+
+- **Reference:** the byte-exact uploaded Canvas raster, sampled bilinearly in f64
+  at output pixel centres through the authored quad, with its opacity over the
+  captured background. The quad and full-canvas placement remain exact.
+- **Gate:** `pm-render` example `color_depth_parity`, using the synthetic
+  `color-depth.ts` captures. Resampled text uses `pm_reference::compare` with
+  `EIGHT_BIT` at depth 8 and `HALF_FLOAT` at depths 16 and 32; other pixels stay
+  byte-exact. The depth-8 PNG export equals the preview. `pm-node`'s
+  `render_fonts` also requires exact full-canvas pixels after placing the ink crop.
+- **Units:** CV. The maximum can differ within the stated precision bound;
+  p99.9 and mean are no worse than today's full-quad sampling.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Retain only ink without reproducing full-quad f32 interpolation (bilinear pixel-centre reference) | 0.775, 0.748, 0.236 | 0.789, 0.707, 0.235 | Rotated text, depth 8 |
+| Same ink-only quad at half-float depth | 0.487, 0.400, 0.063 | 0.479, 0.366, 0.060 | Rotated text, depth 16 |
+| Same ink-only quad at float depth | 0.405, 0.366, 0.036 | 0.455, 0.304, 0.033 | Rotated text, depth 32 |
+
 ## Video
 
 - **Reference:** each clip's decoded codes in f64 from `pm-reference` (H.273 ranges and
