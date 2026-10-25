@@ -1,7 +1,7 @@
 import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { displayCodeToXyzD50, extractPngIcc, parseMatrixTrcIcc, readPngMatrixTrcProfile,
-  referenceDisplayCodes, srgbEotf } from './source-colour-reference';
+  readSdrVideoTags, referenceDisplayCodes, referenceSrgbCodes, referenceSrgbToDisplay, srgbEotf, uniformPlanarYuv } from './source-colour-reference';
 
 type Triple = readonly [number, number, number];
 type Matrix = readonly [Triple, Triple, Triple];
@@ -107,6 +107,52 @@ function syntheticPng(icc: Buffer): Buffer {
 }
 
 describe('independent PNG ICC and video colour reference', () => {
+  it('reads SD defaults independently and respects each explicit colour tag', () => {
+    const sd = { width: 160, height: 90 };
+    expect(readSdrVideoTags(sd)).toEqual({ matrix: 'bt601', primaries: 'smpte170m', fullRange: false });
+    expect(readSdrVideoTags({ width: 720, height: 576 }).primaries).toBe('bt470bg');
+    for (const size of [{ width: 1280, height: 576 }, { width: 480, height: 720 }])
+      expect(readSdrVideoTags(size)).toEqual({ matrix: 'bt709', primaries: 'bt709', fullRange: false });
+    expect(readSdrVideoTags({ ...sd, color_space: 'bt709', color_range: 'pc' }))
+      .toEqual({ matrix: 'bt709', primaries: 'smpte170m', fullRange: true });
+    expect(readSdrVideoTags({ ...sd, color_primaries: 'bt709' }).matrix).toBe('bt601');
+    for (const tags of [{ color_transfer: 'smpte2084' }, { color_space: 'bt2020c' }, { color_primaries: 'smpte432' }, { color_range: 'other' }])
+      expect(() => readSdrVideoTags({ ...sd, ...tags })).toThrow(/Unsupported SDR/);
+    expect(() => readSdrVideoTags({ width: 0, height: 90 })).toThrow(/dimensions/);
+  });
+
+  it('proves uniformity across all decoded native YUV samples, including 10-bit 4:2:2', () => {
+    const eight = Buffer.from([...Array(16).fill(81), ...Array(4).fill(90), ...Array(4).fill(240)]);
+    expect(uniformPlanarYuv(eight, 4, 4, 'yuv420p')).toEqual({ yuv: [81, 90, 240], bits: 8 });
+    const ten = Buffer.alloc((16 + 8 + 8) * 2);
+    [...Array(16).fill(324), ...Array(8).fill(360), ...Array(8).fill(960)].forEach((sample, at) => ten.writeUInt16LE(sample, at * 2));
+    expect(uniformPlanarYuv(ten, 4, 4, 'yuv422p10le')).toEqual({ yuv: [324, 360, 960], bits: 10 });
+    expect(() => uniformPlanarYuv(eight.subarray(1), 4, 4, 'yuv420p')).toThrow(/planar reference bytes/);
+    expect(() => uniformPlanarYuv(eight, 4, 4, 'nv12')).toThrow(/format/);
+    for (const index of [0, 15, 16, 19, 20, 23]) {
+      const changed = Buffer.from(eight); changed[index]!++;
+      expect(() => uniformPlanarYuv(changed, 4, 4, 'yuv420p')).toThrow(/not uniform/);
+    }
+    ten.writeUInt16LE(1024, 0);
+    expect(() => uniformPlanarYuv(ten, 4, 4, 'yuv422p10le')).toThrow(/Out-of-range/);
+  });
+
+  it('distinguishes the native SD red correction from legacy Canvas2D bytes', () => {
+    const tags = readSdrVideoTags({ width: 160, height: 90 });
+    const codes = referenceSrgbCodes([81, 90, 240], tags);
+    expect(codes[0]).toBeCloseTo(247.5542, 4);
+    expect(codes[1]).toBeCloseTo(35.88093, 4);
+    expect(codes.map(Math.round)).toEqual([248, 36, 0]);
+    const distance = (actual: Triple) => Math.max(...actual.map((value, channel) => Math.abs(value - codes[channel]!)));
+    expect(distance([248, 36, 0])).toBeLessThan(.5);
+    expect(distance([254, 0, 0])).toBeGreaterThan(35);
+    const prores = referenceSrgbCodes([324, 360, 960], tags, 10);
+    for (let channel = 0; channel < 3; channel++) expect(prores[channel]).toBeCloseTo(codes[channel]!, 8);
+    const srgb = parseMatrixTrcIcc(syntheticIcc(SRGB_D50));
+    const displayed = referenceSrgbToDisplay(srgb, [249, 36, 1]);
+    for (let channel = 0; channel < 3; channel++) expect(displayed[channel]).toBeCloseTo([249, 36, 1][channel]!, 1);
+  });
+
   it('extracts matrix/TRC profiles from a PNG and maps known sRGB/P3 colourants into D50 PCS', () => {
     for (const matrix of [SRGB_D50, DISPLAY_P3_D50]) {
       const png = syntheticPng(syntheticIcc(matrix));

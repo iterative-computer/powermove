@@ -265,3 +265,81 @@ export function referenceDisplayCodes(profile: MatrixTrcProfile, yuv: ColourTrip
     return channel <= trc.decode(0) ? 0 : channel >= trc.decode(1) ? 255 : 255 * trc.encode(channel);
   }) as unknown as ColourTriple;
 }
+
+// An ideal sRGB destination for byte snapshots (Canvas2D's default colour
+// space). Unlike a screen capture, these bytes have no display ICC transform.
+const srgbMatrix = deriveRgbToXyz(PRIMARIES.bt709, D65);
+const srgbColumns = [0, 1, 2].map(column => adaptBradford([
+  srgbMatrix[0][column]!, srgbMatrix[1][column]!, srgbMatrix[2][column]!
+]));
+const srgbCurve = curveFromDecode(srgbEotf);
+const SRGB_PROFILE: MatrixTrcProfile = {
+  rgbToXyzD50: [0, 1, 2].map(row => srgbColumns.map(column => column[row]!)) as unknown as Matrix3,
+  trc: [srgbCurve, srgbCurve, srgbCurve]
+};
+
+export const referenceSrgbCodes = (yuv: ColourTriple, tags: VideoTags, bits: 8 | 10 = 8): ColourTriple =>
+  referenceDisplayCodes(SRGB_PROFILE, yuv, tags, bits);
+
+/** Linear-light primaries change into sRGB/BT.709, row-major; null when the
+ * primaries already are sRGB's. Both whites are D65, so no adaptation. */
+export function linearToSrgbPrimaries(primaries: VideoTags['primaries']): number[] | null {
+  if (primaries === 'bt709') return null;
+  const m = multiply3(inverse(srgbMatrix), deriveRgbToXyz(PRIMARIES[primaries], D65));
+  return m.flatMap(row => [...row]);
+}
+
+function multiply3(a: Matrix3, b: Matrix3): Matrix3 {
+  return a.map(row => [0, 1, 2].map(column => row[0] * b[0][column]! + row[1] * b[1][column]! + row[2] * b[2][column]!)) as unknown as Matrix3;
+}
+
+/** Display codes for an already encoded sRGB poster, including WebP loss. */
+export function referenceSrgbToDisplay(profile: MatrixTrcProfile, codes: ColourTriple): ColourTriple {
+  const linear = multiply(inverse(profile.rgbToXyzD50), displayCodeToXyzD50(SRGB_PROFILE, codes));
+  return linear.map((value, channel) => 255 * profile.trc[channel]!.encode(value)) as unknown as ColourTriple;
+}
+
+/** Handwritten section 9 SDR reading of ffprobe fields, never engine output.
+ * Unsupported tags fail closed rather than silently becoming a legacy oracle.
+ */
+export function readSdrVideoTags(stream: { width: number; height: number; color_space?: string;
+  color_primaries?: string; color_range?: string; color_transfer?: string }): VideoTags {
+  const untagged = (tag: string | undefined) => !tag || ['unknown', 'unspecified', 'reserved'].includes(tag);
+  if (!Number.isInteger(stream.width) || !Number.isInteger(stream.height) || stream.width <= 0 || stream.height <= 0)
+    throw new Error('Invalid reference video dimensions');
+  const sd = stream.height <= 576 && stream.width < 1280;
+  const matrices: Record<string, VideoTags['matrix']> = { bt709: 'bt709', smpte170m: 'bt601', bt470bg: 'bt601', bt2020nc: 'bt2020' };
+  const primaries: Record<string, VideoTags['primaries']> = { bt709: 'bt709', smpte170m: 'smpte170m', bt470bg: 'bt470bg', bt2020: 'bt2020' };
+  const matrix = untagged(stream.color_space) ? (sd ? 'bt601' : 'bt709') : matrices[stream.color_space!];
+  const primary = untagged(stream.color_primaries) ? (sd ? stream.height === 576 ? 'bt470bg' : 'smpte170m' : 'bt709') : primaries[stream.color_primaries!];
+  if (!matrix || !primary || (!untagged(stream.color_range) && !['tv', 'pc'].includes(stream.color_range!))
+      || (!untagged(stream.color_transfer) && !['bt709', 'smpte170m', 'iec61966-2-1', 'gamma22', 'gamma28', 'bt2020-10', 'bt2020-12'].includes(stream.color_transfer!)))
+    throw new Error('Unsupported SDR reference colour tags');
+  return { matrix, primaries: primary, fullRange: stream.color_range === 'pc' };
+}
+
+/** The source-media fixtures are solid colour at the tested times. Prove that
+ * from EVERY decoded Y/U/V sample, retaining native range/depth/subsampling.
+ * This makes all output pixels independently referenceable at any scale,
+ * without pretending to model either renderer's reconstruction filter.
+ */
+export function uniformPlanarYuv(data: Uint8Array, width: number, height: number, format: string): { yuv: ColourTriple; bits: 8 | 10 } {
+  const match = /^yuv(420|422|444)p(10le)?$/.exec(format);
+  if (!match || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0)
+    throw new Error('Unsupported planar reference format or dimensions');
+  const bits = match[2] ? 10 : 8;
+  const sampleBytes = bits === 10 ? 2 : 1;
+  const chroma = (match[1] === '444' ? width : Math.ceil(width / 2)) * (match[1] === '420' ? Math.ceil(height / 2) : height);
+  const lengths = [width * height, chroma, chroma];
+  if (data.length !== lengths.reduce((a, b) => a + b) * sampleBytes) throw new Error('Truncated or extra planar reference bytes');
+  const sample = (at: number) => bits === 8 ? data[at]! : data[at * 2]! + data[at * 2 + 1]! * 256;
+  let offset = 0;
+  const values = lengths.map(length => {
+    const value = sample(offset);
+    if (value >= 2 ** bits) throw new Error('Out-of-range planar reference sample');
+    for (let i = 0; i < length; i++) if (sample(offset + i) !== value) throw new Error('Reference fixture is not uniform; use a spatial reference');
+    offset += length;
+    return value;
+  });
+  return { yuv: values as unknown as ColourTriple, bits };
+}

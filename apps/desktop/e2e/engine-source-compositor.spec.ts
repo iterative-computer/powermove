@@ -88,7 +88,7 @@ const REFERENCE: Record<string, { tags: VideoTags | null; exact: boolean; sequen
   'bars-gradient-alpha-vp9.webm': { tags: SD601, exact: false, alpha: true }
 };
 type Yuv420 = { width: number; height: number; bits: 8 | 10; data: Buffer; alpha: boolean };
-type Closeness = { pixels: number; max: number; mean: number; over1: number; worst: unknown };
+type Closeness = { pixels: number; max: number; p999: number; mean: number; over1: number; worst: unknown };
 type Capture = { file: string; geometry: unknown; covered: number[][]; monitorTime?: number | null; pngColor: ReturnType<typeof pngColorMetadata>; effectiveVideoFrameColorSpace?: unknown; legacyVideoFrameGeometry?: unknown; legacyCodedPlaneEdges?: unknown };
 
 function syntheticPpm(width = WIDTH, height = HEIGHT): Buffer {
@@ -243,6 +243,7 @@ async function referenceCloseness(capture: Capture, covered: number[][], yuv: Yu
   const scale = Math.min(surface.width * dpr / yuv.width, surface.height * dpr / yuv.height);
   const left = surface.x * dpr + (surface.width * dpr - yuv.width * scale) / 2, top = surface.y * dpr + (surface.height * dpr - yuv.height * scale) / 2;
   const cache = new Map<number, readonly [number, number, number]>();
+  const distances = new Map<number, number>();
   let count = 0, max = 0, sum = 0, over1 = 0, worst: unknown = null;
   for (let py = 0; py < height!; py++) for (let px = 0; px < width!; px++) {
     if (mask[py * width! + px]) continue;
@@ -260,6 +261,7 @@ async function referenceCloseness(capture: Capture, covered: number[][], yuv: Yu
     for (let channel = 0; channel < 3; channel++) {
       const error = Math.abs(pixels[offset + channel]! - reference[channel]!);
       pixelMax = Math.max(pixelMax, error); sum += error;
+      distances.set(error, (distances.get(error) ?? 0) + 1);
     }
     if (pixelMax > 1) over1++;
     if (pixelMax > max) {
@@ -268,7 +270,13 @@ async function referenceCloseness(capture: Capture, covered: number[][], yuv: Yu
     }
     count++;
   }
-  return { pixels: count, max, mean: count ? sum / (count * 3) : 0, over1, worst };
+  let p999 = 0, samples = 0;
+  const rank = Math.ceil(count * 3 * .999);
+  for (const [distance, frequency] of [...distances].sort(([a], [b]) => a - b)) {
+    samples += frequency;
+    if (samples >= rank) { p999 = distance; break; }
+  }
+  return { pixels: count, max, p999, mean: count ? sum / (count * 3) : 0, over1, worst };
 }
 
 async function importPath(session: LaunchedApp, fixture: Fixture): Promise<string> {

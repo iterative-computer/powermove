@@ -1,15 +1,24 @@
 /** Source surfaces in hidden, isolated app profiles; no user media or screen captures. */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
-import { importFixture } from './helpers/media';
+import { fixturePath } from './helpers/media';
 import { capturedPixelDelta, decodedRenditionIdentity, renditionAudioFixture, sourcePcmComparison } from './helpers/source-media';
+import { readPngMatrixTrcProfile, referenceSrgbToDisplay, type ColourTriple } from './helpers/source-colour-reference';
+import { decodedSourceReference, solidCaptureError } from './helpers/source-snapshot-reference';
+
+const VIDEO_SOURCES = ['h264-aac.mp4', 'prores422.mov'];
+// These solid fixtures must round to the nearest 8-bit sRGB code: half a
+// code, plus only numerical epsilon for the independent f64 calculation.
+// Lossy posters instead use a separately encoded f64 reference at the same
+// shipped WebP quality; they receive no additional colour tolerance.
+const SNAPSHOT_PRECISION = .5 + 1e-6;
 
 for (const enabled of [false, true]) test.describe(`source media, engine ${enabled ? 'on' : 'off'}`, () => {
   test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: enabled ? '1' : '0' } } });
 
-  test('posters, source frames, audio and code renditions retain their shipped behavior', async ({ session }) => {
+  test('video sources follow native colour references; stills, audio and code renditions retain shipped behavior', async ({ session }) => {
     test.setTimeout(240_000);
     const evidence = process.env.PM_SOURCE_EVIDENCE;
     const directory = evidence ? path.join(evidence, enabled ? 'native' : 'legacy') : await mkdtemp(path.join(os.tmpdir(), 'pm-source-surfaces-'));
@@ -28,14 +37,21 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
           return (draw as any).apply(this, args);
         };
       }, enabled);
+      const importSource = async (file: string) => {
+        const chooser = page.waitForEvent('filechooser');
+        await page.evaluate(() => {
+          const input = document.createElement('input'); input.type = 'file';
+          input.onchange = () => { void (window as any).PM.importFiles([...input.files!], { placement: null }); };
+          input.click();
+        });
+        await (await chooser).setFiles(file);
+      };
       for (const file of ['still-red.png', 'h264-aac.mp4', 'tone.wav', 'prores422.mov', 'still.heic']) {
-        await importFixture(page, file);
+        await importSource(fixturePath(file));
         await page.waitForFunction(name => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === name), file);
       }
       const audioFile = await renditionAudioFixture(directory);
-      const chooser = page.waitForEvent('filechooser');
-      await page.evaluate(() => (window as any).PM.pickFiles());
-      await (await chooser).setFiles(audioFile);
+      await importSource(audioFile);
       await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === 'rendition-audio.mov'));
       await page.evaluate(async () => {
         const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><style>text{font:31px system-ui;fill:rebeccapurple}</style><rect x="7.25" y="11.5" width="91.5" height="79.25" rx="13.5" fill="#f57c14"/><text x="18" y="145">Source &amp; type</text></svg>';
@@ -94,11 +110,14 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
           });
           const image = (bytes: Uint8Array) => { context.putImageData(new ImageData(new Uint8ClampedArray(bytes), width, height), 0, 0); return canvas.toDataURL('image/png'); };
           const index = Math.max(0, delta.findIndex(d => d.max > 0));
-          frames[name] = { delta, legacyMs, nativeMs, capturedTime: times[index], reference: image(references[index]!), native: enabled ? image(actual[index]!) : null };
+          frames[name] = { video: meta.kind === 'video', times, width, height, delta, legacyMs, nativeMs,
+            snapshots: references.map((bytes, n) => ({ time: times[n], reference: image(bytes), native: enabled ? image(actual[n]!) : null })),
+            capturedTime: times[index], reference: image(references[index]!), native: enabled ? image(actual[index]!) : null };
           // Match the shipped poster's upscale, timestamp, and lossy encoder too.
           const posterScale = 320 / Math.max(meta.w, meta.h);
           canvas.width = Math.round(meta.w * posterScale); canvas.height = Math.round(meta.h * posterScale);
-          if (meta.kind === 'video') await seek(asset.el, Math.min(.5, meta.dur * .1));
+          frames[name].posterTime = meta.kind === 'video' ? Math.min(.5, meta.dur * .1) : 0;
+          if (meta.kind === 'video') await seek(asset.el, frames[name].posterTime);
           context.clearRect(0, 0, canvas.width, canvas.height); referenceDraw();
           const legacyPoster = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/webp', .8));
           const decodePoster = async (blob: Blob) => {
@@ -116,7 +135,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
             posterNative.data.forEach((v, i) => { const d = Math.abs(v - posterReference.data[i]!); max = Math.max(max, d); if (d) changed++; });
             frames[name].posterDelta = { max, changed };
           }
-          if (enabled && (name === 'h264-aac.mp4' || name === 'source.svg')) {
+          if (enabled && (name === 'h264-aac.mp4' || name === 'prores422.mov' || name === 'source.svg')) {
             const began = performance.now();
             const strip = await source.filmstrip(ids[name], times, width, height);
             frames[name].filmstripMs = performance.now() - began;
@@ -162,7 +181,57 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       for (const [name, result] of Object.entries<any>(measured)) {
         for (const kind of ['reference', 'native', 'posterReference', 'posterNative']) if (result[kind]) await writeFile(path.join(directory, `${name}-${kind}.png`), Buffer.from(result[kind].split(',')[1], 'base64'));
         for (const fit of result.fits ?? []) for (const kind of ['reference', 'reusedReference', 'native']) if (fit[kind]) await writeFile(path.join(directory, `${name}-${fit.fit}-${kind}.png`), Buffer.from(fit[kind].split(',')[1], 'base64'));
+        for (const [index, snapshot] of result.snapshots.entries()) for (const kind of ['reference', 'native']) if (snapshot[kind])
+          await writeFile(path.join(directory, `${name}-frame-${index}-${kind}.png`), Buffer.from(snapshot[kind].split(',')[1], 'base64'));
       }
+
+      // Native sources read original media; browser renditions are only a
+      // legacy comparison. The independent oracle decodes the imported bytes.
+      const videoInputs = ['h264-aac.mp4', 'prores422.mov'];
+      const videoColour = [];
+      for (const name of videoInputs) {
+        const file = fixturePath(name);
+        const result = measured[name];
+        const reference = await decodedSourceReference(file, [...result.times, result.posterTime]);
+        const frames = [];
+        for (const [index, frame] of reference.frames.slice(0, -1).entries()) {
+          const legacy = await solidCaptureError(path.join(directory, `${name}-frame-${index}-reference.png`), frame.codes);
+          const native = enabled ? await solidCaptureError(path.join(directory, `${name}-frame-${index}-native.png`), frame.codes) : null;
+          frames.push({ ...frame, legacy, native });
+          if (native) {
+            expect.soft(native.max, `${name} @ ${frame.time}: f64 ${JSON.stringify(native)}`).toBeLessThanOrEqual(SNAPSHOT_PRECISION);
+            expect.soft(native.alphaMax, `${name} opacity`).toBe(0);
+            expect.soft(native.mean, `${name}: native must improve on legacy against independent f64`).toBeLessThan(legacy.mean);
+          }
+        }
+        // Encode a freshly synthesized f64 reference through the public WebP
+        // encoder. This accounts for actual .8-quality loss, without granting
+        // every poster an arbitrary extra colour tolerance.
+        const posterReference = await page.evaluate(async ({ width, height, codes }) => {
+          const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+          const context = canvas.getContext('2d')!, pixels = new Uint8ClampedArray(width * height * 4);
+          for (let at = 0; at < pixels.length; at += 4) pixels.set([...codes.map(Math.round), 255], at);
+          context.putImageData(new ImageData(pixels, width, height), 0, 0);
+          const blob = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/webp', .8));
+          const bitmap = await createImageBitmap(blob);
+          try { context.clearRect(0, 0, width, height); context.drawImage(bitmap, 0, 0); }
+          finally { bitmap.close(); }
+          return { png: canvas.toDataURL('image/png'), codes: [...context.getImageData(Math.floor(width / 2), Math.floor(height / 2), 1, 1).data].slice(0, 3) };
+        }, { width: 320, height: Math.round(320 * reference.stream.height / reference.stream.width), codes: reference.frames.at(-1)!.codes });
+        result.independentPosterCodes = posterReference.codes;
+        const posterFile = path.join(directory, `${name}-poster-f64.png`);
+        await writeFile(posterFile, Buffer.from(posterReference.png.split(',')[1]!, 'base64'));
+        const poster = enabled ? await capturedPixelDelta(posterFile, path.join(directory, `${name}-posterNative.png`)) : null;
+        const posterLegacy = await capturedPixelDelta(posterFile, path.join(directory, `${name}-posterReference.png`));
+        if (poster) {
+          expect.soft(poster.sameSize, `${name} reference poster size`).toBe(true);
+          expect.soft(poster.max, `${name} independently encoded poster: ${JSON.stringify(poster)}`).toBe(0);
+          expect.soft(poster.max, `${name} native poster improves on legacy against independent encoding`).toBeLessThan(posterLegacy.max);
+        }
+        videoColour.push({ name, provenance: { source: 'original imported fixture; native source and composition share its frozen identity' },
+          ...reference, frames, poster, posterLegacy, snapshotPrecision: SNAPSHOT_PRECISION });
+      }
+      await writeFile(path.join(directory, 'video-colour-reference.json'), JSON.stringify(videoColour, null, 2));
       const inline = [];
       for (const [name, result] of Object.entries<any>(measured)) {
         const poster = page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-poster`);
@@ -182,7 +251,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
             for (let i = 0; i < expected.length; i++) { const d = Math.abs(expected[i]! - actual[i]!); max = Math.max(max, d); if (d) changed++; }
             return { max, changed, width: element.naturalWidth, height: element.naturalHeight, png: canvas.toDataURL('image/png') };
           } finally { bitmap.close(); }
-        }, result.posterReference);
+        }, enabled && result.video ? result.posterNative : result.posterReference);
         const { png, ...metric } = decoded;
         inline.push({ name, ...metric });
         await writeFile(path.join(directory, `${name}-inline.png`), Buffer.from(png.split(',')[1]!, 'base64'));
@@ -246,6 +315,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         };
       });
       await expect(page.locator('.toast')).toHaveCount(0, { timeout: 15_000 });
+      const videoThemeColours = [];
       for (const theme of ['light', 'dark']) {
         await page.evaluate(({ theme, id }) => {
           const PM = (window as any).PM; PM.theme.apply(theme);
@@ -270,8 +340,46 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         await writeFile(path.join(directory, `source-${theme}-composition.json`), JSON.stringify(composition, null, 2));
         await page.keyboard.press('Escape');
         await page.locator('.asset-list').screenshot({ path: path.join(directory, `assets-${theme}.png`), animations: 'disabled' });
-        for (const name of Object.keys(measured)) await page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-preview`).screenshot({ path: path.join(directory, `${name}-inline-${theme}.png`), animations: 'disabled' });
+        const videoLayout: Record<string, unknown> = {};
+        for (const name of Object.keys(measured)) {
+          const preview = page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-preview`);
+          const file = path.join(directory, `${name}-inline-${theme}.png`);
+          await preview.screenshot({ path: file, animations: 'disabled' });
+          if (VIDEO_SOURCES.includes(name)) {
+            const layout = await preview.evaluate(element => {
+              const image = element.querySelector<HTMLImageElement>('.asset-poster')!;
+              const rect = element.getBoundingClientRect(), imageRect = image.getBoundingClientRect();
+              const style = getComputedStyle(image);
+              const badge = element.querySelector<HTMLElement>('.asset-badge')!;
+              const badgeRect = badge.getBoundingClientRect(), badgeStyle = getComputedStyle(badge);
+              return { width: rect.width, height: rect.height, imageX: imageRect.x - rect.x, imageY: imageRect.y - rect.y,
+                imageWidth: imageRect.width, imageHeight: imageRect.height, bitmap: [image.naturalWidth, image.naturalHeight],
+                objectFit: style.objectFit, opacity: style.opacity, filter: style.filter, radius: getComputedStyle(element).borderRadius,
+                badge: { text: badge.textContent, x: badgeRect.x - rect.x, y: badgeRect.y - rect.y, width: badgeRect.width, height: badgeRect.height,
+                  color: badgeStyle.color, background: badgeStyle.backgroundColor, radius: badgeStyle.borderRadius, opacity: badgeStyle.opacity } };
+            });
+            videoLayout[name] = layout;
+            expect.soft(layout.imageX).toBe(0); expect.soft(layout.imageY).toBe(0);
+            expect.soft(layout.imageWidth).toBe(layout.width); expect.soft(layout.imageHeight).toBe(layout.height);
+            expect.soft(layout.objectFit).toBe('cover'); expect.soft(layout.opacity).toBe('1'); expect.soft(layout.filter).toBe('none');
+            expect.soft(layout.bitmap).toEqual([320, 180]);
+            if (enabled) {
+              // Stored screenshot codes belong to its actual display profile,
+              // whereas the independent lossy-poster reference is sRGB.
+              const profile = readPngMatrixTrcProfile(await readFile(file));
+              const expected = referenceSrgbToDisplay(profile, measured[name].independentPosterCodes as ColourTriple);
+              const colour = await solidCaptureError(file, expected, true);
+              videoThemeColours.push({ name, theme, ...colour });
+              expect.soft(colour.max, `${name} ${theme} screenshot versus independent poster/display ICC: ${JSON.stringify(colour)}`).toBeLessThanOrEqual(1);
+              expect.soft(colour.alphaMax).toBe(0);
+              expect.soft(colour.pixels).toBeGreaterThan(colour.size[0]! * colour.size[1]! * .2);
+            }
+          }
+        }
+        await writeFile(path.join(directory, `inline-${theme}-layout.json`), JSON.stringify(videoLayout, null, 2));
+        if (enabled && evidence) expect.soft(videoLayout, `${theme} video thumbnail layout`).toEqual(JSON.parse(await readFile(path.join(evidence, 'legacy', `inline-${theme}-layout.json`), 'utf8')));
       }
+      if (enabled) await writeFile(path.join(directory, 'video-theme-colours.json'), JSON.stringify(videoThemeColours, null, 2));
       if (enabled && evidence) {
         const captures = [];
         for (const theme of ['light', 'dark']) for (const surface of ['source', ...Object.keys(measured).map(name => `${name}-inline`)]) {
@@ -281,7 +389,9 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         await writeFile(path.join(evidence, 'theme-capture-comparison.json'), JSON.stringify(captures, null, 2));
         for (const result of captures) {
           expect.soft(result.sameSize, JSON.stringify(result)).toBe(true);
-          expect.soft(result.max, JSON.stringify(result)).toBe(0);
+          // Video colours now have independent poster + display ICC gates
+          // above; preserve exact legacy pixels for still/SVG/theme chrome.
+          if (!VIDEO_SOURCES.some(name => result.file.startsWith(`${name}-inline-`))) expect.soft(result.max, JSON.stringify(result)).toBe(0);
         }
       }
       const monitor = await page.evaluate(async ({ enabled, id }) => {
@@ -433,8 +543,10 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         for (const frame of monitor.pixels) expect(frame.max, `source monitor at ${frame.time}: ${JSON.stringify({ max: frame.max, changed: frame.changed })}; ${directory}`).toBe(0);
         for (const [name, result] of Object.entries<any>(measured)) {
           for (const fit of result.fits ?? []) expect.soft(fit.max, `${name} ${fit.fit}: ${JSON.stringify({ max: fit.max, changed: fit.changed })}; ${directory}`).toBe(0);
-          for (const metric of result.delta) expect(metric.max, `${name}: ${JSON.stringify(metric)}; ${directory}`).toBe(0);
-          expect(result.posterDelta.max, `${name} poster: ${JSON.stringify(result.posterDelta)}; ${directory}`).toBe(0);
+          if (!result.video) {
+            for (const metric of result.delta) expect(metric.max, `${name}: ${JSON.stringify(metric)}; ${directory}`).toBe(0);
+            expect(result.posterDelta.max, `${name} poster: ${JSON.stringify(result.posterDelta)}; ${directory}`).toBe(0);
+          }
         }
         expect(measured['h264-aac.mp4'].filmstripEqual).toBe(true);
         expect(measured['source.svg'].filmstripEqual).toBe(true);
