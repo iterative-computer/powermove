@@ -67,6 +67,18 @@ export class VsyncEstimator {
       return this.fitted;
     }
     let { periodMs, vsyncMs } = this.fitted;
+    if (!this.nominalHz && this.faster(periodMs)) {
+      // A faster display (the window moved to one, or ProMotion left low
+      // power): the window's median would hold the old period for a second
+      // and more, while every decision steps by it. Refit from the newest
+      // samples at once; the period refines as the window refills.
+      this.samples = this.samples.slice(-(RECENT + 1));
+      this.outside = [];
+      this.residuals = [];
+      this.lastPeriodMs = rafMs;
+      this.fitted = { ...this.fit(), jumped: true };
+      return this.fitted;
+    }
     // Without a nominal rate the period is refined from the window now and
     // then; the phase carries over on the same grid.
     if (!this.nominalHz && rafMs - this.lastPeriodMs > 500) {
@@ -104,6 +116,18 @@ export class VsyncEstimator {
   /** The current fit without new samples. */
   current(): VsyncFit | null {
     return this.fitted;
+  }
+
+  /**
+   * The newest `RECENT` intervals are all a quarter period or more short of
+   * `periodMs`. A busy renderer only lengthens intervals and an early
+   * BeginFrame shortens one, so a dozen in a row is the display's rate.
+   */
+  private faster(periodMs: number): boolean {
+    const s = this.samples;
+    if (s.length <= RECENT) return false;
+    for (let i = s.length - RECENT; i < s.length; i++) if (s[i]! - s[i - 1]! >= 0.75 * periodMs) return false;
+    return true;
   }
 
   private period(recent: number[]): number {

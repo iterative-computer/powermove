@@ -657,3 +657,44 @@ it('draws each refresh\'s timed frame inside its animation frame, one per refres
     expect(presenter.stats.dropped['late'] ?? 0).toBeLessThanOrEqual(3);
   } finally { presenter.dispose(); }
 });
+
+it('keeps an even cadence when the window moves from a 60 Hz to a 120 Hz display', () => {
+  // No nominal rate: the period is estimated. Within a dozen refreshes of
+  // the faster display, 60 fps frames show for two refreshes each; a
+  // decision that kept stepping by the old period ran ahead and snapped
+  // back for as long as the 60 Hz estimate stood.
+  let now = 0;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const latency = 1.5 * 1000 / 60 + 3.2;
+  const presenter = new EnginePresenter({ link, source, painter, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: Math.round(latency * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, latency);
+  const draws: [refresh: number, k: number][] = [];
+  let refresh = 0;
+  presenter.onPresented((f) => draws.push([refresh, Math.round(f.pts / F)]));
+  let pushed = 0;
+  const switchAt = 600 * 1000 / 60;
+  const rafs: number[] = [];
+  for (let i = 0; i < 600; i++) rafs.push(i * 1000 / 60);
+  for (let i = 0; i < 1200; i++) rafs.push(switchAt + i * 1000 / 120);
+  for (const [i, t] of rafs.entries()) {
+    // The engine renders 100 ms ahead.
+    for (; pushed * 1000 / 60 < t + 100; pushed++) {
+      source.arrive(1, pushed % 12);
+      presenter.receive({ type: 'frame', frame: desc(pushed + 1, { poolIndex: pushed % 12, pts: pushed * F, duration: F }) }, t);
+    }
+    refresh = i;
+    now = t;
+    presenter.refresh(Math.round(t * 10) / 10 + ((i * 7919) % 5) / 10 - 0.2);
+    painter.finishGpu();
+  }
+  const gaps = (from: number, to: number) => {
+    const d = draws.filter(([r]) => r >= from && r < to);
+    return d.slice(1).map(([r, k], j) => [r - d[j]![0], k - d[j]![1]]);
+  };
+  // 60 Hz: one frame per refresh.
+  expect(gaps(60, 600).filter(([r, k]) => r !== 1 || k !== 1)).toEqual([]);
+  // 120 Hz, a dozen refreshes after the move: one frame every two refreshes.
+  expect(gaps(600 + 24, 1800).filter(([r, k]) => r !== 2 || k !== 1)).toEqual([]);
+});
