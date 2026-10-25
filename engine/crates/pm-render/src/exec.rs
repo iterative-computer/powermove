@@ -65,29 +65,45 @@ impl Resolved {
     }
 }
 
-/// The quad uniform buffers of a renderer's passes, reused frame after frame
-/// (the n-th pass of a frame takes the n-th buffer): creating one per pass
-/// per frame was 8% of a viewer frame at 500 layers (docs/engine/perf.md).
+/// A frame's draw uniforms, kept frame after frame: each pass takes a
+/// 256-byte-aligned range of the first chunk with room, so passes share
+/// chunks (and their quad bind group) instead of one buffer each. A new
+/// chunk is the next power of two of the pass that needed it, so a frame
+/// never allocates more than one buffer per pass did (creating a buffer per
+/// pass per frame was 8% of a viewer frame at 500 layers, docs/engine/perf.md).
 /// `queue.write_buffer` lands before the next submission's commands, after
-/// the earlier submissions that read the buffer.
+/// the earlier submissions that read the same bytes.
 #[derive(Default)]
 pub(crate) struct UniformPool {
-    buffers: Vec<wgpu::Buffer>,
-    next: usize,
+    chunks: Vec<UniformChunk>,
+}
+
+struct UniformChunk {
+    buffer: wgpu::Buffer,
+    used: u64,
 }
 
 impl UniformPool {
-    /// A frame starts: hand the buffers out from the first again.
+    /// A frame starts: drop the chunks the last frame left unused and hand
+    /// the rest out from their start again.
     pub fn reset(&mut self) {
-        self.next = 0;
+        self.chunks.retain(|chunk| chunk.used > 0);
+        for chunk in &mut self.chunks {
+            chunk.used = 0;
+        }
     }
 
-    /// A buffer of at least `size` bytes for this frame's next pass.
-    fn take(&mut self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-        let i = self.next;
-        self.next += 1;
-        if let Some(b) = self.buffers.get(i).filter(|b| b.size() >= size) {
-            return b.clone();
+    /// `size` bytes of this frame's uniforms: a chunk and the range's start.
+    fn take(&mut self, device: &wgpu::Device, size: u64) -> (wgpu::Buffer, u64) {
+        let span = size.next_multiple_of(UNIFORM_STRIDE);
+        if let Some(chunk) = self
+            .chunks
+            .iter_mut()
+            .find(|chunk| chunk.used + size <= chunk.buffer.size())
+        {
+            let at = chunk.used;
+            chunk.used += span;
+            return (chunk.buffer.clone(), at);
         }
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm quads"),
@@ -95,12 +111,11 @@ impl UniformPool {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        if i < self.buffers.len() {
-            self.buffers[i] = buffer.clone();
-        } else {
-            self.buffers.push(buffer.clone());
-        }
-        buffer
+        self.chunks.push(UniformChunk {
+            buffer: buffer.clone(),
+            used: span,
+        });
+        (buffer, 0)
     }
 }
 
@@ -225,6 +240,30 @@ pub(crate) fn instance_of(layer: &str) -> u64 {
 /// A region of interest renders the full frame's geometry through a
 /// viewport placed so the region lands at the target's origin. Targets are in
 /// GL row order: the region's bottom row is full row `H − y − h`.
+/// The pipeline and source group a draw pass last bound.
+#[derive(Default)]
+struct Bound<'p> {
+    pipeline: Option<&'p wgpu::RenderPipeline>,
+    source: Option<&'p wgpu::BindGroup>,
+}
+
+impl<'p> Bound<'p> {
+    fn pipeline(&mut self, pass: &mut wgpu::RenderPass<'_>, pipeline: &'p wgpu::RenderPipeline) {
+        if self.pipeline != Some(pipeline) {
+            pass.set_pipeline(pipeline);
+            self.pipeline = Some(pipeline);
+            self.source = None;
+        }
+    }
+
+    fn source(&mut self, pass: &mut wgpu::RenderPass<'_>, group: &'p wgpu::BindGroup) {
+        if self.source != Some(group) {
+            pass.set_bind_group(1, group, &[]);
+            self.source = Some(group);
+        }
+    }
+}
+
 fn region_viewport(
     pass: &mut wgpu::RenderPass<'_>,
     region: Option<Region>,
@@ -906,8 +945,9 @@ impl Exec<'_> {
                 data[at..at + size_of::<QuadUniform>()].copy_from_slice(bytes_of(&u));
             }
         }
-        let buffer = self.uniforms.take(self.device, data.len() as u64);
-        self.queue.write_buffer(&buffer, 0, &data);
+        let (buffer, base) = self.uniforms.take(self.device, data.len() as u64);
+        self.queue.write_buffer(&buffer, base, &data);
+        let base = base as u32;
         let quad_bind = self
             .pipelines
             .resample
@@ -1026,33 +1066,39 @@ impl Exec<'_> {
         region_viewport(&mut pass, region, fw, fh, th);
         if let Some(fill) = fill_bind.as_ref() {
             pass.set_pipeline(self.pipelines.background(format));
-            pass.set_bind_group(0, &quad_bind, &[0]);
+            pass.set_bind_group(0, &quad_bind, &[base]);
             pass.set_bind_group(1, fill, &[]);
             pass.draw(0..4, 0..1);
         }
+        // Consecutive draws of one kind keep their pipeline, and a repeated
+        // source keeps its group; a pipeline change rebinds the source.
+        let mut bound = Bound::default();
         for (i, r) in resolved.iter().enumerate() {
-            let offset = ((i + 1) as u64 * UNIFORM_STRIDE) as u32;
+            let offset = base + ((i + 1) as u64 * UNIFORM_STRIDE) as u32;
             if r.level2.is_some() && r.solid.is_none() {
                 // Level 2: the resampler, or nothing when no part of the
                 // content is in front of the camera and in the frame.
                 if let Some(bind) = &sample_binds[i] {
-                    pass.set_pipeline(self.pipelines.resample.pipeline(format, blend));
+                    bound.pipeline(&mut pass, self.pipelines.resample.pipeline(format, blend));
                     pass.set_bind_group(0, &quad_bind, &[offset]);
-                    pass.set_bind_group(1, bind, &[]);
+                    bound.source(&mut pass, bind);
                     pass.draw(0..4, 0..1);
                 }
             } else if r.solid.is_some() {
-                pass.set_pipeline(self.pipelines.solid_with(format, blend));
+                bound.pipeline(&mut pass, self.pipelines.solid_with(format, blend));
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);
             } else if let Some(bind) = &texture_binds[i] {
-                pass.set_pipeline(if r.scene.is_some() {
-                    self.pipelines.scene_with(format, blend)
-                } else {
-                    self.pipelines.draw_with(format, blend)
-                });
+                bound.pipeline(
+                    &mut pass,
+                    if r.scene.is_some() {
+                        self.pipelines.scene_with(format, blend)
+                    } else {
+                        self.pipelines.draw_with(format, blend)
+                    },
+                );
                 pass.set_bind_group(0, &quad_bind, &[offset]);
-                pass.set_bind_group(1, bind, &[]);
+                bound.source(&mut pass, bind);
                 pass.draw(0..4, 0..1);
             }
         }
@@ -1197,11 +1243,11 @@ impl Exec<'_> {
             color: [0.0; 4],
             scene: [0.0; 4],
         };
-        let buffer = self.uniforms.take(self.device, UNIFORM_STRIDE);
+        let (buffer, base) = self.uniforms.take(self.device, UNIFORM_STRIDE);
         // The flip entries never read the scene-output fields.
         self.queue.write_buffer(
             &buffer,
-            0,
+            base,
             &bytes_of(&u)[..std::mem::offset_of!(QuadUniform, scene)],
         );
         let quad = self.binds.quads(
@@ -1233,7 +1279,7 @@ impl Exec<'_> {
             multiview_mask: None,
         });
         pass.set_pipeline(self.pipelines.flip(target.format()));
-        pass.set_bind_group(0, &quad, &[0]);
+        pass.set_bind_group(0, &quad, &[base as u32]);
         pass.set_bind_group(1, &tex, &[]);
         pass.draw(0..4, 0..1);
     }
