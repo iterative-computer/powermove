@@ -386,7 +386,7 @@ fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
             if let pm_render::scene3d::OutputColor3d::LinearScene { weighted: true, .. } =
                 out.color_space
             {
-                pm_render::scene3d::karis::unweight(&mut raw);
+                pm_render::scene3d::karis::unweight(&mut raw, plan.scene.exposure as f32);
             }
             let actual = float_reference::top_down_linear(raw, w as usize, h as usize);
             assert_eq!(actual.len(), reference.len());
@@ -423,7 +423,7 @@ fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
                 .into_iter()
                 .map(|v| f64::from(v) / 255.0)
                 .collect();
-            let classes = float_reference::classes(&modeled, w as usize, h as usize);
+            let classes = float_reference::classes(&modeled, &reference, w as usize, h as usize);
             let report = compare(&engine, &today, &modeled, &classes);
             eprintln!("glTF float display {}:{} {report}", c.id, k);
             // A 3D correction (quality ledger, "3D output and Library
@@ -787,12 +787,6 @@ fn gltf_programs_and_uniforms_equal_three_js() {
     let mut problems = Vec::new();
     let (mut matched, mut values, mut extra, mut depth_phase) = (0, 0, 0, 0);
     for c in &cases {
-        // Recorded before v1.2.0 removed material slots and mesh groups
-        // from the 3D runtime (main 2b1fa379a). The engine draws as v1.2.0;
-        // G-D1 checks this case against that reference.
-        if c.id == "slots-draw-nothing" {
-            continue;
-        }
         for (k, ours) in our_draws(c) {
             let Ok(t) = std::fs::read_to_string(dir.join(&c.id).join(format!("{k}.json"))) else {
                 continue;

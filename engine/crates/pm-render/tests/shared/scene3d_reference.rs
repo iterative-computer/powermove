@@ -83,15 +83,19 @@ pub fn display(linear: &[f32], exposure: f64, background: Option<[f64; 3]>) -> V
 }
 
 /// The scene is rasterized; partially covered pixels and strong 3x3 color
-/// changes are edges. The 8 CV span is the existing 3D card criterion.
-/// Two-pixel dilation is the shared gate-policy edge radius.
-pub fn classes(reference: &[f64], width: usize, height: usize) -> Vec<Class> {
+/// changes are edges. Coverage is the reference's own alpha before the
+/// display background (`coverage`, premultiplied linear RGBA): a composited
+/// background makes every displayed pixel opaque and would hide a sliver
+/// the reference only partly covers. The 8 CV span is the existing 3D card
+/// criterion. Two-pixel dilation is the shared gate-policy edge radius.
+pub fn classes(reference: &[f64], coverage: &[f32], width: usize, height: usize) -> Vec<Class> {
     assert_eq!(reference.len(), width * height * 4);
+    assert_eq!(coverage.len(), width * height * 4);
     let mut edge = vec![false; width * height];
     for y in 0..height {
         for x in 0..width {
             let i = y * width + x;
-            let alpha = reference[4 * i + 3];
+            let alpha = f64::from(coverage[4 * i + 3]);
             if alpha > 0.0 && alpha < 1.0 {
                 edge[i] = true;
                 continue;
