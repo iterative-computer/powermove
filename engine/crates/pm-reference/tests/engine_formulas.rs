@@ -26,6 +26,81 @@ fn grid() -> impl Iterator<Item = f64> {
 }
 
 #[test]
+fn css_srgb_gamut_mapping_agrees_with_independent_reference() {
+    let engine = pm_color::css_srgb;
+    let reference = color::css_gamut_map_srgb;
+
+    // The mapping is relative colorimetric: every in-gamut input is exact.
+    for r in grid().step_by(4) {
+        for g in grid().step_by(4) {
+            for b in grid().step_by(4) {
+                let rgb = [r, g, b];
+                assert_eq!(engine(rgb), rgb);
+                assert_eq!(reference(rgb), rgb);
+            }
+        }
+    }
+
+    // Include the CSS Color 4 P3-yellow example and other P3 authored colors.
+    // Both matrices and the extended transfer are supplied by the f64
+    // reference, independently of the engine's gamut mapping implementation.
+    let p3_to_srgb = |p3: [f64; 3]| {
+        let xyz = color::apply(
+            &Primaries::P3_D65.to_xyz(),
+            p3.map(|v| Transfer::Srgb.to_linear(v)),
+        );
+        color::apply(&color::invert(&Primaries::BT709.to_xyz()), xyz)
+            .map(|v| Transfer::Srgb.from_linear(v))
+    };
+    let mut samples = vec![
+        p3_to_srgb([1.0, 1.0, 0.0]),
+        p3_to_srgb([0.0, 1.0, 0.0]),
+        p3_to_srgb([1.0, 0.0, 0.0]),
+        p3_to_srgb([1.0, 0.5, 0.0]),
+        p3_to_srgb([0.2, 1.0, 0.3]),
+    ];
+    let extended = [-0.5, -0.1, 0.0, 0.3, 0.7, 1.0, 1.1, 1.5];
+    for r in extended {
+        for g in extended {
+            for b in extended {
+                let rgb = [r, g, b];
+                if rgb.iter().any(|v| !(0.0..=1.0).contains(v)) {
+                    samples.push(rgb);
+                }
+            }
+        }
+    }
+    let mut max_error = 0.0f64;
+    let mut worst = [0.0; 3];
+    for rgb in &samples {
+        let (actual, expected) = (engine(*rgb), reference(*rgb));
+        assert!(
+            actual.iter().all(|v| (0.0..=1.0).contains(v)),
+            "engine {rgb:?}: {actual:?}"
+        );
+        assert!(
+            expected.iter().all(|v| (0.0..=1.0).contains(v)),
+            "reference {rgb:?}: {expected:?}"
+        );
+        let error = (0..3)
+            .map(|c| (actual[c] - expected[c]).abs())
+            .fold(0.0f64, f64::max);
+        if error > max_error {
+            max_error = error;
+            worst = *rgb;
+        }
+    }
+    println!(
+        "CSS sRGB gamut: {} extended samples, max f64 channel error {max_error:.9} at {worst:?}",
+        samples.len()
+    );
+    assert!(
+        max_error < 5e-4,
+        "CSS gamut mapper disagreement at {worst:?}: {max_error}"
+    );
+}
+
+#[test]
 fn blend_modes_agree() {
     for (engine, reference) in MODES {
         for b in grid() {
