@@ -301,7 +301,8 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
         let red = draw(&gpu, (&module, Some("vs")), (&module, Some("fs")), 1, None);
         assert_eq!(
             red,
-            vec![0.0999755859375, 0.300048828125, 0.60009765625, 1.001953125]
+            // Nearest halves of 0.1, 0.3 and 0.6; 1 + 3/2048 is a tie, kept even.
+            vec![3276.0 / 32768.0, 2458.0 / 8192.0, 2458.0 / 4096.0, 513.0 / 512.0]
         );
     }
 
@@ -319,6 +320,6 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
             ),
         );
         let red = draw(&gpu, (&module, Some("vs")), (&module, Some("fs")), 4, None);
-        assert_eq!(red[0], 0.10003662109375);
+        assert_eq!(red[0], 3278.0 / 32768.0);
     }
 }
