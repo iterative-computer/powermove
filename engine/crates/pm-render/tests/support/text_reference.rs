@@ -22,61 +22,6 @@ pub struct TextReference {
     pub unreferenced: usize,
 }
 
-/// Direct winding integration on one device pixel. This oracle operates on
-/// the original cubic outline at 256² point centers, independently of the
-/// 32-cell signed-area scan converter and both engine rasterizers.
-pub fn point_oracle(scene: &TextScene, x: usize, y: usize) -> Vec<(usize, usize, f64, f64)> {
-    const GRID: usize = 256;
-    let origin = Affine::translate((-(x as f64), -(y as f64)));
-    let mut out = Vec::new();
-    for (item_index, item) in scene.items.iter().enumerate() {
-        let ItemContent::Coverage { paths } = &item.content else {
-            continue;
-        };
-        for (path_index, path) in paths.iter().enumerate() {
-            let source = match &path.style {
-                PathStyle::Fill => path.path.as_ref().clone(),
-                PathStyle::Stroke(stroke) => {
-                    let c = path.transform.as_coeffs();
-                    let scale = c[0].hypot(c[1]).max(c[2].hypot(c[3])).max(1e-9);
-                    kurbo::stroke(
-                        path.path.iter(),
-                        stroke,
-                        &StrokeOpts::default(),
-                        1e-5 / scale,
-                    )
-                }
-            };
-            let outline = origin * path.transform * source;
-            let b = outline.bounding_box();
-            if b.x1 <= 0.0 || b.x0 >= 1.0 || b.y1 <= 0.0 || b.y0 >= 1.0 {
-                continue;
-            }
-            let area32 = fill(&outline, FillRule::NonZero, 32, 1, 1).at(0, 0);
-            let mut inside = 0usize;
-            for iy in 0..GRID {
-                for ix in 0..GRID {
-                    let p = Point::new(
-                        (ix as f64 + 0.5) / GRID as f64,
-                        (iy as f64 + 0.5) / GRID as f64,
-                    );
-                    inside += usize::from(outline.winding(p) != 0);
-                }
-            }
-            out.push((
-                item_index,
-                path_index,
-                area32,
-                inside as f64 / (GRID * GRID) as f64,
-            ));
-            if out.len() == 8 {
-                return out;
-            }
-        }
-    }
-    out
-}
-
 pub fn render(scene: &TextScene) -> TextReference {
     render_in_working(scene, WorkingEncoding::Standard)
 }
@@ -86,8 +31,8 @@ pub fn render_in_working(scene: &TextScene, working: WorkingEncoding) -> TextRef
     render_with_samples(scene, working, 32)
 }
 
-/// Higher-cell diagnostic of the same independent scan conversion. The gate
-/// uses 32; this checks whether a close geometry miss is quadrature error.
+/// Independent integration at the selected subpixel grid. Whole-image
+/// refinement verifies convergence before a close pixel or geometry verdict.
 pub fn render_with_samples(
     scene: &TextScene,
     working: WorkingEncoding,

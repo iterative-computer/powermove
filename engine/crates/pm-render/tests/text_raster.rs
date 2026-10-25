@@ -3,12 +3,81 @@
 
 mod support;
 
+/// Reference for the SDR sRGB8 presentation of an extended premultiplied
+/// Standard-domain float pixel. CSS Color 4 maps the straight color before
+/// alpha is applied; RGBA8 quantization then occurs on the premultiplied
+/// result. The unclipped float raster is checked separately below.
+#[cfg(target_os = "macos")]
+fn display_srgb8(rgba: &[f64], gamut_map: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<f64> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            if p.iter().any(|v| v.is_nan()) {
+                return [f64::NAN; 4];
+            }
+            let a = p[3].clamp(0.0, 1.0);
+            let mapped = if a > 0.0 {
+                gamut_map([p[0] / a, p[1] / a, p[2] / a])
+            } else {
+                [0.0; 3]
+            };
+            let premul = [mapped[0] * a, mapped[1] * a, mapped[2] * a, a];
+            premul.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() / 255.0)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn needs_srgb_gamut_mapping(p: &[f64]) -> bool {
+    let a = p[3];
+    a > 0.0
+        && p[..3]
+            .iter()
+            .any(|channel| !((0.0..=1.0).contains(&(*channel / a))))
+}
+
 #[cfg(target_os = "macos")]
 struct SelectedReference {
     image: support::text_reference::TextReference,
     samples: usize,
     geometry: serde_json::Value,
     failures: Vec<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn max_modeled_raw_cv(actual: &[f64], reference: &[f64]) -> f64 {
+    assert_eq!(actual.len(), reference.len());
+    actual
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .filter(|(_, reference)| reference.iter().all(|v| v.is_finite()))
+        .flat_map(|(actual, reference)| {
+            (0..4).map(move |c| {
+                if actual[c].is_finite() {
+                    (actual[c] - reference[c]).abs() * 255.0
+                } else {
+                    f64::INFINITY
+                }
+            })
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Independent convergence between two complete f64 reference images. No
+/// engine pixel or pixel class participates in the selection decision.
+#[cfg(target_os = "macos")]
+fn whole_reference_delta_cv(previous: &[f64], next: &[f64]) -> Result<f64, String> {
+    assert_eq!(previous.len(), next.len());
+    let mut max_cv = 0.0f64;
+    for (i, (&a, &b)) in previous.iter().zip(next).enumerate() {
+        if a.is_nan() && b.is_nan() {
+            continue;
+        }
+        if !a.is_finite() || !b.is_finite() {
+            return Err(format!("reference modeled channel status changed at {i}"));
+        }
+        max_cv = max_cv.max((a - b).abs() * 255.0);
+    }
+    Ok(max_cv)
 }
 
 #[cfg(target_os = "macos")]
@@ -38,13 +107,16 @@ fn select_reference(
     let actual = geometry(&engine_alpha, width);
     let alpha32: Vec<f64> = reference32.rgba.chunks_exact(4).map(|p| p[3]).collect();
     let g32 = geometry(&alpha32, width);
-    if same_geometry(&actual, &g32, 1e-3).is_ok() {
+    let first_geometry = same_geometry(&actual, &g32, 1e-3);
+    let raw32_max_cv = max_modeled_raw_cv(engine, &reference32.rgba);
+    if first_geometry.is_ok() && raw32_max_cv <= 1.0 + 1e-9 {
         return SelectedReference {
             image: reference32,
             samples: 32,
             geometry: serde_json::json!({
                 "engine": report_geometry(actual),
                 "reference32": report_geometry(g32),
+                "raw32MaxCv": raw32_max_cv,
                 "selectedPass": true,
                 "selectedTolerance": 1e-3,
                 "convergenceStatus": "not_required",
@@ -52,47 +124,96 @@ fn select_reference(
             failures: Vec::new(),
         };
     }
-    // A 32-cell quadrature miss cannot be accepted on geometry alone.
-    // Integrate the *whole image* at two higher resolutions, demand their
-    // geometry converge, then use 512-cell pixels for every gate comparison.
-    let first_error = same_geometry(&actual, &g32, 1e-3).unwrap_err();
+    // A 32-cell quadrature miss can be in geometry or an individual pixel.
+    // Integrate complete images until their geometry and all modeled RGBA
+    // channels converge independently of the engine; the final whole image
+    // then receives every unchanged gate rule.
+    let first_error = first_geometry.err();
     drop(engine_alpha);
     drop(alpha32);
     drop(reference32);
-    let reference256 =
+    let mut previous =
         support::text_reference::render_with_samples(scene, WorkingEncoding::Standard, 256);
-    let alpha256: Vec<f64> = reference256.rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let alpha256: Vec<f64> = previous.rgba.chunks_exact(4).map(|p| p[3]).collect();
     let g256 = geometry(&alpha256, width);
     drop(alpha256);
-    drop(reference256);
-    let reference512 =
-        support::text_reference::render_with_samples(scene, WorkingEncoding::Standard, 512);
-    let alpha512: Vec<f64> = reference512.rgba.chunks_exact(4).map(|p| p[3]).collect();
-    let g512 = geometry(&alpha512, width);
-    drop(alpha512);
-    let convergence = same_geometry(&g256, &g512, 1e-4);
-    let selected = same_geometry(&actual, &g512, 1e-3);
+    let mut previous_samples = 256;
+    let mut previous_geometry = g256;
+    let mut steps = Vec::new();
+    let (image, samples, selected_geometry, geometry_convergence, pixel_convergence) = loop {
+        let samples = previous_samples * 2;
+        let candidate =
+            support::text_reference::render_with_samples(scene, WorkingEncoding::Standard, samples);
+        let candidate_alpha: Vec<f64> = candidate.rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let candidate_geometry = geometry(&candidate_alpha, width);
+        let geometry_verdict = same_geometry(&previous_geometry, &candidate_geometry, 1e-4);
+        let pixel_verdict = whole_reference_delta_cv(&previous.rgba, &candidate.rgba);
+        let pixel_pass = pixel_verdict
+            .as_ref()
+            .is_ok_and(|delta| *delta <= 0.01 + 1e-9);
+        let converged = geometry_verdict.is_ok() && pixel_pass;
+        steps.push(serde_json::json!({
+            "fromSamples": previous_samples,
+            "toSamples": samples,
+            "from": report_geometry(previous_geometry),
+            "to": report_geometry(candidate_geometry),
+            "geometryPass": geometry_verdict.is_ok(),
+            "geometryFailure": geometry_verdict.as_ref().err(),
+            "pixelMaxCv": pixel_verdict.as_ref().ok(),
+            "pixelPass": pixel_pass,
+            "pixelFailure": pixel_verdict.as_ref().err(),
+            "pass": converged,
+        }));
+        if converged || samples == 2048 {
+            break (
+                candidate,
+                samples,
+                candidate_geometry,
+                geometry_verdict,
+                pixel_verdict,
+            );
+        }
+        previous = candidate;
+        previous_samples = samples;
+        previous_geometry = candidate_geometry;
+    };
+    let selected = same_geometry(&actual, &selected_geometry, 1e-3);
     let mut failures = Vec::new();
-    if let Err(reason) = &convergence {
+    if let Err(reason) = &geometry_convergence {
         failures.push(format!(
-            "independent 256/512 reference did not converge: {reason}"
+            "independent reference geometry did not converge by {samples} cells: {reason}"
         ));
+    }
+    match &pixel_convergence {
+        Ok(delta) if *delta > 0.01 + 1e-9 => failures.push(format!(
+            "independent reference pixels did not converge by {samples} cells: {delta:.6} CV (bound 0.01)"
+        )),
+        Err(reason) => failures.push(format!(
+            "independent reference pixels did not converge by {samples} cells: {reason}"
+        )),
+        _ => {}
     }
     if let Err(reason) = &selected {
         failures.push(reason.clone());
     }
     SelectedReference {
-        image: reference512,
-        samples: 512,
+        image,
+        samples,
         geometry: serde_json::json!({
             "engine": report_geometry(actual),
             "reference32": report_geometry(g32),
             "reference256": report_geometry(g256),
-            "reference512": report_geometry(g512),
+            "raw32MaxCv": raw32_max_cv,
             "first32Failure": first_error,
-            "convergencePass": convergence.is_ok(),
-            "convergenceTolerance": 1e-4,
-            "convergenceFailure": convergence.err(),
+            "convergenceSteps": steps,
+            "convergencePass": geometry_convergence.is_ok()
+                && pixel_convergence.as_ref().is_ok_and(|delta| *delta <= 0.01 + 1e-9),
+            "geometryConvergenceTolerance": 1e-4,
+            "pixelConvergenceCv": 0.01,
+            "geometryConvergenceFailure": geometry_convergence.err(),
+            "pixelConvergenceFailure": pixel_convergence.err(),
+            "selectedSamples": samples,
+            "selectedReference": report_geometry(selected_geometry),
             "selectedPass": selected.is_ok(),
             "selectedTolerance": 1e-3,
             "selectedFailure": selected.err(),
@@ -104,11 +225,13 @@ fn select_reference(
 #[cfg(target_os = "macos")]
 fn main() {
     use pm_protocol::color::Precision;
-    use pm_reference::compare::{Bounds, Class, compare, geometry, same_geometry};
+    use pm_reference::compare::{Bounds, Class, compare};
     use pm_render::Renderer;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use support::doc::{layer, project};
+
+    verify_display_boundary();
 
     let sets: Vec<std::path::PathBuf> = match std::env::var("PM_TEXT_RASTER") {
         Ok(p) => vec![p.into()],
@@ -146,6 +269,7 @@ fn main() {
                 .set_font_cache_seeds(serde_json::from_value(seeds.clone()).unwrap());
         }
         let mut renderer = Renderer::headless().expect("Metal device");
+        support::text::configure_coverage(&mut renderer);
         renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
             measure, None,
         ))));
@@ -257,16 +381,18 @@ fn main() {
                 geometry: geometry_report,
                 failures: geometry_failures,
             } = select_reference(&raster.plan.scene, &engine, w);
-            if reference_samples == 512 {
+            if reference_samples > 32 {
                 println!(
-                    "case {index}: 32-cell geometry miss; 256/512 convergence and selected 512-cell verdict: {geometry_report}"
+                    "case {index}: 32-cell geometry or raw-pixel miss; selected converged {reference_samples}-cell whole-image verdict: {geometry_report}"
                 );
             }
             // The legacy capture can put partially covered ink outside the
             // exact outline's two-pixel edge band (CoreText's old padding
             // and preblend). A pixel-aligned exact edge has no fractional
             // coverage pixel, so include both images' support boundaries.
-            // Authored interior colors retain the interior rule.
+            // An opaque caption box can hide a colored glyph edge in final
+            // alpha; a witness RGBA change between neighbors still marks
+            // that local color boundary. Uniform interiors remain interior.
             let support: Vec<bool> = today.chunks_exact(4).map(|p| p[3] > 0.5 / 255.0).collect();
             let exact_support: Vec<bool> = ideal.rgba.chunks_exact(4).map(|p| p[3] > 0.0).collect();
             let mut support_boundary = vec![false; w * h];
@@ -281,6 +407,17 @@ fn main() {
                                     || (x + 1 < w && pixels[i] != pixels[i + 1])
                                     || (y > 0 && pixels[i] != pixels[i - w])
                                     || (y + 1 < h && pixels[i] != pixels[i + w])
+                            })
+                            || [
+                                (x > 0).then_some(i.wrapping_sub(1)),
+                                (x + 1 < w).then_some(i + 1),
+                                (y > 0).then_some(i.wrapping_sub(w)),
+                                (y + 1 < h).then_some(i + w),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .any(|neighbor| {
+                                today[i * 4..i * 4 + 4] != today[neighbor * 4..neighbor * 4 + 4]
                             });
                 }
             }
@@ -294,18 +431,36 @@ fn main() {
                     *class = Class::Edge;
                 }
             }
-            if index == 0 && std::env::var_os("PM_TEXT_COVERAGE_ORACLE").is_some() {
-                for (item, path, area32, winding256) in
-                    support::text_reference::point_oracle(&raster.plan.scene, 205, 35)
-                {
-                    println!(
-                        "coverage oracle item {item} path {path} pixel (205,35): 32-cell {area32:.6}, winding-256 {winding256:.6}, delta {:.3} CV",
-                        (area32 - winding256).abs() * 255.0
-                    );
-                }
-            }
             image_pixels += ideal.image_pixels;
-            let report = compare(&engine, &today, &ideal.rgba, &ideal.classes);
+            // Keep the native float result as the transport attestation and
+            // require independent raw f64 closeness before any SDR gamut map.
+            let raw_nonfinite = engine
+                .chunks_exact(4)
+                .zip(ideal.rgba.chunks_exact(4))
+                .filter(|(_, reference)| reference.iter().all(|v| v.is_finite()))
+                .filter(|(actual, _)| actual.iter().any(|v| !v.is_finite()))
+                .count();
+            let raw_errors: Vec<f64> = engine
+                .chunks_exact(4)
+                .zip(ideal.rgba.chunks_exact(4))
+                .filter(|(actual, reference)| {
+                    actual.iter().all(|v| v.is_finite()) && reference.iter().all(|v| v.is_finite())
+                })
+                .map(|(actual, reference)| {
+                    (0..4)
+                        .map(|c| (actual[c] - reference[c]).abs() * 255.0)
+                        .fold(0.0f64, f64::max)
+                })
+                .collect();
+            let raw_stats = pm_reference::compare::Stats::of(raw_errors);
+            let display_engine = display_srgb8(&engine, pm_color::css_srgb);
+            let display_reference =
+                display_srgb8(&ideal.rgba, pm_reference::color::css_gamut_map_srgb);
+            let report = compare(&display_engine, &today, &display_reference, &ideal.classes);
+            let display_bytes: Vec<u8> = display_engine
+                .iter()
+                .map(|v| (v * 255.0).round() as u8)
+                .collect();
             let engine_bytes: Vec<u8> = engine
                 .iter()
                 .map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)
@@ -315,40 +470,66 @@ fn main() {
                 per_pixel_cv: (1.0, 1.0),
                 ..Bounds::EIGHT_BIT
             });
+            // CSS Color 4 requires a destination gamut map for these
+            // authored extended colors. Today's pre-mapping capture is a
+            // witness, not the color target. Keep the same 1-CV interior
+            // limit against the independent mapped reference, pixel by
+            // pixel; ordinary interiors retain their 1-CV witness rule.
+            why.retain(|issue| !issue.starts_with("interior:"));
+            let mut ordinary_interior = Vec::new();
+            let mut gamut_interior = Vec::new();
+            for (i, class) in ideal.classes.iter().enumerate() {
+                if *class != Class::Interior {
+                    continue;
+                }
+                let source = &ideal.rgba[i * 4..i * 4 + 4];
+                if source.iter().any(|v| v.is_nan()) {
+                    continue;
+                }
+                let actual = &display_engine[i * 4..i * 4 + 4];
+                let gamut_mapped = needs_srgb_gamut_mapping(source);
+                let target = if gamut_mapped {
+                    &display_reference[i * 4..i * 4 + 4]
+                } else {
+                    &today[i * 4..i * 4 + 4]
+                };
+                let cv = (0..4)
+                    .map(|c| (actual[c] - target[c]).abs() * 255.0)
+                    .fold(0.0f64, f64::max);
+                if gamut_mapped {
+                    gamut_interior.push(cv);
+                } else {
+                    ordinary_interior.push(cv);
+                }
+            }
+            let ordinary_interior = pm_reference::compare::Stats::of(ordinary_interior);
+            let gamut_interior = pm_reference::compare::Stats::of(gamut_interior);
+            if ordinary_interior.max > 1.0 + 1e-9 {
+                why.push(format!(
+                    "interior: {:.3} CV from today (bound 1)",
+                    ordinary_interior.max
+                ));
+            }
+            if gamut_interior.max > 1.0 + 1e-9 {
+                why.push(format!(
+                    "gamut-mapped interior: {:.3} CV from independent CSS reference (bound 1)",
+                    gamut_interior.max
+                ));
+            }
+            if raw_stats.max > 1.0 + 1e-9 {
+                why.push(format!(
+                    "raw float raster exceeds independent f64 outline by {:.3} CV (bound 1)",
+                    raw_stats.max
+                ));
+            }
+            if raw_nonfinite > 0 {
+                why.push(format!(
+                    "raw float raster has {raw_nonfinite} nonfinite modeled pixels"
+                ));
+            }
             why.extend(geometry_failures);
             if report.class(Class::Unreferenced).engine_vs_today.max > 1.0 {
                 why.push("unmodeled float image pixels exceed original 1-CV bound".into());
-            }
-            if ideal.unreferenced == 0
-                && std::env::var("PM_TEXT_REFERENCE_CASE")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    == Some(index)
-            {
-                let ea: Vec<f64> = engine.chunks_exact(4).map(|p| p[3]).collect();
-                let ra: Vec<f64> = ideal.rgba.chunks_exact(4).map(|p| p[3]).collect();
-                let engine_geometry = geometry(&ea, w);
-                let reference_geometry = geometry(&ra, w);
-                if let Some(samples) = std::env::var("PM_TEXT_REFERENCE_SAMPLES")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                {
-                    let higher = support::text_reference::render_with_samples(
-                        &raster.plan.scene,
-                        pm_protocol::color::WorkingEncoding::Standard,
-                        samples,
-                    );
-                    let high_alpha: Vec<f64> = higher.rgba.chunks_exact(4).map(|p| p[3]).collect();
-                    let high_geometry = geometry(&high_alpha, w);
-                    println!(
-                        "case {index} geometry oracle {samples} cells: engine {:?}; selected reference{reference_samples} {:?}; reference{samples} {:?}; selected verdict {:?}; oracle verdict {:?}",
-                        engine_geometry,
-                        reference_geometry,
-                        high_geometry,
-                        same_geometry(&engine_geometry, &reference_geometry, 1e-3),
-                        same_geometry(&engine_geometry, &high_geometry, 1e-3),
-                    );
-                }
             }
             let edge = report.class(Class::Edge);
             let image = report.class(Class::Resampled);
@@ -365,15 +546,15 @@ fn main() {
                 println!("case {index} why: {issue}");
             }
             if why.iter().any(|issue| issue.starts_with("interior:")) {
-                for (i, class) in ideal
+                for (i, _) in ideal
                     .classes
                     .iter()
                     .enumerate()
                     .filter(|(_, class)| **class == Class::Interior)
                 {
-                    let actual = &engine[i * 4..][..4];
+                    let actual = &display_engine[i * 4..][..4];
                     let witness = &today[i * 4..][..4];
-                    let reference = &ideal.rgba[i * 4..][..4];
+                    let reference = &display_reference[i * 4..][..4];
                     let original_cv = (0..4)
                         .map(|c| (actual[c] - witness[c]).abs() * 255.0)
                         .fold(0.0f64, f64::max);
@@ -384,7 +565,7 @@ fn main() {
                         .map(|c| (actual[c] - reference[c]).abs() * 255.0)
                         .fold(0.0f64, f64::max);
                     println!(
-                        "case {index} interior residual pixel ({},{}): original {original_cv:.3} CV; outline {modeled_cv:.3} CV; alpha engine {:.6} witness {:.6} reference {:.6}",
+                        "case {index} display interior residual pixel ({},{}): original {original_cv:.3} CV; mapped outline {modeled_cv:.3} CV; alpha engine {:.6} witness {:.6} reference {:.6}",
                         i % w,
                         i / w,
                         actual[3],
@@ -399,9 +580,15 @@ fn main() {
                 "setIndex": set_index, "captureCaseIndex": capture_case_index,
                 "captureDir": dir.display().to_string(),
                 "engineSha256": engine_sha256,
+                "displaySha256": format!("{:x}", Sha256::digest(&display_bytes)),
                 "referenceModel": if ideal.unreferenced == 0 { "outline" } else { "outline-with-original-bound-gap" },
                 "referenceSamples": reference_samples,
                 "geometry": geometry_report,
+                "displayBoundary": "css-color-4-oklch-local-minde-srgb8-premultiplied",
+                "rawFloat": stat(&raw_stats),
+                "rawNonfinitePixels": raw_nonfinite,
+                "ordinaryInterior": stat(&ordinary_interior),
+                "gamutInterior": stat(&gamut_interior),
                 "imagePixels": ideal.image_pixels,
                 "unreferencedPixels": ideal.unreferenced,
                 "edge": { "engine": stat(&edge.engine_vs_reference),
@@ -434,6 +621,11 @@ fn main() {
                         if extension == "rgba" {
                             std::fs::write(dir.join(format!("case-{index}-engine.rgba")), actual)
                                 .unwrap();
+                            std::fs::write(
+                                dir.join(format!("case-{index}-display.rgba")),
+                                &display_bytes,
+                            )
+                            .unwrap();
                             std::fs::write(dir.join(format!("case-{index}-today.rgba")), witness)
                                 .unwrap();
                             std::fs::write(
@@ -503,3 +695,32 @@ fn main() {
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
+
+#[cfg(target_os = "macos")]
+fn verify_display_boundary() {
+    let raw = [0.0, 0.408, 0.0, 0.4];
+    let display = display_srgb8(&raw, pm_reference::color::css_gamut_map_srgb);
+    // A per-channel clamp of the premultiplied raw green is 104/255;
+    // CSS mapping of the straight 1.02 green before alpha is 102/255.
+    assert_eq!((raw[1] * 255.0).round() as u8, 104);
+    assert_eq!((display[1] * 255.0).round() as u8, 102);
+    assert_eq!((display[3] * 255.0).round() as u8, 102);
+    // The gate's target and the production output operation have separate
+    // implementations. Exercise their whole out-of-gamut conversion domain
+    // before reading private captures, including the translucent sample.
+    for r in [-0.5, 0.0, 0.3, 0.7, 1.0, 1.5] {
+        for g in [-0.5, 0.0, 0.3, 0.7, 1.0, 1.5] {
+            for b in [-0.5, 0.0, 0.3, 0.7, 1.0, 1.5] {
+                let color = [r, g, b];
+                let actual = pm_color::css_srgb(color);
+                let reference = pm_reference::color::css_gamut_map_srgb(color);
+                for c in 0..3 {
+                    assert!(
+                        (actual[c] - reference[c]).abs() * 255.0 <= 1.0,
+                        "CSS gamut reference differs at {color:?}: {actual:?} vs {reference:?}"
+                    );
+                }
+            }
+        }
+    }
+}

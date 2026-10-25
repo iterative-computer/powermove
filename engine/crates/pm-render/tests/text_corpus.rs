@@ -235,6 +235,7 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
+    support::text::configure_coverage(&mut renderer);
     // Level 1 SVG images (decision S1) draw Chromium's rasters, as
     // tests/corpus.rs draws them: PM_SVG_RASTERS, else the newest
     // `svg-rasters-*` directory; without one resvg approximates them.
@@ -494,6 +495,14 @@ fn main() {
                         over2 += usize::from(e > 2);
                     }
                 }
+                // An inactive text layer has a known transparent source.
+                // Only accept that interpretation when neither witness nor
+                // engine contributes any text pixel; the complete frame
+                // remains under the original nontext comparison below.
+                let inactive_text = gap.as_deref() == Some("no active text") && n == 0;
+                if inactive_text {
+                    gap = None;
+                }
                 // With a modeled scene, the independent ink footprint—not
                 // differences from the hidden engine frame—defines text.
                 // Thus unrelated nontext differences cannot disappear into
@@ -520,7 +529,8 @@ fn main() {
                     "projectDir": dir.strip_prefix(capture).unwrap().display().to_string(),
                     "sampleIndex": sample_index, "time": s.time,
                     "engineSha256": engine_sha256,
-                    "referenceModel": if gap.is_some() { "original-bound-gap" }
+                    "referenceModel": if inactive_text { "inactive-text-original-bound" }
+                        else if gap.is_some() { "original-bound-gap" }
                         else if unreferenced_text > 0 { "outline-with-original-bound-gap" }
                         else { "outline" },
                     "unreferencedTextPixels": unreferenced_text,
@@ -558,7 +568,7 @@ fn main() {
                     }
                     failed.push(format!("{line}: {}", why.join("; ")));
                 }
-                if !fails && gap.is_none() {
+                if !fails && gap.is_none() && !inactive_text {
                     covered.insert(p.name.clone());
                 }
                 if let Some(reason) = gap {
