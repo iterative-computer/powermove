@@ -7,8 +7,12 @@
 pub(crate) use pm_perf::{add, bump, Counter};
 
 /// Bytes of a texture: every mip level and array layer (or depth slice of
-/// level 0 for 3D, halved per level), times the sample count.
+/// level 0 for 3D, halved per level), times the sample count. A transient
+/// attachment is memoryless on Apple GPUs (tile memory only): zero.
 pub(crate) fn texture_bytes(desc: &crate::TextureDescriptor<'_>) -> u64 {
+    if desc.usage.contains(wgt::TextureUsages::TRANSIENT_ATTACHMENT) {
+        return 0;
+    }
     let format = desc.format;
     let (bw, bh) = format.block_dimensions();
     let block = format

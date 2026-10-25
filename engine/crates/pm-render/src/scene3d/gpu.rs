@@ -1037,7 +1037,7 @@ impl Scene3dRenderer {
         {
             return;
         }
-        let make = |format: wgpu::TextureFormat, label: &str| {
+        let make = |format: wgpu::TextureFormat, usage, label: &str| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -1050,17 +1050,25 @@ impl Scene3dRenderer {
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage,
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
+        // Every pass clears the color samples and discards them after the
+        // resolve, so they live in tile memory only (memoryless on Metal).
+        // Depth is kept between the prepass and the layers of a depth set.
+        let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
         self.attachments = Some(Attachments {
             width,
             height,
             samples,
-            color: make(wgpu::TextureFormat::Rgba16Float, "3d msaa color"),
-            depth: make(wgpu::TextureFormat::Depth32Float, "3d msaa depth"),
+            color: make(
+                wgpu::TextureFormat::Rgba16Float,
+                attachment | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
+                "3d msaa color",
+            ),
+            depth: make(wgpu::TextureFormat::Depth32Float, attachment, "3d msaa depth"),
         });
         self.prepass = None;
     }
