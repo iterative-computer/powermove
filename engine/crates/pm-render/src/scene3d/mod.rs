@@ -120,11 +120,7 @@ impl Object3dPlan {
         // Map images are files: their version is part of the content.
         for o in &self.scene.objects {
             for m in &o.meshes {
-                let list: Vec<&Material3d> = match &m.materials {
-                    Materials::Single(x) => vec![x.as_ref()],
-                    Materials::Slots(v) => v.iter().collect(),
-                };
-                for mat in list {
+                for mat in m.materials.iter() {
                     for (_, t) in mat.maps.all() {
                         if let Some(t) = t
                             && let Ok(meta) = std::fs::metadata(&t.path)

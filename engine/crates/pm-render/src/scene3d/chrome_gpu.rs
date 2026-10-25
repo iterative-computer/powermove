@@ -54,12 +54,7 @@ fn scene_override(scene: &Scene3d, side: Side) -> Scene3d {
     scene.shadows = false;
     for object in &mut scene.objects {
         for mesh in &mut object.meshes {
-            mesh.materials = match &mesh.materials {
-                Materials::Single(_) => Materials::Single(Box::new(override_material(side))),
-                Materials::Slots(slots) => {
-                    Materials::Slots(slots.iter().map(|_| override_material(side)).collect())
-                }
-            };
+            mesh.materials = Materials::new(override_material(side));
         }
     }
     scene

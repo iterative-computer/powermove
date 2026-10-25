@@ -13,7 +13,7 @@ use crate::three::math::{self, Mat4};
 use crate::three::program::Parameters;
 
 use super::lights::{self, LightState, ShadowView};
-use super::model::{Light3d, LightKind, Material3d, MaterialKind, Materials, Scene3d, Texture3d};
+use super::model::{Light3d, LightKind, Material3d, MaterialKind, Scene3d, Texture3d};
 
 /// What a sampler uniform binds.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,9 +84,6 @@ pub struct DrawDesc {
     /// `scene.objects[object].meshes[mesh]`.
     pub object: usize,
     pub mesh: usize,
-    /// The draw range in the geometry's draw order (before the wireframe
-    /// index doubles it): `(start, count)`; `None` for the whole geometry.
-    pub range: Option<(u32, u32)>,
 }
 
 /// A pass of the layer's render.
@@ -208,7 +205,6 @@ struct Item<'s> {
     object: usize,
     mesh: usize,
     material: &'s Material3d,
-    range: Option<(u32, u32)>,
 }
 
 fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<Item<'s>> {
@@ -221,26 +217,11 @@ fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<I
         if !visible_in(planes, mesh) {
             continue;
         }
-        match &mesh.materials {
-            Materials::Single(material) => out.push(Item {
-                object,
-                mesh: m,
-                material,
-                range: None,
-            }),
-            Materials::Slots(list) => {
-                for g in mesh.geometry.geometry.groups() {
-                    if let Some(material) = list.get(g.material_index as usize) {
-                        out.push(Item {
-                            object,
-                            mesh: m,
-                            material,
-                            range: Some((g.start, g.count)),
-                        });
-                    }
-                }
-            }
-        }
+        out.push(Item {
+            object,
+            mesh: m,
+            material: &mesh.materials.0,
+        });
     }
     out
 }
@@ -504,7 +485,6 @@ fn draw_to(
         state: st,
         object: item.object,
         mesh: item.mesh,
-        range: item.range,
     })
 }
 
@@ -567,7 +547,6 @@ fn shadow_draw(
         state,
         object: item.object,
         mesh: item.mesh,
-        range: item.range,
     })
 }
 
@@ -740,17 +719,9 @@ fn sort_keys(scene: &Scene3d, item: &Item<'_>, proj_screen: &Mat4) -> (u64, f64,
     };
     let p = clip4(&mesh.world, [center[0], center[1], center[2], 1.0]);
     let z = clip4(proj_screen, p)[2];
-    // `material.id`: creation order (objects in scene order, a mesh's
-    // materials in slot order).
+    // `material.id`: creation order (objects in scene order, then meshes).
     let order = item.material.ext.as_ref().map_or_else(
-        || {
-            let slot = mesh
-                .materials
-                .iter()
-                .position(|m| std::ptr::eq(m, item.material))
-                .unwrap_or(0);
-            ((item.object as u64) << 32) | ((item.mesh as u64) << 16) | slot as u64
-        },
+        || ((item.object as u64) << 32) | ((item.mesh as u64) << 16),
         |e| e.order,
     );
     (order, z, id)

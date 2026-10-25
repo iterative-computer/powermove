@@ -1457,19 +1457,12 @@ impl Scene3dRenderer {
             .as_ref()
             .and_then(|g| g.instances.as_ref())
             .map_or(1, |(_, i)| i.matrices.len() as u32);
-        let factor = if draw.state.lines { 2 } else { 1 };
         let (index, total) = if draw.state.lines {
             mesh.wireframe.clone().expect("wireframe index")
         } else {
             (mesh.index.clone(), mesh.count)
         };
-        let range = match draw.range {
-            Some((start, count)) => {
-                let s = (start * factor).min(total);
-                s..(s + count * factor).min(total)
-            }
-            None => 0..total,
-        };
+        let range = 0..total;
         Ok(Some(Prepared {
             pipeline,
             bind,
@@ -2360,7 +2353,7 @@ mod prepass_reuse_tests {
                     extra: None,
                 },
                 world: crate::three::math::IDENTITY,
-                materials: Materials::Single(Box::new(Material3d::standard_default())),
+                materials: Materials(Box::new(Material3d::standard_default())),
                 cast_shadow: false,
                 receive_shadow: false,
                 gltf: Some(Arc::new(super::super::gltf::MeshExt {
@@ -2427,9 +2420,7 @@ mod prepass_reuse_tests {
     #[test]
     fn external_maps_and_instances_refuse_cross_scene_reuse() {
         let mut mapped = scene();
-        let Materials::Single(material) = &mut mapped.objects[0].meshes[0].materials else {
-            unreachable!()
-        };
+        let material = &mut mapped.objects[0].meshes[0].materials.0;
         material.maps.color = Some(Texture3d {
             asset: "image".into(),
             path: "image.png".into(),

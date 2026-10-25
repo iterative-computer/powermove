@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pm_geom3d::{Geometry, Group, MeshSource, Parameters, Source};
+use pm_geom3d::{Geometry, MeshSource, Parameters, Source};
 use pm_model::json::{Map, Value};
 
 use crate::js;
@@ -231,28 +231,23 @@ impl Material3d {
     }
 }
 
-/// The materials of a mesh: one (groups ignored) or an array indexed by the
-/// geometry's groups (`slots`).
+/// A mesh's material. Material slots and mesh groups are document fields
+/// the shipped app ignores since v1.2.0 (main 2b1fa379a): they still load,
+/// and the whole mesh draws with its object's material.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Materials {
-    Single(Box<Material3d>),
-    Slots(Vec<Material3d>),
-}
+pub struct Materials(pub Box<Material3d>);
 
 impl Materials {
-    /// The materials in slot order.
+    pub fn new(material: Material3d) -> Materials {
+        Materials(Box::new(material))
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, Material3d> {
-        match self {
-            Materials::Single(m) => std::slice::from_ref(m.as_ref()).iter(),
-            Materials::Slots(list) => list.iter(),
-        }
+        std::slice::from_ref(self.0.as_ref()).iter()
     }
 
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Material3d> {
-        match self {
-            Materials::Single(m) => std::slice::from_mut(m.as_mut()).iter_mut(),
-            Materials::Slots(list) => list.iter_mut(),
-        }
+        std::slice::from_mut(self.0.as_mut()).iter_mut()
     }
 }
 
@@ -314,13 +309,6 @@ impl GeometryPayload {
         match self {
             Self::Standard(g) => g.indexed,
             Self::Gltf { source, .. } => source.index.is_some(),
-        }
-    }
-
-    pub fn groups(&self) -> &[Group] {
-        match self {
-            Self::Standard(g) => &g.groups,
-            Self::Gltf { .. } => &[],
         }
     }
 
@@ -567,10 +555,7 @@ impl Scene3d {
         };
         for o in &mut self.objects {
             for mesh in &mut o.meshes {
-                match &mut mesh.materials {
-                    Materials::Single(m) => edit(m),
-                    Materials::Slots(list) => list.iter_mut().for_each(edit),
-                }
+                mesh.materials.iter_mut().for_each(edit);
             }
         }
     }
@@ -812,24 +797,13 @@ pub fn source_of(source: &Map) -> Result<Source, Unsupported> {
         });
     }
     if let Some(Value::Object(m)) = source.get("mesh") {
-        let groups = arr(m, "groups")
-            .iter()
-            .map(|g| match g {
-                Value::Object(g) => Some(Group {
-                    start: number(g.get("start"))? as u32,
-                    count: number(g.get("count"))? as u32,
-                    material_index: number(g.get("materialIndex"))? as u32,
-                }),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or("mesh groups")?;
         return Ok(Source::Mesh(MeshSource {
             positions: numbers(m.get("positions")).ok_or("mesh positions")?,
             indices: numbers(m.get("indices")).map(|v| v.iter().map(|i| *i as u32).collect()),
             normals: numbers(m.get("normals")),
             uvs: numbers(m.get("uvs")),
-            groups,
+            // An authored mesh's `groups` are ignored (as `slots` are).
+            groups: Vec::new(),
         }));
     }
     Err("an unknown 3D source".into())
@@ -1126,7 +1100,6 @@ impl SceneBuilder {
                 // `parseScene`, which refuses it (`corrupt-scenes.test.ts`).
                 Some(self.geometry(&source_of(source)?))
             };
-            let slots = arr(node, "slots");
             let use_source = boolean(node, "useSourceMaterials") == Some(true);
             let (geometry, materials) = match materials {
                 None => (
@@ -1135,45 +1108,19 @@ impl SceneBuilder {
                         height: 1.0,
                         depth: 1.0,
                     })),
-                    Materials::Single(Box::new(Material3d::missing_box())),
+                    Materials::new(Material3d::missing_box()),
                 ),
-                Some(geometry) if use_source && slots.is_empty() => (
-                    geometry,
-                    Materials::Single(Box::new(Material3d::standard_default())),
-                ),
+                Some(geometry) if use_source => {
+                    (geometry, Materials::new(Material3d::standard_default()))
+                }
                 Some(geometry) => {
                     let base = obj(node, "material").cloned().unwrap_or_default();
-                    let shader_name = obj(&base, "shader").and_then(|s| text(s, "name"));
+                    let name = obj(&base, "shader")
+                        .and_then(|s| text(s, "name"))
+                        .unwrap_or_else(|| "Surface".into());
                     let prefix = format!("o.{id}.m");
-                    if slots.is_empty() {
-                        let name = shader_name.unwrap_or_else(|| "Surface".into());
-                        let m =
-                            self.material(&base, name, &prefix, channels, textures, &mut warnings)?;
-                        (geometry, Materials::Single(Box::new(m)))
-                    } else {
-                        let mut list = Vec::new();
-                        for slot in slots {
-                            let Value::Object(slot) = slot else {
-                                continue;
-                            };
-                            let definition = obj(slot, "material").cloned().unwrap_or_default();
-                            let name = text(slot, "name")
-                                .filter(|n| !n.is_empty())
-                                .or_else(|| {
-                                    obj(&definition, "shader").and_then(|s| text(s, "name"))
-                                })
-                                .unwrap_or_else(|| "Surface".into());
-                            list.push(self.material(
-                                &definition,
-                                name,
-                                &prefix,
-                                channels,
-                                textures,
-                                &mut warnings,
-                            )?);
-                        }
-                        (geometry, Materials::Slots(list))
-                    }
+                    let m = self.material(&base, name, &prefix, channels, textures, &mut warnings)?;
+                    (geometry, Materials::new(m))
                 }
             };
             let fact = facts.get(&id).copied().unwrap_or(LayerFacts {
@@ -1185,7 +1132,7 @@ impl SceneBuilder {
                     objects.len(),
                     a,
                     materials.clone(),
-                    use_source && slots.is_empty(),
+                    use_source,
                 ));
             }
             objects.push(Object3d {
@@ -1252,8 +1199,7 @@ impl SceneBuilder {
                 .unwrap_or(self.animation_default);
             let rule = match (&materials, use_source) {
                 (_, true) => super::gltf::Override::Source,
-                (Materials::Single(m), false) => super::gltf::Override::Single(m),
-                (Materials::Slots(list), false) => super::gltf::Override::Slots(list),
+                (Materials(m), false) => super::gltf::Override::Single(m),
             };
             let (cast, receive) = o
                 .meshes
