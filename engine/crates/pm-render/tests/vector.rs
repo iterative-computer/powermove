@@ -521,10 +521,25 @@ fn svg_fallbacks_are_counted_and_named_per_layer() {
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
     let turbulence = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><filter id="t"><feTurbulence baseFrequency="0.05"/></filter><rect width="100" height="50" filter="url(#t)"/></svg>"##;
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
-    let (doc, resolver, _svg) =
+    let (mut doc, resolver, _svg) =
         svg_project(turbulence, "turbulence.svg", 100, 50, d.clone(), 1, 0.0);
+    composition(&mut doc, "Cother", W, H, 2.0, Vec::new());
     let doc = load(&doc);
+    let warned = |frame: &pm_render::Frame| {
+        frame
+            .scene3d_meta
+            .iter()
+            .any(|m| m.layers.iter().any(|l| l.as_str() == "svg"))
+    };
     for drawn in [true, false] {
+        if !drawn {
+            // A view of another composition on the same renderer neither
+            // clears nor repeats this one's warning.
+            let other = renderer
+                .render(&doc, "Cother", ticks(0.0), &request, &resolver)
+                .unwrap();
+            assert!(other.svg_fallbacks.is_empty() && !warned(&other));
+        }
         let scope = pm_perf::Scope::begin();
         let frame = renderer
             .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)

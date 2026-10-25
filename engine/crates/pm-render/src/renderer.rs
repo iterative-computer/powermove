@@ -331,8 +331,10 @@ fn preview_window(
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// SVG layers (composition, layer) the last frame warned about.
-    svg_warned: Vec<(String, String)>,
+    /// SVG layers (composition, layer) the last frame of each rendered
+    /// composition warned about: views of other compositions sharing the
+    /// renderer neither clear nor repeat them.
+    svg_warned: std::collections::HashMap<String, Vec<(String, String)>>,
     pipelines: Pipelines,
     media: MediaCache,
     pool: TargetPool,
@@ -475,7 +477,7 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
-            svg_warned: Vec::new(),
+            svg_warned: Default::default(),
             channel_memo: true,
             prefix: Default::default(),
             frame_reuse: FrameReuse::default(),
@@ -1885,12 +1887,17 @@ impl Renderer {
         self.media.scrub = scrub;
         failures.extend(exec_failures);
         crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
-        let svg_fallbacks = svg_diagnostics(
-            &svg_layers,
-            &self.vector.take_svg_fallbacks(),
-            &mut self.svg_warned,
-            &mut scene3d_meta,
-        );
+        let fallbacks = self.vector.take_svg_fallbacks();
+        let svg_fallbacks = if fallbacks.is_empty() && !self.svg_warned.contains_key(composition) {
+            Vec::new()
+        } else {
+            let warned = self.svg_warned.entry(composition.to_owned()).or_default();
+            let out = svg_diagnostics(&svg_layers, &fallbacks, warned, &mut scene3d_meta);
+            if warned.is_empty() {
+                self.svg_warned.remove(composition);
+            }
+            out
+        };
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
         }
