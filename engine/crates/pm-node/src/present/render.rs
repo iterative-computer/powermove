@@ -6109,9 +6109,9 @@ impl Thread {
                             && match &job.request.target {
                                 pm_protocol::snapshot::SnapshotTarget::Source {
                                     asset,
-                                    color: pm_protocol::snapshot::SourceColor::Display,
+                                    color,
                                     ..
-                                } => d.source_media(asset.as_str()).is_some(),
+                                } => d.source_read(asset.as_str(), *color).is_some(),
                                 _ => true,
                             }
                     })

@@ -201,6 +201,7 @@ fn original_sdr_heif_depth_alpha_orientation_and_profile_reach_source_frames() {
                 SourceFit::Stretch,
                 &Default::default(),
                 false,
+                pm_render::sampling::Sampling::Final,
             )
             .unwrap();
         assert_eq!(

@@ -397,20 +397,12 @@ impl Thread {
             return;
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-        let original = doc.media().path(asset.as_str());
         let record = pm_eval::node::member(doc.document().root(), "assets")
             .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
         // Interpret Footage says how composition reads the original. The
         // monitor shows that reading of that file, drawn by the engine.
         let footage = record.and_then(pm_render::footage::interpretation);
-        let reads_original = color == SourceColor::Interpreted
-            || (color == SourceColor::Compositor && footage.is_some());
-        let path = if reads_original {
-            original.clone()
-        } else {
-            doc.source_media(asset.as_str()).flatten()
-        };
-        let Some(path) = path else {
+        let Some(path) = doc.source_read(asset.as_str(), color).flatten() else {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
                 &job,
@@ -445,6 +437,15 @@ impl Thread {
                 interpretation.as_ref()
             },
         );
+        let sampling = if self
+            .source_intent
+            .get(&job.key)
+            .is_some_and(|(current, _, playing, _)| current == &asset && *playing)
+        {
+            pm_render::sampling::Sampling::Playback
+        } else {
+            pm_render::sampling::Sampling::Final
+        };
         let Some(gpu) = self.gpu.as_mut() else { return };
         let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let mut coded_video = None;
@@ -491,6 +492,7 @@ impl Thread {
                         fit,
                         footage.as_ref().unwrap_or(&Default::default()),
                         sequence,
+                        sampling,
                     )
                     .map(|pixels| {
                         let pixels = super::super::snapshot::encode_rgba8_unorm(
