@@ -1581,13 +1581,7 @@ fn space_of_argument(name: &str) -> Option<Space> {
 }
 
 /// `MakePerColorSpaceAdjustments`.
-fn adjust(
-    relative: bool,
-    legacy: bool,
-    space: Space,
-    ch: &mut [Option<f64>; 3],
-    alpha: &mut Option<f64>,
-) {
+fn adjust(relative: bool, legacy: bool, space: Space, ch: &mut [Option<f64>; 3]) {
     if let Some(h) = space.hue_index()
         && let Some(v) = ch[h].as_mut()
     {
@@ -1603,9 +1597,6 @@ fn adjust(
             } else if !relative {
                 *c = c.clamp(0.0, 255.0);
             }
-        }
-        if legacy && let Some(a) = alpha.as_mut() {
-            *a = (*a * 255.0).round() / 255.0;
         }
     }
     if matches!(space, Space::Hsl | Space::Hwb) {
@@ -1764,7 +1755,7 @@ fn function(name: &str, args: &[Tok]) -> Option<Color> {
             }
         };
     }
-    let mut a: Option<f64> = match alpha {
+    let a: Option<f64> = match alpha {
         None => {
             if let Some(keys) = keys_ref {
                 keys.iter()
@@ -1779,7 +1770,7 @@ fn function(name: &str, args: &[Tok]) -> Option<Color> {
         Some((Kind::Percentage, v)) => Some((v / 100.0).clamp(0.0, 1.0)),
         Some((Kind::Relative, v)) => Some(v.clamp(0.0, 1.0)),
     };
-    adjust(origin.is_some(), legacy, space, &mut values, &mut a);
+    adjust(origin.is_some(), legacy, space, &mut values);
     let mut c = Color::from_space(
         space,
         [
@@ -1938,6 +1929,12 @@ pub fn parse(value: &str) -> Option<Rgba> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_legacy_alpha_keeps_float_precision() {
+        let color = parse("rgba(255, 0, 0, 0.12345)").unwrap();
+        assert!((color[3] - 0.12345).abs() < 1e-7);
+    }
 
     fn bytes(s: &str) -> [i32; 4] {
         let c = parse(s).unwrap_or_else(|| panic!("{s} does not parse"));

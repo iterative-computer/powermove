@@ -67,7 +67,8 @@ fn main() {
         )
     };
 
-    // Equal scenes: the color a string draws is the color of `expected`.
+    // Equal rendered colors and geometry. Parser representations can differ
+    // below f32 paint precision without sharing an internal cache key.
     let same = [
         (
             "detached light-dark() retains black",
@@ -147,7 +148,8 @@ fn main() {
     for (name, ty, d, expected) in &same {
         match (raster(&mut r, ty, d), raster(&mut r, ty, expected)) {
             (Ok(Some(a)), Ok(Some(b))) => {
-                let equal = a.plan.key == b.plan.key && a.pixels == b.pixels;
+                let equal =
+                    a.canvas == b.canvas && a.plan.crop == b.plan.crop && a.pixels == b.pixels;
                 println!("{name:<72} {}", if equal { "equal" } else { "DIFFERS" });
                 if !equal {
                     failures.push(format!("{name}: draws differently from the expected color"));

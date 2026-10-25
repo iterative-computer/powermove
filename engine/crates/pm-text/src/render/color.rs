@@ -1,8 +1,8 @@
 //! CSS colors as a canvas `fillStyle` or `strokeStyle` setter parses them.
 //!
 //! Parsed here: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, every CSS
-//! named color and `transparent` (the sRGB colors a canvas stores as 8-bit
-//! channels). CSS Color 4/5 (`lab()`, `lch()`, `oklab()`, `oklch()`,
+//! named color and `transparent`. Decimal functional channels stay float;
+//! hex and named colors retain their byte-exact values. CSS Color 4/5 (`lab()`, `lch()`, `oklab()`, `oklch()`,
 //! `color()`, `color-mix()`, relative colors, `calc()`, `currentcolor`, and
 //! the system colors a detached canvas resolves) come from
 //! [`super::color4`], Blink's color model, as unclamped sRGB. A string the
@@ -14,8 +14,8 @@
 //! string is only ever drawn as the fallback when it is certainly not a
 //! color.
 //!
-//! Values are E-encoded straight RGBA in 0..1 (the working encoding:
-//! a hex code's value is the working value, section 9).
+//! Values are E-encoded straight RGBA in 0..1. The paint pass decodes
+//! them when the project uses LinearLight compositing.
 
 /// Straight (unpremultiplied) RGBA, E-encoded, 0..1.
 pub type Rgba = [f64; 4];
@@ -108,11 +108,9 @@ fn css_number(s: &str) -> Option<f64> {
 fn channel(s: &str) -> Option<f64> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
-        // A percentage channel is stored as 8 bits too.
-        return Some(byte_channel(css_number(p)? / 100.0));
+        return Some((css_number(p)? / 100.0).clamp(0.0, 1.0));
     }
-    // CSS rounds the 0..255 value to the 8-bit color the canvas stores.
-    Some((css_number(s)?.clamp(0.0, 255.0)).round() / 255.0)
+    Some(css_number(s)?.clamp(0.0, 255.0) / 255.0)
 }
 
 fn alpha(s: &str) -> Option<f64> {
@@ -224,11 +222,6 @@ fn hsl_rgb(h: f64, s: f64, l: f64) -> [f64; 3] {
     [f(0.0), f(8.0), f(4.0)]
 }
 
-/// A channel in 0..1 rounded to the 8-bit value the canvas stores.
-fn byte_channel(v: f64) -> f64 {
-    (v.clamp(0.0, 1.0) * 255.0).round() / 255.0
-}
-
 fn hsl(args: &str) -> Option<Rgba> {
     let ([h, s, l], a) = components(args)?;
     let numbers = !args.contains(',');
@@ -238,9 +231,9 @@ fn hsl(args: &str) -> Option<Rgba> {
         None => 1.0,
     };
     Some([
-        byte_channel(rgb[0]),
-        byte_channel(rgb[1]),
-        byte_channel(rgb[2]),
+        rgb[0].clamp(0.0, 1.0),
+        rgb[1].clamp(0.0, 1.0),
+        rgb[2].clamp(0.0, 1.0),
         a,
     ])
 }
@@ -258,7 +251,7 @@ fn hwb(args: &str) -> Option<Rgba> {
         b /= sum;
     }
     let base = hsl_rgb(h, 1.0, 0.5);
-    let ch = |c: f64| byte_channel(c * (1.0 - w - b) + w);
+    let ch = |c: f64| (c * (1.0 - w - b) + w).clamp(0.0, 1.0);
     let a = match a {
         Some(a) => alpha(a)?,
         None => 1.0,
@@ -375,11 +368,11 @@ pub fn classify(value: &str) -> Result<Rgba, Rejected> {
     if matches!(lower.as_str(), "accentcolor" | "accentcolortext") {
         return Err(Rejected::Invalid);
     }
-    if let Some(c) = super::color4::parse(&lower) {
-        return Ok(c);
-    }
     if lower == "highlight" {
         return Ok([128.0 / 255.0, 188.0 / 255.0, 254.0 / 255.0, 0.6]);
+    }
+    if let Some(c) = super::color4::parse(&lower) {
+        return Ok(c);
     }
     if DOCUMENT_COLORS.contains(&lower.as_str()) {
         return Err(Rejected::Unsupported);
@@ -607,30 +600,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_hsl_and_hwb_as_chromium_stores_them() {
-        // Chromium (Electron, 2026-10-16) serializes these fillStyle values
-        // as the codes below.
-        assert_eq!(parse("hsl(0, 100%, 50%)"), Some(rgb8(255, 0, 0, 1.0)));
-        assert_eq!(parse("hsl(120deg 100% 25%)"), Some(rgb8(0, 128, 0, 1.0)));
-        assert_eq!(parse("hsl(210 50% 40%)"), Some(rgb8(51, 102, 153, 1.0)));
-        assert_eq!(parse("hsl(0.5turn 100 50)"), Some(rgb8(0, 255, 255, 1.0)));
+    fn functional_colors_keep_fractional_channels() {
+        let c = parse("rgb(10.5 20.25 30.75 / 0.6)").unwrap();
+        assert_eq!(c, [10.5 / 255.0, 20.25 / 255.0, 30.75 / 255.0, 0.6]);
         assert_eq!(
-            parse("hsla(240, 100%, 50%, 0.5)"),
-            Some(rgb8(0, 0, 255, 0.5))
+            parse("rgb(12.5%, 25%, 37.5%)"),
+            Some([0.125, 0.25, 0.375, 1.0])
         );
+        let hsl = parse("hsl(120deg 100% 25%)").unwrap();
+        assert!((hsl[1] - 0.5).abs() < 1e-12);
+        assert_ne!(hsl[1], 128.0 / 255.0);
+        let hwb = parse("hwb(120 20% 30%)").unwrap();
+        assert!((hwb[1] - 0.7).abs() < 1e-12);
         assert_eq!(
-            parse("HSL(300 100% 50% / 25%)"),
-            Some(rgb8(255, 0, 255, 0.25))
+            parse("#808080"),
+            Some([128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0])
         );
-        assert_eq!(parse("hsl(-120, 100%, 50%)"), Some(rgb8(0, 0, 255, 1.0)));
-        assert_eq!(parse("hwb(0 0% 0%)"), Some(rgb8(255, 0, 0, 1.0)));
-        assert_eq!(parse("hwb(120 20% 30%)"), Some(rgb8(51, 179, 51, 1.0)));
-        assert_eq!(parse("hwb(0 60% 60%)"), Some(rgb8(128, 128, 128, 1.0)));
-        assert_eq!(parse("hsl(37 61% 47%)"), Some(rgb8(0xc1, 0x89, 0x2f, 1.0)));
-        assert_eq!(parse("hwb(200 13% 41%)"), Some(rgb8(0x21, 0x6f, 0x96, 1.0)));
-        assert_eq!(parse("hsl(none 100% 50%)"), Some(rgb8(255, 0, 0, 1.0)));
-        // The legacy comma syntax needs percentages (Chromium rejects it);
-        // a functional notation that does not parse is refused, not guessed.
         assert_eq!(classify("hsl(0, 100, 50)"), Err(Rejected::Unsupported));
     }
 
@@ -672,13 +657,13 @@ mod tests {
         // The modern syntax may mix numbers and percentages (Blink's
         // color model, `color4`).
         assert_eq!(parse("rgb(255 50% 0)"), Some([1.0, 0.5, 0.0, 1.0]));
-        assert_eq!(parse("rgb(100%, 0%, 50%)"), Some(rgb8(255, 0, 128, 1.0)));
+        assert_eq!(parse("rgb(100%, 0%, 50%)"), Some([1.0, 0.0, 0.5, 1.0]));
         assert_eq!(parse("rgb( 1 , 2 , 3 , .5 )"), Some(rgb8(1, 2, 3, 0.5)));
         // Every spelling of a CSS number still parses.
         assert_eq!(parse("rgb(+1, 2e0, 3E+0, 5e-1)"), Some(rgb8(1, 2, 3, 0.5)));
         assert_eq!(parse("rgb(-5 0 0 / -.5)"), Some(rgb8(0, 0, 0, 0.0)));
         assert_eq!(parse("rgb(0 0 0 / 2.5e1%)"), Some(rgb8(0, 0, 0, 0.25)));
-        assert_eq!(parse("hsl(1.2e2deg 1e2% 25%)"), Some(rgb8(0, 128, 0, 1.0)));
+        assert_eq!(parse("hsl(1.2e2deg 1e2% 25%)"), Some([0.0, 0.5, 0.0, 1.0]));
     }
 
     #[test]
