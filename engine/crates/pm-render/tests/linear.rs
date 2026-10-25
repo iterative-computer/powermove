@@ -1,15 +1,17 @@
 //! Section 2's linear-blending bar through the renderer: computed at 32-bit,
 //! round half up, sRGB output, 50% white over black is 188 (0.735357;
-//! boundary 187.5), and a 1-pixel checkerboard downscaled 2× is 188. With
-//! linear blending off both are today's 128. (The third line, a Gaussian
-//! blur of a white line conserving energy, needs the blur effect; see
-//! docs/engine/composite.md.)
+//! boundary 187.5), and a 1-pixel checkerboard downscaled 2× through the
+//! box-filtered mip is 188. With linear blending off both are 128. The final
+//! Lanczos-3 kernel filters in the same working encoding. (The third line, a
+//! Gaussian blur of a white line conserving energy, needs the blur effect;
+//! see docs/engine/composite.md.)
 
 mod support;
 
 use pm_color::transfer::unit_to_code;
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
+use pm_render::sampling::Sampling;
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::{Value, json};
 use support::doc::*;
@@ -21,7 +23,18 @@ fn with_linear(mut doc: Value, on: bool) -> Value {
 }
 
 fn render(r: &mut Renderer, doc: &Value, size: (u32, u32), resolver: &MapResolver) -> Vec<f32> {
-    let request = RenderRequest::at_scale(Size::new(size.0, size.1), 1.0, Precision::Float32);
+    render_with(r, doc, size, resolver, Sampling::Final)
+}
+
+fn render_with(
+    r: &mut Renderer,
+    doc: &Value,
+    size: (u32, u32),
+    resolver: &MapResolver,
+    sampling: Sampling,
+) -> Vec<f32> {
+    let mut request = RenderRequest::at_scale(Size::new(size.0, size.1), 1.0, Precision::Float32);
+    request.sampling = sampling;
     let frame = r
         .render(&load(doc), "Ptest-root", ticks(0.0), &request, resolver)
         .unwrap();
@@ -72,75 +85,88 @@ fn checkerboard(path: &std::path::Path) {
     e.write_header().unwrap().write_image_data(&data).unwrap();
 }
 
+/// The 64-pixel checkerboard drawn 32 pixels wide at the frame origin.
+fn half_checker(on: bool) -> Value {
+    let mut image = layer(
+        "img",
+        "image",
+        json!({ "asset": "checker", "fit": "stretch", "w": 64, "h": 64 }),
+        16.0,
+        16.0,
+        1.0,
+    );
+    set(&mut image, "scale.x", json!(50));
+    set(&mut image, "scale.y", json!(50));
+    let mut doc = project(32, 32, 1.0, solid_fill("#000000"), vec![image]);
+    asset(&mut doc, "checker", "image", "png", 64, 64, 1.0);
+    with_linear(doc, on)
+}
+
 #[test]
 fn checkerboard_downscaled_2x_is_188() {
-    let dir = std::env::temp_dir().join(format!("pm-render-linear-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("checker.png");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checker.png");
     checkerboard(&path);
     let mut r = Renderer::headless().unwrap();
     let mut resolver = MapResolver::default();
-    resolver.paths.insert("checker".into(), path.clone());
+    resolver.paths.insert("checker".into(), path);
+    // The checker's texels are 0 and 1 in either working encoding.
+    let n = 64;
+    let checker = support::sampling_reference::Bitmap {
+        width: n,
+        height: n,
+        rgba: (0..n * n)
+            .flat_map(|i| {
+                let v = if (i % n + i / n) % 2 == 0 { 1.0 } else { 0.0 };
+                [v, v, v, 1.0]
+            })
+            .collect(),
+    };
+    let encode = |v: f64| {
+        if v <= 0.0031308 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
     for (on, code) in [(true, 188), (false, 128)] {
-        // The 64-pixel image centered at (16, 16) at 50%: each output pixel
-        // center lands on a texel corner, so bilinear sampling averages
-        // two white and two black texels.
-        let mut image = layer(
-            "img",
-            "image",
-            json!({ "asset": "checker", "fit": "stretch", "w": 64, "h": 64 }),
-            16.0,
-            16.0,
-            1.0,
-        );
-        set(&mut image, "scale.x", json!(50));
-        set(&mut image, "scale.y", json!(50));
-        let mut doc = project(32, 32, 1.0, solid_fill("#000000"), vec![image]);
-        asset(&mut doc, "checker", "image", "png", 64, 64, 1.0);
-        let doc = with_linear(doc, on);
-        let rgba = render(&mut r, &doc, (32, 32), &resolver);
+        // Playback reads the first mip: each output pixel is the exact
+        // mean of two white and two black texels in the working encoding.
+        let rgba = render_with(&mut r, &half_checker(on), (32, 32), &resolver, Sampling::Playback);
         for (i, px) in rgba.chunks_exact(4).enumerate() {
             for c in &px[..3] {
-                assert_eq!(
-                    unit_to_code(f64::from(*c), 8),
-                    code,
-                    "linear {on}: pixel {i} = {c}"
+                assert_eq!(unit_to_code(f64::from(*c), 8), code, "linear {on}: pixel {i} = {c}");
+            }
+        }
+        // Final: the declared Lanczos-3 kernel, computed in f64 on the same
+        // working values, then encoded for output.
+        let rgba = render(&mut r, &half_checker(on), (32, 32), &resolver);
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            let (x, y) = ((i % 32) as f64, (i / 32) as f64);
+            let k = checker.sample((2.0 * x + 1.0, 2.0 * y + 1.0), (2.0, 0.0), (0.0, 2.0))[0];
+            let expected = if on { encode(k) } else { k };
+            for c in &px[..3] {
+                assert!(
+                    (f64::from(*c) - expected).abs() < 1e-3,
+                    "linear {on}: pixel {i} = {c}, declared kernel {expected}"
                 );
             }
         }
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// One renderer drawing the same still for a Standard and a linear-light
 /// project keeps each project's converted texture (working values differ).
 #[test]
 fn converted_media_follow_the_working_encoding() {
-    let dir = std::env::temp_dir().join(format!("pm-render-linear-cache-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("checker.png");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checker.png");
     checkerboard(&path);
     let mut r = Renderer::headless().unwrap();
     let mut resolver = MapResolver::default();
-    resolver.paths.insert("checker".into(), path.clone());
-    let doc = |on: bool| {
-        let mut image = layer(
-            "img",
-            "image",
-            json!({ "asset": "checker", "fit": "stretch", "w": 64, "h": 64 }),
-            16.0,
-            16.0,
-            1.0,
-        );
-        set(&mut image, "scale.x", json!(50));
-        set(&mut image, "scale.y", json!(50));
-        let mut d = project(32, 32, 1.0, solid_fill("#000000"), vec![image]);
-        asset(&mut d, "checker", "image", "png", 64, 64, 1.0);
-        with_linear(d, on)
-    };
+    resolver.paths.insert("checker".into(), path);
     for (on, code) in [(false, 128), (true, 188), (false, 128), (true, 188)] {
-        let rgba = render(&mut r, &doc(on), (32, 32), &resolver);
+        let rgba = render_with(&mut r, &half_checker(on), (32, 32), &resolver, Sampling::Playback);
         assert_eq!(unit_to_code(f64::from(rgba[0]), 8), code, "linear {on}");
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
