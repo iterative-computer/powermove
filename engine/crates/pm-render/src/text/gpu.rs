@@ -29,6 +29,7 @@ pub const CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const RETIRED_BYTES: u64 = 2 * 1024 * 1024;
 const IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const DIRECT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+const DIRECT_UPLOAD_SCRATCH_BYTES: usize = 128 * 1024;
 const DIRECT_MAX_SIDE: f64 = 512.0;
 
 #[repr(C)]
@@ -118,6 +119,7 @@ pub struct TextGpu {
     image_bytes: u64,
     direct: HashMap<usize, DirectCacheEntry>,
     direct_bytes: u64,
+    direct_upload: Vec<[f32; 2]>,
     raster_pool: TargetPool,
     cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
     cache_bytes: u64,
@@ -187,7 +189,11 @@ fn to_working(mut rgba: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
 /// jumps never contribute area. A pixel querying row r has local Y in
 /// [r, r + 1), so its unit-height interval is contained in [r, r + 2).
 /// An edge can contribute only for r in [floor(min_y) - 1, floor(max_y)].
-fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, DirectMeta)> {
+fn direct_texels_into(
+    path: &BezPath,
+    max_dimension: u32,
+    texels: &mut Vec<[f32; 2]>,
+) -> Option<DirectMeta> {
     let bounds = path.bounding_box();
     if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
         .into_iter()
@@ -304,7 +310,8 @@ fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, D
         return None;
     }
     let total = width as usize * height as usize;
-    let mut texels = vec![[0.0, 0.0]; total];
+    texels.clear();
+    texels.resize(total, [0.0, 0.0]);
     for row in 0..rows {
         let end = if row + 1 < rows {
             cursors[row + 1]
@@ -326,17 +333,21 @@ fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, D
         }
     })?;
     debug_assert_eq!(written, point_count);
-    Some((
-        texels,
-        DirectMeta {
-            origin,
-            table,
-            list,
-            row_start,
-            rows: rows as u32,
-            width,
-        },
-    ))
+    Some(DirectMeta {
+        origin,
+        table,
+        list,
+        row_start,
+        rows: rows as u32,
+        width,
+    })
+}
+
+#[cfg(test)]
+fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, DirectMeta)> {
+    let mut texels = Vec::new();
+    let meta = direct_texels_into(path, max_dimension, &mut texels)?;
+    Some((texels, meta))
 }
 
 impl TextGpu {
@@ -536,6 +547,7 @@ impl TextGpu {
             image_bytes: 0,
             direct: HashMap::new(),
             direct_bytes: 0,
+            direct_upload: Vec::new(),
             raster_pool: TargetPool::new(),
             cache: HashMap::new(),
             cache_bytes: 0,
@@ -611,6 +623,7 @@ impl TextGpu {
         self.image_bytes = 0;
         self.direct.clear();
         self.direct_bytes = 0;
+        self.direct_upload = Vec::new();
     }
 
     pub fn cached_bytes(&self) -> u64 {
@@ -721,8 +734,12 @@ impl TextGpu {
                 translation,
             });
         }
-        let (texels, meta) = direct_texels(&path, device.limits().max_texture_dimension_2d)?;
-        let height = (texels.len() as u32).div_ceil(meta.width);
+        let meta = direct_texels_into(
+            &path,
+            device.limits().max_texture_dimension_2d,
+            &mut self.direct_upload,
+        )?;
+        let height = (self.direct_upload.len() as u32).div_ceil(meta.width);
         let bytes = u64::from(meta.width) * u64::from(height) * 8;
         if bytes > DIRECT_CACHE_BYTES / 2 {
             return None;
@@ -743,8 +760,12 @@ impl TextGpu {
         });
         // [f32; 2] has no padding; the immutable slice remains alive for
         // queue.write_texture, which copies its bytes before returning.
-        let data =
-            unsafe { std::slice::from_raw_parts(texels.as_ptr().cast::<u8>(), texels.len() * 8) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.direct_upload.as_ptr().cast::<u8>(),
+                self.direct_upload.len() * 8,
+            )
+        };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -764,6 +785,11 @@ impl TextGpu {
                 depth_or_array_layers: 1,
             },
         );
+        // The queue copied the upload. Keep the common glyph buffer for the
+        // next glyph, but do not retain unusually large staging capacity.
+        if self.direct_upload.capacity() * 8 > DIRECT_UPLOAD_SCRATCH_BYTES {
+            self.direct_upload = Vec::new();
+        }
         let view = texture.create_view(&Default::default());
         while self.direct_bytes + bytes > DIRECT_CACHE_BYTES {
             let (&oldest, _) = self.direct.iter().min_by_key(|(_, entry)| entry.used)?;

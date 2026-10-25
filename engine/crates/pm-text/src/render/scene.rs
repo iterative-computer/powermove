@@ -98,46 +98,70 @@ fn flatten_transformed(path: &BezPath, transform: Affine, tolerance: f64) -> Bez
 /// need nonoverlapping filled boundaries: overlapping source contours would
 /// count their shared pixels twice.
 pub(crate) struct NonzeroResolver {
+    // Element indices borrow the candidate path only during certification;
+    // coordinate contours are materialized only for the union fallback.
+    raw_contours: Vec<Vec<u32>>,
     contours: Vec<Vec<[f64; 2]>>,
     edges: Vec<ContourEdge>,
-    active_edges: Vec<usize>,
+    active_edges: Vec<u32>,
     overlay: FloatOverlay<[f64; 2], i64>,
     peak_estimate: usize,
 }
 
 #[derive(Clone, Copy)]
 struct ContourEdge {
-    a: [f64; 2],
-    b: [f64; 2],
-    contour: usize,
-    index: usize,
+    contour: u32,
+    index: u32,
 }
 
 impl ContourEdge {
-    fn new(a: [f64; 2], b: [f64; 2], contour: usize, index: usize) -> Self {
-        Self {
-            a,
-            b,
-            contour,
-            index,
+    fn endpoints(self, contours: &[Vec<u32>], elements: &[PathEl]) -> ([f64; 2], [f64; 2]) {
+        let contour = &contours[self.contour as usize];
+        let index = self.index as usize;
+        (
+            raw_point(elements, contour[index]),
+            raw_point(elements, contour[(index + 1) % contour.len()]),
+        )
+    }
+
+    fn min_x(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[0].min(b[0])
+    }
+
+    fn max_x(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[0].max(b[0])
+    }
+
+    fn min_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[1].min(b[1])
+    }
+
+    fn max_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[1].max(b[1])
+    }
+}
+
+fn raw_point(elements: &[PathEl], index: u32) -> [f64; 2] {
+    match elements[index as usize] {
+        PathEl::MoveTo(point) | PathEl::LineTo(point) => [point.x, point.y],
+        _ => unreachable!("raw contours contain only move and line points"),
+    }
+}
+
+fn contour_point_count(elements: &[PathEl], offset: usize) -> usize {
+    let mut count = 1;
+    for next in &elements[offset + 1..] {
+        match *next {
+            PathEl::LineTo(_) => count += 1,
+            PathEl::MoveTo(_) | PathEl::ClosePath => break,
+            _ => {}
         }
     }
-
-    fn min_x(self) -> f64 {
-        self.a[0].min(self.b[0])
-    }
-
-    fn max_x(self) -> f64 {
-        self.a[0].max(self.b[0])
-    }
-
-    fn min_y(self) -> f64 {
-        self.a[1].min(self.b[1])
-    }
-
-    fn max_y(self) -> f64 {
-        self.a[1].max(self.b[1])
-    }
+    count
 }
 
 /// A strict sign is a proof; zero, overflow, and cancellation are unknown.
@@ -170,23 +194,30 @@ fn certified_forward(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
     dot > margin
 }
 
-fn certified_separate(a: ContourEdge, b: ContourEdge) -> bool {
-    let a0 = orientation_sign(a.a, a.b, b.a);
-    let a1 = orientation_sign(a.a, a.b, b.b);
+fn certified_separate(
+    a: ContourEdge,
+    b: ContourEdge,
+    contours: &[Vec<u32>],
+    elements: &[PathEl],
+) -> bool {
+    let (a_start, a_end) = a.endpoints(contours, elements);
+    let (b_start, b_end) = b.endpoints(contours, elements);
+    let a0 = orientation_sign(a_start, a_end, b_start);
+    let a1 = orientation_sign(a_start, a_end, b_end);
     if a0.is_some() && a0 == a1 {
         return true;
     }
-    let b0 = orientation_sign(b.a, b.b, a.a);
-    let b1 = orientation_sign(b.a, b.b, a.b);
+    let b0 = orientation_sign(b_start, b_end, a_start);
+    let b1 = orientation_sign(b_start, b_end, a_end);
     b0.is_some() && b0 == b1
 }
 
-fn certified_area_sign(contour: &[[f64; 2]]) -> Option<i32> {
-    let origin = contour[0];
+fn certified_area_sign(contour: &[u32], elements: &[PathEl]) -> Option<i32> {
+    let origin = raw_point(elements, contour[0]);
     let mut sum = 0.0;
     let mut magnitude = 0.0;
     for pair in contour[1..].windows(2) {
-        let (a, b) = (pair[0], pair[1]);
+        let (a, b) = (raw_point(elements, pair[0]), raw_point(elements, pair[1]));
         let left = (a[0] - origin[0]) * (b[1] - origin[1]);
         let right = (a[1] - origin[1]) * (b[0] - origin[0]);
         let term = left - right;
@@ -204,11 +235,11 @@ fn certified_area_sign(contour: &[[f64; 2]]) -> Option<i32> {
 }
 
 /// Winding of a simple contour at a point certified to be off its boundary.
-fn certified_winding(contour: &[[f64; 2]], point: [f64; 2]) -> Option<i32> {
+fn certified_winding(contour: &[u32], elements: &[PathEl], point: [f64; 2]) -> Option<i32> {
     let mut winding = 0i32;
     for index in 0..contour.len() {
-        let a = contour[index];
-        let b = contour[(index + 1) % contour.len()];
+        let a = raw_point(elements, contour[index]);
+        let b = raw_point(elements, contour[(index + 1) % contour.len()]);
         if a[1] <= point[1] && point[1] < b[1] {
             if orientation_sign(a, b, point)? > 0 {
                 winding = winding.checked_add(1)?;
@@ -225,6 +256,7 @@ fn certified_winding(contour: &[[f64; 2]], point: [f64; 2]) -> Option<i32> {
 impl Default for NonzeroResolver {
     fn default() -> Self {
         Self {
+            raw_contours: Vec::new(),
             contours: Vec::new(),
             edges: Vec::new(),
             active_edges: Vec::new(),
@@ -235,6 +267,78 @@ impl Default for NonzeroResolver {
 }
 
 impl NonzeroResolver {
+    fn start_raw_contour(&mut self, index: usize, point: u32, point_count: usize) {
+        if index == self.raw_contours.len() {
+            self.raw_contours.push(Vec::new());
+        }
+        let contour = &mut self.raw_contours[index];
+        contour.clear();
+        if contour.capacity() < point_count {
+            contour.reserve_exact(point_count);
+        }
+        contour.push(point);
+    }
+
+    fn finish_raw_contour(&mut self, index: &mut usize, open: &mut bool, elements: &[PathEl]) {
+        if !*open {
+            return;
+        }
+        let contour = &mut self.raw_contours[*index];
+        if let (Some(&first), Some(&last)) = (contour.first(), contour.last()) {
+            if raw_point(elements, first) == raw_point(elements, last) {
+                contour.pop();
+            }
+        }
+        if contour.len() >= 3 {
+            *index += 1;
+        }
+        *open = false;
+    }
+
+    fn parse_raw(&mut self, lines: &BezPath) -> (usize, bool) {
+        let elements = lines.elements();
+        if u32::try_from(elements.len()).is_err() {
+            return (0, false);
+        }
+        let (mut active, mut open) = (0usize, false);
+        let mut explicit_simple = true;
+        for (offset, el) in elements.iter().enumerate() {
+            match *el {
+                PathEl::MoveTo(_) => {
+                    explicit_simple &= !open;
+                    self.finish_raw_contour(&mut active, &mut open, elements);
+                    self.start_raw_contour(
+                        active,
+                        offset as u32,
+                        contour_point_count(elements, offset),
+                    );
+                    open = true;
+                }
+                PathEl::LineTo(_) if open => {
+                    let point = raw_point(elements, offset as u32);
+                    let contour = &mut self.raw_contours[active];
+                    if contour
+                        .last()
+                        .is_none_or(|&last| raw_point(elements, last) != point)
+                    {
+                        contour.push(offset as u32);
+                    }
+                }
+                PathEl::LineTo(_) => explicit_simple = false,
+                PathEl::ClosePath => {
+                    explicit_simple &= open && self.raw_contours[active].len() >= 3;
+                    self.finish_raw_contour(&mut active, &mut open, elements);
+                }
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                    unreachable!("coverage paths were flattened before nonzero resolution")
+                }
+            }
+        }
+        explicit_simple &= !open;
+        self.finish_raw_contour(&mut active, &mut open, elements);
+        (active, explicit_simple && active != 0)
+    }
+
     fn start_contour(&mut self, index: usize, point: [f64; 2], point_count: usize) {
         if index == self.contours.len() {
             self.contours.push(Vec::new());
@@ -270,15 +374,7 @@ impl NonzeroResolver {
                 PathEl::MoveTo(p) => {
                     explicit_simple &= !open;
                     self.finish_contour(&mut active, &mut open);
-                    let mut point_count = 1;
-                    for next in &elements[offset + 1..] {
-                        match *next {
-                            PathEl::LineTo(_) => point_count += 1,
-                            PathEl::MoveTo(_) | PathEl::ClosePath => break,
-                            _ => {}
-                        }
-                    }
-                    self.start_contour(active, [p.x, p.y], point_count);
+                    self.start_contour(active, [p.x, p.y], contour_point_count(elements, offset));
                     open = true;
                 }
                 PathEl::LineTo(p) if open => {
@@ -311,10 +407,11 @@ impl NonzeroResolver {
     /// Preserve the owned path only when its raw contours already describe
     /// the exact nonzero filled boundary. Any uncertified case uses i_overlay.
     pub(crate) fn resolve_owned(&mut self, lines: BezPath) -> BezPath {
-        let (active, explicit_simple) = self.parse(&lines);
-        if explicit_simple && self.certifies_raw_boundary(active) {
+        let (active, explicit_simple) = self.parse_raw(&lines);
+        if explicit_simple && self.certifies_raw_boundary(&lines, active) {
             return lines;
         }
+        let (active, _) = self.parse(&lines);
         self.overlay_active(active)
     }
 
@@ -343,69 +440,100 @@ impl NonzeroResolver {
     /// or one common sign everywhere. This last condition matters for area
     /// integration: adjacent opposite-winding outer contours can cancel in a
     /// pixel even though their boundaries never intersect.
-    fn certifies_raw_boundary(&mut self, count: usize) -> bool {
+    fn certifies_raw_boundary(&mut self, lines: &BezPath, count: usize) -> bool {
         self.edges.clear();
         self.active_edges.clear();
-        let edge_count: usize = self.contours[..count].iter().map(Vec::len).sum();
+        let elements = lines.elements();
+        // Every edge reference and active-list index must be representable.
+        // Large paths use the ordinary union resolver instead of truncating.
+        if u32::try_from(count).is_err()
+            || self.raw_contours[..count]
+                .iter()
+                .any(|contour| u32::try_from(contour.len()).is_err())
+        {
+            return false;
+        }
+        let Some(edge_count) = self.raw_contours[..count]
+            .iter()
+            .try_fold(0usize, |sum, contour| sum.checked_add(contour.len()))
+        else {
+            return false;
+        };
+        if u32::try_from(edge_count).is_err() {
+            return false;
+        }
         if self.edges.capacity() < edge_count {
             self.edges.reserve_exact(edge_count);
         }
-        for (contour_index, contour) in self.contours[..count].iter().enumerate() {
-            if contour.len() < 3 || contour.iter().flatten().any(|v| !v.is_finite()) {
+        for (contour_index, contour) in self.raw_contours[..count].iter().enumerate() {
+            if contour.len() < 3
+                || contour
+                    .iter()
+                    .any(|&point| raw_point(elements, point).iter().any(|v| !v.is_finite()))
+            {
                 return false;
             }
             for index in 0..contour.len() {
-                let a = contour[index];
-                let b = contour[(index + 1) % contour.len()];
-                let c = contour[(index + 2) % contour.len()];
+                let a = raw_point(elements, contour[index]);
+                let b = raw_point(elements, contour[(index + 1) % contour.len()]);
+                let c = raw_point(elements, contour[(index + 2) % contour.len()]);
                 if a == b || (orientation_sign(a, b, c).is_none() && !certified_forward(a, b, c)) {
                     return false;
                 }
-                self.edges
-                    .push(ContourEdge::new(a, b, contour_index, index));
+                self.edges.push(ContourEdge {
+                    contour: contour_index as u32,
+                    index: index as u32,
+                });
             }
         }
-        self.edges
-            .sort_unstable_by(|a, b| a.min_x().total_cmp(&b.min_x()));
+        let contours = &self.raw_contours;
+        self.edges.sort_unstable_by(|a, b| {
+            a.min_x(contours, elements)
+                .total_cmp(&b.min_x(contours, elements))
+        });
         for index in 0..self.edges.len() {
             let edge = self.edges[index];
-            self.active_edges
-                .retain(|&other| self.edges[other].max_x() >= edge.min_x());
+            self.active_edges.retain(|&other| {
+                self.edges[other as usize].max_x(contours, elements)
+                    >= edge.min_x(contours, elements)
+            });
             for &other_index in &self.active_edges {
-                let other = self.edges[other_index];
-                if edge.max_y() < other.min_y() || other.max_y() < edge.min_y() {
+                let other = self.edges[other_index as usize];
+                if edge.max_y(contours, elements) < other.min_y(contours, elements)
+                    || other.max_y(contours, elements) < edge.min_y(contours, elements)
+                {
                     continue;
                 }
                 if edge.contour == other.contour {
-                    let length = self.contours[edge.contour].len();
-                    if (edge.index + 1) % length == other.index
-                        || (other.index + 1) % length == edge.index
+                    let length = contours[edge.contour as usize].len();
+                    if (edge.index as usize + 1) % length == other.index as usize
+                        || (other.index as usize + 1) % length == edge.index as usize
                     {
                         // Their sole shared endpoint and strict turn or
                         // forward continuation were certified above.
                         continue;
                     }
                 }
-                if !certified_separate(edge, other) {
+                if !certified_separate(edge, other, contours, elements) {
                     return false;
                 }
             }
-            self.active_edges.push(index);
+            self.active_edges.push(index as u32);
         }
 
         let mut common_sign = 0i32;
-        for (index, contour) in self.contours[..count].iter().enumerate() {
-            let sign = match certified_area_sign(contour) {
+        for (index, contour) in contours[..count].iter().enumerate() {
+            let sign = match certified_area_sign(contour, elements) {
                 Some(sign) => sign,
                 None => return false,
             };
-            let probe = contour[0];
+            let probe = raw_point(elements, contour[0]);
             let mut outside = 0i32;
-            for (other_index, other) in self.contours[..count].iter().enumerate() {
+            for (other_index, other) in contours[..count].iter().enumerate() {
                 if index == other_index {
                     continue;
                 }
-                let winding = match certified_winding(other, probe) {
+                let winding = match certified_winding(other, elements, probe) {
                     Some(winding) => winding,
                     None => return false,
                 };
@@ -441,14 +569,20 @@ impl NonzeroResolver {
         output_elements: usize,
         limit: usize,
     ) {
-        let contour_bytes = self.contours.capacity() * size_of::<Vec<[f64; 2]>>()
+        let contour_bytes = self.raw_contours.capacity() * size_of::<Vec<u32>>()
+            + self
+                .raw_contours
+                .iter()
+                .map(|contour| contour.capacity() * size_of::<u32>())
+                .sum::<usize>()
+            + self.contours.capacity() * size_of::<Vec<[f64; 2]>>()
             + self
                 .contours
                 .iter()
                 .map(|contour| contour.capacity() * size_of::<[f64; 2]>())
                 .sum::<usize>();
         let certificate_bytes = self.edges.capacity() * size_of::<ContourEdge>()
-            + self.active_edges.capacity() * size_of::<usize>();
+            + self.active_edges.capacity() * size_of::<u32>();
         let overlay_allowance = input_elements
             .max(output_elements)
             .saturating_mul(16 * size_of::<[f64; 2]>());
@@ -975,9 +1109,9 @@ mod tests {
     fn assert_union_semantics(contours: &[Vec<[f64; 2]>], certified: bool) {
         let raw = line_contours(contours);
         let mut resolver = NonzeroResolver::default();
-        let (count, clean) = resolver.parse(&raw);
+        let (count, clean) = resolver.parse_raw(&raw);
         assert!(clean);
-        assert_eq!(resolver.certifies_raw_boundary(count), certified);
+        assert_eq!(resolver.certifies_raw_boundary(&raw, count), certified);
         let resolved = resolver.resolve_owned(raw);
         let fresh = fresh_union(contours);
         for y in -2..13 {
