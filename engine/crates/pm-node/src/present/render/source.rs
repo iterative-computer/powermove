@@ -50,51 +50,6 @@ pub(super) fn audio_source_end(
     }
 }
 
-#[cfg(test)]
-mod source_audio_tests {
-    use super::*;
-    use pm_protocol::clock::ClockSample;
-    use pm_protocol::common::{HostMicros, PlaybackRate, Seq};
-
-    #[test]
-    fn source_audio_clock_runs_through_short_audio_and_holds_media_end() {
-        let duration = Ticks::from_whole_seconds(10);
-        let sample = ClockSample {
-            seq: Seq::new(1).unwrap(),
-            epoch: 1,
-            state: TransportState::Playing,
-            host_time: HostMicros::new(1_000_000).unwrap(),
-            // The soundtrack has ended, but the document still has video.
-            media_time: Ticks::from_whole_seconds(4),
-            rate: PlaybackRate { num: 1, den: 1 },
-            output_latency_us: 0,
-            sample_rate: 48_000,
-            loop_range: None,
-        };
-        assert_eq!(
-            audio_source_end(&sample, duration, true, sample.host_time),
-            None
-        );
-        assert_eq!(
-            audio_source_end(&sample, duration, true, HostMicros::new(6_999_999).unwrap()),
-            None
-        );
-        assert_eq!(
-            audio_source_end(&sample, duration, true, HostMicros::new(7_000_000).unwrap()),
-            Some(duration)
-        );
-        let stopped = ClockSample {
-            state: TransportState::Stopped,
-            media_time: duration,
-            ..sample
-        };
-        assert_eq!(
-            audio_source_end(&stopped, duration, true, stopped.host_time),
-            Some(duration)
-        );
-    }
-}
-
 impl SourceAudio {
     pub(super) fn start(
         key: Key,
@@ -685,5 +640,50 @@ impl Thread {
         });
         envelope.revision = Some(revision);
         self.send(job.host, envelope);
+    }
+}
+
+#[cfg(test)]
+mod source_audio_tests {
+    use super::*;
+    use pm_protocol::clock::ClockSample;
+    use pm_protocol::common::{HostMicros, PlaybackRate, Seq};
+
+    #[test]
+    fn source_audio_clock_runs_through_short_audio_and_holds_media_end() {
+        let duration = Ticks::from_whole_seconds(10);
+        let sample = ClockSample {
+            seq: Seq::new(1).unwrap(),
+            epoch: 1,
+            state: TransportState::Playing,
+            host_time: HostMicros::new(1_000_000).unwrap(),
+            // The soundtrack has ended, but the document still has video.
+            media_time: Ticks::from_whole_seconds(4),
+            rate: PlaybackRate { num: 1, den: 1 },
+            output_latency_us: 0,
+            sample_rate: 48_000,
+            loop_range: None,
+        };
+        assert_eq!(
+            audio_source_end(&sample, duration, true, sample.host_time),
+            None
+        );
+        assert_eq!(
+            audio_source_end(&sample, duration, true, HostMicros::new(6_999_999).unwrap()),
+            None
+        );
+        assert_eq!(
+            audio_source_end(&sample, duration, true, HostMicros::new(7_000_000).unwrap()),
+            Some(duration)
+        );
+        let stopped = ClockSample {
+            state: TransportState::Stopped,
+            media_time: duration,
+            ..sample
+        };
+        assert_eq!(
+            audio_source_end(&stopped, duration, true, stopped.host_time),
+            Some(duration)
+        );
     }
 }

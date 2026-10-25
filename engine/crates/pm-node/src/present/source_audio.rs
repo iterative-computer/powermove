@@ -447,10 +447,10 @@ mod tests {
             SourceMonitorTiming::open(path)
         };
         let mut cache = SourceMonitorTimingCache::default();
-        let timing = cache.open_with("source", &path, &read).unwrap();
+        let timing = cache.open_with("source", &path, read).unwrap();
         assert_eq!(timing.duration, 2.0, "includes the final frame's duration");
         assert_eq!(timing.audio_start, None);
-        assert_eq!(cache.open_with("source", &path, &read).unwrap(), timing);
+        assert_eq!(cache.open_with("source", &path, read).unwrap(), timing);
         assert_eq!(cache.get("source"), Some(timing));
         assert_eq!(reads.get(), 1, "seek/status reuse the indexed endpoint");
         // The silent transport uses the same endpoint without an audio document.
@@ -489,28 +489,28 @@ mod tests {
             })
         };
         let mut cache = SourceMonitorTimingCache::default();
-        let first = cache.open_with("asset", &path, &read).unwrap();
+        let first = cache.open_with("asset", &path, read).unwrap();
         for _ in 0..8 {
-            assert_eq!(cache.open_with("asset", &path, &read).unwrap(), first);
+            assert_eq!(cache.open_with("asset", &path, read).unwrap(), first);
         }
         cache.invalidate("unrelated");
-        cache.open_with("asset", &path, &read).unwrap();
+        cache.open_with("asset", &path, read).unwrap();
         assert_eq!(
             reads.get(),
             1,
             "seeks and unrelated answers keep the warm facts"
         );
         cache.invalidate("asset");
-        cache.open_with("asset", &path, &read).unwrap();
+        cache.open_with("asset", &path, read).unwrap();
         assert_eq!(reads.get(), 2, "rebinding invalidates even the same path");
         std::fs::write(&path, b"replacement").unwrap();
-        cache.open_with("asset", &path, &read).unwrap();
+        cache.open_with("asset", &path, read).unwrap();
         assert_eq!(reads.get(), 3, "a changed original is reprobed");
-        cache.open_with("another-asset", &path, &read).unwrap();
-        cache.open_with("asset", &path, &read).unwrap();
+        cache.open_with("another-asset", &path, read).unwrap();
+        cache.open_with("asset", &path, read).unwrap();
         assert_eq!(reads.get(), 5, "only one current source is retained");
         std::fs::remove_file(&path).unwrap();
-        assert!(cache.open_with("asset", &path, &read).is_err());
+        assert!(cache.open_with("asset", &path, read).is_err());
         assert!(
             cache.entry.is_none(),
             "an unavailable original drops its facts"
