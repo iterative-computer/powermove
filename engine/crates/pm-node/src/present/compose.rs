@@ -298,6 +298,8 @@ pub struct Composed {
     pub chrome_glyphs: Vec<pm_protocol::frame::ChromeGlyph>,
     pub chrome_selection: Option<pm_protocol::frame::ChromeSelection>,
     pub failures: Vec<LayerFailure>,
+    /// SVG layers drawn by the declared resvg fallback.
+    pub svg_fallbacks: Vec<pm_render::SvgFallback>,
     /// Render and placement time on the CPU (µs), the GPU work submitted.
     pub cpu_us: i64,
     /// Video layers drawn with a stand-in while their exact frame decodes
@@ -851,6 +853,7 @@ impl Composer {
         let device = self.renderer.device().clone();
         let queue = self.renderer.queue().clone();
         let mut failures = Vec::new();
+        let mut svg_fallbacks = Vec::new();
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
         let mut scene3d_meta = Vec::new();
@@ -908,6 +911,7 @@ impl Composer {
             let rendered = rendered?;
             scene3d_meta = rendered.scene3d_meta;
             failures = rendered.failures;
+            svg_fallbacks = rendered.svg_fallbacks;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
         }
@@ -967,6 +971,7 @@ impl Composer {
             chrome_selection,
             overlay: overlay(&place, cw, ch, &quads),
             failures,
+            svg_fallbacks,
             cpu_us: super::render::now_us() - start,
             stand_ins,
         })

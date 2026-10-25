@@ -28,10 +28,12 @@ pub(super) fn normalize(text: &str) -> Option<String> {
         }
     });
     let markers = text.contains("marker-") || text.contains("marker:") || text.contains("marker=");
+    let mut tags = Vec::new();
+    for_each_tag(text.as_bytes(), |tag| tags.push(tag));
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
-    for_each_tag(text.as_bytes(), |tag| {
-        let Tag::Open { start, end, empty } = tag else {
-            return;
+    for (i, tag) in tags.iter().enumerate() {
+        let Tag::Open { start, end, empty } = *tag else {
+            continue;
         };
         let source = &text[start..end];
         let name_end = source
@@ -39,6 +41,18 @@ pub(super) fn normalize(text: &str) -> Option<String> {
             .unwrap_or(source.len());
         let name = &source[1..name_end];
         let attrs = attributes(source);
+        // A shape written `<rect …></rect>` (Sketch's spelling) is a shape
+        // without content, as `<rect …/>` is.
+        let close = match tags.get(i + 1) {
+            Some(Tag::Close { start: c, end: e })
+                if !empty
+                    && text[end..*c].trim().is_empty()
+                    && text[*c + 2..*e - 1].trim() == name =>
+            {
+                Some(*c)
+            }
+            _ => None,
+        };
         if name == "path" && !markers {
             if let Some((_, d, range)) = attrs.iter().find(|(n, _, _)| *n == "d")
                 && let Some(new_d) = precise_path(d)
@@ -51,7 +65,7 @@ pub(super) fn normalize(text: &str) -> Option<String> {
             }
         } else if !css_shapes
             && !markers
-            && empty
+            && (empty || close.is_some())
             && matches!(name, "circle" | "ellipse" | "rect")
             && let Some(d) = shape_path(name, &attrs)
         {
@@ -59,9 +73,13 @@ pub(super) fn normalize(text: &str) -> Option<String> {
             // transform, and geometry attributes used by [attr] selectors
             // or references. usvg ignores the extra geometry on <path>.
             edits.push((start + 1..start + name_end, "path".into()));
-            edits.push((end - 2..end - 2, format!(" d=\"{d}\"")));
+            let tail = if empty { 2 } else { 1 };
+            edits.push((end - tail..end - tail, format!(" d=\"{d}\"")));
+            if let Some(c) = close {
+                edits.push((c + 2..c + 2 + name.len(), "path".into()));
+            }
         }
-    });
+    }
     if edits.is_empty() {
         return None;
     }
@@ -528,6 +546,25 @@ mod tests {
                 .filter(|e| matches!(e, PathEl::CurveTo(..)))
                 .count();
             assert!(curves >= 4, "{id}: {curves}");
+        }
+    }
+
+    #[test]
+    fn shapes_written_with_a_close_tag_get_fine_curves_too() {
+        let source = r#"<svg viewBox="0 0 120 100"><g><rect id="c" x="20" y="16" width="80" height="64" rx="8"></rect> <circle id="d" cx="60" cy="50" r="9">
+</circle><rect id="e" width="5" height="5" rx="1"><title>kept</title></rect></g></svg>"#;
+        let normalized = normalize(source).unwrap();
+        assert_eq!(normalized.matches("<path").count(), 2, "{normalized}");
+        assert_eq!(normalized.matches("</path>").count(), 2, "{normalized}");
+        assert!(normalized.contains("<title>kept</title></rect>"));
+        let doc = usvg::roxmltree::Document::parse(&normalized).unwrap();
+        for id in ["c", "d"] {
+            let node = doc
+                .descendants()
+                .find(|n| n.attribute("id") == Some(id))
+                .unwrap();
+            assert_eq!(node.tag_name().name(), "path");
+            assert!(node.attribute("d").is_some(), "{id}");
         }
     }
 

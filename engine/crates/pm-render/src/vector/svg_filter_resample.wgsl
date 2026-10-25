@@ -26,7 +26,7 @@ fn sample(q: vec2<f32>) -> vec4<f32> {
                                dot(p.v[2].xyz, vec3<f32>(local, 1.0)));
         q = device - p.v[3].xy;
     } else {
-        let fine_device = pos.xy + p.v[3].xy;
+        let fine_device = pos.xy + p.v[3].zw;
         let rate = p.v[5].y;
         let device = floor(fine_device / rate) * rate + vec2<f32>(0.5 * rate);
         let local = vec2<f32>(dot(p.v[1].xyz, vec3<f32>(device, 1.0)),

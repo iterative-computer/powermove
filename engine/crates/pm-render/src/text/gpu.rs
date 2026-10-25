@@ -378,34 +378,35 @@ fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, D
     Some((texels, meta))
 }
 
+/// A text fragment module: `body` with the entry `fs` returning
+/// `paint(pos)`. An RGBA16F target gets the nearest half of it
+/// (`crate::nearest_half`): the target's own store truncates.
+fn fragment_source(body: &str, paint: &str, fs: &str, format: wgpu::TextureFormat) -> String {
+    let (half, value) = if format == wgpu::TextureFormat::Rgba16Float {
+        (
+            crate::nearest_half::NEAREST_HALF_WGSL,
+            format!("pm_scene_half_color({paint}(pos))"),
+        )
+    } else {
+        ("", format!("{paint}(pos)"))
+    };
+    format!(
+        "{half}\n{body}\n@fragment\nfn {fs}(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n    return {value};\n}}\n"
+    )
+}
+
 impl TextGpu {
     pub fn new(device: &wgpu::Device) -> TextGpu {
         // Each text module has one entry point. Metal's shader translation
         // can borrow its IR directly, and plain glyphs never compile the
-        // polygon clipping functions used only by bitmap images.
-        let text_module = |label, body: &str| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!("{}\n{body}", include_str!("../shaders/text_common.wgsl")).into(),
-                ),
-            })
-        };
-        let vertex_module = text_module(
-            "pm-render text quad",
-            include_str!("../shaders/text_vertex.wgsl"),
-        );
-        let outline_module = text_module(
-            "pm-render text outline",
-            include_str!("../shaders/text.wgsl"),
-        );
-        let image_module = text_module(
-            "pm-render text image",
-            include_str!("../shaders/text_image.wgsl"),
-        );
-        let blur_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm-render text Gaussian"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/text_blur.wgsl").into()),
+        // polygon clipping functions used only by bitmap images. Fragment
+        // modules are made per target format (`fragment_source`).
+        let common = include_str!("../shaders/text_common.wgsl");
+        let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm-render text quad"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{common}\n{}", include_str!("../shaders/text_vertex.wgsl")).into(),
+            ),
         });
         let uniform = |binding, dynamic, size: u64| wgpu::BindGroupLayoutEntry {
             binding,
@@ -483,23 +484,35 @@ impl TextGpu {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let pipeline = |vertex_module: &wgpu::ShaderModule,
-                        fragment_module: &wgpu::ShaderModule,
+        // `vertex`: the quad's module, or `None` for the fragment module's
+        // own vertex entry.
+        let pipeline = |vertex: Option<&wgpu::ShaderModule>,
+                        (label, body, paint): (&'static str, &'static str, &'static str),
                         layout: &wgpu::PipelineLayout,
-                        vs: &'static str,
-                        fs: &'static str,
+                        (vs, fs): (&'static str, &'static str),
                         format: wgpu::TextureFormat,
                         blend: Option<wgpu::BlendState>| {
             let device = device.clone();
-            let vertex_module = vertex_module.clone();
-            let fragment_module = fragment_module.clone();
+            let vertex = vertex.cloned();
             let layout = layout.clone();
+            let module = move |device: &wgpu::Device| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(
+                        fragment_source(body, paint, fs, format).into(),
+                    ),
+                })
+            };
+            // The working format's (RGBA16F) module is made now, as every
+            // text module was; an RGBA32F one when a 32-bit frame needs it.
+            let ready = (format == wgpu::TextureFormat::Rgba16Float).then(|| module(&device));
             crate::pipelines::LazyRenderPipeline::new(move || {
+                let fragment = ready.clone().unwrap_or_else(|| module(&device));
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(fs),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
-                        module: &vertex_module,
+                        module: vertex.as_ref().unwrap_or(&fragment),
                         entry_point: Some(vs),
                         compilation_options: Default::default(),
                         buffers: &[],
@@ -512,7 +525,7 @@ impl TextGpu {
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
-                        module: &fragment_module,
+                        module: &fragment,
                         entry_point: Some(fs),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
@@ -527,35 +540,55 @@ impl TextGpu {
             })
         };
         let formats = [Precision::Float16, Precision::Float32].map(working_format);
+        let outline = (
+            "pm-render text outline",
+            concat!(
+                include_str!("../shaders/text_common.wgsl"),
+                "\n",
+                include_str!("../shaders/text.wgsl")
+            ),
+            "paint_outline",
+        );
+        let image = (
+            "pm-render text image",
+            concat!(
+                include_str!("../shaders/text_common.wgsl"),
+                "\n",
+                include_str!("../shaders/text_image.wgsl")
+            ),
+            "paint_image",
+        );
+        let gaussian = (
+            "pm-render text Gaussian",
+            include_str!("../shaders/text_blur.wgsl"),
+            "blur_pass",
+        );
         let paint = formats.map(|f| {
             pipeline(
-                &vertex_module,
-                &outline_module,
+                Some(&vertex_module),
+                outline,
                 &paint_layout,
-                "vs",
-                "fs_outline",
+                ("vs", "fs_outline"),
                 f,
                 Some(over),
             )
         });
         let image_paint = formats.map(|f| {
             pipeline(
-                &vertex_module,
-                &image_module,
+                Some(&vertex_module),
+                image,
                 &paint_layout,
-                "vs",
-                "fs_image",
+                ("vs", "fs_image"),
                 f,
                 Some(over),
             )
         });
         let blur = formats.map(|f| {
             pipeline(
-                &blur_module,
-                &blur_module,
+                None,
+                gaussian,
                 &blur_pipeline_layout,
-                "vs_blur",
-                "fs_blur",
+                ("vs_blur", "fs_blur"),
                 f,
                 None,
             )

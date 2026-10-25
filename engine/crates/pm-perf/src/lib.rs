@@ -171,6 +171,12 @@ counters! {
     /// SVG source rasters reused across output translations and rotations.
     SvgRasterHits = "cache.svg_raster.hits",
     SvgRasterMisses = "cache.svg_raster.misses",
+    /// SVG images drawn by the declared resvg fallback (RGBA8), by reason:
+    /// a feature the float painter does not draw, a device or work limit,
+    /// a GPU without float blending.
+    SvgFallbackFeature = "engine.svg_fallback.feature",
+    SvgFallbackLimit = "engine.svg_fallback.limit",
+    SvgFallbackDevice = "engine.svg_fallback.device",
 }
 
 /// The number of counters.

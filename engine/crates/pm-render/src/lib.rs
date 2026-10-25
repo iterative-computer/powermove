@@ -38,6 +38,7 @@ pub mod glsl;
 pub mod js;
 pub mod media;
 pub mod motion;
+mod nearest_half;
 pub mod parity;
 mod pipelines;
 pub mod plan;
@@ -60,7 +61,7 @@ pub use capability::{
     unsupported_with_fonts, unsupported_with_media,
 };
 pub use effects::{Effects, builtin_definitions};
-pub use error::{LayerFailure, RenderError};
+pub use error::{LayerFailure, RenderError, SvgFallback};
 pub use renderer::{
     CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
     MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, TextRaster,

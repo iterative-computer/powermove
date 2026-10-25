@@ -61,8 +61,7 @@ fn direct_area(pixel: vec2<f32>) -> f32 {
     return clamp(abs(area), 0.0, 1.0);
 }
 
-@fragment
-fn fs_outline(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn paint_outline(pos: vec4<f32>) -> vec4<f32> {
     let kind = it.params.x;
     if (kind < 0.5) {
         let t = vec2<i32>(floor(pos.xy) + it.map.xy);

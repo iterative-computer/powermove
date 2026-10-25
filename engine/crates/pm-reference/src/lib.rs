@@ -12,6 +12,7 @@
 //! | [`composite`] | Porter-Duff operators and the W3C separable blend modes on premultiplied colors |
 //! | [`gaussian`] | The exact separable Gaussian blur |
 //! | [`effects`] | The built-in effects from their GLSL formulas, with GL's sampling and passes |
+//! | [`filter`] | SVG filter primitives: colour spaces, flood, colour matrices, component transfer, composite, blend, merge, offset |
 //! | [`stroke`] | The region a stroke covers, from its joins, caps and half-width |
 //! | [`color`] | Transfer functions, H.273 matrices, ranges and primaries, ICC matrix/TRC profiles, the BT.2390 EETF |
 //! | [`chroma`] | Subsampled chroma reconstructed with Lanczos-3 at its H.273 sample positions |
@@ -24,5 +25,6 @@ pub mod compare;
 pub mod composite;
 pub mod coverage;
 pub mod effects;
+pub mod filter;
 pub mod gaussian;
 pub mod stroke;

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100" viewBox="0 0 120 100">
+<filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+<feDropShadow dx="6" dy="8" stdDeviation="5" flood-color="#102040" flood-opacity="0.6"/>
+</filter>
+<rect x="20" y="16" width="80" height="64" rx="8" fill="#4C8DFF" filter="url(#shadow)"/>
+</svg>

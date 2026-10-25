@@ -97,8 +97,7 @@ fn image_area(pixel: vec2<f32>) -> vec4<f32> {
     return sum;
 }
 
-@fragment
-fn fs_image(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn paint_image(pos: vec4<f32>) -> vec4<f32> {
     if (it.params.y > 0.5) {
         return image_area(floor(pos.xy)) * it.color.w;
     }

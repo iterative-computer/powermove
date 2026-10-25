@@ -66,7 +66,8 @@ impl PathMaskPipelines {
             label: Some("pm-render path masks"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}",
+                    crate::nearest_half::NEAREST_HALF_WGSL,
                     include_str!("path_masks.wgsl"),
                     include_str!("gaussian.wgsl")
                 )
@@ -199,6 +200,7 @@ impl PathMaskPipelines {
                         grid: rect4(b),
                         out: rect4(b),
                         step: 1,
+                        ystep: 1,
                         ..Default::default()
                     },
                 };
