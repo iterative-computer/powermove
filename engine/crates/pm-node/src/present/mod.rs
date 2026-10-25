@@ -31,6 +31,7 @@ pub mod rasters;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;
+pub mod source_audio;
 pub mod stats;
 pub mod svg;
 pub mod view;
@@ -736,6 +737,14 @@ impl FramePresenter for BridgePresenter {
         Ok(())
     }
 
+    fn cancel_snapshot(&mut self, host: PortId, id: RequestId) -> bool {
+        if self.config.source != Some(FrameSource::Document) {
+            return false;
+        }
+        self.send(Command::CancelSnapshot { host, id });
+        true
+    }
+
     fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
         if ctx.lease_reason() == Some(pm_protocol::lease::LeaseReason::MemoryPressure) {
             self.send(Command::AudioMemoryPressure);
@@ -825,6 +834,21 @@ impl FramePresenter for BridgePresenter {
     ) {
         self.audio_ingress.forget((port, session));
         self.send(Command::Media {
+            key: (port, session),
+            asset: asset.to_owned(),
+            path,
+        });
+    }
+
+    fn source_media(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        asset: &str,
+        path: Option<Option<std::path::PathBuf>>,
+    ) {
+        self.send(Command::SourceMedia {
             key: (port, session),
             asset: asset.to_owned(),
             path,

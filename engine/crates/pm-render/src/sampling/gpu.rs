@@ -827,7 +827,8 @@ impl Placement {
         (x1 > x0 && y1 > y0).then_some([x1 - x0, 0.0, 0.0, y1 - y0, x0, y0])
     }
 
-    /// The fragment uniform for a draw of this placement.
+    /// The draw uniform of this placement in a `frame`-sized output, or
+    /// `None` when the draw misses the frame.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn uniform(
         &self,
@@ -837,8 +838,10 @@ impl Placement {
         sampling: Sampling,
         region_origin: (u32, u32),
         target_height: u32,
+        frame: (u32, u32),
         pyramid: &Pyramid,
-    ) -> ResampleUniform {
+    ) -> Option<ResampleUniform> {
+        let bounds = self.bounds_matrix(frame.0, frame.1)?;
         let i = &self.inverse;
         let mut u = ResampleUniform {
             inv: [
@@ -860,13 +863,13 @@ impl Placement {
                 region_origin.0 as f32,
                 region_origin.1 as f32,
                 target_height as f32,
-                0.0,
+                frame.0 as f32,
             ],
             tex: [
                 pyramid.width as f32,
                 pyramid.height as f32,
                 pyramid.levels as f32,
-                0.0,
+                frame.1 as f32,
             ],
             origin: [
                 self.bounds[0] as f32,
@@ -875,7 +878,12 @@ impl Placement {
                 0.0,
             ],
             edges: [[0.0; 4]; MAX_EDGES],
-            bounds: [0.0; 4],
+            bounds: [
+                bounds[4] as f32,
+                bounds[5] as f32,
+                bounds[0] as f32,
+                bounds[3] as f32,
+            ],
         };
         // Unit normals, relative to the bounds' (integer) origin.
         let (ox, oy) = (self.bounds[0], self.bounds[1]);
@@ -885,7 +893,54 @@ impl Placement {
             let c = (e[2] + e[0] * ox + e[1] * oy) / len;
             u.edges[k] = [a as f32, b as f32, c as f32, 0.0];
         }
-        u
+        Some(u)
+    }
+}
+
+/// The pyramid levels an affine draw (unit quad to output pixels) of
+/// `texture`'s `uv` window can read: none beyond mip zero until its major
+/// axis minifies past the kernel's reach.
+pub(crate) fn mip_levels(
+    matrix: &[f64; 6],
+    uv: [f64; 4],
+    texture: &wgpu::Texture,
+    sampling: Sampling,
+) -> u32 {
+    let available = texture.width().max(texture.height()).ilog2() + 1;
+    let Some(inv) = pm_eval::transform::invert(matrix) else {
+        return 1;
+    };
+    let sx = uv[2] * f64::from(texture.width());
+    let sy = uv[3] * f64::from(texture.height());
+    let (a, b, c, d) = (inv[0] * sx, inv[1] * sy, inv[2] * sx, inv[3] * sy);
+    let (xx, xy, yy) = (a * a + c * c, a * b + c * d, b * b + d * d);
+    let major = (0.5 * (xx + yy) + (0.25 * (xx - yy).powi(2) + xy * xy).sqrt()).sqrt();
+    let threshold = match sampling {
+        Sampling::Final => 4.0,
+        Sampling::Playback => 1.0,
+    };
+    (1 + (major / threshold).log2().ceil().max(0.0) as u32).min(available)
+}
+
+impl Resampler {
+    /// `texture`'s pyramid for a draw that reads `levels`: the source alone,
+    /// its first mip box-filtered inline, or a kept pyramid.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pyramid_for(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        view: Option<&wgpu::TextureView>,
+        levels: u32,
+        revision: Option<u64>,
+        cache: &mut PyramidCache,
+    ) -> Pyramid {
+        match levels {
+            1 => Pyramid::base(texture, view),
+            2 => Pyramid::inline_first(texture, view),
+            _ => self.pyramid(device, encoder, texture, levels, revision, cache),
+        }
     }
 }
 

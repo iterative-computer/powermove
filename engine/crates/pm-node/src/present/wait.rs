@@ -119,6 +119,7 @@ mod tests {
         SvgRasterKey {
             content: "ab".repeat(32),
             texture: None,
+            source_fit: None,
             width: w,
             height: 2,
         }

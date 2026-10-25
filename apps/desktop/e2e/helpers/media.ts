@@ -16,6 +16,23 @@ export async function importFixture(page: Page, name: string): Promise<void> {
   await (await chooser).setFiles(fixturePath(name));
 }
 
+/** Imports `file` into the media pool only (no timeline layers). Playwright
+ * sets the files on an attached input itself: no native file chooser, whose
+ * event a detached, collectable input lost under load. */
+export async function importToMediaPool(page: Page, file: string): Promise<void> {
+  const id = `pm-e2e-import-${randomUUID()}`;
+  await page.evaluate(id => {
+    const input = document.createElement('input');
+    input.type = 'file'; input.id = id; input.hidden = true;
+    input.onchange = async () => {
+      try { await (window as any).PM.importFiles([...input.files!], { placement: null }); }
+      finally { input.remove(); }
+    };
+    document.body.append(input);
+  }, id);
+  await page.locator(`#${id}`).setInputFiles(file);
+}
+
 /** Sample the delivered PNG, including the real native save path. */
 export async function exportStillPixels(session: Awaited<ReturnType<typeof launchApp>>, time: number,
   width: number, height: number, points: number[][]): Promise<number[][]> {

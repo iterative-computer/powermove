@@ -409,6 +409,7 @@ mod tests {
     fn key(content: char, w: u32, h: u32) -> SvgRasterKey {
         SvgRasterKey {
             texture: None,
+            source_fit: None,
             content: content.to_string().repeat(64),
             width: w,
             height: h,

@@ -6,4 +6,4 @@ import type { JobId } from "./JobId";
 /**
  * What a handle grants.
  */
-export type CapabilityKind = { "kind": "mediaRead", asset: AssetId, } | { "kind": "cache", cache: CacheKind, } | { "kind": "outputWrite", job: JobId, } | { "kind": "projectStore" } | { "kind": "extensionBundle" };
+export type CapabilityKind = { "kind": "mediaRead", asset: AssetId, } | { "kind": "sourceRead", asset: AssetId, } | { "kind": "cache", cache: CacheKind, } | { "kind": "outputWrite", job: JobId, } | { "kind": "projectStore" } | { "kind": "extensionBundle" };

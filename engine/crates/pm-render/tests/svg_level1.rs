@@ -125,6 +125,7 @@ fn a_frame_names_todays_bucket_and_the_svg_bytes() {
         need.request.key,
         SvgRasterKey {
             texture: None,
+            source_fit: None,
             content: sha(ART.as_bytes()),
             width: 150,
             height: 75
@@ -422,6 +423,7 @@ fn rasters_are_uploaded_once_per_content_and_bucket_across_layers() {
     // empty the same way).
     assert!(renderer.has_svg_raster(&SvgRasterKey {
         texture: None,
+        source_fit: None,
         content: sha(ART.as_bytes()),
         width: 40,
         height: 20
@@ -429,6 +431,7 @@ fn rasters_are_uploaded_once_per_content_and_bucket_across_layers() {
     renderer.forget_svg_rasters(Some(&sha(ART.as_bytes())));
     assert!(!renderer.has_svg_raster(&SvgRasterKey {
         texture: None,
+        source_fit: None,
         content: sha(ART.as_bytes()),
         width: 40,
         height: 20
@@ -438,6 +441,7 @@ fn rasters_are_uploaded_once_per_content_and_bucket_across_layers() {
             .put_svg_raster(
                 SvgRasterKey {
                     texture: None,
+                    source_fit: None,
                     content: sha(b"x"),
                     width: 2,
                     height: 2

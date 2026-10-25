@@ -43,26 +43,13 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// Whether this affine draw can read beyond mip zero. Projective draws
-    /// retain the full pyramid because their Jacobian changes across the quad.
+    /// Whether this draw can read beyond mip zero. Projective draws retain
+    /// the full pyramid because their Jacobian changes across the quad.
     fn mip_levels(&self, texture: &wgpu::Texture, sampling: crate::sampling::Sampling) -> u32 {
-        let available = texture.width().max(texture.height()).ilog2() + 1;
         if self.plane.is_some() {
-            return available;
+            return texture.width().max(texture.height()).ilog2() + 1;
         }
-        let Some(inv) = pm_eval::transform::invert(&self.matrix) else {
-            return 1;
-        };
-        let sx = self.uv[2] * f64::from(texture.width());
-        let sy = self.uv[3] * f64::from(texture.height());
-        let (a, b, c, d) = (inv[0] * sx, inv[1] * sy, inv[2] * sx, inv[3] * sy);
-        let (xx, xy, yy) = (a * a + c * c, a * b + c * d, b * b + d * d);
-        let major = (0.5 * (xx + yy) + (0.25 * (xx - yy).powi(2) + xy * xy).sqrt()).sqrt();
-        let threshold = match sampling {
-            crate::sampling::Sampling::Final => 4.0,
-            crate::sampling::Sampling::Playback => 1.0,
-        };
-        (1 + (major / threshold).log2().ceil().max(0.0) as u32).min(available)
+        crate::sampling::gpu::mip_levels(&self.matrix, self.uv, texture, sampling)
     }
 
     /// The quad's `mat3` uniform: the plane, or the affine matrix.
@@ -699,19 +686,12 @@ impl Exec<'_> {
     ) {
         if let Some(sampling) = r.level2 {
             let levels = r.mip_levels(texture, sampling);
-            if levels <= 2 {
-                let view = r.view.as_ref().filter(|v| v.texture() == texture);
-                r.pyramid = Some(if levels == 1 {
-                    crate::sampling::gpu::Pyramid::base(texture, view)
-                } else {
-                    crate::sampling::gpu::Pyramid::inline_first(texture, view)
-                });
-                return;
-            }
-            r.pyramid = Some(self.pipelines.resample.pyramid(
+            let view = r.view.as_ref().filter(|v| v.texture() == texture);
+            r.pyramid = Some(self.pipelines.resample.pyramid_for(
                 self.device,
                 encoder,
                 texture,
+                view,
                 levels,
                 revision,
                 self.pyramids,
@@ -866,25 +846,17 @@ impl Exec<'_> {
                     .plane
                     .unwrap_or_else(|| crate::sampling::gpu::affine3(&r.matrix));
                 let placement = crate::sampling::gpu::placement(matrix, r.uv)?;
-                let bounds = placement.bounds_matrix(fw, fh)?;
                 let origin = region.map_or((0, 0), |g| (g.x, g.y));
-                let mut u = placement.uniform(
+                let u = placement.uniform(
                     r.uv,
                     r.alpha,
                     r.from_fbo,
                     sampling,
                     origin,
                     target.height(),
+                    (fw, fh),
                     pyramid,
-                );
-                u.view[3] = fw as f32;
-                u.tex[3] = fh as f32;
-                u.bounds = [
-                    bounds[4] as f32,
-                    bounds[5] as f32,
-                    bounds[0] as f32,
-                    bounds[3] as f32,
-                ];
+                )?;
                 let index = sample_uniforms.len();
                 sample_uniforms.push(u);
                 Some(index)

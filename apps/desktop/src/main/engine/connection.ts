@@ -85,11 +85,14 @@ export class HostConnection {
   }
 
   /** Sends a request and resolves with the engine's answer. */
-  request(body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+  request(body: Request, session: number | null = null, revision: number | null = null, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) return Promise.reject(new ProtocolError('cancelled', 'The request was cancelled.'));
     if (!this.isOpen) return Promise.reject(new ProtocolError('internal', `the ${this.process} engine is not connected`));
     const { id, answer } = this.outstanding.open(body);
     this.send(envelope(requestMessage(id, body), session, revision));
-    return answer;
+    const cancel = () => this.send(envelope({ kind: 'cancel', id }, session));
+    signal?.addEventListener('abort', cancel, { once: true });
+    return answer.finally(() => signal?.removeEventListener('abort', cancel));
   }
 
   event(body: Event, session: number | null = null): void {

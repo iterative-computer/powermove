@@ -4,7 +4,7 @@ import path from 'node:path';
 import { playerBundlePlugin } from './scripts/player-bundle';
 
 // The legacy suite under tests/ runs with `node --test` (npm test); vitest only
-// owns the new TypeScript modules under src/. The svelte plugin compiles
+// owns the new TypeScript modules under src/ and pure e2e helper math. The svelte plugin compiles
 // *.svelte.ts rune modules and components for unit tests.
 export default defineConfig({
   // Keep Vite's test cache in this checkout; node_modules may be a read-only symlink.
@@ -15,7 +15,7 @@ export default defineConfig({
     // The animation suite measures real frame-evaluation time. Concurrent test
     // workers otherwise turn its calibrated budget into a CPU-contention test.
     fileParallelism: false,
-    include: ['src/**/*.{test,spec}.ts', 'scripts/**/*.{test,spec}.ts'],
+    include: ['src/**/*.{test,spec}.ts', 'scripts/**/*.{test,spec}.ts', 'e2e/helpers/**/*.test.ts'],
     // scripts/gate-3b holds Playwright specs (its own playwright.config.ts).
     exclude: ['**/node_modules/**', 'out/**', 'tests/**', 'scripts/gate-3b/**'],
     passWithNoTests: true,

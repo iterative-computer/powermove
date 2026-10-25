@@ -144,6 +144,12 @@ export class HostServicesCore {
         if (!resolved) throw new ProtocolError('mediaOffline', 'The asset\'s file is not available.');
         return resolved;
       }
+      case 'sourceRead': {
+        if (!isId(kind.asset)) throw new ProtocolError('invalidMessage', 'invalid source asset id');
+        const resolved = await this.options.resolveAsset?.(kind.asset, { process, session });
+        if (!resolved) throw new ProtocolError('mediaOffline', 'The source media is not available.');
+        return resolved;
+      }
       case 'outputWrite':
         throw new ProtocolError('capabilityRejected', 'Output handles come from outputDestination.');
       case 'projectStore':

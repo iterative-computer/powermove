@@ -136,6 +136,21 @@ pub struct MediaTable {
     next_generation: u64,
 }
 
+/// The record's digest without `poster`: generated thumbnail metadata,
+/// persisted after import, never changes what the media resolves to.
+/// Restarting on it would drop a resolved source read until the host binds
+/// again.
+fn media_fingerprint(record: &Node) -> [u8; 32] {
+    if record.get("poster").is_none() {
+        return pm_model::hash::canonical_digest(record);
+    }
+    let mut value = record.to_value();
+    if let pm_model::Value::Object(map) = &mut value {
+        map.remove("poster");
+    }
+    pm_model::hash::canonical_digest(&value)
+}
+
 /// The `assets` member of a canonical document: asset id → record.
 pub fn asset_records(root: Option<&Node>) -> Vec<(String, &Node)> {
     let Some(assets) = root.and_then(|r| r.get("assets")) else {
@@ -176,7 +191,7 @@ impl MediaTable {
             work.removed.push(id);
         }
         for (id, record) in records {
-            let fingerprint = pm_model::hash::canonical_digest(record);
+            let fingerprint = media_fingerprint(record);
             if self
                 .entries
                 .get(&id)
@@ -322,6 +337,11 @@ mod tests {
 
         // Same records: nothing to do, answers kept.
         assert_eq!(table.reconcile(first.root()), MediaWork::default());
+        assert_eq!(table.state("a"), Some(&MediaState::Resolved("/m/a".into())));
+
+        // A persisted poster flag is not a media change.
+        let posted = doc(r#"{"assets":{"a":{"id":"a","name":"a.mov","poster":true},"b":{"id":"b"}}}"#);
+        assert_eq!(table.reconcile(posted.root()), MediaWork::default());
         assert_eq!(table.state("a"), Some(&MediaState::Resolved("/m/a".into())));
 
         // A changed record (relink) and a removed asset.

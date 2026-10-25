@@ -116,7 +116,8 @@ function captureShownRendition(PM: any, id: string, meta: any): Promise<Blob | n
  * renders the frozen original, else converts that original the way the
  * viewer does (`stillRendition`, `playbackProxy` in legacy/gl/raster.ts).
  */
-async function browserRendition(PM: any, meta: any, shown: Promise<Blob | null> | null): Promise<Blob> {
+async function browserRendition(PM: any, meta: any, project: any, shown: Promise<Blob | null> | null): Promise<Blob> {
+  if (PM.EngineSourceMedia) return PM.EngineSourceMedia.rendition(project, meta.id, meta.kind === 'image' ? 'png' : 'webm');
   const store = PM.MediaStore;
   const hash = renditionHash(meta);
   const kept = hash ? await store?.rendition?.get?.(hash).catch(() => null) : null;
@@ -210,7 +211,7 @@ export async function buildWebExport(PM: any) {
     const loaded = await Promise.allSettled(assetIds.slice(start, start + 4).map(async id => {
       const meta = findAsset(project, id);
       if (!meta) throw new Error(`Missing media metadata: ${id}`);
-      const blob = meta.rendition === true ? await browserRendition(PM, meta, shown.get(id) ?? null) : await PM.MediaStore.get(meta);
+      const blob = meta.rendition === true ? await browserRendition(PM, meta, project, shown.get(id) ?? null) : await PM.MediaStore.get(meta);
       if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
       return { id, meta, blob, data: new Uint8Array(await blob.arrayBuffer()) };
     }));

@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::common::Bytes;
+use crate::snapshot::SourceFit;
 use crate::validate::{Violation, ensure};
 use crate::version::ContractId;
 
@@ -42,10 +43,11 @@ pub const MAX_SVG_ASSET: usize = 512;
 pub const MAX_SVG_MESSAGE: usize = 2048;
 
 /// One raster: the SVG's bytes (SHA-256, lowercase hex) drawn at one
-/// bucket or material-map upload. Canvas buckets are premultiplied,
-/// top-down RGBA8; material maps use three.js's straight-alpha image
-/// upload with flipY. Source bytes, dimensions and upload kind decide the
-/// pixels.
+/// bucket, material-map upload, or final-size source monitor. Composition
+/// canvas buckets are premultiplied top-down RGBA8; material maps use
+/// three.js's straight-alpha image upload with flipY; source monitor rasters
+/// are Canvas2D `getImageData` straight RGBA8. Source bytes, dimensions,
+/// upload kind and source fit decide the pixels.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -56,23 +58,29 @@ pub struct SvgRasterKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub texture: Option<bool>,
+    // A source monitor's final-size Canvas2D raster, straight RGBA8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub source_fit: Option<SourceFit>,
     pub width: u32,
     pub height: u32,
 }
 
 impl SvgRasterKey {
     /// The key a snapshot's `uploaded` names once the renderer posted the
-    /// raster's bands (`svg:<content>:<width>x<height>`).
+    /// raster's bands (`svg:<content>:<width>x<height>` for old buckets).
     pub fn upload_key(&self) -> String {
         format!(
             "svg:{}:{}x{}{}",
             self.content,
             self.width,
             self.height,
-            if self.texture == Some(true) {
-                ":texture"
-            } else {
-                ""
+            match (self.texture, self.source_fit) {
+                (Some(true), _) => ":texture",
+                (_, Some(SourceFit::Stretch)) => ":source:stretch",
+                (_, Some(SourceFit::Contain)) => ":source:contain",
+                (_, Some(SourceFit::Cover)) => ":source:cover",
+                _ => "",
             }
         )
     }
@@ -82,6 +90,11 @@ impl SvgRasterKey {
         ensure(self.texture != Some(false), c, || {
             "omit texture for a canvas bucket".into()
         })?;
+        ensure(
+            self.texture != Some(true) || self.source_fit.is_none(),
+            c,
+            || "a source SVG raster cannot be a material texture".into(),
+        )?;
         ensure(
             self.content.len() == 64
                 && self
@@ -132,8 +145,9 @@ impl SvgRasterRequest {
 }
 
 /// Rows `row .. row + rows` of a raster, in upload-storage order: canvas
-/// buckets are top-down premultiplied RGBA8, texture maps are straight
-/// RGBA8 after flipY (bottom row first), as the key specifies.
+/// buckets are top-down premultiplied RGBA8, source rasters are top-down
+/// straight RGBA8, and texture maps are straight RGBA8 after flipY (bottom
+/// row first), as the key specifies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -197,6 +211,7 @@ mod tests {
     fn key() -> SvgRasterKey {
         SvgRasterKey {
             texture: None,
+            source_fit: None,
             content: "0123456789abcdef".repeat(4),
             width: 3,
             height: 2,
@@ -244,6 +259,42 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn source_fit_keys_are_distinct_and_keep_old_key_encoding() {
+        let old = key();
+        assert_eq!(old.upload_key(), format!("svg:{}:3x2", old.content));
+        assert!(!serde_json::to_string(&old).unwrap().contains("sourceFit"));
+        for fit in [SourceFit::Stretch, SourceFit::Contain, SourceFit::Cover] {
+            let source = SvgRasterKey {
+                source_fit: Some(fit),
+                ..old.clone()
+            };
+            assert!(source.validate().is_ok());
+            assert!(source.upload_key().ends_with(&format!(
+                ":source:{}",
+                match fit {
+                    SourceFit::Stretch => "stretch",
+                    SourceFit::Contain => "contain",
+                    SourceFit::Cover => "cover",
+                }
+            )));
+            let encoded = serde_json::to_string(&source).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SvgRasterKey>(&encoded).unwrap(),
+                source
+            );
+            assert_ne!(source.upload_key(), old.upload_key());
+            assert!(
+                SvgRasterKey {
+                    texture: Some(true),
+                    ..source
+                }
+                .validate()
+                .is_err()
+            );
+        }
     }
 
     #[test]

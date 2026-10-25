@@ -297,7 +297,7 @@ export class MediaStoreService {
     for (const meta of Object.values<any>(project['assets'] || {})) {
       if (!meta || typeof meta.id !== 'string') continue;
       if (meta.storage === 'linked' && validLink(meta.link)) {
-        assets.set(meta.id, { link: { ...meta.link } });
+        assets.set(meta.id, { link: { ...meta.link }, ...(meta.rendition === true ? { rendition: true } : {}) });
       } else {
         const key = validStorageKey(meta.storageKey) ? meta.storageKey : meta.id;
         const hash = typeof meta.contentHash === 'string' && HASH_HEX.test(meta.contentHash)
@@ -305,7 +305,7 @@ export class MediaStoreService {
         // Freeze the hash now: later key writes must not change this snapshot.
         // The key stays as the window path's fallback for when that object is
         // missing (offline at snapshot time, or put later).
-        const binding: MediaBinding = { ...(validStorageKey(key) ? { key } : {}), ...(hash ? { hash } : {}) };
+        const binding: MediaBinding = { ...(validStorageKey(key) ? { key } : {}), ...(hash ? { hash } : {}), ...(meta.rendition === true ? { rendition: true } : {}) };
         if (binding.key || binding.hash) assets.set(meta.id, binding);
       }
     }
@@ -320,6 +320,7 @@ export class MediaStoreService {
       if (binding.key !== undefined && validStorageKey(binding.key)) clean.key = binding.key;
       if (binding.hash !== undefined && HASH_HEX.test(binding.hash)) clean.hash = binding.hash;
       if (binding.link !== undefined && validLink(binding.link)) clean.link = binding.link;
+      if (typeof binding.rendition === 'boolean') clean.rendition = binding.rendition;
       if (clean.key || clean.hash || clean.link) map.set(id, clean);
     }
     this.bindings.set(owner, { projectId, assets: map });

@@ -9,6 +9,8 @@ use std::time::Instant;
 mod chrome;
 mod layer_raster;
 mod media_prepare;
+mod source;
+mod source_video;
 pub use layer_raster::{LayerPixels, LayerRaster};
 pub use media_prepare::MediaPreparation;
 
@@ -322,6 +324,9 @@ pub struct Renderer {
     /// [`Renderer::release_frame_reuse`] (the export's end, every one-off
     /// frame) and by [`Renderer::trim`].
     frame_reuse: FrameReuse,
+    /// Source-monitor and filmstrip targets/readbacks reused only by the
+    /// source path. Composition frame-reuse and its lease stay independent.
+    source_reuse: source::SourceReuse,
     /// Bind groups kept across frames (`crate::binds`).
     binds: crate::binds::BindCache,
 }
@@ -422,6 +427,7 @@ impl Renderer {
             svg_skip_failed: false,
             svg_source: None,
             frame_reuse: FrameReuse::default(),
+            source_reuse: source::SourceReuse::default(),
             binds: crate::binds::BindCache::default(),
         }
     }
@@ -1263,6 +1269,11 @@ impl Renderer {
         self.media.scrub_stats()
     }
 
+    /// Exact Export-purpose source decoder counters.
+    pub fn source_scrub_stats(&self) -> pm_media::decode::scrub::ScrubStats {
+        self.media.source_scrub_stats()
+    }
+
     /// Applies this renderer's shares of the engine's lease to its decode
     /// service (the viewer's renderer: docs/engine/scrub.md, "Memory").
     /// Renderers that never get a share keep
@@ -1290,6 +1301,8 @@ impl Renderer {
         // An export's kept staging buffer, frame target and pixels (the
         // next frame allocates them again).
         self.release_frame_reuse();
+        self.source_reuse.trim(bytes);
+        let bytes = bytes.saturating_sub(self.source_reuse.bytes());
         self.pool.trim(bytes);
         if self.pool.bytes() + self.pyramids.bytes() > bytes {
             self.pyramids.clear();
@@ -1299,10 +1312,10 @@ impl Renderer {
         self.text_gpu.trim(bytes);
     }
 
-    /// Frees every idle intermediate target (a viewer at rest) and returns
-    /// the bytes freed. Targets in use, such as the kept bottom of the last
-    /// frame (`crate::frame_prefix`), and every content cache stay; the
-    /// next frame takes fresh targets from the device.
+    /// Frees every idle intermediate target and kept mip pyramid (a viewer
+    /// at rest), and returns the bytes freed. Targets in use, such as the
+    /// kept bottom of the last frame (`crate::frame_prefix`), and every
+    /// content cache stay; the next frame takes fresh targets from the device.
     pub fn release_idle_targets(&mut self) -> u64 {
         let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);
@@ -2139,6 +2152,7 @@ impl Renderer {
         r.readback.capacity_bytes()
             + r.target.as_ref().map_or(0, |t| t.bytes())
             + r.rgba.as_ref().map_or(0, |v| (v.capacity() * 4) as u64)
+            + self.source_reuse.bytes()
     }
 
     /// Drops what [`Self::read_rgba_reusing`], [`Self::give_rgba`] and

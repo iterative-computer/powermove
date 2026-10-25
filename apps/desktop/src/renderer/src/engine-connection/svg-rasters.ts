@@ -9,9 +9,10 @@
  * composites that texture natively but does not emulate Chromium's SVG
  * rasterization: this module runs the same code and hands the engine the
  * bytes the texture holds, read back from a WebGL2 texture uploaded with
- * the same flags (`SvgRasterCanvas`). The 2D canvas is never read with
+ * the same flags (`SvgRasterCanvas`). Composition buckets never use
  * `getImageData` (that unpremultiplies, and can move the canvas off the
- * GPU).
+ * GPU). Source monitor rasters instead return the final Canvas2D
+ * `getImageData` bytes to match its source-frame canvas.
  *
  * `SvgRasters` answers the engine for the window:
  *
@@ -32,7 +33,7 @@
  * on-demand Chromium, the capture tools) rasterizes SVG bytes the same way
  * (`decodeSvg`, `SvgRasterCanvas`).
  */
-import type { CompatFrameRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
+import type { CompatFrameRequest, SourceFit, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { limitUtf8 } from '../../../shared/protocol-strings';
 
 /** Largest band of one message (pm_protocol MAX_SVG_BAND_BYTES). */
@@ -72,6 +73,7 @@ export interface SvgRasterCanvasOptions {
 /**
  * Today's `rasterSvgAsset` followed by the compositor's `texFor` upload,
  * read back: premultiplied RGBA8, top-down, `width × height × 4` bytes.
+ * Source fit keys use the final Canvas2D image and straight RGBA8 instead.
  */
 export class SvgRasterCanvas {
   private context: WebGL2RenderingContext | null = null;
@@ -129,7 +131,7 @@ export class SvgRasterCanvas {
     }
   }
 
-  draw(image: CanvasImageSource, width: number, height: number): Uint8Array {
+  draw(image: CanvasImageSource, width: number, height: number, sourceFit?: SourceFit): Uint8Array {
     const w = Math.max(1, Math.round(width)), h = Math.max(1, Math.round(height));
     if (w > MAX_SVG_EDGE || h > MAX_SVG_EDGE) throw new SvgRasterError('size', `A ${w}×${h} SVG raster is over ${MAX_SVG_EDGE} px.`);
     const cv = (this.options.createCanvas ?? todaysCanvas)(w, h);
@@ -138,6 +140,18 @@ export class SvgRasterCanvas {
       const context = cv.getContext('2d');
       if (!context) throw new SvgRasterError('unavailable', 'Could not rasterize this SVG file');
       context.clearRect(0, 0, w, h);
+      if (sourceFit) {
+        // A source snapshot matches Canvas2D's final display pixels. Draw the
+        // decoded SVG once at the same fractional object-fit rectangle as the
+        // browser source monitor, then preserve getImageData's straight bytes.
+        const source = image as HTMLImageElement;
+        const sw = source.naturalWidth, sh = source.naturalHeight;
+        if (!(sw > 0 && sh > 0)) throw new SvgRasterError('size', 'The source SVG has no intrinsic size.');
+        const scale = sourceFit === 'stretch' ? null : (sourceFit === 'contain' ? Math.min : Math.max)(w / sw, h / sh);
+        const dw = scale === null ? w : sw * scale, dh = scale === null ? h : sh * scale;
+        context.drawImage(image, (w - dw) / 2, (h - dh) / 2, dw, dh);
+        return new Uint8Array(context.getImageData(0, 0, w, h).data);
+      }
       context.drawImage(image, 0, 0, w, h);
       // texFor: the same pixel store flags, then the texture read back.
       const gl = this.gl();
@@ -283,7 +297,7 @@ export interface SvgPostTarget {
   post(event: Record<string, unknown> & { type: string }): boolean;
 }
 
-const keyText = (k: SvgRasterKey) => `${k.content}:${k.width}x${k.height}${k.texture ? ":texture" : ""}`;
+const keyText = (k: SvgRasterKey) => `${k.content}:${k.width}x${k.height}${k.texture ? ':texture' : k.sourceFit ? `:source:${k.sourceFit}` : ''}`;
 
 function isSvg(asset: SvgAsset): boolean {
   return asset.format === 'svg' && (asset.kind === undefined || asset.kind === 'image');
@@ -377,6 +391,9 @@ export class SvgRasters {
   }
 
   private validate(key: SvgRasterKey): void {
+    if (key.sourceFit && (key.texture || !['stretch', 'contain', 'cover'].includes(key.sourceFit))) {
+      throw new SvgRasterError('size', 'The source SVG raster has an invalid fit.');
+    }
     const max = key.texture ? MAX_SVG_TEXTURE_EDGE : MAX_SVG_EDGE;
     if (!(Number.isInteger(key.width) && Number.isInteger(key.height) && key.width >= 1 && key.height >= 1 && key.width <= max && key.height <= max)) {
       throw new SvgRasterError('size', `A ${key.width}×${key.height} SVG raster is outside 1..${max}.`);
@@ -390,7 +407,7 @@ export class SvgRasters {
     const asset = this.options.asset(request.asset);
     const content = asset ? await this.content(asset) : null;
     const image = this.checked(request, content);
-    const data = request.key.texture ? this.canvas.drawTexture(image, request.key.width, request.key.height) : this.canvas.draw(image, request.key.width, request.key.height);
+    const data = request.key.texture ? this.canvas.drawTexture(image, request.key.width, request.key.height) : this.canvas.draw(image, request.key.width, request.key.height, request.key.sourceFit);
     this.stats.drawn++;
     return data;
   }
@@ -401,7 +418,7 @@ export class SvgRasters {
     this.validate(request.key);
     const asset = this.options.asset(request.asset);
     const image = this.checked(request, asset ? this.contentSync(asset) : null);
-    const data = request.key.texture ? this.canvas.drawTexture(image, request.key.width, request.key.height) : this.canvas.draw(image, request.key.width, request.key.height);
+    const data = request.key.texture ? this.canvas.drawTexture(image, request.key.width, request.key.height) : this.canvas.draw(image, request.key.width, request.key.height, request.key.sourceFit);
     this.stats.drawn++;
     return data;
   }
@@ -472,6 +489,6 @@ export class SvgRasters {
     if (!svg) throw new SvgRasterError('missing', 'The ask names no SVG raster.');
     const data = await this.slot(() => this.draw(svg));
     this.stats.produced++;
-    return { key: keyText(svg.key), width: svg.key.width, height: svg.key.height, format: svg.key.texture ? 'rgba8Straight' : 'rgba8Premultiplied', origin: [0, 0], scale: 1, data };
+    return { key: keyText(svg.key), width: svg.key.width, height: svg.key.height, format: svg.key.texture || svg.key.sourceFit ? 'rgba8Straight' : 'rgba8Premultiplied', origin: [0, 0], scale: 1, data };
   }
 }

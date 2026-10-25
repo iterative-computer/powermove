@@ -2,6 +2,8 @@ import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
 import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
 import { installAgentFramesIpc } from './agent-frames';
+import { SourceJobs, installSourceJobsIpc } from './source-jobs';
+import { resolveFfmpeg } from '../ffmpeg-binary';
 import { installDocumentKernelIpc } from './document-kernel';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
@@ -254,9 +256,15 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     });
   });
   options.ipc.handle(ENGINE_IPC.snapshot, (event, request: unknown) => snapshotReply(event, request));
+  options.ipc.handle(ENGINE_IPC.cancelSnapshot, (event, requestId: unknown) => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (typeof requestId !== 'string' || requestId.length > 256) throw new Error('Invalid snapshot cancellation id.');
+    snapshots?.cancel(event.sender.id, requestId);
+  });
   const removeSnapshotIpc = (): void => {
     options.ipc.removeAllListeners(ENGINE_IPC.snapshotSync);
     options.ipc.removeHandler(ENGINE_IPC.snapshot);
+    options.ipc.removeHandler(ENGINE_IPC.cancelSnapshot);
   };
 
   if (!options.enabled) {
@@ -410,6 +418,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           ...(process === 'interactive' ? (launch?.env ?? {}) : launch ? { POWERMOVE_EXPORT_BRIDGE: launch.env['POWERMOVE_FRAME_BRIDGE'] } : {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
+          POWERMOVE_ENGINE_FFMPEG: resolveFfmpeg({ packaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env }).ffmpeg,
           // Invalidate first-use parity on every engine/browser/OS update.
           // GPU identity and native driver version are added by pm-render.
           POWERMOVE_ENGINE_PARITY_ENV: persistShaderEnvironment(path.join(cacheDirectory, CACHE_DIRS.shaderCache), JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() })),
@@ -580,6 +589,11 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
   const removeAgentFramesIpc = installAgentFramesIpc(options.ipc, agentJobs, options.isTrustedSender);
+  const sourceJobs = new SourceJobs({ engine, directory: path.join(options.userData, 'Engine Cache', 'Scratch'),
+    releaseOutput: handle => engine.releaseOutput(handle),
+    ...(options.snapshotMedia ? { snapshotMedia: options.snapshotMedia } : {}),
+    ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}) });
+  const removeSourceJobsIpc = installSourceJobsIpc(options.ipc, sourceJobs, options.isTrustedSender);
   jobOwners = agentJobs;
   renderQueue = new RenderQueue({
     windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
@@ -727,6 +741,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       exportWarmth.forget(id);
       // A new page starts its document revisions again.
       windowSessions.forget(id);
+      snapshots?.forget(id);
+      sourceJobs.forget(id);
       if (!engine) return;
       if (attached) engine.reconnectClient(id);
       else engine.addClient(id, deliver);
@@ -736,9 +752,11 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       exportWarmth.forget(id);
       fallbackRelay.forget(id);
       engine?.removeClient(id);
+      snapshots?.forget(id);
       windowSessions.forget(id);
       compatFrames.windowGone(id);
       void agentJobs.forgetOwner(id);
+      sourceJobs.forget(id);
     });
     contents.on('did-start-navigation', (details) => {
       if (details.isMainFrame && !details.isSameDocument) exportWarmth.forget(id);
@@ -794,6 +812,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
       options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);
       agentJobs.dispose();
+      removeSourceJobsIpc();
+      sourceJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();
     }

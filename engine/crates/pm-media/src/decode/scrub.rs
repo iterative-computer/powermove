@@ -21,7 +21,8 @@
 //! further along the run continues from there. After a target lands it
 //! decodes ahead in the direction of motion into the frame cache (the GOP
 //! neighbourhood, within the cache's lease share), a stride at a time;
-//! nothing after a jump.
+//! the display worker does nothing after a jump. The source-only Export
+//! worker may warm the rest of a bounded GOP after a jump.
 
 use super::service::{DecodeService, InstanceId, MediaSource};
 use super::session::{DEFAULT_WINDOW, Progress};
@@ -81,6 +82,10 @@ pub struct ScrubStats {
 
 /// Frames decoded ahead of a target in the direction of motion.
 const AHEAD: usize = 8;
+/// Source monitor seeks can be scattered within a short GOP. Warm only
+/// contiguous presented frames of the same GOP, bounded by the decoder
+/// lease and this count; a new exact request always preempts look-ahead.
+const SOURCE_GOP_AHEAD: usize = 64;
 /// While scrubbing backward, one seek from the GOP start serves the
 /// reverse steps of up to this many presented frames before its target:
 /// every reference picture on the way and the unreferenced ones at the
@@ -88,7 +93,8 @@ const AHEAD: usize = 8;
 /// the frame cache).
 const KEEP_BEFORE: usize = 32;
 /// Moves of more frames than this are jumps (a click on the ruler, a
-/// random seek), not drags: nothing is decoded ahead of them.
+/// random seek), not drags. Only the source Export worker warms the bounded
+/// remainder of the current GOP after them.
 const MAX_STRIDE: i64 = 16;
 /// An idle worker exits after this long; the next request starts another.
 pub const IDLE_EXIT: Duration = Duration::from_secs(30);
@@ -96,6 +102,7 @@ pub const IDLE_EXIT: Duration = Duration::from_secs(30);
 /// The decode workers of one renderer's display frames.
 pub struct ViewerDecode {
     service: Arc<DecodeService>,
+    purpose: DecodePurpose,
     workers: Mutex<HashMap<(u64, InstanceId), Arc<Worker>>>,
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
@@ -113,6 +120,7 @@ struct Shared {
     source: Arc<MediaSource>,
     instance: InstanceId,
     service: Arc<DecodeService>,
+    purpose: DecodePurpose,
     /// Presented position of each sample.
     shown_at: Vec<usize>,
     state: Mutex<State>,
@@ -171,8 +179,15 @@ impl Job {
 
 impl ViewerDecode {
     pub fn new(service: Arc<DecodeService>) -> ViewerDecode {
+        Self::with_purpose(service, DecodePurpose::Display)
+    }
+
+    /// An exact source viewer can keep Export-purpose frames and its decoder
+    /// warm without changing the composition viewer's Display-purpose cache.
+    pub fn with_purpose(service: Arc<DecodeService>, purpose: DecodePurpose) -> ViewerDecode {
         ViewerDecode {
             service,
+            purpose,
             workers: Mutex::new(HashMap::new()),
             landed: Arc::new(AtomicU64::new(0)),
             stats: Arc::new(Mutex::new(ScrubStats::default())),
@@ -233,7 +248,7 @@ impl ViewerDecode {
         let key = FrameKey {
             source: source.id,
             sample,
-            purpose: DecodePurpose::Display,
+            purpose: self.purpose,
         };
         self.stats.lock().unwrap().requests += 1;
         loop {
@@ -381,6 +396,7 @@ impl ViewerDecode {
             source: source.clone(),
             instance,
             service: self.service.clone(),
+            purpose: self.purpose,
             shown_at,
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
@@ -440,7 +456,7 @@ impl Shared {
         FrameKey {
             source: self.source.id,
             sample: self.source.index.frames[n].sample,
-            purpose: DecodePurpose::Display,
+            purpose: self.purpose,
         }
     }
 
@@ -450,7 +466,7 @@ impl Shared {
     fn nearest(&self, n: usize, st: &State) -> Option<(usize, DecodedFrame)> {
         let cache = self.service.cache();
         let best = cache
-            .samples_of(self.source.id, DecodePurpose::Display)
+            .samples_of(self.source.id, self.purpose)
             .into_iter()
             .filter_map(|s| self.shown_at.get(s).copied().filter(|&m| m != usize::MAX))
             .min_by_key(|&m| (m.abs_diff(n), m > n));
@@ -469,9 +485,9 @@ impl Shared {
         while let Some(job) = self.next_job() {
             let n = job.frame();
             let result = (|| -> Result<Option<DecodedFrame>> {
-                let mut guard =
-                    self.service
-                        .session(&self.source, self.instance, DecodePurpose::Display)?;
+                let mut guard = self
+                    .service
+                    .session(&self.source, self.instance, self.purpose)?;
                 let (keep, stride) = {
                     let st = self.state.lock().unwrap();
                     if st.stride < 0 {
@@ -575,29 +591,45 @@ impl Shared {
     /// The next frame to decode ahead of the last target, a stride at a
     /// time in the direction of motion: [`AHEAD`] steps forward within half
     /// its part of the frame cache, or one reverse neighbourhood
-    /// ([`ViewerDecode`]'s reverse reach). Nothing after a jump.
+    /// ([`ViewerDecode`]'s reverse reach). The source Export worker may
+    /// warm a bounded same-GOP run after a jump; composition does not.
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
         let stride = st.stride;
-        if stride == 0 {
+        if stride == 0 && self.purpose != DecodePurpose::Export {
             st.ahead_from = None;
             return None;
         }
         // Reverse steps need a seek from the GOP start for every
         // neighbourhood, so they look as far ahead as one neighbourhood.
-        let count = if stride < 0 {
+        let count = if stride == 0 {
+            SOURCE_GOP_AHEAD.min(self.cache_frames(st))
+        } else if stride < 0 {
             (self.reverse_reach(st) as i64 / -stride).max(1) as usize
         } else {
             AHEAD.min(self.cache_frames(st))
         };
         let frames = self.source.index.frames.len() as i64;
         let cache = self.service.cache();
+        let source_gop = (stride == 0).then(|| {
+            self.source
+                .index
+                .sync_for(self.source.index.frames[from].sample)
+        });
         for i in 1..=count as i64 {
-            let m = from as i64 + i * stride;
+            let m = from as i64 + i * if stride == 0 { 1 } else { stride };
             if m < 0 || m >= frames {
                 break;
             }
             let m = m as usize;
+            if source_gop.is_some_and(|gop| {
+                self.source
+                    .index
+                    .sync_for(self.source.index.frames[m].sample)
+                    != gop
+            }) {
+                break;
+            }
             if !cache.contains(&self.key(m)) {
                 return Some(m);
             }

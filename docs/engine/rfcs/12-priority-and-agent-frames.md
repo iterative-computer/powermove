@@ -35,6 +35,59 @@ and generated media.
 | `CancelJobs`, `JobsCancelled` | Cancel one job, or every job of an agent run (the run was cancelled or rolled back) |
 | `AgentExportMode`, `AgentExportReply`, `agent_export_reply` | `export_video` `mode: "wait" \| "async"` (default `wait`) and the reply rule below |
 
+## Source jobs
+
+`sourceFilmstrip { session, asset, times, outputSize, fit, color }` draws one
+asset from a frozen job snapshot. Times are non-negative source ticks, in
+requested order, with one to 64 frames. Each frame is top-down straight
+RGBA8, concatenated without a header. The protocol's batch limit is 512 MiB;
+the app additionally caps each frame at 16 MiB and each edge at 8192 pixels.
+Fit and color follow RFC 16's source target. SVG
+sources request Chromium rasters through `CompatFrame`, using the frozen
+document id to find the owning editor window. Their `sourceFit` key names
+the final output canvas and its fit mode; the host returns straight pixels
+drawn once at the fitted rectangle, which the job packs without refiltering.
+
+`browserRendition { session, asset, format }` converts the frozen original
+to `png` or `webm` with today's browser-rendition converter flags. It does
+not render a composition. Its output follows EXPORT-1: decoded image,
+video, and audio content must match the current converter. Both jobs use
+the existing job scheduler, output capabilities, terminal status events,
+and cancellation. Converter cancellation terminates the child process.
+
+Source frame jobs retain a bounded, sender-owned frozen-session cache: at
+most four cached sources per window, sixteen overall, with a 90-second idle
+expiry. Retired in-flight bindings live until their requests release them;
+they are no longer cache entries.
+Its document contains only the requested asset, preserving all metadata
+except the generated poster flag. Main pins the selected media before a cold
+engine wait. Unrelated project edits and poster persistence can advance the
+same source session's revision without changing its body or media binding;
+a changed source reading creates another session. Already submitted jobs
+retain their frozen document and binding until completion. Restart, project
+close and window teardown retire sessions before numeric identifiers can be
+reused. Browser-rendition jobs retain their dedicated per-request sessions.
+
+Poster/source-monitor use prepares one real source frame ahead of a strip.
+An idle one-frame job also starts the exact Export-purpose decoder's bounded
+same-GOP prefetch, sharing its decoded cache with later batch jobs. Larger
+strips and playback slices keep direct decode under the priority gate.
+The user-job lane initializes its renderer when the job runtime starts;
+other lanes remain lazy. A filmstrip admits bounded chunks through the
+priority gate (up to sixteen frames and 16 MiB of padded staging), records one
+GPU submission and maps one readback per chunk. Playback can reduce an
+admission to one frame. SVG exchange remains one frame at a time. Output
+remains ordered straight RGBA8, with no image encoding. Main returns one
+packed typed array over Electron IPC; the renderer creates frame views after
+the preload boundary. This is not a zero-copy transfer. Completed strips
+have a 16 MiB renderer cache within the existing 64 MiB source cache budget.
+
+Each request still owns a private scratch destination and removes output
+capabilities, listeners and scratch files on success, failure or cancel.
+Window reload and close cancel the sender's outstanding requests. Source
+requests never change composition playback or silently call the legacy
+capture/conversion surface.
+
 ## Invariants
 
 1. **Class order and placement** (tested):

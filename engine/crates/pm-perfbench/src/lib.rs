@@ -14,6 +14,8 @@ pub mod ratchet;
 
 #[cfg(target_os = "macos")]
 pub mod benches;
+#[cfg(target_os = "macos")]
+pub mod source_media;
 
 use pm_perf::Counters;
 
