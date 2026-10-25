@@ -21,7 +21,7 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::{Mat3, PixelRect, Rect, Size, Ticks};
 use pm_protocol::frame::{OverlayGeometry, OverlayLayer, PreviewResolution, ViewerState};
 use pm_render::effects::Effects;
-use pm_render::{AssetResolver, LayerFailure, RenderError, RenderRequest, Renderer};
+use pm_render::{AssetResolver, LayerFailure, RenderError, RenderRequest, Renderer, SnapshotRows};
 
 /// Where the composition goes in a viewer frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -215,7 +215,8 @@ pub struct Composed {
 }
 
 const BLIT_WGSL: &str = r#"
-struct U { dst: vec4f };
+// dst: the placed rectangle; flags.x: 1 when the source is in GL row order.
+struct U { dst: vec4f, flags: vec4f };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
@@ -229,7 +230,10 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 // Over opaque black, as today's opaque WebGL canvas shows a composition.
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    let uv = (pos.xy - u.dst.xy) / u.dst.zw;
+    var uv = (pos.xy - u.dst.xy) / u.dst.zw;
+    if (u.flags.x > 0.5) {
+        uv.y = 1.0 - uv.y;
+    }
     let c = textureSampleLevel(src, samp, uv, 0.0);
     return vec4f(c.rgb, 1.0);
 }
@@ -333,7 +337,7 @@ impl Composer {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewer placement"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -504,9 +508,10 @@ impl Composer {
         self.playing = playing;
     }
 
-    /// Places the rendered region (`source`) where `place` puts it in a
-    /// `size` target (`view`), cleared to transparent around it. `exact`:
-    /// always nearest sampling (depth and ids must not be filtered).
+    /// Places the rendered region (`source`, top-down or in GL row order)
+    /// where `place` puts it in a `size` target (`view`), cleared to
+    /// transparent around it. `exact`: always nearest sampling (depth and
+    /// ids must not be filtered).
     #[allow(clippy::too_many_arguments)]
     fn place(
         &self,
@@ -516,7 +521,7 @@ impl Composer {
         view: &wgpu::TextureView,
         size: Size,
         place: &Placement,
-        source: Option<&Target>,
+        source: Option<(&Target, SnapshotRows)>,
         exact: bool,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -532,7 +537,7 @@ impl Composer {
             })],
             ..Default::default()
         });
-        let (Some(dst), Some(source)) = (place.region_rect(), source) else {
+        let (Some(dst), Some((source, rows))) = (place.region_rect(), source) else {
             return;
         };
         if place.region.is_none() {
@@ -552,8 +557,12 @@ impl Composer {
             dst.y as f32,
             dst.width as f32,
             dst.height as f32,
+            f32::from(u8::from(rows == SnapshotRows::Gl)),
+            0.0,
+            0.0,
+            0.0,
         ];
-        let mut bytes = [0u8; 16];
+        let mut bytes = [0u8; 32];
         for (i, v) in u.iter().enumerate() {
             bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
@@ -635,6 +644,7 @@ impl Composer {
         let mut stand_ins = Vec::new();
         let mut scene3d_meta = Vec::new();
         let mut svg_misses = Vec::new();
+        let mut scratch_rows = SnapshotRows::TopDown;
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -689,10 +699,13 @@ impl Composer {
             // (`super::wait`), as today draws the frame without a layer whose
             // raster throws.
             let mut renderer = self.renderer.svg_waiting_viewer();
+            // In Standard working encoding the region keeps GL row order and
+            // the placement below flips it: no separate flip pass or target.
             let rendered =
-                renderer.render_into(doc, composition, time, &request, media, scratch, None);
+                renderer.render_snapshot_into(doc, composition, time, &request, media, scratch);
             renderer.set_draw_reuse(false);
-            let rendered = rendered?;
+            let (rendered, rows) = rendered?;
+            scratch_rows = rows;
             scene3d_meta = rendered.scene3d_meta;
             failures = rendered.failures;
             quads = rendered.quads;
@@ -710,7 +723,7 @@ impl Composer {
             &working.view,
             working.size,
             &place,
-            self.scratch.as_ref(),
+            self.scratch.as_ref().map(|t| (t, scratch_rows)),
             false,
         );
         queue.submit([encoder.finish()]);

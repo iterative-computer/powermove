@@ -148,7 +148,8 @@ pub struct Rendered {
 }
 
 /// Row order in a snapshot target. `Gl` rows are inverted while the mapped
-/// readback is encoded; other callers always receive top-down targets.
+/// readback is encoded or the viewer places the frame; other callers always
+/// receive top-down targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotRows {
     TopDown,
