@@ -98,8 +98,6 @@ counters! {
     TextureAllocs = "gpu.texture_allocs",
     /// Bytes of GPU textures allocated (all mips and layers, times the sample count).
     TextureAllocBytes = "gpu.texture_alloc_bytes",
-    /// Physical raster pyramid tail textures allocated (pool misses).
-    PyramidAllocs = "gpu.pyramid_allocs",
     /// Texture views created.
     TextureViews = "gpu.texture_views",
     /// Command encoders created.

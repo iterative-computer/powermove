@@ -537,7 +537,6 @@ impl Resampler {
         // identity after its old source bindings are dropped.
         let reused = cache.take_tail(source, width, height, levels, format);
         let (texture, levels) = reused.unwrap_or_else(|| {
-            pm_perf::bump(pm_perf::Counter::PyramidAllocs);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("pm raster pyramid"),
                 size: wgpu::Extent3d {

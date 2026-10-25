@@ -696,13 +696,13 @@ fn simultaneous_minified_sources_keep_distinct_pyramid_tails() {
         renderer.recycle(frame);
         pixels
     };
-    let before = pm_perf::snapshot();
     let pixels = draw(&mut renderer, 0.5);
-    let allocations = pm_perf::snapshot()
-        .since(&before)
-        .get(Counter::PyramidAllocs);
+    // 129×65 at 15% in Playback reads levels 1 to 3 below the borrowed
+    // source: 64×32, 32×16 and 16×8 half-float texels per tail.
+    let tail = (64 * 32 + 32 * 16 + 16 * 8) * 8;
     assert_eq!(
-        allocations, 2,
+        renderer.pyramid_bytes(),
+        2 * tail,
         "both simultaneously read tails need storage"
     );
     for (x, expected) in [(64usize, 0.2f32), (192, 0.8)] {
@@ -710,14 +710,13 @@ fn simultaneous_minified_sources_keep_distinct_pyramid_tails() {
         assert!((px[0] - expected).abs() < 0.03, "{x}: {px:?}");
         assert!(px[3] > 0.99, "{x}: {px:?}");
     }
-    let before = pm_perf::snapshot();
+    // The new stills upload their own textures; their tails are the
+    // prior frame's storage.
     let next = draw(&mut renderer, 1.5);
     assert_eq!(
-        pm_perf::snapshot()
-            .since(&before)
-            .get(Counter::PyramidAllocs),
-        0,
-        "two new source allocations reuse the prior frame's tails"
+        renderer.pyramid_bytes(),
+        2 * tail,
+        "two new sources reuse the prior frame's tails"
     );
     for (x, expected) in [(64usize, 0.4f32), (192, 0.6)] {
         let px = &next[(64 * 256 + x) * 4..][..4];
@@ -728,7 +727,7 @@ fn simultaneous_minified_sources_keep_distinct_pyramid_tails() {
     assert_eq!(
         pm_perf::snapshot()
             .since(&before)
-            .get(Counter::PyramidAllocs),
+            .get(Counter::TextureAllocs),
         0,
         "held source revisions reuse filtered texels"
     );

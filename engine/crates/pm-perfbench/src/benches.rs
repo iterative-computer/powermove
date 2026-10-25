@@ -295,7 +295,7 @@ pub fn playback_500(ctx: &Ctx) -> BenchReport {
 }
 
 /// Thirty changing video frames after the first two have established tail
-/// storage. This bench's hard zero allocation bar is checked per frame.
+/// storage. This bench's hard zero texture allocation bar is checked per frame.
 pub fn pyramid_playback_30(ctx: &Ctx) -> BenchReport {
     use pm_perf::Counter;
 
@@ -304,23 +304,22 @@ pub fn pyramid_playback_30(ctx: &Ctx) -> BenchReport {
     let mut v = Viewer::new(ctx, &doc, &media);
     v.composer.set_playing(true);
     let fps = 30.0;
-    let warm_allocations = pm_perf::snapshot().get(Counter::PyramidAllocs);
     for k in 0..2 {
         v.frame(ticks(f64::from(k) / fps));
     }
     assert!(
-        pm_perf::snapshot().get(Counter::PyramidAllocs) > warm_allocations,
+        v.composer.renderer().pyramid_bytes() > 0,
         "warmup must exercise a physical video pyramid"
     );
     let scope = Scope::begin();
     let mut wall = Vec::with_capacity(30);
     for k in 2..32 {
-        let before = pm_perf::snapshot().get(Counter::PyramidAllocs);
+        let before = pm_perf::snapshot().get(Counter::TextureAllocs);
         wall.push(v.frame(ticks(f64::from(k) / fps)));
         assert_eq!(
-            pm_perf::snapshot().get(Counter::PyramidAllocs) - before,
+            pm_perf::snapshot().get(Counter::TextureAllocs) - before,
             0,
-            "frame {k} allocated a pyramid after warmup"
+            "frame {k} allocated a texture after warmup"
         );
     }
     let m = measured(scope);
