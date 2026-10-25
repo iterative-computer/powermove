@@ -3,6 +3,13 @@ import path from 'node:path';
 import { expect, test } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
+// Keep exact byte equality without constructing a quadratic pixel-array diff.
+const samePixels = (actual: number[], expected: number[]) => Buffer.from(actual).equals(Buffer.from(expected));
+
+// Every case checks the legacy WebGL compositor's canvas, preview-frame cache,
+// or GPU targets. Native playback presents through a separate engine canvas.
+test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: '0' } } });
+
 test('idle preparation leaves the canvas and playhead alone, then normal Play reuses accurate frames', async ({ session }) => {
   await session.openEditor();
   await session.page.evaluate(async () => {
@@ -33,7 +40,7 @@ test('idle preparation leaves the canvas and playhead alone, then normal Play re
     before: (window as any).__idleFirst, after: (window as any).__readPreview(),
     memory: (window as any).PM.Memory.stats().preview,
   }));
-  expect(idle.time).toBe(0); expect(idle.after).toEqual(idle.before);
+  expect(idle.time).toBe(0); expect(samePixels(idle.after, idle.before), 'idle preparation preserves every canvas byte').toBe(true);
   expect(idle.memory.bytes).toBeLessThanOrEqual(idle.memory.budget);
   const parity = await session.page.evaluate(() => {
     const PM = (window as any).PM, options = { mblur: true, mbSamples: 6, shutter: .5, hideShy: false };
@@ -44,7 +51,7 @@ test('idle preparation leaves the canvas and playhead alone, then normal Play re
     const prepared = (window as any).__readPreview(), hit = PM.GL.stats.previewHit;
     return { direct, prepared, hit };
   });
-  expect(parity.hit).toBe(true); expect(parity.prepared).toEqual(parity.direct);
+  expect(parity.hit).toBe(true); expect(samePixels(parity.prepared, parity.direct), 'prepared frame matches every direct-render byte').toBe(true);
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     (window as any).__automaticHits = [];
@@ -103,7 +110,7 @@ test('prepared display frames preserve 8, 16 and 32-bit HDR and translucent outp
   expect(results.length).toBeGreaterThan(0);
   for (const result of results) {
     expect(result.prepared).toBe(true); expect(result.hit).toBe(true);
-    expect(result.unchanged).toEqual(result.original); expect(result.cached).toEqual(result.original);
+    expect(samePixels(result.unchanged, result.original), 'preparation preserves every canvas byte').toBe(true); expect(samePixels(result.cached, result.original), 'cached frame matches every original byte').toBe(true);
     expect(result.timeUnchanged).toBe(true); expect(result.error).toBe(0);
     expect(result.memory.bytes).toBe(128 * 72 * 4);
   }
@@ -222,7 +229,7 @@ for (const matte of [false, true]) test(`automatic video preparation preserves l
     return { pixels: Array.from(pixels), error: gl.getError(), privateTextures: [...PM.GL.texes.keys()]
       .filter((key: string) => key.startsWith('idle-video:')).length, staging: PM.AutomaticPreview.stagingBytes };
   });
-  expect(direct.pixels).toEqual(prepared.pixels);
+  expect(samePixels(direct.pixels, prepared.pixels), 'prepared video matches every direct-render byte').toBe(true);
   expect(direct.error).toBe(0); expect(direct.privateTextures).toBe(0); expect(direct.staging).toBe(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -1,10 +1,10 @@
 import { expect, launchApp, test } from './helpers/app';
 
-/* Settings › Project › Color (docs/rust-engine.md section 9): linear blending
-   and precision, shown with the new engine only, each change one Undo step,
-   and the new engine's stamp following a non-default setting. */
+/* Settings › Project: Color depth belongs to Composition in either engine;
+   linear blending belongs to Color with the new engine. Each change is one
+   Undo step, and the native-only blend setting controls the engine stamp. */
 
-test('Settings › Project › Color edits linear blending and precision with the new engine', async ({}, info) => {
+test('Settings › Project edits linear blending and Color depth with the new engine', async ({}, info) => {
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
   try {
     await session.openEditor();
@@ -17,25 +17,27 @@ test('Settings › Project › Color edits linear blending and precision with th
     const panel = settings.getByRole('region', { name: 'Project', exact: true });
     await expect(panel).toContainText('Color');
     const linear = panel.getByLabel('Blend in linear light', { exact: true });
-    const precision = panel.locator('select[aria-label="Precision"]');
+    const depth = panel.locator('select[aria-label="Color depth"]');
     await expect(linear).toHaveAttribute('aria-pressed', 'false');
-    await expect(precision).toHaveValue('float16');
+    await expect(depth).toHaveValue('16');
     await linear.scrollIntoViewIfNeeded();
     await settings.screenshot({ path: info.outputPath('project-color.png') });
 
     await linear.click();
     await expect(linear).toHaveAttribute('aria-pressed', 'true');
     expect(await page.evaluate(() => (window as any).PM.proj.color))
-      .toEqual({ mode: 'standard', linearBlending: true, precision: 'float16', blendDomain: 'hdrSafe' });
+      .toEqual({ mode: 'standard', linearBlending: true, blendDomain: 'hdrSafe' });
     await expect.poll(() => page.evaluate(() => (window as any).PM.proj.requiresEngine ?? null)).toBe('native');
-    await precision.selectOption('float32');
-    expect(await page.evaluate(() => (window as any).PM.proj.color.precision)).toBe('float32');
+    await depth.selectOption('32');
+    expect(await page.evaluate(() => (window as any).PM.proj.colorDepth)).toBe(32);
     await settings.screenshot({ path: info.outputPath('project-color-on.png') });
 
     // One Undo step per change.
-    expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Precision');
+    expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Project settings');
     await page.evaluate(() => (window as any).PM.hist.undo());
-    expect(await page.evaluate(() => (window as any).PM.proj.color.precision)).toBe('float16');
+    expect(await page.evaluate(() => (window as any).PM.proj.colorDepth)).toBe(16);
+    await expect(depth).toHaveValue('16');
+    expect(await page.evaluate(() => (window as any).PM.proj.color.linearBlending)).toBe(true);
     expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Blend in linear light');
     await page.evaluate(() => (window as any).PM.hist.undo());
     expect(await page.evaluate(() => 'color' in (window as any).PM.proj)).toBe(false);
@@ -57,6 +59,7 @@ test('Settings › Project › Color is hidden without the new engine', async ()
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     const panel = settings.getByRole('region', { name: 'Project', exact: true });
     await expect(panel).toContainText('Composition');
+    await expect(panel.locator('select[aria-label="Color depth"]')).toHaveValue('16');
     await expect(panel.getByLabel('Blend in linear light', { exact: true })).toHaveCount(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
