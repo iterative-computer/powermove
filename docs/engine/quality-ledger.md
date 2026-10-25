@@ -64,11 +64,18 @@ nearest-even half computed in the shader.
   geometry), and the Editor-view Library cards (`e2e/library-card-parity.spec.ts`).
 - **Units:** CV; card statistics over the cube's pixels, signed mean per channel.
 
-No 3D correction is accepted yet: the per-pixel edge rule and the cards' per-pixel
-rule remain red. The cards are unbiased (signed mean +0.0005/0.0000/−0.0003 CV,
-today +0.0008/+0.0008/+0.0006; truncating stores gave −0.0178/−0.0064/−0.0021); their
-remaining one-code differences match the rate of a half-float working frame rounded
-again to 8 bits.
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Masked object depth-tests itself (D-R5) | 135.06, 135.04, 1.436 | 0.95, 0.49, 0.003 | `layer-opacity-and-mask:0` interior |
+| X-ray translucency blended in linear light (D-R6, `3D-TONEMAP-1`) | 23.70, 23.66, 10.803 | 0.07, 0.07, 0.016 | `look-xray:2` interior |
+| Legacy scene shaded and resolved in linear light | 64.18, 61.66, 0.371 | 3.72, 0.33, 0.006 | `legacy-scene:0` interior |
+| Nearest-half 3D and working stores (Editor Library card) | 25, 5, 0.0072 (card, signed +0.0008) | 25, 5, 0.0122 (card, signed +0.0005) | Editor-view card, depth 16 |
+
+Library cards pass gate-policy's precision-bound rule (all 32). Their remaining
+one-code differences are the half-float working frame rounded again to 8 bits: the
+Editor card's interior mean is 0.0073 CV (today 0.0004) and its edge mean 0.1601
+(today 0.1587). The scene gate leaves `slots-and-groups:0` and `maps-placement:1`
+under investigation; glTF material cases remain red.
 
 ## Raster sampling and masks
 

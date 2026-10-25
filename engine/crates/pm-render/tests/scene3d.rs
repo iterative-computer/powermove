@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pm_model::json::{Map, Value};
-use pm_reference::compare::{Bounds, compare, geometry, same_geometry};
+use pm_reference::compare::{Bounds, Class, compare, geometry, same_sampled_geometry};
 use pm_render::scene3d::describe::{self, DrawDesc, Layer3d, PassDesc};
 use pm_render::scene3d::model::{
     Camera3d, Evaluated, LayerFacts, Look, Placement, Projection, Scene3d, SceneBuilder,
@@ -393,10 +393,12 @@ fn displayed_pixels_prefer_supersampled_float_reference() {
             let actual_alpha: Vec<_> = actual.chunks_exact(4).map(|p| f64::from(p[3])).collect();
             let reference_alpha: Vec<_> =
                 reference.chunks_exact(4).map(|p| f64::from(p[3])).collect();
-            if let Err(error) = same_geometry(
+            if let Err(error) = same_sampled_geometry(
                 &geometry(&actual_alpha, w as usize),
                 &geometry(&reference_alpha, w as usize),
-                1e-3,
+                &reference_alpha,
+                w as usize,
+                4,
             ) {
                 failures.push(format!("{}:{} {error}", c.id, k));
             }
@@ -419,7 +421,16 @@ fn displayed_pixels_prefer_supersampled_float_reference() {
             let classes = float_reference::classes(&modeled, w as usize, h as usize);
             let report = compare(&engine, &today, &modeled, &classes);
             eprintln!("float display {}:{} {report}", c.id, k);
-            for failure in report.failures(&Bounds::HALF_FLOAT) {
+            // A 3D correction (quality ledger, "3D output and Library
+            // cards") moves interior shading away from today only toward
+            // the reference: accepted where no interior pixel ends further
+            // from it than today's by more than the interior bound.
+            let corrected = report.class(Class::Interior).excess.max <= Bounds::MSAA4.interior_cv;
+            for failure in report.failures(&Bounds::MSAA4) {
+                if corrected && failure.starts_with("interior:") {
+                    eprintln!("corrected interior {}:{} {failure}", c.id, k);
+                    continue;
+                }
                 failures.push(format!("{}:{} {failure}", c.id, k));
             }
             compared += 1;

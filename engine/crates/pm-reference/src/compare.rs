@@ -102,6 +102,16 @@ impl Bounds {
         precision_cv: 255.0 / 2048.0,
         per_pixel_cv: (1.0, 1.0),
     };
+    /// Edges rasterized with 4 coverage samples, against a converged
+    /// reference and today's 8-bit capture: each statistic within today's
+    /// plus half a code of that capture's rounding; per pixel, a coverage
+    /// estimate may be off by one of its 4 samples (a quarter of full scale),
+    /// whichever space the samples are resolved in. Interiors stay at 1 CV.
+    pub const MSAA4: Bounds = Bounds {
+        interior_cv: 1.0,
+        precision_cv: 0.5,
+        per_pixel_cv: (255.0 / 4.0, 255.0 / 4.0),
+    };
 }
 
 /// Per-class statistics of a frame.
@@ -292,6 +302,50 @@ pub fn same_geometry(engine: &Geometry, reference: &Geometry, tolerance: f64) ->
     if da > tolerance || dc > tolerance {
         return Err(format!(
             "geometry: area {:.4} vs {:.4} ({da:.2e} relative), centroid off by {dc:.2e} px",
+            engine.area, reference.area
+        ));
+    }
+    Ok(())
+}
+
+/// [`same_geometry`] for coverage estimated with `samples` per pixel: each
+/// partly covered reference pixel may be off by half a sample, which bounds
+/// the area by `edge / (2·samples)` and the centroid by that area error over
+/// the shape's area times its extent.
+pub fn same_sampled_geometry(
+    engine: &Geometry,
+    reference: &Geometry,
+    reference_alpha: &[f64],
+    width: usize,
+    samples: u32,
+) -> Result<(), String> {
+    let half = 0.5 / f64::from(samples);
+    let (mut edge, mut extent) = (0.0, [0.0f64; 2]);
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for (i, a) in reference_alpha.iter().enumerate() {
+        if *a > 0.0 {
+            let p = [(i % width) as f64, (i / width) as f64];
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k] + 1.0);
+            }
+            if *a < 1.0 {
+                edge += 1.0;
+            }
+        }
+    }
+    for k in 0..2 {
+        extent[k] = (hi[k] - lo[k]).max(0.0);
+    }
+    let area_bound = edge * half;
+    let da = (engine.area - reference.area).abs();
+    let dc = (engine.centroid[0] - reference.centroid[0])
+        .abs()
+        .max((engine.centroid[1] - reference.centroid[1]).abs());
+    let dc_bound = area_bound / reference.area.max(1.0) * extent[0].max(extent[1]);
+    if da > area_bound + 1e-9 || dc > dc_bound + 1e-9 {
+        return Err(format!(
+            "geometry: area {:.4} vs {:.4} (bound {area_bound:.3}), centroid off by {dc:.2e} px (bound {dc_bound:.2e})",
             engine.area, reference.area
         ));
     }

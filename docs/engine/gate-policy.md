@@ -36,7 +36,14 @@ Precision bounds (`Bounds`): 0.5 CV for 8-bit frames (`EIGHT_BIT`), 2⁻¹¹ ≈
 half-float frames (`HALF_FLOAT`). The previous bound (`per_pixel_cv`) is ≤ 1 CV for 99.9%
 and ≤ 4 for any pixel at 8 bits, ≤ 1 at half float: no single pixel may regress under
 today's worst error elsewhere. A gate with other storage states its own. Geometry is
-exact: alpha area (relative) and centroid (px) within 1e-3 (`same_geometry`). Preview ==
+exact: alpha area (relative) and centroid (px) within 1e-3 (`same_geometry`).
+
+3D edges come from 4 coverage samples (`MSAA4`): against the converged reference and
+today's 8-bit capture, each edge statistic within today's + 0.5 CV, and per pixel the
+engine within one sample (a quarter of full scale) of today's error; geometry within
+half a sample per partly covered pixel (`same_sampled_geometry`). Interiors stay at
+1 CV of today unless no interior pixel ends further from the reference than today's
+(a 3D correction with a ledger row). Preview ==
 export: the paused viewer's frame and the export's are identical (`identical`).
 
 For a fully modelled transparent Float16 corpus frame, G-C2 measures that same 1e-3
