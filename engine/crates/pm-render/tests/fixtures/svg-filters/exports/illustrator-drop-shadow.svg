@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px" width="120px" height="100px" viewBox="0 0 120 100">
+<filter filterUnits="objectBoundingBox" width="140%" height="140%" x="-20%" y="-20%" id="AI_Shadow_2">
+	<feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/>
+	<feOffset in="blur" result="offsetBlurredAlpha" dx="5" dy="5"/>
+	<feMerge>
+		<feMergeNode in="offsetBlurredAlpha"/>
+		<feMergeNode in="SourceGraphic"/>
+	</feMerge>
+</filter>
+<rect x="20" y="16" width="80" height="60" rx="8" fill="#E83A5E" filter="url(#AI_Shadow_2)"/>
+</svg>

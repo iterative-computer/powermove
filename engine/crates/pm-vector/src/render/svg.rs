@@ -8,10 +8,11 @@
 //!
 //! - [`SvgDocument::gpu_paintable`] documents (paths with solid or gradient
 //!   paint, groups with opacity and blend modes, clip paths, masks, text,
-//!   Gaussian blur and offset filters) are
-//!   extracted as ordered float paint operations ([`SvgDocument::float_scene`]);
-//! - unsupported filters, patterns, embedded images and `crispEdges` use resvg
-//!   ([`SvgDocument::raster_device`]).
+//!   and the filter primitives in [`float_primitive`]) are extracted as
+//!   ordered float paint operations ([`SvgDocument::float_scene`]);
+//! - other filter primitives, patterns, embedded images and `crispEdges` use
+//!   resvg ([`SvgDocument::raster_device`]);
+//!   [`SvgDocument::unsupported_feature`] names the first such feature.
 //!
 //! As in an `<img>`, an SVG image loads no external resources: only
 //! `data:` URLs resolve.
@@ -58,7 +59,8 @@ pub struct SvgDocument {
     /// The element nesting ([`super::svg_depth::element_depth`]): recursive
     /// work over the tree runs on a stack sized to it.
     pub(crate) depth: usize,
-    gpu: bool,
+    /// The first feature the float painter cannot draw, or `None`.
+    unsupported: Option<String>,
     pub(crate) filter_res: HashMap<String, Option<[u32; 2]>>,
 }
 
@@ -75,7 +77,7 @@ impl core::fmt::Debug for SvgDocument {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SvgDocument")
             .field("size", &self.size())
-            .field("gpu", &self.gpu)
+            .field("unsupported", &self.unsupported)
             .finish()
     }
 }
@@ -137,29 +139,35 @@ impl SvgDocument {
             return Err(SvgError("SVGZ (gzip) is not read".into()));
         }
         let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
-        let (tree, gpu, filter_res) = with_stack(depth, || {
+        let (tree, unsupported, filter_res) = with_stack(depth, || {
             let xml =
                 |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
             let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
             let doc = super::svg_xml::parse(&text).map_err(xml)?;
             let filter_res = filter_resolutions(&doc)?;
-            let unsupported_edge_mode = doc.descendants().any(|n| {
-                n.is_element()
-                    && n.tag_name().name() == "feGaussianBlur"
-                    && n.attribute("edgeMode").is_some_and(|v| v != "none")
-            });
+            // usvg reads no Gaussian edge mode; resvg's own blur keeps
+            // today's duplicate/wrap edges.
+            let edge_mode = doc
+                .descendants()
+                .find(|n| {
+                    n.is_element()
+                        && n.tag_name().name() == "feGaussianBlur"
+                        && n.attribute("edgeMode").is_some_and(|v| v != "none")
+                })
+                .and_then(|n| n.attribute("edgeMode"))
+                .map(|mode| format!("feGaussianBlur edgeMode=\"{mode}\""));
             let text_nodes = doc
                 .descendants()
                 .any(|n| n.is_element() && n.tag_name().name() == "text");
             let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
                 .map_err(|e| SvgError(e.to_string()))?;
-            let gpu = paintable_group(tree.root()) && !unsupported_edge_mode;
-            Ok::<_, SvgError>((tree, gpu, filter_res))
+            let unsupported = edge_mode.or_else(|| unpaintable_group(tree.root()));
+            Ok::<_, SvgError>((tree, unsupported, filter_res))
         })?;
         Ok(Self {
             tree: core::mem::ManuallyDrop::new(tree),
             depth,
-            gpu,
+            unsupported,
             filter_res,
         })
     }
@@ -209,11 +217,16 @@ impl SvgDocument {
         })
     }
 
-    /// Whether the float painter can draw every part of the document. Gaussian
-    /// blur and offset filters are supported; patterns, embedded images,
-    /// unsupported filters and `crispEdges` shapes are not.
+    /// Whether the float painter can draw every part of the document.
     pub fn gpu_paintable(&self) -> bool {
-        self.gpu
+        self.unsupported.is_none()
+    }
+
+    /// The first feature the float painter cannot draw (a filter primitive
+    /// such as `feTurbulence`, pattern paint, an embedded image, a
+    /// `crispEdges` shape): the document is drawn by resvg.
+    pub fn unsupported_feature(&self) -> Option<&str> {
+        self.unsupported.as_deref()
     }
 
     /// The SVG's user space stretched over `width` × `height` (an `<img>`
@@ -301,28 +314,77 @@ impl SvgDocument {
     }
 }
 
-fn paintable_group(g: &usvg::Group) -> bool {
-    g.filters().iter().all(|f| {
-        f.primitives().iter().all(|p| {
-            matches!(
-                p.kind(),
-                usvg::filter::Kind::GaussianBlur(_) | usvg::filter::Kind::Offset(_)
-            )
-        })
-    }) && g.clip_path().is_none_or(paintable_clip)
-        && g.mask().is_none_or(paintable_mask)
-        && g.children().iter().all(|node| match node {
-            usvg::Node::Group(g) => paintable_group(g),
-            usvg::Node::Path(p) => {
-                p.rendering_mode().use_shape_antialiasing()
-                    && p.fill()
-                        .is_none_or(|f| !matches!(f.paint(), usvg::Paint::Pattern(_)))
-                    && p.stroke()
-                        .is_none_or(|s| !matches!(s.paint(), usvg::Paint::Pattern(_)))
+/// The filter primitives the float painter draws.
+pub fn float_primitive(kind: &usvg::filter::Kind) -> bool {
+    use usvg::filter::Kind;
+    matches!(
+        kind,
+        Kind::Blend(_)
+            | Kind::ColorMatrix(_)
+            | Kind::ComponentTransfer(_)
+            | Kind::Composite(_)
+            | Kind::DropShadow(_)
+            | Kind::Flood(_)
+            | Kind::GaussianBlur(_)
+            | Kind::Merge(_)
+            | Kind::Offset(_)
+    )
+}
+
+/// A filter primitive's element name.
+pub fn primitive_name(kind: &usvg::filter::Kind) -> &'static str {
+    use usvg::filter::Kind;
+    match kind {
+        Kind::Blend(_) => "feBlend",
+        Kind::ColorMatrix(_) => "feColorMatrix",
+        Kind::ComponentTransfer(_) => "feComponentTransfer",
+        Kind::Composite(_) => "feComposite",
+        Kind::ConvolveMatrix(_) => "feConvolveMatrix",
+        Kind::DiffuseLighting(_) => "feDiffuseLighting",
+        Kind::DisplacementMap(_) => "feDisplacementMap",
+        Kind::DropShadow(_) => "feDropShadow",
+        Kind::Flood(_) => "feFlood",
+        Kind::GaussianBlur(_) => "feGaussianBlur",
+        Kind::Image(_) => "feImage",
+        Kind::Merge(_) => "feMerge",
+        Kind::Morphology(_) => "feMorphology",
+        Kind::Offset(_) => "feOffset",
+        Kind::SpecularLighting(_) => "feSpecularLighting",
+        Kind::Tile(_) => "feTile",
+        Kind::Turbulence(_) => "feTurbulence",
+    }
+}
+
+/// The first part of `g` the float painter cannot draw, named.
+fn unpaintable_group(g: &usvg::Group) -> Option<String> {
+    for filter in g.filters() {
+        if let Some(p) = filter.primitives().iter().find(|p| !float_primitive(p.kind())) {
+            return Some(primitive_name(p.kind()).to_owned());
+        }
+    }
+    if let Some(reason) = g.clip_path().and_then(unpaintable_clip) {
+        return Some(reason);
+    }
+    if let Some(reason) = g.mask().and_then(unpaintable_mask) {
+        return Some(reason);
+    }
+    g.children().iter().find_map(|node| match node {
+        usvg::Node::Group(g) => unpaintable_group(g),
+        usvg::Node::Path(p) => {
+            let pattern = |paint: &usvg::Paint| matches!(paint, usvg::Paint::Pattern(_));
+            if !p.rendering_mode().use_shape_antialiasing() {
+                Some("shape-rendering crispEdges".to_owned())
+            } else if p.fill().is_some_and(|f| pattern(f.paint()))
+                || p.stroke().is_some_and(|s| pattern(s.paint()))
+            {
+                Some("pattern paint".to_owned())
+            } else {
+                None
             }
-            usvg::Node::Image(_) => false,
-            usvg::Node::Text(t) => paintable_group(t.flattened()),
-        })
+        }
+        usvg::Node::Image(_) => Some("embedded image".to_owned()),
+        usvg::Node::Text(t) => unpaintable_group(t.flattened()),
+    })
 }
 
 /// `usvg` discards SVG 1.1 filterRes. Retain it after XML normalization,
@@ -383,12 +445,12 @@ fn filter_resolutions(
     Ok(result)
 }
 
-fn paintable_clip(c: &usvg::ClipPath) -> bool {
-    paintable_group(c.root()) && c.clip_path().is_none_or(paintable_clip)
+fn unpaintable_clip(c: &usvg::ClipPath) -> Option<String> {
+    unpaintable_group(c.root()).or_else(|| c.clip_path().and_then(unpaintable_clip))
 }
 
-fn paintable_mask(m: &usvg::Mask) -> bool {
-    paintable_group(m.root()) && m.mask().is_none_or(paintable_mask)
+fn unpaintable_mask(m: &usvg::Mask) -> Option<String> {
+    unpaintable_group(m.root()).or_else(|| m.mask().and_then(unpaintable_mask))
 }
 
 pub(crate) fn affine(t: tiny_skia::Transform) -> Affine {
@@ -434,15 +496,53 @@ mod tests {
         assert!(!gpu(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1" edgeMode="wrap"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
         ));
-        assert!(!gpu(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feColorMatrix type="saturate" values="0.5"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+        assert!(gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feFlood flood-color="#0f0" result="f"/><feColorMatrix in="SourceAlpha" type="saturate" values="0.5"/><feComponentTransfer><feFuncA type="table" tableValues="0 1"/></feComponentTransfer><feDropShadow dx="1"/><feComposite in2="f" operator="arithmetic" k2="1"/><feBlend in2="SourceGraphic" mode="multiply"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
         ));
-        assert!(!gpu(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1"/></pattern><rect width="10" height="10" fill="url(#p)"/></svg>"##
-        ));
-        assert!(!gpu(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" shape-rendering="crispEdges"/></svg>"##
-        ));
+    }
+
+    #[test]
+    fn unsupported_features_are_named() {
+        let reason = |svg: &str| {
+            SvgDocument::parse(svg.as_bytes())
+                .unwrap()
+                .unsupported_feature()
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            reason(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1" result="b"/><feTurbulence baseFrequency="0.1"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+            )
+            .as_deref(),
+            Some("feTurbulence")
+        );
+        assert_eq!(
+            reason(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1" edgeMode="wrap"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+            )
+            .as_deref(),
+            Some("feGaussianBlur edgeMode=\"wrap\"")
+        );
+        assert_eq!(
+            reason(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1"/></pattern><rect width="10" height="10" fill="url(#p)"/></svg>"##
+            )
+            .as_deref(),
+            Some("pattern paint")
+        );
+        assert_eq!(
+            reason(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" shape-rendering="crispEdges"/></svg>"##
+            )
+            .as_deref(),
+            Some("shape-rendering crispEdges")
+        );
+        assert_eq!(
+            reason(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>"##
+            ),
+            None
+        );
     }
 
     #[test]

@@ -217,10 +217,60 @@ fn main() {
     linear_overlap_and_colr_source(&mut gpu, &mut failures);
     linear_project_text_source(&mut gpu, &mut failures);
     direct_fractional_coverage(&mut gpu, &mut failures);
+    half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
     for f in &failures {
         println!("FAILED {f}");
     }
     assert!(failures.is_empty());
+}
+
+/// Text paint into an RGBA16F raster stores the nearest half of each
+/// computed value (`src/nearest_half.rs`), where Metal's own store
+/// truncates: every pixel of a one-glyph-run raster at half precision is
+/// the nearest half of the same paint at f32.
+#[cfg(target_os = "macos")]
+fn half_paint_stores_the_nearest_half(
+    renderer: &mut pm_render::Renderer,
+    failures: &mut Vec<String>,
+) {
+    use pm_protocol::color::Precision;
+    use support::doc::{layer, no_fill, project};
+    let d = serde_json::json!({
+        "text": "HI", "font": "SF Pro Display", "weight": 900, "size": 96,
+        "color": "#090909", "align": "left"
+    });
+    let v = project(
+        640,
+        360,
+        10.0,
+        no_fill(),
+        vec![layer("l", "text", d, 320.0, 180.0, 10.0)],
+    );
+    let doc = pm_model::Document::new(Some(pm_model::json::parse(&v.to_string()).unwrap()), 1);
+    let mut raster = |precision| {
+        renderer
+            .text_raster(&doc, "Ptest-root", "l", 0.0, 1.0, precision)
+            .unwrap()
+            .unwrap()
+            .pixels
+    };
+    let (full, half) = (raster(Precision::Float32), raster(Precision::Float16));
+    assert_eq!(full.len(), half.len());
+    let nearest = |v: f32| pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(v));
+    let mut rounded_up = 0;
+    for (i, (f, h)) in full.iter().zip(&half).enumerate() {
+        if *h != nearest(*f) {
+            failures.push(format!(
+                "half text paint at value {i}: {h} is not the nearest half of {f}"
+            ));
+            return;
+        }
+        rounded_up += usize::from(nearest(*f) > *f);
+    }
+    println!("half text paint: {rounded_up} values a truncating store would keep an ulp low");
+    if rounded_up == 0 {
+        failures.push("half text paint: no value rounds up, the check proves nothing".into());
+    }
 }
 
 /// Auto and Direct must take the same eligible contour path and retain

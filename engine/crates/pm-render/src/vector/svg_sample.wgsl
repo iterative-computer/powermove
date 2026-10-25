@@ -13,7 +13,7 @@ struct Params {
 
 // The output pixel's square, mapped into the source raster, integrated by
 // a stratified 4 × 4 quadrature of the bilinear reconstruction.
-@fragment fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn integrate(position: vec4<f32>) -> vec4<f32> {
     let pixel = floor(position.xy);
     let origin = vec2<f32>(dot(p.x.xyz, vec3<f32>(pixel, 1.0)), dot(p.y.xyz, vec3<f32>(pixel, 1.0)));
     let ex = vec2<f32>(p.x.x, p.y.x);
@@ -27,4 +27,11 @@ struct Params {
         }
     }
     return color * (1.0 / 16.0);
+}
+@fragment fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return integrate(position);
+}
+// RGBA16F stores the nearest half (`crate::nearest_half`).
+@fragment fn fs_half(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return pm_scene_half_color(integrate(position));
 }

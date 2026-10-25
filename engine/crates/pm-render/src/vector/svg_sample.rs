@@ -122,7 +122,14 @@ impl SvgSample {
     pub fn new(device: &wgpu::Device) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm svg raster sample"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("svg_sample.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    crate::nearest_half::NEAREST_HALF_WGSL,
+                    include_str!("svg_sample.wgsl")
+                )
+                .into(),
+            ),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm svg raster sample"),
@@ -160,7 +167,7 @@ impl SvgSample {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let make = |format| {
+        let make = |format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("pm svg raster sample"),
                 layout: Some(&pipeline_layout),
@@ -178,7 +185,11 @@ impl SvgSample {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if format == wgpu::TextureFormat::Rgba16Float {
+                        "fs_half"
+                    } else {
+                        "fs"
+                    }),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,

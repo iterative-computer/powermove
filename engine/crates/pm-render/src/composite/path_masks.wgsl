@@ -49,12 +49,12 @@ fn draw(a: f32, v: f32) -> f32 {
     return a * (1.0 - v);
 }
 
-// Values are rounded to the nearest f16 here: the target's own store may
-// truncate.
+// Values are rounded to the nearest-even f16 here (`nearest_half.rs`): the
+// target's own store, and `quantizeToF16`, may truncate.
 @fragment
 fn fs_store(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let q = vec2<i32>(floor(pos.xy));
-    return vec4<f32>(quantizeToF16(acc[canvas(q.x, q.y)]), 0.0, 0.0, 1.0);
+    return vec4<f32>(pm_scene_nearest_half(acc[canvas(q.x, q.y)]), 0.0, 0.0, 1.0);
 }
 
 // A layer's only mask, drawn straight onto the start: covered exactly when
@@ -63,5 +63,5 @@ fn fs_store(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 fn fs_single(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let q = vec2<i32>(floor(pos.xy));
     let v = clamp(grid_at(q.x, q.y), 0.0, 1.0);
-    return vec4<f32>(quantizeToF16(draw(f32(p.mode), v)), 0.0, 0.0, 1.0);
+    return vec4<f32>(pm_scene_nearest_half(draw(f32(p.mode), v)), 0.0, 0.0, 1.0);
 }

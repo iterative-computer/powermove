@@ -245,10 +245,22 @@ pub enum Source {
     Accumulate(Box<CompPlan>),
 }
 
+/// An SVG image layer of a frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SvgLayer {
+    pub path: std::path::PathBuf,
+    pub composition: String,
+    pub layer: String,
+}
+
 /// Inputs and outputs of a build.
 pub struct Build<'r> {
     pub assets: &'r dyn AssetResolver,
     pub failures: Vec<LayerFailure>,
+    /// SVG image layers whose document has a feature the float painter
+    /// does not draw (their file, composition and layer): the frame's SVG
+    /// diagnostics name them.
+    pub svg_layers: Vec<SvgLayer>,
     pub unsupported: Vec<Unsupported>,
     pub(crate) retime: RetimeCache,
     pub(crate) precomp_depth: u32,
@@ -457,6 +469,7 @@ pub(crate) fn build_reusing<'r>(
     let mut b = Build {
         assets,
         failures: Vec::new(),
+        svg_layers: Vec::new(),
         unsupported: Vec::new(),
         retime: RetimeCache::new(),
         precomp_depth: 0,
@@ -1283,13 +1296,22 @@ fn native_content_quad<'d>(
                     .map_err(|e| format!("{}: {e}", path.display()))
                     .and_then(|broken| {
                         if broken {
-                            return Ok(false);
+                            return Ok(None);
                         }
-                        crate::vector::svg::document(&path).map(|_| true)
+                        crate::vector::svg::document(&path)
+                            .map(|(doc, _)| Some(doc.unsupported_feature().is_some()))
                     });
                 match drawable {
-                    Ok(true) => {}
-                    Ok(false) => return Ok(None),
+                    Ok(Some(unsupported)) => {
+                        if unsupported {
+                            b.svg_layers.push(SvgLayer {
+                                path: path.clone(),
+                                composition: comp_id.clone(),
+                                layer: js::layer_id(layer),
+                            });
+                        }
+                    }
+                    Ok(None) => return Ok(None),
                     Err(message) => {
                         b.failures.push(LayerFailure {
                             composition: comp_id,
