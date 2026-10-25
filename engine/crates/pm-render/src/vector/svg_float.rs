@@ -1281,7 +1281,7 @@ impl SvgPainter {
         let mut pool = ScratchPool::default();
         // The source over the first filter's planned rectangle, on its grid.
         let mut current = match planned.first().and_then(|p| p.source) {
-            None => None,
+            None => Some((svg_filter::Image::empty(), false)),
             // A 4× grid paints the 4× twin there, unless its clips or masks
             // need a finer grid still: then the device paint is repeated.
             Some(rect) if rate == GROUP_RATE && !needs_joint_samples(source.fine) => {
@@ -1336,13 +1336,13 @@ impl SvgPainter {
             if pooled {
                 input.release(&mut pool);
             }
-            current = output.texture.is_some().then_some((output, true));
+            current = Some((output, true));
         }
         // The result over `need` at device resolution, transparent where
         // nothing was drawn.
         let output = float_target(device, need.width, need.height);
-        if let Some((image, _)) = &current {
-            let texture = image.texture.as_ref().expect("a drawn image");
+        if let Some(texture) = current.as_ref().and_then(|(image, _)| image.texture.as_ref()) {
+            let image = &current.as_ref().expect("a drawn image").0;
             if rate == 1 {
                 copy_rect(&mut encoder, texture, [0, 0], &output, image.rect, need);
             } else {

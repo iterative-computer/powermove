@@ -74,7 +74,7 @@ impl Image {
         }
     }
 
-    fn empty() -> Image {
+    pub(super) fn empty() -> Image {
         Image {
             texture: None,
             rect: PixelRect::new(0, 0, 0, 0),
@@ -174,6 +174,26 @@ fn isect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
         a[1].max(b[1]),
         a[2].min(b[2]),
         a[3].min(b[3]),
+    ]
+}
+
+fn empty_region(r: [f32; 4]) -> bool {
+    r[0] >= r[2] || r[1] >= r[3]
+}
+
+/// The bounding rectangle of two regions (an empty one adds nothing).
+fn hull(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    if empty_region(a) {
+        return b;
+    }
+    if empty_region(b) {
+        return a;
+    }
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
     ]
 }
 
@@ -723,6 +743,27 @@ impl Filters {
         }
     }
 
+    /// A per-pixel primitive's result, clipped to `s`: within its inputs'
+    /// regions unless it `paints` where they are transparent.
+    #[allow(clippy::too_many_arguments)]
+    fn per_pixel(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        pass: Pass<'_>,
+        s: [f32; 4],
+        paints: bool,
+        pool: &mut ScratchPool,
+    ) -> Image {
+        let region = if paints {
+            s
+        } else {
+            let [a, b] = pass.inputs.map(|i| i.map_or(NOWHERE, |i| i.region));
+            isect(hull(a, b), s)
+        };
+        self.pass(device, encoder, pass, region, pool)
+    }
+
     fn pass(
         &self,
         device: &wgpu::Device,
@@ -992,6 +1033,7 @@ impl Filters {
             let s = isect(region, rect4(p.rect()));
             let linear = p.color_interpolation() == filter::ColorInterpolation::LinearRGB;
             let fe = Fe::new(transform, s, linear);
+            let paints = makes_content(p.kind());
             let sources = inputs(p.kind());
             let input = |k: usize| -> Result<(Image, bool), String> {
                 match (sources[k], producers[i][k]) {
@@ -1036,42 +1078,27 @@ impl Filters {
                         }
                     };
                     let fe = fe.op(OP_COMPOSITE, sub, [aa, ba]).k(k);
-                    self.pass(
-                        device,
-                        encoder,
-                        self.point(fe, [Some(&a), Some(&b)], None, rect),
-                        s,
-                        pool,
-                    )
+                    let pass = self.point(fe, [Some(&a), Some(&b)], None, rect);
+                    self.per_pixel(device, encoder, pass, s, paints, pool)
                 }
                 filter::Kind::Blend(bl) => {
                     let ((a, aa), (b, ba)) = (input(0)?, input(1)?);
                     let fe = fe.op(OP_BLEND, blend_code(bl.mode()), [aa, ba]);
-                    self.pass(
-                        device,
-                        encoder,
-                        self.point(fe, [Some(&a), Some(&b)], None, rect),
-                        s,
-                        pool,
-                    )
+                    let pass = self.point(fe, [Some(&a), Some(&b)], None, rect);
+                    self.per_pixel(device, encoder, pass, s, paints, pool)
                 }
                 filter::Kind::ColorMatrix(c) => {
                     let (a, aa) = input(0)?;
                     let fe = fe.op(OP_MATRIX, 0, [aa, false]).m(&color_matrix(c.kind()));
-                    self.pass(
-                        device,
-                        encoder,
-                        self.point(fe, [Some(&a), None], None, rect),
-                        s,
-                        pool,
-                    )
+                    let pass = self.point(fe, [Some(&a), None], None, rect);
+                    self.per_pixel(device, encoder, pass, s, paints, pool)
                 }
                 filter::Kind::ComponentTransfer(ct) => {
                     let (a, aa) = input(0)?;
                     let (m, table) = transfer(ct);
                     let fe = fe.op(OP_TRANSFER, 0, [aa, false]).m(&m);
                     let pass = self.point(fe, [Some(&a), None], Some(&table), rect);
-                    self.pass(device, encoder, pass, s, pool)
+                    self.per_pixel(device, encoder, pass, s, paints, pool)
                 }
                 filter::Kind::Merge(m) => {
                     let mut acc: Option<Image> = None;
@@ -1091,7 +1118,7 @@ impl Filters {
                                 rect,
                             ),
                         };
-                        let step = self.pass(device, encoder, pass, s, pool);
+                        let step = self.per_pixel(device, encoder, pass, s, false, pool);
                         if let Some(prev) = acc.replace(step) {
                             prev.release(pool);
                         }
@@ -1215,7 +1242,7 @@ impl Filters {
                     table: None,
                     rect,
                 };
-                Ok(self.pass(device, encoder, pass, s, pool))
+                Ok(self.per_pixel(device, encoder, pass, s, false, pool))
             }
             Ok(sigma) => {
                 let kx = Kernel::new(sigma[0]).unwrap_or_else(Kernel::identity);
@@ -1370,7 +1397,7 @@ impl Filters {
             None,
             rect,
         );
-        let shadow = self.pass(device, encoder, tinted, s, pool);
+        let shadow = self.per_pixel(device, encoder, tinted, s, false, pool);
         moved.release(pool);
         let over = self.point(
             fe.op(OP_COMPOSITE, 0, [alpha, false]),
@@ -1378,7 +1405,7 @@ impl Filters {
             None,
             rect,
         );
-        let out = self.pass(device, encoder, over, s, pool);
+        let out = self.per_pixel(device, encoder, over, s, false, pool);
         shadow.release(pool);
         Ok(out)
     }
