@@ -35,8 +35,6 @@
 pub(crate) mod compat;
 mod compile;
 mod definitions;
-mod encode;
-mod encode_gpu;
 mod fallback;
 pub mod gate;
 mod qos;
@@ -54,7 +52,7 @@ use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
     encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_into,
-    sink_for_with, to_rgba8,
+    sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -476,10 +474,6 @@ impl JobEngineService {
         wake: Wake,
         fonts: Option<Arc<crate::fonts::hub::FontHub>>,
     ) -> Result<JobEngineService, String> {
-        // Check in before the bridge's startup deadline. A failed optional
-        // bridge is cached and reported by GPU WebM, without disabling other
-        // job formats or agent snapshots.
-        let _ = encode_gpu::connect();
         let state = State {
             user: Some(Scheduler::new(EngineProcess::Job)),
             ..State::default()
@@ -1604,27 +1598,7 @@ fn run_job(
             Some(session),
         );
     };
-    // Opaque WebM goes to the host's WebCodecs encoders, as today's
-    // exporter encodes it (decision EXPORT-1).
-    let encoder: Box<dyn pm_export::webcodecs::EncodeHost> = Box::new(
-        encode::HostEncoder::new(
-            shared.clone(),
-            session,
-            job.clone(),
-            cancel.clone(),
-            dest.handle.clone(),
-        )
-        .with_gpu(
-            renderer.device().clone(),
-            renderer.queue().clone(),
-            Arc::new(gate.clone()),
-            pm_export::render::pass_key(
-                export.seed ^ 0x5745_424d_5247_4241,
-                plan.request.output_size,
-            ),
-        ),
-    );
-    let sink = match sink_for_with(&plan, Some(encoder)) {
+    let sink = match sink_for(&plan) {
         Ok(s) => s,
         Err(e) => {
             discard(shared);

@@ -653,14 +653,8 @@ fn depth8_project_exports_every_shipped_format() {
                 "{}: {info}",
                 case.name
             );
-            // Opaque WebM is today's WebCodecs file (EXPORT-1): its mux
-            // writes no Colour element, so VP9's bitstream alone marks
-            // BT.709 limited range and opaque VP8 carries no tags at all.
-            let (space, range) = if case.codec == "vp8" && case.alpha == AlphaOutput::None {
-                ("unknown", "unknown")
-            } else {
-                ("bt709", "tv")
-            };
+            // WebM carries the export's colour description, limited range.
+            let (space, range) = ("bt709", "tv");
             assert!(
                 info.contains(&format!("color_space={space}")),
                 "{}: {info}",

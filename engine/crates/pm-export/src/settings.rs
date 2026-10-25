@@ -362,9 +362,8 @@ pub enum AudioCodec {
     Pcm24,
     /// 32-bit float LPCM, the mix as it is.
     PcmF32,
-    /// AAC LC. In H.264 MP4, the bundled FFmpeg encoder with its default
-    /// bitrate and edit list (the desktop exporter's settings); otherwise
-    /// AudioToolbox at 128 kbps per channel with an edit list.
+    /// AAC LC through AudioToolbox at 128 kbps per channel, from the f32 mix,
+    /// with an edit list for its priming.
     Aac,
     /// Opus through libopus at 48 kHz (WebM), 160 kbps for the stream with
     /// Chromium WebCodecs' AudioEncoder settings (20 ms, VBR, complexity 9).
@@ -399,18 +398,6 @@ pub struct AudioSpec {
 }
 
 impl AudioSpec {
-    /// Whether the desktop exporter's final FFmpeg mux writes this audio.
-    /// Today's exporter has ProRes MOV with 24-bit PCM and H.264 MP4 with
-    /// AAC; both go through bundled FFmpeg from its 16-bit WAV. Other
-    /// combinations (HEVC, H.264 in MOV) keep AVAssetWriter's mux.
-    pub fn ffmpeg_mux(self, video: Codec, container: Container) -> bool {
-        matches!(self.codec, AudioCodec::Aac | AudioCodec::Pcm24)
-            && matches!(
-                (video, container),
-                (Codec::ProRes(_), Container::Mov) | (Codec::H264 { .. }, Container::Mp4)
-            )
-    }
-
     /// Today's audio for a container: 24-bit PCM in MOV, AAC in MP4, Opus in WebM.
     pub fn default_for(container: Container, sample_rate: u32, channels: u16) -> AudioSpec {
         let codec = match container {

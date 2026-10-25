@@ -1,80 +1,30 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
 import path from 'node:path';
-
-import type { Page } from 'playwright';
 
 import { ffmpegBinary } from './ffmpeg';
 
 const ffprobeBinary = ffmpegBinary.replace(/ffmpeg$/, 'ffprobe');
-const MAX_BUFFER = 96 * 1024 * 1024;
-/** Decoded video above this is compared by per-frame hashes. */
-const LARGE_BYTES = 64 * 1024 * 1024;
-
-function frameHashes(file: string, kind: 'video' | 'audio'): string[] {
-  const args = kind === 'video'
-    ? ['-map', '0:v:0', '-fps_mode', 'passthrough', '-pix_fmt', 'rgba']
-    : ['-map', '0:a:0', '-acodec', 'pcm_f32le'];
-  const text = execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, ...args, '-f', 'framemd5', 'pipe:1'],
-    { encoding: 'utf8', maxBuffer: MAX_BUFFER });
-  return text.split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1)!.trim());
-}
+const MAX_BUFFER = 256 * 1024 * 1024;
 
 type Stream = Record<string, unknown>;
 type Probe = { streams: Stream[]; format: Record<string, unknown> };
-type Packet = { size?: string; data_hash?: string; pts?: number; dts?: number; duration?: number };
 
 export type Check = { name: string; expected: unknown; actual: unknown; equal: boolean };
-export type Difference = { compared: number; unequal: number; first: number | null; peak: number; rms: number };
 export type ParityReport = { checks: Check[]; metrics: Record<string, unknown> };
 
-const VIDEO_FIELDS = [
-  'codec_name', 'profile', 'codec_tag_string', 'pix_fmt', 'bits_per_raw_sample',
-  'color_primaries', 'color_transfer', 'color_space', 'color_range', 'width', 'height',
-  'r_frame_rate', 'avg_frame_rate', 'time_base', 'start_time', 'nb_frames',
-  'nb_read_frames', 'duration', 'duration_ts',
-] as const;
-const AUDIO_FIELDS = [
-  'codec_name', 'profile', 'sample_fmt', 'sample_rate', 'channels', 'channel_layout',
-  'ch_layout', 'bits_per_sample', 'bits_per_raw_sample', 'time_base', 'start_time',
-  'duration', 'duration_ts', 'nb_frames', 'nb_read_frames',
-] as const;
+/** Stream properties an export keeps from today's (G-X1). Codec ids,
+ *  container framing and colour tags may change with the engine's encoders
+ *  (WebM now carries the export's colour description). */
+const VIDEO_FIELDS = ['codec_name', 'pix_fmt', 'width', 'height', 'r_frame_rate', 'nb_read_frames'] as const;
+const AUDIO_FIELDS = ['sample_rate', 'channels'] as const;
 
 function json<T>(binary: string, args: string[]): T {
   return JSON.parse(execFileSync(binary, args, { encoding: 'utf8', maxBuffer: MAX_BUFFER })) as T;
 }
 
 function probe(file: string): Probe {
-  return json<Probe>(ffprobeBinary, [
-    '-v', 'error', '-count_frames', '-show_streams', '-show_format', '-of', 'json', file,
-  ]);
-}
-
-function packets(file: string): Packet[] {
-  return json<{ packets: Packet[] }>(ffprobeBinary, [
-    '-v', 'error', '-select_streams', 'a:0', '-show_packets', '-show_data_hash', 'sha256',
-    '-show_entries', 'packet=size,pts,dts,duration,data_hash', '-of', 'json', file,
-  ]).packets ?? [];
-}
-
-function decode(file: string, kind: 'video' | 'audio' | 'wav-s16'): Buffer {
-  const args = kind === 'video'
-    ? ['-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'rgba']
-    : kind === 'audio'
-      ? ['-map', '0:a:0', '-f', 'f32le', '-acodec', 'pcm_f32le']
-      : ['-map', '0:a:0', '-f', 's16le', '-acodec', 'pcm_s16le'];
-  return execFileSync(ffmpegBinary, ['-v', 'error', '-i', file, ...args, 'pipe:1'], { maxBuffer: MAX_BUFFER });
-}
-
-function encodedAudio(file: string): Buffer {
-  // The data muxer concatenates packet payloads without container framing.
-  // Comparing this stream does not mistake different packet grouping for
-  // different encoded bytes (PCM in MOV may have different chunk boundaries).
-  return execFileSync(ffmpegBinary, [
-    '-v', 'error', '-i', file, '-map', '0:a:0', '-c', 'copy', '-f', 'data', 'pipe:1',
-  ], { maxBuffer: MAX_BUFFER });
+  return json<Probe>(ffprobeBinary, ['-v', 'error', '-count_frames', '-show_streams', '-show_format', '-of', 'json', file]);
 }
 
 function add(checks: Check[], name: string, expected: unknown, actual: unknown): void {
@@ -85,182 +35,71 @@ function one(probeResult: Probe, kind: 'video' | 'audio'): Stream | null {
   return probeResult.streams.find(stream => stream.codec_type === kind) ?? null;
 }
 
-function floatDifference(expected: Buffer, actual: Buffer): Difference {
-  const n = Math.min(Math.floor(expected.length / 4), Math.floor(actual.length / 4));
-  let unequal = 0, first: number | null = null, peak = 0, sumSquares = 0;
-  for (let i = 0; i < n; i++) {
-    if (expected.readUInt32LE(i * 4) === actual.readUInt32LE(i * 4)) continue;
-    unequal++;
-    first ??= i;
-    const delta = expected.readFloatLE(i * 4) - actual.readFloatLE(i * 4);
-    peak = Math.max(peak, Math.abs(delta));
-    sumSquares += delta * delta;
-  }
-  return { compared: n, unequal, first, peak, rms: Math.sqrt(sumSquares / Math.max(n, 1)) };
+/** Decoded frames as 16-bit RGBA (alpha as coded; opaque formats at full). */
+function frames16(input: string): Buffer {
+  return execFileSync(ffmpegBinary, ['-v', 'error', '-i', input, '-map', '0:v:0', '-fps_mode', 'passthrough',
+    '-f', 'rawvideo', '-pix_fmt', 'rgba64le', 'pipe:1'], { maxBuffer: MAX_BUFFER });
 }
 
-function byteDifference(expected: Buffer, actual: Buffer): Difference {
-  const n = Math.min(expected.length, actual.length);
-  let unequal = 0, first: number | null = null, peak = 0, sumSquares = 0;
-  for (let i = 0; i < n; i++) {
-    const delta = expected[i]! - actual[i]!;
-    if (delta === 0) continue;
-    unequal++;
-    first ??= i;
-    peak = Math.max(peak, Math.abs(delta));
-    sumSquares += delta * delta;
-  }
-  return { compared: n, unequal, first, peak, rms: Math.sqrt(sumSquares / Math.max(n, 1)) };
+/** A PNG sequence folder's frames, in name order, as one input. */
+function sequenceFrames16(folder: string): Buffer {
+  const first = readdirSync(folder).filter(n => n.endsWith('.png')).sort()[0];
+  if (!first) throw new Error(`no PNG frames in ${folder}`);
+  const digits = /_(\d+)\.png$/.exec(first)?.[1]?.length ?? 5;
+  const pattern = path.join(folder, first.replace(/_\d+\.png$/, `_%0${digits}d.png`));
+  return execFileSync(ffmpegBinary, ['-v', 'error', '-start_number', String(Number(/_(\d+)\.png$/.exec(first)![1])),
+    '-i', pattern, '-f', 'rawvideo', '-pix_fmt', 'rgba64le', 'pipe:1'], { maxBuffer: MAX_BUFFER });
 }
 
-/** Every field is a separate check, so a codec failure does not conceal timing or pixel results. */
-export function compareExports(reference: string, candidate: string, expectedFrames: number): ParityReport {
-  const old = probe(reference), current = probe(candidate);
+/** PSNR in dB of the color channels of `actual` against `reference`
+ *  (16-bit RGBA, color over black where `opaque`). */
+function psnr(reference: Buffer, actual: Buffer, opaque: boolean): number {
+  const n = Math.min(reference.length, actual.length) / 2;
+  let sum = 0, count = 0;
+  for (let i = 0; i < n; i += 4) {
+    const ra = opaque ? reference.readUInt16LE((i + 3) * 2) / 65535 : 1;
+    for (let c = 0; c < 3; c++) {
+      const r = reference.readUInt16LE((i + c) * 2) / 65535 * ra;
+      const a = actual.readUInt16LE((i + c) * 2) / 65535;
+      sum += (r - a) ** 2;
+      count++;
+    }
+  }
+  const mse = sum / Math.max(count, 1);
+  return mse === 0 ? Infinity : 10 * Math.log10(1 / mse);
+}
+
+/** G-X1 (docs/engine/gate-policy.md): the engine's export keeps today's
+ *  stream properties, and its decoded pictures are at least as close to the
+ *  reference (the engine's lossless 16-bit PNG render of the same frames)
+ *  as today's. Every field is a separate check. */
+export function compareExports(today: string, engine: string, reference: string | null, expectedFrames: number,
+  opaqueReference: boolean): ParityReport {
+  const old = probe(today), current = probe(engine);
   const checks: Check[] = [];
   const metrics: Record<string, unknown> = {};
   for (const kind of ['video', 'audio'] as const) {
-    const a = old.streams.filter(stream => stream.codec_type === kind);
-    const b = current.streams.filter(stream => stream.codec_type === kind);
-    add(checks, `${kind}.legacy_count`, 1, a.length);
-    add(checks, `${kind}.candidate_count`, 1, b.length);
-    for (const field of kind === 'video' ? VIDEO_FIELDS : AUDIO_FIELDS) {
-      add(checks, `${kind}.${field}`, a[0]?.[field] ?? null, b[0]?.[field] ?? null);
-    }
+    const a = one(old, kind), b = one(current, kind);
+    add(checks, `${kind}.present`, a !== null, b !== null);
+    for (const field of kind === 'video' ? VIDEO_FIELDS : AUDIO_FIELDS) add(checks, `${kind}.${field}`, a?.[field] ?? null, b?.[field] ?? null);
   }
-  const videoA = one(old, 'video'), videoB = one(current, 'video');
-  add(checks, 'video.legacy_decoded_frames', expectedFrames, Number(videoA?.nb_read_frames));
-  add(checks, 'video.candidate_decoded_frames', expectedFrames, Number(videoB?.nb_read_frames));
-  for (const field of ['start_time', 'duration'] as const) {
-    add(checks, `container.${field}`, old.format[field] ?? null, current.format[field] ?? null);
-  }
-  // The shared WebM muxer has no random IDs or wall-clock metadata. Prove
-  // complete byte parity, including video packets and container framing.
-  if (String(old.format.format_name).split(',').includes('webm')) {
-    const a = readFileSync(reference), b = readFileSync(candidate);
-    const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
-    metrics.encodedWebm = { legacyBytes: a.length, candidateBytes: b.length, legacyHash: hash(a), candidateHash: hash(b) };
-    add(checks, 'webm.file_bytes', a.length, b.length);
-    add(checks, 'webm.file_identical', true, a.equals(b));
-  }
-  const frameBytes = Number(videoA?.width) * Number(videoA?.height) * 4;
-  if (videoA && videoB && expectedFrames * frameBytes > LARGE_BYTES) {
-    // Large exports: per-frame hashes of the decoded RGBA (and f32 audio).
-    const a = frameHashes(reference, 'video'), b = frameHashes(candidate, 'video');
-    const unequal = a.filter((hash, i) => hash !== b[i]).length + Math.abs(a.length - b.length);
-    metrics.decodedVideo = { legacyFrames: a.length, candidateFrames: b.length, unequalFrames: unequal };
-    add(checks, 'video.decoded_frame_count', a.length, b.length);
-    add(checks, 'video.decoded_rgba_identical', true, unequal === 0);
-  } else if (videoA && videoB) {
-    const a = decode(reference, 'video'), b = decode(candidate, 'video');
-    const diff = byteDifference(a, b);
-    metrics.decodedVideo = { legacyBytes: a.length, candidateBytes: b.length, ...diff };
-    add(checks, 'video.decoded_rgba_bytes', a.length, b.length);
-    add(checks, 'video.decoded_rgba_identical', true, a.equals(b));
-    add(checks, 'video.legacy_rgba_frame_bytes', expectedFrames * frameBytes, a.length);
-    add(checks, 'video.candidate_rgba_frame_bytes', expectedFrames * frameBytes, b.length);
-  }
-  if (one(old, 'audio') && one(current, 'audio')) {
-    const a = decode(reference, 'audio'), b = decode(candidate, 'audio');
-    metrics.decodedAudio = { legacySamples: a.length / 4, candidateSamples: b.length / 4, ...floatDifference(a, b) };
-    add(checks, 'audio.decoded_f32_bytes', a.length, b.length);
-    add(checks, 'audio.decoded_f32_identical', true, a.equals(b));
-    const oldPackets = packets(reference), newPackets = packets(candidate);
-    const signature = (p: Packet) => `${p.size ?? ''}:${p.data_hash ?? ''}`;
-    const timing = (p: Packet) => `${p.pts ?? ''}:${p.dts ?? ''}:${p.duration ?? ''}`;
-    const encodedA = encodedAudio(reference), encodedB = encodedAudio(candidate);
-    metrics.encodedAudio = { legacyPackets: oldPackets.length, candidatePackets: newPackets.length,
-      legacyBytes: encodedA.length, candidateBytes: encodedB.length,
-      differingPayloadPackets: Math.max(oldPackets.length, newPackets.length) - oldPackets.filter((p, i) => signature(p) === signature(newPackets[i] ?? {})).length,
-      payloadByteDifference: byteDifference(encodedA, encodedB) };
-    add(checks, 'audio.encoded_bytes', encodedA.length, encodedB.length);
-    add(checks, 'audio.encoded_payload_identical', true, encodedA.equals(encodedB));
-    add(checks, 'audio.packet_count', oldPackets.length, newPackets.length);
-    add(checks, 'audio.encoded_packet_timing_identical', true,
-      oldPackets.length === newPackets.length && oldPackets.every((p, i) => timing(p) === timing(newPackets[i]!)));
+  add(checks, 'video.engine_decoded_frames', expectedFrames, Number(one(current, 'video')?.nb_read_frames));
+  // Audio: the same family (PCM, AAC, Opus) and the same length.
+  const family = (s: Stream | null) => String(s?.codec_name ?? '').replace(/^pcm_.*/, 'pcm');
+  add(checks, 'audio.codec_family', family(one(old, 'audio')), family(one(current, 'audio')));
+  const samples = (s: Stream | null) => Math.round(Number(s?.duration ?? 0) * Number(s?.sample_rate ?? 0));
+  const lengths = [samples(one(old, 'audio')), samples(one(current, 'audio'))];
+  metrics.audioSamples = lengths;
+  add(checks, 'audio.length_within_one_opus_frame', true, Math.abs(lengths[0]! - lengths[1]!) <= 960);
+  const video = one(current, 'video');
+  const colour = [video?.color_primaries, video?.color_transfer, video?.color_space, video?.color_range].map(String).join('/');
+  metrics.colour = colour;
+  add(checks, 'video.colour_tags', 'bt709/iec61966-2-1/bt709/tv', colour);
+  if (reference) {
+    const want = sequenceFrames16(reference);
+    const t = psnr(want, frames16(today), opaqueReference), e = psnr(want, frames16(engine), opaqueReference);
+    metrics.psnrDb = { today: t, engine: e };
+    add(checks, 'video.psnr_at_least_todays', true, e >= t);
   }
   return { checks, metrics };
-}
-
-export async function compareCapture(reference: string, candidate: string, kind: 'rgba' | 'wav' | 'f32', expectedBytes?: number): Promise<ParityReport> {
-  const checks: Check[] = [];
-  const metrics: Record<string, unknown> = {};
-  const [a, b] = await Promise.all([readFile(reference).catch(() => null), readFile(candidate).catch(() => null)]);
-  add(checks, `${kind}.legacy_capture_present`, true, a !== null);
-  add(checks, `${kind}.native_capture_present`, true, b !== null);
-  if (!a || !b) return { checks, metrics };
-  const old = kind === 'wav' ? decode(reference, 'audio') : a;
-  const current = kind === 'wav' ? decode(candidate, 'audio') : b;
-  const diff = kind === 'rgba' ? byteDifference(old, current) : floatDifference(old, current);
-  metrics[kind] = { legacyBytes: old.length, nativeBytes: current.length, ...diff };
-  add(checks, `${kind}.capture_bytes`, old.length, current.length);
-  if (expectedBytes !== undefined) {
-    add(checks, `${kind}.legacy_expected_bytes`, expectedBytes, old.length);
-    add(checks, `${kind}.native_expected_bytes`, expectedBytes, current.length);
-  }
-  add(checks, `${kind}.capture_identical`, true, old.equals(current));
-  if (kind === 'wav') {
-    const pcmA = decode(reference, 'wav-s16'), pcmB = decode(candidate, 'wav-s16');
-    metrics.wavS16 = { legacyBytes: pcmA.length, nativeBytes: pcmB.length, ...byteDifference(pcmA, pcmB) };
-    add(checks, 'wav.s16_bytes', pcmA.length, pcmB.length);
-    add(checks, 'wav.s16_identical', true, pcmA.equals(pcmB));
-  }
-  return { checks, metrics };
-}
-
-/** Capture Chromium WebCodecs inputs without changing the frames handed to its encoders. */
-export async function installLegacyWebmCapture(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const w = window as any;
-    if (!w.VideoEncoder || !w.AudioEncoder) throw new Error('WebCodecs encoders are unavailable');
-    const state = { frames: [] as Array<Uint8Array | null>, audio: [] as Uint8Array[], pending: [] as Promise<void>[], errors: [] as string[],
-      videoEncode: w.VideoEncoder.prototype.encode, audioEncode: w.AudioEncoder.prototype.encode };
-    w.__exportParityCapture = state;
-    w.VideoEncoder.prototype.encode = function (frame: any, options: any) {
-      const clone = frame.clone();
-      const index = state.frames.push(null) - 1;
-      const bytes = new Uint8Array(clone.displayWidth * clone.displayHeight * 4);
-      state.pending.push(Promise.resolve(clone.copyTo(bytes, { format: 'RGBA', layout: [{ offset: 0, stride: clone.displayWidth * 4 }] }))
-        .then(() => { state.frames[index] = bytes; })
-        .catch((error: unknown) => { state.errors.push(`VideoFrame.copyTo: ${String(error)}`); })
-        .finally(() => clone.close()));
-      return state.videoEncode.call(this, frame, options);
-    };
-    w.AudioEncoder.prototype.encode = function (data: any) {
-      try {
-        const channels = data.numberOfChannels, frames = data.numberOfFrames;
-        const planes = Array.from({ length: channels }, (_, c) => {
-          const plane = new Float32Array(frames);
-          data.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
-          return plane;
-        });
-        const interleaved = new Float32Array(channels * frames);
-        for (let i = 0; i < frames; i++) for (let c = 0; c < channels; c++) interleaved[i * channels + c] = planes[c]![i]!;
-        state.audio.push(new Uint8Array(interleaved.buffer));
-      } catch (error) { state.errors.push(`AudioData.copyTo: ${String(error)}`); }
-      return state.audioEncode.call(this, data);
-    };
-  });
-}
-
-export async function saveLegacyWebmCapture(page: Page, directory: string): Promise<string[]> {
-  const result = await page.evaluate(async () => {
-    const w = window as any, state = w.__exportParityCapture;
-    if (!state) throw new Error('WebCodecs capture was not installed');
-    w.VideoEncoder.prototype.encode = state.videoEncode;
-    w.AudioEncoder.prototype.encode = state.audioEncode;
-    delete w.__exportParityCapture;
-    await Promise.all(state.pending);
-    const base64 = (bytes: Uint8Array) => {
-      let text = '';
-      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-      return btoa(text);
-    };
-    return { video: state.frames.filter((frame: Uint8Array | null): frame is Uint8Array => frame !== null).map(base64),
-      audio: state.audio.map(base64), errors: state.errors as string[] };
-  });
-  await Promise.all([
-    writeFile(path.join(directory, 'legacy.rgba'), Buffer.concat(result.video.map((part: string) => Buffer.from(part, 'base64')))),
-    writeFile(path.join(directory, 'legacy.f32'), Buffer.concat(result.audio.map((part: string) => Buffer.from(part, 'base64')))),
-  ]);
-  return result.errors;
 }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -6,23 +6,21 @@ import { expect, test, type TestInfo } from '@playwright/test';
 
 import { launchApp, type LaunchedApp } from './helpers/app';
 import { requestJobEngine } from './helpers/job-engine';
-import { compareCapture, compareExports, installLegacyWebmCapture, saveLegacyWebmCapture,
-  type ParityReport } from './helpers/export-encoding-parity';
+import { compareExports, type ParityReport } from './helpers/export-encoding-parity';
 import { importFixture } from './helpers/media';
 
-/* EXPORT-1 (export encoding parity): for the same settings, an export with
-   Use New Engine on must hand today's encoders today's frames and samples,
-   use today's encoders and settings, and decode to today's pictures and
-   samples with today's stream properties. Each fixture exports every format
-   twice with the setting off (today against itself: its own variance) and
-   once with it on, then compares the encoder inputs (captured at the
-   encoder boundary in hidden test launches), the decoded media, the stream
-   properties, the encoded audio bytes, and the export time. */
+/* G-X1 (docs/engine/gate-policy.md; replaces EXPORT-1's byte identity with
+   today's encoders, X-A2): for the same settings, an export with Use New
+   Engine on keeps today's stream properties, and its decoded pictures are at
+   least as close to the reference (the engine's lossless 16-bit PNG render of
+   the same frames, exported alongside) as today's export. Each fixture exports
+   every format with the setting off and on, and the large fixture twice with
+   it on for the export time (pending a quiet machine for its verdict). */
 
 type Format = { id: string; format: 'prores' | 'mp4' | 'webm'; alpha: boolean; extension: string };
 type Mode = 'legacy' | 'native';
 type Fixture = { name: 'basic' | 'automation' | 'advanced' | 'large'; width: number; height: number; fps: number; dur: number; capture: boolean };
-type Exported = { file: string; captures: Record<string, string>; elapsedMs: number; load?: { before: number[]; after: number[] }; statuses: Array<{ state: string; routed?: boolean; error?: string }> };
+type Exported = { file: string; elapsedMs: number; load?: { before: number[]; after: number[] }; statuses: Array<{ state: string; routed?: boolean; error?: string }> };
 
 const FORMATS: Format[] = [
   { id: 'prores', format: 'prores', alpha: false, extension: '.mov' },
@@ -42,10 +40,6 @@ const FIXTURES: Fixture[] = [
 ];
 
 const frames = (f: Fixture) => Math.round(f.dur * f.fps);
-const captureNames = (mode: Mode, format: Format): string[] => {
-  const prefix = mode === 'legacy' ? 'legacy' : 'native';
-  return [`${prefix}.rgba`, format.format === 'webm' ? `${prefix}.f32` : `${prefix}.wav`];
-};
 
 async function engineReady(session: LaunchedApp): Promise<void> {
   // The job utility starts on first demand (enginemem).
@@ -117,52 +111,29 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
 }
 
 async function runExport(session: LaunchedApp, mode: Mode, format: Format, fixture: Fixture, serial: number,
-  root: string, captureDir: string | null): Promise<Exported> {
+  root: string, reference = false): Promise<Exported> {
   const loadBefore = os.loadavg();
-  const basename = `${mode}-${format.id}-${serial}`;
-  const file = path.join(root, basename + format.extension);
-  const names = captureNames(mode, format);
-  if (captureDir) await Promise.all(names.map(name => rm(path.join(captureDir, name), { force: true })));
-  const webmCapture = !!captureDir && mode === 'legacy' && format.format === 'webm';
-  if (webmCapture) await installLegacyWebmCapture(session.page);
+  const basename = `${mode}-${reference ? 'reference' : format.id}-${serial}`;
+  const file = path.join(root, basename + (reference ? '' : format.extension));
   await session.app.evaluate(({ dialog }, output) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: output });
   }, file);
   if (mode === 'native') await session.page.evaluate(() => { (window as any).__parityStatuses = []; });
-  let webmErrors: string[] = [];
-  let run: { result: { cancelled?: boolean; error?: string }; elapsedMs: number } | undefined;
-  try {
-    run = await session.page.evaluate(async ({ selected, alpha, fps }) => {
-      const PM = (window as any).PM;
-      const started = performance.now();
-      const result = await PM.Export.run({ format: selected, scale: 1, fps,
-        range: 'all', quality: 'high', mblur: false, alpha, audio: true });
-      while (PM.Export.busy) await new Promise(resolve => setTimeout(resolve, 20));
-      return { result, elapsedMs: performance.now() - started };
-    }, { selected: format.format, alpha: format.alpha, fps: fixture.fps });
-  } finally {
-    if (webmCapture) webmErrors = await saveLegacyWebmCapture(session.page, captureDir!);
-  }
-  if (webmErrors.length) throw new Error(`WebCodecs input capture failed: ${webmErrors.join('; ')}`);
+  const run = await session.page.evaluate(async ({ selected, alpha, fps, reference }) => {
+    const PM = (window as any).PM;
+    const started = performance.now();
+    const result = await PM.Export.run({ format: reference ? 'png' : selected, scale: 1, fps,
+      range: 'all', quality: 'high', mblur: false, alpha, audio: !reference,
+      ...(reference ? { delivery: { highDepth: true } } : {}) });
+    while (PM.Export.busy) await new Promise(resolve => setTimeout(resolve, 20));
+    return { result, elapsedMs: performance.now() - started };
+  }, { selected: format.format, alpha: format.alpha, fps: fixture.fps, reference });
   if (run?.result?.cancelled || run?.result?.error) throw new Error(`${basename}: ${run.result.error ?? 'cancelled'}`);
   if (!(await stat(file).catch(() => null))) throw new Error(`${basename}: output was not written`);
-  const captures: Record<string, string> = {};
-  if (captureDir) {
-    const archived = path.join(root, basename + '-inputs');
-    await mkdir(archived);
-    for (const name of names) {
-      const source = path.join(captureDir, name), destination = path.join(archived, name);
-      if (await stat(source).catch(() => null)) {
-        await rm(destination, { force: true });
-        await rename(source, destination);
-        captures[name] = destination;
-      }
-    }
-  }
   const statuses = mode === 'native'
     ? await session.page.evaluate(() => (window as any).__parityStatuses as Exported['statuses'])
     : [];
-  return { file, captures, elapsedMs: run!.elapsedMs, load: { before: loadBefore, after: os.loadavg() }, statuses };
+  return { file, elapsedMs: run!.elapsedMs, load: { before: loadBefore, after: os.loadavg() }, statuses };
 }
 
 function softReport(label: string, report: ParityReport, all: Record<string, unknown>): void {
@@ -174,31 +145,13 @@ function softReport(label: string, report: ParityReport, all: Record<string, unk
   }
 }
 
-async function comparePair(label: string, reference: Exported, candidate: Exported, format: Format, fixture: Fixture,
-  evidence: Record<string, unknown>): Promise<void> {
+function comparePair(label: string, today: Exported, engine: Exported, reference: Exported | null, fixture: Fixture,
+  evidence: Record<string, unknown>): void {
   try {
-    softReport(`${label}.media`, compareExports(reference.file, candidate.file, frames(fixture)), evidence);
+    softReport(label, compareExports(today.file, engine.file, reference?.file ?? null, frames(fixture), false), evidence);
   } catch (error) {
     evidence[`${label}.mediaError`] = String(error);
     expect.soft(String(error), `${label}: inspect encoded media`).toBe('inspected');
-  }
-  if (!fixture.capture) return;
-  const rawName = format.format === 'webm' ? 'f32' : 'wav';
-  const prefix = (e: Exported) => e.file.includes(`${path.sep}native-`) ? 'native' : 'legacy';
-  const capture = (e: Exported, ext: string) =>
-    e.captures[`${prefix(e)}.${ext}`] ?? path.join(path.dirname(e.file), `missing-${prefix(e)}.${ext}`);
-  try {
-    softReport(`${label}.preencode-rgba`, await compareCapture(capture(reference, 'rgba'), capture(candidate, 'rgba'), 'rgba',
-      frames(fixture) * fixture.width * fixture.height * 4), evidence);
-  } catch (error) {
-    evidence[`${label}.rgbaError`] = String(error);
-    expect.soft(String(error), `${label}: inspect preencode RGBA`).toBe('inspected');
-  }
-  try {
-    softReport(`${label}.preencode-audio`, await compareCapture(capture(reference, rawName), capture(candidate, rawName), rawName), evidence);
-  } catch (error) {
-    evidence[`${label}.audioInputError`] = String(error);
-    expect.soft(String(error), `${label}: inspect preencode audio`).toBe('inspected');
   }
 }
 
@@ -206,19 +159,18 @@ for (const fixture of FIXTURES) {
   test(`export encoding parity: ${fixture.name} project`, async ({}, testInfo: TestInfo) => {
     test.setTimeout(1_800_000);
     const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-encoding-'));
-    const captureDir = fixture.capture ? path.join(root, 'live-inputs') : null;
     const evidence: Record<string, unknown> = { fixture, formats: FORMATS.map(f => f.id), frames: frames(fixture) };
     let legacy: LaunchedApp | undefined, native: LaunchedApp | undefined;
     const old = new Map<string, Exported[]>();
     const current = new Map<string, Exported[]>();
-    const env = (setting: string) => ({ POWERMOVE_NEW_ENGINE: setting, ...(captureDir ? { PM_EXPORT_INPUT_CAPTURE_DIR: captureDir } : {}) });
+    const references = new Map<string, Exported>();
+    const env = (setting: string) => ({ POWERMOVE_NEW_ENGINE: setting });
     try {
-      if (captureDir) await mkdir(captureDir);
       legacy = await launchApp({ userData: path.join(root, 'legacy-profile'), env: env('0') });
       await project(legacy, fixture);
-      for (const format of FORMATS) for (let serial = 0; serial < 2; serial++) {
+      for (const format of FORMATS) for (let serial = 0; serial < 1; serial++) {
         try {
-          const exported = await runExport(legacy, 'legacy', format, fixture, serial, root, captureDir);
+          const exported = await runExport(legacy, 'legacy', format, fixture, serial, root);
           old.set(format.id, [...(old.get(format.id) ?? []), exported]);
         } catch (error) {
           expect.soft(String(error), `legacy ${format.id} export ${serial}`).toBe('completed');
@@ -240,11 +192,20 @@ for (const fixture of FIXTURES) {
           w.__parityStatuses.push({ state: status.state, routed: status.routed, error: status.error });
         });
       });
-      // Timing: two engine exports when there are no captures.
+      // Timing: two engine exports of the large fixture.
       const nativeRuns = fixture.capture ? 1 : 2;
+      // The reference: the engine's 16-bit PNG render of the same frames,
+      // with and without alpha (small fixtures; the large one is timing).
+      if (fixture.capture) for (const alpha of [false, true]) {
+        try {
+          references.set(String(alpha), await runExport(native, 'native', { ...FORMATS[0]!, alpha }, fixture, alpha ? 1 : 0, root, true));
+        } catch (error) {
+          expect.soft(String(error), `reference PNG (alpha ${alpha})`).toBe('completed');
+        }
+      }
       for (const format of FORMATS) for (let serial = 0; serial < nativeRuns; serial++) {
         try {
-          const exported = await runExport(native, 'native', format, fixture, serial, root, captureDir);
+          const exported = await runExport(native, 'native', format, fixture, serial, root);
           current.set(format.id, [...(current.get(format.id) ?? []), exported]);
           expect.soft(exported.statuses.some(status => status.state === 'done'), `${format.id}: native completion status`).toBe(true);
           expect.soft(exported.statuses.some(status => status.routed), `${format.id}: no routed fallback`).toBe(false);
@@ -253,19 +214,15 @@ for (const fixture of FIXTURES) {
           expect.soft(String(error), `native ${format.id} export ${serial}`).toBe('completed');
         }
       }
-      const encoderFrames = await native.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.exportEncoders?.frames);
-      evidence.encoderFrames = encoderFrames;
-      expect.soft(encoderFrames, 'desktop WebM must use GPU frames without CPU pixel transport').toEqual({ cpu: 0, gpu: frames(fixture) * nativeRuns });
       for (const format of FORMATS) {
         const pair = old.get(format.id) ?? [], candidates = current.get(format.id) ?? [];
-        if (pair.length < 2 || !candidates.length) continue;
-        await comparePair(`${format.id}.today-repeat`, pair[0]!, pair[1]!, format, fixture, evidence);
-        await comparePair(`${format.id}.engine`, pair[0]!, candidates[0]!, format, fixture, evidence);
+        if (!pair.length || !candidates.length) continue;
+        comparePair(`${format.id}.engine`, pair[0]!, candidates[0]!, references.get(String(format.alpha)) ?? null, fixture, evidence);
         const times = { todayMs: pair.map(e => Math.round(e.elapsedMs)), engineMs: candidates.map(e => Math.round(e.elapsedMs)), todayLoad: pair.map(e => e.load), engineLoad: candidates.map(e => e.load) };
         evidence[`${format.id}.time`] = times;
         if (!fixture.capture) {
-          // Export time must not get slower than today: the engine's best
-          // against today's best (both runs warm after the first).
+          // Export time must not get slower than today (pending a quiet
+          // machine for its verdict; the numbers are in metrics.json).
           expect.soft(Math.min(...times.engineMs), `${format.id}: engine export time vs today`).toBeLessThanOrEqual(Math.min(...times.todayMs));
         }
         await testInfo.attach(`today-${format.id}`, { path: pair[0]!.file });

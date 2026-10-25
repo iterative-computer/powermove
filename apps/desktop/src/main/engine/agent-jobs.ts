@@ -88,7 +88,6 @@ export interface AgentJobsEngine {
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
   /** Starts only the hidden WebM encoder window while a user snapshot opens. */
-  warmExportEncoder?(): void;
   /** Marks a job session as a draft render (offline media from proxies). */
   setDraftSession?(session: number, draft: boolean): void;
 }
@@ -736,7 +735,6 @@ export class AgentJobs {
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
-    if (settings.format.kind === 'webm' && settings.alpha === 'none') this.options.engine.warmExportEncoder?.();
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
     // Queue ownership is for status delivery; seed ownership follows the
     // window that queued this snapshot while that renderer still exists.

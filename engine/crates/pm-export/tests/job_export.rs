@@ -208,7 +208,7 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             WireAlpha::None,
             "mov",
             "apch",
-            "in24",
+            "lpcm",
         ),
         (
             "4444",
@@ -218,7 +218,7 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             WireAlpha::Straight,
             "mov",
             "ap4h",
-            "in24",
+            "lpcm",
         ),
         (
             "h264",
