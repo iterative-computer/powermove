@@ -82,6 +82,33 @@ function applyLook(scene: THREE.Scene, look: { wireframe?: boolean; xray?: boole
   };
 }
 
+// Material slots: the document's per-group materials, as the scene schema
+// stores them and the native pass draws them (slot i shades geometry group
+// i; a group without a slot draws nothing, as Three.js skips it). The
+// current SceneRuntime no longer applies slots or authored mesh groups, so
+// this path builds them from the authored values.
+function applySlots(runtime: any, scene: any) {
+  for (const node of scene.objects) {
+    if (!node.slots?.length || node.useSourceMaterials) continue;
+    const object = runtime.objects.get(node.id);
+    object?.traverse((child: any) => {
+      if (!child.isMesh || child.userData.missing) return;
+      // An authored mesh's groups select its slots.
+      if (!child.geometry.groups.length) for (const group of node.source?.mesh?.groups ?? [])
+        child.geometry.addGroup(group.start, group.count, group.materialIndex);
+      for (const old of Array.isArray(child.material) ? child.material : [child.material]) old.dispose();
+      child.material = node.slots.map((slot: any) => {
+        const m = Object.fromEntries(Object.entries<any>(slot.material.p).map(([k, v]) => [k, v.v]));
+        const transparent = m.opacity < 1;
+        return new THREE.MeshStandardMaterial({ name: slot.name, color: m.color, roughness: m.roughness,
+          metalness: m.metalness, emissive: m.emissive, emissiveIntensity: m.emissiveIntensity,
+          opacity: m.opacity, transparent, depthWrite: !transparent,
+          side: slot.material.doubleSided ? THREE.DoubleSide : THREE.FrontSide });
+      });
+    });
+  }
+}
+
 // A WebGL line remains one framebuffer pixel wide when the target grows.
 // For wireframe, points and lines, 8x dimensions would shrink that authored
 // width to 1/8 after resolve. Integrate 8x8 subpixel camera jitter at the
@@ -110,6 +137,7 @@ async function renderCase(c: any) {
   const time = c.time ?? 0;
   runtime.sync(c.scene, (id: string) => assets.get(id) ?? null, (p: any) => p.v,
     time, true, c.animationTimes ? (id: string) => c.animationTimes[id] ?? time : undefined);
+  applySlots(runtime, c.scene);
   if (c.matrices) for (const [id, matrix] of Object.entries<number[]>(c.matrices)) {
     const object = runtime.objects.get(id)!;
     runtime.scene.add(object);
