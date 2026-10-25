@@ -137,6 +137,10 @@ export class SceneRuntime {
         if (object) this.remove(node.id,object);
         object=this.makeObject(node);this.objects.set(node.id,object);this.sources.set(node.id,source);this.assetRefs.set(node.id,asset);
         this.scene.add(object);
+      } else if (object.userData.missing && 'assetId' in node.source) {
+        // `warnings` is refreshed each sync, while missing placeholders are
+        // cached. Keep their semantic warning visible for every displayed frame.
+        this.warnings.push(`Missing model: ${node.source.assetId}`);
       }
       object.name=node.name;object.userData.sceneId=node.id;
       const v = values(node.p,`o.${node.id}`);

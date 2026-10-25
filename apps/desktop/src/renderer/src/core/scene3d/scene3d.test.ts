@@ -184,6 +184,20 @@ describe('individual 3D layers and guarded edits',()=>{
 });
 
 describe('shared render graph, camera projection and picking',()=>{
+  it('keeps a missing model warning while its placeholder is cached, then clears it on recovery',()=>{
+    const runtime=new SceneRuntime(),scene=parseScene({objects:[{id:'model',source:{assetId:'missing_model'}}]});
+    runtime.sync(scene,()=>null);
+    const placeholder=runtime.objects.get('model')!;
+    expect(placeholder.userData.missing).toBe(true);
+    expect(runtime.warnings).toEqual(['Missing model: missing_model']);
+    runtime.sync(scene,()=>null);
+    expect(runtime.objects.get('model')).toBe(placeholder);
+    expect(runtime.warnings).toEqual(['Missing model: missing_model']);
+    runtime.sync(parseScene({objects:[{id:'model',source:{primitive:'box'}}]}),()=>null);
+    expect(runtime.objects.get('model')).not.toBe(placeholder);
+    expect(runtime.warnings).toEqual([]);
+    runtime.dispose();
+  });
   it('uses depth-aware picking and object bounds instead of a full-screen rectangle',()=>{
     const runtime=new SceneRuntime(),scene=parseScene({...createScene(),camera:{p:{x:0,y:0,z:6}},objects:[createObject('cube')]});
     runtime.sync(scene);runtime.resizeCamera(1920,1080);
