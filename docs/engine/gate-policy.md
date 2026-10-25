@@ -108,7 +108,13 @@ on every surface, holding the last source frame without browser seek padding.
   source-over, which keeps the light an effect writes at zero alpha). A value the
   formula leaves open (a Posterize level at a storage boundary, hash noise in Grain,
   Displace and Gradient's dither) is judged by the nearest value it allows and classed
-  as resampled. Effects on raster images stay unreferenced with the image.
+  as resampled. Effects on raster images stay unreferenced with the image. The four
+  built-in transitions (`pm_reference::effects::transition`) run on the frame: the
+  stack below the layer and the stack with it.
+- **Text** (`support::text_group_reference`): a text layer's built-in effects run on
+  its outline reference after its masks, its transition on the frame, and motion
+  blur as the additive sum of its samples, open by what each store into the working
+  format may lose.
 - **The effect proof** (`tests/effect_proof.rs`) proves every corpus chain on every
   layer type: the f64 chain on the engine's own render without effects equals its
   render with them within 1 CV at float depth (the GPU's bilinear fractions).
