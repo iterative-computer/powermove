@@ -400,8 +400,7 @@ impl TextGpu {
         // Each text module has one entry point. Metal's shader translation
         // can borrow its IR directly, and plain glyphs never compile the
         // polygon clipping functions used only by bitmap images. Fragment
-        // modules are made per target format when their pipeline is first
-        // built (`fragment_source`).
+        // modules are made per target format (`fragment_source`).
         let common = include_str!("../shaders/text_common.wgsl");
         let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render text quad"),
@@ -496,13 +495,19 @@ impl TextGpu {
             let device = device.clone();
             let vertex = vertex.cloned();
             let layout = layout.clone();
-            crate::pipelines::LazyRenderPipeline::new(move || {
-                let fragment = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = move |device: &wgpu::Device| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
                     source: wgpu::ShaderSource::Wgsl(
                         fragment_source(body, paint, fs, format).into(),
                     ),
-                });
+                })
+            };
+            // The working format's (RGBA16F) module is made now, as every
+            // text module was; an RGBA32F one when a 32-bit frame needs it.
+            let ready = (format == wgpu::TextureFormat::Rgba16Float).then(|| module(&device));
+            crate::pipelines::LazyRenderPipeline::new(move || {
+                let fragment = ready.clone().unwrap_or_else(|| module(&device));
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(fs),
                     layout: Some(&layout),
