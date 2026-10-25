@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { makePM } from '../__tests__/make-pm';
+import { MAX_DEFER_MS } from '../../media/activity';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -15,12 +16,14 @@ function posterRegistry(): {
   put: ReturnType<typeof vi.fn>;
   checkpoint: ReturnType<typeof vi.fn>;
   posterBlob: Blob;
+  drawImage: ReturnType<typeof vi.fn>;
 } {
   let nextUrl = 0;
   const posterBlob = new Blob(['poster'], { type: 'image/webp' });
+  const drawImage = vi.fn();
   const canvas: any = {
     width: 0, height: 0,
-    getContext: () => ({ drawImage: vi.fn() }),
+    getContext: () => ({ drawImage }),
     toBlob: (callback: (blob: Blob) => void) => callback(posterBlob),
   };
   vi.stubGlobal('window', {
@@ -43,7 +46,7 @@ function posterRegistry(): {
   PM.MediaImport.fingerprint = vi.fn(async () => 'fingerprint');
   const put = vi.fn(async () => true);
   PM.MediaStore = { put, get: vi.fn(async () => null) };
-  return { PM, put, checkpoint, posterBlob };
+  return { PM, put, checkpoint, posterBlob, drawImage };
 }
 
 function imageFile(name = 'photo.png') {
@@ -51,6 +54,35 @@ function imageFile(name = 'photo.png') {
 }
 
 describe('raster media posters', () => {
+  it.each(['import', 'replace', 'restore'])('uses only engine source pixels for native %s posters', async operation => {
+    const { PM, put, posterBlob, drawImage } = posterRegistry();
+    const poster = vi.fn(async () => posterBlob);
+    (PM as any).EngineSourceMedia = { poster };
+    drawImage.mockImplementation(() => { throw new Error('Legacy poster capture invoked'); });
+    try {
+      let id: string;
+      if (operation === 'import') id = (await PM.assets.add(imageFile())).id;
+      else {
+        id = 'native-image';
+        PM.proj.assets[id] = { id, name: 'old.png', kind: 'image', storageKey: 'media:old', persisted: true };
+        if (operation === 'replace') {
+          PM.assets.map.set(id, { id, name: 'old.png', kind: 'image', w: 100, h: 100, el: { close: vi.fn() } });
+          await PM.assets.replace(id, imageFile('new.png'));
+        } else {
+          vi.useFakeTimers();
+          PM.MediaStore.get = vi.fn(async (value: any) => typeof value === 'object' ? imageFile() : null);
+          await PM.assets.restoreProject(PM.proj);
+          await vi.runAllTimersAsync();
+        }
+      }
+      await vi.waitFor(() => expect(poster).toHaveBeenCalledWith(id));
+      // Import and replace resolve without the poster; its store and
+      // document writes follow once media rests (at most MAX_DEFER_MS).
+      await vi.waitFor(() => expect(PM.proj.assets[id].poster).toBe(true), { timeout: MAX_DEFER_MS + 1_500 });
+      expect(drawImage).not.toHaveBeenCalled();
+      expect(put).toHaveBeenCalledWith(expect.stringMatching(/:poster$/), posterBlob, expect.objectContaining({ type: 'image/webp' }));
+    } finally { PM.hist.clear(); PM.assets.clear(); }
+  });
   it('persists an imported poster beside the source and records it in asset metadata', async () => {
     const { PM, put, posterBlob } = posterRegistry();
     const file = imageFile();

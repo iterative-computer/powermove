@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
 import type { Request, Response, SnapshotViewer } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
-import { MAX_BLENDER_WAIT_MS, MAX_FALLBACK_BYTES, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, fallbackBudgetBytes, validSnapshotRequest, type SnapshotEngine } from './snapshots';
+import { MAX_BLENDER_WAIT_MS, MAX_FALLBACK_BYTES, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, sourceVideoByteLength, fallbackBudgetBytes, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
 import { decode, encode } from './msgpack';
 
@@ -55,6 +55,32 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
+  it('validates source identity, fit, color and source time', () => {
+    const source = { kind: 'source' as const, asset: 'clip', fit: 'contain' as const, color: 'display' as const };
+    expect(validSnapshotRequest(request({ target: source, time: 0 }))).toBe(true);
+    expect(validSnapshotRequest(request({ target: { ...source, color: 'compositor' }, time: 0, class: 'async', pixels: 'straight' }))).toBe(true);
+    expect(validSnapshotRequest(request({ target: { ...source, color: 'compositor' }, time: 0 }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: source, time: -1 }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: { ...source, asset: '' } }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: { ...source, fit: 'other' as never } }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: { ...source, color: 'other' as never } }))).toBe(false);
+  });
+
+  it('cancels only the originating window snapshot and forwards its signal', async () => {
+    let pending!: AbortSignal;
+    const e = engine(async () => { throw new Error('unused'); });
+    e.request = async (_process, _body, _session, _revision, signal) => {
+      pending = signal!;
+      return new Promise((_resolve, reject) => signal!.addEventListener('abort', () => reject(new RemoteError({ code: 'cancelled', message: 'Cancelled.', scope: { kind: 'session' } } as never)), { once: true }));
+    };
+    const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
+    const result = service.snapshot(9, request({}, { requestId: 'one' }));
+    service.cancel(10, 'one'); expect(pending.aborted).toBe(false);
+    service.cancel(9, 'one');
+    expect(await result).toMatchObject({ status: 'failed', code: 'cancelled' });
+    expect(service.status().outstanding).toBe(0);
+  });
+
   it('validates pinned viewer captures at the original backing size and rejects malformed cameras', () => {
     const viewer: SnapshotViewer = { viewSeq: 19, canvas: { width: 4, height: 2, crop: { x: 40, y: 20, width: 100, height: 50 }, css: { x: 5, y: 6, width: 200, height: 100 } },
       view: { camera: { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: -100, far: 100 } }, shading: 'solid', xray: true, localView: ['cube'] } };
@@ -151,6 +177,41 @@ describe('SnapshotService', () => {
     expect(reply).toMatchObject({ status: 'rendered', revision: 41, viewSeq: 3, width: 4, height: 2, pixels: 'opaque' });
     expect(reply.status === 'rendered' && reply.data).toEqual(pixels);
     expect(e.sent[0]).toMatchObject({ body: { type: 'snapshot', renderer: 33, session: 5 }, revision: 41 });
+  });
+
+  it('uses distinct delivery stamps for consecutive coded frames even at one clock tick', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(42);
+    try {
+      const e = engine(async () => ({ ...rendered({ kind: 'inline', bytes: new Uint8Array(6) }, 2, 2),
+        pixels: 'straight', video: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } }) as Response);
+      const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
+      const capture = () => service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
+      expect(await capture()).toMatchObject({ status: 'rendered', videoPlanes: { timestamp: 42000 } });
+      expect(await capture()).toMatchObject({ status: 'rendered', videoPlanes: { timestamp: 42001 } });
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each([
+    [{ format: 'nv12', primaries: 'bt470bg', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 6],
+    [{ format: 'i420a', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 10],
+    [{ format: 'i422', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 8],
+    [{ format: 'i420p10', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' }, 12],
+    [{ format: 'rgba', primaries: 'bt709', transfer: 'srgb', matrix: 'rgb', range: 'full' }, 16]
+  ])('returns %o frames as WebCodecs planes for the window', async (video, bytes) => {
+    const planes = new Uint8Array(bytes);
+    const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
+    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, log: () => {} });
+    const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
+    expect(reply).toMatchObject({ status: 'rendered', videoPlanes: { ...video, timestamp: expect.any(Number) }, data: planes });
+    const ordinary = await service.snapshot(9, request());
+    expect(ordinary).toMatchObject({ status: 'failed', code: 'invalidMessage' });
+  });
+
+  it('refuses retired IOSurface layouts and unknown colour tags', () => {
+    for (const format of ['nv16', 'p010le']) expect(() => sourceVideoByteLength(2, 2, { format, primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' })).toThrow('format');
+    expect(() => sourceVideoByteLength(2, 2, { format: 'nv12', primaries: 'bt709', transfer: 'private', matrix: 'bt709', range: 'limited' })).toThrow('colour tags');
+    expect(sourceVideoByteLength(3, 3, { format: 'i422', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' })).toBe(21);
+    expect(sourceVideoByteLength(3, 3, { format: 'i420p10', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' })).toBe(34);
   });
 
   it('maps shared-memory results once through the bridge', async () => {

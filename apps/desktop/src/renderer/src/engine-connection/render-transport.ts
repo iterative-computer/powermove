@@ -93,10 +93,14 @@ export type EngineSnapshotOptions = {
    *  frame an earlier capture prepared or fails with today's error. Async
    *  and idle frames only; ignored with `draft3d`. */
   prepareBlender?: boolean;
+  /** Cancel an asynchronous source request while queued or decoding. */
+  signal?: AbortSignal;
   /** A layer's raster instead of the frame (`render.raster` base pixels).
    *  `content`: the layer object the caller passed, as JSON, when it is not
    *  the document's own (a wrapper's modified copy). */
   layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null; content?: Uint8Array | null };
+  /** Original media at source time, without composition effects or transforms. */
+  source?: { asset: string; fit?: 'stretch' | 'contain' | 'cover'; color?: 'display' | 'interpreted' | 'compositor' };
 };
 
 /** A rendered snapshot. `data` is RGBA8, top-down, in `pixels`'s encoding. */
@@ -104,6 +108,8 @@ export type EngineSnapshot = {
   width: number;
   height: number;
   data: Uint8ClampedArray;
+  /** Source monitor video: `data` holds these decoded planes, not RGBA. */
+  videoPlanes?: import('../../../shared/engine-protocol').SourceVideoFrame & { timestamp: number };
   pixels: SnapshotPixels;
   revision: number;
   viewSeq: number | null;
@@ -281,7 +287,7 @@ export type CompatAnswerOptions = { fresh?: boolean; layer?: string; prepared?: 
 export type RenderTransportOptions = {
   /** CPU hidden tabs use host-owned document sessions for every snapshot. */
   documentOnly?: boolean;
-  native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
+  native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'cancelSnapshot' | 'onCompatAsk' | 'answerCompat'>;
   /** The session snapshots are taken of (the newest viewer session). */
   session: () => TransportSession | null;
   /** A producer threw while answering a frame's need (today's failed frame). */
@@ -959,10 +965,12 @@ export class EngineRenderTransport {
       composition: options.composition ?? this.options.composition(),
       time: ticks(time),
       outputSize: { width, height },
-      target: layer
+      target: options.source
+        ? { kind: 'source', asset: options.source.asset, fit: options.source.fit ?? 'stretch', color: options.source.color ?? 'display' }
+        : layer
         ? { kind: 'layer', layer: layer.id, scale: layer.scale, crop: layer.crop ?? null, content: layer.content ?? null }
         : { kind: 'frame', motionBlurSamples: Math.max(0, Math.min(256, Math.round(options.motionBlurSamples ?? 0))), background: options.background !== false, draft3d: options.draft3d === true },
-      captionsHidden: !layer && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
+      captionsHidden: !layer && !options.source && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
       pixels: options.pixels ?? 'opaque',
       class: cls,
       viewSeq: options.viewer?.viewSeq ?? this.options.viewSeq(),
@@ -976,7 +984,7 @@ export class EngineRenderTransport {
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
     const data = new Uint8ClampedArray(reply.data.buffer, reply.data.byteOffset, reply.data.byteLength);
-    return { width: reply.width, height: reply.height, data, pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
+    return { width: reply.width, height: reply.height, data, ...(reply.videoPlanes ? { videoPlanes: reply.videoPlanes } : {}), pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
   }
 
   private fail(error: unknown, where: string): EngineSnapshotError {
@@ -1120,6 +1128,7 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot exceeded ${MAX_DEPENDENCY_PHASES} renderer dependency phases.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
@@ -1238,7 +1247,7 @@ export class EngineRenderTransport {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
         const began = performance.now();
-        const reply = await this.admitted(cls, () => native.snapshot!(request));
+        const reply = await this.admitted(cls, () => this.askSnapshot(request, options.signal));
         this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
         if (reply.status === 'rendered') {
           this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));
@@ -1269,9 +1278,19 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot exceeded ${MAX_DEPENDENCY_PHASES} renderer dependency phases.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
+  }
+
+  private async askSnapshot(request: EngineSnapshotRequest, signal?: AbortSignal): Promise<EngineSnapshotReply> {
+    if (signal?.aborted) throw new EngineSnapshotError('cancelled', 'The source request was cancelled.');
+    const requestId = crypto.randomUUID();
+    const cancel = () => { void this.options.native.cancelSnapshot?.(requestId); };
+    signal?.addEventListener('abort', cancel, { once: true });
+    try { return await this.options.native.snapshot!({ ...request, requestId }); }
+    finally { signal?.removeEventListener('abort', cancel); }
   }
 
   private async documentSnapshot(options: EngineSnapshotOptions, cls: SnapshotClass): Promise<EngineSnapshot> {
@@ -1284,8 +1303,8 @@ export class EngineRenderTransport {
       let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
       let svgPixels: { key: SvgRasterKey; data: Uint8Array }[] = [];
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const reply = await this.options.native.snapshot!({ ...this.request(options, cls, uploaded, true, revision), session: null,
-          document: { id: doc.id, revision: body.revision, hash: body.hash, json: body.json }, fallbackPixels, svgPixels });
+        const reply = await this.askSnapshot({ ...this.request(options, cls, uploaded, true, revision), session: null,
+          document: { id: doc.id, revision: body.revision, hash: body.hash, json: body.json }, fallbackPixels, svgPixels }, options.signal);
         fallbackPixels = []; svgPixels = [];
         if (reply.status === 'rendered') { this.stats[cls]++; return this.result(reply); }
         if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
@@ -1309,6 +1328,7 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
@@ -1366,6 +1386,7 @@ export class EngineRenderTransport {
   }
 
   private canvas(snapshot: EngineSnapshot): HTMLCanvasElement {
+    if (snapshot.videoPlanes) throw new EngineSnapshotError('invalidMessage', 'Native source video planes are presented through their video track.');
     const out = this.options.createCanvas?.(snapshot.width, snapshot.height) ?? document.createElement('canvas');
     out.width = snapshot.width;
     out.height = snapshot.height;

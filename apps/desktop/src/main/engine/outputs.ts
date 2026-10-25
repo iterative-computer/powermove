@@ -164,6 +164,12 @@ export class OutputDestinations {
     return handle;
   }
 
+  /** A caller-owned choice is no longer needed after its job has stopped. */
+  releaseChoice(handle: string): void {
+    this.policies.delete(handle);
+    this.options.handles.revoke(handle);
+  }
+
   /** `outputDestination`: creates the temporary file and binds a write handle. */
   async destination(request: OutputDestinationRequest, session: number, port: number): Promise<OutputDestination> {
     validateDestinationRequest(request);

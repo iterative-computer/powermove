@@ -38,11 +38,26 @@ for all of that.
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
 class, viewSeq, viewer?, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 
-- `target`: `frame { motionBlurSamples, background, draft3d }` or
+- `target`: `frame { motionBlurSamples, background, draft3d }`,
+  `source { asset, fit, color }`, or
   `layer { layer, scale, crop, content? }`. `content` is the layer object
   the caller passed, as canonical JSON (at most 4 MiB), when it is not the
   document's own (a raster wrapper's modified copy): the engine draws it in
   the composition in place of layer `layer`.
+- A `source` target reads the asset at non-negative source `time`, independent
+  of the composition, captions, layers, effects, and project color settings.
+  `fit` is `stretch`, `contain`, or `cover`; unused pixels are transparent.
+  `color: display` reads the original source through the session-scoped
+  `sourceRead` capability, and converts
+  video with the native colour reading. It preserves authored source content
+  without reproducing browser colour-conversion errors.
+  `interpreted` reads the frozen original and applies its source interpretation.
+  `compositor` supplies tagged decoded video planes or native-converted sRGB
+  for the source monitor's generated video track.
+  Source SVGs use the Chromium raster exchange below at the final output size,
+  with a source-fit key preserving the fractional fitted rectangle.
+  Missing sources fail by name; no composition or
+  legacy frame substitutes for them.
 - `pixels`: the RGBA8 encoding of the result, rows top-down: `opaque`
   (premultiplied over black, alpha 255: today's `renderOpaqueFrame` and the
   input of `toDataURL('image/jpeg')`), `premultiplied`, `straight` (canvas
@@ -102,6 +117,9 @@ exclusively (mode 0600, `/pm.` and 24 hex digits, 96 random bits). Main maps
 it once (pm-bridge `takePixels`), which unlinks it; the engine unlinks
 segments nobody took after a minute and at shutdown. Electron's IPC carries
 the buffer to the renderer in shared memory again (Mojo big buffers).
+Coded source planes are packed once, from the decoder straight into the
+segment (`shm::publish_with`), in the WebCodecs buffer layout the window's
+`VideoFrame` reads.
 
 ### Invariants
 
@@ -151,6 +169,32 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
    running), `refused` (main's caps), and `needsDocument` (see below).
    `render.snapshot` returns `''` only then, and throws today's error for
    `blenderFailed` as today's capture does.
+
+### Source request cancellation
+
+The asynchronous IPC request may carry a window-scoped `requestId`.
+`engine:snapshot-cancel` cancels only that sender's request, forwarded as the
+protocol's existing `Message::Cancel` for the native request id. Queued
+snapshots are removed and answered `cancelled`. A decode or readback already
+executing finishes before the render thread handles the next command. Source
+monitor seeks cancel the previous frame and reject stale completions before
+painting; closing the monitor cancels its frame and audio voice.
+
+The renderer source service keeps at most 64 MiB of completed frame pixels,
+keyed by project, source content identity and interpretation, source time,
+size, fit, and color. Replacing the source changes the identity; loading a
+project clears frames and poster URLs. Native decoding uses the existing
+renderer media cache.
+
+### Source monitor audio
+
+Session-bound `AudioMessage::SourceMonitor { asset, time, playing, generation }`
+controls an isolated engine source voice. `asset: null` closes it.
+`SourceStatus { asset, time, playing, generation, levels, error? }` reports the
+heard time, channel levels, natural end, and named failures. The renderer
+ignores older generations. Silent video uses an engine host clock; sources
+with audio use the engine output clock. The source monitor and composition
+playback remain mutually exclusive in the existing viewer controls.
 
 ### Sync snapshots the window's session cannot serve
 
@@ -212,6 +256,18 @@ frame's revision. Other sessions and the audio clock continue running. TypeScrip
 gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
 (`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
 `PM.EngineSvgRasters` (`SvgRasters`, with `stats`).
+
+#### Source SVG rasters
+
+`SvgRasterKey.sourceFit?: SourceFit` requests the source monitor's final-size
+Canvas2D pixels. Width and height are the output canvas size; Chromium draws
+the SVG once at the corresponding, potentially fractional fit rectangle.
+These keys are distinct from composition buckets and material maps, append
+`:source:<fit>` to upload and `CompatFrame` keys, and carry top-down
+`rgba8Straight` pixels. The engine preserves them without another fit/filter
+or premultiply/unpremultiply round trip. `sourceFit` and `texture: true`
+cannot be combined. Omitting both fields retains the composition-bucket
+contract and key encoding.
 
 #### SVG material-map uploads
 

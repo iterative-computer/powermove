@@ -101,6 +101,9 @@ export function imageSequenceConverter(binary: string): ConvertSequence {
       '-framerate', String(fps), '-start_number', '0', '-i', pattern,
       '-frames:v', String(count), '-an', '-c:v', 'libvpx-vp9',
       '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
+      // sRGB stills through FFmpeg's BT.601 matrix: say so, so every reader
+      // (the engine's shared reading, Chromium) decodes them the same way.
+      '-colorspace', 'smpte170m', '-color_primaries', 'bt709', '-color_trc', 'iec61966-2-1', '-color_range', 'tv',
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
       '-f', 'webm', '-y', output,
     ], { stdio: ['ignore', 'pipe', 'pipe'] }, 'image sequence encoder');

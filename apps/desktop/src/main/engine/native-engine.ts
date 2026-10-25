@@ -545,13 +545,13 @@ export class NativeEngine {
   /** A request main itself sends to an engine (sessions main opens for
    *  exports and agent snapshots; tests). `revision` is the envelope
    *  revision (an agent frame request's read-your-writes revision). */
-  async request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
-    if (process !== 'job') return this.send(process, body, session, revision);
+  async request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null, signal?: AbortSignal): Promise<Response> {
+    if (process !== 'job') return this.send(process, body, session, revision, signal);
     await this.ensureReady(process);
     this.jobOutstanding++;
     this.touchJob();
     try {
-      return await this.send(process, body, session, revision);
+      return await this.send(process, body, session, revision, signal);
     } finally {
       this.jobOutstanding--;
       this.touchJob();
@@ -560,8 +560,8 @@ export class NativeEngine {
 
   /** A resync the engine's document reader refuses for backpressure is
    *  retried on the same launch (`retryResync`); other requests go once. */
-  private send(process: EngineProcess, body: Request, session: number | null, revision: number | null): Promise<Response> {
-    if (body.type !== 'resync') return this.supervisors[process].request(body, session, revision);
+  private send(process: EngineProcess, body: Request, session: number | null, revision: number | null, signal?: AbortSignal): Promise<Response> {
+    if (body.type !== 'resync') return this.supervisors[process].request(body, session, revision, signal);
     const launch = this.supervisors[process].current;
     return retryResync(() => {
       if (!launch || launch.exiting || this.stopping || this.supervisors[process].current !== launch) throw new Error('The resync engine launch ended.');
@@ -668,6 +668,11 @@ export class NativeEngine {
     const launch = this.supervisors.job.current;
     if (!launch) throw new Error('the job engine is not running');
     return this.outputs.chooseDestination(file, job, session, launch.hostPort, overwrite);
+  }
+
+  /** Retained job sessions release each completed job's output choice now. */
+  releaseOutput(handle: string): void {
+    this.outputs.releaseChoice(handle);
   }
 
   /** Prepare only Chromium's hidden WebM window while the snapshot opens. */

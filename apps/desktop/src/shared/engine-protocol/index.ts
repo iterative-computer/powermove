@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-5f88b17acce289e3";
+export const PROTOCOL_BUILD = "protocol-9a3a143bc1d088e9";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -38,6 +38,7 @@ export type { BlenderStatus } from "./BlenderStatus";
 export type { BlenderSurface } from "./BlenderSurface";
 export type { BlenderThrottle } from "./BlenderThrottle";
 export type { BlenderUse } from "./BlenderUse";
+export type { BrowserRenditionFormat } from "./BrowserRenditionFormat";
 export type { ByteSize } from "./ByteSize";
 export type { Bytes } from "./Bytes";
 export type { CacheKind } from "./CacheKind";
@@ -260,6 +261,9 @@ export type { SnapshotRequest } from "./SnapshotRequest";
 export type { SnapshotResult } from "./SnapshotResult";
 export type { SnapshotTarget } from "./SnapshotTarget";
 export type { SnapshotViewer } from "./SnapshotViewer";
+export type { SourceColor } from "./SourceColor";
+export type { SourceFit } from "./SourceFit";
+export type { SourceVideoFrame } from "./SourceVideoFrame";
 export type { StripLevels } from "./StripLevels";
 export type { SubmitJob } from "./SubmitJob";
 export type { SurfaceDescriptor } from "./SurfaceDescriptor";

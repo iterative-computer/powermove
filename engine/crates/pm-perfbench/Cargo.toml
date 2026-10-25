@@ -17,6 +17,8 @@ serde_json.workspace = true
 png = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Direct dependency exposes the linked FFmpeg dylib directory to build.rs.
+pm-media = { path = "../pm-media" }
 pm-node = { path = "../pm-node" }
 pm-render = { path = "../pm-render" }
 pm-gpu = { path = "../pm-gpu", default-features = false }

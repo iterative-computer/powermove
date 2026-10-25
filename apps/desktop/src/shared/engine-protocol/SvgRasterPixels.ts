@@ -4,7 +4,8 @@ import type { SvgRasterKey } from "./SvgRasterKey";
 
 /**
  * Rows `row .. row + rows` of a raster, in upload-storage order: canvas
- * buckets are top-down premultiplied RGBA8, texture maps are straight
- * RGBA8 after flipY (bottom row first), as the key specifies.
+ * buckets are top-down premultiplied RGBA8, source rasters are top-down
+ * straight RGBA8, and texture maps are straight RGBA8 after flipY (bottom
+ * row first), as the key specifies.
  */
 export type SvgRasterPixels = { key: SvgRasterKey, row: number, rows: number, data: Bytes, };

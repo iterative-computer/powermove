@@ -62,6 +62,56 @@ fn exact_requests_wait_for_their_frame() {
 }
 
 #[test]
+fn source_export_worker_is_exact_and_warms_neighbours_after_a_jump() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let expected = {
+        let svc = DecodeService::new(ServiceConfig {
+            cache_bytes: 0,
+            ..Default::default()
+        });
+        let mut session = svc.session(&src, 99, DecodePurpose::Export).unwrap();
+        [7, 28, 9, 28].map(|n| session.frame(n).unwrap().md5_hex().unwrap())
+    };
+    let svc = service();
+    let viewer = ViewerDecode::with_purpose(svc.clone(), DecodePurpose::Export);
+    let first_gop = src.index.sync_for(src.index.frames[7].sample);
+    let gop_end = (8..src.index.frames.len())
+        .find(|&n| src.index.sync_for(src.index.frames[n].sample) != first_gop)
+        .unwrap_or(src.index.frames.len());
+    let warmed = (gop_end - 1).min(7 + 64);
+    let first = viewer.fetch(&src, 1, 7, Want::Exact).unwrap();
+    assert!(first.exact);
+    eventually("bounded source GOP is cached", || {
+        svc.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[warmed].sample,
+            purpose: DecodePurpose::Export,
+        })
+    });
+    if gop_end < src.index.frames.len() {
+        assert!(!svc.cache().contains(&pm_media::cache::FrameKey {
+            source: src.id,
+            sample: src.index.frames[gop_end].sample,
+            purpose: DecodePurpose::Export,
+        }));
+    }
+    for (index, n) in [7, 28, 9, 28].into_iter().enumerate() {
+        let frame = viewer.fetch(&src, 1, n, Want::Exact).unwrap();
+        assert!(frame.exact);
+        assert_eq!(frame.shown, n);
+        assert_eq!(frame.frame.md5_hex().unwrap(), expected[index]);
+    }
+    assert_eq!(viewer.stats().workers, 1);
+    assert_eq!(viewer.stats().stand_ins, 0);
+    eventually("source neighbours are cached", || viewer.stats().ahead > 0);
+    assert!(
+        !svc.cache()
+            .samples_of(src.id, DecodePurpose::Export)
+            .is_empty()
+    );
+}
+
+#[test]
 fn scrub_requests_show_the_nearest_decoded_frame_then_land_the_exact_one() {
     let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
     let want = sequential(&src);

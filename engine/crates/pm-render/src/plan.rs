@@ -1335,6 +1335,7 @@ fn native_content_quad<'d>(
                         source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
                             key: pm_protocol::svg_raster::SvgRasterKey {
                                 texture: None,
+                                source_fit: None,
                                 content,
                                 width,
                                 height,
@@ -1405,9 +1406,7 @@ fn native_content_quad<'d>(
                     }
                 };
             }
-            let sequence = ty == "video"
-                && (rec("imageSequence").truthy()
-                    || matches!(format.as_str(), "gif" | "webp" | "png" | "apng" | "avif"));
+            let sequence = crate::footage::is_sequence(record);
             if sequence {
                 match crate::media::sequence_rendition(&path) {
                     Ok(true) => {}

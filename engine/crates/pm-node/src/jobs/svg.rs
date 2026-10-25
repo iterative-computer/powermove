@@ -91,7 +91,7 @@ impl SvgRasterSource for HostSvgRasters {
             || frame.width != key.width
             || frame.height != key.height
             || frame.format
-                != if key.texture == Some(true) {
+                != if key.texture == Some(true) || key.source_fit.is_some() {
                     CompatFormat::Rgba8Straight
                 } else {
                     CompatFormat::Rgba8Premultiplied

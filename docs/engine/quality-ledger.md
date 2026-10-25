@@ -151,3 +151,70 @@ the unclipped reference over the same band centers.
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Straight colour is the working float divided by alpha (today: rounded to 8 bits, truncated on unpremultiply, premultiplied and unpremultiplied again by Canvas2D) | 167, 78, 1.7 | 0.50, 0.50, 0.25 | 400,000 random premultiplied pixels |
+
+## Source monitor
+
+Reference: independent f64 Y′CbCr conversion (H.273), the documented SDR
+transfer reading, linear-light primaries and Bradford adaptation into the
+capture's display ICC. `e2e/helpers/source-colour-reference.ts` implements the
+math independently of production. Gate: `engine-source-compositor.spec.ts`.
+Numbers below are CV over flat, opaque RGB samples in the light-theme,
+full-size capture at 0.5 s; the gate also checks dark and intrinsic-size
+captures. Max, p99.9 and mean describe that same sampled population.
+
+| Correction / case | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean |
+|---|---|---|
+| Tagged full-range HD H.264 | 11.801, 11.799, 4.163 | 0.538, 0.494, 0.173 |
+| Untagged HD H.264 | 11.700, 11.700, 4.409 | 0.524, 0.507, 0.196 |
+| Untagged portrait H.264 | 10.568, 8.998, 3.397 | 0.462, 0.453, 0.152 |
+| Partially tagged BT.709 matrix with SD primaries | 26.151, 26.151, 6.111 | 0.513, 0.513, 0.154 |
+| 10-bit HEVC (P010 decode, presented as I420P10) | 8.820, 8.820, 2.760 | 2.054, 2.054, 0.781 |
+| Untagged SD ProRes: today shows its 8-bit VP9 rendition with Rec.709 primaries; the engine converts the original 10-bit 4:2:2 itself and presents sRGB RGBA | 11.085, 11.085, 6.306 | 2.567, 2.567, 0.972 |
+| SD VP9 with alpha (opaque samples) | 11.939, 11.939, 2.385 | 0.490, 0.490, 0.113 |
+| Tagged BT.470BG PAL | 24.744, 24.744, 8.567 | 0.536, 0.529, 0.187 |
+| Untagged 576-line PAL | 26.126, 26.126, 6.550 | 0.536, 0.529, 0.187 |
+| Untagged HD VP9 | 11.849, 11.673, 4.193 | 0.529, 0.509, 0.176 |
+| Untagged image-sequence rendition, BT.601 matrix | 26.802, 26.802, 7.265 | 0.529, 0.524, 0.226 |
+| BT.2020 SDR through the sRGB working gamut | 20.558, 20.558, 6.509 | 12.273, 12.273, 1.446 |
+
+The 8-bit HD corrections remove Chromium's VideoToolbox transfer lift;
+partial tags retain the specified matrix. SD primaries follow VIDEO-SD-1,
+including BT.470BG for 576-line sources. Sequence renditions retain the
+BT.601 matrix used by their encoder.
+
+Residuals remain: Chromium presentation of 10-bit planes exceeds one CV;
+engine-converted frames (original ProRes, BT.2020) reach the display as 8-bit
+sRGB RGBA, which Chromium converts again into the display gamut; and BT.2020
+converted through the sRGB working gamut differs from direct conversion into
+the display gamut. These are measured limitations, not
+reference-accuracy claims. PQ playback is checked for an SDR capture; this
+screen gate does not supply an independent HDR tone-mapping reference.
+
+Fully tagged 8-bit SDR and untagged non-PAL SD H.264 retain their correct
+monitor reading. Interpret Footage uses the same native conversion as a
+composition layer (`source_snapshot`), and an open paused still/video monitor
+repaints Apply, Undo and Redo without seeking (`engine-source-refresh`).
+The source-frame/thumbnail gate independently decodes original media for
+native source consumers and the actual browser rendition for legacy consumers.
+For the solid SD red H.264 fixture at 0, 0.25 and 0.5 s, the f64 sRGB reference
+is `(247.554, 35.881, 0)`. All snapshot RGB channels give these CV distances:
+
+| Source snapshot | Today: max, p99.9, mean | Engine: max, p99.9, mean |
+|---|---|---|
+| H.264 source | 35.881, 35.881, 14.109 | 0.446, 0.446, 0.188 |
+
+The native result rounds to `(248, 36, 0)`. Posters match an independently
+synthesized reference encoded at the shipped WebP quality exactly; inline
+thumbnails retain that poster. Theme captures additionally compare layout and
+ICC-transformed reference colours. This gate requires half-code snapshot
+rounding accuracy, not equality with Chromium's Canvas2D colour bug.
+
+Frame identity at open-GOP boundaries. Reference: FFmpeg's sequential decode
+in presentation order; the shown frame is the one whose interval holds the
+time. Gate: `pm-media/tests/random_access.rs` (`s6_corpus`: every frame of
+open-GOP H.264 and HEVC by random access equals the sequential decode). Units
+are source frames.
+
+| Correction | Today vs reference | Engine vs reference | Cases |
+|---|---|---|---|
+| A seek to a leading picture of a CRA shows that picture (today: the CRA, the next keyframe) | 1 frame (frame 30, the CRA, for frame 29) | 0 | 4K HEVC Main10, keyint 30, open GOP |

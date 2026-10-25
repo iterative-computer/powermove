@@ -883,6 +883,7 @@ pub fn svg_request() -> crate::svg_raster::SvgRasterRequest {
     crate::svg_raster::SvgRasterRequest {
         key: crate::svg_raster::SvgRasterKey {
             texture: None,
+            source_fit: None,
             content: "9f".repeat(32),
             width: 2,
             height: 2,
@@ -1214,6 +1215,7 @@ pub fn responses() -> Vec<Envelope> {
                     payload: crate::snapshot::PixelPayload::Inline {
                         bytes: crate::common::Bytes(vec![0, 0, 0, 255, 255, 255, 255, 255]),
                     },
+                    video: None,
                     origin: [0.0, 0.0],
                     layer_box: None,
                     raster: None,

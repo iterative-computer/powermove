@@ -82,6 +82,9 @@ pub struct ViewDocument {
     /// A batch did not apply; frames wait for the renderer's resync.
     broken: Option<String>,
     media: MediaMap,
+    /// Browser-visible source paths, answered independently of composition
+    /// media so a proxy never changes Interpret Footage or timeline renders.
+    source_media: BTreeMap<String, Option<PathBuf>>,
     media_version: u64,
     /// The session's definitions (contract 10) and their version.
     definitions: Option<(Arc<pm_protocol::definitions::DefinitionSetSnapshot>, u64)>,
@@ -198,6 +201,21 @@ impl ViewDocument {
 
     pub fn media(&self) -> &MediaMap {
         &self.media
+    }
+
+    pub fn source_media(&self, asset: &str) -> Option<Option<PathBuf>> {
+        self.source_media.get(asset).cloned()
+    }
+
+    pub fn set_source_media(&mut self, asset: &str, path: Option<Option<PathBuf>>) {
+        match path {
+            Some(path) => {
+                self.source_media.insert(asset.to_owned(), path);
+            }
+            None => {
+                self.source_media.remove(asset);
+            }
+        }
     }
 
     /// Applies an update from the engine. A batch that does not apply

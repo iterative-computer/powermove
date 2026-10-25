@@ -516,6 +516,7 @@ mod tests {
                 key: pm_protocol::svg_raster::SvgRasterKey {
                     content: "0".repeat(64),
                     texture: None,
+                    source_fit: None,
                     width: 4,
                     height: 4,
                 },

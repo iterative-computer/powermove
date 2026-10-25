@@ -54,7 +54,12 @@ impl Reference {
             .chunks_exact(4)
             .flat_map(|p| {
                 let a = if p[3].is_nan() { f64::NAN } else { 1.0 };
-                [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0), a]
+                [
+                    p[0].clamp(0.0, 1.0),
+                    p[1].clamp(0.0, 1.0),
+                    p[2].clamp(0.0, 1.0),
+                    a,
+                ]
             })
             .collect()
     }
@@ -85,7 +90,13 @@ fn hex(s: &str) -> Option<[f64; 4]> {
 /// along the angle (or the radius × 1.4142) from the pixel center with y up,
 /// colors mixed stop by stop with `smoothstep` (a hard step where two stops
 /// coincide), in E.
-fn gradient(fill: &pm_render::plan::Fill, x: usize, y: usize, w: usize, h: usize) -> Option<[f64; 3]> {
+fn gradient(
+    fill: &pm_render::plan::Fill,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> Option<[f64; 3]> {
     let stops: Vec<([f64; 4], f64)> = fill
         .stops
         .iter()
@@ -183,7 +194,8 @@ fn draw(
     let comp = Comp::resolve(document, composition).map_err(|e| format!("{e:?}"))?;
     let seconds = comp.seconds_at(time.get());
     if background {
-        let fill = pm_render::plan::normalize_fill(comp.member("backgroundFill"), comp.member("bg"));
+        let fill =
+            pm_render::plan::normalize_fill(comp.member("backgroundFill"), comp.member("bg"));
         for y in 0..h {
             for x in 0..w {
                 let c: Rgba = match fill.kind.as_str() {
@@ -206,7 +218,9 @@ fn draw(
     let mut scope = Scope::new(&mut ev, &comp, &comp);
     let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
     let layers: Vec<&Node> = comp.layers().iter().collect();
-    let solo = layers.iter().any(|l| node::truthy(node::member(Some(l), "solo")));
+    let solo = layers
+        .iter()
+        .any(|l| node::truthy(node::member(Some(l), "solo")));
     // Bottom (last) to top (first), with today's skip rules.
     for &layer in layers.iter().rev() {
         let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
@@ -221,7 +235,11 @@ fn draw(
             continue;
         }
         let opacity = scope.num(layer, "opacity", seconds).map_err(fail)? / 100.0;
-        let opacity = if opacity.is_nan() { opacity } else { opacity.clamp(0.0, 1.0) };
+        let opacity = if opacity.is_nan() {
+            opacity
+        } else {
+            opacity.clamp(0.0, 1.0)
+        };
         if opacity <= 0.001 {
             continue;
         }
@@ -233,12 +251,18 @@ fn draw(
             || flag("threeD")
             || pm_render::composite::build::has_masks(&mut scope, layer, seconds).map_err(fail)?
             || scope.has_renderable_effects(layer, seconds).map_err(fail)?
-            || scope.active_transition(layer, seconds, &|_| true).map_err(fail)?.is_some()
+            || scope
+                .active_transition(layer, seconds, &|_| true)
+                .map_err(fail)?
+                .is_some()
             || scope.is_3d_layer(layer).map_err(fail)?
         {
             return Err("mattes, motion blur, 3D, masks, effects or transitions".into());
         }
-        let d = scope.ev.resolve_content(scope.comp, layer, seconds).map_err(fail)?;
+        let d = scope
+            .ev
+            .resolve_content(scope.comp, layer, seconds)
+            .map_err(fail)?;
         let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
         let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
         let world = scope.world_matrix(layer, seconds).map_err(fail)?;
@@ -255,7 +279,13 @@ fn draw(
             // Resampled content no lane models yet: its box (centered on
             // the anchor), grown by a pixel, is unreferenced.
             let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
-            let box_ = fill(&(device * kurbo::Shape::to_path(&rect, 1e-9)), FillRule::NonZero, 1, w, h);
+            let box_ = fill(
+                &(device * kurbo::Shape::to_path(&rect, 1e-9)),
+                FillRule::NonZero,
+                1,
+                w,
+                h,
+            );
             let mut inside = vec![false; w * h];
             for y in box_.y0..box_.y0 + box_.height {
                 for x in box_.x0..box_.x0 + box_.width {
@@ -268,7 +298,8 @@ fn draw(
             }
             continue;
         }
-        let paint = hex(&pm_render::js::string(pm_render::js::get(&d, "color"))).ok_or("solid color")?;
+        let paint =
+            hex(&pm_render::js::string(pm_render::js::get(&d, "color"))).ok_or("solid color")?;
         // Level 2 honors `radius` (at most half of either side); level 1
         // ignores it, as shipped (decision SOLID-RADIUS-1 is open).
         let radius = pm_render::js::get(&d, "radius").to_number();
@@ -277,7 +308,8 @@ fn draw(
         } else {
             0.0
         };
-        let outline = kurbo::Shape::to_path(&kurbo::RoundedRect::new(0.0, 0.0, sw, sh, radius), 1e-9);
+        let outline =
+            kurbo::Shape::to_path(&kurbo::RoundedRect::new(0.0, 0.0, sw, sh, radius), 1e-9);
         let coverage = fill(&(device * outline), FillRule::NonZero, PATH_SAMPLES, w, h);
         let mode = reference_blend(
             pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
@@ -353,7 +385,9 @@ pub fn preview_and_export(
         // The legacy scale of the composition, as the corpus renders it.
         r.scale = None;
         r.motion_blur = motion_blur;
-        let f = renderer.render(document, composition, time, &r, resolver).unwrap();
+        let f = renderer
+            .render(document, composition, time, &r, resolver)
+            .unwrap();
         renderer.read_rgba(&f).unwrap()
     };
     (frame(&preview), frame(&export))

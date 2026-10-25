@@ -28,6 +28,41 @@ pub fn interpretation(record: &pm_model::Node) -> Option<Interpretation> {
     (!interp.is_empty()).then_some(interp)
 }
 
+/// Persisted animated imports can identify their sequence by format even
+/// when older asset records have no `imageSequence` slot metadata.
+pub fn is_sequence(record: &pm_model::Node) -> bool {
+    use pm_eval::node;
+    let member = |name| node::member(Some(record), name);
+    node::is_str(member("kind"), "video")
+        && (node::truthy(member("imageSequence"))
+            || ["gif", "webp", "png", "apng", "avif"]
+                .iter()
+                .any(|format| node::is_str(member("format"), format)))
+}
+
+/// Source-only consumers use the same persisted image-sequence slots as
+/// composition. A conformed rate overrides those slots, as in the planner.
+pub fn source_time(
+    record: Option<&pm_model::Node>,
+    time: pm_protocol::common::Ticks,
+    interpretation: Option<&Interpretation>,
+) -> pm_protocol::common::Ticks {
+    if interpretation.is_some_and(|i| i.frame_rate.is_some()) {
+        return time;
+    }
+    let seconds = time.get() as f64 / pm_time::TICKS_PER_SECOND as f64;
+    record
+        .filter(|record| is_sequence(record))
+        .and_then(|record| crate::media::sequence_playback_time(record, seconds))
+        .and_then(|seconds| {
+            pm_protocol::common::Ticks::new(
+                (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64
+            )
+            .ok()
+        })
+        .unwrap_or(time)
+}
+
 /// What a composition time shows of a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pick {
@@ -46,6 +81,23 @@ pub struct Timing {
 }
 
 impl Timing {
+    /// A source monitor has no composition cadence: retain every field at
+    /// its source time, using the resolved field order and conformed grid.
+    pub fn source(reading: &VideoReading) -> Timing {
+        let order = reading.field_order.value;
+        Timing {
+            fields: FieldPlan {
+                order,
+                output: match order {
+                    pm_media::probe::FieldOrder::TopFirst
+                    | pm_media::probe::FieldOrder::BottomFirst => DeinterlaceOutput::FieldRate,
+                    _ => DeinterlaceOutput::Off,
+                },
+            },
+            conformed: reading.conformed(),
+        }
+    }
+
     pub fn new(src: &MediaSource, reading: &VideoReading, composition: Rate) -> Timing {
         let source_rate = reading.conformed().unwrap_or(src.rate());
         let info = FieldInfo {

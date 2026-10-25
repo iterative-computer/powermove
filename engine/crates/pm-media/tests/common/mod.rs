@@ -82,7 +82,7 @@ pub const PROBE_LIMIT_MS: f64 = 2_000.0;
 const PROBE_HANG_S: u64 = 60;
 
 /// Watches probes in flight (per test thread) and aborts on a hang.
-mod watchdog {
+pub mod watchdog {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::thread::ThreadId;

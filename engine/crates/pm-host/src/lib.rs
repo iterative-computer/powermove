@@ -217,7 +217,8 @@ impl CliHost {
                 })?;
                 Ok((dir, None))
             }
-            CapabilityKind::MediaRead { asset } => {
+            // The CLI has no browser renditions: a source read is the original.
+            CapabilityKind::MediaRead { asset } | CapabilityKind::SourceRead { asset } => {
                 if !asset.is_valid() {
                     return Err(error(ErrorCode::InvalidMessage, "invalid asset id"));
                 }
