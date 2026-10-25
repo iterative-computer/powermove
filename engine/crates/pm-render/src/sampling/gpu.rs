@@ -331,11 +331,12 @@ impl Default for PyramidCache {
 pub(crate) struct Resampler {
     uniform_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
-    mip_layout: wgpu::BindGroupLayout,
+    /// Per [`MIP_FORMATS`] entry: the level above and the level written.
+    mip_layouts: [wgpu::BindGroupLayout; 2],
     trilinear: wgpu::Sampler,
     /// `[format][blend]`: rgba16float, rgba32float, rgba8unorm × over, additive.
     draw: [[crate::pipelines::LazyRenderPipeline; 2]; 3],
-    down: [crate::pipelines::LazyRenderPipeline; 2],
+    down: [crate::pipelines::Lazy<wgpu::ComputePipeline>; 2],
 }
 
 const FORMATS: [wgpu::TextureFormat; 3] = [
@@ -376,10 +377,6 @@ impl Resampler {
             label: Some("pm-render resample"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/resample.wgsl").into()),
         });
-        let mips = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm-render mips"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mips.wgsl").into()),
-        });
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -403,9 +400,26 @@ impl Resampler {
                 texture(2),
             ],
         });
-        let mip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("pm mips"),
-            entries: &[texture(0)],
+        let mip_layouts = MIP_FORMATS.map(|format| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("pm mips"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ..texture(0)
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            })
         });
         let trilinear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pm trilinear clamp"),
@@ -420,11 +434,6 @@ impl Resampler {
         let draw_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pm resample"),
             bind_group_layouts: &[Some(&uniform_layout), Some(&layout)],
-            immediate_size: 0,
-        });
-        let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pm mips"),
-            bind_group_layouts: &[Some(&mip_layout)],
             immediate_size: 0,
         });
         let component = |dst| wgpu::BlendComponent {
@@ -495,12 +504,45 @@ impl Resampler {
                 )
             })
         });
-        let down = MIP_FORMATS
-            .map(|f| pipeline(&mip_pipeline_layout, &mips, "vs_full", "fs_down", f, None));
+        let down = std::array::from_fn(|i| {
+            let device = device.clone();
+            let layout = mip_layouts[i].clone();
+            let (storage, store) = match MIP_FORMATS[i] {
+                wgpu::TextureFormat::Rgba16Float => (
+                    "rgba16float",
+                    "fn store(c: vec4<f32>) -> vec4<f32> { return pm_scene_half_color(c); }",
+                ),
+                _ => ("rgba32float", "fn store(c: vec4<f32>) -> vec4<f32> { return c; }"),
+            };
+            crate::pipelines::Lazy::new(move || {
+                let source = format!(
+                    "{}\n{store}\n{}",
+                    crate::scene3d::NEAREST_HALF_WGSL,
+                    include_str!("../shaders/mips.wgsl").replace("STORE", storage)
+                );
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("pm-render mips"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("pm mips"),
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                });
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("cs_down"),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some("cs_down"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            })
+        });
         Resampler {
             uniform_layout,
             layout,
-            mip_layout,
+            mip_layouts,
             trilinear,
             draw,
             down,
@@ -548,14 +590,23 @@ impl Resampler {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                usage: wgpu::TextureUsages::STORAGE_BINDING
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             (texture, levels)
         });
         let i = format_index(format);
-        let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("pm pyramid"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(self.down[i].get());
+        let mut above = source.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
         for level in 0..levels - 1 {
             let target = texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("pm pyramid level"),
@@ -565,34 +616,24 @@ impl Resampler {
             });
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pm pyramid"),
-                layout: &self.mip_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&above),
-                }],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pm pyramid level"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                layout: &self.mip_layouts[i],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&above),
                     },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&target),
+                    },
+                ],
             });
-            pass.set_pipeline(self.down[i].get());
             pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..4, 0..1);
-            drop(pass);
+            let (w, h) = ((width >> (level + 1)).max(1), (height >> (level + 1)).max(1));
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             above = target;
         }
+        drop(pass);
         let pyramid = Pyramid {
             view: source.create_view(&wgpu::TextureViewDescriptor {
                 base_mip_level: 0,
@@ -623,9 +664,9 @@ impl Resampler {
         self.draw
             .iter()
             .flat_map(|variants| variants.iter())
-            .chain(self.down.iter())
             .filter(|pipeline| pipeline.is_built())
             .count()
+            + self.down.iter().filter(|pipeline| pipeline.is_built()).count()
     }
 
     #[cfg(test)]

@@ -4,20 +4,22 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// A pipeline compiled on first use. The factory owns only handles from its
 /// device; neither it nor the device keeps a reference to this wrapper.
-pub(crate) struct LazyRenderPipeline {
-    pipeline: OnceLock<wgpu::RenderPipeline>,
-    create: Mutex<Option<Box<dyn FnOnce() -> wgpu::RenderPipeline + Send>>>,
+pub(crate) struct Lazy<T> {
+    pipeline: OnceLock<T>,
+    create: Mutex<Option<Box<dyn FnOnce() -> T + Send>>>,
 }
 
-impl LazyRenderPipeline {
-    pub(crate) fn new(create: impl FnOnce() -> wgpu::RenderPipeline + Send + 'static) -> Self {
+pub(crate) type LazyRenderPipeline = Lazy<wgpu::RenderPipeline>;
+
+impl<T> Lazy<T> {
+    pub(crate) fn new(create: impl FnOnce() -> T + Send + 'static) -> Self {
         Self {
             pipeline: OnceLock::new(),
             create: Mutex::new(Some(Box::new(create))),
         }
     }
 
-    pub(crate) fn get(&self) -> &wgpu::RenderPipeline {
+    pub(crate) fn get(&self) -> &T {
         self.pipeline.get_or_init(|| {
             // OnceLock admits one initializer. Take the factory before running
             // it so its captured device, module, and layout handles drop as
@@ -714,10 +716,11 @@ mod tests {
         times.extend(pipelines.ops.path_masks.probe_all());
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
-        // 18 2D, 12 composite and 12 resample (rgba16float, rgba32float and
-        // colordepth's rgba8unorm), path masks and text.
-        assert_eq!(times.len(), 56);
-        assert_eq!(built(), 56);
+        // 18 2D, 21 composite (7 ops) and 6 resample draws over rgba16float,
+        // rgba32float and colordepth's rgba8unorm; 2 mip writers, 10 path
+        // masks and 4 text paints.
+        assert_eq!(times.len(), 61);
+        assert_eq!(built(), 61);
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
         }
