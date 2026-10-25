@@ -790,79 +790,6 @@ fn a_job_draws_more_runner_steps_than_a_fixed_round_limit() {
     assert_eq!(drawn, expected);
 }
 
-/// A copy of the built-in Invert as a Store effect `id` that translates
-/// natively, listed as ANGLE-only (`pm_render::effects::ANGLE_ONLY`).
-fn angle_only_renderer(id: &str) -> Renderer {
-    let mut set = builtin_definitions();
-    let mut d = set
-        .definitions
-        .iter()
-        .find(|d| d.id.as_str() == "invert")
-        .unwrap()
-        .clone();
-    d.id = id.into();
-    d.origin = DefinitionOrigin::Store;
-    let fingerprint = pm_render::glsl::body_fingerprint(d.glsl.as_ref().unwrap());
-    set.definitions.push(d);
-    let mut r = Renderer::headless().unwrap();
-    r.effects_mut()
-        .add_angle_only(fingerprint, "a test program WebGL draws differently");
-    assert!(r.set_definitions(&set).unwrap().is_empty());
-    assert!(matches!(
-        r.effects().status(DefinitionKind::Effect, id),
-        Some(Status::Ready)
-    ));
-    assert!(r.effects().angle_only(DefinitionKind::Effect, id));
-    r
-}
-
-#[test]
-fn an_angle_only_program_draws_through_the_runner_where_one_is_attached() {
-    let _gpu = gpu();
-    let doc = stack(fx("acme.glass"), Value::Null);
-    // Without a runner (pm-cli): the native translation draws, nothing is
-    // routed or reported.
-    let mut headless = angle_only_renderer("acme.glass");
-    let native = render(&mut headless, &doc).unwrap();
-    assert!(headless.watchdog_reports(true).is_empty());
-    let plain = render(&mut headless, &stack(json!([]), Value::Null)).unwrap();
-    assert_ne!(native, plain);
-    // The viewer: asked of the runner, with the effect's textures.
-    let mut viewer = angle_only_renderer("acme.glass");
-    viewer.set_shader_fallback_runner(true);
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut viewer, &doc) else {
-        panic!("expected a runner request")
-    };
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0].stage, "angle-parity");
-    assert!(
-        q[0].message.contains("draws differently from WebGL"),
-        "{}",
-        q[0].message
-    );
-    // The runner's pixels are drawn (the CPU stand-in's, not the native
-    // program's).
-    let drawn = loop {
-        match render(&mut viewer, &doc) {
-            Ok(px) => break px,
-            Err(RenderError::ShaderFallbackPending(q)) => answer(&mut viewer, q),
-            Err(e) => panic!("{e}"),
-        }
-    };
-    assert_ne!(drawn, native);
-    // A job: through its host, the same frame as the viewer.
-    let host = Arc::new(Cpu::default());
-    let mut job = angle_only_renderer("acme.glass");
-    job.effects_mut().watchdog.set_policy(Policy::Job);
-    job.set_fallback_host(Some(host.clone()));
-    assert_eq!(render(&mut job, &doc).unwrap(), drawn);
-    assert_eq!(host.seen.lock().unwrap().len(), 1);
-    // The built-in it was copied from stays native everywhere.
-    let mut builtin = angle_only_renderer("acme.glass");
-    builtin.set_shader_fallback_runner(true);
-    assert!(render(&mut builtin, &stack(fx("invert"), Value::Null)).is_ok());
-}
-
 /// Answers every request with the same pixels at once: the engine's own
 /// cost of a fallback step (submit, readback, keying, upload) without a
 /// runner's draw.
@@ -961,678 +888,74 @@ fn fallback_step_cost_at_full_hd() {
     );
 }
 
-/// First-use decisions use the runner's actual first frame, then avoid the
-/// runner for verified programs; mismatches pin and survive a fresh renderer.
+/// E-R1: with a runner attached (the app's viewer and exports), a user
+/// effect, transition, shader layer and extension fragment layer that
+/// translate draw natively in their first frame: no held frame, no runner
+/// request, nothing persisted. The offline shader gate (`shader_gate.rs`,
+/// G-E1) judges translations against WebGL instead of the app.
 #[test]
-fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
-    use pm_render::effects::parity::Verdict;
+fn user_programs_draw_natively_on_first_use() {
     let _gpu = gpu();
-    let mut set = builtin_definitions();
-    let mut def = set
-        .definitions
-        .iter()
-        .find(|d| d.id.as_str() == "invert")
-        .unwrap()
-        .clone();
-    def.id = "probe.identity".into();
-    def.origin = DefinitionOrigin::Local;
-    // Use an exact copy shader, regardless of the built-in's formatting.
-    let g = def.glsl.as_mut().unwrap();
-    let start = g.source.find("void main()").unwrap();
-    g.source.truncate(start);
-    g.source.push_str("void main(){o=texture(u_tex,v_st);}");
-    let code = g.source.clone();
-    set.definitions.push(def);
-    let doc = stack(
-        json!([{ "id": "fx", "type": "probe.identity", "on": true, "p": {} }]),
-        Value::Null,
-    );
-    let dir = std::env::temp_dir().join(format!("pm-render-parity-{}", std::process::id()));
-    let make = |env: &str| {
-        let mut r = Renderer::headless().unwrap();
-        r.set_definitions(&set).unwrap();
-        r.set_shader_fallback_runner(true);
-        r.effects_mut()
-            .parity
-            .configure(Some(env.into()), Some(dir.clone()));
-        r
-    };
-    let pending = |r: &mut Renderer| match render(r, &doc) {
-        Err(RenderError::ShaderFallbackPending(p)) => p[0].clone(),
-        other => panic!("unknown program must hold presentation: {other:?}"),
-    };
-    let mut r = make("version A");
-    let first = pending(&mut r);
-    let pixels = r.fallback_textures(&first.key).unwrap()[0].as_ref().clone();
-    r.put_fallback_pixels(first.key.clone(), pixels);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified,
-        "the reply is judged immediately, before a paused redraw or a later playback frame"
-    );
-    let angle_frame = render(&mut r, &doc).unwrap();
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    assert_eq!(render(&mut r, &doc).unwrap(), angle_frame);
-    let mut restarted = make("version A");
-    assert_eq!(
-        restarted
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    assert_eq!(render(&mut restarted, &doc).unwrap(), angle_frame);
-    // Playback can advance while the first ANGLE request is outstanding.
-    // Its reply must verify without requesting that old time/input again.
-    let mut advancing = make("playing");
-    let first = pending(&mut advancing);
-    let pixels = advancing.fallback_textures(&first.key).unwrap()[0]
-        .as_ref()
-        .clone();
-    advancing.put_fallback_pixels(first.key, pixels);
-    let frame = advancing
-        .render(
-            &doc,
-            "P-root",
-            Ticks::new(pm_time::TICKS_PER_SECOND / 30).unwrap(),
-            &request(),
-            &MapResolver::default(),
-        )
-        .unwrap();
-    assert_eq!(advancing.read_rgba(&frame).unwrap(), angle_frame);
-    assert_eq!(
-        advancing
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    // An independent driver/browser generation must be probed again.
-    let mut r = make("version B");
-    let request = pending(&mut r);
-    let mut angle = r.fallback_textures(&request.key).unwrap()[0]
-        .as_ref()
-        .clone();
-    for p in angle.rgba16f.chunks_exact_mut(4) {
-        p[0] = 0x3800;
-    }
-    r.put_fallback_pixels(request.key.clone(), angle);
-    let pinned_frame = render(&mut r, &doc).unwrap();
-    assert_ne!(
-        pinned_frame, angle_frame,
-        "presents ANGLE even on a native discrepancy"
-    );
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Runner
-    );
-    let mut restarted = make("version B");
-    assert_eq!(
-        restarted
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Runner
-    );
-    assert_eq!(pending(&mut restarted).key, request.key);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// A renderer whose runner is not the namespace's reference browser (the
-/// hidden MCP host, the CLIs) probes an unknown program as usual but leaves
-/// no decision behind that the desktop would trust; it still honours the
-/// desktop's own persisted verification.
-#[test]
-fn a_read_only_first_probe_leaves_no_marker_for_the_desktop() {
-    use pm_render::effects::parity::Verdict;
-    let _gpu = gpu();
-    let mut set = builtin_definitions();
-    let mut def = set
-        .definitions
-        .iter()
-        .find(|d| d.id.as_str() == "invert")
-        .unwrap()
-        .clone();
-    def.id = "probe.read-only".into();
-    def.origin = DefinitionOrigin::Local;
-    let g = def.glsl.as_mut().unwrap();
-    let start = g.source.find("void main()").unwrap();
-    g.source.truncate(start);
-    g.source.push_str("void main(){o=texture(u_tex,v_st);}");
-    let code = g.source.clone();
-    set.definitions.push(def);
-    let doc = stack(
-        json!([{ "id": "fx", "type": "probe.read-only", "on": true, "p": {} }]),
-        Value::Null,
-    );
-    let dir = std::env::temp_dir().join(format!("pm-render-parity-ro-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let make = |read_only: bool| {
-        let mut r = Renderer::headless().unwrap();
-        r.set_definitions(&set).unwrap();
-        r.set_shader_fallback_runner(true);
-        if read_only {
-            r.read_only_shader_reference();
-        }
-        r.effects_mut()
-            .parity
-            .configure(Some("desktop electron".into()), Some(dir.clone()));
-        r
-    };
-    let probe = |r: &mut Renderer| {
-        let first = match render(r, &doc) {
-            Err(RenderError::ShaderFallbackPending(p)) => p[0].clone(),
-            other => panic!("unknown program must hold presentation: {other:?}"),
-        };
-        let pixels = r.fallback_textures(&first.key).unwrap()[0].as_ref().clone();
-        r.put_fallback_pixels(first.key, pixels);
-        render(r, &doc).unwrap()
-    };
-    let markers = || -> Vec<String> {
-        std::fs::read_dir(&dir)
-            .map(|d| {
-                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let mut hidden = make(true);
-    let frame = probe(&mut hidden);
-    assert_eq!(
-        hidden
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    assert_eq!(render(&mut hidden, &doc).unwrap(), frame);
-    assert!(
-        markers().is_empty(),
-        "a read-only first probe wrote {:?}",
-        markers()
-    );
-    let mut desktop = make(false);
-    assert_eq!(
-        desktop
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Unknown,
-        "the desktop must still compare the program with its own runner"
-    );
-    assert_eq!(probe(&mut desktop), frame);
-    assert_eq!(
-        markers().iter().filter(|m| m.ends_with(".native")).count(),
-        1
-    );
-    // A fresh read-only host honours the desktop's verification at once.
-    let mut later = make(true);
-    assert_eq!(
-        later
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    assert_eq!(render(&mut later, &doc).unwrap(), frame);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn parity_probe_covers_transitions_and_fragment_layers() {
-    use pm_render::effects::parity::Verdict;
-    let _gpu = gpu();
-    for kind in ["transition", "shader", "extension"] {
+    for kind in ["effect", "transition", "shader", "extension"] {
         let mut set = builtin_definitions();
+        let base = if kind == "effect" { "invert" } else { "crossfade" };
         let mut def = set
             .definitions
             .iter()
-            .find(|d| d.id.as_str() == "crossfade")
+            .find(|d| d.id.as_str() == base)
             .unwrap()
             .clone();
-        def.id = "probe.constant".into();
+        def.id = "user.constant".into();
         def.origin = DefinitionOrigin::Local;
         let g = def.glsl.as_mut().unwrap();
         let start = g.source.find("void main()").unwrap();
         g.source.truncate(start);
         g.source.push_str("void main(){o=vec4(0.25,0.5,0.75,1.0);}");
-        let mut code = g.source.clone();
+        let body = "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}";
         if kind == "extension" {
             def.kind = DefinitionKind::Layer;
             def.renderer = Some(pm_protocol::definitions::LayerRenderer::Fragment {
-                fragment: "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}".into(),
+                fragment: body.into(),
             });
-            let body = "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}";
             def.glsl = Some(pm_protocol::definitions::WrappedGlsl {
                 source: format!("{}\n{body}", pm_render::shader_layers::header()),
                 body_line_offset: pm_render::shader_layers::header().lines().count() as u32,
                 body_utf16_len: body.len() as u32,
                 body_utf8_len: body.len() as u32,
             });
-            code = def.glsl.as_ref().unwrap().source.clone();
         }
-        let doc = if kind == "transition" {
-            stack(json!([]), json!({"type":"probe.constant","dur":1,"p":{}}))
-        } else {
-            let mut l = layer("fragment", "#000000", json!([]), Value::Null);
-            l["type"] = json!(if kind == "shader" {
-                "shader"
-            } else {
-                "extension"
-            });
-            l["d"] = if kind == "shader" {
-                json!({"code":"void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}","uniforms":{},"w":64,"h":32})
-            } else {
-                json!({"definition":"probe.constant","params":{},"w":64,"h":32})
-            };
-            document(vec![l])
+        let doc = match kind {
+            "effect" => stack(
+                json!([{ "id": "fx", "type": "user.constant", "on": true, "p": {} }]),
+                Value::Null,
+            ),
+            "transition" => stack(json!([]), json!({"type":"user.constant","dur":1,"p":{}})),
+            _ => {
+                let mut l = layer("fragment", "#000000", json!([]), Value::Null);
+                l["type"] = json!(kind);
+                l["d"] = if kind == "shader" {
+                    json!({"code": body, "uniforms": {}, "w": 64, "h": 32})
+                } else {
+                    json!({"definition": "user.constant", "params": {}, "w": 64, "h": 32})
+                };
+                document(vec![l])
+            }
         };
-        if kind == "shader" {
-            code = format!(
-                "{}\nvoid main(){{fragColor=vec4(0.25,0.5,0.75,1.0);}}",
-                pm_render::shader_layers::header()
-            );
-        }
         if kind != "shader" {
             set.definitions.push(def);
         }
         let mut r = Renderer::headless().unwrap();
-        r.set_definitions(&set).unwrap();
+        assert!(r.set_definitions(&set).unwrap().is_empty(), "{kind}");
         r.set_shader_fallback_runner(true);
-        r.effects_mut()
-            .parity
-            .configure(Some(format!("test-{kind}")), None);
-        let request = match render(&mut r, &doc) {
-            Err(RenderError::ShaderFallbackPending(p)) => p[0].clone(),
-            other => panic!("{kind} must hold its first frame: {other:?}"),
-        };
-        let pixels = FallbackPixels {
-            rgba32f: None,
-            width: request.width,
-            height: request.height,
-            rgba16f: (0..request.width * request.height)
-                .flat_map(|_| [0x3400, 0x3800, 0x3a00, 0x3c00])
-                .collect(),
-        };
-        r.put_fallback_pixels(request.key, pixels);
-        render(&mut r, &doc).unwrap();
-        assert_eq!(
-            r.effects_mut()
-                .parity
-                .verdict_at_precision(&code, Precision::Float16),
-            Verdict::NativeVerified,
-            "{kind}"
-        );
-        render(&mut r, &doc).unwrap();
+        let first = render(&mut r, &doc).unwrap_or_else(|e| panic!("{kind}: {e}"));
+        assert!(r.watchdog_reports(true).is_empty(), "{kind}");
+        // The program's constant is what the frame shows where it draws.
+        let drawn = first.chunks_exact(4).any(|px| {
+            px.iter()
+                .zip([0.25f32, 0.5, 0.75, 1.0])
+                .all(|(got, want)| (got - want).abs() < 1e-3)
+        });
+        assert!(drawn, "{kind}: the native program did not draw");
+        assert_eq!(render(&mut r, &doc).unwrap(), first, "{kind}");
     }
-}
-
-/// A user effect native draws (its input with red and blue swapped, exact
-/// in binary16), unknown to the parity probe: the definitions and its
-/// wrapped source.
-fn probe_swap() -> (DefinitionSetSnapshot, String) {
-    let mut set = builtin_definitions();
-    let mut def = set
-        .definitions
-        .iter()
-        .find(|d| d.id.as_str() == "invert")
-        .unwrap()
-        .clone();
-    def.id = "probe.swap".into();
-    def.origin = DefinitionOrigin::Local;
-    let g = def.glsl.as_mut().unwrap();
-    let start = g.source.find("void main()").unwrap();
-    g.source.truncate(start);
-    g.source
-        .push_str("void main(){o=texture(u_tex,v_st).bgra;}");
-    let code = g.source.clone();
-    set.definitions.push(def);
-    (set, code)
-}
-
-fn refused() -> FallbackFailure {
-    FallbackFailure {
-        reason: "compile".into(),
-        message: "ERROR: 0:7: 'probe' : WebGL refuses this".into(),
-    }
-}
-
-/// The probe's WebGL reference fails for good (WebGL refuses the program
-/// natively drawn): the program is pinned to the runner, whose failure
-/// handling reproduces today's outcome (skipped and reported once, as
-/// `runEffects` skips a program WebGL refuses), frames keep presenting,
-/// nothing is asked for again, and the pin survives a restart. A job
-/// whose host refuses it renders the same frame.
-#[test]
-fn an_effect_whose_parity_reference_fails_for_good_is_pinned_and_skipped_as_today() {
-    use pm_render::effects::parity::Verdict;
-    let _gpu = gpu();
-    let (set, code) = probe_swap();
-    let doc = stack(
-        json!([{ "id": "fx", "type": "probe.swap", "on": true, "p": {} }]),
-        Value::Null,
-    );
-    let dir = std::env::temp_dir().join(format!("pm-render-parity-fail-{}", std::process::id()));
-    let make = |env: &str| {
-        let mut r = Renderer::headless().unwrap();
-        r.set_definitions(&set).unwrap();
-        r.set_shader_fallback_runner(true);
-        r.effects_mut()
-            .parity
-            .configure(Some(env.into()), Some(dir.clone()));
-        r
-    };
-    let mut r = make("refused");
-    let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
-        panic!("the probed frame waits for its reference")
-    };
-    assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Runner
-    );
-    for _ in 0..3 {
-        assert_eq!(
-            render(&mut r, &doc).unwrap(),
-            without,
-            "presented without the effect, as WebGL skips it today"
-        );
-    }
-    let reports = r.watchdog_reports(true);
-    assert_eq!(reports.len(), 1, "reported once: {reports:?}");
-    assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
-    assert!(
-        reports[0].message.contains("WebGL refuses"),
-        "{}",
-        reports[0].message
-    );
-    assert_eq!(r.fallback_retry_at(), None, "never asked for again");
-    let mut restarted = make("refused");
-    assert_eq!(
-        restarted
-            .effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Runner,
-        "the pin persists"
-    );
-    // A job: its host refuses the probe's reference; the frame is the
-    // same, never a native frame without its reference.
-    let mut job = Renderer::headless().unwrap();
-    job.set_definitions(&set).unwrap();
-    job.effects_mut().watchdog.set_policy(Policy::Job);
-    job.effects_mut()
-        .parity
-        .configure(Some("job refused".into()), None);
-    let host = Arc::new(Cpu::default());
-    *host.fail.lock().unwrap() = Some(refused());
-    job.set_fallback_host(Some(host.clone()));
-    assert_eq!(render(&mut job, &doc).unwrap(), without);
-    assert_eq!(render(&mut job, &doc).unwrap(), without);
-    assert_eq!(host.seen.lock().unwrap().len(), 1, "not asked for again");
-    assert_eq!(
-        job.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Runner
-    );
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// The probe's reference fails transiently (the runner's context was
-/// lost): the program stays unknown and goes through the runner's retry
-/// and backoff (asked for again at once, then drawn without it and
-/// reported once until the backoff passes), never a stuck frame or an
-/// unbounded request loop; once the runner draws it, the probe judges it.
-/// A job whose runner keeps losing its context stops naming the effect.
-#[test]
-fn an_effect_whose_parity_reference_fails_transiently_is_retried_with_backoff() {
-    use pm_render::effects::parity::Verdict;
-    let _gpu = gpu();
-    let (set, code) = probe_swap();
-    let doc = stack(
-        json!([{ "id": "fx", "type": "probe.swap", "on": true, "p": {} }]),
-        Value::Null,
-    );
-    let mut r = Renderer::headless().unwrap();
-    r.set_definitions(&set).unwrap();
-    r.set_shader_fallback_runner(true);
-    r.effects_mut()
-        .parity
-        .configure(Some("transient".into()), None);
-    let (offset, clock) = movable_clock();
-    r.effects_mut().watchdog.set_clock(Some(clock));
-    let without = render(&mut r, &stack(json!([]), Value::Null)).unwrap();
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
-        panic!("the probed frame waits for its reference")
-    };
-    assert_eq!(
-        r.put_fallback_failure(&q[0].key, lost()),
-        Some(std::time::Duration::ZERO)
-    );
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Unknown
-    );
-    let Err(RenderError::ShaderFallbackPending(again)) = render(&mut r, &doc) else {
-        panic!("asked for again at once")
-    };
-    assert_eq!(again[0].key, q[0].key);
-    assert_eq!(
-        r.put_fallback_failure(&again[0].key, lost()),
-        Some(std::time::Duration::from_millis(250))
-    );
-    for _ in 0..3 {
-        assert_eq!(
-            render(&mut r, &doc).unwrap(),
-            without,
-            "drawn without it during the backoff, as a runner program"
-        );
-    }
-    let reports = r.watchdog_reports(true);
-    assert_eq!(reports.len(), 1, "{reports:?}");
-    assert_eq!(reports[0].code, ErrorCode::NotHeadlessRenderable);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Unknown
-    );
-    offset.store(250, std::sync::atomic::Ordering::Relaxed);
-    let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
-        panic!("asked for again after the backoff")
-    };
-    // WebGL's answer: the same swap of the input it was sent.
-    let mut reference = r.fallback_textures(&third[0].key).unwrap()[0]
-        .as_ref()
-        .clone();
-    for p in reference.rgba16f.chunks_exact_mut(4) {
-        p.swap(0, 2);
-    }
-    r.put_fallback_pixels(third[0].key.clone(), reference);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    let drawn = render(&mut r, &doc).unwrap();
-    assert_ne!(drawn, without);
-    assert_eq!(render(&mut r, &doc).unwrap(), drawn);
-    assert_eq!(r.fallback_retry_at(), None);
-    // A job: retried in place, then stopped by name; never a native frame
-    // without its reference.
-    let mut job = Renderer::headless().unwrap();
-    job.set_definitions(&set).unwrap();
-    job.effects_mut().watchdog.set_policy(Policy::Job);
-    job.effects_mut()
-        .parity
-        .configure(Some("job transient".into()), None);
-    let host = Arc::new(Cpu::default());
-    *host.fail.lock().unwrap() = Some(lost());
-    job.set_fallback_host(Some(host));
-    match render(&mut job, &doc) {
-        Err(RenderError::Fallback(m)) => {
-            assert!(m.contains("probe.swap") && m.contains("contextLost"), "{m}")
-        }
-        other => panic!("expected a named failure, got {:?}", other.map(|_| ())),
-    }
-    assert_eq!(
-        job.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Unknown
-    );
-}
-
-/// A shader layer (and a transition) whose probe reference fails: for
-/// good, it is pinned and draws nothing, reported once, as WebGL draws
-/// nothing for a program it refuses; transiently, the runner's backoff
-/// bounds its requests (none while it waits) and the probe judges it once
-/// the runner draws it.
-#[test]
-fn a_layer_and_a_transition_whose_parity_reference_fails_follow_the_runner() {
-    use pm_render::effects::parity::Verdict;
-    let _gpu = gpu();
-    let body = "void main(){fragColor=vec4(0.25,0.5,0.75,1.0);}";
-    let code = format!("{}\n{body}", pm_render::shader_layers::header());
-    let mut l = layer("fragment", "#000000", json!([]), Value::Null);
-    l["type"] = json!("shader");
-    l["d"] = json!({"code": body, "uniforms": {}, "w": 64, "h": 32});
-    let doc = document(vec![l]);
-    let make = |env: &str| {
-        let mut r = Renderer::headless().unwrap();
-        r.set_definitions(&builtin_definitions()).unwrap();
-        r.set_shader_fallback_runner(true);
-        r.effects_mut().parity.configure(Some(env.into()), None);
-        r
-    };
-    let empty = render(&mut make("none"), &document(vec![])).unwrap();
-    // For good.
-    let mut r = make("layer refused");
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
-        panic!("the probed layer waits for its reference")
-    };
-    assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Runner
-    );
-    for _ in 0..3 {
-        assert_eq!(render(&mut r, &doc).unwrap(), empty, "draws nothing");
-    }
-    let reports = r.watchdog_reports(true);
-    assert_eq!(reports.len(), 1, "{reports:?}");
-    assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
-    // Transiently.
-    let mut r = make("layer transient");
-    let (offset, clock) = movable_clock();
-    r.effects_mut().watchdog.set_clock(Some(clock));
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
-        panic!("the probed layer waits for its reference")
-    };
-    assert_eq!(
-        r.put_fallback_failure(&q[0].key, lost()),
-        Some(std::time::Duration::ZERO)
-    );
-    let Err(RenderError::ShaderFallbackPending(again)) = render(&mut r, &doc) else {
-        panic!("asked for again at once")
-    };
-    assert_eq!(again[0].key, q[0].key);
-    assert_eq!(
-        r.put_fallback_failure(&again[0].key, lost()),
-        Some(std::time::Duration::from_millis(250))
-    );
-    for _ in 0..3 {
-        assert_eq!(
-            render(&mut r, &doc).unwrap(),
-            empty,
-            "no request while the backoff runs"
-        );
-    }
-    assert_eq!(r.watchdog_reports(true).len(), 1);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::Unknown
-    );
-    offset.store(250, std::sync::atomic::Ordering::Relaxed);
-    let Err(RenderError::ShaderFallbackPending(third)) = render(&mut r, &doc) else {
-        panic!("asked for again after the backoff")
-    };
-    let reference = FallbackPixels {
-        rgba32f: None,
-        width: third[0].width,
-        height: third[0].height,
-        rgba16f: (0..third[0].width * third[0].height)
-            .flat_map(|_| [0x3400, 0x3800, 0x3a00, 0x3c00])
-            .collect(),
-    };
-    r.put_fallback_pixels(third[0].key.clone(), reference);
-    let drawn = render(&mut r, &doc).unwrap();
-    assert_ne!(drawn, empty);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&code, Precision::Float16),
-        Verdict::NativeVerified
-    );
-    assert_eq!(render(&mut r, &doc).unwrap(), drawn);
-    assert_eq!(r.fallback_retry_at(), None);
-    // A transition refused for good: pinned, skipped as WebGL skips it.
-    let mut set = builtin_definitions();
-    let mut def = set
-        .definitions
-        .iter()
-        .find(|d| d.id.as_str() == "crossfade")
-        .unwrap()
-        .clone();
-    def.id = "probe.fade".into();
-    def.origin = DefinitionOrigin::Local;
-    let g = def.glsl.as_mut().unwrap();
-    let start = g.source.find("void main()").unwrap();
-    g.source.truncate(start);
-    g.source
-        .push_str("void main(){o=mix(texture(u_from,v_st),texture(u_to,v_st),u_prog);}");
-    let fade = g.source.clone();
-    set.definitions.push(def);
-    let mut r = Renderer::headless().unwrap();
-    r.set_definitions(&set).unwrap();
-    r.set_shader_fallback_runner(true);
-    r.effects_mut()
-        .parity
-        .configure(Some("transition refused".into()), None);
-    let doc = stack(json!([]), json!({"type": "probe.fade", "dur": 1, "p": {}}));
-    let Err(RenderError::ShaderFallbackPending(q)) = render(&mut r, &doc) else {
-        panic!("the probed transition waits for its reference")
-    };
-    assert_eq!(r.put_fallback_failure(&q[0].key, refused()), None);
-    assert_eq!(
-        r.effects_mut()
-            .parity
-            .verdict_at_precision(&fade, Precision::Float16),
-        Verdict::Runner
-    );
-    render(&mut r, &doc).unwrap();
-    render(&mut r, &doc).unwrap();
-    let reports = r.watchdog_reports(true);
-    assert_eq!(reports.len(), 1, "{reports:?}");
-    assert_eq!(reports[0].code, ErrorCode::ShaderCompile);
 }

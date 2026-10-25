@@ -330,8 +330,8 @@ mod tests {
 
     /// The revision and the SHA-256 of what [`EMITTED_PROGRAMS`] prepare to.
     const EMITTED: (u32, &str) = (
-        2,
-        "981e3be32ecc0f78f4c9bbf902a177afe0859b0fa0b84f3cdaae2c072583aa28",
+        3,
+        "bbba2c6f31e120b8405c840d87f1756f7d71e8c2b1930305a49e477d9293b280",
     );
 
     #[test]

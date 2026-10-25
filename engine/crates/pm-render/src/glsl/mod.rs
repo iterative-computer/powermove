@@ -117,72 +117,6 @@ fn in_functions(msl: &str, prefix: &str, edit: impl Fn(&str) -> String) -> Strin
     out
 }
 
-/// A fingerprint of a legacy program that ignores its numeric literals: the
-/// SHA-256 of the source with every number written as `0` and every run of
-/// whitespace as one space. Programs an extension generates with baked
-/// constants (a composition's resolution) keep one fingerprint; programs
-/// that differ only in constants share it.
-pub fn fingerprint(source: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let starts_number = (c.is_ascii_digit()
-            || (c == '.' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit())))
-            && !(i > 0 && ident(chars[i - 1]));
-        if starts_number {
-            while i < chars.len() {
-                let d = chars[i];
-                let exponent_sign =
-                    (d == '+' || d == '-') && i > 0 && matches!(chars[i - 1], 'e' | 'E');
-                if d.is_ascii_alphanumeric() || d == '.' || exponent_sign {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            out.push('0');
-            continue;
-        }
-        if c.is_whitespace() {
-            while i < chars.len() && chars[i].is_whitespace() {
-                i += 1;
-            }
-            out.push(' ');
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    Sha256::digest(out.trim().as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// The fingerprint ([`fingerprint`]) of a wrapped program's user body (the
-/// `body_utf8_len` bytes from line `body_line_offset`), so a change to the
-/// kernel's wrapper does not change it; the whole source when the range
-/// does not fit.
-pub fn body_fingerprint(glsl: &pm_protocol::definitions::WrappedGlsl) -> String {
-    let source = glsl.source.as_str();
-    let mut start = 0usize;
-    for _ in 0..glsl.body_line_offset {
-        match source[start..].find('\n') {
-            Some(n) => start += n + 1,
-            None => return fingerprint(source),
-        }
-    }
-    let end = start + glsl.body_utf8_len as usize;
-    match source.get(start..end) {
-        Some(body) => fingerprint(body),
-        None => fingerprint(source),
-    }
-}
-
 /// A stage of a legacy program for a pipeline: the module and its entry
 /// point name.
 pub struct Stage {
@@ -372,20 +306,6 @@ mod tests {
         assert_eq!(single_call(two, "metal::round"), two);
         let odd = "float pm_round_u0028_f1_u0029_(float x) { return x; }\n";
         assert_eq!(single_call(odd, "metal::round"), odd);
-    }
-
-    #[test]
-    fn fingerprints_ignore_numbers_and_spacing_only() {
-        let a =
-            fingerprint("const vec2 r = vec2(256.000000, 144.000000);\nfloat x = 1e-3 + u_p0;\n");
-        let b = fingerprint("const vec2 r = vec2(1920.000000, 1080.0);  float x = 2.5E+4 + u_p0;");
-        assert_eq!(a, b);
-        assert_ne!(
-            a,
-            fingerprint("const vec2 r = vec2(256.0, 144.0); float x = 1e-3 - u_p0;")
-        );
-        // Digits inside identifiers are names, not numbers.
-        assert_ne!(fingerprint("float u_p0;"), fingerprint("float u_p1;"));
     }
 
     #[test]

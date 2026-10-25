@@ -7,7 +7,7 @@
  *
  * Usage (under the machine-wide Electron lock):
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
- *     bun engine/crates/pm-render/tools/effects/webgl.ts [--corpus <dir>] [--angle metal|swiftshader] [--filter <s>] [--perturb [k]] [--perturb-input]
+ *     bun engine/crates/pm-render/tools/effects/webgl.ts [--corpus <dir>] [--angle metal|swiftshader] [--filter <s>] [--perturb [k]] [--perturb-input] [--perturb-geometry] [--perturb-storage]
  * Default corpus: the newest glsl-* capture in the engine corpus folder.
  * Output: <corpus>/webgl-<angle>[-perturbed<k>]/<case>/<variant>.f16 and status.json
  * (`compiled`, the link log, and any GL error the draws raised: a program that
@@ -18,6 +18,18 @@
  * whose output moves by more than the parity tolerance under it is
  * ill-conditioned in WebGL itself (amendment 9's WebGL-unstable class), so
  * any renderer that computes its input slightly differently differs there.
+ *
+ * --perturb-geometry scales the quad's matrix and content coordinates
+ * (`u_m`, `u_uv`) by 1 + 2⁻²⁰ (into <corpus>/webgl-<angle>-geometry-perturbed):
+ * every interpolated coordinate moves by about an ulp, so a pixel whose
+ * output flips under it sits on a hard threshold of its own coordinates,
+ * where the interpolation precision GLSL ES leaves open decides it.
+ *
+ * --perturb-storage keeps a multi-pass program's intermediate passes in
+ * RGBA32F (into <corpus>/webgl-<angle>-storage-perturbed): Metal truncates
+ * each RGBA16F store, the engine stores the nearest half, so a pixel whose
+ * output moves when its intermediates are not rounded at all depends on
+ * the last bit of a stored pass.
  *
  * The browser is headless; nothing is shown on screen.
  */
@@ -36,12 +48,14 @@ const perturb = args.includes('--perturb');
 const perturbArg = perturb ? args[args.indexOf('--perturb') + 1] : undefined;
 const perturbK = perturbArg !== undefined && /^-?\d+(\.\d+)?$/.test(perturbArg) ? Number(perturbArg) : 1;
 const perturbInput = args.includes('--perturb-input');
+const perturbGeometry = args.includes('--perturb-geometry');
+const perturbStorage = args.includes('--perturb-storage');
 const ROOT = join(homedir(), 'Library', 'Application Support', 'Powermove Engine Corpus');
 const corpusDir = args.includes('--corpus')
   ? resolve(args[args.indexOf('--corpus') + 1]!)
   : join(ROOT, (await readdir(ROOT)).filter((d) => d.startsWith('glsl-')).sort().at(-1) ?? 'missing');
 const corpus = JSON.parse(await readFile(join(corpusDir, 'corpus.json'), 'utf8'));
-const out = join(corpusDir, `webgl-${angle}${perturb ? `-perturbed${perturbK === 1 ? '' : perturbK}` : ''}${perturbInput ? '-input-perturbed' : ''}`);
+const out = join(corpusDir, `webgl-${angle}${perturb ? `-perturbed${perturbK === 1 ? '' : perturbK}` : ''}${perturbInput ? '-input-perturbed' : ''}${perturbGeometry ? '-geometry-perturbed' : ''}${perturbStorage ? '-storage-perturbed' : ''}`);
 await mkdir(out, { recursive: true });
 
 const launchArgs = angle === 'swiftshader'
@@ -79,10 +93,12 @@ const renderer = await page.evaluate(({ vertex, images }) => {
   gl.bindBuffer(gl.ARRAY_BUFFER, w.quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
   gl.disable(gl.DEPTH_TEST);
-  const texture = (width: number, height: number, data: Uint16Array | null) => {
+  if (!gl.getExtension('OES_texture_float_linear')) throw new Error('OES_texture_float_linear unavailable');
+  const texture = (width: number, height: number, data: Uint16Array | null, float32 = false) => {
     const tex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, data);
+    if (float32) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, data);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -107,7 +123,7 @@ const status: Record<string, unknown> = { ...previous };
 let compiled = 0, failed = 0;
 for (const c of corpus.cases) {
   if (filter && !c.id.includes(filter)) continue;
-  const result = await page.evaluate(({ c, perturb, perturbK }: { c: any; perturb: boolean; perturbK: number }) => {
+  const result = await page.evaluate(({ c, perturb, perturbK, perturbGeometry, perturbStorage }: { c: any; perturb: boolean; perturbK: number; perturbGeometry: boolean; perturbStorage: boolean }) => {
     const w = window as any;
     const gl: WebGL2RenderingContext = w.gl;
     const shader = (type: number, source: string) => {
@@ -135,8 +151,9 @@ for (const c of corpus.cases) {
     const started = performance.now();
     for (const variant of c.variants) {
       const targets: { tex: WebGLTexture; fb: WebGLFramebuffer }[] = [];
-      for (const pass of variant.passes) {
-        const tex = w.makeTexture(variant.width, variant.height, null);
+      for (const [index, pass] of variant.passes.entries()) {
+        const intermediate = perturbStorage && index < variant.passes.length - 1;
+        const tex = w.makeTexture(variant.width, variant.height, null, intermediate);
         const fb = gl.createFramebuffer()!;
         gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
@@ -158,7 +175,8 @@ for (const c of corpus.cases) {
           if (location === null && call.alt) location = gl.getUniformLocation(program, call.alt);
           if (location === null) continue;
           const geometry = call.name === 'u_m' || call.name === 'u_uv';
-          const x = perturb && call.fn !== '1i' && !geometry ? call.v.map((v: number) => Math.fround(v * (1 + perturbK * 2 ** -20))) : call.v;
+          const moved = (perturb && call.fn !== '1i' && !geometry) || (perturbGeometry && geometry);
+          const x = moved ? call.v.map((v: number) => Math.fround(v * (1 + (perturbGeometry ? 1 : perturbK) * 2 ** -20))) : call.v;
           if (call.fn === '1f') gl.uniform1f(location, x[0]);
           else if (call.fn === '2f') gl.uniform2f(location, x[0], x[1]);
           else if (call.fn === '3f') gl.uniform3f(location, x[0], x[1], x[2]);
@@ -197,7 +215,7 @@ for (const c of corpus.cases) {
     gl.deleteProgram(program);
     const after = gl.getError();
     return { ok: true, outputs, ms: performance.now() - started, glError: glError || after };
-  }, { c, perturb, perturbK });
+  }, { c, perturb, perturbK, perturbGeometry, perturbStorage });
   if (!result.ok) {
     failed++;
     status[c.id] = { compiled: false, log: result.log };

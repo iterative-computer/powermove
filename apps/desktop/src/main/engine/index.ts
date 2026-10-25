@@ -1,4 +1,3 @@
-import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
 import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
 import { installAgentFramesIpc } from './agent-frames';
@@ -15,7 +14,7 @@ import { installDocumentKernelIpc } from './document-kernel';
  * sandbox frames), tells windows about crashes and restarts, and serves
  * the engines' host requests (native-engine.ts).
  */
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { appendFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -419,9 +418,6 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
           POWERMOVE_ENGINE_FFMPEG: resolveFfmpeg({ packaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env }).ffmpeg,
-          // Invalidate first-use parity on every engine/browser/OS update.
-          // GPU identity and native driver version are added by pm-render.
-          POWERMOVE_ENGINE_PARITY_ENV: persistShaderEnvironment(path.join(cacheDirectory, CACHE_DIRS.shaderCache), JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() })),
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
         }

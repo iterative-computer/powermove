@@ -535,23 +535,14 @@ impl Composer {
     }
 
     /// Adopts a definition set translated before this device and renderer
-    /// existed. Runtime parity belongs to the renderer; prepared sets only
-    /// carry CPU translation and their per-owner watchdog state.
+    /// existed: prepared sets carry CPU translation and their per-owner
+    /// watchdog state.
     pub fn park_prepared_definitions(
         &mut self,
         owner: impl std::hash::Hash,
-        mut effects: Effects,
+        effects: Effects,
         loaded: (usize, u64),
     ) {
-        let parity = &self.renderer.effects().parity;
-        if effects.parity.environment() != parity.environment()
-            || effects.parity.directory() != parity.directory()
-        {
-            effects.parity.configure(
-                parity.environment().map(str::to_owned),
-                parity.directory().map(std::path::Path::to_path_buf),
-            );
-        }
         self.parked
             .insert(owner_hash(owner), (effects, Some(loaded)));
     }
@@ -577,7 +568,7 @@ impl Composer {
 
     /// Moves one owner's translated definitions out of a retiring composer.
     /// Programs and query objects are discarded; source preparation,
-    /// watchdog judgments and parity decisions survive until reattachment.
+    /// watchdog judgments survive until reattachment.
     pub fn take_prepared_definitions(
         &mut self,
         owner: impl std::hash::Hash,

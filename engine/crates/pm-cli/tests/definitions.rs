@@ -3,8 +3,9 @@
 //! `--definitions` set (the app's winning registrations) replaces them, so
 //! an override by id draws the fork's GLSL; an effect with no snapshot that
 //! is not marked missing fails naming it (exit 3), one marked missing is
-//! skipped as in the app. User overrides draw through the production ANGLE
-//! helper; without that helper an unverified program fails by name.
+//! skipped as in the app. User programs draw natively; one the engine
+//! cannot translate needs the production ANGLE helper and otherwise fails
+//! by name.
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
@@ -113,10 +114,7 @@ fn cli_with_angle(args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Option<std
     command
         .arg("render")
         .args(args)
-        .env("POWERMOVE_ANGLE_HELPER", helper)
-        .env_remove("POWERMOVE_ENGINE_PARITY_ENV")
-        .env_remove("POWERMOVE_ENGINE_PARITY_STORE")
-        .env_remove("POWERMOVE_ENGINE_SHADER_CACHE");
+        .env("POWERMOVE_ANGLE_HELPER", helper);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -257,20 +255,16 @@ fn a_definitions_snapshot_overrides_built_ins_by_id() {
         )
     });
     let out = dir.join("still.png");
-    let Some(run) = cli_with_angle(
-        &[
-            file.to_str().unwrap(),
-            "-o",
-            out.to_str().unwrap(),
-            "--format",
-            "still",
-            "--definitions",
-            defs.to_str().unwrap(),
-        ],
-        &[],
-    ) else {
-        return;
-    };
+    // A user fork draws natively on first use: no browser, no probe.
+    let run = cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "still",
+        "--definitions",
+        defs.to_str().unwrap(),
+    ]);
     let s = ok(&run);
     assert_eq!(s["definitions"], json!(defs.to_str().unwrap()));
     assert!(
@@ -360,6 +354,43 @@ fn a_program_only_the_webgl_runner_draws_is_not_headless_renderable() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A program the engine cannot translate (E-K6) still draws, through the
+/// production helper's Chromium runner.
+#[test]
+fn a_program_only_the_webgl_runner_draws_renders_through_the_helper() {
+    let dir = scratch("runner-helper");
+    let file = dir.join("p.json");
+    let fx = json!([{ "id": "fx1", "type": "acme.sky", "on": true, "p": {} }]);
+    std::fs::write(&file, project(fx).to_string()).unwrap();
+    let source = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform samplerCube u_sky;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) + texture(u_sky, vec3(0.0, 0.0, 1.0)); }\n";
+    let defs = definitions_file(&dir, |set| {
+        set["definitions"].as_array_mut().unwrap().push(json!({
+            "id": "acme.sky", "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+            "glsl": { "source": source, "bodyLineOffset": 0, "bodyUtf16Len": source.encode_utf16().count(), "bodyUtf8Len": source.len() },
+            "params": [],
+            "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
+        }));
+    });
+    let out = dir.join("still.png");
+    let Some(run) = cli_with_angle(
+        &[
+            file.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--format",
+            "still",
+            "--definitions",
+            defs.to_str().unwrap(),
+        ],
+        &[],
+    ) else {
+        return;
+    };
+    ok(&run);
+    // An unbound cube sampler reads (0, 0, 0, 1): the solid shows through.
+    assert!(near(corner(&out), [0x3F, 0xCF, 0x8E]), "{:?}", corner(&out));
+}
+
 #[test]
 fn cli_parameter_overrides_change_rendered_expression_values_and_refuse_invalid_values() {
     let dir = scratch("parameters");
@@ -395,140 +426,18 @@ fn cli_parameter_overrides_change_rendered_expression_values_and_refuse_invalid_
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[test]
-fn an_unverified_shader_layer_is_not_delivered_without_its_browser_reference() {
-    let dir = scratch("unverified-layer");
-    let file = dir.join("p.json");
-    let mut p = project(json!([]));
-    p["layers"][0]["type"] = json!("shader");
-    p["layers"][0]["d"] = json!({ "code": "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0); }", "uniforms": {}, "w": 320, "h": 180 });
-    std::fs::write(&file, p.to_string()).unwrap();
-    let out = dir.join("shader.png");
-    let result = cli(&[
-        file.to_str().unwrap(),
-        "-o",
-        out.to_str().unwrap(),
-        "--format",
-        "still",
-    ]);
-    assert!(
-        !result.status.success(),
-        "an unknown program must not render natively"
-    );
-    assert!(String::from_utf8_lossy(&result.stderr).contains("fallback runner"));
-    assert!(!out.exists());
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// The desktop's probe namespace compares native output with Electron's
-/// WebGL runner. A CLI first probe (Playwright's Chromium) honours it but must
-/// never leave a `.native` (or `.runner`) marker the desktop would trust, on
-/// both entry points: direct pm-cli reading the profile's descriptor, and
-/// `powermove render`, which passes the descriptor in the environment.
-#[test]
-fn a_cli_first_probe_leaves_no_decision_in_the_desktop_namespace() {
-    let dir = scratch("first-probe");
-    let file = dir.join("p.json");
-    std::fs::write(&file, project(invert()).to_string()).unwrap();
-    // An exactly representable fork: native and ANGLE agree, so a writable
-    // namespace would record a native verification.
-    let defs = definitions_file(&dir, |set| {
-        rewrite_body(
-            set,
-            "invert",
-            "fork",
-            "\n      vec4 c = texture(u_tex, v_st); o = vec4(0.0, 0.0, c.a, c.a);",
-        )
-    });
-    let cache = dir.join("Shader Cache");
-    std::fs::create_dir_all(&cache).unwrap();
-    std::fs::write(
-        cache.join("desktop-environment.json"),
-        json!({ "v": 1, "environment": "{\"electron\":\"desktop\",\"chrome\":\"electron chromium\"}" }).to_string(),
-    )
-    .unwrap();
-    let markers = || -> Vec<String> {
-        std::fs::read_dir(cache.join("angle-parity"))
-            .map(|d| {
-                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let descriptor = std::fs::read_to_string(cache.join("desktop-environment.json")).unwrap();
-    let descriptor: Value = serde_json::from_str(&descriptor).unwrap();
-    let descriptor = descriptor["environment"].as_str().unwrap().to_owned();
-    for (entry, env) in [
-        (
-            "direct",
-            vec![("POWERMOVE_ENGINE_SHADER_CACHE", cache.as_os_str())],
-        ),
-        (
-            "powermove render",
-            vec![
-                ("POWERMOVE_ENGINE_SHADER_CACHE", cache.as_os_str()),
-                (
-                    "POWERMOVE_ENGINE_PARITY_ENV",
-                    std::ffi::OsStr::new(&descriptor),
-                ),
-                (
-                    "POWERMOVE_ENGINE_PARITY_STORE",
-                    std::ffi::OsStr::new("read-only"),
-                ),
-            ],
-        ),
-    ] {
-        let out = dir.join(format!("{}.png", entry.replace(' ', "-")));
-        let Some(run) = cli_with_angle(
-            &[
-                file.to_str().unwrap(),
-                "-o",
-                out.to_str().unwrap(),
-                "--format",
-                "still",
-                "--definitions",
-                defs.to_str().unwrap(),
-            ],
-            &env,
-        ) else {
-            return;
-        };
-        ok(&run);
-        assert!(
-            near(corner(&out), [0, 0, 255]),
-            "{entry}: {:?}",
-            corner(&out)
-        );
-        assert_eq!(
-            markers(),
-            Vec::<String>::new(),
-            "{entry} wrote a probe decision"
-        );
-    }
-    // The desktop's own verification is still honoured: a native marker for
-    // this exact program would be read (the pin-store harness checks pixels).
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// `pm-cli scope` draws with `render`'s setup (DEFS-4): the same probe store,
-/// definitions, and Chromium runner, so its waveform, parade, vectorscope and
-/// scope.json never come from a user program drawn natively unverified.
-fn scope(args: &[&str], helper: Option<&str>, cache: &Path) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pm-cli"));
-    command
+/// `pm-cli scope` draws with `render`'s setup: the same definitions and
+/// runner rules, so its waveform, parade, vectorscope and scope.json are the
+/// pixels `render` would deliver.
+fn scope(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_pm-cli"))
         .arg("scope")
         .args(args)
         .env_remove("POWERMOVE_ANGLE_ENDPOINT")
         .env_remove("POWERMOVE_ANGLE_TOKEN")
-        .env_remove("POWERMOVE_ENGINE_PARITY_ENV")
-        .env_remove("POWERMOVE_ENGINE_PARITY_STORE")
-        // An empty probe namespace: nothing is verified natively.
-        .env("POWERMOVE_ENGINE_SHADER_CACHE", cache);
-    match helper {
-        Some(helper) => command.env("POWERMOVE_ANGLE_HELPER", helper),
-        None => command.env_remove("POWERMOVE_ANGLE_HELPER"),
-    };
-    command.output().unwrap()
+        .env_remove("POWERMOVE_ANGLE_HELPER")
+        .output()
+        .unwrap()
 }
 
 fn shader_layer_project(dir: &Path) -> PathBuf {
@@ -538,29 +447,6 @@ fn shader_layer_project(dir: &Path) -> PathBuf {
     p["layers"][0]["d"] = json!({ "code": "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0); }", "uniforms": {}, "w": 320, "h": 180 });
     std::fs::write(&file, p.to_string()).unwrap();
     file
-}
-
-#[test]
-fn scope_never_measures_an_unverified_shader_layer_drawn_natively() {
-    let dir = scratch("scope-unverified-layer");
-    let file = shader_layer_project(&dir);
-    let cache = dir.join("Shader Cache");
-    std::fs::create_dir_all(&cache).unwrap();
-    let out = dir.join("scopes");
-    let run = scope(
-        &[file.to_str().unwrap(), "-o", out.to_str().unwrap()],
-        None,
-        &cache,
-    );
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert_eq!(run.status.code(), Some(4), "{stderr}");
-    assert!(stderr.contains("not headless-renderable"), "{stderr}");
-    assert!(stderr.contains("fallback runner"), "{stderr}");
-    assert!(stderr.contains("layer bg"), "{stderr}");
-    assert!(
-        !out.join("scope.json").exists(),
-        "no scopes of native pixels"
-    );
 }
 
 #[test]
@@ -578,20 +464,14 @@ fn scope_takes_definitions_and_refuses_a_runner_only_program_without_a_helper() 
             "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
         }));
     });
-    let cache = dir.join("Shader Cache");
-    std::fs::create_dir_all(&cache).unwrap();
     let out = dir.join("scopes");
-    let run = scope(
-        &[
-            file.to_str().unwrap(),
-            "-o",
-            out.to_str().unwrap(),
-            "--definitions",
-            defs.to_str().unwrap(),
-        ],
-        None,
-        &cache,
-    );
+    let run = scope(&[
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--definitions",
+        defs.to_str().unwrap(),
+    ]);
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert_eq!(run.status.code(), Some(4), "{stderr}");
     assert!(stderr.contains("acme.sky"), "{stderr}");
@@ -599,11 +479,7 @@ fn scope_takes_definitions_and_refuses_a_runner_only_program_without_a_helper() 
     // Built-in effects now draw in scope from the built-in set (they were
     // routed before scope took definitions), with render's warning.
     std::fs::write(&file, project(invert()).to_string()).unwrap();
-    let run = scope(
-        &[file.to_str().unwrap(), "-o", out.to_str().unwrap()],
-        None,
-        &cache,
-    );
+    let run = scope(&[file.to_str().unwrap(), "-o", out.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "{stderr}");
     assert!(
@@ -627,21 +503,23 @@ fn scope_takes_definitions_and_refuses_a_runner_only_program_without_a_helper() 
     );
 }
 
+/// A user shader layer draws natively on first use, in `render` and in
+/// `scope`, with no browser and no first-frame probe (E-R1).
 #[test]
-fn scope_measures_an_unverified_shader_layer_through_the_chromium_runner() {
-    let Some(helper) = angle_helper() else {
-        return;
-    };
-    let dir = scratch("scope-runner-layer");
+fn a_user_shader_layer_draws_natively_on_first_use() {
+    let dir = scratch("native-layer");
     let file = shader_layer_project(&dir);
-    let cache = dir.join("Shader Cache");
-    std::fs::create_dir_all(&cache).unwrap();
+    let still = dir.join("shader.png");
+    ok(&cli(&[
+        file.to_str().unwrap(),
+        "-o",
+        still.to_str().unwrap(),
+        "--format",
+        "still",
+    ]));
+    assert!(near(corner(&still), [64, 128, 191]), "{:?}", corner(&still));
     let out = dir.join("scopes");
-    let run = scope(
-        &[file.to_str().unwrap(), "-o", out.to_str().unwrap()],
-        Some(&helper),
-        &cache,
-    );
+    let run = scope(&[file.to_str().unwrap(), "-o", out.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "{stderr}");
     let stats: Value = serde_json::from_slice(&run.stdout).unwrap();
@@ -652,9 +530,4 @@ fn scope_measures_an_unverified_shader_layer_through_the_chromium_runner() {
         }
     }
     assert!(out.join("scope.json").exists());
-    // A first probe leaves no decision the desktop would trust.
-    let left: Vec<_> = std::fs::read_dir(cache.join("angle-parity"))
-        .map(|d| d.map(|e| e.unwrap().file_name()).collect())
-        .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
 }

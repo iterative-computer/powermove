@@ -662,6 +662,10 @@ impl FallbackStore {
 mod tests {
     use super::*;
 
+    fn bind_failure() -> pm_glsl::Failure {
+        pm_glsl::Failure::new(pm_glsl::FailureStage::Bind, "a samplerCube")
+    }
+
     #[test]
     fn rgba8_requests_partition_the_cache_and_accept_only_byte_codes() {
         let f16 = request(
@@ -670,7 +674,7 @@ mod tests {
             1,
             1,
             &[],
-            &crate::effects::exec::parity_failure(),
+            &bind_failure(),
         );
         let u8_request = at_color_depth(&f16, 8);
         assert_eq!(f16.color_depth, 16);
@@ -735,7 +739,7 @@ mod tests {
             1,
             1,
             &[],
-            &crate::effects::exec::parity_failure(),
+            &bind_failure(),
         );
         let f32 = at_color_depth(&f16, 32);
         let pixels = FallbackPixels {
@@ -758,7 +762,7 @@ mod tests {
                 &[],
                 vec![],
                 &[p],
-                &crate::effects::exec::parity_failure(),
+                &bind_failure(),
             )
             .key
         };
@@ -788,7 +792,7 @@ mod tests {
             &[],
             vec![],
             &[&pixels],
-            &crate::effects::exec::parity_failure(),
+            &bind_failure(),
         );
         let mut legacy = blake3::Hasher::new();
         legacy.update(b"pm-render shader fallback with textures 3\0");
