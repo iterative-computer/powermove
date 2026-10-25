@@ -391,6 +391,7 @@ export class SourceMonitor extends EventTarget {
     });
     this.resize.observe(this.surface, { box: 'border-box' });
     this.watchResolution();
+    window.addEventListener('resize', this.resolutionChanged);
     void this.command(false);
     queueMicrotask(() => { if (this.surface.isConnected) void this.paint(); });
   }
@@ -555,6 +556,7 @@ export class SourceMonitor extends EventTarget {
     if (this.disposed) return;
     this.disposed = true; this.requested++; this.cancel.abort(); this.resize.disconnect();
     this.resolution?.removeEventListener('change', this.resolutionChanged); this.resolution = null;
+    window.removeEventListener('resize', this.resolutionChanged);
     if (this.frame) cancelAnimationFrame(this.frame); this.frame = 0;
     this.host.session()?.audio({ audio: 'sourceMonitor', generation: this.source.nextGeneration(), asset: null, time: 0, playing: false });
     if (this.imageUrl) { URL.revokeObjectURL(this.imageUrl); this.imageUrl = null; }

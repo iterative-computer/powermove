@@ -471,10 +471,17 @@ describe('engine source consumers', () => {
       expect(queries[1]!.remove).toHaveBeenCalledOnce();
       expect(width).not.toHaveBeenCalled(); expect(height).not.toHaveBeenCalled();
       expect(monitor.paused).toBe(true);
-      f.source.dispose();
+      // Chromium can deliver the window resize before the resolution query.
+      vi.stubGlobal('devicePixelRatio', 1);
+      window.dispatchEvent(new Event('resize'));
+      await vi.waitFor(() => expect(present).toHaveBeenCalledTimes(4));
+      expect(f.snapshot).toHaveBeenLastCalledWith(expect.objectContaining({ width: 160, height: 90 }), 'async');
       expect(queries[2]!.remove).toHaveBeenCalledOnce();
-      queries[2]!.change!();
-      expect(f.snapshot).toHaveBeenCalledTimes(3);
+      f.source.dispose();
+      expect(queries[3]!.remove).toHaveBeenCalledOnce();
+      queries[3]!.change!();
+      window.dispatchEvent(new Event('resize'));
+      expect(f.snapshot).toHaveBeenCalledTimes(4);
     } finally { f.source.dispose(); vi.unstubAllGlobals(); }
   });
 
