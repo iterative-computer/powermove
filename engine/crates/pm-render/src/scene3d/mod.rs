@@ -12,11 +12,12 @@
 //! - [`describe`]: the passes and draws three.js issues for a layer.
 //! - [`lights`]: `WebGLLights` and the light shadows.
 //! - [`gpu`]: executes the draws (MSAA, shared prepass, shadow maps).
+//! - [`karis`]: the luminance-weighted MSAA resolve.
 //! - [`textures`]: material maps, shadow-map samplers, LTC tables.
 //! - [`legacy`]: legacy `scene3d` and OBJ mesh layers.
 //!
-//! A 3D object or scene layer resolves premultiplied linear RGBA16F. The
-//! compositing seam tone maps and encodes once before 2D masks and effects.
+//! A 3D object or scene layer resolves premultiplied linear RGBA16F,
+//! luminance-weighted ([`karis`]). The compositing seam unweights, tone maps and encodes once before 2D masks and effects.
 //! Legacy OBJ mesh layers retain their own encoded output contract.
 
 mod color_round;
@@ -24,6 +25,7 @@ pub(crate) use color_round::NEAREST_HALF_WGSL;
 pub mod describe;
 pub mod gltf;
 pub mod gpu;
+pub mod karis;
 pub mod layers;
 pub mod legacy;
 pub mod lights;

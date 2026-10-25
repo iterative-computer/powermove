@@ -21,7 +21,7 @@ struct Quad {
     m0: vec4<f32>,
     m1: vec4<f32>,
     m2: vec4<f32>,
-    // xy: target size; zw: unused.
+    // xy: target size; z: 1 for luminance-weighted 3D samples; w: unused.
     res: vec4<f32>,
     // Content UV window: offset (xy), scale (zw).
     uv: vec4<f32>,

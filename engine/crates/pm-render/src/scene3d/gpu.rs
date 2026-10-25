@@ -304,9 +304,12 @@ pub enum OutputColor3d {
     /// Premultiplied linear scene light. Apply the authored ACES Filmic curve
     /// once after the 3D blend and resolve, then encode once. The optional
     /// background is an authored display color and bypasses tone mapping.
+    /// `weighted`: the samples resolved luminance-weighted
+    /// ([`super::karis`]); unweight before toning.
     LinearScene {
         exposure: f32,
         background: Option<[f32; 3]>,
+        weighted: bool,
     },
     /// The legacy OBJ mesh pass already yields encoded color.
     Encoded,
@@ -354,6 +357,9 @@ pub struct Scene3dRenderer {
     cache_write_failures: u64,
     pub(crate) legacy: super::legacy::MeshRenderer,
     gltf: super::gltf::gpu::GltfGpu,
+    /// The resolve weighting pass, once asked for (`None` inside: the
+    /// device has no passthrough MSL).
+    weighting: Option<Option<super::karis::Weighting>>,
 }
 
 impl Default for Scene3dRenderer {
@@ -382,6 +388,7 @@ impl Default for Scene3dRenderer {
             cache_write_failures: 0,
             legacy: Default::default(),
             gltf: Default::default(),
+            weighting: None,
         }
     }
 }
@@ -1656,6 +1663,13 @@ impl Scene3dRenderer {
                         list.push(prepared);
                     }
                 }
+                let weighting = if samples > 1 {
+                    self.weighting
+                        .get_or_insert_with(|| super::karis::Weighting::new(device, SAMPLES))
+                        .as_ref()
+                } else {
+                    None
+                };
                 let a = self.attachments.as_ref().expect("attachments");
                 let resolve = resolve.expect("a resolve target");
                 let (view, resolve_target, store) = if samples > 1 {
@@ -1693,6 +1707,9 @@ impl Scene3dRenderer {
                 });
                 for p in &list {
                     p.draw(&mut rp);
+                }
+                if let Some(w) = weighting {
+                    w.draw(&mut rp);
                 }
             }
         }
@@ -1842,6 +1859,11 @@ impl Scene3dRenderer {
         });
     }
 
+    /// Whether a color pass weights its samples ([`super::karis`]).
+    fn weighted(&self, device: &wgpu::Device) -> bool {
+        self.samples > 1 && pm_gpu::msl::supported(device)
+    }
+
     fn output(&self, device: &wgpu::Device, pool: &mut TargetPool, w: u32, h: u32) -> Target {
         pool.take(
             device,
@@ -1938,6 +1960,7 @@ impl Scene3dRenderer {
             color: out,
             depth,
             color_space: OutputColor3d::LinearScene {
+                weighted: self.weighted(device),
                 exposure: scene.exposure as f32,
                 background: background
                     .then_some(scene.background)
@@ -2003,6 +2026,7 @@ impl Scene3dRenderer {
             color: out,
             depth,
             color_space: OutputColor3d::LinearScene {
+                weighted: self.weighted(device),
                 exposure: scene.exposure as f32,
                 background: scene
                     .background

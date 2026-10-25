@@ -246,7 +246,7 @@ fn fs_encode_flip_value(in: VsOut) -> vec4<f32> {
 }
 
 fn fs_scene_output_value(in: VsOut) -> vec4<f32> {
-    return scene_output(load_a(in.pos), op.f.x, op.g[0], has(FLAG_LINEAR));
+    return scene_output(load_a(in.pos), op.f.x, op.g[0], has(FLAG_LINEAR), op.f.y > 0.5);
 }
 
 

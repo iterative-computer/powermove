@@ -379,11 +379,14 @@ fn displayed_pixels_prefer_supersampled_float_reference() {
                 )
                 .unwrap_or_else(|e| panic!("{}: {e}", plan.layer));
             gpu.queue.submit([encoder.finish()]);
-            let actual = float_reference::top_down_linear(
-                pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &out.color.texture).unwrap(),
-                w as usize,
-                h as usize,
-            );
+            let mut raw =
+                pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
+            if let pm_render::scene3d::OutputColor3d::LinearScene { weighted: true, .. } =
+                out.color_space
+            {
+                pm_render::scene3d::karis::unweight(&mut raw);
+            }
+            let actual = float_reference::top_down_linear(raw, w as usize, h as usize);
             assert_eq!(actual.len(), reference.len());
             assert!(
                 reference.iter().all(|v| v.is_finite()),

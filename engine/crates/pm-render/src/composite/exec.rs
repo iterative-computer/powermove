@@ -217,12 +217,14 @@ impl Exec<'_> {
         source: &Target,
         exposure: f32,
         background: Option<[f32; 3]>,
+        weighted: bool,
     ) -> Target {
         let full = (source.width(), source.height());
         let rect = Region::full(full.0, full.1);
         let target = self.take_rect(rect);
         let mut u = self.op_uniform(full);
         u.f[0] = exposure;
+        u.f[1] = f32::from(weighted);
         if let Some(rgb) = background {
             u.g[0] = [rgb[0], rgb[1], rgb[2], 1.0];
         }

@@ -15,8 +15,18 @@ fn scene_aces(rgb: vec3<f32>, exposure: f32) -> vec3<f32> {
     return clamp(output * (a / b), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// Luminance-weighted resolved samples (`scene3d::karis`): color scaled by
+// 1 / (1 + luma), coverage as is. The weights' sum is the coverage less the
+// stored color's luma (Rec. 709).
+fn scene_unweight(y: vec4<f32>) -> vec4<f32> {
+    if (y.a <= 0.0) { return vec4<f32>(0.0); }
+    let weights = y.a - max(dot(y.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0);
+    return vec4<f32>(y.rgb * (y.a / max(weights, 1.0 / 16384.0)), y.a);
+}
+
 // A display background bypasses ACES but joins the object in linear light.
-fn scene_output(src: vec4<f32>, exposure: f32, background: vec4<f32>, linear: bool) -> vec4<f32> {
+fn scene_output(stored: vec4<f32>, exposure: f32, background: vec4<f32>, linear: bool, weighted: bool) -> vec4<f32> {
+    let src = select(stored, scene_unweight(stored), weighted);
     var rgb = vec3<f32>(0.0);
     if (src.a > 0.0) { rgb = scene_aces(src.rgb / src.a, exposure); }
     var result = vec4<f32>(rgb * src.a, src.a);

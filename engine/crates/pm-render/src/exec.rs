@@ -30,7 +30,8 @@ pub(crate) struct Resolved {
     /// The texture holds premultiplied E values whatever the working
     /// encoding (the 3D pass output, section 9 "3D layers").
     pub encoded: bool,
-    pub scene: Option<(f32, Option<[f32; 3]>)>,
+    /// A linear 3D source: exposure, display background, weighted samples.
+    pub scene: Option<(f32, Option<[f32; 3]>, bool)>,
     pub uv: [f64; 4],
     pub layer: String,
     /// A 2.5D plane: replaces `matrix` (unit quad to target pixels,
@@ -677,10 +678,12 @@ impl Exec<'_> {
                                     crate::scene3d::OutputColor3d::LinearScene {
                                         exposure,
                                         background,
+                                        weighted,
                                     } => {
                                         if r.level2.is_some() {
                                             let converted = self.scene_output(
                                                 encoder, &out.color, exposure, background,
+                                                weighted,
                                             );
                                             self.prepare_level2(
                                                 encoder,
@@ -691,7 +694,7 @@ impl Exec<'_> {
                                             r.view = Some(converted.view.clone());
                                         } else {
                                             r.view = Some(out.color.view.clone());
-                                            r.scene = Some((exposure, background));
+                                            r.scene = Some((exposure, background, weighted));
                                         }
                                     }
                                 }
@@ -927,7 +930,8 @@ impl Exec<'_> {
             ]);
             let mut u = quad(r.matrix, r.uv, color);
             u.m = r.uniform_matrix();
-            if let Some((exposure, background)) = r.scene {
+            if let Some((exposure, background, weighted)) = r.scene {
+                u.res[2] = f32::from(weighted);
                 u.color[2] = if self.working == WorkingEncoding::LinearLight {
                     2.0
                 } else {
