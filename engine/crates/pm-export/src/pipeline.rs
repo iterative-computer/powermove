@@ -351,16 +351,12 @@ mod tests {
 
     #[test]
     fn frames_reach_the_sink_converted_in_order_with_per_frame_dither() {
-        let mut p = Pipeline::new(
-            spec(
-                Codec::H264 {
-                    bitrate_bps: 4_000_000,
-                },
-                3,
-            ),
-            MemorySink::default(),
-        )
-        .unwrap();
+        let h264 = Codec::H264 {
+            bitrate_bps: 4_000_000,
+        };
+        let mut dithered = spec(h264, 3);
+        dithered.dither = Dither::On;
+        let mut p = Pipeline::new(dithered, MemorySink::default()).unwrap();
         let f = ramp(0);
         for _ in 0..3 {
             p.push_frame(&WorkingFrame {
@@ -384,8 +380,21 @@ mod tests {
         assert_eq!(sink.frames.len(), 3);
         assert_eq!(sink.audio.len(), 3 * 2 * 1920);
         assert!(sink.frames.iter().all(|f| f.format == InputFormat::V420));
-        // Same pixels, different frame index: the 8-bit default dither differs per frame.
+        // Same pixels, different frame index: opt-in dither differs per frame.
         assert_ne!(sink.frames[0], sink.frames[1]);
+        // H.264 is not dithered by default (EXPORT-DITHER-1): same pixels, same input.
+        let mut p = Pipeline::new(spec(h264, 2), MemorySink::default()).unwrap();
+        for _ in 0..2 {
+            p.push_frame(&WorkingFrame {
+                width: 32,
+                height: 16,
+                rgba: &f,
+            })
+            .unwrap();
+            p.push_audio(&[0.0; 2 * 1920]).unwrap();
+        }
+        let sink = p.finish().unwrap();
+        assert_eq!(sink.frames[0], sink.frames[1]);
     }
 
     #[test]

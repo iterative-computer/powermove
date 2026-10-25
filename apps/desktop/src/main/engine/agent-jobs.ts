@@ -203,8 +203,8 @@ function agentFormat(input: ExportVideoInput): { format: DeliveryFormat; deliver
 
 /** The job engine's settings for a format and the sheet's delivery options:
  *  tags, audio coding, start timecode and reel, a Float32 wire hint (the
- *  project's colorDepth selects working precision), and dither for outputs
- *  at 8 bits or less. */
+ *  project's colorDepth selects working precision), and dither for 8-bit
+ *  PNG (EXPORT-DITHER-1). */
 export function wireSettings(input: {
   format: DeliveryFormat;
   delivery: DeliveryOptions;
@@ -241,7 +241,8 @@ export function wireSettings(input: {
     motionBlur: input.motionBlur,
     color: wireColor(format, delivery),
     precision: 'float32',
-    dither: outputDepth(format, delivery) <= 8,
+    // Final 8-bit images only: a lossy encoder codes dither as content.
+    dither: image && outputDepth(format, delivery) <= 8,
     draftFromProxies: input.draft === true,
     delivery: {
       audioCoding: coding,
@@ -260,8 +261,8 @@ export function wireSettings(input: {
  *  pixels, the composition rate, all or the work area, ProRes 4444 (straight
  *  alpha when asked) or H.264 at the High tier (16 Mbps), Rec.709 (QuickTime
  *  and Safari) tags; or a preset's or another delivery format's. Exports
- *  use the project's colorDepth despite the Float32 wire hint, and delivery
- *  formats at 8 bits or less are dithered (section 17). */
+ *  use the project's colorDepth despite the Float32 wire hint, and only 8-bit
+ *  PNG is dithered (section 17, EXPORT-DITHER-1). */
 export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput, compat: readonly CompatSource[] = []): ExportSettings {
   const project = asProject(projectValue);
   const rate = resolveFrameRate(project['fps'], project['fpsRational']);
