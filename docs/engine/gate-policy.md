@@ -120,7 +120,8 @@ on every surface, holding the last source frame without browser seek padding.
   itself. Compile and refusal verdicts stay exact.
 - **G-X1** (`e2e/export-encoding-parity.spec.ts`) replaces EXPORT-1's byte identity:
   today's stream properties, and decoded pictures at least as close to the engine's
-  lossless 16-bit render as today's export.
+  lossless 16-bit render as today's export. Pictures are decoded with zimg's exact
+  BT.709 limited-range inverse; swscale's tables are off by up to a code.
 
 ## Who converts what
 

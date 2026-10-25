@@ -51,8 +51,9 @@ JobDocument (frozen Arc<Document> at the session's revision)
   calling thread's QoS and refresh it as rows complete. User exports use
   default QoS while playback is idle and utility while it plays; agent and
   background work stays at utility (RFC 13 invariant 10).
-- **Dither**: the desktop enables it for delivery formats at 8 bits or less;
-  it is never applied to alpha (delivery.md has the tile and its tests).
+- **Dither**: the desktop enables it for 8-bit PNG only, a final image; lossy
+  codecs take the float frame rounded once (EXPORT-DITHER-1). It is never applied
+  to alpha (delivery.md has the tile and its tests).
 - **Precision**: saved `project.colorDepth` selects 8-bit normalized, 16-bit
   float, or 32-bit float working targets. The desktop still sends a Float32
   request hint for wire compatibility; it does not promote project depth.
@@ -338,7 +339,7 @@ measured.
 `ExportSpec::input_format()` picks the input from codec and alpha.
 Conversion (`convert.rs`) stays the f64 reference: Rec.709 matrix, siting
 type 0, 4:2:0 vertical filter, the deterministic blue-noise dither (±0.5 LSB,
-8-bit outputs only), round half to even, clipping to the codable range.
+8-bit PNG by default), round half to even, clipping to the codable range.
 Verification (`verify.rs`) covers every format: for MOV and MP4 the movie's
 boxes (`hvcC` profile and depth, `almo` mode, PCM bits and float flag,
 `tmcd` and reel), for WebM a demux and libvpx decode of sampled frames, for
@@ -540,17 +541,20 @@ remains below 0.125 CV for all eight ICC compositions (`media.md`).
 ## Encoders (X-R2 to X-R5)
 
 Every format takes the engine's own conversion of the working frames
-(`convert.rs`: Rec.709 matrix, siting type 0, the 4:2:0 vertical filter, the
-deterministic blue-noise dither for 8-bit outputs, round half to even, the codable
-range) and the f32 mix:
+(`convert.rs`: Rec.709 matrix, siting type 0, the 4:2:0 vertical filter, round half
+to even, the codable range; blue-noise dither only for 8-bit PNG, X-K6 as amended by
+EXPORT-DITHER-1) and the f32 mix:
 
-- **H.264 and ProRes** (`mac::VideoToolboxSink`): VideoToolbox from `420v`, `v216` or
-  `y416`, muxed by AVAssetWriter. Today's "over black, no dither" RGBA8 pipe to an
+- **H.264 and ProRes** (`mac::VideoToolboxSink`): VideoToolbox from `420v` (undithered),
+  `v216` or `y416` (ProRes at its native 10 or 12 bits from the float frame), muxed by
+  AVAssetWriter; MOV sound tracks get a `chan` layout box after AVAssetWriter finishes. Today's "over black, no dither" RGBA8 pipe to an
   FFmpeg process (swscale) is gone, and so is the FFmpeg audio remux: PCM is written as
   24-bit (or 16-bit with TPDF dither, or float) `lpcm` from the f32 mix, AAC by
   AudioToolbox from f32 with an edit list, and MP4 starts with its movie header.
 - **WebM** (`webm::WebmSink`): libvpx and libopus in the engine with today's realtime
-  encoder settings and keyframe schedule, tagged with the export's colour description
+  encoder settings and keyframe schedule, on its own thread one frame behind the
+  conversion (`pipeline::Overlapped`; thread count, tile columns and frame-parallel
+  changed nothing measurable), tagged with the export's colour description
   (1-13-1 limited range). OpusHead carries libopus's 312-sample pre-skip with packets
   from zero and no CodecDelay, so audio starts with the first frame. The hidden Chromium
   encoder window, its preload and page, the GPU frame transport and the `hostEncode`

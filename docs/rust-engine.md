@@ -190,7 +190,7 @@ encoder-input buffer. Dither is off for every bar unless stated.
 | Color invariants, linear blending | Bars (1) and (2) also hold with linear blending on. | 3a |
 | Pipeline transparency | At 32-bit precision, ProRes 4444 XQ decode → engine (no effects) → `y416` sink matches a VideoToolbox reference decode exactly at 12-bit; ProRes 422 → `x422` sink matches exactly. | 2 |
 | Codec generation | Engine ProRes and H.264 exports versus Apple's re-encode (`AVAssetExportSession`) of the same decoded frames: maximum 1 CV at 10-bit and PSNR within 0.1 dB. | 2 |
-| Bit depth | A 16-bit grey ramp across at least 1024 columns, exported to a 10-bit limited-range preset (ProRes 422 HQ), contains every luma code 64 to 940 (877 levels), is monotonic, steps at most 1 CV, and keeps Cb = Cr exactly neutral; a chroma ramp covers 64 to 960 (897 levels). 16-bit PNG output is monotonic with maximum step ⌈65535 / (columns − 1)⌉. With default dither on an 8-bit output, the 16-column local mean is within 0.5 CV of ideal. | 3b |
+| Bit depth | A 16-bit grey ramp across at least 1024 columns, exported to a 10-bit limited-range preset (ProRes 422 HQ), contains every luma code 64 to 940 (877 levels), is monotonic, steps at most 1 CV, and keeps Cb = Cr exactly neutral; a chroma ramp covers 64 to 960 (897 levels). 16-bit PNG output is monotonic with maximum step ⌈65535 / (columns − 1)⌉. With default dither on an 8-bit PNG output, the 16-column local mean is within 0.5 CV of ideal. | 3b |
 | Alpha | ProRes 4444 alpha is exact at the source alpha depth; straight and premultiplied outputs both correct. HEVC alpha PSNR at least that of AVFoundation's HEVC-with-alpha preset on the same frames. | 3b |
 | SDR color | Patch centers within 1 CV of analytic expectations; ΔE2000 maximum 1.0 and mean 0.5 at 8-bit, maximum 0.5 at 10-bit; two references (FFmpeg with zimg, and AVFoundation). | 3b |
 | Linear blending | Computed at 32-bit, round half up, sRGB output: 50% white over black is 188 (0.735357; boundary 187.5). A 1-pixel checkerboard downscaled 2× is 188. A Gaussian blur of a white line conserves energy within 0.5%. | 3a |
@@ -1191,7 +1191,11 @@ evaluate → [Blender stage] → render (float) → output transform
   native buffers with color attachments, or copies planes on pass-through.
 - **Dither:** deterministic blue-noise RPDF of ±0.5 LSB seeded by frame and pixel,
   after the matrix in the output domain (values already on the output grid are
-  unchanged); on by default for 8-bit outputs, opt-in for 10-bit, never on alpha.
+  unchanged); on by default only for final 8-bit images (8-bit PNG and stills), opt-in
+  elsewhere, never on alpha. Lossy codecs (H.264, HEVC, VP8/VP9) take the float frame
+  converted and rounded once, undithered: an encoder codes the noise as content
+  (EXPORT-DITHER-1: 2.0 Mb/s instead of 7.7 kb/s, and lower PSNR). ProRes and HEVC
+  Main10 get their native 10- or 12-bit input from the float frame.
 - **Muxers:** AVAssetWriter for MOV and MP4; FFmpeg for WebM. Timescales: NTSC rates
   use the rate numerator (24000, 30000, 48000, 60000, 120000, 240000); integer rate f
   uses f × 1000; audio tracks use the sample rate; `movieTimeScale` matches; a `tmcd`
