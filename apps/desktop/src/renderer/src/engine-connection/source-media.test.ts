@@ -412,6 +412,84 @@ describe('engine source consumers', () => {
     } finally { f.source.dispose(); vi.unstubAllGlobals(); }
   });
 
+  it('repaints after pausing so playback sampling is replaced by final quality', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const f = fixture();
+    const present = vi.spyOn(SourceVideoPresenter.prototype, 'paint').mockResolvedValue();
+    f.snapshot.mockResolvedValue({ width: 4, height: 2, data: new Uint8ClampedArray(12),
+      videoPlanes: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited', timestamp: 0 } } as EngineSnapshot);
+    try {
+      const monitor = f.source.monitor('clip');
+      await monitor.play();
+      monitor.pause();
+      await vi.waitFor(() => expect(present).toHaveBeenCalledOnce());
+      expect(monitor.paused).toBe(true);
+      expect(f.audio.mock.calls.at(-1)![0]).toMatchObject({ playing: false, asset: 'clip' });
+      expect(f.audio.mock.invocationCallOrder.at(-1)!).toBeLessThan(f.snapshot.mock.invocationCallOrder[0]!);
+    } finally { f.source.dispose(); vi.unstubAllGlobals(); }
+  });
+
+  it('repaints a paused monitor on DPR-only changes and rearms the resolution listener', async () => {
+    let resized!: ResizeObserverCallback;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { resized = callback; }
+      observe() {} disconnect() {}
+    });
+    const queries: Array<{ query: string; change?: () => void; remove: ReturnType<typeof vi.fn> }> = [];
+    vi.stubGlobal('devicePixelRatio', 1);
+    vi.stubGlobal('matchMedia', (query: string) => {
+      const entry = { query, change: undefined as (() => void) | undefined, remove: vi.fn() };
+      queries.push(entry);
+      return { addEventListener: (_: string, listener: () => void) => { entry.change = listener; },
+        removeEventListener: entry.remove };
+    });
+    const f = fixture();
+    const present = vi.spyOn(SourceVideoPresenter.prototype, 'paint').mockResolvedValue();
+    f.snapshot.mockResolvedValue({ width: 4, height: 2, data: new Uint8ClampedArray(12),
+      videoPlanes: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited', timestamp: 0 } } as EngineSnapshot);
+    try {
+      const monitor = f.source.monitor('clip');
+      const width = vi.spyOn(monitor.surface, 'clientWidth', 'get').mockReturnValue(160);
+      const height = vi.spyOn(monitor.surface, 'clientHeight', 'get').mockReturnValue(90);
+      resized([{ target: monitor.surface } as ResizeObserverEntry], {} as ResizeObserver);
+      await vi.waitFor(() => expect(present).toHaveBeenCalledOnce());
+      expect(monitor.paused).toBe(true);
+      expect(queries.map(entry => entry.query)).toEqual(['(resolution: 1dppx)']);
+      width.mockClear(); height.mockClear();
+
+      vi.stubGlobal('devicePixelRatio', 2);
+      queries[0]!.change!();
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledWith(expect.objectContaining({ width: 320, height: 180 }), 'async'));
+      await vi.waitFor(() => expect(present).toHaveBeenCalledTimes(2));
+      expect(queries[0]!.remove).toHaveBeenCalledOnce();
+      expect(queries.map(entry => entry.query)).toEqual(['(resolution: 1dppx)', '(resolution: 2dppx)']);
+
+      vi.stubGlobal('devicePixelRatio', 1.5);
+      queries[1]!.change!();
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledWith(expect.objectContaining({ width: 240, height: 135 }), 'async'));
+      await vi.waitFor(() => expect(present).toHaveBeenCalledTimes(3));
+      expect(queries[1]!.remove).toHaveBeenCalledOnce();
+      expect(width).not.toHaveBeenCalled(); expect(height).not.toHaveBeenCalled();
+      expect(monitor.paused).toBe(true);
+      // Chromium can deliver the window resize before the resolution query.
+      vi.stubGlobal('devicePixelRatio', 1);
+      window.dispatchEvent(new Event('resize'));
+      await vi.waitFor(() => expect(present).toHaveBeenCalledTimes(4));
+      expect(f.snapshot).toHaveBeenLastCalledWith(expect.objectContaining({ width: 160, height: 90 }), 'async');
+      expect(queries[2]!.remove).toHaveBeenCalledOnce();
+      // A resize that keeps the density neither rearms nor repaints.
+      window.dispatchEvent(new Event('resize'));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(queries).toHaveLength(4);
+      expect(f.snapshot).toHaveBeenCalledTimes(4);
+      f.source.dispose();
+      expect(queries[3]!.remove).toHaveBeenCalledOnce();
+      queries[3]!.change!();
+      window.dispatchEvent(new Event('resize'));
+      expect(f.snapshot).toHaveBeenCalledTimes(4);
+    } finally { f.source.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it.each([
     [{ alpha: 'premultiplied' }, 'png', 'interpreted'],
     [undefined, 'png', 'display'],

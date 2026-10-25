@@ -13,7 +13,11 @@ use pm_protocol::svg_raster::{SvgRasterKey, SvgRasterRequest};
 use sha2::{Digest, Sha256};
 
 use crate::media::MediaFailure;
-use crate::pipelines::{QuadUniform, UNIFORM_STRIDE, bytes_of};
+use crate::pipelines::{PassBlend, QuadUniform, UNIFORM_STRIDE, bytes_of};
+use crate::sampling::{
+    Sampling,
+    gpu::{Pyramid, affine3, bounds_quad, placement},
+};
 
 use super::Renderer;
 
@@ -28,6 +32,10 @@ pub(super) struct SourceReuse {
     target: Option<Target>,
     readback: pm_gpu::readback::ReadbackRing,
     batch_buffer: Option<(wgpu::Buffer, u64)>,
+    /// The last minified draw's mip pyramid, rebuilt in place by the next
+    /// draw of a source with the same extent (playback, scrubbing and each
+    /// frame of a batch), so neither allocates a pyramid per frame.
+    pyramid: Option<Pyramid>,
 }
 
 impl SourceReuse {
@@ -35,12 +43,21 @@ impl SourceReuse {
         self.target.as_ref().map_or(0, Target::bytes)
             + self.readback.capacity_bytes()
             + self.batch_buffer.as_ref().map_or(0, |(_, bytes)| *bytes)
+            + self.pyramid.as_ref().map_or(0, Pyramid::bytes)
     }
 
     pub(super) fn trim(&mut self, bytes: u64) {
         if self.bytes() > bytes {
+            self.pyramid = None;
+        }
+        if self.bytes() > bytes {
             *self = Self::default();
         }
+    }
+
+    /// Drops the kept pyramid (a monitor at rest); returns its bytes.
+    pub(super) fn release_pyramid(&mut self) -> u64 {
+        self.pyramid.take().map_or(0, |p| p.bytes())
     }
 }
 
@@ -65,7 +82,16 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         sequence: bool,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, true, sequence)
+        self.source_rgba8_with_decode(
+            path,
+            time,
+            output,
+            fit,
+            interpretation,
+            true,
+            sequence,
+            Sampling::Final,
+        )
     }
 
     /// The source as composition reads it: Interpret Footage's
@@ -81,6 +107,7 @@ impl Renderer {
         fit: SourceFit,
         interpretation: &Interpretation,
         sequence: bool,
+        sampling: Sampling,
     ) -> Result<Vec<u8>, String> {
         self.source_rgba8_with_decode(
             path,
@@ -90,6 +117,7 @@ impl Renderer {
             Some(interpretation),
             true,
             sequence,
+            sampling,
         )
     }
 
@@ -103,7 +131,16 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         sequence: bool,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, false, sequence)
+        self.source_rgba8_with_decode(
+            path,
+            time,
+            output,
+            fit,
+            interpretation,
+            false,
+            sequence,
+            Sampling::Final,
+        )
     }
 
     fn source_rgba8_with_decode(
@@ -115,6 +152,7 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         exact_worker: bool,
         sequence: bool,
+        sampling: Sampling,
     ) -> Result<Vec<u8>, String> {
         let mut head = [0u8; 512];
         let n = std::fs::File::open(path)
@@ -140,7 +178,7 @@ impl Renderer {
             exact_worker,
             sequence,
         )?;
-        self.draw_source_target(source, output, fit, encoder)
+        self.draw_source_target(source, output, fit, sampling, encoder)
     }
 
     fn source_texture(
@@ -284,7 +322,7 @@ impl Renderer {
                 false,
                 sequence,
             )?;
-            self.record_source_draw(&source, output, fit, &target, &mut encoder);
+            self.record_source_draw(&source, output, fit, Sampling::Final, &target, &mut encoder);
             encoder.copy_texture_to_buffer(
                 target.texture.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
@@ -403,6 +441,7 @@ impl Renderer {
         source: (Target, (f64, f64)),
         output: Size,
         fit: SourceFit,
+        sampling: Sampling,
         mut encoder: wgpu::CommandEncoder,
     ) -> Result<Vec<u8>, String> {
         let target = self.take_source_target(output);
@@ -412,7 +451,7 @@ impl Renderer {
             .reserve(&self.device, &target.texture, MAX_REUSED_SOURCE_BYTES)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "The source readback is still in flight".to_owned())?;
-        self.record_source_draw(&source, output, fit, &target, &mut encoder);
+        self.record_source_draw(&source, output, fit, sampling, &target, &mut encoder);
         copy.record(&mut encoder, &target.texture);
         self.queue.submit([encoder.finish()]);
         self.media.flush();
@@ -469,10 +508,11 @@ impl Renderer {
     }
 
     fn record_source_draw(
-        &self,
+        &mut self,
         source: &(Target, (f64, f64)),
         output: Size,
         fit: SourceFit,
+        sampling: Sampling,
         target: &Target,
         encoder: &mut wgpu::CommandEncoder,
     ) {
@@ -485,16 +525,43 @@ impl Renderer {
             SourceFit::Cover => Some((ow / sw).max(oh / sh)),
         };
         let (dw, dh) = ratio.map_or((ow, oh), |r| (sw * r, sh * r));
-        let uniform = QuadUniform {
-            m: [
-                [dw as f32, 0.0, 0.0, 0.0],
-                [0.0, -(dh as f32), 0.0, 0.0],
-                [((ow - dw) * 0.5) as f32, ((oh + dh) * 0.5) as f32, 1.0, 0.0],
-            ],
-            res: [w as f32, h as f32, 0.0, 0.0],
-            uv: [0.0, 0.0, 1.0, 1.0],
-            color: [1.0, 0.0, 0.0, 0.0],
+        // Source readbacks are top-down, unlike composition intermediates.
+        // The same placement and kernel apply, with the output Y axis flipped.
+        let uv = [0.0, 0.0, 1.0, 1.0];
+        let placement = placement(
+            affine3(&[dw, 0.0, 0.0, -dh, (ow - dw) * 0.5, (oh + dh) * 0.5]),
+            uv,
+        )
+        .expect("a source has nonzero dimensions");
+        let uniform = bounds_quad(
+            placement
+                .bounds_matrix(w, h)
+                .expect("source intersects output"),
+            w,
+            h,
+        );
+        // One GPU pyramid per decoded source draw, shared by playback's
+        // trilinear filter and Final's bounded-support Lanczos-3. Never read
+        // back or build mips on the CPU, or retain mutable decoder textures;
+        // the levels are rebuilt each draw into one kept texture.
+        let pyramid = if f64::from(source.0.width()) > dw || f64::from(source.0.height()) > dh {
+            let pyramid = self.pipelines.resample.rebuild(
+                &self.device,
+                encoder,
+                &source.0.texture,
+                self.source_reuse.pyramid.take(),
+            );
+            self.source_reuse.pyramid = Some(pyramid.clone());
+            pyramid
+        } else {
+            Pyramid::base(&source.0.texture)
         };
+        let tex = self.pipelines.resample.bind(
+            &self.device,
+            &self.queue,
+            &pyramid,
+            &placement.uniform(uv, 1.0, false, sampling, (0, 0), h, &pyramid),
+        );
         let params = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm source snapshot quad"),
             size: UNIFORM_STRIDE,
@@ -514,20 +581,6 @@ impl Renderer {
                 }),
             }],
         });
-        let tex = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm source snapshot texture"),
-            layout: &self.pipelines.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.0.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.pipelines.linear),
-                },
-            ],
-        });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pm source snapshot draw"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -544,7 +597,11 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(self.pipelines.draw(wgpu::TextureFormat::Rgba8Unorm));
+        pass.set_pipeline(
+            self.pipelines
+                .resample
+                .pipeline(target.format(), PassBlend::Over),
+        );
         pass.set_bind_group(0, &quad, &[0]);
         pass.set_bind_group(1, &tex, &[]);
         pass.draw(0..4, 0..1);

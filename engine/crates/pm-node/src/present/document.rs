@@ -207,6 +207,28 @@ impl ViewDocument {
         self.source_media.get(asset).cloned()
     }
 
+    /// The file a source snapshot in `color` reads: `None` until the host
+    /// answered it, `Some(None)` when it is offline. Interpreted stills and
+    /// Interpret Footage video read composition's original; every other
+    /// reading reads the source binding, which the host answers separately.
+    pub fn source_read(
+        &self,
+        asset: &str,
+        color: pm_protocol::snapshot::SourceColor,
+    ) -> Option<Option<PathBuf>> {
+        use pm_protocol::snapshot::SourceColor;
+        let footage = || {
+            pm_eval::node::member(pm_eval::node::member(self.doc.root(), "assets"), asset)
+                .and_then(pm_render::footage::interpretation)
+                .is_some()
+        };
+        if color == SourceColor::Interpreted || (color == SourceColor::Compositor && footage()) {
+            self.media.answer(asset)
+        } else {
+            self.source_media(asset)
+        }
+    }
+
     pub fn set_source_media(&mut self, asset: &str, path: Option<Option<PathBuf>>) {
         match path {
             Some(path) => {
@@ -489,6 +511,47 @@ mod tests {
         assert_eq!(view.route("c"), Route::Pending("media is being resolved"));
         view.set_media("img", None);
         assert_eq!(view.route("c"), Route::Engine);
+    }
+
+    #[test]
+    fn source_snapshots_wait_for_the_binding_they_read() {
+        use pm_protocol::snapshot::SourceColor;
+        let doc = |interpret: &str| {
+            format!(
+                r#"{{"id":"P","compId":"c","w":64,"h":36,"fps":30,"dur":2,"layers":[],"comps":{{}},"assets":{{"v":{{"id":"v","name":"v.mov","kind":"video","format":"mov"{interpret}}}}}}}"#
+            )
+        };
+        let mut view = ViewDocument::default();
+        // An asset record change restarts both host answers; composition's
+        // can arrive first.
+        view.update(&replace(&doc(""), 1)).unwrap();
+        view.set_media("v", Some(PathBuf::from("/original.mov")));
+        assert!(view.media_ready());
+        for color in [SourceColor::Display, SourceColor::Compositor] {
+            assert_eq!(view.source_read("v", color), None, "{color:?} waits");
+        }
+        assert_eq!(
+            view.source_read("v", SourceColor::Interpreted),
+            Some(Some(PathBuf::from("/original.mov")))
+        );
+        view.set_source_media("v", Some(Some(PathBuf::from("/source.mov"))));
+        for color in [SourceColor::Display, SourceColor::Compositor] {
+            assert_eq!(
+                view.source_read("v", color),
+                Some(Some(PathBuf::from("/source.mov")))
+            );
+        }
+        view.set_source_media("v", Some(None));
+        assert_eq!(view.source_read("v", SourceColor::Compositor), Some(None));
+        // Interpret Footage video reads composition's original instead.
+        view.update(&replace(&doc(r#","interpret":{"frameRate":25}"#), 2))
+            .unwrap();
+        view.set_source_media("v", None);
+        assert_eq!(
+            view.source_read("v", SourceColor::Compositor),
+            Some(Some(PathBuf::from("/original.mov")))
+        );
+        assert_eq!(view.source_read("v", SourceColor::Display), None);
     }
 
     #[test]
