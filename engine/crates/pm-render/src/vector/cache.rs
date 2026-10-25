@@ -416,14 +416,30 @@ impl VectorCache {
         });
         let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
         let paint = self.paint.get_or_insert_with(|| Paint::new(device));
-        let globals = [rect.width as f32, rect.height as f32, 0.0, 0.0];
-        let gbuf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm vector paint globals"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&gbuf, 0, &f32_bytes(&globals));
+        // Uniform globals and every instance's paint data are one upload.
+        // The first 16 bytes are the uniform; the vertex slice starts there.
+        let mut paint_data = Vec::with_capacity(4 + layout.cells.len() * 10);
+        paint_data.extend_from_slice(&[rect.width as f32, rect.height as f32, 0.0, 0.0]);
+        for c in &layout.cells {
+            let item = &scene.items[c.item];
+            paint_data.extend_from_slice(&[
+                (c.device.x - rect.x) as f32,
+                (c.device.y - rect.y) as f32,
+                c.device.width as f32,
+                c.device.height as f32,
+                c.x as f32,
+                c.y as f32,
+            ]);
+            paint_data.extend_from_slice(&item.premultiplied());
+        }
+        let paint_buffer = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("pm vector paint data"),
+                contents: crate::composite::gaussian::f32_bytes(&paint_data),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::VERTEX,
+            },
+        );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm vector paint"),
@@ -448,6 +464,7 @@ impl VectorCache {
             } else {
                 &paint.pipeline_f16
             });
+            pass.set_vertex_buffer(0, paint_buffer.slice(16..));
             // Items draw in scene order; consecutive items on one page share
             // a draw.
             let mut i = 0;
@@ -456,29 +473,9 @@ impl VectorCache {
             while i < cells.len() {
                 let page = cells[i].page;
                 let mut j = i;
-                let mut data: Vec<f32> = Vec::new();
                 while j < cells.len() && cells[j].page == page {
-                    let c = &cells[j];
-                    let item = &scene.items[c.item];
-                    let paint_color = item.premultiplied();
-                    data.extend_from_slice(&[
-                        (c.device.x - rect.x) as f32,
-                        (c.device.y - rect.y) as f32,
-                        c.device.width as f32,
-                        c.device.height as f32,
-                        c.x as f32,
-                        c.y as f32,
-                    ]);
-                    data.extend_from_slice(&paint_color);
                     j += 1;
                 }
-                let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pm vector paint items"),
-                    size: (data.len() * 4) as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                queue.write_buffer(&vbuf, 0, &f32_bytes(&data));
                 let bind = binds[page].get_or_insert_with(|| {
                     let view = pages[page].create_view(&wgpu::TextureViewDescriptor::default());
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -491,14 +488,17 @@ impl VectorCache {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: gbuf.as_entire_binding(),
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &paint_buffer,
+                                    offset: 0,
+                                    size: std::num::NonZeroU64::new(16),
+                                }),
                             },
                         ],
                     })
                 });
                 pass.set_bind_group(0, &*bind, &[]);
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.draw(0..4, 0..(j - i) as u32);
+                pass.draw(0..4, i as u32..j as u32);
                 i = j;
             }
         }
@@ -517,10 +517,6 @@ fn bytes_per_pixel(format: wgpu::TextureFormat) -> u64 {
         wgpu::TextureFormat::Rgba8Unorm => 4,
         other => panic!("unsupported vector format: {other:?}"),
     }
-}
-
-fn f32_bytes(v: &[f32]) -> Vec<u8> {
-    v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 /// A premultiplied RGBA8 texture, top-down.

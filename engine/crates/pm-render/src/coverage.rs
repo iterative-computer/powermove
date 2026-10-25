@@ -17,7 +17,7 @@
 use kurbo::{BezPath, PathEl, Point};
 use pm_vector::render::scene::PixelRect;
 
-use crate::composite::gaussian::{bind, compute, storage};
+use crate::composite::gaussian::{bind, compute};
 use crate::pipelines::LazyComputePipeline;
 
 /// Flattening tolerance, px: a chord moves a pixel's coverage by at most
@@ -184,6 +184,42 @@ fn words<T: Copy>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), size_of_val(v)) }
 }
 
+/// Counts and four read-only arrays share one upload and tracked GPU resource.
+/// Each binding starts at the device's required storage offset alignment.
+fn input_buffer(device: &wgpu::Device, batch: &Batch) -> (wgpu::Buffer, [(u64, u64); 5]) {
+    let counts = [[batch.edges.len() as u32, batch.rows.len() as u32, 0, 0]];
+    let inputs = [
+        words(&counts),
+        words(&batch.items),
+        words(&batch.edges),
+        words(&batch.edge_items),
+        words(&batch.rows),
+    ];
+    let align = u64::from(device.limits().min_storage_buffer_offset_alignment.max(4));
+    let mut end = 0u64;
+    let mut ranges = [(0, 0); 5];
+    for (i, bytes) in inputs.iter().enumerate() {
+        let start = end.div_ceil(align) * align;
+        let size = bytes.len().max(16) as u64;
+        ranges[i] = (start, size);
+        end = start + size;
+    }
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pm coverage inputs"),
+        size: end.div_ceil(4) * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: true,
+    });
+    {
+        let mut mapped = buffer.slice(..).get_mapped_range_mut().expect("buffer mapped at creation");
+        for (bytes, &(start, _)) in inputs.iter().zip(&ranges) {
+            mapped.slice(start as usize..start as usize + bytes.len()).copy_from_slice(bytes);
+        }
+    }
+    buffer.unmap();
+    (buffer, ranges)
+}
+
 /// The coverage pipelines.
 pub struct AreaCoverage {
     raster: LazyComputePipeline,
@@ -252,18 +288,15 @@ impl AreaCoverage {
             return;
         }
         encoder.clear_buffer(values, 0, Some(batch.bytes()));
-        let counts = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("pm coverage counts"),
-                contents: words(&[[batch.edges.len() as u32, batch.rows.len() as u32, 0, 0]]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            },
-        );
-        let items = storage(device, "pm coverage items", words(&batch.items));
-        let edges = storage(device, "pm coverage edges", words(&batch.edges));
-        let edge_items = storage(device, "pm coverage edge items", words(&batch.edge_items));
-        let rows = storage(device, "pm coverage rows", words(&batch.rows));
+        let (inputs, ranges) = input_buffer(device, batch);
+        let read = |index: usize| {
+            let (offset, size) = ranges[index];
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &inputs,
+                offset,
+                size: std::num::NonZeroU64::new(size),
+            })
+        };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("pm coverage"),
             timestamp_writes: None,
@@ -273,10 +306,10 @@ impl AreaCoverage {
             device,
             &raster.get_bind_group_layout(0),
             &[
-                (0, counts.as_entire_binding()),
-                (1, items.as_entire_binding()),
-                (2, edges.as_entire_binding()),
-                (3, edge_items.as_entire_binding()),
+                (0, read(0)),
+                (1, read(1)),
+                (2, read(2)),
+                (3, read(3)),
                 (5, values.as_entire_binding()),
             ],
         );
@@ -284,9 +317,9 @@ impl AreaCoverage {
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups((batch.edges.len() as u32).div_ceil(64), 1, 1);
         let mut entries = vec![
-            (0, counts.as_entire_binding()),
-            (1, items.as_entire_binding()),
-            (4, rows.as_entire_binding()),
+            (0, read(0)),
+            (1, read(1)),
+            (4, read(4)),
             (6, values.as_entire_binding()),
         ];
         let scan = match page {

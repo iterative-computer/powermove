@@ -84,7 +84,7 @@ pub struct TextGpu {
     paint: [crate::pipelines::LazyRenderPipeline; 2],
     paint_n32: crate::pipelines::LazyRenderPipeline,
     paint_bgra: crate::pipelines::LazyRenderPipeline,
-    filter: crate::composite::gaussian::RgbaBlur,
+    filter: super::legacy_blur::LegacyTextBlur,
     sampler: wgpu::Sampler,
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
     cache: HashMap<([u64; 2], Precision), Cached>,
@@ -247,7 +247,7 @@ impl TextGpu {
             paint,
             paint_n32,
             paint_bgra,
-            filter: crate::composite::gaussian::RgbaBlur::new(device),
+            filter: super::legacy_blur::LegacyTextBlur::new(device),
             sampler,
             images: HashMap::new(),
             cache: HashMap::new(),
@@ -840,8 +840,8 @@ impl TextGpu {
         }
     }
 
-    /// A draw painted into an N32 save layer, blurred by the exact Gaussian
-    /// (`composite::gaussian`), then composited.
+    /// A draw painted into an N32 save layer, blurred by the legacy Graphite
+    /// pass plan, then composited.
     #[allow(clippy::too_many_arguments)]
     fn blurred(
         &self,
@@ -909,9 +909,16 @@ impl TextGpu {
         self.pass(
             device, queue, encoder, &a, &draws, pages, images, precision, &mut fresh,
         );
-        let filtered =
-            self.filter
-                .blur(device, encoder, &a, [rx0 as i32, ry0 as i32], plan.crop, item.blur);
+        let filtered = self.filter.blur_rgba(
+            device,
+            queue,
+            encoder,
+            &a,
+            [rx0 as i32, ry0 as i32],
+            (scene.width, scene.height),
+            plan.crop,
+            item.blur as f32,
+        );
         let (tw, th) = (plan.width() as f32, plan.height() as f32);
         let copy = Draw {
             page: Some(0),
@@ -976,17 +983,42 @@ fn vello_page(scene: &TextScene, atlas: &Atlas, page: usize) -> vello::Scene {
 pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
     let full = pm_text::render::paint::render_cpu_with_format(
         &plan.scene,
-        Some(&|img, origin, canvas, sigma| pm_text::render::paint::Image {
-            width: canvas.0,
-            height: canvas.1,
-            data: crate::composite::gaussian::blur_rgba_cpu(
-                &img.to_rgba8(),
-                img.width,
-                img.height,
-                origin,
-                canvas,
-                sigma,
-            ),
+        Some(&|img, origin, canvas, sigma| {
+            use pm_vector::canvas2d::filter::{BlurPlan, Rect};
+            let rgba = img.to_rgba8();
+            let data = if let Some(filter) = BlurPlan::new(canvas.0, canvas.1, sigma as f32) {
+                filter.run_cpu_rgba_region(
+                    &rgba,
+                    Rect {
+                        x0: origin[0],
+                        y0: origin[1],
+                        w: img.width,
+                        h: img.height,
+                    },
+                    canvas.0,
+                    canvas.1,
+                )
+            } else {
+                let mut data = vec![0.0; (canvas.0 * canvas.1 * 4) as usize];
+                let x0 = origin[0].max(0);
+                let x1 = (origin[0] + img.width as i32).min(canvas.0 as i32);
+                for y in origin[1].max(0)..(origin[1] + img.height as i32).min(canvas.1 as i32) {
+                    for x in x0..x1 {
+                        let src = (((y - origin[1]) as u32 * img.width + (x - origin[0]) as u32)
+                            * 4) as usize;
+                        let dst = ((y as u32 * canvas.0 + x as u32) * 4) as usize;
+                        for c in 0..4 {
+                            data[dst + c] = f32::from(rgba[src + c]) / 255.0;
+                        }
+                    }
+                }
+                data
+            };
+            pm_text::render::paint::Image {
+                width: canvas.0,
+                height: canvas.1,
+                data,
+            }
         }),
         plan.canvas_n32,
     );

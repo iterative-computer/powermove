@@ -2,24 +2,28 @@
  * SVG images with "Use New Engine" on: the engine draws them natively at
  * output resolution (docs/engine/vector.md). Same or better than today:
  * each frame is compared, with today's compositor (`PM.GL.renderToPixels`)
- * and the engine (`PM.EngineRender.snapshotSync`), against Chromium's own
- * drawing of the same SVGs at 16x supersampling, box-filtered down:
+ * and the engine (`PM.EngineRender.snapshotSync`), against an independent
+ * f64 render of the authored SVG and its live placement matrices:
  *   (a) interior pixels (more than 2 px from any reference edge): the engine
- *       within 1 CV of today;
- *   (b) edge pixels: per channel |engine − ref| ≤ |today − ref| + 1 CV for
- *       99.9%, + 4 CV for all, and the engine's mean error ≤ today's;
+ *       within 1 CV of the authored reference;
+ *   (b) edge pixels: max channel |engine − ref| ≤ |today − ref| + 1 CV for
+ *       99.9%, + 4 CV for all; max, p99.9 and mean error ≤ today's + 0.5 CV;
  *   (c) geometry of each layer alone: alpha area and alpha centroid of the
- *       engine within 1e-3 (relative, and px) of the reference;
+ *       RGBA32F engine within 1e-3 (relative, and px) of the reference;
+ *       the window's RGBA8 bytes equal that float frame's rounded endpoint;
  *   (d) no window SVG raster route exists.
  * Edits and engine restarts are compared engine to engine, exactly. The
  * job engine's export and both CLI entry points are compared with the
  * engine's frames.
  *
  * Run serially, one Electron at a time:
- *   pm-electron-lock bunx playwright test e2e/engine-svg.spec.ts --workers=1
+ *   PM_SVG_REFERENCE_BIN=<prebuilt svg_filters test binary>
+ *     pm-electron-lock bunx playwright test -c playwright.consumers.config.ts
+ *       e2e/engine-svg.spec.ts --workers=1
  */
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import os from 'node:os';
@@ -97,7 +101,7 @@ const RECOLORED = ART.replace('#FFD23F', '#00C2A8');
 async function svgProject(page: Page, svg = ART): Promise<void> {
   await page.evaluate(async (svg) => {
     const PM = (window as any).PM;
-    const project = PM.mkProject({ name: 'SVG images', w: 640, h: 360, fps: 30, dur: 2, bg: '#203040' });
+    const project = PM.mkProject({ name: 'SVG images', w: 640, h: 360, fps: 30, dur: 2, bg: '#203040', colorDepth: 32 });
     project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
     PM.replaceProject(project);
     const asset = await PM.assets.add(new File([svg], 'art.svg', { type: 'image/svg+xml' }), { newAsset: true, silent: true });
@@ -128,155 +132,196 @@ async function showEngine(session: LaunchedApp, svg = ART): Promise<void> {
   await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
 }
 
-/** (a)–(c) for one frame, measured in the window (see the header). */
-const measure = (page: Page, time: number) => page.evaluate(async (t) => {
-  const PM = (window as any).PM, W = 640, H = 360;
-  type Draw = { image: CanvasImageSource; sw: number; sh: number; fit: string; bw: number; bh: number; m: number[]; alpha: number };
-  // Bottom layer first: today's compositor draws the list from its end.
-  const drawsOf = async (layers: any[]): Promise<Draw[]> => {
-    const draws: Draw[] = [];
-    for (const L of [...layers].reverse()) {
-      const asset = PM.assets.get(L.d.asset);
-      await asset.el.decode?.();
-      draws.push({ image: asset.el, sw: asset.w, sh: asset.h, fit: L.d.fit, bw: L.d.w, bh: L.d.h, m: [...PM.worldMatrix(L, t)], alpha: Math.min(1, Math.max(0, PM.ev(L, 'opacity', t) / 100)) });
-    }
-    return draws;
-  };
-  // Chromium's drawing at S× of the region (x0, y0, w, h), box-filtered to
-  // one sample per pixel: premultiplied RGBA (0–255, unrounded), and each
-  // pixel's spread (the largest channel range among its S × S samples).
-  // Each layer is drawn as today's quad (box w × h about its centre, the
-  // image fitted as today's UV window fits it) into its own canvas, then
-  // composited with its opacity, as today's layer texture is.
-  const reference = (draws: Draw[], S: number, x0: number, y0: number, w: number, h: number, background: string | null) => {
-    const T = Math.floor(2048 / S), size = T * S;
-    const make = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = size; canvas.height = size;
-      return [canvas, canvas.getContext('2d', { willReadFrequently: true })!] as const;
-    };
-    const [, ctx] = make(), [layerCanvas, layer] = make();
-    const color = new Float64Array(w * h * 4), spread = new Uint8Array(w * h);
-    for (let ty = 0; ty < h; ty += T) for (let tx = 0; tx < w; tx += T) {
-      const tw = Math.min(T, w - tx), th = Math.min(T, h - ty);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, size, size);
-      if (background) { ctx.fillStyle = background; ctx.fillRect(0, 0, size, size); }
-      for (const d of draws) {
-        layer.clearRect(0, 0, size, size);
-        layer.save();
-        const m = d.m;
-        layer.setTransform(S * m[0]!, S * m[1]!, S * m[2]!, S * m[3]!, S * (m[4]! - x0 - tx), S * (m[5]! - y0 - ty));
-        const { bw, bh } = d, ar = d.sw / d.sh, br = bw / bh;
-        if (d.fit === 'cover') {
-          layer.beginPath(); layer.rect(-bw / 2, -bh / 2, bw, bh); layer.clip();
-          const [iw, ih] = ar > br ? [bh * ar, bh] : [bw, bw / ar];
-          layer.drawImage(d.image, -iw / 2, -ih / 2, iw, ih);
-        } else if (d.fit === 'contain') {
-          const [iw, ih] = ar > br ? [bw, bw / ar] : [bh * ar, bh];
-          layer.drawImage(d.image, -iw / 2, -ih / 2, iw, ih);
-        } else {
-          layer.drawImage(d.image, -bw / 2, -bh / 2, bw, bh);
+/** Live authored placement and actual 8-bit endpoints. Reference math runs in Rust. */
+const measure = async (page: Page, time: number) => {
+  const captured = await page.evaluate((t) => {
+    const PM = (window as any).PM, W = 640, H = 360;
+    const original = PM.proj.layers;
+    const layers = [...original].reverse().map((L: any) => ({
+      name: L.name, fit: L.d.fit, bw: L.d.w, bh: L.d.h,
+      m: [...PM.worldMatrix(L, t)], alpha: Math.min(1, Math.max(0, PM.ev(L, 'opacity', t) / 100)),
+    }));
+    const project = JSON.parse(JSON.stringify(PM.proj));
+    const asset_id = original[0]?.d.asset;
+    const engine = Array.from(PM.EngineRender.snapshotSync({ time: t, width: W, height: H, pixels: 'opaque', motionBlurSamples: 0, background: true }).data as Uint8ClampedArray);
+    const today = Array.from(PM.GL.renderToPixels(t, W, H, { opaque: true, topDownOpaque: true, mblur: false }) as Uint8Array);
+    const geometry = [];
+    for (const L of [...original].reverse()) {
+      PM.proj.layers = [L]; PM.ProjectIndex?.invalidate?.(); PM.touch();
+      try {
+        const alone = PM.EngineRender.snapshotSync({ time: t, width: W, height: H, pixels: 'premultiplied', motionBlurSamples: 0, background: false }).data as Uint8ClampedArray;
+        let area = 0, sx = 0, sy = 0;
+        for (let i = 0; i < W * H; i++) {
+          const a = alone[i * 4 + 3]! / 255;
+          area += a; sx += a * (i % W + 0.5); sy += a * (Math.floor(i / W) + 0.5);
         }
-        layer.restore();
-        ctx.globalAlpha = d.alpha;
-        ctx.drawImage(layerCanvas, 0, 0);
-        ctx.globalAlpha = 1;
-      }
-      const data = ctx.getImageData(0, 0, tw * S, th * S).data, rowBytes = tw * S * 4, n = S * S;
-      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-        let r = 0, g = 0, b = 0, a = 0, rl = 255, rh = 0, gl = 255, gh = 0, bl = 255, bh = 0;
-        for (let sy = 0; sy < S; sy++) {
-          let i = (y * S + sy) * rowBytes + x * S * 4;
-          for (let sx = 0; sx < S; sx++, i += 4) {
-            const R = data[i]!, G = data[i + 1]!, B = data[i + 2]!, A = data[i + 3]!;
-            r += R * A; g += G * A; b += B * A; a += A;
-            if (R < rl) rl = R; if (R > rh) rh = R;
-            if (G < gl) gl = G; if (G > gh) gh = G;
-            if (B < bl) bl = B; if (B > bh) bh = B;
-          }
-        }
-        const p = (ty + y) * w + tx + x;
-        color[p * 4] = r / 255 / n; color[p * 4 + 1] = g / 255 / n; color[p * 4 + 2] = b / 255 / n; color[p * 4 + 3] = a / n;
-        spread[p] = Math.max(rh - rl, gh - gl, bh - bl);
+        geometry.push({ layer: L.name, engine: { area, x: sx / area, y: sy / area }, bytes: Array.from(alone) });
+      } finally {
+        PM.proj.layers = original; PM.ProjectIndex?.invalidate?.(); PM.touch();
       }
     }
-    return { color, spread };
-  };
-  const snapshot = (pixels: string, background: boolean): Uint8ClampedArray =>
-    PM.EngineRender.snapshotSync({ time: t, width: W, height: H, pixels, motionBlurSamples: 0, background }).data;
-
-  // The frame: engine, today, and the reference over the same background.
-  const engine = snapshot('opaque', true);
-  const today: Uint8Array = PM.GL.renderToPixels(t, W, H, { opaque: true, topDownOpaque: true, mblur: false });
-  const ref = reference(await drawsOf(PM.proj.layers), 16, 0, 0, W, H, '#203040');
-  // A reference edge: a pixel whose samples spread more than 4 CV (a
-  // gradient moves about 1 CV a pixel). Interior: no edge within 2 px.
-  const near = new Uint8Array(W * H);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    if (ref.spread[y * W + x]! <= 4) continue;
+    return { input: { width: W, height: H, layers, project, asset_id, time: t }, engine, today, geometry };
+  }, time);
+  const binary = process.env.PM_SVG_REFERENCE_BIN;
+  expect(binary, 'prebuild svg_filters and set PM_SVG_REFERENCE_BIN before Electron').toBeTruthy();
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'pm-svg-f64-'));
+  let reference: Buffer, native: Buffer, endpoint: Buffer;
+  try {
+    const input = path.join(temporary, 'input.json'), output = path.join(temporary, 'reference.f64');
+    const nativeOutput = path.join(temporary, 'native.f32'), endpointOutput = path.join(temporary, 'endpoint.rgba');
+    const artPath = path.join(temporary, 'art.svg');
+    await writeFile(artPath, ART);
+    await writeFile(input, JSON.stringify({ ...captured.input, svg_sha256: createHash('sha256').update(ART).digest('hex') }));
+    const ffmpegLib = path.join(process.env.PM_FFMPEG_DIR ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out'), 'lib');
+    await promisify(execFile)(binary!, ['--exact', 'art_reference_export', '--nocapture'], {
+      env: { ...process.env, DYLD_LIBRARY_PATH: [ffmpegLib, process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+        PM_SVG_REFERENCE_INPUT: input, PM_SVG_REFERENCE_OUTPUT: output,
+        PM_SVG_NATIVE_OUTPUT: nativeOutput, PM_SVG_ENDPOINT_OUTPUT: endpointOutput,
+        PM_SVG_ART_PATH: artPath },
+      timeout: 180_000,
+    });
+    reference = await readFile(output);
+    native = await readFile(nativeOutput);
+    endpoint = await readFile(endpointOutput);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+  const W = 640, H = 360, count = W * H, layerCount = captured.input.layers.length;
+  expect(reference.byteLength).toBe((4 + layerCount) * count * 8);
+  expect(native.byteLength).toBe((1 + layerCount) * count * 4 * 4);
+  expect(endpoint.byteLength).toBe((1 + layerCount) * count * 4);
+  const ref = new Float64Array(reference.buffer.slice(reference.byteOffset, reference.byteOffset + reference.byteLength));
+  const actual32 = new Float32Array(native.buffer.slice(native.byteOffset, native.byteOffset + native.byteLength));
+  const nativePixel = (frame: number, i: number, c: number) => actual32[(frame * count + i) * 4 + c]!;
+  const color = (i: number, c: number) => ref[i * 4 + c]! * 255;
+  const alpha = (layer: number, i: number) => ref[4 * count + layer * count + i]!;
+  const edge = new Uint8Array(count), near = new Uint8Array(count);
+  for (let i = 0; i < count; i++) {
+    const x = i % W, y = Math.floor(i / W);
+    if (captured.input.layers.some((_, j) => { const a = alpha(j, i); return a > 1e-6 && a < 1 - 1e-6; })) { edge[i] = 1; continue; }
+    for (const n of [x > 0 ? i - 1 : i, x + 1 < W ? i + 1 : i, y > 0 ? i - W : i, y + 1 < H ? i + W : i]) {
+      if ([0, 1, 2, 3].some((c) => Math.abs(color(i, c) - color(n, c)) > 2)) { edge[i] = 1; break; }
+    }
+  }
+  for (let i = 0; i < count; i++) if (edge[i]) {
+    const x = i % W, y = Math.floor(i / W);
     for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const yy = y + dy, xx = x + dx;
-      if (yy >= 0 && yy < H && xx >= 0 && xx < W) near[yy * W + xx] = 1;
+      const xx = x + dx, yy = y + dy;
+      if (xx >= 0 && xx < W && yy >= 0 && yy < H) near[yy * W + xx] = 1;
     }
   }
-  const interior = { count: 0, max: 0 };
-  const edges = { pixels: 0, samples: 0, over1: 0, maxExcess: -Infinity, engineMean: 0, todayMean: 0 };
-  let nonBackground = 0;
-  for (let p = 0; p < W * H; p++) {
-    const i = p * 4;
-    if (today[i] !== 0x20 || today[i + 1] !== 0x30 || today[i + 2] !== 0x40) nonBackground++;
-    if (!near[p]) {
-      // Opaque reference pixels only (the frame is opaque throughout).
-      if (ref.color[i + 3]! < 254.5) continue;
-      interior.count++;
-      for (let c = 0; c < 3; c++) interior.max = Math.max(interior.max, Math.abs(engine[i + c]! - today[i + c]!));
-      continue;
-    }
-    edges.pixels++;
-    for (let c = 0; c < 3; c++) {
-      const e = Math.abs(engine[i + c]! - ref.color[i + c]!), d = Math.abs(today[i + c]! - ref.color[i + c]!);
-      edges.samples++;
-      if (e > d + 1) edges.over1++;
-      edges.maxExcess = Math.max(edges.maxExcess, e - d);
-      edges.engineMean += e; edges.todayMean += d;
+  const errors: number[] = [], todayErrors: number[] = [], excess: number[] = [];
+  const worstPixels: Array<{ x: number; y: number; engine: number[]; native32: number[];
+    nativeLayers: number[][]; today: number[]; reference: number[]; layerAlpha: number[];
+    engineError: number; todayError: number; excess: number }> = [];
+  let interiorCount = 0, interiorMax = 0, nonBackground = 0;
+  for (let i = 0; i < count; i++) {
+    const k = i * 4;
+    if (captured.today[k] !== 0x20 || captured.today[k + 1] !== 0x30 || captured.today[k + 2] !== 0x40) nonBackground++;
+    if (!near[i]) {
+      interiorCount++;
+      for (let c = 0; c < 3; c++) interiorMax = Math.max(interiorMax, Math.abs(captured.engine[k + c]! - captured.today[k + c]!));
+    } else {
+      let e = 0, d = 0;
+      for (let c = 0; c < 3; c++) {
+        e = Math.max(e, Math.abs(captured.engine[k + c]! - color(i, c)));
+        d = Math.max(d, Math.abs(captured.today[k + c]! - color(i, c)));
+      }
+      errors.push(e); todayErrors.push(d); excess.push(e - d);
+      if (e - d >= 3.5) {
+        worstPixels.push({ x: i % W, y: Math.floor(i / W),
+          engine: captured.engine.slice(k, k + 3),
+          native32: [0, 1, 2].map((c) => nativePixel(0, i, c) * 255),
+          nativeLayers: captured.input.layers.map((_, j) => [0, 1, 2, 3].map((c) =>
+            nativePixel(j + 1, i, c) * 255)),
+          today: captured.today.slice(k, k + 3),
+          reference: [0, 1, 2].map((c) => color(i, c)),
+          layerAlpha: captured.input.layers.map((_, j) => alpha(j, i)),
+          engineError: e, todayError: d, excess: e - d });
+      }
     }
   }
-  edges.engineMean /= edges.samples; edges.todayMean /= edges.samples;
-
-  // Geometry: each layer alone, without the background.
-  const moments = (alpha: (x: number, y: number) => number, x0: number, y0: number, w: number, h: number) => {
-    let s = 0, sx = 0, sy = 0;
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const a = alpha(x, y);
-      s += a; sx += a * (x0 + x + 0.5); sy += a * (y0 + y + 0.5);
-    }
-    return { area: s / 255, x: sx / s, y: sy / s };
+  const stats = (values: number[]) => {
+    values.sort((a, b) => a - b);
+    return { count: values.length, max: values.at(-1) ?? 0, p999: values[Math.ceil(0.999 * values.length) - 1] ?? 0,
+      mean: values.reduce((sum, value) => sum + value, 0) / values.length };
   };
-  const geometry = [];
-  const layers = PM.proj.layers;
-  for (const L of layers) {
-    PM.proj.layers = [L]; PM.ProjectIndex?.invalidate?.(); PM.touch();
-    let alone: Uint8ClampedArray;
-    try { alone = snapshot('premultiplied', false); }
-    finally { PM.proj.layers = layers; PM.ProjectIndex?.invalidate?.(); PM.touch(); }
-    const [draw] = await drawsOf([L]);
-    // The layer's box on the frame, 2 px wider.
-    const m = draw!.m, xs: number[] = [], ys: number[] = [];
-    for (const [X, Y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-      const bx = X! * draw!.bw / 2, by = Y! * draw!.bh / 2;
-      xs.push(m[0]! * bx + m[2]! * by + m[4]!); ys.push(m[1]! * bx + m[3]! * by + m[5]!);
+  const geometryError = (actual: { area: number; x: number; y: number },
+    wanted: { area: number; x: number; y: number }) => ({
+    areaRelative: Math.abs(actual.area - wanted.area) / wanted.area,
+    centroidPx: Math.hypot(actual.x - wanted.x, actual.y - wanted.y),
+  });
+  const geometryRows: string[] = [];
+  for (let j = 0; j < captured.geometry.length; j++) {
+    const g = captured.geometry[j]!;
+    let area = 0, sx = 0, sy = 0, fArea = 0, fSx = 0, fSy = 0;
+    for (let i = 0; i < count; i++) {
+      const a = alpha(j, i); area += a;
+      sx += a * (i % W + 0.5); sy += a * (Math.floor(i / W) + 0.5);
+      const f = nativePixel(j + 1, i, 3);
+      fArea += f; fSx += f * (i % W + 0.5); fSy += f * (Math.floor(i / W) + 0.5);
     }
-    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - 2), y0 = Math.max(0, Math.floor(Math.min(...ys)) - 2);
-    const x1 = Math.min(W, Math.ceil(Math.max(...xs)) + 2), y1 = Math.min(H, Math.ceil(Math.max(...ys)) + 2);
-    const at = (S: number) => {
-      const { color } = reference([draw!], S, x0, y0, x1 - x0, y1 - y0, null);
-      return moments((x, y) => color[(y * (x1 - x0) + x) * 4 + 3]!, x0, y0, x1 - x0, y1 - y0);
-    };
-    geometry.push({ layer: L.name, engine: moments((x, y) => alone[(y * W + x) * 4 + 3]!, 0, 0, W, H), ref16: at(16), ref8: at(8) });
+    // Keep each layer's raw moments and derived errors in one serialized
+    // value before measuring the next layer. A frozen object still allowed a
+    // prior full-suite run to pair Contain's reference with Stretch's engine
+    // moments; a primitive string cannot retain a cross-layer object alias.
+    const engine = { area: Number(g.engine.area), x: Number(g.engine.x), y: Number(g.engine.y) };
+    const referenceGeometry = { area, x: sx / area, y: sy / area };
+    const nativeGeometry = { area: fArea, x: fSx / fArea, y: fSy / fArea };
+    const byteError = geometryError(engine, referenceGeometry);
+    const floatError = geometryError(nativeGeometry, referenceGeometry);
+    const row = JSON.stringify({ layer: String(g.layer), engine, reference: referenceGeometry,
+      areaRelative: byteError.areaRelative, centroidPx: byteError.centroidPx,
+      float32: { ...nativeGeometry, ...floatError } });
+    const immediate = JSON.parse(row) as { layer: string; engine: typeof engine;
+      reference: typeof referenceGeometry; areaRelative: number; centroidPx: number };
+    const raw = geometryError(immediate.engine, immediate.reference);
+    expect(immediate.areaRelative, `serialized area consistency at ${time}, ${immediate.layer}`).toBe(raw.areaRelative);
+    expect(immediate.centroidPx, `serialized centroid consistency at ${time}, ${immediate.layer}`).toBe(raw.centroidPx);
+    geometryRows.push(row);
   }
-  return { nonBackground, interior, edges, geometry };
-}, time);
+  type GeometryRow = {
+    layer: string; engine: { area: number; x: number; y: number };
+    reference: { area: number; x: number; y: number }; areaRelative: number; centroidPx: number;
+    float32: { area: number; x: number; y: number; areaRelative: number; centroidPx: number };
+  };
+  const geometry: GeometryRow[] = [];
+  for (const serialized of geometryRows) {
+    const g = JSON.parse(serialized) as GeometryRow;
+    const raw = geometryError(g.engine, g.reference);
+    const evidence = JSON.stringify({ time, layer: g.layer, engine: g.engine,
+      reference: g.reference, reported: [g.areaRelative, g.centroidPx], recomputed: raw });
+    expect(g.areaRelative, `reported area consistency: ${evidence}`).toBe(raw.areaRelative);
+    expect(g.centroidPx, `reported centroid consistency: ${evidence}`).toBe(raw.centroidPx);
+    geometry.push(g);
+  }
+  const byteEndpoint = [captured.engine, ...captured.geometry.map((g) => g.bytes)].map((windowBytes, frame) => {
+    let mismatches = 0, maxDelta = 0, maxQuantizationCv = 0;
+    let maxExactProductCv = 0, maxF32ProductRoundoffCv = 0;
+    for (let i = 0; i < count; i++) for (let c = 0; c < 4; c++) {
+      const index = (frame * count + i) * 4 + c;
+      const value = endpoint[index]!;
+      const delta = Math.abs(windowBytes[i * 4 + c]! - value);
+      mismatches += Number(delta !== 0); maxDelta = Math.max(maxDelta, delta);
+      if (frame !== 0 || c !== 3) {
+        const f = Math.max(0, Math.min(1, nativePixel(frame, i, c)));
+        const exactProduct = f * 255;
+        const storageProduct = Math.fround(exactProduct); // Rust snapshot_byte multiplies as f32.
+        maxQuantizationCv = Math.max(maxQuantizationCv, Math.abs(storageProduct - value));
+        maxExactProductCv = Math.max(maxExactProductCv, Math.abs(exactProduct - value));
+        maxF32ProductRoundoffCv = Math.max(maxF32ProductRoundoffCv, Math.abs(exactProduct - storageProduct));
+      }
+    }
+    return { frame: frame === 0 ? 'full' : captured.geometry[frame - 1]!.layer,
+      mismatches, maxDelta, maxQuantizationCv, storageBoundCv: 0.5,
+      maxExactProductCv, maxF32ProductRoundoffCv };
+  });
+  return { placement: { layers: captured.input.layers, svgSha256: createHash('sha256').update(ART).digest('hex') },
+    nonBackground, interior: { count: interiorCount, max: interiorMax },
+    edges: { pixels: errors.length, engine: stats(errors), today: stats(todayErrors), excess: stats(excess),
+      over1Fraction: excess.filter((value) => value > 1).length / excess.length,
+      worstPixels: worstPixels.sort((a, b) => b.excess - a.excess).slice(0, 16) }, geometry, byteEndpoint };
+};
 
 /** Engine frames kept in the window by name. */
 const keep = (page: Page, name: string, time: number) => page.evaluate(({ name, time }) => {
@@ -313,15 +358,23 @@ const SAME = { differ: 0, max: 0 };
 test.describe('Use New Engine: SVG images', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
-  test('the engine draws SVG images natively, at least as close to Chromium’s own drawing as today', async ({ session }) => {
+  test('the engine draws SVG images natively, at least as close to f64 as today', async ({ session }, testInfo) => {
     test.setTimeout(240_000);
     const { page } = session;
     await session.openEditor();
     await showEngine(session);
     // (d) No window SVG raster route.
     expect(await page.evaluate(() => (window as any).PM.EngineSvgRasters)).toBeUndefined();
+    const measurements = [];
     for (const t of TIMES) {
       const m = await measure(page, t);
+      measurements.push({ time: t, ...m });
+      const report = process.env.PM_SVG_QUALITY_REPORT ?? testInfo.outputPath('svg-quality.json');
+      await mkdir(path.dirname(report), { recursive: true });
+      await writeFile(report, JSON.stringify({ reference: 'independent f64 authored ART and analytic Gaussian; each SVG image resolves before layer compositing',
+        fixture: 'unchanged ART, three live placements',
+        standards: ['https://www.w3.org/TR/filter-effects-1/', 'https://www.w3.org/TR/SVG11/filters.html'],
+        frames: measurements }, null, 2));
       console.log(`SVG frame at ${t}: ${JSON.stringify(m)}`);
       expect(m.nonBackground).toBeGreaterThan(20_000);
       // (a) Interiors.
@@ -329,17 +382,23 @@ test.describe('Use New Engine: SVG images', () => {
       expect(m.interior.max, `interior at ${t}`).toBeLessThanOrEqual(1);
       // (b) Edges.
       expect(m.edges.pixels).toBeGreaterThan(1_000);
-      expect(m.edges.over1 / m.edges.samples, `edges beyond today + 1 CV at ${t}`).toBeLessThanOrEqual(0.001);
-      expect(m.edges.maxExcess, `edges beyond today at ${t}`).toBeLessThanOrEqual(4);
-      expect(m.edges.engineMean, `mean edge error at ${t}`).toBeLessThanOrEqual(m.edges.todayMean);
-      // (c) Geometry. The 16x reference is itself an approximation: its
-      // error is about its change from 8x (supersampling converges), so
-      // where that change exceeds 1e-3 it is the bound instead.
+      expect(m.edges.over1Fraction, `edges beyond today + 1 CV at ${t}`).toBeLessThanOrEqual(0.001);
+      expect(m.edges.excess.p999, `edge p99.9 excess at ${t}`).toBeLessThanOrEqual(1);
+      expect(m.edges.excess.max, `edge max excess at ${t}`).toBeLessThanOrEqual(4);
+      for (const statistic of ['max', 'p999', 'mean'] as const) {
+        expect(m.edges.engine[statistic], `${statistic} edge error at ${t}`).toBeLessThanOrEqual(m.edges.today[statistic] + 0.5);
+      }
+      // (c) Exact authored geometry uses the native RGBA32F live project.
+      // The reported RGBA8 geometry retains the visible snapshot evidence.
       for (const g of m.geometry) {
-        const areaBound = Math.max(1e-3, Math.abs(g.ref16.area - g.ref8.area) / g.ref16.area);
-        const centroidBound = Math.max(1e-3, Math.hypot(g.ref16.x - g.ref8.x, g.ref16.y - g.ref8.y));
-        expect(Math.abs(g.engine.area - g.ref16.area) / g.ref16.area, `${g.layer} area at ${t}`).toBeLessThanOrEqual(areaBound);
-        expect(Math.hypot(g.engine.x - g.ref16.x, g.engine.y - g.ref16.y), `${g.layer} centroid at ${t}`).toBeLessThanOrEqual(centroidBound);
+        expect(g.float32.areaRelative, `${g.layer} f32 area at ${t}`).toBeLessThanOrEqual(1e-3);
+        expect(g.float32.centroidPx, `${g.layer} f32 centroid at ${t}`).toBeLessThanOrEqual(1e-3);
+      }
+      // The window's 8-bit API must be the exact round-to-even endpoint of
+      // those same float frames (with the declared half-CV storage interval).
+      for (const endpoint of m.byteEndpoint) {
+        expect(endpoint.maxQuantizationCv, `${endpoint.frame} 8-bit storage at ${t}`).toBeLessThanOrEqual(0.5);
+        expect(endpoint.mismatches, `${endpoint.frame} window/native bytes at ${t}`).toBe(0);
       }
     }
     expect(session.diagnostics.pageErrors).toEqual([]);

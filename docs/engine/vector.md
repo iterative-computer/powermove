@@ -57,11 +57,11 @@ plane; interior pixels take 1 at once. No texture, no cache.
 `radius` is honoured on every solid: the inspector edits and animates it (`c.radius`,
 `ContentSection.svelte`) and the agent commands accept it (decision SOLID-RADIUS-1).
 
-## Text glyphs drawn as paths
+## Text ownership
 
-Glyphs the text canvas draws as paths (beyond the mask atlas) are coverage items too
-(`pm_vector::render::glyphs`): outlines at their exact matrices, filled nonzero or stroked
-with round joins and miter limit 2, with the call's paint, opacity and blur.
+Text keeps L2's platform glyph rasterizer and text-local blur executor. The retained
+`canvas2d::text` dependencies serve that caller only; shapes, masks and SVG use the
+native coverage paths described here.
 
 ## Gates
 
@@ -82,7 +82,7 @@ GPU area-coverage pass. Each outline is feathered with the exact separable Gauss
 at `σ = max(0, feather) × |world x| / 2`, with transparent canvas edges. Add and
 subtract compose in authored order; subtract-only stacks start covered. Coverage
 stays in float until the final `r16float` store. Work is bounded by each outline
-and its feather. The text animator uses the same Gaussian for its RGBA save layer.
+and its feather.
 See [composite.md](composite.md#path-masks) and `tests/path_masks.rs` (G-V2).
 
 ## SVG images
@@ -98,10 +98,20 @@ with subcell coverage at an adaptive 1–16 samples per axis. Clips and masks sh
 a 4× grid with child paint, group opacity and W3C blending, then resolve once.
 Intermediates stay RGBA32F until the project's working-precision store.
 
-Filters, patterns, embedded images and documents exceeding device limits or the
-128 MiB fine-grid budget use resvg in the output rectangle at output resolution.
-This fallback stores RGBA8 and still fails the filtered SVG quality gate.
-External resources never load; data URLs may resolve.
+Gaussian blur and offset run in float before the group's clip, mask and opacity.
+Filter and primitive regions clip output while retaining the source halo. Each
+primitive uses its declared `color-interpolation-filters`, defaulting to linearRGB.
+SVG 1.1 `filterRes` uses its authored raster grid; zero disables the filtered element.
+
+Large supported groups use ordered tiles with a shared 4× grid and Gaussian halos.
+Scratch textures return to a pool after their last encoded read. Texture scratch
+and coverage are preflighted against 128 MiB; output and command metadata are
+separate, and device limits remain enforced. Supported paint never selects RGBA8
+because of the fine-grid budget.
+
+Unsupported filter primitives, Gaussian duplicate/wrap edge modes, patterns,
+embedded images and crisp-edge paint use resvg at output resolution with an RGBA8
+store. External resources never load; data URLs may resolve.
 The image reader retains the existing corrupt-document and encoding decisions,
 and deeply nested documents use a bounded, sized stack.
 
@@ -117,5 +127,10 @@ size instead of stretching the content bounds. Rounded rectangles follow SVG's
 `pm-render/tests/svg.rs` (G-V3) checks geometry, paint, scale, cache independence
 and preview/export equality against an independent f64 paint reference. It requires
 captured legacy-app frames for all placements and all Chromium semantic probes.
-The CLI and job-engine tests require an SVG project to render with no
-Chromium helper or editor window attached.
+`tests/svg_filters.rs` also requires actual captured filter witnesses and checks
+Gaussian color, regions, transformed covariance and filter grids against independent
+f64 math. The desktop gate uses live authored placements, checks geometry at RGBA32F
+against f64, and proves the window's RGBA8 endpoint is the same frame after rounding.
+Each SVG image resolves before layer compositing; paint, filter, clip and mask within
+one image share their subpixel grid. CLI and job-engine tests require an SVG project
+to render with no Chromium helper or editor window attached.

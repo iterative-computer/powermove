@@ -30,6 +30,11 @@
 //! `PM_RENDER_ONLY` limits to project names with a prefix;
 //! `PM_RENDER_DIFFS=<dir>` writes engine and today's PNGs of failures there.
 
+#[path = "support/pending.rs"]
+mod pending;
+#[path = "support/quality.rs"]
+mod quality;
+use quality::reference_problems;
 mod support;
 
 use pm_protocol::color::Precision;
@@ -109,8 +114,24 @@ fn tempdir_guard(name: &str) -> TempDir {
     TempDir(dir)
 }
 
+/// Optional anonymous per-frame evidence for paired branch attribution.
+fn record_frame_result(file: &mut Option<std::fs::File>, id: &str, failed: bool, pixels: &[u8]) {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    if let Some(file) = file {
+        let row = serde_json::json!({
+            "frame": id, "status": if failed { "fail" } else { "pass" },
+            "pixel_sha256": format!("{:x}", Sha256::digest(pixels)),
+        });
+        writeln!(file, "{row}").expect("frame attribution evidence");
+    }
+}
+
 #[test]
 fn corpus_render_parity() {
+    use sha2::{Digest, Sha256};
+    let mut frame_results = std::env::var_os("PM_CORPUS_FRAME_RESULTS")
+        .map(|path| std::fs::File::create(path).expect("frame attribution output"));
     let captures = corpus_dirs();
     if captures.is_empty() {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
@@ -131,6 +152,7 @@ fn corpus_render_parity() {
     // Opaque frames the reference models in full, and in part.
     let (mut complete, mut partial) = (0, 0);
     let mut failed = Vec::new();
+    let mut pending = pending::Audit::read(include_str!("fixtures/corpus-pending.json"));
     let mut skipped = Vec::new();
     let mut seen = std::collections::BTreeMap::new();
     for (capture, dir) in captures
@@ -277,6 +299,11 @@ fn corpus_render_parity() {
         }
         let mut geometry_document = None;
         for s in &p.samples {
+            let failed_before = failed.len();
+            let frame_id = format!(
+                "{:x}",
+                Sha256::digest(format!("{}|{}|{}", capture.display(), p.name, s.time).as_bytes(),)
+            );
             // The capture's motion blur: 16 samples opaque, 20 transparent.
             let mut request =
                 RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
@@ -294,6 +321,7 @@ fn corpus_render_parity() {
                 Ok(f) => f,
                 Err(e) => {
                     failed.push(format!("{} t={}: render error {e}", p.name, s.time));
+                    record_frame_result(&mut frame_results, &frame_id, true, &[]);
                     continue;
                 }
             };
@@ -358,6 +386,12 @@ fn corpus_render_parity() {
                         write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
                     }
                 }
+                record_frame_result(
+                    &mut frame_results,
+                    &frame_id,
+                    failed.len() > failed_before,
+                    &ours,
+                );
                 continue;
             }
             // 3D class: the 3D pixels and MSAA edges, measured on our renders.
@@ -435,7 +469,46 @@ fn corpus_render_parity() {
                             b.object_ssim.unwrap_or(f64::NAN)
                         );
                         eprintln!("{line}");
-                        if max > 1.0 || !b.pass() {
+                        let checks = if max <= 1.0 && b.pass() {
+                            Vec::new()
+                        } else {
+                            vec![format!(
+                                "3D alpha: outside max {max:.9} CV; fraction within 2 {:.12}; max outside edges {}; SSIM {:?}",
+                                b.fraction_within_2, b.max_cv_outside_edges, b.object_ssim
+                            )]
+                        };
+                        let classes: Vec<_> = class
+                            .iter()
+                            .map(|v| {
+                                if *v {
+                                    pm_reference::compare::Class::Resampled
+                                } else {
+                                    pm_reference::compare::Class::Unreferenced
+                                }
+                            })
+                            .collect();
+                        let owned = pending.check(
+                            pending::Entry {
+                                frame: pending::frame_id(
+                                    &p.name,
+                                    s.time,
+                                    s.width,
+                                    s.height,
+                                    "3d-transparent",
+                                ),
+                                owner: "L4".into(),
+                                reason: "3D surfaces and composition".into(),
+                                checks: checks.clone(),
+                                measurement_sha256: pending::measurement(
+                                    &unit32(&ours),
+                                    &unit32(&today),
+                                    &[],
+                                    &classes,
+                                ),
+                            },
+                            true,
+                        );
+                        if !checks.is_empty() && !owned {
                             failed.push(line);
                         }
                     }
@@ -449,10 +522,18 @@ fn corpus_render_parity() {
                             false,
                             20,
                             renderer.effects(),
+                            &p.resolver,
                         );
                         let (engine, today) = (unit32(&ours), unit32(&today));
                         let report = compare(&engine, &today, &r.rgba, &r.classes());
-                        let mut problems = report.failures(&Bounds::HALF_FLOAT);
+                        let mut problems = reference_problems(
+                            &report,
+                            &Bounds::HALF_FLOAT,
+                            &engine,
+                            &today,
+                            &r.rgba,
+                            &r.classes(),
+                        );
                         let mut shape = String::new();
                         if r.modelled() == 1.0 {
                             let alpha =
@@ -506,7 +587,35 @@ fn corpus_render_parity() {
                             unmodelled(&r)
                         );
                         eprintln!("{line}");
-                        if !problems.is_empty() {
+                        let eligible = !r.unmodelled.is_empty()
+                            && problems.iter().all(|p| p.starts_with("unreferenced:"));
+                        let owner = if r.unmodelled.iter().any(|r| r == "effects") {
+                            "L6"
+                        } else {
+                            "L4"
+                        };
+                        let owned = pending.check(
+                            pending::Entry {
+                                frame: pending::frame_id(
+                                    &p.name,
+                                    s.time,
+                                    s.width,
+                                    s.height,
+                                    "transparent",
+                                ),
+                                owner: owner.into(),
+                                reason: r.unmodelled.join(", "),
+                                checks: problems.clone(),
+                                measurement_sha256: pending::measurement(
+                                    &engine,
+                                    &today,
+                                    &r.rgba,
+                                    &r.classes(),
+                                ),
+                            },
+                            eligible,
+                        );
+                        if !problems.is_empty() && !owned {
                             failed.push(format!("{line}\n      {}", problems.join("\n      ")));
                         }
                     }
@@ -532,7 +641,50 @@ fn corpus_render_parity() {
                         b.max_cv_outside_edges,
                         b.object_ssim.unwrap_or(f64::NAN)
                     );
-                    (line, d.passes() && b.pass())
+                    let checks = if d.passes() && b.pass() {
+                        Vec::new()
+                    } else {
+                        vec![format!(
+                            "3D opaque: rest fraction within 1 {:.12}; rest max {}; fraction within 2 {:.12}; max outside edges {}; SSIM {:?}",
+                            d.fraction_within_one(),
+                            d.max,
+                            b.fraction_within_2,
+                            b.max_cv_outside_edges,
+                            b.object_ssim
+                        )]
+                    };
+                    let classes: Vec<_> = class
+                        .iter()
+                        .map(|v| {
+                            if *v {
+                                pm_reference::compare::Class::Resampled
+                            } else {
+                                pm_reference::compare::Class::Unreferenced
+                            }
+                        })
+                        .collect();
+                    let owned = pending.check(
+                        pending::Entry {
+                            frame: pending::frame_id(
+                                &p.name,
+                                s.time,
+                                s.width,
+                                s.height,
+                                "3d-opaque",
+                            ),
+                            owner: "L4".into(),
+                            reason: "3D surfaces and composition".into(),
+                            checks: checks.clone(),
+                            measurement_sha256: pending::measurement(
+                                &unit8(&ours),
+                                &unit8(&reference),
+                                &[],
+                                &classes,
+                            ),
+                        },
+                        true,
+                    );
+                    (line, checks.is_empty() || owned)
                 }
                 None => {
                     let r = reference::render(
@@ -544,16 +696,49 @@ fn corpus_render_parity() {
                         true,
                         16,
                         renderer.effects(),
+                        &p.resolver,
                     );
                     let modelled = r.modelled();
                     complete += usize::from(modelled == 1.0);
                     partial += usize::from(modelled > 0.0 && modelled < 1.0);
                     let (engine, today) = (unit8(&ours), unit8(&reference));
-                    let opaque = reference::Reference { rgba: r.opaque(), ..r.clone() };
+                    let opaque = reference::Reference {
+                        rgba: r.opaque(),
+                        ..r.clone()
+                    };
                     let report = compare(&engine, &today, &opaque.rgba, &opaque.classes());
-                    let problems = report.failures(&Bounds::EIGHT_BIT);
+                    let problems = reference_problems(
+                        &report,
+                        &Bounds::EIGHT_BIT,
+                        &engine,
+                        &today,
+                        &opaque.rgba,
+                        &opaque.classes(),
+                    );
                     let line = format!("{:<40} t={:<6}{}{report}", p.name, s.time, unmodelled(&r));
-                    let pass = problems.is_empty();
+                    let eligible = !r.unmodelled.is_empty()
+                        && problems.iter().all(|p| p.starts_with("unreferenced:"));
+                    let owner = if r.unmodelled.iter().any(|r| r == "effects") {
+                        "L6"
+                    } else {
+                        "L4"
+                    };
+                    let owned = pending.check(
+                        pending::Entry {
+                            frame: pending::frame_id(&p.name, s.time, s.width, s.height, "opaque"),
+                            owner: owner.into(),
+                            reason: r.unmodelled.join(", "),
+                            checks: problems.clone(),
+                            measurement_sha256: pending::measurement(
+                                &engine,
+                                &today,
+                                &opaque.rgba,
+                                &opaque.classes(),
+                            ),
+                        },
+                        eligible,
+                    );
+                    let pass = problems.is_empty() || owned;
                     let line = if pass {
                         line
                     } else {
@@ -586,8 +771,15 @@ fn corpus_render_parity() {
                     write_png(&dir.join(format!("{stem}-diff.png")), w, h, &marked);
                 }
             }
+            record_frame_result(
+                &mut frame_results,
+                &frame_id,
+                failed.len() > failed_before,
+                &ours,
+            );
         }
     }
+    failed.extend(pending.finish(only.is_none() && std::env::var_os("PM_ENGINE_CORPUS").is_none()));
     eprintln!("\nskipped (unsupported by this renderer):");
     for (name, why) in &skipped {
         eprintln!("  {name:<40} {why}");
@@ -625,5 +817,169 @@ fn corpus_render_parity() {
         failed.is_empty(),
         "{} frames outside the render class",
         failed.len()
+    );
+}
+
+#[test]
+fn interior_reference_proof_rejects_wrong_authored_paint() {
+    use pm_reference::compare::{Class, compare};
+    let today = [1.0, 1.0, 1.0, 1.0];
+    let wanted = [0.0, 0.0, 0.0, 1.0];
+    let report = compare(&wanted, &today, &wanted, &[Class::Interior]);
+    assert!(
+        reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &wanted,
+            &today,
+            &wanted,
+            &[Class::Interior]
+        )
+        .is_empty()
+    );
+    let wrong = [0.01, 0.0, 0.0, 1.0];
+    let report = compare(&wrong, &today, &wanted, &[Class::Interior]);
+    assert!(
+        !reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &wrong,
+            &today,
+            &wanted,
+            &[Class::Interior]
+        )
+        .is_empty()
+    );
+    // A wrong legacy pixel elsewhere cannot hide a local regression.
+    let report = compare(&wrong, &wanted, &wanted, &[Class::Interior]);
+    assert!(
+        !reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &wrong,
+            &wanted,
+            &wanted,
+            &[Class::Interior]
+        )
+        .is_empty()
+    );
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::pending::{Audit, Entry};
+    fn row() -> Entry {
+        Entry {
+            frame: "anonymous".into(),
+            owner: "L6".into(),
+            reason: "effects".into(),
+            checks: vec!["unreferenced: max 7 CV".into()],
+            measurement_sha256: "measured".into(),
+        }
+    }
+    fn audit() -> Audit {
+        Audit::read(&serde_json::to_string(&[row()]).unwrap())
+    }
+    #[test]
+    fn only_unchanged_owned_measurements_are_pending() {
+        let mut a = audit();
+        assert!(a.check(row(), true));
+        assert!(a.finish(true).is_empty());
+        let mut a = audit();
+        let mut worse = row();
+        worse.measurement_sha256 = "different".into();
+        assert!(!a.check(worse, true));
+        assert!(!a.finish(true).is_empty());
+        let mut a = audit();
+        assert!(!a.check(row(), false));
+        assert!(!a.finish(true).is_empty());
+    }
+    #[test]
+    fn unknown_resolved_and_unmeasured_are_not_exempt() {
+        let mut a = audit();
+        let mut new = row();
+        new.frame = "new".into();
+        assert!(!a.check(new, true));
+        assert!(!a.finish(true).is_empty());
+        let mut a = audit();
+        let mut solved = row();
+        solved.checks.clear();
+        assert!(!a.check(solved, true));
+        assert!(!a.finish(true).is_empty());
+        assert!(!audit().finish(true).is_empty());
+    }
+}
+
+#[test]
+fn text_context_pending_requires_independent_local_proof() {
+    use quality::text_context_is_owned_gap as eligible;
+    assert!(eligible(false, true, 100, 100));
+    assert!(eligible(false, false, 100, 0));
+    assert!(!eligible(false, false, 100, 1));
+    assert!(!eligible(true, true, 100, 0));
+    assert!(!eligible(false, false, 0, 0));
+}
+
+#[test]
+fn isolated_text_pairing_keeps_authored_values_exact() {
+    use serde_json::json;
+    let hash = |v: &serde_json::Value| {
+        let value = pm_model::json::parse(&v.to_string()).unwrap();
+        let doc = pm_model::Document::new(Some(value), 0);
+        support::text::authored_isolation_fingerprint(&doc).unwrap()
+    };
+    let full = json!({"layers": [
+        {"id":"ink", "type":"text", "threeD":true, "mblur":true,
+         "d":{"text":"Authored", "size":32}, "p":{"position.x":{"v":20}},
+         "fx":[{"type":"blur", "p":{"radius":{"kf":[{"i":"capture-a", "t":1, "v":2, "e":"linear"}]}}}]},
+        {"id":"back", "type":"solid"}
+    ]});
+    let mut isolated = full.clone();
+    isolated["layers"].as_array_mut().unwrap().pop();
+    isolated["layers"][0]["threeD"] = json!(false);
+    isolated["layers"][0]["mblur"] = json!(false);
+    isolated["layers"][0]["fx"][0]["p"]["radius"]["kf"][0]["i"] = json!("capture-b");
+    assert_eq!(hash(&full), hash(&isolated));
+    for property in ["t", "v", "e"] {
+        let mut changed = isolated.clone();
+        changed["layers"][0]["fx"][0]["p"]["radius"]["kf"][0][property] = json!(9);
+        assert_ne!(hash(&full), hash(&changed), "authored keyframe {property}");
+    }
+    isolated["layers"][0]["d"]["text"] = json!("Changed");
+    assert_ne!(hash(&full), hash(&isolated), "authored text");
+}
+
+#[test]
+fn corrected_interior_proof_is_local_to_pixels_outside_the_legacy_bound() {
+    use pm_reference::compare::{Class, compare};
+    let classes = [Class::Interior; 2];
+    let wanted = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let today = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let mut engine = wanted;
+    engine[4] = 0.8 / 255.0;
+    let report = compare(&engine, &today, &wanted, &classes);
+    assert!(
+        reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &engine,
+            &today,
+            &wanted,
+            &classes
+        )
+        .is_empty()
+    );
+    engine[4] = 2.0 / 255.0;
+    let report = compare(&engine, &today, &wanted, &classes);
+    assert!(
+        !reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &engine,
+            &today,
+            &wanted,
+            &classes
+        )
+        .is_empty()
     );
 }

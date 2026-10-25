@@ -1,0 +1,388 @@
+//! 4× multisample rasterization as the GPU performs it for Chromium's
+//! accelerated Canvas2D (Skia Graphite on Metal, docs/engine/vector.md):
+//! vertices snapped to the rasterizer's subpixel grid, coverage decided per
+//! sample with the top-left rule, per-sample source-over blending in 8-bit
+//! unorm, and a box resolve.
+
+/// The standard 4× sample positions (Metal's and D3D's default pattern), in
+/// pixels from the pixel's top-left corner, y down.
+pub const SAMPLES_4X: [[f64; 2]; 4] = [
+    [0.375, 0.125],
+    [0.875, 0.375],
+    [0.125, 0.625],
+    [0.625, 0.875],
+];
+
+/// A single sample at the pixel center (a render pass without MSAA).
+pub const SAMPLES_1X: [[f64; 2]; 1] = [[0.5, 0.5]];
+
+/// Subpixel bits of vertex snapping (8 bits: 1/256 pixel).
+pub const SUBPIXEL_BITS: u32 = 8;
+
+/// Snaps a window coordinate to the rasterizer's fixed-point grid (round to
+/// nearest).
+#[inline]
+pub fn snap(v: f64) -> i64 {
+    libm::round(v * f64::from(1u32 << SUBPIXEL_BITS)) as i64
+}
+
+/// A sample position in grid units.
+#[inline]
+fn sample_grid(px: i64, py: i64, s: [f64; 2]) -> (i64, i64) {
+    let one = 1i64 << SUBPIXEL_BITS;
+    (
+        px * one + (s[0] * one as f64) as i64,
+        py * one + (s[1] * one as f64) as i64,
+    )
+}
+
+/// Fill rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    NonZero,
+    EvenOdd,
+}
+
+/// A coverage mask: 4 sample bits per pixel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampleMask {
+    pub width: u32,
+    pub height: u32,
+    /// Pixel origin in the original canvas; preserves the global sample grid.
+    pub origin: [u32; 2],
+    /// The sample positions (4× or 1×).
+    pub pattern: &'static [[f64; 2]],
+    pub bits: Vec<u8>,
+}
+
+impl SampleMask {
+    pub fn new(width: u32, height: u32, pattern: &'static [[f64; 2]]) -> Self {
+        Self {
+            width,
+            height,
+            origin: [0, 0],
+            pattern,
+            bits: vec![0; (width * height) as usize],
+        }
+    }
+}
+
+/// An edge in grid units, `y0 < y1`, with winding direction.
+#[derive(Debug, Clone, Copy)]
+struct GridEdge {
+    x0: i64,
+    y0: i64,
+    x1: i64,
+    y1: i64,
+    winding: i32,
+}
+
+/// Fills closed polygons (window coordinates in pixels, already transformed)
+/// into `mask` with the given rule. Every contour is implicitly closed.
+pub fn fill_polygons(mask: &mut SampleMask, contours: &[Vec<[f64; 2]>], rule: Rule) {
+    let mut edges = Vec::new();
+    let (mut miny, mut maxy) = (i64::MAX, i64::MIN);
+    for c in contours {
+        if c.len() < 2 {
+            continue;
+        }
+        for i in 0..c.len() {
+            let a = c[i];
+            let b = c[(i + 1) % c.len()];
+            let (ax, ay, bx, by) = (snap(a[0]), snap(a[1]), snap(b[0]), snap(b[1]));
+            if ay == by {
+                continue;
+            }
+            let e = if ay < by {
+                GridEdge {
+                    x0: ax,
+                    y0: ay,
+                    x1: bx,
+                    y1: by,
+                    winding: 1,
+                }
+            } else {
+                GridEdge {
+                    x0: bx,
+                    y0: by,
+                    x1: ax,
+                    y1: ay,
+                    winding: -1,
+                }
+            };
+            miny = miny.min(e.y0);
+            maxy = maxy.max(e.y1);
+            edges.push(e);
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+    let one = 1i64 << SUBPIXEL_BITS;
+    let py0 = (miny.div_euclid(one) - 1).max(i64::from(mask.origin[1]));
+    let py1 = (maxy.div_euclid(one) + 1).min(i64::from(mask.origin[1] + mask.height) - 1);
+    let mut crossings: Vec<(i64, i64, i32)> = Vec::new();
+    for py in py0..=py1 {
+        for (si, s) in mask.pattern.iter().enumerate() {
+            let (_, sy) = sample_grid(0, py, *s);
+            crossings.clear();
+            for e in &edges {
+                // Half-open in y: a sample on a vertex row belongs to the edge
+                // below it (the top-left rule's "top" part).
+                if sy < e.y0 || sy >= e.y1 {
+                    continue;
+                }
+                // x of the edge at sy as an exact rational: num / den.
+                let den = e.y1 - e.y0;
+                let num = e.x0 * den + (e.x1 - e.x0) * (sy - e.y0);
+                crossings.push((num, den, e.winding));
+            }
+            if crossings.is_empty() {
+                continue;
+            }
+            // Each edge changes winding at the first integer pixel whose
+            // sample is on its right. Compute that threshold as an exact
+            // rational ceil: no float intersection can flip an edge sample.
+            // Filling spans avoids testing every pixel against every edge.
+            let sx = (s[0] * one as f64) as i64;
+            let mut events: Vec<(i64, i32)> = crossings
+                .iter()
+                .map(|&(num, den, wd)| {
+                    let n = i128::from(num) - i128::from(sx) * i128::from(den);
+                    let d = i128::from(one) * i128::from(den);
+                    let x = n.div_euclid(d) + i128::from(n.rem_euclid(d) != 0);
+                    (
+                        x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+                        wd,
+                    )
+                })
+                .collect();
+            events.sort_unstable_by_key(|e| e.0);
+            let x0 = i64::from(mask.origin[0]);
+            let x1 = x0 + i64::from(mask.width);
+            let row = (py as u32 - mask.origin[1]) as usize * mask.width as usize;
+            let (mut x, mut w) = (x0, 0);
+            for (edge, wd) in events.into_iter().chain(std::iter::once((x1, 0))) {
+                let end = edge.clamp(x0, x1);
+                let inside = match rule {
+                    Rule::NonZero => w != 0,
+                    Rule::EvenOdd => w & 1 != 0,
+                };
+                if inside && end > x {
+                    for bits in &mut mask.bits[row + (x - x0) as usize..row + (end - x0) as usize] {
+                        *bits |= 1 << si;
+                    }
+                }
+                w += wd;
+                x = end;
+            }
+        }
+    }
+}
+
+/// A 4× multisampled RGBA8 target (premultiplied), cleared to transparent.
+#[derive(Debug, Clone)]
+pub struct MsaaTarget {
+    pub width: u32,
+    pub height: u32,
+    /// The sample positions (4× or 1×).
+    pub pattern: &'static [[f64; 2]],
+    /// `pattern.len()` samples per pixel, RGBA8 each.
+    pub samples: Vec<[u8; 4]>,
+}
+
+/// Float to unorm8 as the GPU converts blend results (round to nearest even).
+#[inline]
+pub fn unorm8(v: f32) -> u8 {
+    let x = (v.clamp(0.0, 1.0) * 255.0) as f64;
+    let r = libm::rint(x);
+    r as u8
+}
+
+impl MsaaTarget {
+    pub fn new(width: u32, height: u32, pattern: &'static [[f64; 2]]) -> Self {
+        Self {
+            width,
+            height,
+            pattern,
+            samples: vec![[0; 4]; (width * height) as usize * pattern.len()],
+        }
+    }
+
+    /// A mask matching this target's sample pattern.
+    pub fn mask(&self) -> SampleMask {
+        SampleMask::new(self.width, self.height, self.pattern)
+    }
+
+    /// Source-over blends premultiplied `color` into every covered sample.
+    pub fn blend(&mut self, mask: &SampleMask, color: [f32; 4]) {
+        // A sample's new value depends only on its old one: the same
+        // `unorm8(color + dst × (1 − α))` for each of the 256 values,
+        // looked up instead of computed per sample.
+        let inv = 1.0 - color[3];
+        let mut lut = [[0u8; 256]; 4];
+        for (c, table) in lut.iter_mut().enumerate() {
+            for (dst, out) in table.iter_mut().enumerate() {
+                *out = unorm8(color[c] + (dst as u8 as f32 / 255.0) * inv);
+            }
+        }
+        let n = self.pattern.len();
+        let full = (1u8 << n) - 1;
+        for (p, bits) in mask.bits.iter().enumerate() {
+            if *bits == 0 {
+                continue;
+            }
+            if *bits == full {
+                for d in &mut self.samples[p * n..p * n + n] {
+                    for c in 0..4 {
+                        d[c] = lut[c][usize::from(d[c])];
+                    }
+                }
+                continue;
+            }
+            for s in 0..n {
+                if bits & (1 << s) == 0 {
+                    continue;
+                }
+                let d = &mut self.samples[p * n + s];
+                for c in 0..4 {
+                    d[c] = lut[c][usize::from(d[c])];
+                }
+            }
+        }
+    }
+
+    /// Box resolve to RGBA8 (premultiplied): the mean of the four samples,
+    /// rounded half up (measured: a 26 in one sample resolves to 7).
+    pub fn resolve(&self) -> Vec<u8> {
+        fn mean<const N: usize>(samples: &[[u8; 4]], out: &mut [u8]) {
+            let half = N as u16 / 2;
+            for (pixel, samples) in out.chunks_exact_mut(4).zip(samples.chunks_exact(N)) {
+                for c in 0..4 {
+                    let mut sum = 0u16;
+                    for s in samples {
+                        sum += u16::from(s[c]);
+                    }
+                    pixel[c] = ((sum + half) / N as u16) as u8;
+                }
+            }
+        }
+        let mut out = vec![0u8; (self.width * self.height * 4) as usize];
+        match self.pattern.len() {
+            4 => mean::<4>(&self.samples, &mut out),
+            1 => mean::<1>(&self.samples, &mut out),
+            n => {
+                for (pixel, samples) in out.chunks_exact_mut(4).zip(self.samples.chunks_exact(n)) {
+                    for c in 0..4 {
+                        let sum: u32 = samples.iter().map(|s| u32::from(s[c])).sum();
+                        pixel[c] = ((sum + n as u32 / 2) / n as u32) as u8;
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Rasterizes triangles (window coordinates) into `mask` as their union,
+/// with the same snapping and top-left rule as [`fill_polygons`].
+pub fn fill_triangles(mask: &mut SampleMask, tris: &[[[f32; 2]; 3]]) {
+    let one = 1i64 << SUBPIXEL_BITS;
+    for t in tris {
+        let v: Vec<(i64, i64)> = t
+            .iter()
+            .map(|p| (snap(f64::from(p[0])), snap(f64::from(p[1]))))
+            .collect();
+        // Zero-area triangles cover nothing.
+        let area = (v[1].0 - v[0].0) * (v[2].1 - v[0].1) - (v[2].0 - v[0].0) * (v[1].1 - v[0].1);
+        if area == 0 {
+            continue;
+        }
+        let (minx, maxx) = (
+            v.iter().map(|p| p.0).min().unwrap(),
+            v.iter().map(|p| p.0).max().unwrap(),
+        );
+        let (miny, maxy) = (
+            v.iter().map(|p| p.1).min().unwrap(),
+            v.iter().map(|p| p.1).max().unwrap(),
+        );
+        let px0 = (minx.div_euclid(one)).max(i64::from(mask.origin[0]));
+        let px1 = (maxx.div_euclid(one)).min(i64::from(mask.origin[0] + mask.width) - 1);
+        let py0 = (miny.div_euclid(one)).max(i64::from(mask.origin[1]));
+        let py1 = (maxy.div_euclid(one)).min(i64::from(mask.origin[1] + mask.height) - 1);
+        if px1 < px0 || py1 < py0 {
+            continue;
+        }
+        let edges: Vec<GridEdge> = (0..3)
+            .filter_map(|i| {
+                let (a, b) = (v[i], v[(i + 1) % 3]);
+                if a.1 == b.1 {
+                    return None;
+                }
+                Some(if a.1 < b.1 {
+                    GridEdge {
+                        x0: a.0,
+                        y0: a.1,
+                        x1: b.0,
+                        y1: b.1,
+                        winding: 1,
+                    }
+                } else {
+                    GridEdge {
+                        x0: b.0,
+                        y0: b.1,
+                        x1: a.0,
+                        y1: a.1,
+                        winding: -1,
+                    }
+                })
+            })
+            .collect();
+        for py in py0..=py1 {
+            let row = (py as u32 - mask.origin[1]) as usize * mask.width as usize;
+            for (si, s) in mask.pattern.iter().enumerate() {
+                let (_, sy) = sample_grid(0, py, *s);
+                let sx = (s[0] * one as f64) as i64;
+                // Each crossing adds its winding from the first pixel whose
+                // sample is on or right of it (`num <= sample × den`): an exact
+                // rational ceil, as `fill_polygons` decides it, so only the
+                // covered span of the bounding box is written.
+                let mut events = [(0i64, 0i32); 3];
+                let mut n = 0;
+                for e in &edges {
+                    if sy < e.y0 || sy >= e.y1 {
+                        continue;
+                    }
+                    let den = e.y1 - e.y0;
+                    let num = e.x0 * den + (e.x1 - e.x0) * (sy - e.y0);
+                    let q = i128::from(num) - i128::from(sx) * i128::from(den);
+                    let d = i128::from(one) * i128::from(den);
+                    let x = q.div_euclid(d) + i128::from(q.rem_euclid(d) != 0);
+                    events[n] = (
+                        x.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+                        e.winding,
+                    );
+                    n += 1;
+                }
+                if n == 0 {
+                    continue;
+                }
+                let events = &mut events[..n];
+                events.sort_unstable_by_key(|e| e.0);
+                let (mut x, mut w) = (px0, 0);
+                for &(edge, wd) in events.iter().chain(std::iter::once(&(px1 + 1, 0))) {
+                    let end = edge.clamp(px0, px1 + 1);
+                    if w != 0 && end > x {
+                        let from = row + (x - i64::from(mask.origin[0])) as usize;
+                        let to = row + (end - i64::from(mask.origin[0])) as usize;
+                        for bits in &mut mask.bits[from..to] {
+                            *bits |= 1 << si;
+                        }
+                    }
+                    w += wd;
+                    x = x.max(end);
+                }
+            }
+        }
+    }
+}

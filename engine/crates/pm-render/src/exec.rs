@@ -932,7 +932,11 @@ impl Exec<'_> {
                     pass.draw(0..4, 0..1);
                 }
             } else if r.solid.is_some() {
-                pass.set_pipeline(self.pipelines.solid_with(format, blend));
+                pass.set_pipeline(if r.uv[2] == 0.0 {
+                    self.pipelines.rect_with(format, blend)
+                } else {
+                    self.pipelines.solid_with(format, blend)
+                });
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);
             } else if let Some(bind) = &texture_binds[i] {

@@ -215,6 +215,12 @@ struct Params { v: array<vec4<f32>, 2> };
 const GROUP_RATE: u32 = 4;
 const MAX_FINE_BYTES: u64 = 128 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+struct FilterPaintGrid {
+    rect: PixelRect,
+    smooth_resolve: bool,
+}
+
 struct DrawEntry {
     path: BezPath,
     bounds: PixelRect,
@@ -224,19 +230,22 @@ struct DrawEntry {
 }
 
 /// Reuses the same GPU allocations across ordered tile commands in one
-/// encoder. Each checkout within a tile is distinct; reset occurs only after
-/// its resolve and copy have been recorded.
+/// encoder. A target returns to the free list after its last encoded read;
+/// ordered render passes make that reuse safe before submission.
 #[derive(Default)]
 struct ScratchPool {
     textures: std::collections::HashMap<(u32, u32), Vec<wgpu::Texture>>,
-    used: std::collections::HashMap<(u32, u32), usize>,
-    coverage: Option<wgpu::Buffer>,
-    coverage_bytes: u64,
+    busy: std::collections::HashSet<wgpu::Texture>,
+    coverage: Vec<(u64, wgpu::Buffer)>,
 }
 
 impl ScratchPool {
     fn reset(&mut self) {
-        self.used.clear();
+        debug_assert!(
+            self.busy.is_empty(),
+            "previous SVG tile retained a live scratch target"
+        );
+        self.busy.clear();
     }
 
     fn target(&mut self, device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
@@ -247,42 +256,195 @@ impl ScratchPool {
             .textures
             .iter()
             .filter(|((tw, th), list)| {
-                *tw >= w
-                    && *th >= h
-                    && self.used.get(&(*tw, *th)).copied().unwrap_or(0) < list.len()
+                *tw >= w && *th >= h && list.iter().any(|texture| !self.busy.contains(texture))
             })
             .map(|(key, _)| *key)
-            .min_by_key(|(tw, th)| u64::from(*tw) * u64::from(*th))
+            .min_by_key(|(tw, th)| (u64::from(*tw) * u64::from(*th), *tw, *th))
             .unwrap_or((w, h));
-        let index = self.used.entry(key).or_default();
         let list = self.textures.entry(key).or_default();
-        if *index == list.len() {
-            list.push(float_target(device, key.0, key.1));
-        }
-        let out = list[*index].clone();
-        *index += 1;
+        let out = if let Some(texture) = list.iter().find(|texture| !self.busy.contains(*texture)) {
+            texture.clone()
+        } else {
+            let texture = float_target(device, key.0, key.1);
+            list.push(texture.clone());
+            texture
+        };
+        assert!(
+            self.busy.insert(out.clone()),
+            "scratch texture checked out twice"
+        );
         out
     }
 
+    fn release(&mut self, texture: &wgpu::Texture) {
+        assert!(self.busy.remove(texture), "scratch texture released twice");
+    }
+
     fn coverage(&mut self, device: &wgpu::Device, bytes: u64) -> wgpu::Buffer {
-        if self.coverage_bytes < bytes {
-            self.coverage = Some(coverage::buffer(device, bytes));
-            self.coverage_bytes = bytes;
+        if let Some((_, buffer)) = self
+            .coverage
+            .iter()
+            .filter(|(size, _)| *size >= bytes.max(16))
+            .min_by_key(|(size, _)| *size)
+        {
+            return buffer.clone();
         }
-        self.coverage.as_ref().unwrap().clone()
+        let size = bytes.max(16);
+        let buffer = coverage::buffer(device, size);
+        self.coverage.push((size, buffer.clone()));
+        buffer
     }
 
     fn allocated_bytes(&self) -> u64 {
-        self.textures
-            .iter()
-            .fold(self.coverage_bytes, |sum, ((w, h), list)| {
+        self.textures.iter().fold(
+            self.coverage.iter().map(|(size, _)| *size).sum(),
+            |sum, ((w, h), list)| {
                 sum.saturating_add(
                     u64::from(*w)
                         .saturating_mul(u64::from(*h))
                         .saturating_mul(16)
                         .saturating_mul(list.len() as u64),
                 )
+            },
+        )
+    }
+
+    fn projection(&self, coverage_bytes: Option<u64>) -> ScratchProjection {
+        let mut slots = Vec::new();
+        for (key, list) in &self.textures {
+            slots.extend(std::iter::repeat_n(*key, list.len()));
+        }
+        let mut bytes = self.allocated_bytes();
+        if let Some(size) = coverage_bytes.map(|size| size.max(16))
+            && !self.coverage.iter().any(|(have, _)| *have >= size)
+        {
+            bytes = bytes.saturating_add(size);
+        }
+        ScratchProjection {
+            slots,
+            busy: Vec::new(),
+            bytes,
+        }
+    }
+}
+
+struct ScratchProjection {
+    slots: Vec<(u32, u32)>,
+    busy: Vec<bool>,
+    bytes: u64,
+}
+
+impl ScratchProjection {
+    fn target(&mut self, (w, h): (u32, u32)) -> usize {
+        let slot = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, (tw, th))| {
+                *tw >= w && *th >= h && !self.busy.get(*i).copied().unwrap_or(false)
             })
+            .min_by_key(|(i, (tw, th))| (u64::from(*tw) * u64::from(*th), *tw, *th, *i))
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| {
+                self.slots.push((w, h));
+                self.bytes = self
+                    .bytes
+                    .saturating_add(u64::from(w).saturating_mul(u64::from(h)).saturating_mul(16));
+                self.slots.len() - 1
+            });
+        if self.busy.len() < self.slots.len() {
+            self.busy.resize(self.slots.len(), false);
+        }
+        assert!(!std::mem::replace(&mut self.busy[slot], true));
+        slot
+    }
+
+    fn release(&mut self, slot: usize) {
+        assert!(std::mem::replace(&mut self.busy[slot], false));
+    }
+
+    fn paint_filter_grid(
+        &mut self,
+        filter: &FloatFilter,
+        graphic: usize,
+        size: (u32, u32),
+    ) -> usize {
+        let mut created = Vec::new();
+        for primitive in filter.filter.primitives() {
+            let result = match primitive.kind() {
+                filter::Kind::GaussianBlur(_) => {
+                    let first = self.target(size);
+                    let second = self.target(size);
+                    self.release(first);
+                    second
+                }
+                filter::Kind::Offset(_) => self.target(size),
+                _ => continue, // SvgDocument rejects unsupported primitives
+            };
+            created.push(result);
+        }
+        let output = created.last().copied().unwrap_or(graphic);
+        for slot in created {
+            if slot != output {
+                self.release(slot);
+            }
+        }
+        output
+    }
+
+    fn paint_filter(&mut self, filter: &FloatFilter, graphic: usize, fine: (u32, u32)) -> usize {
+        if matches!(filter.resolution, Some(None)) {
+            return self.target(fine);
+        }
+        if let Some(Some([w, h])) = filter.resolution {
+            let grid = (w, h);
+            let source = self.target(grid);
+            let filtered = self.paint_filter_grid(filter, source, grid);
+            let output = self.target(fine);
+            self.release(filtered);
+            if filtered != source {
+                self.release(source);
+            }
+            output
+        } else {
+            self.paint_filter_grid(filter, graphic, fine)
+        }
+    }
+
+    fn paint_nodes(&mut self, nodes: &[FloatNode], fine: (u32, u32)) -> usize {
+        let mut target = self.target(fine);
+        for node in nodes {
+            let FloatNode::Group(group) = node else {
+                continue;
+            };
+            let mut front = self.paint_nodes(&group.children, fine);
+            for filter in &group.filters {
+                let filtered = self.paint_filter(filter, front, fine);
+                if filtered != front {
+                    self.release(front);
+                }
+                front = filtered;
+            }
+            let clip = group
+                .clip
+                .as_ref()
+                .map(|nodes| self.paint_nodes(nodes, fine));
+            let mask = group
+                .mask
+                .as_ref()
+                .map(|nodes| self.paint_nodes(nodes, fine));
+            let result = self.target(fine);
+            self.release(target);
+            self.release(front);
+            if let Some(clip) = clip {
+                self.release(clip);
+            }
+            if let Some(mask) = mask {
+                self.release(mask);
+            }
+            target = result;
+        }
+        target
     }
 }
 
@@ -579,8 +741,13 @@ impl SvgPainter {
         let Some(mut scene) = doc.float_scene(transform, clip) else {
             return Ok(None);
         };
+        if rect.width.max(1) > device.limits().max_texture_dimension_2d
+            || rect.height.max(1) > device.limits().max_texture_dimension_2d
+        {
+            return Err("SVG output exceeds device texture dimensions".into());
+        }
         if has_filters(&scene) {
-            let target = self.render_filtered_tiled(device, encoder, doc, transform, rect, clip)?;
+            let target = self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
             return self
                 .finish_output(device, encoder, target, rect, precision)
                 .map(Some);
@@ -590,11 +757,15 @@ impl SvgPainter {
         let mut resolve = None;
         let mut paths = Vec::new();
         if collect(&scene, rect, &mut paths).is_none() {
-            return Ok(None);
+            return Err("SVG coverage coordinates overflow".into());
         }
         if needs_joint_samples(&scene) {
             let Some(bounds) = path_bounds(&paths) else {
-                return Ok(None);
+                let target =
+                    self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+                return self
+                    .finish_output(device, encoder, target, rect, precision)
+                    .map(Some);
             };
             let rate = GROUP_RATE;
             let Some(x) = rect
@@ -602,24 +773,32 @@ impl SvgPainter {
                 .checked_add(bounds.x)
                 .and_then(|v| v.checked_mul(rate as i32))
             else {
-                return Ok(None);
+                return Err("SVG fine x coordinate overflow".into());
             };
             let Some(y) = rect
                 .y
                 .checked_add(bounds.y)
                 .and_then(|v| v.checked_mul(rate as i32))
             else {
-                return Ok(None);
+                return Err("SVG fine y coordinate overflow".into());
             };
             let Some(fw) = bounds.width.checked_mul(rate) else {
-                return Ok(None);
+                return Err("SVG fine width overflow".into());
             };
             let Some(fh) = bounds.height.checked_mul(rate) else {
-                return Ok(None);
+                return Err("SVG fine height overflow".into());
             };
             let max_dim = device.limits().max_texture_dimension_2d;
-            if fw > max_dim || fh > max_dim {
-                return Ok(None);
+            let target_bytes = u64::from(fw)
+                .saturating_mul(u64::from(fh))
+                .saturating_mul(16)
+                .saturating_mul(target_count(&scene));
+            if fw > max_dim || fh > max_dim || target_bytes > MAX_FINE_BYTES {
+                let target =
+                    self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+                return self
+                    .finish_output(device, encoder, target, rect, precision)
+                    .map(Some);
             }
             let fine_clip: Vec<_> = clip
                 .iter()
@@ -628,20 +807,20 @@ impl SvgPainter {
             let Some(fine_scene) =
                 doc.float_scene(Affine::scale(f64::from(rate)) * transform, &fine_clip)
             else {
-                return Ok(None);
+                return Err("SVG fine scene changed during render".into());
             };
             let fine_rect = PixelRect::new(x, y, fw, fh);
             let mut fine_paths = Vec::new();
             if collect(&fine_scene, fine_rect, &mut fine_paths).is_none() {
-                return Ok(None);
+                return Err("SVG fine coverage coordinates overflow".into());
             }
-            let target_bytes = u64::from(fw)
-                .saturating_mul(u64::from(fh))
-                .saturating_mul(16)
-                .saturating_mul(target_count(&fine_scene));
             let coverage_bytes = coverage_pixels(&fine_paths).saturating_mul(4);
             if target_bytes.saturating_add(coverage_bytes) > MAX_FINE_BYTES {
-                return Ok(None);
+                let target =
+                    self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+                return self
+                    .finish_output(device, encoder, target, rect, precision)
+                    .map(Some);
             }
             scene = fine_scene;
             paths = fine_paths;
@@ -652,7 +831,10 @@ impl SvgPainter {
         // Never lower the selected sampling rate to fit storage: that would
         // silently weaken the paint integration bound.
         if coverage_pixels(&paths) > limit {
-            return Ok(None);
+            let target = self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+            return self
+                .finish_output(device, encoder, target, rect, precision)
+                .map(Some);
         }
         let items: Vec<_> = paths
             .iter()
@@ -731,7 +913,7 @@ impl SvgPainter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_filtered_tiled(
+    fn render_joint_tiled(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -765,7 +947,7 @@ impl SvgPainter {
                     TILE.min(rect.width.max(1) - x),
                     TILE.min(rect.height.max(1) - y),
                 );
-                self.render_filter_tile(
+                self.render_joint_tile(
                     device,
                     encoder,
                     doc,
@@ -784,7 +966,7 @@ impl SvgPainter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_filter_tile(
+    fn render_joint_tile(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -839,19 +1021,33 @@ impl SvgPainter {
         let mut paths = Vec::new();
         collect(&scene, fine_rect, &mut paths)
             .ok_or_else(|| "SVG fine coverage coordinates overflow".to_owned())?;
-        let target_bytes = u64::from(fine_rect.width)
-            .saturating_mul(u64::from(fine_rect.height))
-            .saturating_mul(16)
-            .saturating_mul(target_count(&scene));
         let coverage_bytes = coverage_pixels(&paths).saturating_mul(4);
-        let limit = u64::from(device.limits().max_storage_buffer_binding_size);
+        let mut projection = scratch.projection((!paths.is_empty()).then_some(coverage_bytes));
+        let fine_size = (fine_rect.width, fine_rect.height);
+        let painted = if paths.is_empty() {
+            projection.target(fine_size)
+        } else {
+            projection.paint_nodes(&scene, fine_size)
+        };
+        let resolved = projection.target((tile.width, tile.height));
+        projection.release(painted);
+        projection.release(resolved);
+        let projected = projection.bytes;
+        let limit = device.limits().max_storage_buffer_binding_size;
         let oversize = fine_rect.width > device.limits().max_texture_dimension_2d
             || fine_rect.height > device.limits().max_texture_dimension_2d
-            || target_bytes.saturating_add(coverage_bytes) > MAX_FINE_BYTES
+            || projected > MAX_FINE_BYTES
             || coverage_bytes > limit;
         if oversize {
             if tile.width <= 1 && tile.height <= 1 {
-                return Err("SVG filtered tile exceeds device or 128 MiB fine-grid budget".into());
+                return Err(format!(
+                    "SVG joint tile exceeds device or 128 MiB fine-grid budget (scratch {projected} bytes, {} targets, fine {}×{}, halo {}×{})",
+                    projection.slots.len(),
+                    fine_rect.width,
+                    fine_rect.height,
+                    halo[0],
+                    halo[1]
+                ));
             }
             let (a, b) = if tile.width >= tile.height && tile.width > 1 {
                 let half = tile.width / 2;
@@ -866,7 +1062,7 @@ impl SvgPainter {
                     PixelRect::new(tile.x, tile.y + half as i32, tile.width, tile.height - half),
                 )
             };
-            self.render_filter_tile(
+            self.render_joint_tile(
                 device,
                 encoder,
                 doc,
@@ -879,7 +1075,7 @@ impl SvgPainter {
                 output,
                 scratch,
             )?;
-            self.render_filter_tile(
+            self.render_joint_tile(
                 device,
                 encoder,
                 doc,
@@ -988,6 +1184,8 @@ impl SvgPainter {
                 depth_or_array_layers: 1,
             },
         );
+        scratch.release(&tile_target);
+        scratch.release(&resolved);
         if scratch.allocated_bytes() > MAX_FINE_BYTES {
             return Err("SVG scratch allocations exceed 128 MiB fine-grid budget".into());
         }
@@ -1128,15 +1326,21 @@ impl SvgPainter {
                         smooth_resolve,
                     )?;
                     for filter in &group.filters {
-                        front = self.paint_filter(
+                        let filtered = self.paint_filter(
                             device,
                             encoder,
                             filter,
                             &front,
-                            rect,
+                            FilterPaintGrid {
+                                rect,
+                                smooth_resolve,
+                            },
                             scratch,
-                            smooth_resolve,
                         )?;
+                        if filtered != front {
+                            scratch.release(&front);
+                        }
+                        front = filtered;
                     }
                     let clip = if let Some(nodes) = &group.clip {
                         Some(self.paint_nodes(
@@ -1227,6 +1431,14 @@ impl SvgPainter {
                         ],
                     );
                     render_pass(encoder, &result, true, &self.composite, &bg);
+                    scratch.release(&target);
+                    scratch.release(&front);
+                    if let Some(clip) = &clip {
+                        scratch.release(clip);
+                    }
+                    if let Some(mask) = &mask {
+                        scratch.release(mask);
+                    }
                     target = result;
                 }
             }
@@ -1240,10 +1452,13 @@ impl SvgPainter {
         encoder: &mut wgpu::CommandEncoder,
         filter: &FloatFilter,
         graphic: &wgpu::Texture,
-        rect: PixelRect,
+        grid: FilterPaintGrid,
         scratch: &mut ScratchPool,
-        smooth_resolve: bool,
     ) -> Result<wgpu::Texture, String> {
+        let FilterPaintGrid {
+            rect,
+            smooth_resolve,
+        } = grid;
         if let Some(Some([w, h])) = filter.resolution {
             let r = filter.filter.rect();
             let region = [r.left(), r.top(), r.width(), r.height()];
@@ -1278,11 +1493,13 @@ impl SvgPainter {
                 encoder,
                 &grid_filter,
                 &source,
-                grid_rect,
+                FilterPaintGrid {
+                    rect: grid_rect,
+                    smooth_resolve: false,
+                },
                 scratch,
-                false,
             )?;
-            return self.filter_resample_pass(
+            let output = self.filter_resample_pass(
                 device,
                 encoder,
                 &filtered,
@@ -1293,10 +1510,16 @@ impl SvgPainter {
                 [rect.x, rect.y],
                 true,
                 scratch,
-            );
+            )?;
+            scratch.release(&filtered);
+            if filtered != source {
+                scratch.release(&source);
+            }
+            return Ok(output);
         }
         let mut results = std::collections::HashMap::<String, wgpu::Texture>::new();
         let mut previous: Option<wgpu::Texture> = None;
+        let mut created = Vec::new();
         let region = rect4(filter.filter.rect());
         let t = filter.transform;
         let inv = t.inverse().as_coeffs();
@@ -1351,7 +1574,7 @@ impl SvgPainter {
                             [1.0, 0.0]
                         };
                         let weights = gaussian_weights(sigma)?;
-                        current = self.filter_pass(
+                        let next = self.filter_pass(
                             device,
                             encoder,
                             &current,
@@ -1368,6 +1591,10 @@ impl SvgPainter {
                             linear && stage == 1,
                             scratch,
                         );
+                        if stage > 0 {
+                            scratch.release(&current);
+                        }
+                        current = next;
                     }
                     current
                 }
@@ -1404,9 +1631,16 @@ impl SvgPainter {
                 }
             };
             results.insert(primitive.result().to_owned(), result.clone());
+            created.push(result.clone());
             previous = Some(result);
         }
-        Ok(previous.unwrap_or_else(|| graphic.clone()))
+        let output = previous.unwrap_or_else(|| graphic.clone());
+        for texture in created {
+            if texture != output {
+                scratch.release(&texture);
+            }
+        }
+        Ok(output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1557,7 +1791,7 @@ fn rect4(r: pm_vector::render::svg::SvgRect) -> [f32; 4] {
 }
 
 fn gaussian_weights(sigma: f64) -> Result<Vec<f32>, String> {
-    if !sigma.is_finite() || sigma < 0.0 || sigma > 4096.0 {
+    if !sigma.is_finite() || !(0.0..=4096.0).contains(&sigma) {
         return Err(format!("invalid SVG Gaussian standard deviation {sigma}"));
     }
     if sigma == 0.0 {

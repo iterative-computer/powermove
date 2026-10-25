@@ -765,31 +765,31 @@
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1365",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1368",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : prepared ? p : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1372",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1375",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1750",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1753",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1751",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1754",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1762",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1765",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."

@@ -50,6 +50,9 @@ pm-edit = { path = "../pm-edit" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
 read-fonts = "0.45"
 png = "0.18"
+resvg = { version = "=0.48.1", default-features = false, features = ["raster-images"] }
+tiny-skia = "=0.12.0"
+usvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts"] }
 
 [[test]]
 # Runs on the main thread: the CoreText font registry uses AppKit's font

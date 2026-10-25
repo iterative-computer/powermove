@@ -1,6 +1,6 @@
-//! The exact separable Gaussian blur: path mask feathers
-//! ([`super::path_masks`]) and the text animator's `blur()` (`text::gpu`),
-//! on the GPU (`gaussian.wgsl`), with a CPU model of the same plan.
+//! The exact separable Gaussian blur for path mask feathers
+//! ([`super::path_masks`]), on the GPU (`gaussian.wgsl`), with a CPU model
+//! of the same plan.
 //!
 //! Pixels are squares, transparent outside the source. The blur of
 //! standard deviation σ px weighs the pixel `k` away by
@@ -107,7 +107,9 @@ impl Kernel {
         if !(sigma > 0.0 && sigma.is_finite()) {
             return None;
         }
-        let step = (STEP_PER_SIGMA * sigma).floor().clamp(1.0, f64::from(MAX_RADIUS)) as i32;
+        let step = (STEP_PER_SIGMA * sigma)
+            .floor()
+            .clamp(1.0, f64::from(MAX_RADIUS)) as i32;
         if step == 1 {
             let (radius, weights) = box_gaussian(sigma);
             return Some(Kernel {
@@ -172,7 +174,13 @@ impl Kernel {
 
     /// The CPU model of the GPU passes: `src` (`channels` values per pixel
     /// over `rect`, transparent outside) blurred, over `out`.
-    pub fn blur_cpu(&self, src: &[f32], rect: PixelRect, channels: usize, out: PixelRect) -> Vec<f32> {
+    pub fn blur_cpu(
+        &self,
+        src: &[f32],
+        rect: PixelRect,
+        channels: usize,
+        out: PixelRect,
+    ) -> Vec<f32> {
         let g = self.grid(out);
         let (gw, gh) = (g.size[0] as usize, g.size[1] as usize);
         let (sw, sh) = (rect.width as i32, rect.height as i32);
@@ -240,7 +248,10 @@ impl Kernel {
         let at = |p: i32, axis: usize| {
             let f = p - origin[axis];
             let k = f / g.step;
-            (k - 2, lagrange6(f64::from(f - k * g.step) / f64::from(g.step)))
+            (
+                k - 2,
+                lagrange6(f64::from(f - k * g.step) / f64::from(g.step)),
+            )
         };
         let mut ix = vec![0.0f64; ow * nh * ch];
         for m in 0..nh {
@@ -274,7 +285,12 @@ impl Kernel {
 
 /// `r` grown by `d` px each way.
 pub(crate) fn inflate(r: PixelRect, d: i32) -> PixelRect {
-    PixelRect::new(r.x - d, r.y - d, r.width + 2 * d as u32, r.height + 2 * d as u32)
+    PixelRect::new(
+        r.x - d,
+        r.y - d,
+        r.width + 2 * d as u32,
+        r.height + 2 * d as u32,
+    )
 }
 
 /// `P` in `gaussian.wgsl`.
@@ -513,7 +529,11 @@ impl Separable {
             &[uniform(), weights(), (9, h2), (4, v.clone())],
             nodes,
         );
-        run(&self.ix, &[uniform(), (4, v), (10, ix)], [p.out[2], nodes[1]]);
+        run(
+            &self.ix,
+            &[uniform(), (4, v), (10, ix)],
+            [p.out[2], nodes[1]],
+        );
     }
 
     #[cfg(test)]
@@ -546,194 +566,6 @@ pub(crate) fn sizes(p: &Params, elem: u64) -> [u64; 5] {
     ]
 }
 
-const RGBA_PRELUDE: &str = "
-alias Elem = vec4<f32>;
-@group(0) @binding(2) var src: texture_2d<f32>;
-fn src_at(i: i32, j: i32) -> vec4<f32> {
-    return textureLoad(src, vec2<i32>(i, j), 0);
-}
-// The blur at each pixel of the output texture (`p.dst`): zero outside
-// `p.out`; rounded to the nearest f16 here (the target's store may
-// truncate).
-@fragment
-fn fs_out(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let q = vec2<i32>(floor(pos.xy)) + p.dst.xy;
-    if (any(q < p.out.xy) || any(q >= p.out.xy + p.out.zw)) {
-        return vec4<f32>(0.0);
-    }
-    return quantizeToF16(grid_at(q.x, q.y));
-}
-";
-
-/// The format of [`RgbaBlur::blur`]'s result.
-pub(crate) const RGBA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-
-/// The blur of premultiplied RGBA layers (the text animator's `blur()`).
-pub(crate) struct RgbaBlur {
-    separable: Separable,
-    out: LazyRenderPipeline,
-}
-
-impl RgbaBlur {
-    pub(crate) fn new(device: &wgpu::Device) -> RgbaBlur {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm gaussian rgba"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!("{RGBA_PRELUDE}\n{}", include_str!("gaussian.wgsl")).into(),
-            ),
-        });
-        RgbaBlur {
-            separable: Separable::new(device, &module),
-            out: render(device, &module, "fs_out", RGBA_FORMAT),
-        }
-    }
-
-    /// `src` (its pixel (0, 0) at `origin`, transparent outside) blurred by
-    /// σ = `sigma` px, over `crop` (x0, y0, x1, y1): a texture of the crop's
-    /// size.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn blur(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        src: &pm_gpu::Target,
-        origin: [i32; 2],
-        crop: [u32; 4],
-        sigma: f64,
-    ) -> pm_gpu::Target {
-        let kernel = Kernel::new(sigma).unwrap_or_else(Kernel::identity);
-        let crop_rect = PixelRect::new(
-            crop[0] as i32,
-            crop[1] as i32,
-            crop[2] - crop[0],
-            crop[3] - crop[1],
-        );
-        let out_target = pm_gpu::Target::new(
-            device,
-            "pm text blur",
-            crop_rect.width.max(1),
-            crop_rect.height.max(1),
-            RGBA_FORMAT,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
-        );
-        let src_rect = PixelRect::new(origin[0], origin[1], src.width(), src.texture.height());
-        let out = inflate(src_rect, kernel.extent).intersect(crop_rect);
-        let mut bound = None;
-        if let Some(out) = out {
-            let mut p = Params::blur(&kernel, src_rect, out, 0);
-            p.dst = rect4(crop_rect);
-            let uniform = p.uniform(device);
-            let all: Vec<f32> = kernel.weights.iter().chain(&kernel.coarse).copied().collect();
-            let weights = storage(device, "pm gaussian weights", f32_bytes(&all));
-            let buffers = sizes(&p, 16).map(|n| scratch(device, "pm gaussian", n));
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("pm text blur"),
-                timestamp_writes: None,
-            });
-            let b = Passes {
-                uniform: &uniform,
-                weights: &weights,
-                src: wgpu::BindingResource::TextureView(&src.view),
-                scratch: [0, 1, 2, 3, 4].map(|i| &buffers[i]),
-            };
-            self.separable.encode(device, &mut pass, &b, &p);
-            drop(pass);
-            bound = Some((uniform, buffers));
-        }
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("pm text blur out"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &out_target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        if let Some((uniform, buffers)) = &bound {
-            let pipeline = self.out.get();
-            let group = bind(
-                device,
-                &pipeline.get_bind_group_layout(0),
-                &[
-                    (0, uniform.as_entire_binding()),
-                    (8, buffers[1].as_entire_binding()),
-                    (10, buffers[4].as_entire_binding()),
-                ],
-            );
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        drop(pass);
-        out_target
-    }
-
-    #[cfg(test)]
-    pub(crate) fn built_count(&self) -> usize {
-        self.separable
-            .pipelines()
-            .into_iter()
-            .filter(|(_, p)| p.is_built())
-            .count()
-            + usize::from(self.out.is_built())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
-        let mut times: Vec<(String, std::time::Duration)> = self
-            .separable
-            .pipelines()
-            .into_iter()
-            .map(|(name, p)| {
-                let start = std::time::Instant::now();
-                p.get();
-                (format!("gaussian rgba {name}"), start.elapsed())
-            })
-            .collect();
-        let start = std::time::Instant::now();
-        self.out.get();
-        times.push(("gaussian rgba out".into(), start.elapsed()));
-        times
-    }
-}
-
-/// The CPU model of [`RgbaBlur::blur`]: `src` (RGBA8, `width` × `height`,
-/// its pixel (0, 0) at `origin`) blurred by σ = `sigma` px into a
-/// transparent `canvas`-sized RGBA frame.
-pub fn blur_rgba_cpu(
-    src: &[u8],
-    width: u32,
-    height: u32,
-    origin: [i32; 2],
-    canvas: (u32, u32),
-    sigma: f64,
-) -> Vec<f32> {
-    let kernel = Kernel::new(sigma).unwrap_or_else(Kernel::identity);
-    let mut frame = vec![0.0f32; canvas.0 as usize * canvas.1 as usize * 4];
-    let rect = PixelRect::new(origin[0], origin[1], width, height);
-    let Some(out) = inflate(rect, kernel.extent).intersect(PixelRect::new(0, 0, canvas.0, canvas.1))
-    else {
-        return frame;
-    };
-    let values: Vec<f32> = src.iter().map(|v| f32::from(*v) / 255.0).collect();
-    let blurred = kernel.blur_cpu(&values, rect, 4, out);
-    for y in 0..out.height as usize {
-        let row = &blurred[y * out.width as usize * 4..][..out.width as usize * 4];
-        let o = ((out.y as usize + y) * canvas.0 as usize + out.x as usize) * 4;
-        frame[o..o + row.len()].copy_from_slice(row);
-    }
-    frame
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,18 +577,36 @@ mod tests {
         let (cx, cy) = (w / 2, h / 2);
         let band = (2.0 * sigma).round().max(1.0) as usize;
         vec![
-            ("step", (0..w * h).map(|i| f64::from(u8::from(i % w < cx))).collect()),
+            (
+                "step",
+                (0..w * h)
+                    .map(|i| f64::from(u8::from(i % w < cx)))
+                    .collect(),
+            ),
             (
                 "band",
                 (0..w * h)
-                    .map(|i| f64::from(u8::from((i % w).abs_diff(cx) * 2 < band && (i / w).abs_diff(cy) * 2 < band)))
+                    .map(|i| {
+                        f64::from(u8::from(
+                            (i % w).abs_diff(cx) * 2 < band && (i / w).abs_diff(cy) * 2 < band,
+                        ))
+                    })
                     .collect(),
             ),
-            ("impulse", (0..w * h).map(|i| f64::from(u8::from(i == cy * w + cx))).collect()),
+            (
+                "impulse",
+                (0..w * h)
+                    .map(|i| f64::from(u8::from(i == cy * w + cx)))
+                    .collect(),
+            ),
             (
                 "checker",
                 (0..w * h)
-                    .map(|i| f64::from(u8::from((i % w + i / w).is_multiple_of(2) && (i % w).abs_diff(cx) < 40)))
+                    .map(|i| {
+                        f64::from(u8::from(
+                            (i % w + i / w).is_multiple_of(2) && (i % w).abs_diff(cx) < 40,
+                        ))
+                    })
                     .collect(),
             ),
         ]
@@ -767,7 +617,9 @@ mod tests {
         // The plan's bound (module docs) and f32 weights.
         let bound = 2f64.powi(-12) + 1e-6;
         // Both sides of the first spacings (5.56: s = 2, 8.34: s = 3).
-        for sigma in [0.02, 0.3, 1.0, 2.5, 5.5, 5.56, 8.3, 8.34, 10.0, 17.3, 33.0, 60.0] {
+        for sigma in [
+            0.02, 0.3, 1.0, 2.5, 5.5, 5.56, 8.3, 8.34, 10.0, 17.3, 33.0, 60.0,
+        ] {
             let k = Kernel::new(sigma).unwrap();
             let n = (6.0 * sigma).ceil() as usize + 24;
             let (w, h) = (n.max(64), n.max(64));
@@ -801,61 +653,9 @@ mod tests {
         assert_eq!(Kernel::new(5.56).unwrap().step, 2);
         // σ is the authored one: no cap (Skia clamps at 532).
         let huge = Kernel::new(2000.0).unwrap();
-        assert_eq!((huge.step, huge.radius, huge.coarse_radius), (720, 3240, 12));
-    }
-
-    #[test]
-    fn the_gpu_passes_match_the_cpu_model() {
-        let gpu = pm_gpu::Gpu::new("gaussian test").unwrap();
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        let blur = RgbaBlur::new(device);
-        let (w, h) = (97u32, 61u32);
-        // Premultiplied: every channel at most its alpha.
-        let src: Vec<u8> = (0..w * h)
-            .flat_map(|p| {
-                let (x, y) = (p % w, p / w);
-                let a: u32 = if (x / 7 + y / 5) % 3 == 0 { 255 } else { 40 };
-                let c = |k: u32| ((x * 13 + y * 7 + k * 50) % 256).min(a) as u8;
-                [c(0), c(1), c(2), a as u8]
-            })
-            .collect();
-        let target = pm_gpu::Target::new(
-            device,
-            "src",
-            w,
-            h,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        assert_eq!(
+            (huge.step, huge.radius, huge.coarse_radius),
+            (720, 3240, 12)
         );
-        queue.write_texture(
-            target.texture.as_image_copy(),
-            &src,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
-            },
-            target.texture.size(),
-        );
-        let origin = [-9, 14];
-        let canvas = (120u32, 90u32);
-        let crop = [3u32, 5, 117, 88];
-        for sigma in [0.6, 4.0, 12.5] {
-            let mut encoder = device.create_command_encoder(&Default::default());
-            let out = blur.blur(device, &mut encoder, &target, origin, crop, sigma);
-            queue.submit([encoder.finish()]);
-            let gpu = pm_gpu::readback::read_f32(device, queue, &out.texture).unwrap();
-            let cpu = blur_rgba_cpu(&src, w, h, origin, canvas, sigma);
-            let cw = (crop[2] - crop[0]) as usize;
-            let mut max = 0.0f32;
-            for y in 0..(crop[3] - crop[1]) as usize {
-                for x in 0..cw * 4 {
-                    let c = cpu[((y + crop[1] as usize) * canvas.0 as usize + crop[0] as usize) * 4 + x];
-                    max = max.max((gpu[y * cw * 4 + x] - c).abs());
-                }
-            }
-            // One f16 rounding of values in [0, 1].
-            assert!(max <= 2f32.powi(-11), "σ {sigma}: {max}");
-        }
     }
 }

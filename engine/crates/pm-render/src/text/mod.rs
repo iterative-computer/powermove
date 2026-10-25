@@ -18,6 +18,7 @@
 mod canvas;
 pub mod gpu;
 mod graphite;
+mod legacy_blur;
 pub mod served;
 
 use std::hash::{Hash, Hasher};
@@ -539,7 +540,7 @@ impl TextContext {
                     None
                 },
                 viewport: Some(viewport),
-                path_rasterizer: Some(&pm_vector::render::glyphs::GLYPH_PATHS),
+                path_rasterizer: Some(&pm_vector::canvas2d::text::RASTERIZER),
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },

@@ -33,13 +33,16 @@ struct Quad {
 };
 
 @group(0) @binding(0) var<uniform> q: Quad;
+// Solid module header ends here.
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var smp: sampler;
 
+// Vertex output starts.
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
+// Vertex output ends.
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> VsOut {
@@ -151,6 +154,7 @@ fn poly_area(p: Poly) -> f32 {
     return 0.5 * s;
 }
 
+// Rounded-only circle helpers.
 // Signed area of the sector of radius `r` between directions `a` and `b`.
 fn sector(a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let c = cross2(a, b);
@@ -305,6 +309,43 @@ fn fs_solid(in: VsOut) -> @location(0) vec4<f32> {
     pixel.v[3] = 0.5 * (jy - jx);
     // f32 leaves coverage within ~1e-6 of exact: snap the ends.
     let coverage = clamp(abs(rounded_area(pixel, lo, hi, r, -ext, ext)) / det, 0.0, 1.0);
+    if (coverage > 1.0 - 1e-5) {
+        return q.color;
+    }
+    return q.color * select(coverage, 0.0, coverage < 1e-5);
+}
+
+// Rect-only fragment. The `radius == 0` path uses the same exact polygon
+// clipping and pixel coverage as `fs_solid`, without compiling disk math.
+@fragment
+fn fs_rect(in: VsOut) -> @location(0) vec4<f32> {
+    let at = in.pos.xy + q.res.zw;
+    let inv = inverse3(mat3x3<f32>(q.m0.xyz, q.m1.xyz, q.m2.xyz));
+    let h = inv * vec3<f32>(at.x, q.res.y - at.y, 1.0);
+    if (h.z <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let size = q.uv.xy;
+    let local = h.xy / h.z * size;
+    let jx = (inv[0].xy * h.z - h.xy * inv[0].z) / (h.z * h.z) * size;
+    let jy = (inv[1].xy * h.z - h.xy * inv[1].z) / (h.z * h.z) * size;
+    let det = abs(cross2(jx, jy));
+    let lo = min(vec2<f32>(0.0), size) - local;
+    let hi = max(vec2<f32>(0.0), size) - local;
+    let ext = 0.5 * (abs(jx) + abs(jy));
+    if (det == 0.0 || any(ext <= lo) || any(-ext >= hi)) {
+        return vec4<f32>(0.0);
+    }
+    if (all(-ext >= lo) && all(ext <= hi)) {
+        return q.color;
+    }
+    var pixel: Poly;
+    pixel.n = 4u;
+    pixel.v[0] = -0.5 * (jx + jy);
+    pixel.v[1] = 0.5 * (jx - jy);
+    pixel.v[2] = 0.5 * (jx + jy);
+    pixel.v[3] = 0.5 * (jy - jx);
+    let coverage = clamp(abs(poly_area(clip_box(pixel, lo, hi))) / det, 0.0, 1.0);
     if (coverage > 1.0 - 1e-5) {
         return q.color;
     }

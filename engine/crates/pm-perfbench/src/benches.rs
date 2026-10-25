@@ -88,7 +88,6 @@ pub fn correlation() -> Vec<(String, BoxedBench)> {
 pub fn all() -> Vec<Bench> {
     vec![
         ("playback_500", playback_500),
-        ("playback_shapes_200", playback_shapes_200),
         ("drag_500", drag_500),
         ("edit_playback_500", edit_playback_500),
         ("inspector_edit_500", inspector_edit_500),
@@ -103,6 +102,7 @@ pub fn all() -> Vec<Bench> {
         ("import_3d_600k", import_3d_600k),
         ("blend_stack_cold", blend_stack_cold),
         ("text_cold", text_cold),
+        ("playback_shapes_200", playback_shapes_200),
     ]
 }
 

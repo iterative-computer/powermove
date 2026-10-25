@@ -4,13 +4,11 @@
 //! - [`color`]: Canvas2D color strings.
 //! - [`scene`]: coverage scenes at output resolution (`compat` level 2) and
 //!   their atlas layout.
-//! - [`glyphs`]: text glyphs drawn as paths, as coverage items.
 //! - [`svg`]: SVG images through usvg (drawn in float or by resvg).
 //! - [`svg_depth`]: nesting safety for SVG documents; `svg_xml`: their XML
 //!   read as Chromium reads it.
 
 pub mod color;
-pub mod glyphs;
 pub mod scene;
 pub mod svg;
 pub mod svg_depth;

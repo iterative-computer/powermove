@@ -425,8 +425,14 @@ mod tests {
         assert!(gpu(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient><clipPath id="c"><circle cx="5" cy="5" r="4"/></clipPath><mask id="m"><rect width="10" height="5" fill="#fff"/></mask></defs><g opacity="0.5" clip-path="url(#c)" mask="url(#m)" style="mix-blend-mode:multiply"><rect width="10" height="10" fill="url(#g)" stroke="#f00" stroke-dasharray="1 1"/></g></svg>"##
         ));
-        assert!(!gpu(
+        assert!(gpu(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+        ));
+        assert!(!gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1" edgeMode="wrap"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+        ));
+        assert!(!gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feColorMatrix type="saturate" values="0.5"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
         ));
         assert!(!gpu(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1"/></pattern><rect width="10" height="10" fill="url(#p)"/></svg>"##

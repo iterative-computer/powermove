@@ -2514,10 +2514,13 @@ dependencies = [
  "pollster",
  "read-fonts 0.45.0",
  "regex",
+ "resvg",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "tiny-skia",
+ "usvg",
  "vello",
  "wgpu",
 ]

@@ -160,13 +160,27 @@ the unclipped reference over the same band centers.
   transform, as Canvas2D specifies.
 - **Gate:** `pm-render/tests/vector_gate.rs` (G-V1), all 474 captured canvases.
   Geometry is checked separately at 1e-3. The corpus also checks paused
-  preview/export identity; its remaining reference failures block G-C2.
+  preview/export identity; out-of-scope reference gaps use the measured owned
+  pending ratchet in the gate policy.
 - **Units:** CV, pooled edge pixels.
 
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Exact area coverage replaces density-bucket rasterization (Canvas2D fill and stroke geometry) | 123.65, 59.01, 0.661 | 3.16, 0.02, <0.001 | 474 shape and path canvases |
 | Authored stroke styles covered without raster seams (Canvas2D caps, joins, miter limits and dashes) | 123.21, 58.94, 0.658 | 3.16, 0.03, <0.001 | 209 stroked canvases from the same witness |
+
+## Solid corner radius
+
+- **Reference:** authored rounded-rectangle geometry, independently covered in
+  f64 at 16 × 16 cells per output pixel and composited over the authored background.
+- **Gate:** `pm-render/tests/corpus.rs` and `vector.rs::solid_radius_is_honored`.
+  Actual legacy captures stay in the comparison; corrected interiors additionally
+  prove authored paint directly, as described in the gate policy.
+- **Units:** CV, worst per-frame max, p99.9 and mean over edge pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Honor the authored solid radius (SOLID-RADIUS-1); today ignores it | 224, 224, 50.888 | 0.62, 0.57, 0.121 | Three captured solid placements; interior engine error is at most 0.50 CV |
 
 ## Path mask coverage and feather
 
@@ -196,4 +210,20 @@ the unclipped reference over the same band centers.
 |---|---|---|---|
 | Output-resolution coverage, float gradient integration and joint clip/mask compositing (SVG geometry and paint rules) | 170.45, 163.81, 21.368 | 6.757, 6.245, 0.0133 | Five SVG sources at contain/cover/stretch placements and 25–800% or animated scale, 43 frames |
 
-Filtered SVGs still use the RGBA8 fallback and fail their separate desktop gate.
+## SVG filters
+
+- **Reference:** analytic Gaussian/CDF integration and premultiplied f64 compositing,
+  following Filter Effects and SVG 1.1 filter regions, color domains and filterRes.
+  Paint, filter, clip and mask share a grid within an image; each image resolves
+  before layer compositing.
+- **Gate:** `pm-render/tests/svg_filters.rs`, four SHA-verified legacy-app witnesses,
+  plus transformed covariance and filter-grid cases; `e2e/engine-svg.spec.ts` checks
+  live placements, exact window/native byte endpoints and f32 geometry at 1e-3.
+- **Units:** CV, worst per-case max, p99.9 and mean across the four witnesses.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Float Gaussian and per-primitive linearRGB/sRGB domains, source halos and hard filter regions (Filter Effects, SVG 1.1) | 5.1233, 5.1233, 0.50966 | 0.7380, 0.7380, 0.01997 | Anisotropic blur, default linearRGB and explicit sRGB, hard region/source halo, zero blur |
+
+Unsupported primitives retain the declared native resvg RGBA8 fallback. Supported
+filters and oversized supported groups keep float intermediates.
