@@ -86,7 +86,17 @@ engine (150) are both 0.50 away.
 - **Gate:** `pm-render/tests/video_reading.rs` (engine within 0.59 / 0.063 / 0.004 CV of
   the reference at 8 / 16 / 32-bit on pixels whose chroma is flat over the
   reconstruction footprint, and at least as close as today everywhere), and
-  `pm-render/tests/chroma_truth.rs` for the filter.
+  `pm-render/tests/chroma_truth.rs` for the filter. `e2e/engine-viewer-canvas.spec.ts`
+  checks the untagged SD fixture's native viewer colour against the same
+  independent f64 H.273 / SMPTE 170M reference. It compares every pixel in
+  the video box, including its scaled border, using today's original-video
+  coverage with only the source colour corrected. Whole-stage geometry and
+  nonvideo pixel parity retain their original bounds; the native snapshot's
+  video interior is checked against the reference and the displayed frame.
+  The viewer gate uses the largest RGB-channel error per pixel for aggregate
+  max, p99.9 and mean, and checks the native-minus-today error at every pixel
+  (99.9% at most 1 CV, none beyond 4 CV).
+  `video_reading.rs` proves the same video reading in paused preview and export.
 - **Units:** CV. Engine columns are 16-bit projects; their max and p99.9 sit at chroma
   edges, where the engine's Catmull-Rom and the reference's Lanczos-3 legitimately
   differ.
@@ -99,6 +109,7 @@ engine (150) are both 0.50 away.
 | 10-bit kept at half float or better, no RGBA8 store | 157, 100, 6.9 | 93, 47, 2.1 | 10-bit HEVC, full and limited |
 | BT.2020 and Display P3 SDR converted once in float (BT.2087 linear light); today converts through two RGBA8 stores, or not at all while playing | 157, 106, 6.9 | 103, 57, 2.5 | H.264 and HEVC BT.2020, HEVC P3 |
 | Untagged SD primaries by BT.601 system (VIDEO-SD-1): 576 active lines BT.470BG, other SD sizes SMPTE 170M, converted to Rec.709 in linear light; tagged 170M likewise; today reads them as Rec.709 | 89, 79, 15 | 39, 26, 2.2 | SD clips with 170M or no primaries tag |
+| Untagged 160×90 H.264 red still in the viewer: SMPTE 170M primaries converted to Rec.709 (VIDEO-SD-1), where today's browser displays the decoded red as Rec.709 | 36, 36, 29.503 | 1, 1, 0.015 | `h264-aac.mp4` at 0.5 s, all 455,118 video-box stage pixels across 18 zoom/preview views, including scaled borders; editing-copy views use today's original-video control. Interior Y′CbCr (81, 90, 240) gives f64 reference (247.553, 35.877, 0) CV, native (248, 36, 0), today (254, 0, 0) |
 | Untagged and partly tagged video read by the shared table: untagged SD VP9 BT.601, a lone Rec.709 matrix tag kept | 87, 81, 23 | 39, 28, 2.1 | untagged VP9, matrix-only H.264 |
 | Superwhites and sub-blacks kept through linearisation and primaries conversion, allowing exposure to recover highlights before display clips them | 8.233, 8.233, 0.935 | 0.500, 0.500, 0.135 | `superwhite-*`; displayed output of 32-bit projects |
 | PQ and HLG decoded per BT.2100 and tone mapped with the BT.2390 EETF to 203 cd/m² SDR white (HDR-1), in float; today: RGBA8 before Skia's RWTMO curve paused, untone-mapped playing | 255, 255, 42 | 170, 99, 2.1 | HEVC/AV1 PQ and HLG, P3 PQ |
