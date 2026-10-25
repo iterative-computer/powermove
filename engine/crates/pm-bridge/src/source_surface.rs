@@ -303,9 +303,42 @@ impl SourceVideoSurface {
         bytes: Buffer,
         full_range: bool,
     ) -> Result<Self> {
-        let format = PackedFormat::parse(&format)?;
+        Self::filled(width, height, &format, &bytes, full_range)
+    }
+
+    /// Fills the surface straight from the engine's shared-memory segment
+    /// (taken: unlinked), without first copying it into a JavaScript Buffer.
+    #[napi(factory)]
+    pub fn from_segment(
+        width: u32,
+        height: u32,
+        format: String,
+        name: String,
+        length: f64,
+        full_range: bool,
+    ) -> Result<Self> {
+        if !length.is_finite() || length < 1.0 || length > crate::shm::MAX_SEGMENT as f64 {
+            return Err(invalid(format!("a {length}-byte source-video segment")));
+        }
+        let mut filled = None;
+        crate::shm::take_with(&name, length as usize, |bytes| {
+            filled = Some(Self::filled(width, height, &format, bytes, full_range));
+            Ok(())
+        })
+        .map_err(|e| invalid(format!("source-video segment {name}: {e}")))?;
+        filled.expect("take_with read the segment")
+    }
+
+    fn filled(
+        width: u32,
+        height: u32,
+        format: &str,
+        bytes: &[u8],
+        full_range: bool,
+    ) -> Result<Self> {
+        let format = PackedFormat::parse(format)?;
         let layout = Layout::new(width, height, format)?;
-        layout.validate_payload(&bytes)?;
+        layout.validate_payload(bytes)?;
         let buffer = create_buffer(width, height, format, full_range)?;
         let locked = LockedBuffer::new(buffer.0)?;
         // SAFETY: the lock holds both planes' storage until unlock below.
