@@ -217,7 +217,7 @@ describe('WorkerPresenter and the presentation worker', () => {
   it('sends each frame with its VideoFrame to the worker, which draws a next-refresh frame on arrival and releases it after the GPU', async () => {
     const { pair, source, link, presenter, presented } = setup();
     source.imports.add('1:1');
-    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } } as never, 0);
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8, surfaces: [] } } as never, 0);
     pair.workerNow = 10;
     presenter.receive({ type: 'frame', frame: desc(1) }, 5);
     await settle();
@@ -269,7 +269,7 @@ describe('WorkerPresenter and the presentation worker', () => {
 
   it('retires a replaced pool on the page, counts stale descriptors, and tells the worker', async () => {
     const { pair, source, presenter } = setup();
-    const pool = (generation: number) => ({ type: 'surfacePool', pool: { generation, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } }) as never;
+    const pool = (generation: number) => ({ type: 'surfacePool', pool: { generation, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8, surfaces: [] } }) as never;
     presenter.receive(pool(1));
     presenter.receive(pool(2));
     presenter.receive(pool(2));
