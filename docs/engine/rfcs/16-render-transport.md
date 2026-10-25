@@ -47,12 +47,16 @@ class, viewSeq, viewer?, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 - A `source` target reads the asset at non-negative source `time`, independent
   of the composition, captions, layers, effects, and project color settings.
   `fit` is `stretch`, `contain`, or `cover`; unused pixels are transparent.
-  `color: display` matches the browser source surface, including its stored
-  browser rendition through the session-scoped `sourceRead` capability.
+  `color: display` reads the original source through the session-scoped
+  `sourceRead` capability, and converts
+  video with the native colour reading. It preserves authored source content
+  without reproducing browser colour-conversion errors.
   `interpreted` reads the frozen original and applies its source interpretation.
+  `compositor` supplies tagged decoded video planes or native-converted sRGB
+  for the source monitor's generated video track.
   Source SVGs use the Chromium raster exchange below at the final output size,
   with a source-fit key preserving the fractional fitted rectangle.
-  Missing sources and required renditions fail by name; no composition or
+  Missing sources fail by name; no composition or
   legacy frame substitutes for them.
 - `pixels`: the RGBA8 encoding of the result, rows top-down: `opaque`
   (premultiplied over black, alpha 255: today's `renderOpaqueFrame` and the
@@ -113,6 +117,9 @@ exclusively (mode 0600, `/pm.` and 24 hex digits, 96 random bits). Main maps
 it once (pm-bridge `takePixels`), which unlinks it; the engine unlinks
 segments nobody took after a minute and at shutdown. Electron's IPC carries
 the buffer to the renderer in shared memory again (Mojo big buffers).
+Coded source planes are packed once, from the decoder straight into the
+segment (`shm::publish_with`), in the WebCodecs buffer layout the window's
+`VideoFrame` reads.
 
 ### Invariants
 

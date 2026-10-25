@@ -124,45 +124,57 @@ the unclipped reference over the same band centers.
 
 ## Source monitor
 
-Reference for every video row: the shared reading
-`pm_media::probe::color::frame_reading` (tags, else the untagged rules),
-decoded in f64, extended sRGB curve, linear-light primaries to the
-display ICC, clipped only at the display encode (`e2e/helpers/source-colour-reference.ts`).
-Gate: `e2e/engine-source-compositor.spec.ts`, which writes
-`source-compositor/comparison.json` under `PM_SOURCE_EVIDENCE`.
+Reference: independent f64 Y′CbCr conversion (H.273), the documented SDR
+transfer reading, linear-light primaries and Bradford adaptation into the
+capture's display ICC. `e2e/helpers/source-colour-reference.ts` implements the
+math independently of production. Gate: `engine-source-compositor.spec.ts`.
+Numbers below are CV over flat, opaque RGB samples in the light-theme,
+full-size capture at 0.5 s; the gate also checks dark and intrinsic-size
+captures. Max, p99.9 and mean describe that same sampled population.
 
-| Surface | Today (CSS video monitor) | Native monitor |
+| Correction / case | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean |
 |---|---|---|
-| HD video Chromium decodes with VideoToolbox (≥ 360 lines): its CoreVideo 709 transfer is read as BT709_APPLE (1.961 gamma), lifting mid-greys; the shared reading uses the sRGB curve | max 11.9, mean 3.4–5.8 | max 0.54, mean 0.15–0.21 |
-| Partially tagged video (matrix only): Chromium discards the set for Rec.601; the reading keeps the tagged matrix | max 26.2, mean 6.1 | max 0.51, mean 0.15 |
-| 10-bit HEVC (Main10, P010) | max 11.6, mean 2.8–3.6 | max 2.44, mean 0.79–0.87; Chromium's compositor keeps this residual for 10-bit frames, also when they arrive as WebCodecs I420P10 buffers |
-| Untagged SD ProRes (VideoToolbox): Chromium reads Rec.709 primaries; the reading gives SMPTE 170M (VIDEO-SD-1) | max 11.1, mean 5.2–6.3 | max 0.69, mean 0.31–0.59 |
-| Untagged SD VP9 with alpha (software decode): Chromium reads Rec.709 primaries; opaque samples measured | max 11.9, mean 2.4 | max 0.49, mean 0.11 |
-| Tagged BT.470BG PAL (720×576, BT.470BG primaries and gamma-2.8 tag read as the display encoding) | max 24.9, mean 8.9–13.6 | max 0.54, mean 0.19–0.23 |
-| Untagged 576-line video: Chromium reads SMPTE 170M primaries; the reading gives the 625-line EBU/BT.470BG primaries (VIDEO-SD-1, by line count) | max 26.1, mean 6.4–6.9 | max 0.54, mean 0.19–0.23 |
-| Untagged HD VP9: Chromium's software decode reads it with Rec.709 primaries but its own transfer handling | max 11.9, mean 4.2–5.4 | max 0.53, mean 0.18–0.21 |
-| Image-sequence renditions written untagged (1080p VP9): Chromium reads BT.709, but the importer encoded them with FFmpeg's BT.601 matrix; `frame_reading` reads BT.601 at any size, and new renditions are tagged | max 26.8, mean 7.3–8.8 | max 0.53, mean 0.23–0.28 |
-| BT.2020 SDR (10-bit HEVC, transfer 14): the engine converts the primaries itself, as composition does, and presents sRGB; out-of-gamut bars clip in linear light, where the reference clips the signal first | max 20.6, mean 6.5–6.9 | max 12.3, mean 0.9–1.5 |
+| Tagged full-range HD H.264 | 11.801, 11.799, 4.163 | 0.538, 0.494, 0.173 |
+| Untagged HD H.264 | 11.700, 11.700, 4.409 | 0.524, 0.507, 0.196 |
+| Untagged portrait H.264 | 10.568, 8.998, 3.397 | 0.462, 0.453, 0.152 |
+| Partially tagged BT.709 matrix with SD primaries | 26.151, 26.151, 6.111 | 0.513, 0.513, 0.154 |
+| 10-bit HEVC (P010 decode, presented as I420P10) | 8.820, 8.820, 2.760 | 2.054, 2.054, 0.781 |
+| Untagged SD ProRes: today shows its 8-bit VP9 rendition with Rec.709 primaries; the engine converts the original 10-bit 4:2:2 itself and presents sRGB RGBA | 11.085, 11.085, 6.306 | 2.567, 2.567, 0.972 |
+| SD VP9 with alpha (opaque samples) | 11.939, 11.939, 2.385 | 0.490, 0.490, 0.113 |
+| Tagged BT.470BG PAL | 24.744, 24.744, 8.567 | 0.536, 0.529, 0.187 |
+| Untagged 576-line PAL | 26.126, 26.126, 6.550 | 0.536, 0.529, 0.187 |
+| Untagged HD VP9 | 11.849, 11.673, 4.193 | 0.529, 0.509, 0.176 |
+| Untagged image-sequence rendition, BT.601 matrix | 26.802, 26.802, 7.265 | 0.529, 0.524, 0.226 |
+| BT.2020 SDR through the sRGB working gamut | 20.558, 20.558, 6.509 | 12.273, 12.273, 1.446 |
 
-HDR (PQ, HLG) is tone-mapped by the engine as composition does and
-presented as sRGB; today's monitor puts HDR on screen. There is no f64
-reference for tone mapping here, so the gate only requires that it plays
-with an SDR capture.
+The 8-bit HD corrections remove Chromium's VideoToolbox transfer lift;
+partial tags retain the specified matrix. SD primaries follow VIDEO-SD-1,
+including BT.470BG for 576-line sources. Sequence renditions retain the
+BT.601 matrix used by their encoder.
 
-Untagged non-576-line SD H.264 (VIDEO-SD-1, resolved as a fix): the
-shared reading gives SMPTE 170M primaries, as today's VideoToolbox monitor
-does, and the monitor is byte-exact with today (max 0.49–0.69 from the
-reference for both). Composition and
-export move from Rec.709 to the same primaries when the videoparity lane
-adopts `frame_reading`; that change is its row. Tagged SMPTE 170M SD video is
-byte-exact with today (max 0.49 from the reference for both).
+Residuals remain: Chromium presentation of 10-bit planes exceeds one CV;
+engine-converted frames (original ProRes, BT.2020) reach the display as 8-bit
+sRGB RGBA, which Chromium converts again into the display gamut; and BT.2020
+converted through the sRGB working gamut differs from direct conversion into
+the display gamut. These are measured limitations, not
+reference-accuracy claims. PQ playback is checked for an SDR capture; this
+screen gate does not supply an independent HDR tone-mapping reference.
 
-Interpret Footage on the monitor: today's CSS monitor ignores it, so an
-interpreted asset looked different in the monitor and in the viewer. The
-native monitor draws interpreted footage as composition does (within one
-code of a full-frame layer of it: `pm-render` test
-`monitor_reads_interpret_footage_as_composition_does`).
+Fully tagged 8-bit SDR and untagged non-PAL SD H.264 retain their correct
+monitor reading. Interpret Footage uses the same native conversion as a
+composition layer (`source_snapshot`), and an open paused still/video monitor
+repaints Apply, Undo and Redo without seeking (`engine-source-refresh`).
+The source-frame/thumbnail gate independently decodes original media for
+native source consumers and the actual browser rendition for legacy consumers.
+For the solid SD red H.264 fixture at 0, 0.25 and 0.5 s, the f64 sRGB reference
+is `(247.554, 35.881, 0)`. All snapshot RGB channels give these CV distances:
 
-Fully tagged 8-bit video that Chromium software-decodes already reads the
-shared way and stays byte-exact with today (max 0.45–0.50 from the
-reference for both).
+| Source snapshot | Today: max, p99.9, mean | Engine: max, p99.9, mean |
+|---|---|---|
+| H.264 source | 35.881, 35.881, 14.109 | 0.446, 0.446, 0.188 |
+
+The native result rounds to `(248, 36, 0)`. Posters match an independently
+synthesized reference encoded at the shipped WebP quality exactly; inline
+thumbnails retain that poster. Theme captures additionally compare layout and
+ICC-transformed reference colours. This gate requires half-code snapshot
+rounding accuracy, not equality with Chromium's Canvas2D colour bug.
