@@ -38,6 +38,7 @@ pub mod glsl;
 pub mod js;
 pub mod media;
 pub mod motion;
+mod nearest_half;
 pub mod parity;
 mod pipelines;
 pub mod plan;

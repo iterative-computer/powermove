@@ -260,17 +260,23 @@ struct Out {
     return o;
 }
 
-@fragment fn fs(i: Out) -> @location(0) vec4<f32> {
+fn paint(i: Out) -> vec4<f32> {
     let cov = textureLoad(coverage, vec2<i32>(floor(i.cell)), 0).r;
     return i.color * cov;
 }
+@fragment fn fs(i: Out) -> @location(0) vec4<f32> { return paint(i); }
+// RGBA16F targets store the nearest half of the painted value
+// (`crate::nearest_half`); overlapping items round their blend in hardware.
+@fragment fn fs_half(i: Out) -> @location(0) vec4<f32> { return pm_scene_half_color(paint(i)); }
 "#;
 
 impl Paint {
     fn new(device: &wgpu::Device) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm vector paint"),
-            source: wgpu::ShaderSource::Wgsl(PAINT_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{PAINT_WGSL}", crate::nearest_half::NEAREST_HALF_WGSL).into(),
+            ),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm vector paint"),
@@ -324,7 +330,11 @@ impl Paint {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if format == wgpu::TextureFormat::Rgba16Float {
+                        "fs_half"
+                    } else {
+                        "fs"
+                    }),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,

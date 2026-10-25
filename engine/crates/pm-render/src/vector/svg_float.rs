@@ -183,11 +183,16 @@ struct Clip { edges: vec4<f32> };
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(f32(i & 1u)*2.0-1.0, 1.0-f32(i >> 1u)*2.0,0.0,1.0);
 }
-@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn clipped(pos: vec4<f32>) -> vec4<f32> {
     let p = floor(pos.xy);
     let x = clamp(min(p.x + 1.0, clip.edges.z) - max(p.x, clip.edges.x), 0.0, 1.0);
     let y = clamp(min(p.y + 1.0, clip.edges.w) - max(p.y, clip.edges.y), 0.0, 1.0);
     return textureLoad(source,vec2<i32>(p),0) * (x * y);
+}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> { return clipped(pos); }
+// RGBA16F stores the nearest half (`crate::nearest_half`).
+@fragment fn fs_half(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return pm_scene_half_color(clipped(pos));
 }
 "#;
 
@@ -586,7 +591,7 @@ fn buffer_entry(binding: u32, storage: bool) -> wgpu::BindGroupLayoutEntry {
 }
 fn pipeline(
     device: &wgpu::Device,
-    module: &wgpu::ShaderModule,
+    (module, entry): (&wgpu::ShaderModule, &str),
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
     blend: Option<wgpu::BlendState>,
@@ -613,7 +618,7 @@ fn pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module,
-            entry_point: Some("fs"),
+            entry_point: Some(entry),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -769,7 +774,9 @@ impl SvgPainter {
         });
         let xm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm svg float copy"),
-            source: wgpu::ShaderSource::Wgsl(COPY.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{COPY}", crate::nearest_half::NEAREST_HALF_WGSL).into(),
+            ),
         });
         let rm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm svg float resolve"),
@@ -820,28 +827,29 @@ impl SvgPainter {
         Some(Self {
             fallback_reason: None,
             coverage: AreaCoverage::new(device),
-            draw: pipeline(
-                device,
-                &dm,
+            draw: pipeline(device, (&dm, "fs"),
                 &dl,
                 wgpu::TextureFormat::Rgba32Float,
                 Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
             ),
             draw_layout: dl,
-            composite: pipeline(device, &cm, &cl, wgpu::TextureFormat::Rgba32Float, None),
+            composite: pipeline(device, (&cm, "fs"), &cl, wgpu::TextureFormat::Rgba32Float, None),
             composite_layout: cl,
             copy: [
                 wgpu::TextureFormat::Rgba8Unorm,
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::TextureFormat::Rgba32Float,
             ]
-            .map(|f| pipeline(device, &xm, &xl, f, None)),
+            .map(|f| {
+                let entry = if f == wgpu::TextureFormat::Rgba16Float { "fs_half" } else { "fs" };
+                pipeline(device, (&xm, entry), &xl, f, None)
+            }),
             copy_layout: xl,
-            resolve: pipeline(device, &rm, &rl, wgpu::TextureFormat::Rgba32Float, None),
+            resolve: pipeline(device, (&rm, "fs"), &rl, wgpu::TextureFormat::Rgba32Float, None),
             resolve_layout: rl,
-            filter: pipeline(device, &fm, &fl, wgpu::TextureFormat::Rgba32Float, None),
+            filter: pipeline(device, (&fm, "fs"), &fl, wgpu::TextureFormat::Rgba32Float, None),
             filter_layout: fl,
-            filter_resample: pipeline(device, &sm, &sl, wgpu::TextureFormat::Rgba32Float, None),
+            filter_resample: pipeline(device, (&sm, "fs"), &sl, wgpu::TextureFormat::Rgba32Float, None),
             filter_resample_layout: sl,
         })
     }
