@@ -621,9 +621,21 @@ fn deposit_edge(
 /// Float area scan conversion of one transformed COLR path. Resolve nonzero
 /// winding before integrating edges so overlapping source contours do not
 /// count their common area twice.
-fn coverage(path: &BezPath, width: u32, height: u32, left: i32, top: i32) -> Vec<f32> {
+fn coverage(
+    path: &BezPath,
+    width: u32,
+    height: u32,
+    left: i32,
+    top: i32,
+    resolver: &mut super::scene::NonzeroResolver,
+) -> Vec<f32> {
     let lines = super::scene::flatten_device_path(path);
-    let resolved = super::scene::resolve_nonzero(&lines);
+    let resolved = resolver.resolve(&lines);
+    resolver.trim_after(
+        lines.elements().len(),
+        resolved.elements().len(),
+        super::scene::COVERAGE_PATH_CACHE_BYTES,
+    );
     let mut differences = vec![0.0f64; (width as usize + 1) * height as usize];
     let mut breaks = Vec::new();
     let (mut start, mut last, mut open) = (Point::ZERO, Point::ZERO, false);
@@ -987,13 +999,14 @@ impl Program {
         let (width, height) = (self.width, self.height);
         let (left, top) = (self.bounds.x0 as i32, self.bounds.y0 as i32);
         let mut image = vec![0f32; (width * height * 4) as usize];
+        let mut resolver = super::scene::NonzeroResolver::default();
         let mut clips: Vec<Vec<f32>> = Vec::new();
         let mut layers: Vec<(Vec<f32>, CompositeMode)> = Vec::new();
         for op in &self.ops {
             match op {
                 Op::Clip(path) => {
                     let mut mask = if let Some(path) = path {
-                        coverage(path, width, height, left, top)
+                        coverage(path, width, height, left, top, &mut resolver)
                     } else {
                         vec![0.0; width as usize * height as usize]
                     };
@@ -1023,7 +1036,7 @@ impl Program {
                     }
                 }
                 Op::SolidGlyph(path, color) => {
-                    let mask = coverage(path, width, height, left, top);
+                    let mask = coverage(path, width, height, left, top, &mut resolver);
                     let color = color_to_working(*color, working);
                     for (i, pixel) in image.chunks_exact_mut(4).enumerate() {
                         let clip = clips.last().map_or(1.0, |m| m[i]);
@@ -1070,7 +1083,14 @@ mod tests {
     #[test]
     fn fractional_rectangle_has_sub_byte_area_and_centroid_accuracy() {
         let rect = Rect::new(1.123, 0.234, 6.777, 7.456);
-        let coverage = coverage(&rect.to_path(0.1), 8, 9, 0, 0);
+        let coverage = coverage(
+            &rect.to_path(0.1),
+            8,
+            9,
+            0,
+            0,
+            &mut crate::render::scene::NonzeroResolver::default(),
+        );
         let (mut actual_area, mut actual_x, mut actual_y) = (0.0, 0.0, 0.0);
         let (mut expected_area, mut expected_x, mut expected_y) = (0.0, 0.0, 0.0);
         for y in 0..9 {
@@ -1112,7 +1132,14 @@ mod tests {
             path.line_to((rect.x0, rect.y1));
             path.close_path();
         }
-        let pixels = coverage(&path, 9, 8, 0, 0);
+        let pixels = coverage(
+            &path,
+            9,
+            8,
+            0,
+            0,
+            &mut crate::render::scene::NonzeroResolver::default(),
+        );
         for y in 0..8 {
             for x in 0..9 {
                 let expected = pixel_rect_area(a, x, y) + pixel_rect_area(b, x, y)
@@ -1134,7 +1161,14 @@ mod tests {
         path.line_to((3.8, 8.1));
         path.close_path();
         let path = Affine::rotate(0.21) * path;
-        let pixels = coverage(&path, 12, 12, 0, 0);
+        let pixels = coverage(
+            &path,
+            12,
+            12,
+            0,
+            0,
+            &mut crate::render::scene::NonzeroResolver::default(),
+        );
         let reference = |x: usize, y: usize| {
             let mut n = 0u32;
             for sy in 0..32 {
