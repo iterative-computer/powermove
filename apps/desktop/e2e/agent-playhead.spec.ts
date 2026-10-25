@@ -12,9 +12,6 @@ test('sending messages supplies composition frames while preserving the paused p
     PM.setTime(1.5);
     PM.AgentUI.setAccess('editor');
     (window as any).__sendTimes = [];
-    (window as any).__agentCaptures = 0;
-    const capture = PM.Export.snapshotAsync;
-    PM.Export.snapshotAsync = (...args: any[]) => { (window as any).__agentCaptures++; return capture(...args); };
     PM.bus.on('time', (time: number) => (window as any).__sendTimes.push(time));
     PM.CodexBridge.request = async (_prompt: any, _schema: any, images: any[], options: any) => {
       (window as any).__requestImages = images;
@@ -33,7 +30,8 @@ test('sending messages supplies composition frames while preserving the paused p
       await session.openAgent();
       await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe(access === 'editor' ? 'conversation' : 'result');
       expect(await page.evaluate(() => ({ time: (window as any).PM.time, playing: (window as any).PM.playing, events: (window as any).__sendTimes }))).toEqual({ time: 1.5, playing: false, events: [] });
-      expect(await page.evaluate(() => (window as any).__agentCaptures)).toBeGreaterThan(0);
+      // Observe the frames delivered to the provider. Native capture uses its
+      // frame job service rather than the legacy Export.snapshotAsync hook.
       expect((await page.evaluate(() => (window as any).__requestImages)).length).toBeGreaterThanOrEqual(3);
     }
   }
