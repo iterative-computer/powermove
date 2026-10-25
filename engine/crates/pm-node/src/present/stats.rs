@@ -68,6 +68,11 @@ impl ViewStats {
         });
     }
 
+    /// The weighted average cost of a frame (compose CPU and GPU, µs).
+    pub fn average_us(&self) -> Option<f64> {
+        self.average_us
+    }
+
     /// A playback frame was skipped as late.
     pub fn late(&mut self) {
         self.late += 1;

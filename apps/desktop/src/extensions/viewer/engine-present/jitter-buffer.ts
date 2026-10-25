@@ -151,11 +151,15 @@ export function decisionOffsetUs(periodUs: number, decisionUs: number, clock: Cl
   const frameUs = (frameTicks / TICKS_PER_SECOND) * 1e6 / Math.abs(rate);
   const refreshes = frameUs / periodUs;
   if (Math.round(refreshes) < 1 || Math.abs(refreshes - Math.round(refreshes)) > 0.01) return 0;
+  // Boundaries repeat every frame; the refresh they are folded into is the
+  // frame's whole share of it, exact, not the estimated period: the sample
+  // can be seconds old, and a period off by 0.1% would turn its phase.
+  const unitUs = frameUs / Math.round(refreshes);
   // A boundary near the sample's instant, in host µs.
   const k = Math.round(clock!.mediaTime / frameTicks);
   const boundaryUs = clock!.hostTime + ((k * frameTicks - clock!.mediaTime) / TICKS_PER_SECOND) * 1e6 / rate;
-  const phase = ((((boundaryUs - decisionUs) % periodUs) + periodUs) % periodUs);
-  let offset = phase - periodUs / 2;
-  if (offset <= -periodUs / 2) offset += periodUs;
+  const phase = ((((boundaryUs - decisionUs) % unitUs) + unitUs) % unitUs);
+  let offset = phase - unitUs / 2;
+  if (offset <= -unitUs / 2) offset += unitUs;
   return offset;
 }

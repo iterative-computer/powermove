@@ -1,6 +1,8 @@
-//! Frames shown at the next refresh (paused edits, gestures) leave the
-//! render thread when their GPU work is submitted, not when it finishes
-//! (docs/engine/perf.md, "The render thread does not wait for the GPU").
+//! Frames leave the render thread when their GPU work is submitted, not
+//! when it finishes (docs/engine/perf.md, "The render thread does not wait
+//! for the GPU"): frames shown at the next refresh (paused edits, gestures)
+//! and playback's timed frames alike, so render-ahead costs the render
+//! thread each frame's compose only.
 //!
 //! The render thread used to block in `device.poll(Wait)` for every frame
 //! before it could take the next command. During a layer drag (a new
@@ -14,9 +16,9 @@
 //!
 //! Descriptors go out in submission order (one thread, FIFO). The render
 //! thread drains the completions before anything whose order against them
-//! matters: a timed (playback) frame, a frame request's answer, a pool
-//! change, an `unsupported` report (a frame drawn before the decision must
-//! not reach the viewer after it), GPU recovery, and shutdown. At most
+//! matters: a frame request's answer, a new state or pool, an `unsupported`
+//! report (a frame drawn before the decision must not reach the viewer
+//! after it), GPU recovery, and shutdown. At most
 //! [`MAX_IN_FLIGHT`] frames wait on the GPU, so the queue never runs ahead
 //! of the display.
 
