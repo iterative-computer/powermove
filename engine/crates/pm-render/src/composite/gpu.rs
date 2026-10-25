@@ -68,10 +68,11 @@ pub(crate) struct OpPipelines {
 impl OpPipelines {
     pub fn new(device: &wgpu::Device) -> OpPipelines {
         let code = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             pm_color::wgsl::COLOR,
             pm_color::wgsl::BLEND,
             pm_color::wgsl::CSS_GAMUT,
+            crate::scene3d::NEAREST_HALF_WGSL,
             include_str!("../shaders/scene_output.wgsl"),
             include_str!("ops.wgsl")
         );
@@ -170,7 +171,15 @@ impl OpPipelines {
                         multisample: wgpu::MultisampleState::default(),
                         fragment: Some(wgpu::FragmentState {
                             module: &module,
-                            entry_point: Some(entry),
+                            entry_point: Some(
+                                if op == Op::SceneOutput
+                                    && format == wgpu::TextureFormat::Rgba16Float
+                                {
+                                    "fs_scene_output_half"
+                                } else {
+                                    entry
+                                },
+                            ),
                             compilation_options: Default::default(),
                             targets: &[Some(wgpu::ColorTargetState {
                                 format,

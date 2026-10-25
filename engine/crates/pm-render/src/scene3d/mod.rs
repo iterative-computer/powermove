@@ -19,6 +19,8 @@
 //! compositing seam tone maps and encodes once before 2D masks and effects.
 //! Legacy OBJ mesh layers retain their own encoded output contract.
 
+mod color_round;
+pub(crate) use color_round::NEAREST_HALF_WGSL;
 pub mod describe;
 pub mod gltf;
 pub mod gpu;

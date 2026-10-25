@@ -253,8 +253,9 @@ impl Pipelines {
                             label: Some("pm-render scene composite"),
                             source: wgpu::ShaderSource::Wgsl(
                                 format!(
-                                    "{}\n{}\n{}\n{}",
+                                    "{}\n{}\n{}\n{}\n{}",
                                     pm_color::wgsl::COLOR,
+                                    crate::scene3d::NEAREST_HALF_WGSL,
                                     include_str!("shaders/scene_output.wgsl"),
                                     include_str!("shaders/composite.wgsl"),
                                     include_str!("shaders/scene_quad.wgsl")
@@ -284,7 +285,13 @@ impl Pipelines {
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
                         module,
-                        entry_point: Some(entry),
+                        entry_point: Some(
+                            if entry == "fs_scene" && format == wgpu::TextureFormat::Rgba16Float {
+                                "fs_scene_half"
+                            } else {
+                                entry
+                            },
+                        ),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format,

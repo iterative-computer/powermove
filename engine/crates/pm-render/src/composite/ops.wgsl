@@ -255,6 +255,11 @@ fn fs_scene_output(in: VsOut) -> @location(0) vec4<f32> {
     return scene_output(load_a(in.pos), op.f.x, op.g[0], has(FLAG_LINEAR));
 }
 
+@fragment
+fn fs_scene_output_half(in: VsOut) -> @location(0) vec4<f32> {
+    return pm_scene_half_color(scene_output(load_a(in.pos), op.f.x, op.g[0], has(FLAG_LINEAR)));
+}
+
 // An effect/shader's authored E-space output joins linear filtering only
 // after decoding; decoding a filtered E-space value would change the kernel.
 @fragment

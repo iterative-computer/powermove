@@ -669,6 +669,14 @@ impl Scene3dRenderer {
                 "float texture2DCompare( sampler2DShadow depths, vec2 uv, float compare ) {\n return texture( depths, vec3( uv, compare ) );\n}\n",
             );
         }
+        // Every color program targets the RGBA16F scene attachment; depth and
+        // distance programs write depth only.
+        if !matches!(
+            params.shader_type.as_str(),
+            "MeshDepthMaterial" | "MeshDistanceMaterial"
+        ) {
+            fs = super::color_round::at_fragment_output(&fs)?;
+        }
         // The sampler specialization and binding layout are part of the
         // translation.
         let mode = format!("{:?} preprocess 1 specialize 1 compact 1", self.math);
