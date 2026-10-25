@@ -27,6 +27,7 @@ pub mod capability;
 pub mod compat;
 pub mod compat_crop;
 pub mod composite;
+pub mod coverage;
 pub mod effects;
 mod error;
 mod exec;
