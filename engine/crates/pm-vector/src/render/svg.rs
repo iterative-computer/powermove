@@ -7,9 +7,9 @@
 //!
 //! - [`SvgDocument::gpu_paintable`] documents (paths with solid or gradient
 //!   paint, groups with opacity and blend modes, clip paths, masks, text) are
-//!   encoded as a Vello scene (`super::svg_vello`, feature `gpu`);
-//! - anything else (filters, patterns, embedded images, `crispEdges`), or a
-//!   host without Vello, is drawn by resvg ([`SvgDocument::raster_device`]).
+//!   extracted as ordered float paint operations ([`SvgDocument::float_scene`]);
+//! - filters, patterns, embedded images and `crispEdges` are drawn by resvg
+//!   ([`SvgDocument::raster_device`]).
 //!
 //! As in an `<img>`, an SVG image loads no external resources: only
 //! `data:` URLs resolve.
@@ -18,6 +18,11 @@ use kurbo::{Affine, BezPath};
 
 use super::svg_depth::{MAX_ELEMENT_DEPTH, element_depth, with_stack};
 use crate::render::scene::PixelRect;
+
+#[path = "svg_float.rs"]
+mod svg_float;
+pub use svg_float::{FloatDraw, FloatGradient, FloatGroup, FloatNode, FloatPaint, FloatStop};
+pub use usvg::{BlendMode, SpreadMethod};
 
 /// Why an SVG could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +77,8 @@ impl core::fmt::Debug for SvgDocument {
 /// Fonts 4 §2 leaves them to the user agent). Text is laid out by usvg
 /// (fontdb matching, rustybuzz shaping) and drawn as its outlines.
 fn fonts() -> std::sync::Arc<usvg::fontdb::Database> {
-    static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
+    static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
     FONTS
         .get_or_init(|| {
             let mut db = usvg::fontdb::Database::new();
@@ -123,13 +129,15 @@ impl SvgDocument {
         }
         let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
         let (tree, gpu) = with_stack(depth, || {
-            let xml = |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
+            let xml =
+                |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
             let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
             let doc = super::svg_xml::parse(&text).map_err(xml)?;
             let text_nodes = doc
                 .descendants()
                 .any(|n| n.is_element() && n.tag_name().name() == "text");
-            let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes)).map_err(|e| SvgError(e.to_string()))?;
+            let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
+                .map_err(|e| SvgError(e.to_string()))?;
             let gpu = paintable_group(tree.root());
             Ok::<_, SvgError>((tree, gpu))
         })?;
@@ -151,7 +159,7 @@ impl SvgDocument {
         (f64::from(s.width()), f64::from(s.height()))
     }
 
-    /// Whether Vello can draw every part of the document (no filters,
+    /// Whether the float painter can draw every part of the document (no filters,
     /// patterns, embedded images, or `crispEdges` shapes).
     pub fn gpu_paintable(&self) -> bool {
         self.gpu
@@ -168,7 +176,12 @@ impl SvgDocument {
     /// The SVG under `transform` (user units to device pixels), drawn by
     /// resvg into the device rectangle `rect`. `clip` (a closed polygon in
     /// device pixels) limits it, antialiased.
-    pub fn raster_device(&self, transform: Affine, rect: PixelRect, clip: Option<&[kurbo::Point]>) -> SvgRaster {
+    pub fn raster_device(
+        &self,
+        transform: Affine,
+        rect: PixelRect,
+        clip: Option<&[kurbo::Point]>,
+    ) -> SvgRaster {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
         let empty = || SvgRaster {
             width: w,
@@ -245,8 +258,10 @@ fn paintable_group(g: &usvg::Group) -> bool {
             usvg::Node::Group(g) => paintable_group(g),
             usvg::Node::Path(p) => {
                 p.rendering_mode().use_shape_antialiasing()
-                    && p.fill().is_none_or(|f| !matches!(f.paint(), usvg::Paint::Pattern(_)))
-                    && p.stroke().is_none_or(|s| !matches!(s.paint(), usvg::Paint::Pattern(_)))
+                    && p.fill()
+                        .is_none_or(|f| !matches!(f.paint(), usvg::Paint::Pattern(_)))
+                    && p.stroke()
+                        .is_none_or(|s| !matches!(s.paint(), usvg::Paint::Pattern(_)))
             }
             usvg::Node::Image(_) => false,
             usvg::Node::Text(t) => paintable_group(t.flattened()),
@@ -293,7 +308,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn what_vello_can_paint() {
+    fn what_float_can_paint() {
         let gpu = |svg: &str| SvgDocument::parse(svg.as_bytes()).unwrap().gpu_paintable();
         assert!(gpu(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient><clipPath id="c"><circle cx="5" cy="5" r="4"/></clipPath><mask id="m"><rect width="10" height="5" fill="#fff"/></mask></defs><g opacity="0.5" clip-path="url(#c)" mask="url(#m)" style="mix-blend-mode:multiply"><rect width="10" height="10" fill="url(#g)" stroke="#f00" stroke-dasharray="1 1"/></g></svg>"##
@@ -357,11 +372,7 @@ mod tests {
                 let b = doc.raster(8, 8);
                 assert_eq!(&b.rgba[..4], &[0x4C, 0x8D, 0xFF, 255]);
                 assert!(doc.user_bounds().is_some());
-                #[cfg(feature = "gpu")]
-                {
-                    let mut scene = vello::Scene::new();
-                    doc.encode(&mut scene, Affine::IDENTITY, &[]);
-                }
+                assert!(doc.float_scene(Affine::IDENTITY, &[]).is_some());
                 drop(doc);
                 // Shallow enough to run on this thread itself.
                 let doc = SvgDocument::parse(inline.as_bytes()).unwrap();

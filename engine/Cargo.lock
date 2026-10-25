@@ -2590,8 +2590,6 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "usvg",
- "vello",
- "wgpu",
 ]
 
 [[package]]

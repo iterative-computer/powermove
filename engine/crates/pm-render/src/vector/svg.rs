@@ -4,7 +4,7 @@
 //! Every SVG image (any `compat` level) is drawn at output resolution: the
 //! plan places the SVG's user space in the image box as the image quad
 //! places a bitmap (`fit`, anchor at the box center) and clips it to the
-//! box and the SVG's viewport; the cache draws it with Vello on the GPU, or
+//! box and the SVG's viewport; the cache draws it in float on the GPU, or
 //! resvg ([`super::cache`]).
 
 use std::path::{Path, PathBuf};
@@ -129,36 +129,6 @@ pub fn plan_svg(
     })))
 }
 
-/// The SVG image sources `plan` draws (nested compositions, layers drawn
-/// through their own targets, and matte passes included), in draw order.
-pub fn svg_sources<'p>(plan: &'p crate::plan::CompPlan, out: &mut Vec<&'p VectorSource>) {
-    use crate::plan::{Content, Source};
-    fn content<'p>(c: &'p Content, out: &mut Vec<&'p VectorSource>) {
-        match c {
-            Content::Placed(p) => content(&p.content, out),
-            Content::Texture { source, .. } => match source {
-                Source::Vector(v) if matches!(**v, VectorSource::SvgRaster { .. }) => out.push(v),
-                Source::Comp(child) | Source::Accumulate(child) => svg_sources(child, out),
-                _ => {}
-            },
-            Content::Composite(node) => {
-                if let crate::composite::Node::Layer(l) = &**node {
-                    for d in &l.content {
-                        content(&d.content, out);
-                    }
-                    if let Some(m) = &l.matte {
-                        svg_sources(&m.source, out);
-                    }
-                }
-            }
-            Content::Solid(_) => {}
-        }
-    }
-    for d in &plan.draws {
-        content(&d.content, out);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,11 +156,25 @@ mod tests {
 
     const SOLID: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="10" y="10" width="80" height="30" fill="#4C8DFF"/></svg>"##;
 
-    fn planned(p: &Path, bw: f64, bh: f64, uv: [f64; 4], world: &Mat2d) -> (PixelRect, [f64; 6], [[f64; 2]; 4]) {
+    fn planned(
+        p: &Path,
+        bw: f64,
+        bh: f64,
+        uv: [f64; 4],
+        world: &Mat2d,
+    ) -> (PixelRect, [f64; 6], [[f64; 2]; 4]) {
         let target = PixelRect::new(0, 0, 400, 200);
-        let quad = plan_svg(p, bw, bh, uv, world, target).unwrap().expect("drawn");
+        let quad = plan_svg(p, bw, bh, uv, world, target)
+            .unwrap()
+            .expect("drawn");
         let VectorQuad::Device {
-            source: VectorSource::SvgRaster { transform, rect: r, clip, .. },
+            source:
+                VectorSource::SvgRaster {
+                    transform,
+                    rect: r,
+                    clip,
+                    ..
+                },
             rect,
         } = *quad
         else {
@@ -210,7 +194,10 @@ mod tests {
         // The rect spans user (10..90, 10..40) × 2 from (100, 50).
         assert_eq!(rect, PixelRect::new(120, 70, 160, 60));
         assert_eq!(transform, [2.0, 0.0, 0.0, 2.0, 100.0, 50.0]);
-        assert_eq!(clip, [[100.0, 50.0], [300.0, 50.0], [300.0, 150.0], [100.0, 150.0]]);
+        assert_eq!(
+            clip,
+            [[100.0, 50.0], [300.0, 50.0], [300.0, 150.0], [100.0, 150.0]]
+        );
     }
 
     #[test]

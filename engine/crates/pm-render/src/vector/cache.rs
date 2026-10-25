@@ -4,13 +4,12 @@
 //!
 //! - Coverage scenes use exact area coverage in `r32float` atlas pages,
 //!   then composite their paint in float at working precision.
-//! - SVG images draw at output resolution through the native GPU painter,
+//! - SVG images draw at output resolution through the float GPU painter,
 //!   or resvg for documents it cannot draw. No editor window is involved.
 
 use std::collections::HashMap;
 
 use pm_protocol::color::Precision;
-use pm_vector::gpu::{GpuCoverage, SvgCell};
 use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
 
 use crate::coverage::{AreaCoverage, Batch, Item};
@@ -163,13 +162,7 @@ pub struct VectorCache {
     max_entries: usize,
     coverage: Option<AreaCoverage>,
     paint: Option<Paint>,
-    premultiply: Premultiply,
-    /// This frame's SVG batch: its signature and its images' keys
-    /// ([`Self::prepare_svgs`]).
-    svg_batch: Option<([u8; 32], Vec<[u8; 32]>)>,
-    /// Which backend rendered the last SVG (tests).
-    pub last_backend: Option<&'static str>,
-    gpu: Option<Option<GpuCoverage>>,
+    svg: Option<super::svg_float::SvgPainter>,
 }
 
 impl Default for VectorCache {
@@ -189,10 +182,7 @@ impl VectorCache {
             max_entries: DEFAULT_MAX_ENTRIES,
             coverage: None,
             paint: None,
-            premultiply: Premultiply::default(),
-            svg_batch: None,
-            last_backend: None,
-            gpu: None,
+            svg: None,
         }
     }
 
@@ -232,7 +222,6 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
-        self.svg_batch = None;
         self.evict(self.max_bytes, self.max_entries, false);
     }
 
@@ -278,12 +267,7 @@ impl VectorCache {
         precision: Precision,
     ) -> Result<wgpu::TextureView, String> {
         self.tick += 1;
-        let mut key = (source.key(), precision as u8);
-        if let Some((sig, members)) = &self.svg_batch
-            && members.contains(&key.0)
-        {
-            key.0 = batch_key(&key.0, sig);
-        }
+        let key = (source.key(), precision as u8);
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
             e.frame = self.frame;
@@ -295,17 +279,43 @@ impl VectorCache {
             VectorSource::Scene { scene, rect } => {
                 self.render_scene(device, queue, scene, *rect, precision)?
             }
-            VectorSource::SvgRaster { .. } => {
-                let item = SvgItem::of(source).expect("an SVG source")?;
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("pm svg"),
-                });
-                let drawn = self
-                    .render_svgs(device, queue, &mut encoder, vec![item], precision)?
-                    .pop()
-                    .expect("one texture per item");
-                queue.submit([encoder.finish()]);
-                drawn
+            VectorSource::SvgRaster {
+                path,
+                transform,
+                rect,
+                clip,
+                ..
+            } => {
+                let (doc, _) = super::svg::document(path)?;
+                let transform = pm_vector::kurbo::Affine::new(*transform);
+                let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
+                if doc.gpu_paintable() {
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("pm svg float"),
+                        });
+                    let painter = self
+                        .svg
+                        .get_or_insert_with(|| super::svg_float::SvgPainter::new(device));
+                    if let Some(drawn) = painter.render(
+                        device,
+                        queue,
+                        &mut encoder,
+                        &doc,
+                        transform,
+                        *rect,
+                        &clip,
+                        precision,
+                    )? {
+                        queue.submit([encoder.finish()]);
+                        return Ok(self.insert(key, drawn.0, drawn.1));
+                    }
+                }
+                let b = doc.raster_device(transform, *rect, Some(&clip));
+                (
+                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
+                    u64::from(b.width) * u64::from(b.height) * 4,
+                )
             }
         };
         // Make room before inserting: earlier frames' entries go first, so
@@ -341,163 +351,6 @@ impl VectorCache {
         view
     }
 
-    /// Draws a frame's SVG images ahead, together: one Vello pass per atlas
-    /// page for the whole frame instead of one per image (each pass has a
-    /// fixed cost). Vello's f32 arithmetic depends on where an image sits
-    /// in its page (a gradient's position can round to the neighbouring
-    /// ramp entry), so a frame's images are always drawn as the same
-    /// batch, the frame's list of them, and cached under it: the frame is
-    /// drawn the same in a viewer that holds other images as in a cold
-    /// export. [`Self::resolve`] finds them. A frame with one SVG image, or
-    /// images Vello cannot draw, leaves them to `resolve`.
-    pub fn prepare_svgs(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        plan: &crate::plan::CompPlan,
-        precision: Precision,
-    ) {
-        self.svg_batch = None;
-        let mut sources = Vec::new();
-        super::svg::svg_sources(plan, &mut sources);
-        let mut members: Vec<[u8; 32]> = Vec::new();
-        let mut items = Vec::new();
-        for source in sources {
-            let key = source.key();
-            if members.contains(&key) {
-                continue;
-            }
-            if let Some(Ok(item)) = SvgItem::of(source)
-                && item.doc.gpu_paintable()
-            {
-                members.push(key);
-                items.push(item);
-            }
-        }
-        if items.len() < 2 || self.gpu(device).is_none() {
-            return;
-        }
-        let batch = {
-            use sha2::{Digest, Sha256};
-            let mut h = Sha256::new();
-            h.update(b"pm-svg-batch/1");
-            members.iter().for_each(|k| h.update(k));
-            let sig: [u8; 32] = h.finalize().into();
-            (sig, members)
-        };
-        let keys: Vec<([u8; 32], u8)> = batch
-            .1
-            .iter()
-            .map(|k| (batch_key(k, &batch.0), precision as u8))
-            .collect();
-        self.svg_batch = Some(batch);
-        if keys.iter().all(|k| self.entries.contains_key(k)) {
-            return;
-        }
-        // A failure leaves every image to `resolve`, which reports it.
-        if let Ok(textures) = self.render_svgs(device, queue, encoder, items, precision) {
-            self.tick += 1;
-            // Room for the whole batch at once (one eviction pass, not one
-            // per texture).
-            let total: u64 = textures.iter().map(|(_, b)| b).sum();
-            self.evict(
-                self.max_bytes.saturating_sub(total),
-                self.max_entries.saturating_sub(textures.len()),
-                false,
-            );
-            for (key, (texture, bytes)) in keys.into_iter().zip(textures) {
-                pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
-                self.insert(key, texture, bytes);
-            }
-        }
-    }
-
-    /// SVG images (each under its transform, in its target rectangle,
-    /// clipped to its polygon): Vello on the GPU in one pass per atlas page
-    /// when it can draw them all, else resvg one by one.
-    fn render_svgs(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        items: Vec<SvgItem>,
-        precision: Precision,
-    ) -> Result<Vec<(wgpu::Texture, u64)>, String> {
-        use pm_vector::kurbo::{Affine, Rect};
-        let max_side = device.limits().max_texture_dimension_2d.min(8192);
-        if !items.iter().all(|i| i.doc.gpu_paintable()) || self.gpu(device).is_none() {
-            self.last_backend = Some("resvg");
-            return Ok(items
-                .iter()
-                .map(|i| {
-                    let b = i
-                        .doc
-                        .raster_device(i.transform, i.rect, Some(&i.clip));
-                    (
-                        upload_rgba8(device, queue, b.width, b.height, &b.rgba),
-                        u64::from(b.width) * u64::from(b.height) * 4,
-                    )
-                })
-                .collect());
-        }
-        let format = pm_gpu::working_format(precision);
-        let sizes: Vec<(u32, u32)> = items
-            .iter()
-            .map(|i| (i.rect.width.max(1), i.rect.height.max(1)))
-            .collect();
-        let (pages, places) = shelf_pack(&sizes, max_side);
-        let mut straight = Vec::with_capacity(pages.len());
-        for (page, &(pw, ph)) in pages.iter().enumerate() {
-            let cells: Vec<SvgCell<'_>> = items
-                .iter()
-                .zip(&places)
-                .zip(&sizes)
-                .filter(|((_, p), _)| p.0 == page)
-                .map(|((i, &(_, x, y)), &(w, h))| {
-                    let to_cell = Affine::translate((
-                        f64::from(x) - f64::from(i.rect.x),
-                        f64::from(y) - f64::from(i.rect.y),
-                    ));
-                    SvgCell {
-                        doc: &i.doc,
-                        transform: to_cell * i.transform,
-                        clip: i.clip.map(|p| to_cell * p),
-                        cell: Rect::new(
-                            f64::from(x),
-                            f64::from(y),
-                            f64::from(x + w),
-                            f64::from(y + h),
-                        ),
-                    }
-                })
-                .collect();
-            let texture = device.create_texture(&GpuCoverage::page_descriptor(pw, ph));
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let gpu = self.gpu(device).expect("checked");
-            gpu.render_svgs(device, queue, &cells, (pw, ph), &view)
-                .map_err(|e| e.to_string())?;
-            straight.push(view);
-        }
-        self.last_backend = Some("vello");
-        let cuts: Vec<(&wgpu::TextureView, [u32; 2], (u32, u32))> = places
-            .iter()
-            .zip(&sizes)
-            .map(|(&(page, x, y), &size)| (&straight[page], [x, y], size))
-            .collect();
-        Ok(self
-            .premultiply
-            .run(device, queue, encoder, &cuts, format)
-            .into_iter()
-            .zip(&sizes)
-            .map(|(t, &(w, h))| (t, u64::from(w) * u64::from(h) * bytes_per_pixel(format)))
-            .collect())
-    }
-
-    fn gpu(&mut self, device: &wgpu::Device) -> Option<&mut GpuCoverage> {
-        self.gpu.get_or_insert_with(|| GpuCoverage::new(device).ok()).as_mut()
-    }
-
     /// Renders a coverage scene: each item's exact coverage in `r32float`
     /// atlas pages, then the float paint pass into a `rect`-sized working
     /// texture, in one command buffer.
@@ -514,7 +367,9 @@ impl VectorCache {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("pm vector"),
         });
-        let coverage = self.coverage.get_or_insert_with(|| AreaCoverage::new(device));
+        let coverage = self
+            .coverage
+            .get_or_insert_with(|| AreaCoverage::new(device));
         let outlines: Vec<_> = layout
             .cells
             .iter()
@@ -660,251 +515,6 @@ fn bytes_per_pixel(format: wgpu::TextureFormat) -> u64 {
         wgpu::TextureFormat::Rgba8Unorm => 4,
         other => panic!("unsupported vector format: {other:?}"),
     }
-}
-
-/// Vello's straight-alpha output premultiplied into working textures: one
-/// compute pass, one dispatch per image, recorded into the caller's
-/// encoder.
-#[derive(Default)]
-struct Premultiply {
-    formats: HashMap<wgpu::TextureFormat, (wgpu::BindGroupLayout, wgpu::ComputePipeline)>,
-}
-
-const PREMULTIPLY_WGSL: &str = r#"
-@group(0) @binding(0) var straight: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> cut: vec4<u32>;
-@group(0) @binding(2) var premultiplied: texture_storage_2d<FORMAT, write>;
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= cut.z || id.y >= cut.w) {
-        return;
-    }
-    let c = textureLoad(straight, vec2<i32>(id.xy + cut.xy), 0);
-    textureStore(premultiplied, vec2<i32>(id.xy), vec4<f32>(c.rgb * c.a, c.a));
-}
-"#;
-
-impl Premultiply {
-    fn format(
-        &mut self,
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-    ) -> &(wgpu::BindGroupLayout, wgpu::ComputePipeline) {
-        self.formats.entry(format).or_insert_with(|| {
-            let name = match format {
-                wgpu::TextureFormat::Rgba32Float => "rgba32float",
-                wgpu::TextureFormat::Rgba16Float => "rgba16float",
-                _ => "rgba8unorm",
-            };
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("pm svg premultiply"),
-                source: wgpu::ShaderSource::Wgsl(PREMULTIPLY_WGSL.replace("FORMAT", name).into()),
-            });
-            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("pm svg premultiply"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(16),
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("pm svg premultiply"),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("pm svg premultiply"),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-            (layout, pipeline)
-        })
-    }
-
-    /// Each cut (a straight-alpha page, the cut's origin in it, its size)
-    /// premultiplied into its own `format` texture, recorded into
-    /// `encoder`.
-    fn run(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        cuts: &[(&wgpu::TextureView, [u32; 2], (u32, u32))],
-        format: wgpu::TextureFormat,
-    ) -> Vec<wgpu::Texture> {
-        let (layout, pipeline) = self.format(device, format);
-        // Every cut's rectangle in one buffer, at the uniform alignment.
-        let stride = u64::from(device.limits().min_uniform_buffer_offset_alignment).max(16);
-        let mut words = vec![0u8; (stride * cuts.len() as u64) as usize];
-        for (i, &(_, [x, y], (w, h))) in cuts.iter().enumerate() {
-            let at = i * stride as usize;
-            for (k, v) in [x, y, w, h].into_iter().enumerate() {
-                words[at + 4 * k..at + 4 * k + 4].copy_from_slice(&v.to_le_bytes());
-            }
-        }
-        let rects = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm svg premultiply cuts"),
-            size: words.len() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&rects, 0, &words);
-        let mut out = Vec::with_capacity(cuts.len());
-        let mut binds = Vec::with_capacity(cuts.len());
-        for (i, &(straight, _, (width, height))) in cuts.iter().enumerate() {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("pm svg"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pm svg premultiply"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(straight),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &rects,
-                            offset: i as u64 * stride,
-                            size: wgpu::BufferSize::new(16),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                ],
-            }));
-            out.push(texture);
-        }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pm svg premultiply"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        for (bind, &(_, _, (w, h))) in binds.iter().zip(cuts) {
-            pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-        }
-        drop(pass);
-        out
-    }
-}
-
-/// The cache key of an image drawn in the batch `sig`.
-fn batch_key(key: &[u8; 32], sig: &[u8; 32]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(key);
-    h.update(sig);
-    h.finalize().into()
-}
-
-/// One SVG image to draw: its document, user units to target pixels, its
-/// target rectangle and clip polygon.
-struct SvgItem {
-    doc: std::sync::Arc<pm_vector::render::svg::SvgDocument>,
-    transform: pm_vector::kurbo::Affine,
-    rect: PixelRect,
-    clip: [pm_vector::kurbo::Point; 4],
-}
-
-impl SvgItem {
-    /// `None` for a source that is not an SVG image.
-    fn of(source: &VectorSource) -> Option<Result<SvgItem, String>> {
-        let VectorSource::SvgRaster {
-            path,
-            transform,
-            rect,
-            clip,
-            ..
-        } = source
-        else {
-            return None;
-        };
-        Some(super::svg::document(path).map(|(doc, _)| SvgItem {
-            doc,
-            transform: pm_vector::kurbo::Affine::new(*transform),
-            rect: *rect,
-            clip: clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y)),
-        }))
-    }
-}
-
-/// Shelf packing of `sizes` (each at most `max_side` on a side) into pages
-/// of at most `max_side`: the pages' used sizes and each size's (page, x,
-/// y), in input order.
-fn shelf_pack(sizes: &[(u32, u32)], max_side: u32) -> (Vec<(u32, u32)>, Vec<(usize, u32, u32)>) {
-    let mut order: Vec<usize> = (0..sizes.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(sizes[i].1));
-    let mut pages: Vec<(u32, u32)> = vec![(0, 0)];
-    let mut places = vec![(0, 0, 0); sizes.len()];
-    let (mut x, mut y, mut shelf) = (0u32, 0u32, 0u32);
-    for i in order {
-        let (w, h) = (sizes[i].0.min(max_side), sizes[i].1.min(max_side));
-        if x + w > max_side {
-            (x, y, shelf) = (0, y + shelf, 0);
-        }
-        if y + h > max_side {
-            pages.push((0, 0));
-            (x, y, shelf) = (0, 0, 0);
-        }
-        let page = pages.len() - 1;
-        places[i] = (page, x, y);
-        let p = &mut pages[page];
-        *p = (p.0.max(x + w), p.1.max(y + h));
-        x += w;
-        shelf = shelf.max(h);
-    }
-    (pages, places)
 }
 
 fn f32_bytes(v: &[f32]) -> Vec<u8> {

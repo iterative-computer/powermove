@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod svg;
+pub mod svg_float;
 
 use pm_eval::transform::Mat2d;
 use pm_eval::{JsResult, JsValue, Scope};
@@ -29,7 +30,7 @@ pub enum VectorSource {
         rect: PixelRect,
     },
     /// An SVG image under `transform` (user units to target pixels) drawn
-    /// into `rect`, clipped to the polygon `clip` (Vello, or resvg).
+    /// into `rect`, clipped to the polygon `clip` (float GPU paint, or resvg).
     SvgRaster {
         path: std::path::PathBuf,
         stamp: svg::Stamp,
@@ -173,7 +174,12 @@ pub fn shape_scene(d: &ShapeContent, colors: &ShapeColors, world: &Mat2d) -> Opt
     let g = shape_geometry(d).ok()?;
     let to_layer = Affine::translate((-d.w / 2.0, -d.h / 2.0));
     let mut scene = CoverageScene::default();
-    scene.push_shape(&g, Affine::new(*world) * to_layer, &colors.color, &colors.stroke_color);
+    scene.push_shape(
+        &g,
+        Affine::new(*world) * to_layer,
+        &colors.color,
+        &colors.stroke_color,
+    );
     Some(scene)
 }
 

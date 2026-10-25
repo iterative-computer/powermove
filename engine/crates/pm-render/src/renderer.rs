@@ -1620,8 +1620,6 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
-        self.vector
-            .prepare_svgs(&self.device, &self.queue, &mut encoder, &plan, precision);
         // Video sources this frame meets for the first time open together.
         self.media
             .open_cold(&media_prepare::planned_videos(&plan), request.export);

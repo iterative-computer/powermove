@@ -28,9 +28,11 @@ impl PathRasterizer for GlyphPaths {
     /// here only with the paint of their first.
     fn raster_pass(&self, draws: &[PathDraw], _multisample_pass: bool) -> Option<Item> {
         let first = draws.first()?;
-        debug_assert!(draws.iter().all(|d| d.color == first.color
-            && d.opacity == first.opacity
-            && d.blur == first.blur));
+        debug_assert!(
+            draws.iter().all(|d| d.color == first.color
+                && d.opacity == first.opacity
+                && d.blur == first.blur)
+        );
         let mut paths = Vec::new();
         let mut bounds: Option<Rect> = None;
         for glyph in draws.iter().flat_map(|d| &d.glyphs) {
@@ -39,7 +41,9 @@ impl PathRasterizer for GlyphPaths {
             let style = match glyph.stroke {
                 None => PathStyle::Fill,
                 Some(width) => PathStyle::Stroke(
-                    Stroke::new(f64::from(width)).with_join(Join::Round).with_miter_limit(2.0),
+                    Stroke::new(f64::from(width))
+                        .with_join(Join::Round)
+                        .with_miter_limit(2.0),
                 ),
             };
             let half = glyph.stroke.map_or(0.0, |w| f64::from(w) / 2.0);
@@ -109,17 +113,20 @@ fn outline(glyph: &PathGlyph) -> BezPath {
     out
 }
 
-/// Appends the conic `p0 p1 p2` with weight `w` as 16 quadratics: each a
-/// sixteenth of the conic by exact rational subdivision, its control point
+/// Appends the conic `p0 p1 p2` with weight `w` as 32 quadratics: each a
+/// thirty-second of the conic by exact rational subdivision, its control point
 /// where the conic's tangents at the piece's ends meet. For a quarter
 /// circle of radius 1000 px the pieces stay within 1e-4 px of the arc.
 fn conic_to(out: &mut BezPath, p0: Point, p1: Point, p2: Point, w: f64) {
-    const PIECES: usize = 16;
+    const PIECES: usize = 32;
     // The conic in homogeneous form.
     let at = |t: f64| {
         let (a, b, c) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t) * w, t * t);
         let d = a + b + c;
-        Point::new((a * p0.x + b * p1.x + c * p2.x) / d, (a * p0.y + b * p1.y + c * p2.y) / d)
+        Point::new(
+            (a * p0.x + b * p1.x + c * p2.x) / d,
+            (a * p0.y + b * p1.y + c * p2.y) / d,
+        )
     };
     // The derivative's direction (numerator of the quotient rule, scaled).
     let tangent = |t: f64| {
