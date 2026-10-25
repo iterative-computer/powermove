@@ -275,6 +275,7 @@ fn corpus_render_parity() {
                 }
             }
         }
+        let mut geometry_document = None;
         for s in &p.samples {
             // The capture's motion blur: 16 samples opaque, 20 transparent.
             let mut request =
@@ -457,16 +458,38 @@ fn corpus_render_parity() {
                             let alpha =
                                 |f: &[f64]| f.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
                             let wanted = geometry(&r.alpha(), r.width);
-                            // Geometry is the renderer's, not the storage's:
-                            // judged on an f32 frame (half-float storage
-                            // rounds every partly covered pixel and each
-                            // motion-blur accumulation step).
+                            // Match the CLI's --precision=32: change only
+                            // this render copy's project setting. Requests
+                            // cannot override the saved project's depth.
+                            let document = geometry_document.get_or_insert_with(|| {
+                                let mut root = p.document.to_value().expect("project root");
+                                let pm_model::Value::Object(map) = &mut root else {
+                                    panic!("project root is not an object");
+                                };
+                                map.insert("colorDepth", pm_model::Value::Number(32.0));
+                                pm_model::Document::new(Some(root), p.document.revision())
+                            });
                             let mut exact = request.clone();
                             exact.precision = Precision::Float32;
+                            assert_eq!(
+                                renderer.device_target_format(document, &exact),
+                                wgpu::TextureFormat::Rgba32Float,
+                                "32-bit project geometry requires float32 filtering and blending"
+                            );
                             let f32_frame = renderer
-                                .render(&p.document, &p.composition, ticks(s.time), &exact, &p.resolver)
+                                .render(
+                                    document,
+                                    &p.composition,
+                                    ticks(s.time),
+                                    &exact,
+                                    &p.resolver,
+                                )
                                 .expect("f32 transparent render");
-                            let ours = geometry(&alpha(&unit32(&renderer.read_rgba(&f32_frame).unwrap())), r.width);
+                            assert_eq!(f32_frame.color.format(), wgpu::TextureFormat::Rgba32Float);
+                            let ours = geometry(
+                                &alpha(&unit32(&renderer.read_rgba(&f32_frame).unwrap())),
+                                r.width,
+                            );
                             let theirs = geometry(&alpha(&today), r.width);
                             shape = format!(
                                 " geometry: area {:.3} engine {:.3} today {:.3}",

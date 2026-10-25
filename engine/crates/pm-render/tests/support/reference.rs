@@ -321,8 +321,8 @@ fn draw(
         for &t in &times {
             let sample = content_pixels(&mut scope, layer, &ty, t, (sx, sy), w, h)?;
             for (acc, (px, edge)) in layer_px.iter_mut().zip(sample) {
-                for c in 0..4 {
-                    acc.0[c] += px[c] / times.len() as f64;
+                for (sum, value) in acc.0.iter_mut().zip(px) {
+                    *sum += value / times.len() as f64;
                 }
                 acc.1 |= edge;
             }
@@ -541,6 +541,25 @@ pub fn scene_pixels(
             }
         };
         let coverage = fill(&device, rule, cells, w, h);
+        // A contour can coincide with a pixel boundary: neither adjoining
+        // pixel then has partial coverage, although both touch the edge.
+        // Mark the occupancy transition before the comparator grows it by
+        // two pixels. This also covers an item's boundary hidden beneath a
+        // later, fully opaque item of another color.
+        let x0 = coverage.x0.saturating_sub(1);
+        let y0 = coverage.y0.saturating_sub(1);
+        let x1 = (coverage.x0 + coverage.width + 1).min(w);
+        let y1 = (coverage.y0 + coverage.height + 1).min(h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let here = coverage.at(x, y) > 0.0;
+                let boundary = (x > 0 && (coverage.at(x - 1, y) > 0.0) != here)
+                    || (x + 1 < w && (coverage.at(x + 1, y) > 0.0) != here)
+                    || (y > 0 && (coverage.at(x, y - 1) > 0.0) != here)
+                    || (y + 1 < h && (coverage.at(x, y + 1) > 0.0) != here);
+                out[y * w + x].1 |= boundary;
+            }
+        }
         let paint = item.premultiplied().map(f64::from);
         for y in coverage.y0..coverage.y0 + coverage.height {
             for x in coverage.x0..coverage.x0 + coverage.width {
