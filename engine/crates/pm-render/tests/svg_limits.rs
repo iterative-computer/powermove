@@ -191,6 +191,29 @@ fn large_blurs_stay_native_and_only_impossible_canvases_fall_back() {
     );
 }
 
+/// Chained huge blurs of a thin source, or offsets far out and back, fit
+/// the byte budget, but their intermediate images are wider than any
+/// device texture: the filter tiles or takes the named fallback, never an
+/// invalid texture.
+#[test]
+fn filter_images_stay_within_device_texture_dimensions() {
+    let mut cases: Vec<String> = [(3000.0, 40000.0), (8000.0, 120000.0)]
+        .into_iter()
+        .map(|(deviation, region)| format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080"><filter id="b" filterUnits="userSpaceOnUse" x="-{region}" y="500" width="{}" height="80"><feGaussianBlur stdDeviation="{deviation} 0"/><feGaussianBlur stdDeviation="{deviation} 0"/></filter><rect y="539" width="1920" height="2" fill="#fff" filter="url(#b)"/></svg>"##,
+            2.0 * region
+        ))
+        .collect();
+    cases.push(r##"<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080"><filter id="b" filterUnits="userSpaceOnUse" x="-100000" y="-100" width="200000" height="1300"><feOffset dx="30000"/><feGaussianBlur stdDeviation="2"/><feOffset dx="-30000"/></filter><rect width="1920" height="1080" fill="#fff" filter="url(#b)"/></svg>"##.to_owned());
+    for svg in &cases {
+        let (alive, reason) = probe(svg, 1.0, 1920, 1080, false);
+        assert!(alive, "GPU lost: {svg}");
+        if let Some(reason) = reason {
+            assert!(reason.contains("texture"), "{reason}");
+        }
+    }
+}
+
 #[test]
 fn sequential_large_filtered_exports_keep_the_device_and_pixels() {
     let gpu = pm_gpu::Gpu::new("SVG sequential filtered export test").unwrap();

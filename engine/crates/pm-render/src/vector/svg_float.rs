@@ -1240,18 +1240,26 @@ impl SvgPainter {
             plans.reverse();
             plans
         };
-        let bytes = |plans: &[svg_filter::Plan]| plans.iter().map(|p| p.bytes).sum::<u64>();
+        // Over the filter budget, or an image (the grid copy of the output
+        // included) longer than the device allows: split into tiles.
+        let max_dim = device.limits().max_texture_dimension_2d;
+        let over = |plans: &[svg_filter::Plan], need: PixelRect| {
+            let g = grid(need);
+            plans.iter().map(|p| p.bytes).sum::<u64>() > MAX_FILTER_BYTES
+                || plans.iter().any(|p| p.max_side() > max_dim)
+                || g.width.max(g.height) > max_dim
+        };
         let planned = plans(need);
-        if bytes(&planned) > MAX_FILTER_BYTES {
+        if over(&planned, need) {
             let center = PixelRect::new(
                 need.x + (need.width / 2) as i32,
                 need.y + (need.height / 2) as i32,
                 1,
                 1,
             );
-            if need.width <= 1 && need.height <= 1 || bytes(&plans(center)) > MAX_FILTER_BYTES {
+            if need.width <= 1 && need.height <= 1 || over(&plans(center), center) {
                 return Err(format!(
-                    "SVG filter exceeds the {} MiB filter budget at every tile size",
+                    "SVG filter exceeds the {} MiB filter budget or device texture size at every tile size",
                     MAX_FILTER_BYTES >> 20
                 ));
             }

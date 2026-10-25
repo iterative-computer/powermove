@@ -535,6 +535,25 @@ impl Plan {
             bytes,
         }
     }
+
+    /// The longest side of any image the plan allocates, in grid pixels.
+    pub(super) fn max_side(&self) -> u32 {
+        self.rects
+            .iter()
+            .chain([&self.source])
+            .flatten()
+            .map(|r| r.width.max(r.height))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Whether a filter image of `rect` fits the device's texture dimensions.
+fn fits_texture(device: &wgpu::Device, rect: PixelRect) -> Result<(), String> {
+    if rect.width.max(rect.height) > device.limits().max_texture_dimension_2d {
+        return Err("SVG filter image exceeds device texture dimensions".into());
+    }
+    Ok(())
 }
 
 /// Filter Effects §15.10's matrices for every `feColorMatrix` type (4 × 5,
@@ -1233,6 +1252,7 @@ impl Filters {
         let Some(texture) = &input.texture else {
             return Ok(Image::empty());
         };
+        fits_texture(device, rect)?;
         match sigmas(std_dev, transform) {
             Ok([0.0, 0.0]) => {
                 let pass = Pass {
@@ -1254,8 +1274,16 @@ impl Filters {
                     "pm svg filter gaussian",
                     gaussian::f32_bytes(&Params::weights(&kx, &ky)),
                 );
-                let [h, u, h2, v, ix] = gaussian::sizes(&p, 16)
-                    .map(|bytes| gaussian::scratch(device, "pm svg filter gaussian", bytes));
+                let sizes = gaussian::sizes(&p, 16);
+                let limits = device.limits();
+                let binding = limits
+                    .max_storage_buffer_binding_size
+                    .min(limits.max_buffer_size);
+                if sizes.iter().any(|bytes| *bytes > binding) {
+                    return Err("SVG Gaussian scratch exceeds the device buffer limits".into());
+                }
+                let [h, u, h2, v, ix] =
+                    sizes.map(|bytes| gaussian::scratch(device, "pm svg filter gaussian", bytes));
                 let uniform_p = p.uniform(device);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 {
@@ -1302,6 +1330,7 @@ impl Filters {
                 // The first pass covers what the second reads.
                 let second = blur_reach([0.0, std_dev[1]], transform);
                 let first_rect = grow(rect, second.map(|v| v.ceil() as u32));
+                fits_texture(device, first_rect)?;
                 let mut current: Option<Image> = None;
                 for (pass, (axis, sigma)) in axes.iter().enumerate() {
                     let target = if pass == 0 { first_rect } else { rect };

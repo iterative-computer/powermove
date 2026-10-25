@@ -155,7 +155,8 @@ pixel's average and its range are kept), giving clips and masks its slope.
   the source's bounds through each primitive's reach and subregion) and
   where the output reads it (backward from the output rectangle), so memory
   follows content rather than blur reach. A group whose images exceed
-  256 MiB splits its output into tiles.
+  256 MiB, or the device's texture size, splits its output into tiles;
+  one that no tile fits takes the declared fallback.
 - **Gaussians.** A Gaussian whose covariance is diagonal on the device grid
   (any axis-aligned placement, isotropic blurs under rotation) uses the
   exact separable Gaussian shared with path masks (`composite::gaussian`,
