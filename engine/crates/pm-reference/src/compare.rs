@@ -80,6 +80,8 @@ pub struct Bounds {
     /// Edge and resampled pixels: how much each statistic of the engine's
     /// error may exceed today's, for the rounding of the compared frames.
     pub precision_cv: f64,
+    /// How much the class maximum, a single pixel, may exceed today's.
+    pub max_cv: f64,
     /// The gate's previous per-pixel bound, as (p99.9, max): unreferenced
     /// pixels against today, and each edge or resampled pixel's error
     /// beyond today's (which `|engine − today|` within it implies).
@@ -92,6 +94,7 @@ impl Bounds {
     pub const EIGHT_BIT: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 0.5,
+        max_cv: 0.5,
         per_pixel_cv: (1.0, 4.0),
     };
     /// Half-float frames (transparent captures): one f16 rounding step
@@ -100,16 +103,19 @@ impl Bounds {
     pub const HALF_FLOAT: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 255.0 / 2048.0,
+        max_cv: 255.0 / 2048.0,
         per_pixel_cv: (1.0, 1.0),
     };
     /// Edges rasterized with 4 coverage samples, against a converged
-    /// reference and today's 8-bit capture: each statistic within today's
-    /// plus half a code of that capture's rounding; per pixel, a coverage
-    /// estimate may be off by one of its 4 samples (a quarter of full scale),
-    /// whichever space the samples are resolved in. Interiors stay at 1 CV.
+    /// reference and today's 8-bit capture: p99.9 and mean within today's
+    /// plus half a code of that capture's rounding; per pixel, and so the
+    /// maximum, a coverage estimate may be off by one of its 4 samples (a
+    /// quarter of full scale), whichever space the samples are resolved in.
+    /// Interiors stay at 1 CV.
     pub const MSAA4: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 0.5,
+        max_cv: 255.0 / 4.0,
         per_pixel_cv: (255.0 / 4.0, 255.0 / 4.0),
     };
 }
@@ -146,12 +152,12 @@ impl Report {
         for class in [Class::Edge, Class::Resampled] {
             let r = self.class(class);
             let (e, t) = (&r.engine_vs_reference, &r.today_vs_reference);
-            for (name, ev, tv) in [
-                ("max", e.max, t.max),
-                ("p99.9", e.p999, t.p999),
-                ("mean", e.mean, t.mean),
+            for (name, ev, tv, bound) in [
+                ("max", e.max, t.max, bounds.max_cv),
+                ("p99.9", e.p999, t.p999, bounds.precision_cv),
+                ("mean", e.mean, t.mean, bounds.precision_cv),
             ] {
-                if ev > tv + bounds.precision_cv + 1e-9 {
+                if ev > tv + bound + 1e-9 {
                     out.push(format!(
                         "{class:?}: engine {name} {ev:.3} CV from the reference, today {tv:.3}"
                     ));

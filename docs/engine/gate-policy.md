@@ -39,8 +39,10 @@ today's worst error elsewhere. A gate with other storage states its own. Geometr
 exact: alpha area (relative) and centroid (px) within 1e-3 (`same_geometry`).
 
 3D edges come from 4 coverage samples (`MSAA4`): against the converged reference and
-today's 8-bit capture, each edge statistic within today's + 0.5 CV, and per pixel the
-engine within one sample (a quarter of full scale) of today's error; geometry within
+today's 8-bit capture, edge p99.9 and mean within today's + 0.5 CV, and per pixel (so
+also the edge maximum) within one sample, a quarter of full scale, of today's error.
+Shading runs once per pixel, so a partly covered pixel can show a texel the reference
+averages away; resolving in linear light weighs it differently from today. Geometry within
 half a sample per partly covered pixel (`same_sampled_geometry`). Interiors stay at
 1 CV of today unless no interior pixel ends further from the reference than today's
 (a 3D correction with a ledger row). Preview ==
