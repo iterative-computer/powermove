@@ -5,7 +5,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape};
+#[cfg(feature = "render")]
 use pm_color::contract::WorkingEncoding;
+#[cfg(feature = "render")]
 use pm_color::transfer::display_decode_f32;
 use skrifa::color::{Brush, ColorPainter, ColorStop, Transform};
 pub use skrifa::color::{CompositeMode, Extend};
@@ -17,6 +19,7 @@ use super::color::Rgba;
 use super::outline::{Coords, FaceRef};
 
 /// Premultiplied float pixels in the requested working encoding.
+#[cfg(feature = "render")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RgbaF32 {
     pub width: u32,
@@ -472,6 +475,7 @@ impl ColorPainter for Recorder<'_> {
     }
 }
 
+#[cfg(feature = "render")]
 fn gradient(stops: &[(f32, [f32; 4])], t: f32, extend: Extend) -> [f32; 4] {
     let t = match extend {
         Extend::Pad => t.clamp(0., 1.),
@@ -500,6 +504,7 @@ fn gradient(stops: &[(f32, [f32; 4])], t: f32, extend: Extend) -> [f32; 4] {
     stops.last().unwrap().1
 }
 
+#[cfg(feature = "render")]
 impl Fill {
     fn in_working(&self, working: WorkingEncoding) -> Self {
         let stops = |stops: &[(f32, [f32; 4])]| {
@@ -562,6 +567,7 @@ impl Fill {
 }
 
 /// Signed edge areas of one coverage raster, accumulated per pixel row.
+#[cfg(feature = "render")]
 struct EdgeAreas {
     left: i32,
     top: i32,
@@ -572,6 +578,7 @@ struct EdgeAreas {
     breaks: Vec<f64>,
 }
 
+#[cfg(feature = "render")]
 impl EdgeAreas {
     fn new(width: u32, height: u32, left: i32, top: i32) -> Self {
         Self {
@@ -666,6 +673,7 @@ impl EdgeAreas {
 /// Float area scan conversion of one transformed COLR path. Resolve nonzero
 /// winding before integrating edges so overlapping source contours do not
 /// count their common area twice.
+#[cfg(feature = "render")]
 fn coverage(
     path: &BezPath,
     width: u32,
@@ -714,6 +722,7 @@ fn coverage(
     areas.into_coverage()
 }
 
+#[cfg(feature = "render")]
 fn over(dst: &mut [f32], color: [f32; 4], coverage: f32) {
     let a = (color[3] * coverage).clamp(0.0, 1.0);
     for c in 0..3 {
@@ -722,6 +731,7 @@ fn over(dst: &mut [f32], color: [f32; 4], coverage: f32) {
     dst[3] = a + dst[3] * (1.0 - a);
 }
 
+#[cfg(feature = "render")]
 fn composite(dst: &mut [f32], src: &[f32], mode: CompositeMode) -> Result<(), String> {
     use CompositeMode::*;
     let s: [f32; 4] = src.try_into().expect("RGBA source");
@@ -847,6 +857,7 @@ fn composite(dst: &mut [f32], src: &[f32], mode: CompositeMode) -> Result<(), St
     Ok(())
 }
 
+#[cfg(feature = "render")]
 fn color_to_working(mut color: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
     if working == WorkingEncoding::LinearLight {
         for channel in &mut color[..3] {
@@ -996,6 +1007,7 @@ impl Program {
 
     /// Renders the graph as premultiplied float pixels in `working`. Palette
     /// and foreground channels are decoded before gradient and layer blends.
+    #[cfg(feature = "render")]
     pub fn rasterize(&self, working: WorkingEncoding) -> RgbaF32 {
         let (width, height) = (self.width, self.height);
         let (left, top) = (self.bounds.x0 as i32, self.bounds.y0 as i32);
@@ -1070,7 +1082,7 @@ impl Program {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 mod tests {
     use super::*;
 
