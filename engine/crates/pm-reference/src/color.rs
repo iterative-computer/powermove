@@ -16,6 +16,115 @@ pub fn mul(a: &M3, b: &M3) -> M3 {
     std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| a[r][k] * b[k][c]).sum()))
 }
 
+/// [CSS Color 4 §14.2.2](https://www.w3.org/TR/css-color-4/#binsearch-gamut-mapping)
+/// binary-search gamut mapping with local MINDE, for a
+/// straight, display-encoded sRGB color. The input may have extended values;
+/// callers keep those values for float compositing and use this only at an
+/// SDR sRGB display or unorm8 Canvas destination. The reference deliberately
+/// works in f64 and follows the published XYZ/OkLab matrices, independent of
+/// the engine's color conversion code.
+pub fn css_gamut_map_srgb(rgb: [f64; 3]) -> [f64; 3] {
+    if rgb.iter().all(|v| (0.0..=1.0).contains(v)) {
+        return rgb;
+    }
+
+    // CSS Color 4 sample conversion matrices: linear sRGB <-> D65 XYZ,
+    // then D65 XYZ <-> OkLab. Fractional sRGB coefficients are exact.
+    const RGB_XYZ: M3 = [
+        [506752.0 / 1228815.0, 87881.0 / 245763.0, 12673.0 / 70218.0],
+        [87098.0 / 409605.0, 175762.0 / 245763.0, 12673.0 / 175545.0],
+        [7918.0 / 409605.0, 87881.0 / 737289.0, 1001167.0 / 1053270.0],
+    ];
+    const XYZ_RGB: M3 = [
+        [12831.0 / 3959.0, -329.0 / 214.0, -1974.0 / 3959.0],
+        [
+            -851781.0 / 878810.0,
+            1648619.0 / 878810.0,
+            36519.0 / 878810.0,
+        ],
+        [705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0],
+    ];
+    const XYZ_LMS: M3 = [
+        [0.8190224379967030, 0.3619062600528904, -0.1288737815209879],
+        [0.0329836539323885, 0.9292868615863434, 0.0361446663506424],
+        [0.0481771893596242, 0.2642395317527308, 0.6335478284694309],
+    ];
+    const LMS_LAB: M3 = [
+        [0.2104542683093140, 0.7936177747023054, -0.0040720430116193],
+        [1.9779985324311684, -2.4285922420485799, 0.4505937096174110],
+        [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
+    ];
+    const LAB_LMS: M3 = [
+        [1.0, 0.3963377773761749, 0.2158037573099136],
+        [1.0, -0.1055613458156586, -0.0638541728258133],
+        [1.0, -0.0894841775298119, -1.2914855480194092],
+    ];
+    const LMS_XYZ: M3 = [
+        [1.2268798758459243, -0.5578149944602171, 0.2813910456659647],
+        [-0.0405757452148008, 1.1122868032803170, -0.0717110580655164],
+        [-0.0763729366746601, -0.4214933324022432, 1.5869240198367816],
+    ];
+    let to_lab = |c: [f64; 3]| {
+        let xyz = apply(&RGB_XYZ, c.map(|v| Transfer::Srgb.to_linear(v)));
+        apply(&LMS_LAB, apply(&XYZ_LMS, xyz).map(f64::cbrt))
+    };
+    let to_rgb = |lab: [f64; 3]| {
+        let xyz = apply(&LMS_XYZ, apply(&LAB_LMS, lab).map(|v| v * v * v));
+        apply(&XYZ_RGB, xyz).map(|v| Transfer::Srgb.from_linear(v))
+    };
+    let origin = to_lab(rgb);
+    if origin[0] >= 1.0 {
+        return [1.0; 3];
+    }
+    if origin[0] <= 0.0 {
+        return [0.0; 3];
+    }
+    let chroma = origin[1].hypot(origin[2]);
+    let direction = if chroma > 0.0 {
+        [origin[1] / chroma, origin[2] / chroma]
+    } else {
+        [0.0, 0.0]
+    };
+    let at_chroma = |c: f64| to_rgb([origin[0], direction[0] * c, direction[1] * c]);
+    let clipped = |c: [f64; 3]| c.map(|v| v.clamp(0.0, 1.0));
+    let error = |candidate: [f64; 3], bounded: [f64; 3]| {
+        let lab = to_lab(bounded);
+        ((candidate[0] - lab[0]).powi(2)
+            + (candidate[1] - lab[1]).powi(2)
+            + (candidate[2] - lab[2]).powi(2))
+        .sqrt()
+    };
+    let first = clipped(rgb);
+    if error(origin, first) < 0.02 {
+        return first;
+    }
+
+    let (mut low, mut high) = (0.0, chroma);
+    let mut low_in_gamut = true;
+    let mut result = first;
+    while high - low > 0.0001 {
+        let c = (low + high) * 0.5;
+        let candidate = at_chroma(c);
+        if low_in_gamut && candidate.iter().all(|v| (0.0..=1.0).contains(v)) {
+            low = c;
+            continue;
+        }
+        let bounded = clipped(candidate);
+        result = bounded;
+        let candidate_lab = [origin[0], direction[0] * c, direction[1] * c];
+        if error(candidate_lab, bounded) < 0.02 {
+            if 0.02 - error(candidate_lab, bounded) < 0.0001 {
+                return bounded;
+            }
+            low_in_gamut = false;
+            low = c;
+        } else {
+            high = c;
+        }
+    }
+    result
+}
+
 pub fn invert(m: &M3) -> M3 {
     let c = |r: usize, k: usize| {
         let (r1, r2, k1, k2) = ((r + 1) % 3, (r + 2) % 3, (k + 1) % 3, (k + 2) % 3);
@@ -497,6 +606,21 @@ pub fn convert(src: &MatrixTrc, dst: &MatrixTrc, rgb: [f64; 3], extent: Extent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn css_gamut_map_preserves_in_gamut_and_maps_extended_color() {
+        for rgb in [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.2, 0.5, 0.8]] {
+            assert_eq!(css_gamut_map_srgb(rgb), rgb);
+        }
+        let source = [1.35, -0.18, 0.21];
+        let mapped = css_gamut_map_srgb(source);
+        assert!(mapped.iter().all(|v| (0.0..=1.0).contains(v)));
+        assert_ne!(mapped, source.map(|v| v.clamp(0.0, 1.0)));
+        assert_eq!(css_gamut_map_srgb(mapped), mapped);
+        assert_eq!(css_gamut_map_srgb([0.0, 1.02, 0.0]), [0.0, 1.0, 0.0]);
+        assert_eq!(css_gamut_map_srgb([2.0, 2.0, 2.0]), [1.0; 3]);
+        assert_eq!(css_gamut_map_srgb([-1.0, -1.0, -1.0]), [0.0; 3]);
+    }
 
     #[test]
     fn transfers_round_trip() {
