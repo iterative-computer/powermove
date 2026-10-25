@@ -8,9 +8,10 @@
 //!   recipe part moved by `animatedPart`'s offset when its group's recipe
 //!   is animated), with `sync`'s geometry (sources, OBJ meshes, imported
 //!   glTF models posed at `time − layer.from`, the missing-model box) and
-//!   materials (side, opacity, slots). The render camera is the topmost
-//!   active camera layer's (or the scene camera's) at the composition's
-//!   aspect; the editor view supplies its own camera
+//!   materials (side, opacity; v1.2.0 applies no material slots). The
+//!   render camera is the topmost active camera layer's (or the scene
+//!   camera's) at the composition's aspect; the editor view supplies its
+//!   own camera
 //!   ([`Geometry3d::view_camera`]).
 //! - **Legacy scenes** (`powermove.3d.scene` layers and mesh-definition
 //!   layers, `sceneForLayer`): the layer's own scene with its object
@@ -28,10 +29,10 @@ use std::sync::Arc;
 use pm_geom3d::gltf::math::{self as m3, Mat4, Vec3};
 use pm_geom3d::gltf::pick::{Picker, Posed, Side};
 use pm_geom3d::query::{
-    self, Box3, Camera, Facing, Lens, Materials, ModelMaterials, Object, QueryError, Scene, Shape,
+    self, Box3, Camera, Facing, Lens, ModelMaterials, Object, Scene, Shape,
     TriangleMesh,
 };
-use pm_geom3d::{Group, MeshSource, Parameters, Source};
+use pm_geom3d::{MeshSource, Parameters, Source};
 use pm_model::json::{Map, Value};
 use pm_model::{JsString, Node};
 
@@ -156,12 +157,6 @@ fn host_only(what: &str) -> JsThrow {
     }
 }
 
-fn query_error(e: QueryError) -> JsThrow {
-    match e {
-        QueryError::MissingGroupMaterial => JsThrow::type_error(query::MISSING_GROUP_MATERIAL),
-    }
-}
-
 // ── scene description ───────────────────────────────────────────────────
 
 fn obj<'a>(map: &'a Map, key: &str) -> Option<&'a Map> {
@@ -236,27 +231,13 @@ fn source_of(source: &Map) -> Option<Source> {
         });
     }
     if let Some(m) = obj(source, "mesh") {
-        let groups = m
-            .get("groups")
-            .and_then(Value::as_array)
-            .map(|g| g.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .map(|g| {
-                let g = g.as_object()?;
-                Some(Group {
-                    start: number(g.get("start"))? as u32,
-                    count: number(g.get("count"))? as u32,
-                    material_index: number(g.get("materialIndex"))? as u32,
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
         return Some(Source::Mesh(MeshSource {
             positions: numbers(m.get("positions"))?,
             indices: numbers(m.get("indices")).map(|v| v.iter().map(|i| *i as u32).collect()),
             normals: numbers(m.get("normals")),
             uvs: numbers(m.get("uvs")),
-            groups,
+            // An authored mesh's `groups` are ignored (as v1.2.0 does).
+            groups: Vec::new(),
         }));
     }
     None
@@ -426,8 +407,8 @@ struct Spec {
 }
 
 enum ShapeSpec {
-    Source(Option<Source>, Materials),
-    Model(ModelAsset, ModelMaterials, Materials),
+    Source(Option<Source>, Facing),
+    Model(ModelAsset, ModelMaterials, Facing),
 }
 
 /// Stream the source's structural representation into a compact version key;
@@ -490,48 +471,27 @@ fn objects<'d>(
             .map(|id| g.model_version(&id))
             .unwrap_or(0);
         let version = source_version(&source, truthy(o.get("useSourceMaterials")), asset_version);
-        let slots: Vec<&Map> = o
-            .get("slots")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_object).collect())
-            .unwrap_or_default();
-        let slot_nodes = node::array(node::member(onode, "slots")).unwrap_or(&[]);
-        let use_source = truthy(o.get("useSourceMaterials")) && slots.is_empty();
+        let use_source = truthy(o.get("useSourceMaterials"));
         let mprefix = format!("o.{id}.m");
         // `materialPreview(undefined)` reads `undefined.p` for a missing
         // material (a missing model keeps its own material).
         let missing_model =
             text(&source, "assetId").is_some_and(|a| matches!(g.model(&a), ModelAsset::Missing));
-        let undefined_material = if slots.is_empty() {
-            obj(o, "material").is_none()
-        } else {
-            slots.iter().any(|s| obj(s, "material").is_none())
-        };
+        let undefined_material = obj(o, "material").is_none();
         if !use_source && !missing_model && undefined_material {
             return Err(JsThrow::type_error(
                 "Cannot read properties of undefined (reading 'p')",
             ));
         }
-        let materials = if use_source {
+        let material = if use_source {
             None
-        } else if slots.is_empty() {
-            Some(Materials::Single(facing(
+        } else {
+            Some(facing(
                 ch,
                 obj(o, "material"),
                 node::member(onode, "material"),
                 &mprefix,
-            )?))
-        } else {
-            let mut list = Vec::new();
-            for (k, s) in slots.iter().enumerate() {
-                list.push(facing(
-                    ch,
-                    obj(s, "material"),
-                    node::member(slot_nodes.get(k), "material"),
-                    &mprefix,
-                )?);
-            }
-            Some(Materials::Slots(list))
+            )?)
         };
         let shape = match text(&source, "assetId") {
             Some(asset) => {
@@ -540,20 +500,19 @@ fn objects<'d>(
                     return Err(unloadable(why));
                 }
                 imported += a.vertices();
-                let rule = match &materials {
+                let rule = match material {
                     None => ModelMaterials::Source,
-                    Some(Materials::Single(f)) => ModelMaterials::Single(*f),
-                    Some(Materials::Slots(l)) => ModelMaterials::Slots(l.clone()),
+                    Some(f) => ModelMaterials::Single(f),
                 };
                 ShapeSpec::Model(
                     a,
                     rule,
-                    materials.unwrap_or(Materials::Single(Facing::DEFAULT)),
+                    material.unwrap_or(Facing::DEFAULT),
                 )
             }
             None => ShapeSpec::Source(
                 source_of(&source),
-                materials.unwrap_or(Materials::Single(Facing::DEFAULT)),
+                material.unwrap_or(Facing::DEFAULT),
             ),
         };
         out.push(Spec {
@@ -637,7 +596,7 @@ fn place(
         };
         let s = &specs[i];
         let shape = match &s.shape {
-            ShapeSpec::Source(source, materials) => {
+            ShapeSpec::Source(source, facing) => {
                 let mesh = match source {
                     Some(src) => {
                         let key = source_key(src);
@@ -654,18 +613,18 @@ fn place(
                 };
                 Shape::Mesh {
                     mesh,
-                    materials: materials.clone(),
+                    facing: *facing,
                 }
             }
-            ShapeSpec::Model(asset, rule, materials) => match asset {
+            ShapeSpec::Model(asset, rule, facing) => match asset {
                 // Refused when the spec was built.
                 ModelAsset::Missing | ModelAsset::Unloadable(_) => Shape::Mesh {
                     mesh: query::missing_box(),
-                    materials: Materials::Single(Facing::DEFAULT),
+                    facing: Facing::DEFAULT,
                 },
                 ModelAsset::Mesh(mesh, _, _) => Shape::Mesh {
                     mesh: mesh.clone(),
-                    materials: materials.clone(),
+                    facing: *facing,
                 },
                 ModelAsset::Gltf(picker) => {
                     let time = mixer(&s.id);
@@ -925,7 +884,7 @@ impl<'d> Scope<'_, 'd> {
             return Err(host_only("The 3D cursor's surface"));
         };
         let scene = self.composition_scene3d(time, g)?;
-        scene.scene.cursor_hit(ray).map_err(query_error)
+        Ok(scene.scene.cursor_hit(ray))
     }
 
     /// The geometry `runtime.objects.get(id).geometry` holds for 3D object
@@ -1019,10 +978,7 @@ impl<'d> Scope<'_, 'd> {
         let ids = self.depth_ids3d(layer, time)?;
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         let camera = self.view3d(&scene, g);
-        let hit = scene
-            .scene
-            .pick(&camera, x, y, Some(&ids))
-            .map_err(query_error)?;
+        let hit = scene.scene.pick(&camera, x, y, Some(&ids));
         let id = node::to_js_string(node::member(Some(layer), "id"));
         Ok(hit.is_some_and(|h| id.as_str() == Some(h)))
     }
@@ -1207,7 +1163,7 @@ impl<'d> Scope<'_, 'd> {
         let shape = ShapeSpec::Model(
             a,
             ModelMaterials::Single(Facing::DEFAULT),
-            Materials::Single(Facing::DEFAULT),
+            Facing::DEFAULT,
         );
         let specs = vec![Spec {
             id: "model".into(),
@@ -1319,9 +1275,7 @@ impl<'d> Scope<'_, 'd> {
         };
         let (w, h) = self.layer_canvas(layer);
         let camera = Camera::new(lens, world, query::aspect(w, h));
-        let hit = scene
-            .pick(&camera, px / w * 2.0 - 1.0, 1.0 - py / h * 2.0, None)
-            .map_err(query_error)?;
+        let hit = scene.pick(&camera, px / w * 2.0 - 1.0, 1.0 - py / h * 2.0, None);
         Ok(hit.is_some())
     }
 }

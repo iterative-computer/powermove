@@ -19,10 +19,9 @@
 //!
 //! `Mesh.raycast` is reproduced step by step: the bounding sphere (unless
 //! it contains the ray origin), the bounding box in local space, then every
-//! triangle of the draw range, or of each group when the material is an
-//! array (a group whose material is missing throws three.js's
-//! `TypeError`, a mesh without groups under an array material has no
-//! hits), with `Ray.intersectTriangle` and the material side. The closest
+//! triangle of the draw range (one material per mesh: v1.2.0 applies no
+//! material slots, so geometry groups never split a mesh), with
+//! `Ray.intersectTriangle` and the material side. The closest
 //! hit whose object passes `pick`'s filter (visible chain, depth-set ids,
 //! not every material at opacity 0) wins.
 //!
@@ -38,9 +37,6 @@ use crate::Geometry;
 use crate::gltf::math::{self, Mat4, Vec3};
 use crate::gltf::pick::{Bvh, Picker, Posed, Ray, Side, intersect_triangle};
 use crate::gltf::{Mode, ObjectKind};
-
-/// three.js's `TypeError` message when a group's material is missing.
-pub const MISSING_GROUP_MATERIAL: &str = "Cannot read properties of undefined (reading 'side')";
 
 fn sub(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -432,34 +428,13 @@ impl Facing {
     };
 }
 
-/// A mesh's `material`: one material or an array (slots).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Materials {
-    Single(Facing),
-    Slots(Vec<Facing>),
-}
-
-impl Materials {
-    /// `pick`'s filter: every material at opacity ≤ 0.
-    fn invisible(&self) -> bool {
-        match self {
-            Materials::Single(f) => f.opacity <= 0.0,
-            Materials::Slots(list) => list.iter().all(|f| f.opacity <= 0.0),
-        }
-    }
-}
-
 /// Triangle geometry prepared for raycasts: positions, the draw range's
-/// triangles and each group's, their BVHs, and the bounding volumes.
+/// triangles and their BVH, and the bounding volumes.
 #[derive(Debug)]
 pub struct TriangleMesh {
     positions: Vec<Vec3>,
-    /// The draw range (one material).
+    /// The draw range.
     whole: (Vec<[u32; 3]>, Bvh),
-    /// Every group's triangles, with their group index (array materials).
-    grouped: (Vec<[u32; 3]>, Vec<u32>, Bvh),
-    /// `(material_index, non-empty)` per group.
-    groups: Vec<(u32, bool)>,
     /// `geometry.boundingSphere`.
     pub sphere: (Vec3, f64),
     /// `geometry.boundingBox`.
@@ -497,21 +472,6 @@ impl TriangleMesh {
         };
         // `drawRange` is (0, Infinity).
         let whole_tris = triangles(0, count);
-        let mut grouped_tris = Vec::new();
-        let mut owners = Vec::new();
-        let mut groups = Vec::new();
-        for (gi, group) in g.groups.iter().enumerate() {
-            let start = group.start as usize;
-            let end = count.min(group.start as usize + group.count as usize);
-            let t = if start < end {
-                triangles(start, end)
-            } else {
-                Vec::new()
-            };
-            groups.push((group.material_index, start < end));
-            owners.extend(std::iter::repeat_n(gi as u32, t.len()));
-            grouped_tris.extend(t);
-        }
         let safe = |tris: &[[u32; 3]]| -> Vec<[u32; 3]> {
             // Out-of-range indices read `undefined` in three.js (NaN
             // positions that never hit): leave them out of the BVH.
@@ -529,7 +489,6 @@ impl TriangleMesh {
                 .collect()
         };
         let whole_safe = safe(&whole_tris);
-        let grouped_safe = safe(&grouped_tris);
         let mut bbox = Box3::EMPTY;
         for p in &positions {
             bbox.expand(*p);
@@ -551,12 +510,6 @@ impl TriangleMesh {
         };
         TriangleMesh {
             whole: (whole_safe.clone(), Bvh::build(&positions, &whole_safe)),
-            grouped: (
-                grouped_safe.clone(),
-                owners,
-                Bvh::build(&positions, &grouped_safe),
-            ),
-            groups,
             positions,
             sphere,
             bbox,
@@ -564,54 +517,32 @@ impl TriangleMesh {
     }
 
     /// `Mesh.raycast` with `matrixWorld = world`: the closest hit's world
-    /// distance, or three.js's `TypeError` for a group without a material.
-    fn raycast(&self, world: &Mat4, materials: &Materials, ray: &Ray) -> Result<Option<f64>, ()> {
-        Ok(self.raycast_point(world, materials, ray)?.map(|(d, _)| d))
+    /// distance.
+    fn raycast(&self, world: &Mat4, facing: Facing, ray: &Ray) -> Option<f64> {
+        self.raycast_point(world, facing, ray).map(|(d, _)| d)
     }
 
     /// [`TriangleMesh::raycast`] with the hit's world point
     /// (`intersection.point`: the local intersection through `matrixWorld`).
-    fn raycast_point(
-        &self,
-        world: &Mat4,
-        materials: &Materials,
-        ray: &Ray,
-    ) -> Result<Option<(f64, Vec3)>, ()> {
+    fn raycast_point(&self, world: &Mat4, facing: Facing, ray: &Ray) -> Option<(f64, Vec3)> {
         let center = math::apply(world, self.sphere.0);
         let radius = self.sphere.1 * math::max_scale_on_axis(world);
         if !reaches_sphere(ray, center, radius) {
-            return Ok(None);
+            return None;
         }
         let local = ray.apply(&math::invert(world));
         if !intersects_box(&local, &self.bbox) {
-            return Ok(None);
+            return None;
         }
         let p = &self.positions;
-        let found = match materials {
-            Materials::Single(f) => {
-                let (tris, bvh) = &self.whole;
-                bvh.closest(&local, |t| triangle(&local, p, tris[t as usize], f.side))
-            }
-            Materials::Slots(list) => {
-                if self
-                    .groups
-                    .iter()
-                    .any(|(m, nonempty)| *nonempty && list.get(*m as usize).is_none())
-                {
-                    return Err(());
-                }
-                let (tris, owners, bvh) = &self.grouped;
-                bvh.closest(&local, |t| {
-                    let group = self.groups[owners[t as usize] as usize].0;
-                    let side = list[group as usize].side;
-                    triangle(&local, p, tris[t as usize], side)
-                })
-            }
-        };
-        Ok(found.map(|(t, _)| {
+        let (tris, bvh) = &self.whole;
+        let found = bvh.closest(&local, |t| {
+            triangle(&local, p, tris[t as usize], facing.side)
+        });
+        found.map(|(t, _)| {
             let point = math::apply(world, local.at(t));
             (length(sub(point, ray.origin)), point)
-        }))
+        })
     }
 }
 
@@ -628,19 +559,17 @@ fn triangle(r: &Ray, p: &[Vec3], t: [u32; 3], side: Side) -> Option<f64> {
 /// `sync`'s material rule over an imported model's meshes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelMaterials {
-    /// `useSourceMaterials` without slots: the loader's materials.
+    /// `useSourceMaterials`: the loader's materials.
     Source,
     /// The object's material on every mesh (points and lines keep theirs).
     Single(Facing),
-    /// Slots: an array material on meshes without groups (no hits).
-    Slots(Vec<Facing>),
 }
 
 /// A placed object's geometry.
 pub enum Shape {
     Mesh {
         mesh: Arc<TriangleMesh>,
-        materials: Materials,
+        facing: Facing,
     },
     Model {
         picker: Arc<Picker>,
@@ -659,13 +588,6 @@ pub struct Object {
     /// `matrixWorld` (for a model, the layer matrix the asset root sits under).
     pub world: Mat4,
     pub shape: Shape,
-}
-
-/// Why a question has no answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryError {
-    /// three.js throws `TypeError` (`MISSING_GROUP_MATERIAL`).
-    MissingGroupMaterial,
 }
 
 /// A runtime's objects.
@@ -692,15 +614,12 @@ impl Scene {
 
     /// The closest hit of one object that `pick`'s per-hit filter accepts
     /// (the object's visible chain is checked by the caller).
-    fn object_hit(o: &Object, ray: &Ray) -> Result<Option<f64>, QueryError> {
+    fn object_hit(o: &Object, ray: &Ray) -> Option<f64> {
         match &o.shape {
-            Shape::Light => Ok(None),
-            Shape::Mesh { mesh, materials } => {
-                let d = mesh
-                    .raycast(&o.world, materials, ray)
-                    .map_err(|()| QueryError::MissingGroupMaterial)?;
-                Ok(d.filter(|_| !materials.invisible()))
-            }
+            Shape::Light => None,
+            Shape::Mesh { mesh, facing } => mesh
+                .raycast(&o.world, *facing, ray)
+                .filter(|_| facing.opacity > 0.0),
             Shape::Model {
                 picker,
                 posed,
@@ -711,24 +630,15 @@ impl Scene {
                     ObjectKind::Drawable(d) => model.geometries[d.geometry].mode == Mode::Triangles,
                     _ => false,
                 };
-                let facing = |i: usize| -> Option<Facing> {
-                    if !is_mesh(i) {
-                        return Some(Scene::model_facing(model, i));
-                    }
-                    match materials {
-                        ModelMaterials::Source => Some(Scene::model_facing(model, i)),
-                        ModelMaterials::Single(f) => Some(*f),
-                        ModelMaterials::Slots(_) => None,
-                    }
+                let facing = |i: usize| match materials {
+                    ModelMaterials::Single(f) if is_mesh(i) => *f,
+                    _ => Scene::model_facing(model, i),
                 };
-                let side = |i: usize| facing(i).map_or(Side::Front, |f| f.side);
-                let skip = |i: usize| match facing(i) {
-                    None => true,
-                    Some(f) => f.opacity <= 0.0,
-                };
-                Ok(picker
+                let side = |i: usize| facing(i).side;
+                let skip = |i: usize| facing(i).opacity <= 0.0;
+                picker
                     .pick_as_runtime(posed, ray, 0.0, f64::INFINITY, &side, &skip)
-                    .map(|h| h.distance))
+                    .map(|h| h.distance)
             }
         }
     }
@@ -737,40 +647,20 @@ impl Scene {
     /// along the camera ray through `(x, y)` in normalized device
     /// coordinates, among `ids` when given. The caller supplies objects in
     /// the runtime Map's insertion order so exact ties keep its first hit.
-    pub fn pick(
-        &self,
-        camera: &Camera,
-        x: f64,
-        y: f64,
-        ids: Option<&[&str]>,
-    ) -> Result<Option<&str>, QueryError> {
+    pub fn pick(&self, camera: &Camera, x: f64, y: f64, ids: Option<&[&str]>) -> Option<&str> {
         let ray = camera.ray(x, y);
         let mut best: Option<(f64, &str)> = None;
         for o in &self.objects {
-            let wanted = o.visible && ids.is_none_or(|ids| ids.contains(&o.id.as_str()));
-            // Every object is raycast (three.js raycasts before filtering),
-            // so a missing group material throws whatever the filter says.
-            let can_throw = matches!(
-                &o.shape,
-                Shape::Mesh {
-                    materials: Materials::Slots(_),
-                    ..
-                }
-            );
-            if !wanted && !can_throw {
+            if !o.visible || ids.is_some_and(|ids| !ids.contains(&o.id.as_str())) {
                 continue;
             }
-            let hit = Scene::object_hit(o, &ray)?;
-            if !wanted {
-                continue;
-            }
-            if let Some(d) = hit
+            if let Some(d) = Scene::object_hit(o, &ray)
                 && best.is_none_or(|(b, _)| d < b)
             {
                 best = Some((d, o.id.as_str()));
             }
         }
-        Ok(best.map(|(_, id)| id))
+        best.map(|(_, id)| id)
     }
 
     /// `placeCursor`'s surface point: `new Raycaster(ray.origin,
@@ -782,7 +672,7 @@ impl Scene {
     /// and lines are hit by the raycaster but are not meshes, so they never
     /// answer. Equal distances keep the first object in runtime insertion
     /// order (the sort is stable).
-    pub fn cursor_hit(&self, ray: &Ray) -> Result<Option<Vec3>, QueryError> {
+    pub fn cursor_hit(&self, ray: &Ray) -> Option<Vec3> {
         let mut best: Option<(f64, Vec3)> = None;
         let mut consider = |d: f64, p: Vec3| {
             // `Raycaster` near 0, far Infinity.
@@ -796,14 +686,9 @@ impl Scene {
         for o in &self.objects {
             match &o.shape {
                 Shape::Light => {}
-                Shape::Mesh { mesh, materials } => {
-                    // Raycast first: a missing group material throws even
-                    // for a hidden mesh, as three.js raycasts before `find`.
-                    let hit = mesh
-                        .raycast_point(&o.world, materials, ray)
-                        .map_err(|()| QueryError::MissingGroupMaterial)?;
-                    if let Some((d, p)) = hit
-                        && o.visible
+                Shape::Mesh { mesh, facing } => {
+                    if o.visible
+                        && let Some((d, p)) = mesh.raycast_point(&o.world, *facing, ray)
                     {
                         consider(d, p);
                     }
@@ -820,16 +705,11 @@ impl Scene {
                         }
                         _ => false,
                     };
-                    let facing = |i: usize| -> Option<Facing> {
-                        match materials {
-                            ModelMaterials::Source => Some(Scene::model_facing(model, i)),
-                            ModelMaterials::Single(f) => Some(*f),
-                            // An array material on meshes without groups: no hits.
-                            ModelMaterials::Slots(_) => None,
-                        }
+                    let side = |i: usize| match materials {
+                        ModelMaterials::Source => Scene::model_facing(model, i).side,
+                        ModelMaterials::Single(f) => f.side,
                     };
-                    let side = |i: usize| facing(i).map_or(Side::Front, |f| f.side);
-                    let skip = |i: usize| !is_mesh(i) || facing(i).is_none();
+                    let skip = |i: usize| !is_mesh(i);
                     if let Some(h) =
                         picker.pick_as_runtime(posed, ray, 0.0, f64::INFINITY, &side, &skip)
                     {
@@ -838,7 +718,7 @@ impl Scene {
                 }
             }
         }
-        Ok(best.map(|(_, p)| p))
+        best.map(|(_, p)| p)
     }
 
     /// `runtime.worldBounds(ids)`: the union of the visible meshes' geometry
@@ -991,7 +871,7 @@ mod tests {
         )
     }
 
-    fn object(id: &str, mesh: Arc<TriangleMesh>, x: f64, z: f64, materials: Materials) -> Object {
+    fn object(id: &str, mesh: Arc<TriangleMesh>, x: f64, z: f64, facing: Facing) -> Object {
         let mut world = math::IDENTITY;
         world[12] = x;
         world[14] = z;
@@ -999,7 +879,7 @@ mod tests {
             id: id.into(),
             visible: true,
             world,
-            shape: Shape::Mesh { mesh, materials },
+            shape: Shape::Mesh { mesh, facing },
         }
     }
 
@@ -1012,21 +892,21 @@ mod tests {
                     primitive("box"),
                     0.0,
                     -2.0,
-                    Materials::Single(Facing::DEFAULT),
+                    Facing::DEFAULT,
                 ),
                 object(
                     "front",
                     primitive("sphere"),
                     0.0,
                     0.0,
-                    Materials::Single(Facing::DEFAULT),
+                    Facing::DEFAULT,
                 ),
             ],
         };
         let c = camera();
-        assert_eq!(scene.pick(&c, 0.0, 0.0, None), Ok(Some("front")));
-        assert_eq!(scene.pick(&c, 0.0, 0.0, Some(&["back"])), Ok(Some("back")));
-        assert_eq!(scene.pick(&c, 0.9, 0.9, None), Ok(None));
+        assert_eq!(scene.pick(&c, 0.0, 0.0, None), Some("front"));
+        assert_eq!(scene.pick(&c, 0.0, 0.0, Some(&["back"])), Some("back"));
+        assert_eq!(scene.pick(&c, 0.9, 0.9, None), None);
     }
 
     #[test]
@@ -1036,7 +916,7 @@ mod tests {
             primitive("box"),
             0.0,
             0.0,
-            Materials::Single(Facing::DEFAULT),
+            Facing::DEFAULT,
         );
         hidden.visible = false;
         let clear = object(
@@ -1044,45 +924,22 @@ mod tests {
             primitive("box"),
             0.0,
             -2.0,
-            Materials::Single(Facing {
+            Facing {
                 side: Side::Front,
                 opacity: 0.0,
-            }),
+            },
         );
         let behind = object(
             "c",
             primitive("box"),
             0.0,
             -4.0,
-            Materials::Single(Facing::DEFAULT),
+            Facing::DEFAULT,
         );
         let scene = Scene {
             objects: vec![hidden, clear, behind],
         };
-        assert_eq!(scene.pick(&camera(), 0.0, 0.0, None), Ok(Some("c")));
-    }
-
-    #[test]
-    fn slots_follow_three_groups() {
-        // A box has 6 groups: one slot leaves 5 without a material (three.js
-        // throws); a sphere has none (an array material finds nothing).
-        let one = Materials::Slots(vec![Facing::DEFAULT]);
-        let scene = Scene {
-            objects: vec![object("box", primitive("box"), 0.0, 0.0, one.clone())],
-        };
-        assert_eq!(
-            scene.pick(&camera(), 0.0, 0.0, None),
-            Err(QueryError::MissingGroupMaterial)
-        );
-        let scene = Scene {
-            objects: vec![object("s", primitive("sphere"), 0.0, 0.0, one)],
-        };
-        assert_eq!(scene.pick(&camera(), 0.0, 0.0, None), Ok(None));
-        let six = Materials::Slots(vec![Facing::DEFAULT; 6]);
-        let scene = Scene {
-            objects: vec![object("box", primitive("box"), 0.0, 0.0, six)],
-        };
-        assert_eq!(scene.pick(&camera(), 0.0, 0.0, None), Ok(Some("box")));
+        assert_eq!(scene.pick(&camera(), 0.0, 0.0, None), Some("c"));
     }
 
     #[test]
@@ -1108,11 +965,11 @@ mod tests {
                     plane.clone(),
                     0.0,
                     0.0,
-                    Materials::Single(Facing { side, opacity: 1.0 }),
+                    Facing { side, opacity: 1.0 },
                 )],
             };
             assert_eq!(
-                scene.pick(&c, 0.0, 0.0, None).unwrap().is_some(),
+                scene.pick(&c, 0.0, 0.0, None).is_some(),
                 hit,
                 "{side:?}"
             );
@@ -1127,7 +984,7 @@ mod tests {
                 primitive("box"),
                 0.0,
                 0.0,
-                Materials::Single(Facing::DEFAULT),
+                Facing::DEFAULT,
             )],
         };
         let r = scene
