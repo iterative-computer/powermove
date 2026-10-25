@@ -265,7 +265,7 @@ fn direct_fractional_coverage(renderer: &mut pm_render::Renderer, failures: &mut
     let mut auto = TextGpu::new(device);
     let mut direct = TextGpu::new(device);
     direct.set_coverage(Coverage::Direct);
-    let mut render = |painter: &mut TextGpu, plan: &pm_render::text::TextPlan| {
+    let render = |painter: &mut TextGpu, plan: &pm_render::text::TextPlan| {
         let mut pool = pm_gpu::TargetPool::new();
         let mut held = Vec::new();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

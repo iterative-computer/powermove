@@ -5,7 +5,7 @@
 //! compositing output enters this calculation. `pm-reference` integrates
 //! each outline at 32 cells per pixel side and composites in f64.
 
-use kurbo::{Affine, Point, Shape, StrokeOpts};
+use kurbo::{Affine, Point, StrokeOpts};
 use pm_protocol::color::WorkingEncoding;
 use pm_reference::compare::{Class, classify};
 use pm_reference::composite::{Operator, porter_duff};

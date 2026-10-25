@@ -44,7 +44,9 @@ pub fn png_rgba(px: &[u8], unpremultiply: bool) -> Vec<u8> {
 
 #[path = "main_thread_fonts.rs"]
 mod main_thread_fonts;
+// Shared by every test crate; only those that paint text name it.
 #[cfg(target_os = "macos")]
+#[allow(unused_imports)]
 pub use main_thread_fonts::MainThreadFonts;
 
 /// One face of a font file as its own font (collections split).

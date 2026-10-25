@@ -22,7 +22,7 @@ fn main() {
         leading: Some(1.15),
         ..Default::default()
     };
-    let mut ink = |measure: &mut CompatMeasure<CoreTextRegistry>, text: &str, size: f64| {
+    let ink = |measure: &mut CompatMeasure<CoreTextRegistry>, text: &str, size: f64| {
         let [line] = &measure.measure_lines(&content(text, size))[..] else {
             panic!("one line");
         };
