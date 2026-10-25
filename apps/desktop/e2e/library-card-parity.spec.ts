@@ -150,6 +150,9 @@ async function referenceCard(page: Page): Promise<Buffer> {
         -.00327 * x - .07276 * y + 1.07602 * z].map(v => Math.max(0, Math.min(1, v)));
     };
     const encode = (v: number) => 255 * (v <= .0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - .055);
+    const target = [...document.querySelectorAll<HTMLCanvasElement>('.library-card[data-panel-id="viewer"] .library-clone canvas')]
+      .find(canvas => !canvas.hidden && canvas.width === width && canvas.height === height);
+    if (!target) throw new Error('No cloned composition canvas at the pinned backing size');
     for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
       const sum = [0, 0, 0, 0];
       for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) {
@@ -161,12 +164,12 @@ async function referenceCard(page: Page): Promise<Buffer> {
       const coverage = sum[3] / (k * k);
       const color = coverage > 0 ? aces(sum.slice(0, 3).map(v => v / sum[3])) : [0, 0, 0];
       const at = (y * width + x) * 4;
-      for (let c = 0; c < 3; c++) out.data[at + c] = Math.round(encode(color[c]!) * coverage);
+      for (let c = 0; c < 3; c++) {
+        const code = encode(color[c]!) * coverage;
+        out.data[at + c] = Math.round(code);
+      }
       out.data[at + 3] = 255;
     }
-    const target = [...document.querySelectorAll<HTMLCanvasElement>('.library-card[data-panel-id="viewer"] .library-clone canvas')]
-      .find(canvas => !canvas.hidden && canvas.width === width && canvas.height === height);
-    if (!target) throw new Error('No cloned composition canvas at the pinned backing size');
     target.getContext('2d')!.putImageData(out, 0, 0);
   });
   return freshCapture(page.locator('.library-card[data-panel-id="viewer"]'));
@@ -283,46 +286,17 @@ const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
     .flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene })))),
 ];
 
-async function geometry(page: Page) {
-  return page.locator('.library-card[data-panel-id="viewer"]').evaluate(card => {
-    const box = (element: Element) => {
-      const { x, y, width, height } = element.getBoundingClientRect();
-      const css = getComputedStyle(element);
-      return { x, y, width, height, transform: css.transform, mask: css.maskImage, opacity: css.opacity, background: css.backgroundColor };
-    };
-    return [...card.querySelectorAll('.library-live,.library-live-frame,.library-clone,canvas')].map(element => ({
-      id: (element as HTMLElement).dataset.librarySourceId, className: element.className, box: box(element),
-      ...(element instanceof HTMLCanvasElement ? { backing: [element.width, element.height] } : {}),
-    }));
-  });
-}
-
-async function diagnosticCanvas(page: Page, testInfo: { outputPath(name: string): string }, name: string) {
-  if (!process.env.PM_CARD_RAW_DUMP) return;
-  const png = await page.locator('.library-card[data-panel-id="viewer"] .library-clone canvas')
-    .first()
-    .evaluate(canvas => (canvas as HTMLCanvasElement).toDataURL('image/png'));
-  await writeFile(testInfo.outputPath(name), Buffer.from(png.split(',')[1]!, 'base64'));
-}
-
 for (const { theme, variant, scene } of cases) {
   test(`Library card with the engine on is today's card: ${scene} in ${theme}, ${variant.name}`, async ({}, testInfo) => {
     test.setTimeout(120_000);
-    const today = await card('0', theme, variant, scene, async (page, png) => {
-      await testInfo.attach('card geometry, engine off', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
-      await diagnosticCanvas(page, testInfo, 'raw-canvas-engine-off.png');
-      return png;
-    });
+    const today = await card('0', theme, variant, scene);
     await writeFile(testInfo.outputPath('card-engine-off.png'), today);
     await testInfo.attach('Library card, engine off', { path: testInfo.outputPath('card-engine-off.png'), contentType: 'image/png' });
     const result = await card('1', theme, variant, scene, async (page, engine) => {
-      await testInfo.attach('card geometry, engine on', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
-      await diagnosticCanvas(page, testInfo, 'raw-canvas-engine-on.png');
       await writeFile(testInfo.outputPath('card-engine-on.png'), engine);
       await testInfo.attach('Library card, engine on', { path: testInfo.outputPath('card-engine-on.png'), contentType: 'image/png' });
       if (scene === '2d' || scene === '2d-fit') return compare(page, today, engine);
       const reference = await referenceCard(page);
-      await diagnosticCanvas(page, testInfo, 'raw-canvas-reference.png');
       await writeFile(testInfo.outputPath('card-reference.png'), reference);
       await testInfo.attach('Library card, supersampled reference', { path: testInfo.outputPath('card-reference.png'), contentType: 'image/png' });
       return compareToReference(page, today, engine, reference);
