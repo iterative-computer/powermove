@@ -45,6 +45,8 @@ export type CanvasBindingOptions = {
   composition: () => { w: number; h: number } | null;
   /** The preview quality (today's `PM.quality`: 1, 0.5, 0.25). */
   quality: () => number;
+  /** The editor camera and shading of a pre-engine viewer. */
+  view?: () => Partial<ViewParams>;
   /** Makes the presentation (`new ViewerPresentation(…)`). */
   present: (options: { service: EngineViewerService; stage: HTMLElement; before: Element | null; role: 'binding' }) => BoundPresentation;
   /** Calls `changed` when `canvas` may have left the document; returns the
@@ -104,6 +106,20 @@ export class EngineCanvasBinding {
     return this.presentation !== null;
   }
 
+  /** The existing presenter, shared with captures; never opens another channel. */
+  get viewerPresentation(): BoundPresentation | null {
+    return this.presentation;
+  }
+
+  private lastSize: [number | undefined, number | undefined, { x: number; y: number; width: number; height: number } | null | undefined] = [undefined, undefined, undefined];
+  refresh(): void {
+    // A built-in viewer can leave its canvas behind after unloading, even
+    // after resizing it. View changes update an existing presenter only;
+    // a caller's own resize is what starts a new one.
+    if (!this.presentation) return;
+    this.resize(...this.lastSize);
+  }
+
   /** Whether a viewer of its own presents over `canvas` (the built-in one),
    *  or is mounted to (it presents once the engine connection is up). */
   private owned(canvas: HTMLCanvasElement): boolean {
@@ -150,6 +166,7 @@ export class EngineCanvasBinding {
    *  crop are today's compositor's canvas: the engine renders at it and
    *  scales it into the canvas's box as the browser does (decision V1). */
   resize(width?: number, height?: number, viewport?: { x: number; y: number; width: number; height: number } | null): void {
+    this.lastSize = [width, height, viewport ? { ...viewport } : viewport];
     const canvas = this.canvas;
     if (!canvas) return;
     if (!canvas.isConnected) {
@@ -194,7 +211,7 @@ export class EngineCanvasBinding {
         { x: box.left - parent.left - (viewport?.x ?? 0) * zoomOfBox, y: box.top - parent.top - (viewport?.y ?? 0) * zoomOfBox }, zoomOfBox)
       : null;
     this.presentation.update(
-      { zoom: zoom > 0 && Number.isFinite(zoom) ? zoom : 1, pan, resolution: resolution(this.options.quality()), media: 'automatic', playEveryFrame: false, ...(todays ? { canvas: todays } : {}) },
+      { ...this.options.view?.(), zoom: zoom > 0 && Number.isFinite(zoom) ? zoom : 1, pan, resolution: resolution(this.options.quality()), media: 'automatic', playEveryFrame: false, ...(todays ? { canvas: todays } : {}) },
       { width: parent.width, height: parent.height }
     );
   }
@@ -216,5 +233,6 @@ export class EngineCanvasBinding {
     this.drop();
     this.stopWatching();
     this.canvas = null;
+    this.lastSize = [undefined, undefined, undefined];
   }
 }

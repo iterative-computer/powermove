@@ -7,7 +7,7 @@ alpha, SDR color bars, model import correctness), amendments 2, 6, 13,
 appendix D ("Interpret Footage…"), and spike S6.
 
 Code: `engine/crates/pm-media` (probe, index, readers, decode service,
-interpretation), `pm-color::tonemap` (BT.2446 Method A), `pm-render`
+interpretation), `pm-color::tonemap` (BT.2390 EETF), `pm-render`
 (`footage.rs`, `stills.rs`, `media.rs`, the source pass), `pm-geom3d`
 (`gltf`, `obj`), `pm-protocol::media` (`probeMedia` / `mediaFacts`), and the
 renderer's Interpret Footage sheet (`apps/desktop/src/renderer/src/media/`).
@@ -220,11 +220,11 @@ What the renderer does with each kind of source. Several are drawn only for
 assets with `interpret` until they are compared with today's viewer (see
 Routing below).
 
-- **HDR in Standard projects.** PQ and HLG sources tone map with BT.2446
-  Method A (`pm_color::tonemap`, the WGSL `pm_hdr_to_sdr` in the source
-  pass), then BT.2020 to Rec.709 in linear light. Through the renderer the
-  result equals the f64 oracle applied to the same decode within 1e-3 (f32
-  cancellation near black). Dolby Vision draws its base layer; profile 5
+- **HDR in Standard projects.** PQ and HLG sources decode per BT.2100 and
+  tone map with the BT.2390 EETF (`pm_color::tonemap`, the WGSL
+  `pm_hdr_to_sdr` in the source pass; owner decision HDR-1), then convert
+  to Rec.709 in linear light. Through the renderer the result equals the
+  f64 oracle applied to the same decode within 1e-3. Dolby Vision draws its base layer; profile 5
   (no base layer other decoders show) stays unsupported.
 - **Interlaced sources** deinterlace with bwdif on normalized Y′CbCr before
   chroma upsampling, from the neighboring fields: at field rate when the
@@ -259,7 +259,7 @@ match and only what the renderer cannot draw at all is refused.
 | Source | Without `interpret` | With `interpret` |
 |---|---|---|
 | Progressive, unrotated, square-pixel Rec.709 or BT.601 video (VFR included) | drawn | drawn |
-| HDR video (PQ, HLG, Dolby Vision with a base layer) | legacy: today's Chromium handling is not measured (`corpus.md`, "Not covered yet"), so Method A's difference has no appendix A item or corpus case (DECISION) | drawn, tone mapped with Method A |
+| HDR video (PQ, HLG, Dolby Vision with a base layer) | the compared classes are drawn with the BT.2390 EETF; others legacy | drawn, tone mapped with the BT.2390 EETF |
 | Interlaced video | legacy (today's viewer shows the woven frame; bwdif is a look change) | drawn, bwdif at field or frame rate |
 | Quarter-turn rotation, non-square pixels, a cropping clean aperture | legacy (exact against FFmpeg, not compared with today's viewer) | drawn |
 | Wide-gamut SDR video (Display P3, BT.2020) | legacy (today's viewer clips at upload: the open decision of P3 stills) | drawn, converted in linear light |
@@ -289,12 +289,10 @@ field table, so a new native-only field must be classified first.
 
 ### Open decisions
 
-- **HDR in Standard projects.** Method A is implemented and equals the f64
-  oracle through the renderer (HDR10 6.78e-4, HLG 1.34e-5), but section 9
-  makes the change of look conditional on a measurement of today's Chromium
-  handling, an appendix A item, and a corpus case, and none exists yet
-  (`corpus.md`, "Not covered yet"). Until then iPhone HLG and HDR10 clips
-  in existing projects keep today's look through the legacy renderer.
+- **HDR in Standard projects.** HDR footage the video gate covers
+  ([video-parity.md](video-parity.md)) is drawn with the BT.2390 EETF;
+  other HDR (mastering metadata, Dolby Vision, other codecs) keeps the
+  legacy renderer unless interpreted.
 - **Interlaced, rotated, non-square-pixel, cropping-clean-aperture
   video.** Exact against FFmpeg (bwdif within 2.5e-7, rotations and crops
   bit-exact), not compared with today's viewer, which shows interlaced

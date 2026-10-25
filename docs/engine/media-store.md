@@ -131,8 +131,14 @@ MiB/s (three 256 MiB runs).
   the next open. A restored asset with `rendition: true` keeps its
   original as its bytes in either mode (the in-memory asset reports
   `rendition: true`, `playbackProxy: false`), so a later Save embeds the
-  original, never the rendition. The web export (`player/export-web.ts`) takes the rendition, or the
-  bytes the live asset shows, never an original a browser cannot play.
+  original, never the rendition. The web export (`player/export-web.ts`) first
+  takes a kept rendition, then the browser bytes frozen before its first await
+  when their source identity matches. With the engine on, a missing rendition
+  is converted by reference through the existing host converter; bytes cross
+  IPC only if main reports the original missing. Generated copies are cached
+  by original hash. Engine-off exports keep their existing browser-copy path
+  and error, and write no rendition. A job-engine rendition contract is still
+  required; this is the existing host conversion path.
   Animated images are still stored as their conversion (an image
   sequence). Assets imported earlier, whose stored bytes are the
   conversion, show "Using a converted copy · Relink to the original for

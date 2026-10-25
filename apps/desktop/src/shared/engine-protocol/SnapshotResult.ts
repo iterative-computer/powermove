@@ -18,7 +18,7 @@ export type SnapshotResult = {
  */
 revision: Revision, 
 /**
- * The request's `view_seq`, echoed.
+ * The selected viewer's `view_seq`, or a legacy request's echoed `view_seq`.
  */
 viewSeq: Seq | null, width: number, height: number, pixels: SnapshotPixels, payload: PixelPayload, 
 /**

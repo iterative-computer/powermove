@@ -33,6 +33,5 @@ symphonia-bundle-mp3 = "=0.6.0"
 test-hooks = []
 
 [dev-dependencies]
-proptest.workspace = true
 pm-audio = { path = ".", features = ["test-hooks"] }
 sha2 = { workspace = true, features = ["std"] }

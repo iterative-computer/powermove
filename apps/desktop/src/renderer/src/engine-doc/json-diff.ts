@@ -56,25 +56,25 @@ function elements(arr: readonly any[]): any[] {
  * Operations turning `before` (plain JSON) into the JSON form of the live
  * value `after`, at `path`.
  */
-export function diffJsonOps(before: any, after: any, path: readonly PathPart[] = [], out: PatchOp[] = []): PatchOp[] {
+export function diffJsonOps(before: any, after: any, path: readonly PathPart[] = [], out: PatchOp[] = [], memo?: JsonMemo): PatchOp[] {
   const value = jsonValue(after, path.length ? String(path[path.length - 1]) : '');
   if (value === ABSENT) {
     if (before !== undefined) out.push({ path: path.slice(), exists: true });
     return out;
   }
-  walk(before, value, path.slice(), out);
+  walk(before, value, path.slice(), out, memo);
   return out;
 }
 
-function walk(before: any, after: any, path: PathPart[], out: PatchOp[]): void {
+function walk(before: any, after: any, path: PathPart[], out: PatchOp[], memo?: JsonMemo): void {
   if (Object.is(before, after)) return;
-  if (Array.isArray(before) && Array.isArray(after)) return walkArrays(before, elements(after), path, out);
+  if (Array.isArray(before) && Array.isArray(after)) return walkArrays(before, elements(after), path, out, memo);
   if (isRecord(before) && isRecord(after)) {
     let segments: [string, number, number][] | undefined;
     const member = (key: string, inBefore: boolean, value: any) => {
       const start = out.length;
       path.push(key);
-      if (inBefore && value !== ABSENT) walk(before[key], value, path, out);
+      if (inBefore && value !== ABSENT) walk(before[key], value, path, out, memo);
       else if (value !== ABSENT) out.push({ path: path.slice(), exists: true, value: clone(value) });
       else out.push({ path: path.slice(), exists: false });
       path.pop();
@@ -240,16 +240,17 @@ function slowSame(before: any, after: any, location: PathPart, fast: boolean, ar
   return count === Object.keys(before).length;
 }
 
-function walkArrays(before: readonly any[], after: readonly any[], path: PathPart[], out: PatchOp[]): void {
+function walkArrays(before: readonly any[], after: readonly any[], path: PathPart[], out: PatchOp[], memo?: JsonMemo): void {
+  const same = memo ? (b: any, a: any) => memo.same(b, a) : sameJson;
   const identityOrderChanged = before.length === after.length && before.some((item, index) => {
     const a = idOf(item), b = idOf(after[index]);
     return a !== undefined && b !== undefined && a !== b;
   });
   if (before.length === after.length && !identityOrderChanged) {
     for (let index = 0; index < before.length; index++) {
-      if (sameJson(before[index], after[index])) continue;
+      if (same(before[index], after[index])) continue;
       path.push(index);
-      walk(before[index], after[index], path, out);
+      walk(before[index], after[index], path, out, memo);
       path.pop();
     }
     return;
@@ -268,9 +269,112 @@ function walkArrays(before: readonly any[], after: readonly any[], path: PathPar
   });
   after.forEach((item, index) => {
     const from = oldIndex.get(item.id);
-    if (from === undefined || sameJson(before[from], item)) return;
+    if (from === undefined || same(before[from], item)) return;
     path.push(index);
-    walk(before[from], item, path, out);
+    walk(before[from], item, path, out, memo);
     path.pop();
   });
+}
+
+/**
+ * Remembers, per element of the shadow's id-keyed arrays, the JSON-visible
+ * content of the live value it was last found equal to (`sameJson`), as one
+ * flat list: keys and primitive values in the order `for…in` and indices visit
+ * them, with markers for objects and arrays. While that shadow element is
+ * unchanged, a live value whose walk reproduces the list serializes to the same
+ * JSON, so it is unchanged without reading the shadow. A `touch()` without a
+ * path compares every layer of the open composition; this reads only the live
+ * side, in one pass, without keyed lookups on the shadow.
+ *
+ * The owner must call `forgetAlong` for every operation before applying it to
+ * the shadow, which mutates shadow objects in place. Anything the list cannot
+ * vouch for falls back to `sameJson`: values with a `toJSON` member, other
+ * prototypes, `NaN`, and changed prototypes (`plainPrototypes`).
+ */
+export class JsonMemo {
+  private seen = new WeakMap<object, unknown[]>();
+
+  /** `sameJson(before, after)`, remembering an equal element's content. */
+  same(before: any, after: any): boolean {
+    if (before === after) return true;
+    const plain = plainPrototypes();
+    if (plain && before !== null && typeof before === 'object') {
+      const flat = this.seen.get(before);
+      if (flat) {
+        cursor = 0;
+        if (matches(after, flat) && cursor === flat.length) return true;
+        this.seen.delete(before);
+      }
+    }
+    if (!sameJson(before, after)) return false;
+    if (plain && before !== null && typeof before === 'object') {
+      const flat: unknown[] = [];
+      if (flatten(after, flat)) this.seen.set(before, flat);
+    }
+    return true;
+  }
+
+  /** Forgets every shadow object an operation at `path` may change. */
+  forgetAlong(root: any, path: readonly PathPart[]): void {
+    let node = root;
+    for (let i = 0; ; i++) {
+      if (node === null || typeof node !== 'object') return;
+      this.seen.delete(node);
+      if (i === path.length) return;
+      node = node[path[i] as any];
+    }
+  }
+}
+
+const OBJECT_START = Symbol('object'), ARRAY_START = Symbol('array'), OBJECT_END = Symbol('end');
+
+/** The live value's JSON-visible content into `out`; false when the list cannot vouch for it. */
+function flatten(value: any, out: unknown[]): boolean {
+  const proto = Object.getPrototypeOf(value);
+  if (proto === ARRAY_PROTO && Array.isArray(value)) {
+    out.push(ARRAY_START, value.length);
+    for (let i = 0; i < value.length; i++) {
+      const v = value[i];
+      if (v !== null && typeof v === 'object') { if (!flatten(v, out)) return false; }
+      else out.push(v);
+    }
+    return true;
+  }
+  if (proto !== OBJECT_PROTO && proto !== null) return false;
+  out.push(OBJECT_START);
+  for (const key in value) {
+    if (key === 'toJSON') return false;
+    const v = value[key];
+    out.push(key);
+    if (v !== null && typeof v === 'object') { if (!flatten(v, out)) return false; }
+    else out.push(v);
+  }
+  out.push(OBJECT_END);
+  return true;
+}
+
+/** Read position in the list `matches` walks (one walk at a time: synchronous). */
+let cursor = 0;
+
+/** Whether the live value walks exactly as the remembered list from `cursor`. */
+function matches(value: any, flat: readonly unknown[]): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value);
+  if (proto === ARRAY_PROTO && Array.isArray(value)) {
+    if (flat[cursor++] !== ARRAY_START || flat[cursor++] !== value.length) return false;
+    for (let i = 0; i < value.length; i++) {
+      const v = value[i];
+      if (v !== null && typeof v === 'object') { if (!matches(v, flat)) return false; }
+      else if (flat[cursor++] !== v) return false;
+    }
+    return true;
+  }
+  if ((proto !== OBJECT_PROTO && proto !== null) || flat[cursor++] !== OBJECT_START) return false;
+  for (const key in value) {
+    if (flat[cursor++] !== key) return false;
+    const v = value[key];
+    if (v !== null && typeof v === 'object') { if (!matches(v, flat)) return false; }
+    else if (flat[cursor++] !== v) return false;
+  }
+  return flat[cursor++] === OBJECT_END;
 }

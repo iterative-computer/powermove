@@ -2,7 +2,7 @@
 
 Design notes and measurements for the frame bridge (plan section 18, with
 section 26 amendments 4 and 5; contracts 2 and 3). It productionizes spike
-S1 (`docs/engine/spikes/S1.md`, `engine/spikes/s1-bridge/`). Everything runs
+S1 (`docs/engine/spikes/S1.md`). Everything runs
 behind "Use New Engine".
 
 **Status: flag-gated; the Phase 2 gate's frame-bridge rows are not all
@@ -2053,4 +2053,3 @@ Remaining:
   the canvas box in window coordinates; the engine snaps it in the stage's),
   and an edge exactly halfway between device pixels rounds away from zero
   (Rust's `f64::round`), which may differ from Blink on negative ties.
-

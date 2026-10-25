@@ -165,7 +165,14 @@ pub enum AudioMessage {
     Levels(AudioLevels),
     /// Renderer → engine: the waveform envelope of an asset of the
     /// session's document. Answered with [`AudioMessage::Peaks`].
-    PeaksWanted { asset: String },
+    PeaksWanted {
+        asset: String,
+        /// Echoed by the decoder so replaced sources and resyncs cannot
+        /// accept a prior request's envelope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        request: Option<Seq>,
+    },
     /// Engine → renderer: an asset's waveform envelope (`peakEnvelope` of
     /// today's engine: `peaks_per_second` buckets a second of the source,
     /// each the largest magnitude over every channel), or why there is none.
@@ -223,6 +230,10 @@ pub struct ChannelLevels {
 #[serde(rename_all = "camelCase")]
 pub struct AudioPeaks {
     pub asset: String,
+    /// The request generation of `PeaksWanted` (absent for older senders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub request: Option<Seq>,
     pub peaks_per_second: f64,
     /// Program seconds of the source.
     pub duration: f64,
@@ -282,7 +293,7 @@ impl Validate for AudioMessage {
                 C,
                 || "levels must be finite, non-negative, and per channel".into(),
             ),
-            AudioMessage::PeaksWanted { asset } => {
+            AudioMessage::PeaksWanted { asset, .. } => {
                 ensure(!asset.is_empty(), C, || "peaks need an asset".into())
             }
             AudioMessage::Peaks(peaks) => ensure(

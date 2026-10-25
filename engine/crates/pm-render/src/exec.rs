@@ -155,13 +155,19 @@ pub(crate) fn comp_twins(plan: &CompPlan) -> Vec<(usize, usize)> {
     fn content<'p>(c: &'p Content, out: &mut Vec<&'p CompPlan>) {
         match c {
             Content::Placed(p) => content(&p.content, out),
-            Content::Texture { source: Source::Comp(child), .. } => {
+            Content::Texture {
+                source: Source::Comp(child),
+                ..
+            } => {
                 if !child.group {
                     out.push(child);
                 }
                 walk(child, out);
             }
-            Content::Texture { source: Source::Accumulate(child), .. } => walk(child, out),
+            Content::Texture {
+                source: Source::Accumulate(child),
+                ..
+            } => walk(child, out),
             _ => {}
         }
     }
@@ -195,7 +201,7 @@ fn m3(m: &[f64; 6]) -> [[f32; 4]; 3] {
 }
 
 /// A deterministic session instance per layer (FNV-1a of its id).
-fn instance_of(layer: &str) -> u64 {
+pub(crate) fn instance_of(layer: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in layer.bytes() {
         h ^= u64::from(b);
@@ -430,7 +436,6 @@ impl Exec<'_> {
                         }
                     }
                     Source::Video {
-                        level2,
                         sequence,
                         path,
                         time,
@@ -452,8 +457,6 @@ impl Exec<'_> {
                             interpret.as_ref(),
                             *composition_rate,
                             *sequence,
-                            !*level2,
-                            false,
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());
@@ -531,18 +534,6 @@ impl Exec<'_> {
                             &compat.0,
                             self.precision,
                         ));
-                        r.encoded = true;
-                    }
-                    Source::Blender(blender) => {
-                        r.view = Some(crate::blender::gpu::upload(
-                            self.device,
-                            self.queue,
-                            &blender.surface,
-                            self.precision,
-                            blender.compatibility,
-                        ));
-                        // Premultiplied E like the native 3D output: linear
-                        // light decodes it (section 9).
                         r.encoded = true;
                     }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {

@@ -869,12 +869,8 @@ export class NativeEngine {
           return this.runHostEncode(body, session ?? 0, current);
         }
         if (body.type === 'compatFrame') {
-          // Paused Blender previews use the interactive engine. Admit only
-          // its exact-PNG map source; every other compatibility draw remains
-          // an export/job capability. The shared window ask still checks the
-          // document owner and original content hash; the request's revision
-          // is forwarded unchanged with the frozen source identity.
-          if (process !== 'job' && (body.source !== 'blenderPng' || !body.blender)) {
+          // Compatibility draws are a job engine capability.
+          if (process !== 'job') {
             return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks for this compatibility frame.'));
           }
           if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));

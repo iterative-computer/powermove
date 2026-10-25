@@ -70,4 +70,41 @@ describe('panel pop-outs', () => {
     expect(child.close).toHaveBeenCalledOnce();
     expect(apply).toHaveBeenCalledTimes(2);
   });
+
+  it('copies the theme and density, and their absence (light, default density)', () => {
+    const open = (theme: string | undefined) => {
+      document.body.replaceChildren();
+      const pool = document.createElement('div');
+      pool.id = 'pm-panel-pool';
+      const panel = document.createElement('section');
+      panel.id = 'panel-notes';
+      pool.append(panel);
+      document.body.append(pool);
+      if (theme) document.documentElement.dataset.theme = theme;
+      else delete document.documentElement.dataset.theme;
+      delete document.documentElement.dataset.density;
+      const childDocument = document.implementation.createHTMLDocument('');
+      // A child window reused for the panel may still carry an older theme.
+      childDocument.documentElement.dataset.theme = 'dark';
+      childDocument.documentElement.dataset.density = 'compact';
+      const child: Record<string, any> = { document: childDocument, closed: false, focus: vi.fn(), addEventListener: vi.fn(), close: vi.fn() };
+      vi.spyOn(window, 'open').mockReturnValue(child as Window);
+      const PM: any = {
+        PANELS: { notes: { title: 'Notes' } },
+        panelInst: { notes: { el: panel } },
+        Layout: { ws: { layout: { docks: [] } }, apply: vi.fn() },
+        WS: { current: { layout: { docks: [] } } },
+        closeMenus: vi.fn(),
+        toast: vi.fn()
+      };
+      installPanelPopouts(PM);
+      expect(PM.Popout.open('notes')).toBe(true);
+      return childDocument.documentElement;
+    };
+    const light = open(undefined);
+    expect(light.hasAttribute('data-theme')).toBe(false);
+    expect(light.hasAttribute('data-density')).toBe(false);
+    expect(open('dark').dataset.theme).toBe('dark');
+    delete document.documentElement.dataset.theme;
+  });
 });

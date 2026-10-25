@@ -541,3 +541,31 @@ describe('the engine stamp', () => {
     }
   });
 });
+
+
+it('reports media preparation before copying and advances between upload chunks', async () => {
+  const { host } = fakeHost();
+  const { legacy } = fakeLegacy({ large: new Blob([data(4 * 1024 * 1024 + 64)]) });
+  const store = createHostMediaStore({ host, legacy, enabled: true, sourcePath: () => null });
+  const progress: number[][] = [];
+  const result = await store.migrate([{ id: 'large' }], (done, total) => progress.push([done, total]));
+  expect(result.copied).toBe(1);
+  expect(progress[0]).toEqual([0, 1]);
+  expect(progress.some(([done]) => done! > 0 && done! < 1)).toBe(true);
+  expect(progress.at(-1)).toEqual([1, 1]);
+});
+
+it('remembers existing host records without opening a preparation sheet after restart', async () => {
+  const { host, keys } = fakeHost();
+  const { legacy } = fakeLegacy();
+  const original = new Blob([data(64)]);
+  const beforeRestart = createHostMediaStore({ host, legacy, enabled: true, sourcePath: () => null });
+  await beforeRestart.put('existing', original);
+  expect(keys.has('existing')).toBe(true);
+  const store = createHostMediaStore({ host, legacy, enabled: true, sourcePath: () => null });
+  const progress = vi.fn();
+  expect(store.recordFor('existing')).toBeNull();
+  expect(await store.migrate([{ id: 'existing' }], progress)).toMatchObject({ present: 1, copied: 0 });
+  expect(store.recordFor('existing')).toMatchObject({ key: 'existing', size: 64 });
+  expect(progress).not.toHaveBeenCalled();
+});

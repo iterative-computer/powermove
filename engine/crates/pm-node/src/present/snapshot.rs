@@ -20,26 +20,13 @@
 //! no `sync` or `async` job waits; one idle job per turn of the thread, so
 //! a gesture that starts is served at once.
 //!
-//! **Blender frames.** A `Frame` snapshot of a composition that renders
-//! with Blender draws Blender's surfaces (today's capture never draws
-//! native shading in their place). With `blender_wait_ms` above 0 (today's
-//! `snapshotAsync`, which runs `prepareFrame` first) the job first waits
-//! for the viewer's Blender worker to render the frame's missing surfaces
-//! ([`BlenderPrep`]); that time does not count against `wait_ms`, only
-//! against `blender_wait_ms`. With 0 (today's synchronous capture) it draws
-//! surfaces an earlier capture prepared, or fails with today's sentence.
-//!
 //! **No deadlock.** A job never waits on the renderer: one whose document
 //! has not reached the asked revision waits (bounded by its own `wait_ms`)
 //! for patches the renderer already posted; one that needs pixels only the
 //! renderer draws (the shader fallback runner, compatibility pixels) is
 //! answered `needsRenderer`, so the renderer draws them and asks again.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-
-use pm_blender::DecodedSurface;
-use pm_blender::snapshot::FrameKey;
+use std::collections::VecDeque;
 
 use pm_protocol::common::{RequestId, Revision};
 use pm_protocol::host::PortId;
@@ -63,37 +50,6 @@ pub const MAX_PENDING_BYTES: u64 = 1 << 30;
 /// The first estimate of a snapshot's cost before any was measured (µs).
 pub const FIRST_COST_US: f64 = 30_000.0;
 
-/// Times a job's Blender frame is prepared before it fails (each edit that
-/// changes the frame's snapshots while Blender renders asks again).
-pub const MAX_BLENDER_ATTEMPTS: u8 = 3;
-
-/// One prepared Blender frame: its snapshot's hash, its frame, and the
-/// surface of each layer.
-pub type PreparedFrame = ([u8; 32], FrameKey, HashMap<String, Arc<DecodedSurface>>);
-
-/// The Blender stage of a job (`SnapshotRequest::blender_wait_ms` above 0).
-#[derive(Clone)]
-pub enum BlenderPrep {
-    /// The viewer's Blender worker renders the frame's surfaces; the job
-    /// does not run, and fails with `timeout` at `until` (host µs).
-    Running { token: u64, until: i64 },
-    /// What the worker prepared. The job draws them when the frame's
-    /// snapshots still hash the same (an edit while Blender rendered asks
-    /// again).
-    Ready(Arc<Vec<PreparedFrame>>),
-}
-
-impl std::fmt::Debug for BlenderPrep {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BlenderPrep::Running { token, until } => {
-                write!(f, "Running {{ token: {token}, until: {until} }}")
-            }
-            BlenderPrep::Ready(frames) => write!(f, "Ready({} frames)", frames.len()),
-        }
-    }
-}
-
 /// One snapshot waiting on the render thread.
 #[derive(Debug, Clone)]
 pub struct SnapshotJob {
@@ -112,12 +68,6 @@ pub struct SnapshotJob {
     /// (`SnapshotRequest::uploaded` and `compat_uploaded`) and that had not
     /// landed when the job last rendered: wait until none is outstanding.
     pub waiting_for: Vec<String>,
-    /// Its Blender stage, once it needed one.
-    pub blender: Option<BlenderPrep>,
-    /// Times its Blender frame was sent to the worker.
-    pub blender_attempts: u8,
-    /// One deadline shared by every re-plan, starting at the first attempt.
-    blender_until: Option<i64>,
 }
 
 impl SnapshotJob {
@@ -139,52 +89,7 @@ impl SnapshotJob {
             received: now,
             deadline,
             waiting_for: Vec::new(),
-            blender: None,
-            blender_attempts: 0,
-            blender_until: None,
         }
-    }
-
-    /// The Blender worker's token while it prepares this job's frame.
-    pub fn preparing(&self) -> Option<u64> {
-        match self.blender {
-            Some(BlenderPrep::Running { token, .. }) => Some(token),
-            _ => None,
-        }
-    }
-
-    /// When the job fails with `timeout`: its Blender stage's bound while
-    /// that runs, otherwise its own deadline.
-    pub fn expires_at(&self) -> i64 {
-        match self.blender {
-            Some(BlenderPrep::Running { until, .. }) => until,
-            _ => self.deadline,
-        }
-    }
-
-    /// Hands the frame to the Blender worker (`token`) at `now`.
-    pub fn start_blender(&mut self, token: u64, now: i64) {
-        self.blender_attempts += 1;
-        let bound = i64::from(self.request.blender_wait_ms) * 1_000;
-        self.blender = Some(BlenderPrep::Running {
-            token,
-            until: *self.blender_until.get_or_insert(now + bound),
-        });
-    }
-
-    /// The worker answered at `now`: the job runs again, with its own wait
-    /// counted afresh from now (the Blender stage does not count against
-    /// it).
-    pub fn blender_done(&mut self, frames: Arc<Vec<PreparedFrame>>, now: i64) {
-        // A late worker reply cannot revive an expired capture. Leave its
-        // running deadline in place for the queue to expire and answer it.
-        if self.blender_until.is_some_and(|until| now >= until) {
-            return;
-        }
-        self.blender = Some(BlenderPrep::Ready(frames));
-        self.deadline = self
-            .deadline
-            .max(now + i64::from(self.request.wait_ms) * 1_000);
     }
 
     /// Bytes of its RGBA8 result.
@@ -213,8 +118,6 @@ pub enum Ready {
     Revision,
     /// Its class waits for the views (playback, a gesture).
     Pressure,
-    /// Blender renders its frame's surfaces.
-    Blender,
 }
 
 /// A job refused when it arrives.
@@ -340,25 +243,9 @@ impl SnapshotQueue {
 
     /// Removes and returns every job whose deadline passed.
     pub fn take_expired(&mut self, now: i64) -> Vec<SnapshotJob> {
-        let (gone, kept): (Vec<_>, Vec<_>) =
-            self.jobs.drain(..).partition(|j| now >= j.expires_at());
+        let (gone, kept): (Vec<_>, Vec<_>) = self.jobs.drain(..).partition(|j| now >= j.deadline);
         self.jobs = kept.into();
         gone
-    }
-
-    /// The job whose Blender frame the worker prepares under `token`.
-    pub fn preparing_mut(&mut self, token: u64) -> Option<&mut SnapshotJob> {
-        self.jobs.iter_mut().find(|j| j.preparing() == Some(token))
-    }
-
-    /// Removes the job whose Blender frame the worker prepares under
-    /// `token` (the worker failed).
-    pub fn take_preparing(&mut self, token: u64) -> Option<SnapshotJob> {
-        let index = self
-            .jobs
-            .iter()
-            .position(|j| j.preparing() == Some(token))?;
-        self.jobs.remove(index)
     }
 
     /// Whether `job` can run now. `revision` is the session's document
@@ -379,9 +266,6 @@ impl SnapshotQueue {
         {
             return Ready::Revision;
         }
-        if job.preparing().is_some() {
-            return Ready::Blender;
-        }
         match job.request.class {
             SnapshotClass::Sync => Ready::Run,
             SnapshotClass::Async => {
@@ -395,7 +279,7 @@ impl SnapshotQueue {
                 let urgent = self
                     .jobs
                     .iter()
-                    .any(|j| j.request.class != SnapshotClass::Idle && j.preparing().is_none());
+                    .any(|j| j.request.class != SnapshotClass::Idle);
                 let gesture = pressure
                     .last_interactive
                     .is_some_and(|at| now - at < GESTURE_IDLE_US);
@@ -487,13 +371,12 @@ impl SnapshotQueue {
     /// polls (patches land through commands that wake it; the views'
     /// pressure ends without one).
     pub fn waiting(&self) -> bool {
-        // A job whose frame Blender renders is woken by the worker's answer.
-        self.jobs.iter().any(|j| j.preparing().is_none())
+        !self.jobs.is_empty()
     }
 
     /// The earliest deadline (host µs).
     pub fn earliest_deadline(&self) -> Option<i64> {
-        self.jobs.iter().map(SnapshotJob::expires_at).min()
+        self.jobs.iter().map(|j| j.deadline).min()
     }
 }
 
@@ -761,6 +644,7 @@ mod tests {
                 pixels: SnapshotPixels::Opaque,
                 class,
                 view_seq: None,
+                viewer: None,
                 wait_ms: 1_000,
                 blender_wait_ms: 0,
                 captions_hidden: false,
@@ -1051,82 +935,6 @@ mod tests {
             (remaining[1].host, remaining[1].id),
             (PortId(11), RequestId::new(1).unwrap())
         );
-        assert!(q.is_empty());
-    }
-
-    #[test]
-    fn a_job_whose_frame_blender_renders_waits_on_its_own_bound_not_its_wait() {
-        let mut q = SnapshotQueue::default();
-        let mut j = job(SnapshotClass::Async, key(3, 1), None, 0);
-        j.request.blender_wait_ms = 600_000;
-        j.start_blender(17, 500_000);
-        assert_eq!(j.blender_attempts, 1);
-        assert_eq!(j.expires_at(), 500_000 + 600_000_000);
-        q.push(j).unwrap();
-        // It does not run, and the thread need not poll for it (the
-        // worker's answer wakes it) ...
-        assert!(q.next(|_| Some(0), |_| false, idle(), 600_000).is_none());
-        assert!(!q.waiting());
-        // ... and an idle job is not held behind it.
-        q.push(job(SnapshotClass::Idle, key(3, 2), None, 0))
-            .unwrap();
-        assert_eq!(
-            q.next(|_| Some(0), |_| false, idle(), 600_000)
-                .unwrap()
-                .request
-                .class,
-            SnapshotClass::Idle
-        );
-        // Its own 1 s wait passes while Blender renders: not expired.
-        assert!(q.take_expired(5_000_000).is_empty());
-        // The worker answers at 9 s: it runs, with its wait counted from then.
-        q.preparing_mut(17)
-            .unwrap()
-            .blender_done(Arc::new(Vec::new()), 9_000_000);
-        assert!(q.preparing_mut(17).is_none());
-        assert!(q.take_expired(9_500_000).is_empty());
-        let ready = q.next(|_| Some(0), |_| false, idle(), 9_500_000).unwrap();
-        assert!(matches!(ready.blender, Some(BlenderPrep::Ready(_))));
-        assert_eq!(ready.deadline, 10_000_000);
-    }
-
-    #[test]
-    fn blender_replans_share_one_deadline() {
-        let mut j = job(SnapshotClass::Async, key(3, 1), None, 0);
-        j.request.blender_wait_ms = 2_000;
-        j.start_blender(1, 100_000);
-        let until = j.expires_at();
-        j.blender_done(Arc::new(Vec::new()), 1_500_000);
-        j.start_blender(2, 1_800_000);
-        assert_eq!(j.expires_at(), until);
-        j.blender_done(Arc::new(Vec::new()), 2_000_000);
-        j.start_blender(3, 2_200_000);
-        assert!(
-            j.expires_at() < 2_200_000,
-            "a third attempt has no fresh budget"
-        );
-        j.blender_done(Arc::new(Vec::new()), 2_300_000);
-        assert_eq!(j.preparing(), Some(3), "a late reply stays expired");
-        assert_eq!(j.expires_at(), until);
-    }
-
-    #[test]
-    fn a_blender_stage_past_its_bound_expires_and_a_failed_one_is_taken() {
-        let mut q = SnapshotQueue::default();
-        let mut a = job(SnapshotClass::Async, key(3, 1), None, 0);
-        a.request.blender_wait_ms = 2_000;
-        a.start_blender(1, 0);
-        q.push(a).unwrap();
-        let mut b = job(SnapshotClass::Async, key(3, 1), None, 0);
-        b.request.blender_wait_ms = 900_000;
-        b.start_blender(2, 0);
-        q.push(b).unwrap();
-        assert_eq!(q.earliest_deadline(), Some(2_000_000));
-        let gone = q.take_expired(2_000_000);
-        assert_eq!(gone.len(), 1);
-        assert_eq!(gone[0].preparing(), Some(1));
-        assert_eq!(q.take_preparing(2).unwrap().preparing(), Some(2));
-        assert!(q.take_preparing(2).is_none());
         assert!(q.is_empty());
     }
 

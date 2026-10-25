@@ -19,9 +19,11 @@
  *
  * Engine stats (`RenderStats`, at most twice a second per session) replace
  * `GL.stats` and GPU timing for the status bar and the performance panel:
- * `EngineStatsView` turns them into today's `perf` fields.
+ * `EngineStatsView` turns them into today's `perf` fields, and carries the
+ * session's audio health (audio-diagnostics.ts).
  */
 import type { RenderStats } from '../../../shared/engine-protocol';
+import { audioHealth, type AudioHealth } from './audio-diagnostics';
 import { TICKS_PER_SECOND } from './transport';
 
 /** `PM.animVersion()` per document revision, as each revision was sent. */
@@ -159,6 +161,13 @@ export class EngineStatsView {
   private window: { at: number; frames: number } | null = null;
   private fps = 0;
 
+  /** A new document or engine launch has no presented stats yet. */
+  reset(): void {
+    this.latest = null;
+    this.window = null;
+    this.fps = 0;
+  }
+
   /** A stats message arrived at `nowMs` (performance.now()). */
   receive(stats: RenderStats, nowMs: number): void {
     const frames = Number(stats.frames);
@@ -185,5 +194,10 @@ export class EngineStatsView {
       progs: s.programs,
       raster: s.rasters
     };
+  }
+
+  /** The latest session's audio health, or null without engine audio. */
+  audio(): AudioHealth | null {
+    return audioHealth(this.latest?.audio);
   }
 }

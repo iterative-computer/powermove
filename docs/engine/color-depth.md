@@ -72,28 +72,27 @@ The reproducible capture entry point is `engine/corpus/src/color-depth.ts`.
 Build the desktop and run its `--prepare` step outside the Electron lock;
 then capture under the lock. Supply an external artifact directory. The
 `pm-render` example `color_depth_parity` reads that directory, renders every
-sample, writes native and amplified difference images and measurements, and
-fails if even one output byte differs. It has no residual allowlist.
+sample, and writes native and amplified difference images and measurements.
+It fails if any output byte differs, with one reference-judged exception:
+text sampling (below). It has no residual allowlist.
 
-The initial slice has seven synthetic projects at all three depths: gradient,
-blend stack, feathered mask plus matte, blur, glow, vector and rotated text.
-All 21 output images now match byte for byte. The first run's rotated text
-differed at 293 / 294 / 303 pixels at depths 8 / 16 / 32. The text lane through
-`ec1a0c5fd` (including `7ca866a3c`) was already merged; fetching and merging
-the remote text branch reported it up to date. Its Canvas raster is exact at
-all depths. The difference came from replacing the full Canvas quad with an
-ink-cropped quad: f32 vertex and UV interpolation produced different bilinear
-weights after rotation. Level 1 now keeps the original Canvas backing size
-and quad, matching today's app. This removes every differing output byte
-without changing glyph pixels, tolerances or intermediate quantization.
-Level 2 retains its ink crop. The capture's `--text-only` mode also records
-the actual uploaded Canvas texture, and the native example compares it
-separately from composition sampling.
+The slice has seven synthetic projects at all three depths: gradient, blend
+stack, feathered mask plus matte, blur, glow, vector and rotated text. The
+text sample's uploaded Canvas raster must match today's byte for byte (the
+capture records it). Its composition is judged against an f64 reference
+(gate-policy.md): that raster sampled bilinearly at each output pixel centre
+through the layer's quad, times its opacity, over the depth's background
+capture. Pixels within 2 px of sampled ink are Resampled under
+`pm_reference::compare` (`EIGHT_BIT` at 8, `HALF_FLOAT` at 16 and 32). Every
+other pixel stays byte-exact, and the depth-8 PNG export must equal the
+engine's preview. Cached level-1 and level-2 rasters keep only their ink
+crop, drawn through the part of the quad it covers. The crop's quad has the
+same geometry as the full Canvas quad, but its f32 interpolation rounds
+differently, so a rotated layer's bilinear weights differ from today's by
+less than one subtexel step. The engine is at least as close to the
+reference, and the crop costs a third of the full canvas's texture memory
+while typing.
 
-Retaining the full level-1 canvas can use more memory than the former native
-ink crop. A maximal 8192² source is 256 MiB; sources beyond half the 192 MiB
-text cache budget draw without being retained. This is a correctness tradeoff
-to preserve today's sampling geometry, not an added 8-bit quantization point.
 Parity verdicts compare exact byte codes at 8 and exact binary32 bits at 32;
 the existing binary16 bound is unchanged. The 32-bit policy can keep programs
 with small arithmetic differences on the WebGL runner; its throughput is not
@@ -121,19 +120,21 @@ The video/3D gate (`color-depth-media.ts`, `color_depth_media`) captures
 scaling, rotation and partial opacity, and a visible three.js cube with a
 translucent 2D overlay, each at all three depths. Source Canvas pixels are
 recorded separately from composition sampling. The flat video and 3D samples
-match output bytes and raw float values. The detailed source revealed a
-Chromium/native YUV conversion difference at all depths. The dedicated
-video-parity lane owns that engine-wide source issue; the depth lane retains
-all six failing comparisons and their source evidence. No tolerance is applied
-to that gate.
+match output bytes and raw float values. The detailed source differs from
+Chromium's YUV conversion at all depths by design: video now has one reading,
+proven against an f64 reference rather than Chromium's bytes
+([video-parity.md](video-parity.md)), so those six comparisons measure
+closeness to that reference, not byte equality.
 
 `color-depth-alpha.ts` captures actual legacy transparent PNGs with
 identical overlapping solids and a blurred layer at depths 8, 16 and 32.
 Every readback and PNG contains 113 alpha codes. All three premultiplied
 frames match, including raw floats. Decoded PNGs differ at 176 / 2,968 / 179
-pixels respectively, each by one RGB code with unchanged alpha. This now
-observes the shared level-1 Canvas conversion issue at all depths; it remains
-routed to the video/image lane, with each strict export failure retained.
+pixels respectively, each by one RGB code with unchanged alpha. Transparent
+8-bit PNG export now divides the premultiplied working floats by alpha and
+rounds once, instead of reproducing Canvas2D's truncated 8-bit unpremultiply,
+so a translucent pixel is within half a code of the f64 value
+([quality-ledger.md](quality-ledger.md)).
 Fresh rotated text sources and compositions are exact at all three depths,
 including runner retention with zero differing byte codes or binary32 bits.
 Capture preparation happens outside the Electron lock; prebuilt opt-in

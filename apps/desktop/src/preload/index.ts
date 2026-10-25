@@ -73,6 +73,13 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
   if (Array.isArray(request?.svgPixels)) {
     plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
   }
+  if (Array.isArray(request?.compatEvents)) {
+    plain.compatEvents = request.compatEvents.map(event => {
+      const copy = JSON.parse(JSON.stringify({ ...event, data: undefined }));
+      if ('data' in event) copy.data = bytes(event['data']) ?? new Uint8Array(0);
+      return copy;
+    });
+  }
   return plain;
 }
 

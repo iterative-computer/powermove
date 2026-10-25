@@ -119,13 +119,51 @@ pub(crate) fn premultiplied_f32(raster: &CompatRaster) -> Vec<f32> {
                 out.push(f16_to_f32(u16::from_le_bytes([half[0], half[1]])));
             }
         }
-        // Encoded Blender maps never become layer rasters: the protocol
-        // refuses PNG pixel bands and the job engine refuses PNG layer
-        // answers, so nothing reaches here (transparent if it did).
+        // PNG answers never become layer rasters: the protocol refuses PNG
+        // pixel bands and the job engine refuses PNG layer answers, so
+        // nothing reaches here (transparent if it did).
         CompatFormat::Png => {}
     }
     out.resize(n * 4, 0.0);
     out
+}
+
+/// IEEE 754 binary16 bits of `v`, rounded to nearest even (overflow to
+/// infinity, subnormals kept).
+fn f16_bits(v: f32) -> u16 {
+    let x = v.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let exp = ((x >> 23) & 0xff) as i32;
+    let man = x & 0x7f_ffff;
+    if exp == 0xff {
+        // Inf or NaN (keep NaN quiet).
+        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        // Subnormal: shift the implicit one in, round to nearest even.
+        let m = man | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = 1u32 << (shift - 1);
+        let rest = m & ((1u32 << shift) - 1);
+        let mut out = m >> shift;
+        if rest > half || (rest == half && out & 1 == 1) {
+            out += 1;
+        }
+        return sign | out as u16;
+    }
+    let mut out = ((e as u32) << 10) | (man >> 13);
+    let rest = man & 0x1fff;
+    if rest > 0x1000 || (rest == 0x1000 && out & 1 == 1) {
+        out += 1;
+    }
+    sign | out as u16
 }
 
 fn f16_to_f32(bits: u16) -> f32 {
@@ -145,17 +183,42 @@ fn f16_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// The texture of a raster: premultiplied E values as `rgba32float` at
-/// 32-bit precision, `rgba16float` otherwise (a Blender surface's upload).
-pub(crate) fn upload(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+/// Convert each possible 8-bit channel once. The usual canvas answer is
+/// already premultiplied; expanding it through an f32 allocation and then
+/// converting every channel to half on every edit does unnecessary work.
+/// Keep exactly the same float rounding, including at Float16 precision.
+fn upload_bytes(
     raster: &CompatRaster,
     precision: pm_protocol::color::Precision,
-) -> wgpu::TextureView {
+) -> (wgpu::TextureFormat, Vec<u8>, u32) {
     use pm_protocol::color::Precision;
+    use std::sync::OnceLock;
+    if raster.format == CompatFormat::Rgba8Premultiplied {
+        let channels = raster.width as usize * raster.height as usize * 4;
+        if precision == Precision::Float32 {
+            static VALUES: OnceLock<[[u8; 4]; 256]> = OnceLock::new();
+            let values =
+                VALUES.get_or_init(|| std::array::from_fn(|v| (v as f32 / 255.0).to_le_bytes()));
+            let mut bytes = Vec::with_capacity(channels * 4);
+            for &value in raster.data.iter().take(channels) {
+                bytes.extend_from_slice(&values[value as usize]);
+            }
+            bytes.resize(channels * 4, 0);
+            return (wgpu::TextureFormat::Rgba32Float, bytes, 16);
+        }
+        static VALUES: OnceLock<[[u8; 2]; 256]> = OnceLock::new();
+        let values = VALUES.get_or_init(|| {
+            std::array::from_fn(|v| f16_bits(v as f32 / 255.0).to_le_bytes())
+        });
+        let mut bytes = Vec::with_capacity(channels * 2);
+        for &value in raster.data.iter().take(channels) {
+            bytes.extend_from_slice(&values[value as usize]);
+        }
+        bytes.resize(channels * 2, 0);
+        return (wgpu::TextureFormat::Rgba16Float, bytes, 8);
+    }
     let values = premultiplied_f32(raster);
-    let (format, bytes, texel): (wgpu::TextureFormat, Vec<u8>, u32) = match precision {
+    match precision {
         Precision::Float32 => (
             wgpu::TextureFormat::Rgba32Float,
             values.iter().flat_map(|v| v.to_le_bytes()).collect(),
@@ -165,11 +228,22 @@ pub(crate) fn upload(
             wgpu::TextureFormat::Rgba16Float,
             values
                 .iter()
-                .flat_map(|v| crate::blender::gpu::f16_bits(*v).to_le_bytes())
+                .flat_map(|v| f16_bits(*v).to_le_bytes())
                 .collect(),
             8,
         ),
-    };
+    }
+}
+
+/// The texture of a raster: premultiplied E values as `rgba32float` at
+/// 32-bit precision, `rgba16float` otherwise.
+pub(crate) fn upload(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster: &CompatRaster,
+    precision: pm_protocol::color::Precision,
+) -> wgpu::TextureView {
+    let (format, bytes, texel) = upload_bytes(raster, precision);
     let (w, h) = (raster.width.max(1), raster.height.max(1));
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pm compatibility raster"),
@@ -210,6 +284,36 @@ pub(crate) fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_lookup_is_bit_identical_for_every_channel_and_precision() {
+        use pm_protocol::color::Precision;
+        let r = CompatRaster {
+            width: 64,
+            ..raster(CompatFormat::Rgba8Premultiplied, (0..=255).collect())
+        };
+        let values = premultiplied_f32(&r);
+        let (_, bytes, _) = upload_bytes(&r, Precision::Float32);
+        let expected: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(bytes, expected);
+        let (_, bytes, _) = upload_bytes(&r, Precision::Float16);
+        let expected: Vec<u8> = values
+            .iter()
+            .flat_map(|v| f16_bits(*v).to_le_bytes())
+            .collect();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn upload_lookup_keeps_short_answers_transparent() {
+        use pm_protocol::color::Precision;
+        let r = CompatRaster {
+            width: 2,
+            ..raster(CompatFormat::Rgba8Premultiplied, vec![255; 4])
+        };
+        assert_eq!(&upload_bytes(&r, Precision::Float16).1[8..], &[0; 8]);
+        assert_eq!(&upload_bytes(&r, Precision::Float32).1[16..], &[0; 16]);
+    }
 
     fn raster(format: CompatFormat, data: Vec<u8>) -> CompatRaster {
         CompatRaster {

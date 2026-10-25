@@ -13,6 +13,8 @@
   import { panelScope } from '../panels/agent/panel-focus';
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
+  import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
+  import { compositionHas3D, engineCanvasEditorCamera } from '../engine-connection/canvas-view';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -376,14 +378,7 @@
   /* cloneNode leaves canvases blank and drops live form values; copy both so
      every panel — including future generated ones — previews as-is. */
   function copyLiveState(source: Element, target: Element): void {
-    const canvases = source.querySelectorAll('canvas');
-    target.querySelectorAll('canvas').forEach((node, index) => {
-      const from = canvases[index];
-      if (!from?.width || !from?.height) return;
-      node.width = from.width;
-      node.height = from.height;
-      try { node.getContext('2d')?.drawImage(from, 0, 0); } catch { /* tainted or GL-only canvas */ }
-    });
+    copyClonedCanvasBitmaps(source, target);
     const fields = source.querySelectorAll<HTMLInputElement>('input,textarea,select');
     target.querySelectorAll<HTMLInputElement>('input,textarea,select').forEach((node, index) => {
       const from = fields[index];
@@ -629,7 +624,10 @@
   /* Cloning and measuring nearby panels runs in short batches, leaving time
      between builds for scrolling, typing and navigation. A cover travelling
      back from the editor lands before any replacement is measured. */
-  const buildQueue: Array<() => void> = [];
+  const buildQueue: Array<() => void | Promise<void>> = [];
+  const requestedViewerFrames = new WeakMap<HTMLElement, {
+    stamp: string; time: number; revision: number | null; presentation: unknown; viewSeq: number | undefined;
+  }>();
   let pumping = false;
   /* A hidden or busy window can hold animation frames back; a timer keeps
      the queue moving regardless. Whichever fires first runs the step. */
@@ -645,22 +643,25 @@
     const frame = window.requestAnimationFrame(run);
     const timer = window.setTimeout(run, 64);
   }
-  function scheduleBuild(task: () => void): void {
+  function scheduleBuild(task: () => void | Promise<void>): void {
     buildQueue.push(task);
     if (rootEl) rootEl.dataset.previews = 'pending';
     if (!pumping) { pumping = true; nextFrame(pumpBuilds); }
   }
-  function pumpBuilds(): void {
+  async function pumpBuilds(): Promise<void> {
     if (!flying) {
       const start = performance.now();
-      while (buildQueue.length && performance.now() - start < 4) buildQueue.shift()!();
+      while (buildQueue.length && performance.now() - start < 4) {
+        try { await buildQueue.shift()!(); }
+        catch (error) { console.warn('Library preview capture failed', error); }
+      }
     }
     if (buildQueue.length) { nextFrame(pumpBuilds); return; }
     pumping = false;
     if (rootEl) rootEl.dataset.previews = 'ready';
   }
 
-  function buildPreview(host: HTMLElement, id: string, stamp: string): Preview {
+  async function buildPreview(host: HTMLElement, id: string, stamp: string, current: () => boolean): Promise<Preview | null> {
     const blank: Preview = { stamp, frame: null, width: 0, height: 0, clipped: false };
     /* A sandboxed panel's body is another document: a DOM clone would load
        a second, unconnected copy of it. Its cover is the art instead. */
@@ -675,7 +676,57 @@
     clone.style.width = `${size.width}px`;
     clone.style.height = `${size.height}px`;
     clone.style.flex = 'none';
+    const library = PM.PANELS?.[id]?.library;
     copyLiveState(element, clone);
+    const transport = PM.EngineRender;
+    if (transport && element.querySelector('#engine-present')) {
+      const project = PM.proj, time = PM.time;
+      const has3D = compositionHas3D(PM as any);
+      const presentedBy = () => PM.Kernel.services.get('viewer')?.enginePresentation
+        ?? (element.contains(PM.EngineCanvas?.bound) ? PM.EngineCanvas?.viewerPresentation : null);
+      const presentation = presentedBy();
+      const latest = presentation?.latest;
+      const state = latest ? presentation.stateFor(latest.viewSeq) : null;
+      const crop = state?.canvas?.crop ?? PM.GL?.previewViewport;
+      const cropped = crop && (crop.x !== 0 || crop.y !== 0 || crop.width !== project.w || crop.height !== project.h);
+      const editorView = () => JSON.stringify(engineCanvasEditorCamera(PM as any));
+      const view = editorView();
+      if (!PM.playing) {
+        // The clone's overlay describes the presented frame. Wait for that
+        // frame to catch up before combining it with fresh snapshot pixels.
+        const revision = transport.currentRevision();
+        if (presentation && (!presentation.presenting || !latest || latest.standIn
+          || latest.revision !== revision
+          || latest.pts !== Math.max(0, Math.round(time * 705_600_000)))) {
+          const previous = requestedViewerFrames.get(element);
+          if (!previous || previous.stamp !== stamp || previous.time !== time || previous.revision !== revision
+            || previous.presentation !== presentation || previous.viewSeq !== latest?.viewSeq) {
+            requestedViewerFrames.set(element, { stamp, time, revision, presentation, viewSeq: latest?.viewSeq });
+            // An unchanged layout does not request another paused frame.
+            // Ask once for this capture target, including after a project
+            // reset left the engine clock at the previous playhead time.
+            PM.EngineConnection?.transport?.seek(time, false);
+          }
+          return null;
+        }
+        // Pin the view and canvas of the frame cloned above. The snapshot
+        // renders that original canvas, before stage presentation.
+        if ((cropped || has3D) && !state?.canvas) return null;
+        const viewer = cropped || has3D
+          ? structuredClone({ view: state.view ?? null, canvas: state.canvas, viewSeq: state.viewSeq }) : undefined;
+        const captured = await snapshotClonedCanvasBitmaps(element, clone, {
+          transport, time, composition: String(project.compId ?? project.id ?? ''),
+          ...(viewer ? { viewer } : {}),
+          current: () => current() && PM.EngineRender === transport && PM.proj === project && PM.time === time
+            && PM.panelInst?.[id]?.el === element
+            && presentedBy() === presentation
+            && presentation?.latest?.viewSeq === latest?.viewSeq
+            && editorView() === view,
+        });
+        if (!captured) return null;
+      }
+    }
+    if (!current()) return null;
     const frame = document.createElement('div');
     frame.className = 'library-live-frame';
     frame.style.width = `${size.width}px`;
@@ -683,10 +734,7 @@
     frame.appendChild(clone);
     /* Measure in place: computed styles and scroll sizes need the document. */
     host.appendChild(frame);
-    const library = PM.PANELS?.[id]?.library;
-    if (library && typeof library.render === 'function') {
-      library.render({ source: element, clone, width: size.width, height: size.height });
-    } else {
+    if (!renderLibraryCallback(library, { source: element, clone, width: size.width, height: size.height })) {
       // Snapshots cannot scroll. Unroll their scroll regions from the inside
       // out, then grow the book so the last controls and footer stay visible.
       // Canvas previews own their geometry through library.render instead.
@@ -764,11 +812,14 @@
       const id = current.id;
       const stamp = current.stamp;
       queuedStamp = stamp;
-      scheduleBuild(() => {
-        if (queuedStamp === stamp) queuedStamp = null;
-        if (!alive || !nearby || !isOpen() || editingId || current.id !== id || current.stamp !== stamp) return;
+      scheduleBuild(async () => {
+        const valid = () => alive && nearby && isOpen() && !editingId && current.id === id && current.stamp === stamp;
+        if (!valid()) { if (queuedStamp === stamp) queuedStamp = null; return; }
         const previous = shown?.frame;
-        const next = buildPreview(node, id, stamp);
+        let next: Preview | null;
+        try { next = await buildPreview(node, id, stamp, valid); }
+        finally { if (queuedStamp === stamp) queuedStamp = null; }
+        if (!next) { if (valid()) attach(); return; }
         if (previous && previous !== next.frame) previous.remove();
         previews.set(id, next);
         show(next, !previous);

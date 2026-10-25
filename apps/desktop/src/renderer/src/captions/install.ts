@@ -413,6 +413,9 @@ export function installCaptions(PM: PMRegistry): void {
       if (target?.type === 'captions') return ['-', { label: 'Add Caption at Playhead', icon: 'captions', run: () => addCaption() }, { label: 'Export Captions…', run: () => void exportFile(target.id) }];
       return [];
     });
-    kernel.contributeMenu(OWNER, 'timeline:context', () => [{ label: 'Import Captions…', icon: 'captions', run: () => void importFile() }]);
+    /* The canvas and timeline layer menus stay identical (precomp.spec.ts). */
+    for (const location of ['timeline:context', 'viewer:context'] as const) {
+      kernel.contributeMenu(OWNER, location, () => [{ label: 'Import Captions…', icon: 'captions', run: () => void importFile() }]);
+    }
   }
 }

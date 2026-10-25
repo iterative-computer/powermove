@@ -31,8 +31,18 @@ test('profiles playback and bidirectional scrubbing with a populated timeline an
     let phase = 'playback', last = 0, cycleChecks = 0, playbackCycleChecks = 0;
     const wouldCycle = PM.wouldCycle;
     PM.wouldCycle = (...args: any[]) => { cycleChecks++; return wouldCycle(...args); };
-    const frames: any[] = [], scrubs: any[] = [];
-    PM.GL.render = (...args: any[]) => {
+    const frames: any[] = [], scrubs: any[] = [], engineCosts: any[] = [];
+    const native = Boolean(PM.EngineConnection);
+    const offPresented = native ? PM.bus.on('preview:presented', (frame: any) => {
+      const now = performance.now();
+      frames.push({ phase, time: frame.time, ms: null, gap: last ? now - last : 0, presented: true });
+      const stats = PM.EngineStats?.latest;
+      if (stats && engineCosts.at(-1)?.frames !== stats.frames) {
+        engineCosts.push({ phase, frames: stats.frames, meanMs: stats.frameUsAvg / 1000 });
+      }
+      last = now;
+    }) : null;
+    if (!native) PM.GL.render = (...args: any[]) => {
       const start = performance.now();
       const presented = render(...args);
       frames.push({ phase, time: args[0], ms: performance.now() - start, gap: last ? start - last : 0, presented });
@@ -50,9 +60,9 @@ test('profiles playback and bidirectional scrubbing with a populated timeline an
         scrubs.push({ time, setMs, elapsed: performance.now() - start });
       }
       await new Promise(resolve => setTimeout(resolve, 200));
-    } finally { PM.pause(); PM.GL.render = render; PM.wouldCycle = wouldCycle; }
+    } finally { PM.pause(); offPresented?.(); PM.GL.render = render; PM.wouldCycle = wouldCycle; }
     const rotation = document.querySelector<HTMLInputElement>('[data-channel="rotation"] [role="spinbutton"]');
-    return { frames, scrubs, cycleChecks, playbackCycleChecks,
+    return { frames, scrubs, engineCosts, cycleChecks, playbackCycleChecks, frameSource: native ? 'native-presentation' : 'legacy-render',
       inspectorRotation: rotation ? parseFloat(rotation.value) : null,
       expectedRotation: PM.ev(PM.proj.layers[0], 'rotation', PM.time), preserved: serialized === JSON.stringify(PM.proj), quality: PM.quality };
   });
@@ -65,10 +75,16 @@ test('profiles playback and bidirectional scrubbing with a populated timeline an
   }
   for (const phase of ['playback', 'scrub']) {
     const frames = result.frames.filter(frame => frame.phase === phase);
-    const times = frames.map(frame => frame.ms).sort((a, b) => a - b);
+    const times = frames.map(frame => frame.ms).filter((ms): ms is number => typeof ms === 'number').sort((a, b) => a - b);
     const gaps = frames.slice(1).map(frame => frame.gap).sort((a, b) => a - b);
-    console.log('PREVIEW', JSON.stringify({ phase, cycleChecks: result.cycleChecks, count: frames.length, median: times[Math.floor(times.length / 2)], p95: times[Math.floor(times.length * .95)], gap95: gaps[Math.floor(gaps.length * .95)] }));
+    console.log('PREVIEW', JSON.stringify({ phase, frameSource: result.frameSource,
+      timing: result.frameSource === 'native-presentation' ? 'presentation-cadence' : 'render-call-duration',
+      cycleChecks: result.cycleChecks, count: frames.length, median: times[Math.floor(times.length / 2)] ?? null,
+      p95: times[Math.floor(times.length * .95)] ?? null, gap95: gaps[Math.floor(gaps.length * .95)] }));
   }
+  // Native rolling means are engine stats, separate from per-frame cadence;
+  // they cannot be relabeled as a render-duration percentile.
+  if (result.frameSource === 'native-presentation') console.log('PREVIEW_ENGINE_COST', JSON.stringify(result.engineCosts));
   expect(result.preserved).toBe(true);
   expect(result.quality).toBe(1);
   if (process.env.PM_PREVIEW_BASELINE !== '1') expect(result.playbackCycleChecks).toBeLessThan(100_000);

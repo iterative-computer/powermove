@@ -3,13 +3,14 @@
 // values at the source's size.
 //
 // - Y′CbCr: siting-aware chroma upsampling, exact at co-sited samples
-//   (pm_color::chroma): horizontal linear for 4:2:2, Catmull-Rom
-//   horizontally and linear vertically for 4:2:0; then the matrix.
+//   (pm_color::chroma): Catmull-Rom horizontally, linear vertically for
+//   4:2:0; then the matrix.
 // - Transfer and primaries into the working encoding. In Standard an
 //   E-encoded Rec.709 source is the identity: code values pass through.
-//   HDR sources (transfer 5 PQ, 6 HLG) are tone mapped with BT.2446 Method A
-//   to Rec.709 SDR code values, which Standard reads as E
-//   (pm_color::tonemap; `PM_TONEMAP` is prepended too).
+//   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 and tone
+//   mapped with the BT.2390 EETF to linear light with SDR white at 1.0
+//   (pm_color::tonemap's WGSL is prepended too); the primaries columns
+//   then convert the source's primaries to Rec.709.
 // - Alpha by pm_color::alpha's plan.
 //
 // `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
@@ -124,19 +125,22 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
 }
 
 // The input transform: source encoding and primaries to the working encoding.
+// SDR transfers are extended and sign-preserving, so superwhites and
+// sub-blacks survive linearisation and any primaries conversion for every
+// reading; only 8-bit storage or display clips them. PQ and HLG are defined
+// on 0..1, so the tone map's input is clipped.
 fn to_working(c: vec3<f32>) -> vec3<f32> {
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
         return c;
     }
     if (P.a.y == 5u || P.a.y == 6u) {
-        // BT.2020 HDR signal to Rec.709 SDR codes (E in Standard); the
-        // primaries columns hold BT.2020 to Rec.709.
-        let sdr = pm_hdr_to_sdr(c, P.a.y == 6u, P.hdr.x, mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz));
+        let sdr = pm_hdr_to_sdr(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), P.a.y == 6u, P.hdr.x);
+        let l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * sdr;
         if (P.a.z == 0u) {
-            return sdr;
+            return pm_e_encode3(l);
         }
-        return pm_e_decode3(sdr);
+        return l;
     }
     var l = transfer_to_linear(c);
     if (P.c.w == 1u) {

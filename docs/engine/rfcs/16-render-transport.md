@@ -36,7 +36,7 @@ for all of that.
 ### Snapshot request
 
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
-class, viewSeq, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
+class, viewSeq, viewer?, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 
 - `target`: `frame { motionBlurSamples, background, draft3d }`,
   `source { asset, fit, color }`, or
@@ -79,6 +79,14 @@ class, viewSeq, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 - `captionsHidden` (optional, default false): omit caption layers for this
   frame capture, matching `PM.captionsHidden`. It does not alter the viewer
   or subsequent captures.
+- `viewer` (optional): a pinned UI view `{ view: ViewOverride | null,
+  canvas: ViewerCanvas, viewSeq }`. It selects the editor camera, shading,
+  X-ray and Local View and renders the canvas's backing pixels and composition
+  crop before stage scaling. `outputSize` must equal that backing size;
+  `viewSeq`, when present at the request's top level, must match the pin.
+  This uses paused viewer sampling and motion blur, without changing the live
+  viewer or opening a presenter. It is a frame target only. Ordinary export,
+  agent and thumbnail requests retain their defaults when it is absent.
 - `uploaded`: shader fallback keys the caller drew and posted on the
   session's port after a `needsRenderer` answer (see below).
 
@@ -97,7 +105,9 @@ paths, text (plain or animated), and any other layer as `rasterShape` of
 its resolved content. A text layer with no ink is a transparent canvas of
 its geometry (as today), a captions layer between cues is `empty`.
 `revision` is the exact revision rendered;
-`viewSeq` echoes the request. `payload` is `inline { bytes }` up to 1 MiB,
+`viewSeq` identifies the selected pinned viewer, or echoes a legacy request
+without `viewer`. UI consumers reject a result for another selected sequence.
+`payload` is `inline { bytes }` up to 1 MiB,
 otherwise `sharedMemory { name, length }`: a POSIX segment the engine created
 exclusively (mode 0600, `/pm.` and 24 hex digits, 96 random bits). Main maps
 it once (pm-bridge `takePixels`), which unlinks it; the engine unlinks
@@ -294,7 +304,10 @@ after a GPU loss.
 
 `RenderStats { frames, timedFrames, lateSkipped, cpuUs, gpuUs, layers,
 frameUsAvg, programs, rasters, layerFailures, snapshots, snapshotUsMax,
-revision }` per session. `frameUsAvg` is today's `E.ms` average (0.85/0.15)
+revision, audio? }` per session. `audio` carries the session’s optional
+`{ error?, problems, starvedRenders, underruns, deviceOverloads }` diagnostics.
+Changes are reported even while paused and before the surface pool arrives,
+at most twice a second. `frameUsAvg` is today's `E.ms` average (0.85/0.15)
 of CPU plus GPU time.
 
 ## The TypeScript interfaces

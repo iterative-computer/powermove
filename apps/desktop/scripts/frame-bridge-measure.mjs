@@ -9,7 +9,7 @@
  * with the real preload and engine process, runs every scenario in its own
  * Electron launch (one at a time, window off every screen, never focused),
  * and analyzes Chromium's PipelineReporter trace as S1 did. Summaries go to
- * docs/engine/bridge-measurements/<run>.json and a table to stdout.
+ * <--out>/bridge/<run>.json (outside the repository) and a table to stdout.
  *
  * The `app-*` runs measure the real app instead (amendment 18): the WebGL
  * viewer drawing a corpus project ("today"), and the engine path presented
@@ -44,11 +44,15 @@ import { rawText } from './esbuild-raw-text.mjs';
 const desktop = path.resolve(import.meta.dirname, '..');
 const repo = path.resolve(desktop, '../..');
 const engineDir = path.join(repo, 'engine');
-const summaries = path.join(repo, 'docs/engine/bridge-measurements');
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(`--${name}`);
   return i > 0 ? process.argv[i + 1] : fallback;
 };
+// Measurement summaries are run evidence, never committed: they go under
+// --out (default ~/Library/Caches/powermove-engine/measurements), one folder per
+// family (bridge, tracer, phase3a-gate, phase3c).
+const outRoot = path.resolve(arg('out', path.join(os.homedir(), 'Library/Caches/powermove-engine/measurements')));
+const summaries = path.join(outRoot, 'bridge');
 const seconds = Number(arg('seconds', '60'));
 const only = arg('only', '').split(',').filter(Boolean);
 const tag = arg('tag', '');
@@ -151,21 +155,21 @@ const RUNS = [
   // The Phase 2 tracer bullet (docs/engine/tracer.md): the app's own engine
   // connection draws a synthetic project of slice features (Use New
   // Engine on); "today" is the WebGL viewer on the same project. Summaries
-  // go to docs/engine/tracer-measurements/.
+  // go to <--out>/tracer/.
   ...tracerRuns(),
   // Phase 3a (docs/engine/phase3a-gate.md): layer drag on the 884-layer
   // project (the corpus perf copy), today and with Use New Engine on, idle.
-  { name: 'p3a-drag-today-884-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'], dir: 'docs/engine/phase3a-gate-measurements' },
-  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3a-gate-measurements' },
+  { name: 'p3a-drag-today-884-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'], dir: 'phase3a-gate' },
+  { name: 'p3a-drag-engine-884-idle', ...latency, app: true, mode: 'tracer', load: false, inputModes: ['drag'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'phase3a-gate' },
   // Phase 3c (plan section 25, "3D orbit, 3D corpus scene with shadows",
   // p95 ≤ 33 ms pointer-to-pixel): a middle-button orbit in the 3D
   // viewport's editor view of the corpus primitives scene with a sun
   // casting shadows, 1920 × 1080, today's WebGL viewer and the engine
   // drawing the document, idle and under the gate load.
-  { name: 'p3c-orbit-today-idle', ...latency, app: true, mode: 'today', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'docs/engine/phase3c-measurements' },
-  { name: 'p3c-orbit-engine-idle', ...latency, app: true, mode: 'tracer', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3c-measurements' },
-  { name: 'p3c-orbit-today-load', ...latency, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'docs/engine/phase3c-measurements' },
-  { name: 'p3c-orbit-engine-load', ...latency, app: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'docs/engine/phase3c-measurements' }
+  { name: 'p3c-orbit-today-idle', ...latency, app: true, mode: 'today', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'phase3c' },
+  { name: 'p3c-orbit-engine-idle', ...latency, app: true, mode: 'tracer', load: false, synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'phase3c' },
+  { name: 'p3c-orbit-today-load', ...latency, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], dir: 'phase3c' },
+  { name: 'p3c-orbit-engine-load', ...latency, app: true, mode: 'tracer', load: true, loadProfile: 'no-autosave', synthetic: { layers: 0, scene3d: true }, inputModes: ['orbit'], env: { POWERMOVE_ENGINE_FRAME_SOURCE: 'document' }, dir: 'phase3c' }
 ];
 
 /** The tracer's runs: layer drag on 500 layers (engine and today, idle and
@@ -1048,7 +1052,7 @@ try {
       continue;
     }
     if (!from && Math.max(os.loadavg()[0], raw.machineLoad?.before?.[0] ?? 0, raw.machineLoad?.after?.[0] ?? 0, ...(raw.machineLoad?.during ?? [])) > maxLoad) summary.invalid = `Machine load exceeded ${maxLoad}; retry this pair`;
-    const dir = evidenceDir ?? (run.dir ? path.join(repo, run.dir) : run.tracer ? path.join(repo, 'docs/engine/tracer-measurements') : summaries);
+    const dir = evidenceDir ?? (run.dir ? path.join(outRoot, run.dir) : run.tracer ? path.join(outRoot, 'tracer') : summaries);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`);
     results[name] = summary;

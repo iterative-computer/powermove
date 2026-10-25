@@ -270,6 +270,3 @@ export type ServiceName =
 export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout', 'manage_project', 'publish_visual_reply'] as const;
 export const JOB_TOOLS = ['export_video', 'get_render_status'] as const;
 
-/** Explicit entries in the default document route (schema and arguments are
- * the harness's own). New document tools still use that default route. */
-export const DOCUMENT_TOOLS = ['manage_media', '__composition_info', 'get_workspace_state'] as const;

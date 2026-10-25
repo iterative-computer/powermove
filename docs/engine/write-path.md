@@ -70,6 +70,30 @@ The diff reads the live side as `JSON.stringify` does (`engine-doc/json-diff.ts`
 `diffOps`' operations on plain JSON (2,000 random pairs) and converges on live
 objects (`NaN`, `-0`, `undefined`, `toJSON`, accessors).
 
+A `touch()` without paths compares every layer of the open composition. Each
+id-keyed array element found equal remembers the live content it matched, as one
+flat list of keys and primitive values (`JsonMemo`). While that shadow element is
+unchanged, a live value that walks the same list serializes to the same JSON, so the
+comparison reads only the live side, without keyed lookups on the shadow. Invariant:
+the barrier forgets every shadow object along an operation's path before applying it
+(the shadow is mutated in place). Values the list cannot vouch for (`toJSON`, other
+prototypes, `NaN`, changed shared prototypes) take the exact comparison.
+
+**Provisional revisions.** On a large document that comparison is too slow for a
+paused edit to wait for, so an unscoped write does not. The barrier remembers the
+layers recent diffs changed (`HOT_LAYERS`, newest last). `flushProvisional` diffs
+only those and the paths written by name, and sends them as a provisional batch:
+the engine applies and draws it, but presents nothing at that revision yet. In the
+same task, `flush` compares the whole document. Nothing more: a `confirmed` stream
+item (`confirmRevision`, on the same port after the batch) lets the frame show.
+More: that batch supersedes the provisional revision, whose frames are dropped and
+never presented. Invariants: at most one provisional revision is outstanding; the
+whole comparison runs before any query, raster answer or other flush, so nothing
+reads a partial document; the engine holds snapshot jobs while a session's revision
+is provisional; a coalesced batch is provisional only if its last batch is; none is
+sent during playback, and timed playback frames never render at an unconfirmed
+revision. The protocol is described in `extensions-compat.md`, "Paused edits".
+
 How writes reach the barrier:
 
 | Source | How |
@@ -81,7 +105,7 @@ How writes reach the barrier:
 | Bus announcements (`layers`, `project`, `assets`, `comps`) from writers that skip `touch()` | treated as a `touch()` without paths, marked by a wrapper around `PM.bus.emit` before any listener runs (the kernel turns them into `project:changed`, and the viewer asks from there; inside an Edit's scoped transaction the held paths are marked again first) |
 | `PM.ProjectIndex.invalidate()` | the registry's "the layer structure changed" signal (code that rewrites `layers` outside history must call it, or the index answers with the old layers); treated as a `touch()` without paths, marked before the index is cleared. Code that assigns `layers`, invalidates the index, and selects (which redraws the overlay) before its `touch()` gets fresh answers |
 | Queries inside an open history transaction | the transaction's writes reach the barrier at its commit, and code inside it may ask before then (the pen tool between `begin` and its first `touch()`, a split that groups and selects). The first flush of each synchronous run, and the first after an announcement without paths, diffs what the transaction may have written: a plain transaction's open composition (as `touch()` does), a scoped one's tracked paths. Announcements without paths inside a plain transaction wait for that flush or the commit, whose paths replace the structural diff. A write after a query in the same run, with no announcement before the next query, is the one case left to the auditor |
-| Legacy key adoption | the adopted keys' path, found by identity anywhere in the document (`PM.doc.wroteObject`); keys outside the document are not a document write |
+| Legacy key adoption | the adopted keys' path, found by identity anywhere in the document (`PM.doc.wroteObject`); keys outside the document are not a document write. While the next flush resyncs or diffs the whole document (a document replacement adopts every key list it holds), no path is searched: that walk per key list is quadratic in the document |
 | Compatibility accessors (`ui-state.ts` `defineCompat`) that take a stored member out of the JSON (an effect's `open`) | `PM.doc.wroteObject(object)` |
 | Legacy key adoption during evaluation (`temporal-bridge.ts`) | runs inside a barrier writer scope (`setEvaluationWriter`); a rewrite the JSON can see names the keys (below) |
 | `PM.proj = another project` | resync at the next flush |
@@ -91,7 +115,7 @@ How writes reach the barrier:
 
 `scripts/engine-writers.mjs` classifies `PM.touch(paths)`, `PM.doc.write`, and
 `PM.doc.touched`, and records the `PatchOrigin` every writer class reaches the mirror
-with (`origins` in `docs/engine/writers.json`).
+with (`origins` in `apps/desktop/scripts/engine-writers.json`).
 
 ### The tracking Proxy (`engine-doc/proxy.ts`)
 

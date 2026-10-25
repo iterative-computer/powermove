@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-c9128e91855694b5";
+export const PROTOCOL_BUILD = "protocol-f434e85fb98a2a14";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -16,6 +16,7 @@ export type { AgentRunId } from "./AgentRunId";
 export type { AlphaOutput } from "./AlphaOutput";
 export type { AssetId } from "./AssetId";
 export type { AudioCoding } from "./AudioCoding";
+export type { AudioDiagnostics } from "./AudioDiagnostics";
 export type { AudioFacts } from "./AudioFacts";
 export type { AudioLevels } from "./AudioLevels";
 export type { AudioMessage } from "./AudioMessage";
@@ -65,6 +66,7 @@ export type { CompatNeed } from "./CompatNeed";
 export type { CompatPixels } from "./CompatPixels";
 export type { CompatSource } from "./CompatSource";
 export type { CompositionId } from "./CompositionId";
+export type { ConfirmRevision } from "./ConfirmRevision";
 export type { ConsistencyCheck } from "./ConsistencyCheck";
 export type { ConsistencyResult } from "./ConsistencyResult";
 export type { Container } from "./Container";
@@ -258,6 +260,7 @@ export type { SnapshotRef } from "./SnapshotRef";
 export type { SnapshotRequest } from "./SnapshotRequest";
 export type { SnapshotResult } from "./SnapshotResult";
 export type { SnapshotTarget } from "./SnapshotTarget";
+export type { SnapshotViewer } from "./SnapshotViewer";
 export type { SourceColor } from "./SourceColor";
 export type { SourceFit } from "./SourceFit";
 export type { SourceVideoFrame } from "./SourceVideoFrame";

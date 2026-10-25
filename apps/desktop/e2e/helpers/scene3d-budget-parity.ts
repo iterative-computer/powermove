@@ -88,8 +88,6 @@ export async function addFourthBudgetPlacement(page: Page, assetId: string) {
   }, assetId);
 }
 
-export type BudgetFrame = Awaited<ReturnType<typeof measureBudgetFrame>>;
-
 /** Use each lane's public capture path. Both return premultiplied RGBA;
  * normalize the native top-down rows to WebGL's bottom-up readPixels order. */
 export async function measureBudgetFrame(page: Page, engine: boolean, repeats = 12) {

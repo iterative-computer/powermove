@@ -46,10 +46,10 @@ import { ViewerPresentation } from '../../../extensions/viewer/engine-present/pr
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
-import { BlenderPngs } from './blender-png';
 import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
+import { engineCanvasViewParams, watchEngineCanvasView } from './canvas-view';
 import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -139,7 +139,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // returns their pool slots. An import can arrive after its descriptor.
   const pendingCompatFrames = new Map<string, FrameDescriptor>();
   const captureCompatFrame = (desc: FrameDescriptor): boolean => {
-    if (!PM.CompatContext?.active) return true;
+    if (!PM.CompatContext?.capturesFrames) return true;
     const frame = source.videoFrame(desc.poolGeneration, desc.poolIndex);
     if (!frame) return false;
     try { PM.CompatContext.captureFrame(desc, frame); } finally { frame.close(); }
@@ -150,7 +150,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (desc.poolGeneration === generation && desc.poolIndex === poolIndex && captureCompatFrame(desc)) pendingCompatFrames.delete(key);
     }
   });
-  const drawingWarmup = new PresentationWarmup(target.document, () => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }));
+  const presentationWorker = (): Worker => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' });
+  const drawingWarmup = new PresentationWarmup(target.document, presentationWorker);
   drawingWarmup.warm();
   const hostClock = new HostClock(() => native.hostTime());
   hostClock.start();
@@ -211,6 +212,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         catch (error) { log('error', `native 3D scene synchronization: ${error instanceof Error ? error.message : String(error)}`); }
       }
       PM.CompatContext?.selectFrame?.(frame);
+      renderTransport.trace.record('frame event', frame.revision, frame.pts);
       emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
     },
     (fn) => target.requestAnimationFrame(fn)
@@ -246,6 +248,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     session: () => current,
     driving: () => transport.active(),
     assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
+    source: (id) => {
+      const meta = PM.proj?.assets?.[id];
+      return [meta?.contentHash, meta?.storageKey, meta?.link?.hash, meta?.link?.path];
+    },
     peaksChanged: () => {
       PM.invalidate?.('timeline');
       PM.bus?.emit?.('audio:peaks');
@@ -281,15 +287,40 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     queueMicrotask(() => {
       flushQueued = false;
       if (!sessions.size) return;
+      const barrier = PM.EngineDoc?.barrier;
       flushing = true;
+      const began = performance.now();
       try {
-        const before = PM.EngineDoc?.barrier?.revision ?? null;
-        PM.EngineDoc?.barrier?.flush();
+        const before = barrier?.revision ?? null;
+        // A paused write without paths: the layers it most likely wrote
+        // leave first, as a provisional revision the engine draws but does
+        // not present while the rest of the document is compared. That
+        // comparison confirms the revision or supersedes it; it runs before
+        // anything else here, so every answer (and every query a raster
+        // override makes) sees the whole document. During playback the
+        // comparison would follow at once anyway: no provisional batch.
+        if (!PM.playing && barrier?.flushProvisional()) {
+          noteVersion();
+          connection?.sendPatches();
+          renderTransport.trace.record('provisional sent', barrier.revision, ticks(PM.time ?? 0), began);
+        }
+        try {
+          barrier?.flush();
+        } catch (error) {
+          // A comparison that fails must still end a provisional revision:
+          // a resync supersedes it (and releases or drops its frame).
+          log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (barrier?.provisionalRevision != null) {
+            barrier.markResync();
+            barrier.flush();
+          }
+        }
         noteVersion();
+        renderTransport.trace.record('edit flushed', barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
         // An edit while paused: the producers prepare the frame on screen at
         // the new revision now, beside the engine's render that will ask
         // for it (today draws an edit in the frame it happens).
-        if (before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before) renderTransport.prepareShown();
+        if (before !== null && (barrier?.revision ?? null) !== before) renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -341,6 +372,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           preview.close(session);
           sessions.delete(session);
           if (current === session) {
+            stats.reset();
+            PM.invalidate?.('status');
             current = null;
             sessionReady = null;
             const handlers = viewerHandlers;
@@ -364,7 +397,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // Replace a seek queued on the home screen before any old clock can
       // overwrite the replacement document's requested UI position.
       onLoading: () => { sourceMedia?.reset(); transport.seek(Number(PM.time) || 0, false); },
+      onOpened: () => renderTransport.syncProducers(session),
       onLoaded: () => {
+        stats.reset();
+        PM.invalidate?.('status');
+        audio.resynced();
         if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
       },
@@ -381,7 +418,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     current = session;
     transport.resetLoop();
     session.sendHeadless(openComposition());
-    sessionReady = session.start().then(() => renderTransport.syncProducers(session)).catch((error: unknown) => {
+    sessionReady = session.start().catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
       sessions.delete(session);
@@ -396,20 +433,22 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   };
   let lastProducerFailure = -Infinity;
   const documentEncoder = new TextEncoder();
+  // The window's revision once every pending edit is flushed to the engine.
+  const flushedRevision = (): number | null => {
+    const barrier = PM.EngineDoc?.barrier;
+    if (!barrier) return null;
+    barrier.flush();
+    // A snapshot may block this thread until the engine has the revision:
+    // the batches this run holds (patch-coalesce.ts) leave now.
+    connection?.sendPatches();
+    noteVersion();
+    return barrier.revision;
+  };
   const renderTransport = new EngineRenderTransport({
     native,
     session: snapshotSession,
     sessions: () => [...sessions],
-    revision: () => {
-      const barrier = PM.EngineDoc?.barrier;
-      if (!barrier) return null;
-      barrier.flush();
-      // A snapshot may block this thread until the engine has the revision:
-      // the batches this run holds (patch-coalesce.ts) leave now.
-      connection?.sendPatches();
-      noteVersion();
-      return barrier.revision;
-    },
+    revision: flushedRevision,
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     document: () => documentId(PM.proj?.id),
     viewSeq: () => current?.viewSeq ?? null,
@@ -488,8 +527,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // The job engine's export and agent frames ask this window for the SVG
   // rasters of the document it has open (main's `compatFrame`).
   const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
-  const blenderPngs=new BlenderPngs({meta:id=>(PM as any).proj.assets[id]??null,blob:meta=>(PM as any).MediaStore.get(meta),image:id=>PM.assets.get(id),canvas:()=>document.createElement('canvas'),decode:blob=>createImageBitmap(blob)});
-  const unprovideBlenderPng=renderTransport.provideCompat('blenderPng',request=>blenderPngs.produce(request));
   (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
@@ -621,6 +658,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
     presented: (frame, quality) => {
+      renderTransport.trace.record('viewer submitted', frame.revision, frame.pts);
       sceneMetadata.apply(frame, current);
       if (current) preview.receiveFrame(current, frame);
       presentedEvents.push(frame, quality);
@@ -707,9 +745,20 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     service: () => service,
     composition: () => (PM.proj ? { w: Number(PM.proj.w) || 0, h: Number(PM.proj.h) || 0 } : null),
     quality: () => Number(PM.quality ?? 1),
-    present: (options) => new ViewerPresentation({ ...options, log: (level, message) => log(level, message) })
+    view: () => engineCanvasViewParams(PM),
+    // A bound viewer (a fork or override of the built-in one from before the
+    // engine) presents exactly as the built-in viewer does: in a
+    // presentation worker. Its canvas is then a placeholder the page reads
+    // back like the built-in one (the Library card copies its pixels), and
+    // playback keeps its cadence while the main thread is busy.
+    present: (options) => new ViewerPresentation({
+      ...options,
+      log: (level, message) => log(level, message),
+      createWorker: options.service.offMainThread === false ? undefined : presentationWorker
+    })
   });
   (PM as any).EngineCanvas = canvasBinding;
+  const offCanvasViewport = watchEngineCanvasView(PM, () => canvasBinding.refresh());
 
   const handle: EngineConnectionHandle = {
     hostClock,
@@ -723,6 +772,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       reconcileHomePresentation();
     },
     setTrace: (on) => {
+      renderTransport.trace.enabled = on;
+      const barrier = PM.EngineDoc?.barrier;
+      if (barrier) barrier.trace = on ? (stage: string, began: number) => renderTransport.trace.record(stage, barrier.revision, ticks(PM.time ?? 0), began) : null;
       if (on === trace) return;
       trace = on;
       registration.dispose();
@@ -765,7 +817,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offAssets();
       follower.dispose();
       unprovideSvg();
-      unprovideBlenderPng();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
@@ -789,6 +840,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
       canvasBinding.unbind();
+      offCanvasViewport();
       if ((PM as any).EngineCanvas === canvasBinding) (PM as any).EngineCanvas = null;
       connection?.close('the engine connection was removed');
       connection = null;

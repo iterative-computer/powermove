@@ -1,5 +1,7 @@
 import { validateScene, type WebScene } from './scene';
 import { zipFiles } from './archive';
+import { convertStillImage, readProxyFile } from '../legacy/core/media-conversion';
+import { mediaExtension } from '../../../shared/media-formats';
 import { agentHandoff } from './agent-handoff';
 import { layer3DAssetIds } from '../core/scene3d/layers';
 import { sceneAssetIds, parseScene } from '../core/scene3d/schema';
@@ -81,23 +83,79 @@ export function inspectWebExport(PM: any) {
   return { errors: [...errors], warnings: [...warnings], definitions, fonts, assets };
 }
 
+// Renditions are named by the original's content hash (a linked original's is its link's).
+const renditionHash = (meta: any): string | null =>
+  typeof meta.contentHash === 'string' ? meta.contentHash : meta.link?.hash ?? null;
+
+/* The live asset still shows the frozen asset's original: the same content
+   or link hash, or, for an asset restored without a hash, the same stored
+   bytes (storage key and fingerprint). */
+function showsFrozenOriginal(live: any, meta: any, native: boolean): boolean {
+  if (!live || live.kind !== meta.kind) return false;
+  const liveHash = typeof live.contentHash === 'string' ? live.contentHash : live.link?.hash;
+  if (typeof liveHash === 'string') return liveHash === renditionHash(meta);
+  return !native && !!meta.storageKey && typeof meta.fingerprint === 'string'
+    && live.storageKey === meta.storageKey && live.fingerprint === meta.fingerprint;
+}
+
+/* The rendition the live asset shows, fetched before the export's first
+   await: fetch resolves a blob: URL when it is called, so a relink or a
+   project switch during the export cannot swap or revoke those bytes. */
+function captureShownRendition(PM: any, id: string, meta: any): Promise<Blob | null> | null {
+  const live = PM.assets?.get?.(id);
+  const url = live?.url;
+  if (typeof url !== 'string' || !url.startsWith('blob:') || !showsFrozenOriginal(live, meta, PM.MediaStore?.enabled === true)) return null;
+  try { return fetch(url).then(response => response.blob()).catch(() => null); } catch { return null; }
+}
+
 /**
  * A browser plays what this viewer plays. With the new engine's media store,
  * an asset marked `rendition` stores its original (ProRes, TIFF, HEIF) and
  * keeps a browser rendition as generated media (section 21): the web export
- * takes the rendition, or the bytes the live asset shows.
+ * takes the kept rendition, else the one the live asset shows when it still
+ * renders the frozen original, else converts that original the way the
+ * viewer does (`stillRendition`, `playbackProxy` in legacy/gl/raster.ts).
  */
-async function browserRendition(PM: any, meta: any, project: any): Promise<Blob | null> {
+async function browserRendition(PM: any, meta: any, project: any, shown: Promise<Blob | null> | null): Promise<Blob> {
   if (PM.EngineSourceMedia) return PM.EngineSourceMedia.rendition(project, meta.id, meta.kind === 'image' ? 'png' : 'webm');
-  // Renditions are named by the original's content hash (a linked original's is its link's).
-  const original = typeof meta.contentHash === 'string' ? meta.contentHash : meta.link?.hash;
-  const kept = original ? await PM.MediaStore?.rendition?.get?.(original).catch(() => null) : null;
+  const store = PM.MediaStore;
+  const hash = renditionHash(meta);
+  const kept = hash ? await store?.rendition?.get?.(hash).catch(() => null) : null;
   if (kept) return kept;
-  const url = PM.assets?.get?.(meta.id)?.url;
-  if (typeof url === 'string' && url.startsWith('blob:')) {
-    try { return await (await fetch(url)).blob(); } catch { /* revoked */ }
+  const live = await shown;
+  if (live) return live;
+  const label = meta.name || meta.id;
+  if (store?.enabled === false) throw new Error(`“${label}” has no browser-playable copy yet. Open it in the viewer, then export again.`);
+  const kind = meta.kind === 'video' ? 'video' : meta.kind === 'image' ? 'still' : null;
+  if (!kind) throw new Error(`“${label}” cannot be converted for web playback.`);
+  // Main picks the decoder by this name's extension, and prefers a link to the hash.
+  const link = meta.storage === 'linked' && meta.link ? meta.link : null;
+  const name = `original.${typeof meta.format === 'string' && meta.format ? meta.format : mediaExtension(meta.name)}`;
+  const readOriginal = async (): Promise<Blob> => {
+    const original = await store?.get?.(meta);
+    if (!original) throw new Error(`The original media for “${label}” is missing. Reimport it before exporting.`);
+    return original;
+  };
+  let blob: Blob;
+  if (typeof store?.convert === 'function') {
+    /* By reference first: main converts the stored object or the linked
+       file. Only when it has neither are the original's bytes read here
+       and uploaded, so main's own copy of a multi-gigabyte original is
+       never drained into the page. */
+    let result = hash || link ? await store.convert(kind, null, { hash, link, name }) : { ok: false, missing: true };
+    if (!result.ok && result.missing) result = await store.convert(kind, await readOriginal(), { hash, link, name });
+    if (!result.ok) throw new Error(result.error || `Could not prepare “${label}” for web playback.`);
+    blob = await readProxyFile(result, kind === 'still' ? `${String(meta.name || 'image')}.png` : label, 0);
+  } else if (kind === 'still') {
+    // A remote host's browser: its bridge uploads the bytes to convert.
+    const original = await readOriginal();
+    blob = await convertStillImage(new File([original], name, { type: original.type }));
+  } else {
+    throw new Error(`“${label}” has no browser-playable copy yet. Open it in the viewer, then export again.`);
   }
-  throw new Error(`“${meta.name || meta.id}” has no browser-playable copy yet. Open it in the viewer, then export again.`);
+  // With Use New Engine off the store is read-only, and an export writes nothing.
+  if (hash && store?.enabled === true) await store.rendition?.put?.(hash, blob)?.catch?.(() => false);
+  return blob;
 }
 
 const STORED_EXTENSIONS: Readonly<Record<string, string>> = {
@@ -140,6 +198,12 @@ export async function buildWebExport(PM: any) {
     }
   };
   const assetIds = [...inspection.assets];
+  // Still before the first await: the renditions on screen now belong to this snapshot.
+  const shown = new Map<string, Promise<Blob | null> | null>();
+  for (const id of assetIds) {
+    const meta = findAsset(project, id);
+    if (meta?.rendition === true) shown.set(id, captureShownRendition(PM, id, meta));
+  }
   // Overlap independent storage reads without starting an unbounded number of
   // large Blob conversions. Commit each batch in scene order so filenames and
   // ZIP entry order stay deterministic even when reads finish out of order.
@@ -147,7 +211,7 @@ export async function buildWebExport(PM: any) {
     const loaded = await Promise.allSettled(assetIds.slice(start, start + 4).map(async id => {
       const meta = findAsset(project, id);
       if (!meta) throw new Error(`Missing media metadata: ${id}`);
-      const blob = meta.rendition === true ? await browserRendition(PM, meta, project) : await PM.MediaStore.get(meta);
+      const blob = meta.rendition === true ? await browserRendition(PM, meta, project, shown.get(id) ?? null) : await PM.MediaStore.get(meta);
       if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
       return { id, meta, blob, data: new Uint8Array(await blob.arrayBuffer()) };
     }));

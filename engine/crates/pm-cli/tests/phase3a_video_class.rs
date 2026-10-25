@@ -59,12 +59,6 @@ fn ch(v: Value) -> Value {
 }
 
 fn document(w: u32, h: u32, fps: f64, dur: f64) -> pm_model::Document {
-    // Today's `videoPlaybackTime` clamps the source time to the asset's
-    // duration less an end padding (0.04 s in the viewer, one frame for
-    // final output; `pm_render::retime::playback_time`), so the last 0.04 s
-    // of an asset hold the frame before. The asset is declared longer than
-    // the frames measured so every measured frame is the frame at its time.
-    let asset_dur = dur + 0.04 + 1.0 / fps;
     let p = json!({
         "perspective": ch(json!(50)), "position.z": ch(json!(0)), "anchor.z": ch(json!(0)),
         "scale.z": ch(json!(100)), "rotation.x": ch(json!(0)), "rotation.y": ch(json!(0)),
@@ -88,7 +82,7 @@ fn document(w: u32, h: u32, fps: f64, dur: f64) -> pm_model::Document {
         "compId": "Pvideo-root", "compName": "video", "markers": [], "work": [0, dur], "params": {},
         "revision": 0, "edits": [], "created": 0, "shutter": 0.5, "layers": [layer], "comps": {},
         "assets": { "clip": { "id": "clip", "name": "clip", "kind": "video", "w": w, "h": h,
-            "dur": asset_dur, "fps": fps, "persisted": true } }
+            "dur": dur, "fps": fps, "persisted": true } }
     });
     pm_model::Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1)
 }

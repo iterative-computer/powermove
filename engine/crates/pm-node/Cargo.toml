@@ -41,7 +41,6 @@ wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] 
 # pm-audio playback (the viewer's master clock) and offline mix, the
 # session's pm-model mirror, VideoToolbox and AVAssetWriter through
 # pm-export. This links FFmpeg (pm-media) into the addon.
-pm-blender = { path = "../pm-blender" }
 pm-export = { path = "../pm-export" }
 pm-render = { path = "../pm-render" }
 # Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).

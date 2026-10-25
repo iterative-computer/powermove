@@ -1,6 +1,6 @@
 //! Tracks explicit paused-preview requests for each viewer session. The
-//! render thread owns this state; worker notices and presented frames may
-//! complete only the still-current generation.
+//! render thread owns this state; presented frames may complete only the
+//! still-current generation.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +12,6 @@ use super::render::Key;
 #[derive(Debug, Clone)]
 struct Pending {
     control: PreviewControl,
-    phase: PreviewPhase,
 }
 
 pub struct PresentedFrame<'a> {
@@ -20,7 +19,6 @@ pub struct PresentedFrame<'a> {
     pub composition: &'a str,
     pub time: Ticks,
     pub seq: Seq,
-    pub all_surfaces: bool,
     pub generation: Seq,
 }
 
@@ -48,36 +46,15 @@ impl PreviewControls {
         if control.action == PreviewAction::Cancel {
             self.pending.remove(&key);
         } else {
-            self.pending.insert(key, Pending { control, phase });
+            self.pending.insert(key, Pending { control });
         }
         Some(status)
     }
 
-    pub fn running(
-        &mut self,
-        key: Key,
-        revision: Revision,
-        generation: Option<Seq>,
-    ) -> Option<PreviewStatus> {
-        let p = self.pending.get_mut(&key)?;
-        if p.phase != PreviewPhase::Queued
-            || revision < p.control.revision
-            || generation != Some(p.control.generation)
-        {
-            return None;
-        }
-        p.phase = PreviewPhase::Running;
-        Some(status(&p.control, p.phase, None, None))
-    }
-
     /// Called for the descriptor of the frame actually sent to this viewer.
-    /// `all_surfaces` is true only when the paused Blender host wanted no
-    /// missing snapshots during this composition. This also handles a
-    /// composition with no 3D objects without waiting for a worker notice.
     pub fn presented(&mut self, key: Key, frame: PresentedFrame<'_>) -> Option<PreviewStatus> {
         let p = self.pending.get(&key)?;
         if p.control.cache_only
-            || !frame.all_surfaces
             || frame.generation != p.control.generation
             || frame.revision < p.control.revision
             || frame.composition != p.control.composition.as_str()
@@ -94,7 +71,7 @@ impl PreviewControls {
         ))
     }
 
-    /// The native Blender cache finished without presenting a viewer frame.
+    /// A cache-only preview is ready without presenting a viewer frame.
     pub fn ready_cache(
         &mut self,
         key: Key,
@@ -183,18 +160,12 @@ mod tests {
             camera: None,
         }
     }
-    fn frame(
-        generation: u64,
-        revision: u64,
-        seq: u64,
-        all_surfaces: bool,
-    ) -> PresentedFrame<'static> {
+    fn frame(generation: u64, revision: u64, seq: u64) -> PresentedFrame<'static> {
         PresentedFrame {
             revision: Revision::new(revision).unwrap(),
             composition: "comp",
             time: Ticks::new(42).unwrap(),
             seq: Seq::new(seq).unwrap(),
-            all_surfaces,
             generation: Seq::new(generation).unwrap(),
         }
     }
@@ -208,20 +179,10 @@ mod tests {
         tracker
             .control(key(), control(2, 4, PreviewAction::Render))
             .unwrap();
-        assert!(tracker.presented(key(), frame(1, 3, 5, true)).is_none());
-        let ready = tracker.presented(key(), frame(2, 4, 6, true)).unwrap();
+        assert!(tracker.presented(key(), frame(1, 3, 5)).is_none());
+        let ready = tracker.presented(key(), frame(2, 4, 6)).unwrap();
         assert_eq!(ready.generation.get(), 2);
         assert_eq!(ready.frame_seq.unwrap().get(), 6);
-    }
-
-    #[test]
-    fn missing_blender_surface_never_completes_a_frame() {
-        let mut tracker = PreviewControls::default();
-        tracker
-            .control(key(), control(1, 3, PreviewAction::Render))
-            .unwrap();
-        assert!(tracker.presented(key(), frame(1, 3, 5, false)).is_none());
-        assert!(tracker.current(key()).is_some());
     }
 
     #[test]
@@ -230,7 +191,7 @@ mod tests {
         let mut first = control(1, 3, PreviewAction::Render);
         first.cache_only = true;
         tracker.control(key(), first).unwrap();
-        assert!(tracker.presented(key(), frame(1, 3, 5, true)).is_none());
+        assert!(tracker.presented(key(), frame(1, 3, 5)).is_none());
         let mut second = control(2, 4, PreviewAction::Render);
         second.cache_only = true;
         tracker.control(key(), second).unwrap();
@@ -280,7 +241,7 @@ mod tests {
                     key(),
                     Revision::new(4).unwrap(),
                     Some(Seq::new(3).unwrap()),
-                    "Blender missing".into()
+                    "The preview could not be rendered".into()
                 )
                 .unwrap()
                 .phase,

@@ -16,7 +16,8 @@ export default defineConfig({
     // workers otherwise turn its calibrated budget into a CPU-contention test.
     fileParallelism: false,
     include: ['src/**/*.{test,spec}.ts', 'scripts/**/*.{test,spec}.ts', 'e2e/helpers/**/*.test.ts'],
-    exclude: ['**/node_modules/**', 'out/**', 'tests/**'],
+    // scripts/gate-3b holds Playwright specs (its own playwright.config.ts).
+    exclude: ['**/node_modules/**', 'out/**', 'tests/**', 'scripts/gate-3b/**'],
     passWithNoTests: true,
     // @scritto/core imports its own stylesheet; let Vite load it instead of Node.
     server: { deps: { inline: [/@scritto\//] } },

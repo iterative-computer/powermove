@@ -1,4 +1,5 @@
-//! GPU regressions for compatibility source storage and cache isolation.
+//! GPU regressions for source storage, chroma reconstruction and cache
+//! isolation.
 
 use super::*;
 use pm_gpu::readback::{f32_to_half, half_to_f32, read_f32, read_raw};
@@ -69,7 +70,6 @@ fn source(
         Factors { x: 1, y: 1 },
         None,
         format,
-        format == wgpu::TextureFormat::Rgba8Unorm && precision != Precision::Unorm8,
     );
     gpu.queue.submit([encoder.finish()]);
     target
@@ -104,156 +104,20 @@ fn native_source_storage_preserves_negative_and_superwhite_values() {
 }
 
 #[test]
-fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
+fn video_storage_follows_project_and_source_depth_with_one_reading() {
     let gpu = pm_gpu::Gpu::new("video source storage test").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     let mut media = MediaCache::new(&gpu.device);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video");
+    let eight = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
-    let interpreted = Interpretation {
-        transfer: Some(Transfer::DisplayE),
-        ..Default::default()
-    };
-    // Members that only choose or place frames keep today's upload.
-    let placed = Interpretation {
-        pixel_aspect: Some((1, 1)),
-        clean_aperture: Some(false),
-        field_order: pm_media::interlace::FieldOverride::Progressive,
-        alpha: Some(pm_media::interpret::AlphaChoice::Ignore),
-        ..Default::default()
-    };
-    // Revisit the same decoded frame across readings, then advance to
-    // exercise retired-target reuse. Neither the converted cache nor
-    // its free targets may lend RGBA8 storage to a native reading.
-    for second in [0.1, 0.2] {
-        for (compat, working, interpretation, expected) in [
-            (
-                true,
-                WorkingEncoding::Standard,
-                None,
-                wgpu::TextureFormat::Rgba8Unorm,
-            ),
-            (
-                false,
-                WorkingEncoding::Standard,
-                None,
-                wgpu::TextureFormat::Rgba32Float,
-            ),
-            (
-                true,
-                WorkingEncoding::Standard,
-                Some(&interpreted),
-                wgpu::TextureFormat::Rgba32Float,
-            ),
-            (
-                true,
-                WorkingEncoding::Standard,
-                Some(&placed),
-                wgpu::TextureFormat::Rgba8Unorm,
-            ),
-            (
-                true,
-                WorkingEncoding::LinearLight,
-                None,
-                wgpu::TextureFormat::Rgba32Float,
-            ),
-            (
-                true,
-                WorkingEncoding::Standard,
-                None,
-                wgpu::TextureFormat::Rgba8Unorm,
-            ),
-        ] {
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let target = media
-                .video(
-                    &gpu.device,
-                    &gpu.queue,
-                    &pipelines,
-                    &mut encoder,
-                    &path,
-                    1,
-                    second,
-                    true,
-                    working,
-                    Precision::Float32,
-                    interpretation,
-                    pm_time::Rate::FPS_30,
-                    false,
-                    compat,
-                    false,
-                )
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                target.format(),
-                expected,
-                "compat={compat}, {working:?}, {interpretation:?}"
-            );
-            let cached = media
-                .video(
-                    &gpu.device,
-                    &gpu.queue,
-                    &pipelines,
-                    &mut encoder,
-                    &path,
-                    1,
-                    second,
-                    true,
-                    working,
-                    Precision::Float32,
-                    interpretation,
-                    pm_time::Rate::FPS_30,
-                    false,
-                    compat,
-                    false,
-                )
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                cached.texture, target.texture,
-                "identical request cache hit"
-            );
-            if compat && working == WorkingEncoding::Standard && interpretation.is_none() {
-                let source = media
-                    .video(
-                        &gpu.device,
-                        &gpu.queue,
-                        &pipelines,
-                        &mut encoder,
-                        &path,
-                        1,
-                        second,
-                        true,
-                        working,
-                        Precision::Float32,
-                        interpretation,
-                        pm_time::Rate::FPS_30,
-                        false,
-                        compat,
-                        true,
-                    )
-                    .unwrap()
-                    .unwrap();
-                assert_ne!(
-                    source.texture, target.texture,
-                    "source display and composition have distinct cache identities"
-                );
-            }
-            gpu.queue.submit([encoder.finish()]);
-            assert!(
-                !read_f32(&gpu.device, &gpu.queue, &target.texture)
-                    .unwrap()
-                    .is_empty()
-            );
-            media.flush();
-        }
-    }
-    // The legacy host's per-file interpretation is a separate entry
-    // point from the document's Interpret Footage fields.
-    let reading = media.video_color(&path).unwrap();
-    for override_color in [Some(reading), None] {
-        media.interpret(&path, override_color);
+    let ten = fixtures.join("hevc10-709-limited.mp4");
+    let hdr = fixtures.join("hevc10-2020-pq.mp4");
+    use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
+    let convert = |media: &mut MediaCache,
+                   path: &Path,
+                   precision,
+                   interpretation: Option<&Interpretation>| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
             .video(
@@ -261,37 +125,64 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                 &gpu.queue,
                 &pipelines,
                 &mut encoder,
-                &path,
+                path,
                 1,
                 0.2,
                 true,
                 WorkingEncoding::Standard,
-                Precision::Float32,
-                None,
+                precision,
+                interpretation,
                 pm_time::Rate::FPS_30,
-                false,
-                true,
                 false,
             )
             .unwrap()
             .unwrap();
-        assert_eq!(
-            target.format(),
-            if override_color.is_some() {
-                wgpu::TextureFormat::Rgba32Float
-            } else {
-                wgpu::TextureFormat::Rgba8Unorm
-            }
-        );
         gpu.queue.submit([encoder.finish()]);
-        gpu.wait_idle();
+        let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
         media.flush();
+        (target.format(), pixels)
+    };
+    // Never below 8 bits; half float or better for 10-bit and HDR sources.
+    for (path, precision, format) in [
+        (&eight, Precision::Unorm8, Rgba8Unorm),
+        (&eight, Precision::Float16, Rgba16Float),
+        (&eight, Precision::Float32, Rgba32Float),
+        (&ten, Precision::Unorm8, Rgba16Float),
+        (&ten, Precision::Float32, Rgba32Float),
+        (&hdr, Precision::Unorm8, Rgba16Float),
+    ] {
+        assert_eq!(
+            convert(&mut media, path, precision, None).0,
+            format,
+            "{path:?} {precision:?}"
+        );
     }
+    // Frame-placing overrides and an override restating the file's reading
+    // leave an SDR frame's colour as it is.
+    let (_, base) = convert(&mut media, &eight, Precision::Float32, None);
+    let placed = Interpretation {
+        pixel_aspect: Some((1, 1)),
+        clean_aperture: Some(false),
+        field_order: pm_media::interlace::FieldOverride::Progressive,
+        ..Default::default()
+    };
+    let same = Interpretation {
+        transfer: Some(Transfer::DisplayE),
+        ..Default::default()
+    };
+    let colour = |media: &mut MediaCache, i| convert(media, &eight, Precision::Float32, i).1;
+    assert_eq!(colour(&mut media, Some(&placed)), base);
+    assert_eq!(colour(&mut media, Some(&same)), base);
+    // The host's per-file override restating the reading too.
+    let reading = media.video_color(&eight).unwrap();
+    media.interpret(&eight, Some(reading));
+    assert_eq!(colour(&mut media, None), base);
+    media.interpret(&eight, None);
 }
 
 #[test]
-fn compatibility_source_storage_rounds_directly_to_rgba8() {
-    let gpu = pm_gpu::Gpu::new("compatibility source storage test").unwrap();
+fn rgba8_source_storage_rounds_the_f32_conversion_once() {
+    let gpu = pm_gpu::Gpu::new("rgba8 source storage test").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     // Probe both sides of every half-byte boundary, far enough away
     // to avoid a tie but close enough that f16 can cross the boundary.
@@ -318,24 +209,20 @@ fn compatibility_source_storage_rounds_directly_to_rgba8() {
         expected, rounded_via_half,
         "fixture must detect double rounding"
     );
-    for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
-        let target = source(
-            &gpu,
-            &pipelines,
-            &pixels,
-            precision,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
-        assert_eq!(target.format(), wgpu::TextureFormat::Rgba8Unorm);
-        let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
-        assert_eq!(actual, expected, "{precision:?}: source byte quantization");
-        let last = &actual[actual.len() - 4..];
-        assert_eq!(last, &[255, 0, 64, 255], "clip before subsequent filtering");
-    }
+    let target = source(
+        &gpu,
+        &pipelines,
+        &pixels,
+        Precision::Unorm8,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+    let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
+    assert_eq!(actual, expected, "source byte quantization");
+    assert_eq!(&actual[actual.len() - 4..], &[255, 0, 64, 255]);
 }
 
 #[test]
-fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
+fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
     let gpu = pm_gpu::Gpu::new("source chroma reconstruction test").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     let (width, height) = (8u32, 6u32);
@@ -412,7 +299,7 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
         alpha: AlphaMode::Opaque,
         tone_map: None,
     };
-    let converted = |format, compatibility_storage| {
+    let converted = |format| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = convert_format(
             &gpu.device,
@@ -422,7 +309,7 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
             &normalized,
             &color,
             WorkingEncoding::Standard,
-            if compatibility_storage || format == wgpu::TextureFormat::Rgba32Float {
+            if format == wgpu::TextureFormat::Rgba32Float {
                 Precision::Float32
             } else {
                 Precision::Unorm8
@@ -430,7 +317,6 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
             Factors { x: 2, y: 2 },
             None,
             format,
-            compatibility_storage,
         );
         gpu.queue.submit([encoder.finish()]);
         target
@@ -487,28 +373,29 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
         pixels
     };
     let unorm = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let centered = reference(true);
     let native = reference(false);
-    let expected: Vec<u8> = centered.iter().map(|&v| unorm(v)).collect();
-    let wrong: Vec<u8> = native.iter().map(|&v| unorm(v)).collect();
-    assert!(expected.iter().zip(&wrong).any(|(&a, &b)| a.abs_diff(b) > 20));
-    let bitmap = converted(wgpu::TextureFormat::Rgba8Unorm, true);
-    assert_eq!(
-        read_raw(&gpu.device, &gpu.queue, &bitmap.texture).unwrap(),
+    // Today's viewer reconstructs chroma centered and bilinear: a half
+    // chroma sample off for left-sited 4:2:0, far from the reference here.
+    let centered: Vec<u8> = reference(true).iter().map(|&v| unorm(v)).collect();
+    let expected: Vec<u8> = native.iter().map(|&v| unorm(v)).collect();
+    assert!(
         expected
+            .iter()
+            .zip(&centered)
+            .any(|(&a, &b)| a.abs_diff(b) > 20)
     );
-    let working8 = converted(wgpu::TextureFormat::Rgba8Unorm, false);
+    let working8 = converted(wgpu::TextureFormat::Rgba8Unorm);
     assert_eq!(
         read_raw(&gpu.device, &gpu.queue, &working8.texture).unwrap(),
-        wrong,
-        "RGBA8 working storage keeps native chroma siting and filter"
+        expected,
+        "RGBA8 storage keeps the siting and filter"
     );
-    let float = converted(wgpu::TextureFormat::Rgba32Float, false);
+    let float = converted(wgpu::TextureFormat::Rgba32Float);
     let actual = read_f32(&gpu.device, &gpu.queue, &float.texture).unwrap();
     for (i, (&actual, &expected)) in actual.iter().zip(&native).enumerate() {
         assert!(
             (f64::from(actual) - expected).abs() < 2e-6,
-            "native channel {i}: {actual} != {expected}"
+            "channel {i}: {actual} != {expected}"
         );
     }
     assert!(actual.iter().any(|&v| v < 0.0));

@@ -2114,7 +2114,6 @@ dependencies = [
  "pm-protocol",
  "pm-stretch",
  "pm-time",
- "proptest",
  "rubato",
  "serde",
  "serde_json",
@@ -2123,20 +2122,6 @@ dependencies = [
  "symphonia-bundle-mp3",
  "symphonia-core",
  "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "pm-blender"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "libc",
- "pm-model",
- "pm-protocol",
- "png",
- "serde_json",
- "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -2167,16 +2152,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-cache"
-version = "0.1.0"
-
-[[package]]
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
  "libc",
  "pm-audio",
- "pm-blender",
  "pm-eval",
  "pm-export",
  "pm-media",
@@ -2221,7 +2201,6 @@ dependencies = [
  "libc",
  "pm-model",
  "pm-protocol",
- "proptest",
  "serde",
  "thiserror 2.0.21",
 ]
@@ -2261,7 +2240,6 @@ dependencies = [
  "objc2-io-surface",
  "objc2-video-toolbox",
  "pm-audio",
- "pm-blender",
  "pm-eval",
  "pm-export",
  "pm-gpu",
@@ -2304,14 +2282,11 @@ version = "0.1.0"
 dependencies = [
  "glslang",
  "glslang-sys",
- "libc",
  "naga",
- "proptest",
  "rspirv",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2362,7 +2337,6 @@ dependencies = [
  "pm-color",
  "pm-protocol",
  "pm-time",
- "proptest",
  "resvg",
  "serde",
  "serde_json",
@@ -2392,7 +2366,6 @@ dependencies = [
  "napi-derive",
  "objc2",
  "pm-audio",
- "pm-blender",
  "pm-bridge",
  "pm-engine",
  "pm-eval",
@@ -2464,18 +2437,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-proxy"
+name = "pm-reference"
 version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "libm",
+ "pm-color",
+ "pm-protocol",
+]
 
 [[package]]
 name = "pm-render"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "flate2",
  "kurbo",
  "libm",
- "pm-blender",
  "pm-color",
  "pm-edit",
  "pm-eval",
@@ -2488,6 +2465,7 @@ dependencies = [
  "pm-model",
  "pm-perf",
  "pm-protocol",
+ "pm-reference",
  "pm-text",
  "pm-time",
  "pm-vector",
@@ -2508,7 +2486,6 @@ dependencies = [
 name = "pm-skia-path"
 version = "0.12.0"
 dependencies = [
- "arrayref",
  "bytemuck",
  "libm",
  "strict-num",
@@ -2583,7 +2560,6 @@ dependencies = [
 name = "pm-wasm"
 version = "0.1.0"
 dependencies = [
- "flate2",
  "pm-edit",
  "pm-eval",
  "pm-expr",

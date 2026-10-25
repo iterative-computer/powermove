@@ -10,30 +10,25 @@ use crate::error::RenderError;
 use crate::motion::MotionBlur;
 use crate::sampling::Sampling;
 
-/// How close to a video clip's end its source time may go: today's
-/// `videoPlaybackTime(asset, time, endPadding)` keeps a source time at least
-/// `endPadding` before the asset's duration, and the padding depends on the
-/// path that draws the frame.
+/// Whether the request is an interactive preview or final output. This
+/// controls preview-only canvas clipping, never video frame selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VideoEnd {
-    /// The viewer, scrubbing, and thumbnails: the compositor's own seeks,
-    /// `endPadding = 0.04` s.
+pub enum OutputKind {
+    /// Viewer, scrubbing and thumbnails.
     #[default]
     Preview,
-    /// Exports and agent stills: `prepareFrame` seeks every clip first with
-    /// `endPadding = 1 / fps` of the exported composition, so the last
-    /// frame of a clip that ends with the composition is kept.
+    /// Exports and agent captures.
     Final,
 }
 
-impl VideoEnd {
+impl OutputKind {
     /// The output kind of a contract 2 request: exports and agent captures
     /// are final output.
-    pub const fn of(purpose: pm_protocol::frame::FramePurpose) -> VideoEnd {
+    pub const fn of(purpose: pm_protocol::frame::FramePurpose) -> OutputKind {
         if purpose.is_final() {
-            VideoEnd::Final
+            OutputKind::Final
         } else {
-            VideoEnd::Preview
+            OutputKind::Preview
         }
     }
 }
@@ -74,17 +69,13 @@ pub struct RenderRequest {
     /// render; an export never draws it, and [`RenderRequest::from_frame_request`]
     /// drops it for exports and agent captures (section 8).
     pub view: Option<ViewOverride>,
-    /// How compositions rendered with Blender draw (`crate::blender`):
-    /// native shading, an export's prepared surfaces, or the paused
-    /// viewer's preview surfaces.
-    pub blender: crate::blender::BlenderRender,
     /// Motion blur of layers with their switch on (`crate::motion`).
     pub motion_blur: MotionBlur,
     /// The resampler of `compat` level 2 raster content
     /// (`crate::sampling`).
     pub sampling: Sampling,
-    /// The end-of-clip padding of video sources ([`VideoEnd`]).
-    pub video_end: VideoEnd,
+    /// Preview-only canvas policy; video timing is identical for both kinds.
+    pub output_kind: OutputKind,
     /// Where output pixel (0, 0) sits in scaled composition pixels:
     /// composition pixel `(x, y)` lands at output pixel `(x · sx − ox,
     /// y · sy − oy)` at the top level (today's `scaledWorld` with a
@@ -110,10 +101,9 @@ impl RenderRequest {
             background: true,
             export: false,
             view: None,
-            blender: crate::blender::BlenderRender::Native,
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
-            video_end: VideoEnd::Preview,
+            output_kind: OutputKind::Preview,
             origin: None,
         }
     }
@@ -131,10 +121,9 @@ impl RenderRequest {
             background: true,
             export: false,
             view: None,
-            blender: crate::blender::BlenderRender::Native,
             motion_blur: MotionBlur::Off,
             sampling: Sampling::Final,
-            video_end: VideoEnd::Preview,
+            output_kind: OutputKind::Preview,
             origin: None,
         }
     }
@@ -166,13 +155,12 @@ impl RenderRequest {
             background: true,
             export: request.purpose == FramePurpose::Export,
             view: request.view.clone().filter(|_| !request.purpose.is_final()),
-            blender: crate::blender::BlenderRender::Native,
             motion_blur: match request.motion_blur {
                 MotionBlurKind::Off => MotionBlur::Off,
                 kind => MotionBlur::Kind(kind),
             },
             sampling,
-            video_end: VideoEnd::of(request.purpose),
+            output_kind: OutputKind::of(request.purpose),
             origin: None,
         })
     }
@@ -203,7 +191,8 @@ impl RenderRequest {
             // Its allocation is still bounded by output_size/region. The
             // viewer's already-validated canvas contract permits every
             // finite positive density; captures retain the wire limits.
-            let canvas = self.preview_canvas && !self.export && self.video_end == VideoEnd::Preview;
+            let canvas =
+                self.preview_canvas && !self.export && self.output_kind == OutputKind::Preview;
             for v in [sx, sy] {
                 if canvas {
                     if !(v.is_finite() && v > 0.0) {
@@ -251,12 +240,12 @@ mod tests {
         request.export = true;
         assert!(request.validate().is_err(), "export scale stays bounded");
         request.export = false;
-        request.video_end = VideoEnd::Final;
+        request.output_kind = OutputKind::Final;
         assert!(
             request.validate().is_err(),
             "final capture scale stays bounded"
         );
-        request.video_end = VideoEnd::Preview;
+        request.output_kind = OutputKind::Preview;
         for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             request.scale = Some((invalid, 32.0));
             assert!(request.validate().is_err(), "invalid x density {invalid}");

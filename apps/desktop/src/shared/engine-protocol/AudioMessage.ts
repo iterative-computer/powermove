@@ -3,6 +3,7 @@ import type { AssetId } from "./AssetId";
 import type { AudioLevels } from "./AudioLevels";
 import type { AudioPeaks } from "./AudioPeaks";
 import type { ChannelLevels } from "./ChannelLevels";
+import type { Seq } from "./Seq";
 import type { Ticks } from "./Ticks";
 
 /**
@@ -11,4 +12,9 @@ import type { Ticks } from "./Ticks";
  * Engine"). One event carries the four messages, each naming its
  * direction; all are session-bound.
  */
-export type AudioMessage = { "audio": "monitor", solo: Array<string>, } | { "audio": "levels" } & AudioLevels | { "audio": "peaksWanted", asset: string, } | { "audio": "peaks" } & AudioPeaks | { "audio": "sourceMonitor", asset: AssetId | null, time: Ticks, playing: boolean, generation: number, } | { "audio": "sourceStatus", asset: AssetId, time: Ticks, playing: boolean, generation: number, levels: ChannelLevels, error?: string, };
+export type AudioMessage = { "audio": "monitor", solo: Array<string>, } | { "audio": "levels" } & AudioLevels | { "audio": "peaksWanted", asset: string, 
+/**
+ * Echoed by the decoder so replaced sources and resyncs cannot
+ * accept a prior request's envelope.
+ */
+request?: Seq, } | { "audio": "peaks" } & AudioPeaks | { "audio": "sourceMonitor", asset: AssetId | null, time: Ticks, playing: boolean, generation: number, } | { "audio": "sourceStatus", asset: AssetId, time: Ticks, playing: boolean, generation: number, levels: ChannelLevels, error?: string, };

@@ -80,6 +80,22 @@ function rig(options: { width?: number; height?: number } = {}) {
 }
 
 describe('render.gl.context, the compatibility context', () => {
+  it('reserves a deferred compositor context before creating a mirror, only on explicit context access', () => {
+    const r = rig();
+    const order: string[] = [];
+    r.env.bound.mockReturnValue(r.bound);
+    const host = new CompatContextHost({
+      ...r.env,
+      beforeContext: (bound) => { expect(bound).toBe(r.bound); order.push('reserve WebGL'); },
+      makeCanvas: (...args) => { order.push('compatibility canvas'); return r.env.makeCanvas(...args); }
+    });
+    expect(order).toEqual([]);
+    expect(host.context()).not.toBeNull();
+    expect(order[0]).toBe('reserve WebGL');
+    host.context();
+    expect(order.filter(stage => stage === 'reserve WebGL')).toHaveLength(1);
+  });
+
   it('is the compositor\'s context with the engine off, as today', () => {
     const gl = { canvas: {} };
     expect(compatContext({ GL: { gl } })).toBe(gl);
@@ -111,6 +127,42 @@ describe('render.gl.context, the compatibility context', () => {
     gl.readPixels(0, 0, 1, 1, 0x1908, 0x1401, new Uint8Array(4));
     expect(r.drawn.some((d) => d[0] === 'drawImage' && d[1] === r.presentation)).toBe(false);
     expect(r.drawn).toContainEqual(['drawImage', captured, 0, 0]);
+  });
+
+  it('keeps the completed paused surface when a viewer replaces its bound canvas', () => {
+    const r = rig(); r.env.bound.mockReturnValue(r.bound); r.host.context();
+    const tag = { seq: 1, revision: 7, viewSeq: 3 };
+    r.host.captureFrame(tag, { displayWidth: 400, displayHeight: 200 } as VideoFrame);
+    const saved = r.made.at(-1);
+    r.host.selectFrame(tag); r.host.presented();
+    const replacement = r.bound.cloneNode() as HTMLCanvasElement;
+    replacement.getBoundingClientRect = r.bound.getBoundingClientRect;
+    r.stage.append(replacement);
+    r.env.bound.mockReturnValue(replacement);
+    r.env.presentation = () => r.presentation;
+    r.drawn.length = 0;
+    r.host.context();
+    expect(r.host.stats.made).toBe(2);
+    expect(r.drawn).toContainEqual(['drawImage', saved, 0, 0, 400, 200, 0, 0, 200, 100]);
+    r.host.dispose();
+  });
+
+  it('preserves the current engine frame during compatibility WebGL loss for paused recovery', () => {
+    const r = rig(); r.env.bound.mockReturnValue(r.bound); r.host.context();
+    const lost = r.made[0].addEventListener.mock.calls.find(([name]: [string]) => name === 'webglcontextlost')[1];
+    lost({ preventDefault() {} });
+    expect(r.host.active).toBe(false);
+    expect(r.host.capturesFrames).toBe(true);
+    const tag = { seq: 2, revision: 8, viewSeq: 3 };
+    r.host.captureFrame(tag, { displayWidth: 400, displayHeight: 200 } as VideoFrame);
+    const saved = r.made.at(-1);
+    r.host.selectFrame(tag); r.host.presented();
+    r.drawn.length = 0;
+    r.host.context();
+    expect(r.host.stats).toMatchObject({ made: 2, recreated: 'lost', selectedAtRecreate: true });
+    expect(r.drawn).toContainEqual(['drawImage', saved, 0, 0, 400, 200, 0, 0, 200, 100]);
+    r.host.dispose();
+    expect(r.host.capturesFrames).toBe(false);
   });
 
   it('is null until a viewer binds a canvas, then one context on an offscreen canvas with today\'s attributes', () => {

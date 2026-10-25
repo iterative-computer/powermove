@@ -427,6 +427,9 @@ test.describe('Use New Engine: the tracer bullet', () => {
     await openTracer(session, { pathMask: true });
     await waitRoute(page, 'engine');
     await expect.poll(() => enginePresenting(page), { timeout: 20_000 }).toBe(true);
+    // The canvas turns visible with its first frame; the frame counts as on
+    // screen (and replaces the starting line) once it is revealed.
+    await expect.poll(async () => (await engineFrame(page)) !== null, { timeout: 20_000 }).toBe(true);
     expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').stage.querySelector('[data-engine-status]'))).toBeNull();
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

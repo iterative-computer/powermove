@@ -744,7 +744,6 @@ python3 engine/crates/pm-text/capture/colr-fonts.py "$HOME/Library/Application S
 # The real project's text layers as source textures (needs a text-iso-* capture and the built app)
 ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/source.ts               # text-source-*
 cd engine
-cargo test --release -p pm-render --test text_residuals   # FONTS-R contract tests (no captures needed)
 cargo test --release -p pm-render --test text_raster   # newest text-raster-, text-closure-, text-paths-, text-source-; PM_TEXT_RASTER, PM_TEXT_ONLY, PM_TEXT_DIFFS, PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
 cargo test --release -p pm-render --test text_corpus   # PM_ENGINE_CORPUS, PM_TEXT_ONLY, PM_TEXT_DIFFS
 cargo test --release -p pm-render --test text_level2   # PM_TEXT_ONLY, PM_TEXT_DIFFS
@@ -991,39 +990,12 @@ Round 6 residual checks as visually identical edge-sample decisions, not
 owner-rule blockers. This supersedes their earlier blocker classification.
 It does not claim byte equality or change a pixel tolerance.
 
-The explicit RATCHET is
-[`tests/fixtures/text-residuals.json`](../../engine/crates/pm-render/tests/fixtures/text-residuals.json),
-bounded by the `APPROVED` table in
-[`tests/support/text_residuals.rs`](../../engine/crates/pm-render/tests/support/text_residuals.rs)
-(round 8, below). It contains exactly those 23 measurements: 19 raster checks (main, closure,
-source textures and the independent large-path capture) and four composed
-frames. Every entry records its measured number of pixels beyond the
-original bound, maximum channel delta, one-line cause boundary and review
-PNG basename. Images and private directory paths stay outside Git; the
-lane report resolves the names to the private Round 6 review sheets.
-
-`text_raster` and `text_corpus` share the same checker. The original strict
-bounds remain **1 CV for raster/source textures** and **2 CV for composed
-text**. All unlisted cases still must meet their original strict bound.
-The checker requires exact equality with both listed measurements:
-
-- Increasing either the pixel count or maximum delta fails.
-- Decreasing either one fails until its budget is lowered to the observed
-  value; remove the entry when the case meets the strict bound.
-- Adding new cases or increasing budgets is forbidden by FONTS-R.
-- A selected listed measurement cannot disappear through an empty shot,
-  refusal, missing media or an early return. Corpus identities include
-  the exact project, frame time and original/isolation pass.
-- Geometry, text-routing and non-text Standard-class checks remain in
-  force. The ratchet cannot waive them.
-
-This is a case-specific, downward-only snapshot ratchet, **not a widened
-tolerance**. The summaries retain the strict counts and print ratcheted
-counts separately. Existing residual images are still exported for review.
-Six capture-independent contract tests cover new residuals, both regression
-axes, improvements with stale budgets, lowering/removal, missing selected
-measurements, corpus identity collisions and fixture/path validation
-(twelve since round 8).
+The ratchet that held these measurements (`tests/fixtures/text-residuals.json`,
+`tests/support/text_residuals.rs`, `tests/text_residuals.rs`) is removed by
+the gate policy ([gate-policy.md](gate-policy.md)): it could only tighten
+toward today's pixels, so it blocked every correctness fix. `text_raster` and
+`text_corpus` keep their 1 CV and 2 CV bounds until the text lane converts
+them to the reference comparison.
 
 Round 7 image gates pass in debug and release (integration snapshot
 `a80796f9`, including dochost `f89a239e` and compclose `e9a80939`):
@@ -1071,31 +1043,10 @@ normal visibility for the next capture or viewer frame. A visibility change
 also clears draw reuse. The burn-in test now checks shown → hidden → shown,
 and transport/IPC/protocol tests cover the flag's default and forwarding.
 
-## Round 8: the ratchet cannot loosen or go unchecked
-
-Review of round 7 found two ways FONTS-R could stop holding:
-
-- **Unchecked entries.** `text_raster` only discovered the newest
-  `text-raster-*` and `text-closure-*` captures. The two large-path entries
-  (`text-paths-*`) were checked only through a hand-set `PM_TEXT_RASTER`,
-  and the three source-texture entries had their only capture in `/tmp`,
-  made by an uncommitted script. `Ratchet::missing` only flagged listed
-  cases inside a selected capture, so a deleted capture silently dropped
-  its entries.
-- **Data-only loosening.** "Never increase a budget or add cases" was only
-  the fixture's `policy` string; raising a budget or adding a 24th entry
-  passed every gate.
+## Round 8: capture sets and the UI font census
 
 Fixes:
 
-- The 23 approved ceilings (id, measurement identity, pixels, max CV) are
-  the `APPROVED` table in `tests/support/text_residuals.rs`. The fixture
-  loads only when every entry is in that table, names the same
-  measurement (raster id, or corpus project/isolation/time), and is at or
-  below both approved values. Lowering or removing stays a fixture edit;
-  loosening or adding needs a visible code change. Contract tests raise
-  each real entry on both axes, add a 24th case, and re-point a corpus
-  entry (all fail to load), and lower or remove each entry (all load).
 - `text_raster` gates the newest capture of four sets: `text-raster-*`,
   `text-closure-*`, `text-paths-*` and `text-source-*`.
   [`capture/source.ts`](../../engine/crates/pm-text/capture/source.ts) is
@@ -1104,13 +1055,6 @@ Fixes:
   capture, times 16, 18 and 24 s) rasterized by today's app at the density
   their world transform asks for, written into the corpus directory. It is
   the round 5 tool, unchanged in what it draws and reads back.
-- A full run (no `PM_TEXT_RASTER`/`PM_TEXT_ONLY` for `text_raster`, no
-  `PM_ENGINE_CORPUS`/`PM_TEXT_ONLY` for `text_corpus`) on a machine with
-  the private corpus directory fails for every FONTS-R entry of its gate
-  that no selected capture measured (`Ratchet::unmeasured`). A narrowed run
-  prints how many entries it did not check and that it is not the gate.
-  Without the corpus directory both tests still report and pass vacuously
-  (captures are private; see Gaps).
 
 Also in round 8, the UI font census keeps each canvas context's
 descriptions by state (font, text rendering, stretch, and for a connected
@@ -1398,7 +1342,7 @@ Verification (shipping thin-LTO release profile):
   within 2 CV, 4 FONTS-R ratcheted, 0 failed; 0 level 2 projects in the
   captures). The 13 FONTS-R lines are identical to round 3's; the other ten
   round 3 lines are the residuals the textexact lane retired, and the
-  ratchet fixture equals `feat/native-engine`'s. `text_residuals` **13/13**.
+  ratchet fixture equals `feat/native-engine`'s.
 - Evaluation corpus (`v0-20261012`): 0 mismatches in every class (6,162
   text layouts, 2,157 text bounds, 2,157 raster metrics, 57 animator, glyph
   and style queries each); 0 level 2 projects routed.
@@ -1820,7 +1764,7 @@ Round 2 measurements (2026-10-22, release thin-LTO gates, release addon):
 |---|---|
 | `text_raster` (main, closure, large paths, source) | 495, 116, 4, 3: all within 1 CV, 0 ratcheted, 0 failed |
 | `text_corpus` | 576/576 within 2 CV; every per-frame line identical to the previous qualified run |
-| `text_residuals`, `text_gpu` (incl. skew80/rotated), `text_colors`, `text_level2` | pass |
+| `text_gpu` (incl. skew80/rotated), `text_colors`, `text_level2` | pass |
 | pm-text (cg-masks) / pm-render lib / pm-vector `render` (debug) | 79 / 114 / 78 + integration, pass |
 | App replay, 18 tests (12 parity + 6 canvas-text), host load about 8–10 | 18/18 |
 
@@ -2158,10 +2102,8 @@ qualified; those viewports remain an open gap, unchanged by this round.
 
 2026-10-19 (lane ne-fonts, round 7):
 
-- `pm-render/tests/{text_raster,text_corpus,text_residuals}.rs`,
-  `tests/support/{mod,text_residuals}.rs` and
-  `tests/fixtures/text-residuals.json`: shared FONTS-R enforcement,
-  metadata-only snapshots and contract tests. Pixel references and strict
+- `pm-render/tests/{text_raster,text_corpus}.rs`: shared FONTS-R
+  enforcement (since removed, see round 7). Pixel references and strict
   bounds are unchanged.
 - `pm-node/src/{lib.rs,fonts/{mod,render}.rs,present/{mod,document,render}.rs}`:
   reconcile bridge integration with the existing scoped font hub; propagate

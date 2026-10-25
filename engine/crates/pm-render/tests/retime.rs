@@ -158,8 +158,8 @@ fn a_frame_rate_override_shows_frame_n_at_n_over_the_rate() {
         frame(&native, 37.0 / 30.0),
         "25 fps frame 37",
     );
-    // Past the last frame (120 frames at 15 fps end at 8 s): the last one
-    // (natively today's end clamp, dur − 0.04 s, never reaches it).
+    // Past the last frame (120 frames at 15 fps end at 8 s): hold the last
+    // source frame, just as native-rate footage does.
     same(
         frame(&slow, 9.0),
         frame(&slow, 119.0 / 15.0),

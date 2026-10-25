@@ -57,7 +57,7 @@ ${COMP_TABS_STYLES}
 #tl-mode .tl-mode-button{display:flex;align-items:center;gap:5px;padding:0 9px;border:0;border-radius:calc(var(--r-sm) - 1px);background:none;color:var(--tx-3);font:inherit;font-size:var(--fs-xs);line-height:1;cursor:default}
 #tl-mode .tl-mode-button svg{width:12px;height:12px;flex:none}
 #tl-mode .tl-mode-button:hover{color:var(--tx)}
-#tl-mode .tl-mode-button.on{color:var(--tx);background:var(--bg-panel);box-shadow:0 0 0 1px var(--line)}`;
+#tl-mode .tl-mode-button.on{color:var(--tx);background:var(--bg-panel);box-shadow:none}`;
 
 export function toggleLayerStrips(api: PowermoveAPI): void {
   const layers = selectedLayers(api);
