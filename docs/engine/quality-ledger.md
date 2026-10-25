@@ -210,6 +210,23 @@ the unclipped reference over the same band centers.
 |---|---|---|---|
 | Output-resolution coverage, float gradient integration and joint clip/mask compositing (SVG geometry and paint rules) | 170.45, 163.81, 21.368 | 6.757, 6.245, 0.0133 | Five SVG sources at contain/cover/stretch placements and 25–800% or animated scale, 43 frames |
 
+## SVG playback resampling
+
+- **Reference:** f64 coverage of the authored shapes and image crop under the
+  frame's exact transform, 64 × 64 subpixels per output pixel.
+- **Gate:** `pm-render` unit test
+  `svg_sample::tests::playback_frames_are_closer_to_f64_than_todays_bilinear_draw`.
+  Today is the same source raster stored as RGBA8 and sampled bilinearly at pixel
+  centers (the legacy textured quad). Area and centroid stay within 1e-3 and 2e-3 px.
+- **Units:** CV of alpha, worst case over Float32, Float16 and Unorm8 stores.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Playback frames integrate each pixel's source footprint (4 × 4 quadrature) of a float raster instead of one bilinear RGBA8 sample (area-correct resampling) | 53.01, 44.62, 0.569 | 15.63, 14.13, 0.265 | Rotated, scaled circle and masked stroke with a joint image crop |
+
+Paused frames, exports and captures paint at output resolution (the SVG
+coverage and paint row above).
+
 ## SVG filters
 
 - **Reference:** analytic Gaussian/CDF integration and premultiplied f64 compositing,

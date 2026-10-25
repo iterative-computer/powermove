@@ -509,6 +509,7 @@ mod tests {
 
     struct Closeness {
         max_cv: f64,
+        p999_cv: f64,
         mean_cv: f64,
         area: f64,
         centroid: f64,
@@ -517,6 +518,9 @@ mod tests {
     fn closeness(actual: &[f64], reference: &[f64], size: u32) -> Closeness {
         let (mut max, mut sum, mut a, mut r, mut ax, mut rx, mut ay, mut ry) =
             (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut errors: Vec<f64> =
+            actual.iter().zip(reference).map(|(p, q)| (p - q).abs()).collect();
+        errors.sort_by(f64::total_cmp);
         for (i, (&p, &q)) in actual.iter().zip(reference).enumerate() {
             let (x, y) = (f64::from(i as u32 % size) + 0.5, f64::from(i as u32 / size) + 0.5);
             max = max.max((p - q).abs());
@@ -526,6 +530,7 @@ mod tests {
         }
         Closeness {
             max_cv: max * 255.0,
+            p999_cv: errors[(errors.len() * 999 / 1000).min(errors.len() - 1)] * 255.0,
             mean_cv: sum / actual.len() as f64 * 255.0,
             area: (a - r).abs() / r,
             centroid: (ax / a - rx / r).abs().max((ay / a - ry / r).abs()),
@@ -571,11 +576,12 @@ mod tests {
                 let engine = closeness(&alpha, &wanted, SIZE);
                 let today = closeness(&bilinear_rgba8(&source, &plan, transform, SIZE), &wanted, SIZE);
                 eprintln!(
-                    "{name} {precision:?}: engine max {:.2} mean {:.3} CV area {:.1e} centroid {:.1e} px; today max {:.2} mean {:.3} CV area {:.1e} centroid {:.1e} px",
-                    engine.max_cv, engine.mean_cv, engine.area, engine.centroid,
-                    today.max_cv, today.mean_cv, today.area, today.centroid,
+                    "{name} {precision:?}: engine max {:.2} p99.9 {:.2} mean {:.3} CV area {:.1e} centroid {:.1e} px; today max {:.2} p99.9 {:.2} mean {:.3} CV area {:.1e} centroid {:.1e} px",
+                    engine.max_cv, engine.p999_cv, engine.mean_cv, engine.area, engine.centroid,
+                    today.max_cv, today.p999_cv, today.mean_cv, today.area, today.centroid,
                 );
                 assert!(engine.max_cv <= today.max_cv, "{name} {precision:?}");
+                assert!(engine.p999_cv <= today.p999_cv, "{name} {precision:?}");
                 assert!(engine.mean_cv <= today.mean_cv, "{name} {precision:?}");
                 assert!(engine.area <= 1e-3, "{name} {precision:?}");
                 assert!(engine.centroid <= 2e-3, "{name} {precision:?}");

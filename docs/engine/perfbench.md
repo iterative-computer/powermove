@@ -114,6 +114,8 @@ the cold work is the point.
 | `typing_60` | key | 60 keystrokes into a 96 px SF Pro title, each a revision drawn paused |
 | `open_large_2000` | open | the 2,000-layer project's text parsed, given to a new view, routed, and drawn by a new composer |
 | `import_3d_600k` | frame | the first frame of a lit, shadowed scene placing the 600k-vertex model, then 10 frames turning it |
+| `playback_shapes_200` | frame | 60 playing frames of the synthetic project with 200 animated shape layers (rectangles, ellipses, polygons and stars, some stroked) |
+| `playback_svg_animated` | frame | 60 playing frames of one translating, rotating SVG image (gradient, clip path, blur, 120 motifs); every frame reuses its playback source raster. Notes carry resvg's CPU time for the same document at its device size |
 
 `examples/source_media.rs` is a diagnostic, not a ratcheted bench: it reports
 these counters and GPU-complete wall times for 24 scattered source-monitor

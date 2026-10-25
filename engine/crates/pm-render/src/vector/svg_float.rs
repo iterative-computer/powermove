@@ -238,10 +238,11 @@ struct Params { v: array<vec4<f32>, 2> };
 
 const GROUP_RATE: u32 = 4;
 const MAX_FINE_BYTES: u64 = 128 * 1024 * 1024;
+/// Per-SVG GPU work bounds of a tiled filter render, preflighted before any
+/// command is encoded: fine-grid pixel passes (tiles × fine area × targets)
+/// and Gaussian texture loads. Beyond them the image uses the declared
+/// resvg fallback with the reason, never a long GPU stall.
 const MAX_FILTER_PIXEL_PASSES: u64 = 1_500_000_000;
-// The tile-wide estimate includes shader fragments outside each filter's
-// actual region. Keep the 640×360 ART native while rejecting canonical
-// oversampling that multiplies its blur into hundreds of billions of taps.
 const MAX_FILTER_KERNEL_SAMPLES: u64 = 64_000_000_000;
 
 #[derive(Clone, Copy)]
@@ -2295,9 +2296,8 @@ fn smooth_filter_resolve(nodes: &[FloatNode]) -> bool {
     })
 }
 
-/// Upper bound on separable Gaussian texture loads for one output tile.
-/// A canonical source at 8x can turn a modest authored blur into a
-/// thousand-tap fine-grid convolution; count those taps before encoding.
+/// Upper bound on separable Gaussian texture loads for one output tile:
+/// fine-grid taps, or device-grid taps for a decimated blur.
 fn filter_kernel_work(nodes: &[FloatNode], fine_pixels: u64) -> Result<u64, String> {
     let mut work = 0u64;
     for node in nodes {
