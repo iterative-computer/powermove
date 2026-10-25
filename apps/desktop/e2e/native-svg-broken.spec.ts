@@ -67,7 +67,10 @@ test('corrupt persisted level 1 SVGs paint an empty image through the engine', a
             w.__brokenOff = w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__brokenJobs.push(s));
           });
           const output = path.join(out, `${native ? 'native' : 'legacy'}-${name}.png`);
-          await app.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, output);
+          await app.app.evaluate(({ dialog }, { filePath, valid }) => {
+            dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+            dialog.showMessageBox = async () => ({ response: valid ? 2 : 1, checkboxChecked: false });
+          }, { filePath: output, valid });
           const result = await app.page.evaluate(async () => (window as any).PM.Export.run({ format: 'still', w: 64, h: 64, alpha: true, mblur: false }));
           const jobs = await app.page.evaluate(() => { const w = window as any; w.__brokenOff(); return w.__brokenJobs; });
           await writeFile(path.join(out, `${native ? 'native' : 'legacy'}-${name}.json`), JSON.stringify({ facts, result, jobs, diagnostics: app.diagnostics }, null, 2));

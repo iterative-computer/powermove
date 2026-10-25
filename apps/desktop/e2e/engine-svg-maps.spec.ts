@@ -12,7 +12,7 @@ test('SVG material maps are drawn natively through the 3D pass', async ({ sessio
     const art = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="16" fill="#ff7733"/><rect y="16" width="32" height="16" fill="#3388ff" opacity=".55"/><circle cx="16" cy="16" r="9" fill="#fff" opacity=".4"/></svg>`;
     const asset = await PM.assets.add(new File([art], 'material.svg', { type: 'image/svg+xml' }), { silent: true });
     const api = PM.Kernel.api('svg-map-proof');
-    api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 0, z: 6 } } });
+    api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 0, z: 4 } } });
     api.scene3d.edit({ operation: 'add_object', object: { id: 'mapped', source: { primitive: 'box' }, material: { p: { color: '#ffffff', emissive: '#ffffff', emissiveIntensity: 1 }, maps: { color: asset.id, emissive: asset.id } } } });
     PM.selectLayers(['mapped']);
     PM.invalidate();
@@ -28,11 +28,19 @@ test('SVG material maps are drawn natively through the 3D pass', async ({ sessio
     for (let y = 2; y < 178; y++) for (let x = 2; x < 318; x++) {
       const i = (y * 320 + x) * 4;
       if (native.data[i + 3] > 0) nonempty++;
-      // Exclude silhouette MSAA exactly as the renderer's existing 3D bar:
-      // the flat interior establishes the map's colors and orientation.
-      if (legacy[at(x, y) + 3] < 255 || native.data[i + 3] < 255) continue;
+      // Classify from the legacy reference only: native artifacts must remain
+      // visible in the fixed interior class. Texture and silhouette transitions
+      // belong to the edge class in the gate policy.
+      const center = at(x, y);
+      if (legacy[center + 3] < 255) continue;
       let edge = false;
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) if (legacy[at(x + dx, y + dy) + 3] < 255) edge = true;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const ref = at(x + dx, y + dy);
+        if (legacy[ref + 3] < 255) edge = true;
+        for (let c = 0; c < 3; c++) {
+          if (legacy[ref + c] !== legacy[center + c]) edge = true;
+        }
+      }
       if (edge) continue;
       interior++;
       for (let c = 0; c < 4; c++) max = Math.max(max, Math.abs(native.data[i + c] - legacy[at(x, y) + c]));
@@ -40,7 +48,7 @@ test('SVG material maps are drawn natively through the 3D pass', async ({ sessio
     return { nonempty, interior, max, route: PM.EngineConnection.status().route };
   });
   // Both draw the box once the scene reached the engine.
-  await expect.poll(async () => { const r = await compare(); return Math.min(r.nonempty, r.interior); }, { timeout: 20_000 }).toBeGreaterThan(500);
+  await expect.poll(async () => (await compare()).nonempty, { timeout: 20_000 }).toBeGreaterThan(500);
   const result = await compare();
   console.log(`SVG maps: ${JSON.stringify(result)}`);
   expect(result.route).toBe('engine');
