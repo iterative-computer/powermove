@@ -158,6 +158,29 @@ pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
     pm_model::Document::new(Some(root), doc.revision() + 1)
 }
 
+/// The composition's authored background with every visual layer hidden.
+/// Used to verify that a nontext layer cannot influence modeled text pixels.
+pub fn background_only(doc: &pm_model::Document) -> pm_model::Document {
+    let mut root = doc.to_value().expect("a document");
+    for list in layer_lists(&mut root) {
+        for l in list {
+            let Some(layer) = l.as_object_mut() else {
+                continue;
+            };
+            if !layer.contains_key("p") {
+                layer.insert("p", pm_model::Value::Object(pm_model::json::Map::new()));
+            }
+            let p = layer.get_mut("p").and_then(|p| p.as_object_mut()).unwrap();
+            let mut ch = pm_model::json::Map::new();
+            ch.insert("v", pm_model::Value::Number(0.0));
+            ch.insert("kf", pm_model::Value::Array(Vec::new()));
+            ch.insert("expr", pm_model::Value::Null);
+            p.insert("opacity", pm_model::Value::Object(ch));
+        }
+    }
+    pm_model::Document::new(Some(root), doc.revision() + 1)
+}
+
 /// The corpus ids the native level 2 semantic gate judges
 /// (`tests/text_level2_semantics.rs`, over the shared fixture).
 pub fn semantic_gate_ids() -> std::collections::BTreeSet<String> {

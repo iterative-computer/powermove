@@ -2,10 +2,14 @@
 
 #![allow(dead_code)]
 
+pub mod colr_reference;
 pub mod doc;
 pub mod reference;
 pub mod reference_substitutions;
 pub mod text;
+pub mod text_group_reference;
+pub mod text_mask_reference;
+pub mod text_reference;
 
 use std::path::{Path, PathBuf};
 

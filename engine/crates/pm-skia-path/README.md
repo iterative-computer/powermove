@@ -9,7 +9,7 @@ converted to quads where they are added, and Skia m149's
 pm-text frames glyph outlines with its stroker (synthesized bold,
 `strokeText`) exactly as Chromium's Skia does: the round joins and caps are
 conics in user space, subdivided only in device space where the glyph mask
-is filled (`docs/engine/text-render.md`, "Glyph frames"). Dashing is
+is filled. Dashing is
 removed. See `LICENSE`.
 
 The stroker also retains incoming rational conics until stroking:

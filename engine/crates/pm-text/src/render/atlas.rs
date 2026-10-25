@@ -85,7 +85,7 @@ pub fn pack(scene: &TextScene, max_page: u32) -> Atlas {
     let mut atlas = Atlas::default();
     let mut page: Option<usize> = None;
     let (mut shelf_x, mut shelf_y, mut shelf_h) = (0u32, 0u32, 0u32);
-    // Page width: the widest cell, at least 1024 px, at most `max_page`.
+    // Match the page width to actual ink area, while fitting the widest cell.
     let rects: Vec<_> = scene
         .items
         .iter()
@@ -98,7 +98,12 @@ pub fn pack(scene: &TextScene, max_page: u32) -> Atlas {
         .map(|(_, r)| (r.2 - r.0) as u32)
         .max()
         .unwrap_or(0);
-    let page_w = widest.clamp(1024.min(max_page), max_page);
+    let area: u64 = rects
+        .iter()
+        .map(|(_, r)| ((r.2 - r.0) as u64) * ((r.3 - r.1) as u64))
+        .sum();
+    let square = (area as f64).sqrt().ceil() as u32;
+    let page_w = widest.max(square).clamp(1, max_page);
     // Items larger than a page are split into page-sized tiles, each
     // clipped to its own rect.
     let mut tiles = Vec::with_capacity(rects.len());
@@ -155,6 +160,26 @@ pub fn pack(scene: &TextScene, max_page: u32) -> Atlas {
 mod tests {
     use super::*;
     use crate::render::scene::{fill_path, rounded_rect};
+
+    #[test]
+    fn sparse_text_does_not_allocate_a_wide_empty_page() {
+        let scene = TextScene {
+            width: 4096,
+            height: 2048,
+            items: vec![
+                fill_path(
+                    rounded_rect(10.0, 10.0, 16.0, 20.0, 0.0),
+                    Affine::IDENTITY,
+                    [1.0; 4],
+                    1.0,
+                )
+                .unwrap(),
+            ],
+        };
+        let atlas = pack(&scene, 4096);
+        assert!(atlas.pages[0].0 < 64, "{:?}", atlas.pages);
+        assert!(atlas.pages[0].1 < 64);
+    }
 
     #[test]
     fn cells_do_not_overlap_and_map_device_pixels() {

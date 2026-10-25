@@ -92,7 +92,6 @@ enum Op {
     /// renderer (which does not). The pass's viewport maps them to window
     /// coordinates when they are rasterized.
     Polygons {
-        native: Option<pm_text::render::graphite::Geometry>,
         polys: Vec<Vec<P>>,
         color: Paint,
         msaa: bool,
@@ -101,7 +100,6 @@ enum Op {
     /// The union of triangles in device coordinates (the tessellated fill
     /// and stroke renderers, MSAA).
     Triangles {
-        native: Option<pm_text::render::graphite::Geometry>,
         tris: Vec<[P; 3]>,
         color: Paint,
     },
@@ -127,10 +125,6 @@ enum Op {
 
 /// A Canvas2D context on a `width` × `height` canvas.
 pub struct Context {
-    native_paths: bool,
-    /// The render pass is multisampled for a draw recorded outside this
-    /// context (see [`Context::multisample_pass`]).
-    pass_msaa: bool,
     width: u32,
     height: u32,
     ops: Vec<Op>,
@@ -157,7 +151,8 @@ fn m44_concat(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     for col in 0..4 {
         let r = &b[col * 4..col * 4 + 4];
         for i in 0..4 {
-            out[col * 4 + i] = a[i] * r[0] + (a[4 + i] * r[1] + (a[8 + i] * r[2] + a[12 + i] * r[3]));
+            out[col * 4 + i] =
+                a[i] * r[0] + (a[4 + i] * r[1] + (a[8 + i] * r[2] + a[12 + i] * r[3]));
         }
     }
     out
@@ -166,8 +161,6 @@ fn m44_concat(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 impl Context {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            native_paths: false,
-            pass_msaa: false,
             width,
             height,
             ops: Vec::new(),
@@ -180,22 +173,6 @@ impl Context {
 
     pub fn save(&mut self) {
         self.stack.push(self.state.clone());
-    }
-
-    pub fn retain_native_paths(&mut self) {
-        self.native_paths = true;
-    }
-
-    /// Graphite multisamples a whole render pass once any draw in it needs
-    /// MSAA. A caller that records only part of a pass whose other draws
-    /// tessellate marks the pass multisampled here, so analytic draws are
-    /// rasterized per sample like the rest.
-    pub fn multisample_pass(&mut self) {
-        self.pass_msaa = true;
-    }
-
-    fn multisampled(&self) -> bool {
-        self.pass_msaa || self.ops.iter().any(needs_msaa)
     }
 
     pub fn restore(&mut self) {
@@ -453,22 +430,12 @@ impl Context {
         }
         if p.is_convex() {
             let tris = tess::convex_wedge_triangles(p, &m);
-            let native = self
-                .native_paths
-                .then(|| super::native::fill(p, &m, false, rule == Rule::EvenOdd));
-            self.record(Op::Triangles {
-                tris,
-                color,
-                native,
-            });
+            self.record(Op::Triangles { tris, color });
             return Ok(());
         }
         let local = tess::fill_polygons_local(p, &m);
         let polys = tess::to_device(&local, &m);
         self.record(Op::Polygons {
-            native: self
-                .native_paths
-                .then(|| super::native::fill(p, &m, true, rule == Rule::EvenOdd)),
             polys,
             color,
             msaa: true,
@@ -522,7 +489,6 @@ impl Context {
                 let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
                 let polys = tess::to_device(&[corners.to_vec()], m);
                 self.record(Op::Polygons {
-                    native: None,
                     polys,
                     color,
                     msaa: false,
@@ -586,14 +552,7 @@ impl Context {
         }
         let color = self.stroke_paint();
         let tris = stroke::stroke_triangles(p, &m, params, cap);
-        let native = self
-            .native_paths
-            .then(|| super::native::stroke(p, &m, params, cap));
-        self.record(Op::Triangles {
-            tris,
-            color,
-            native,
-        });
+        self.record(Op::Triangles { tris, color });
         Ok(())
     }
 
@@ -610,111 +569,7 @@ impl Context {
     /// (the tessellating renderers); otherwise every draw is rasterized once
     /// per pixel at its center.
     pub fn finish(&self) -> Vec<u8> {
-        render_ops(self.width, self.height, &self.ops, self.pass_msaa)
-    }
-
-    /// Resolve a device-space crop of primitive path draws, retaining the
-    /// original canvas viewport. This bounds a glyph allocation without
-    /// changing the NDC round trip or any sample decisions.
-    pub fn finish_region(&self, rect: [i32; 4]) -> Option<Vec<u8>> {
-        if rect[2] <= rect[0] || rect[3] <= rect[1] {
-            return None;
-        }
-        if self.ops.iter().any(|o| {
-            !matches!(
-                o,
-                Op::Polygons { .. } | Op::Triangles { .. } | Op::Analytic { .. }
-            )
-        }) {
-            return None;
-        }
-        let pattern = if self.multisampled() {
-            &SAMPLES_4X[..]
-        } else {
-            &SAMPLES_1X[..]
-        };
-        let mut target = MsaaTarget::new(
-            (rect[2] - rect[0]) as u32,
-            (rect[3] - rect[1]) as u32,
-            pattern,
-        );
-        let viewport = tess::Viewport::of(self.width, self.height);
-        for op in &self.ops {
-            render_op_region(&mut target, op, None, viewport, [rect[0], rect[1]]);
-        }
-        Some(target.resolve())
-    }
-
-    /// Native render-step input for the same device crop. Keep the full
-    /// backing canvas: a smaller viewport changes subpixel edge decisions.
-    pub fn graphite_region(&self, rect: [i32; 4]) -> Option<pm_text::render::graphite::Raster> {
-        use pm_text::render::graphite::{Draw, Geometry, Raster};
-        let mut draws = Vec::new();
-        for op in &self.ops {
-            let (geometry, color) = match op {
-                Op::Analytic { inst, color } => {
-                    let m = inst.m.map(|v| [v[0], v[1], v[2], 0.0]);
-                    (
-                        Geometry::Analytic([
-                            inst.x_radii_or_flags,
-                            inst.radii_or_quad_xs,
-                            inst.ltrb_or_quad_ys,
-                            inst.center,
-                            m[0],
-                            m[1],
-                            m[2],
-                        ]),
-                        color,
-                    )
-                }
-                Op::Triangles {
-                    native: Some(geometry),
-                    color,
-                    ..
-                }
-                | Op::Polygons {
-                    native: Some(geometry),
-                    color,
-                    ..
-                } => (geometry.clone(), color),
-                Op::Triangles { tris, color, .. } => (
-                    Geometry::Triangles(tris.iter().flatten().copied().collect()),
-                    color,
-                ),
-                Op::Polygons {
-                    polys, color, rule, ..
-                } => {
-                    let mut vertices = Vec::new();
-                    for p in polys {
-                        for i in 2..p.len() {
-                            vertices.extend([p[0], p[i - 1], p[i]]);
-                        }
-                    }
-                    (
-                        Geometry::Winding {
-                            vertices,
-                            even_odd: *rule == Rule::EvenOdd,
-                        },
-                        color,
-                    )
-                }
-                _ => return None,
-            };
-            let Paint::Solid(color) = color else {
-                return None;
-            };
-            draws.push(Draw {
-                geometry,
-                color: *color,
-            });
-        }
-        Some(Raster {
-            width: self.width,
-            height: self.height,
-            crop: rect.map(|v| v as u32),
-            multisampled: self.multisampled(),
-            draws,
-        })
+        render_ops(self.width, self.height, &self.ops)
     }
 
     /// A single white fill's alpha, with CPU work bounded to its device mesh.
@@ -805,8 +660,8 @@ fn needs_msaa(o: &Op) -> bool {
         Op::Analytic { .. } | Op::Layer { .. } | Op::Bitmap { .. } => false,
     }
 }
-fn render_ops(width: u32, height: u32, ops: &[Op], pass_msaa: bool) -> Vec<u8> {
-    let pattern = if pass_msaa || ops.iter().any(needs_msaa) {
+fn render_ops(width: u32, height: u32, ops: &[Op]) -> Vec<u8> {
+    let pattern = if ops.iter().any(needs_msaa) {
         &SAMPLES_4X[..]
     } else {
         &SAMPLES_1X[..]
@@ -832,10 +687,13 @@ fn render_op_region(
     let mut mask = target.mask();
     let mut coverage = None;
     let paint = match op {
-        Op::Polygons { polys, color, rule, .. } => {
+        Op::Polygons {
+            polys, color, rule, ..
+        } => {
             let mut mapped = viewport.map_polygons(polys);
             for p in mapped.iter_mut().flatten() {
-                p[0] -= f64::from(origin[0]); p[1] -= f64::from(origin[1]);
+                p[0] -= f64::from(origin[0]);
+                p[1] -= f64::from(origin[1]);
             }
             fill_polygons(&mut mask, &mapped, *rule);
             color
@@ -843,7 +701,8 @@ fn render_op_region(
         Op::Triangles { tris, color, .. } => {
             let mut mapped = viewport.map_triangles(tris);
             for p in mapped.iter_mut().flatten() {
-                p[0] -= origin[0] as f32; p[1] -= origin[1] as f32;
+                p[0] -= origin[0] as f32;
+                p[1] -= origin[1] as f32;
             }
             fill_triangles(&mut mask, &mapped);
             color
@@ -919,7 +778,7 @@ fn render_op_region(
             blur,
             linear,
         } => {
-            let mut pixels = render_ops(target.width, target.height, ops, false);
+            let mut pixels = render_ops(target.width, target.height, ops);
             if blur[0] > 0.0 || blur[1] > 0.0 {
                 if *linear {
                     linear_rgb(&mut pixels, false);
@@ -981,7 +840,9 @@ fn gaussian(pixels: &[u8], w: u32, h: u32, sigma: [f64; 2]) -> Vec<u8> {
             continue;
         }
         let r = (sigma * 3.0).ceil() as i32;
-        let mut kernel: Vec<f64> = (-r..=r).map(|i| libm::exp(-0.5 * (f64::from(i) / sigma).powi(2))).collect();
+        let mut kernel: Vec<f64> = (-r..=r)
+            .map(|i| libm::exp(-0.5 * (f64::from(i) / sigma).powi(2)))
+            .collect();
         let sum: f64 = kernel.iter().sum();
         for k in &mut kernel {
             *k /= sum
@@ -994,7 +855,8 @@ fn gaussian(pixels: &[u8], w: u32, h: u32, sigma: [f64; 2]) -> Vec<u8> {
                     for (i, k) in (-r..=r).zip(&kernel) {
                         let (xx, yy) = if axis == 0 { (x + i, y) } else { (x, y + i) };
                         if xx >= 0 && xx < w as i32 && yy >= 0 && yy < h as i32 {
-                            v += f64::from(data[(yy as usize * w as usize + xx as usize) * 4 + c]) * k;
+                            v += f64::from(data[(yy as usize * w as usize + xx as usize) * 4 + c])
+                                * k;
                         }
                     }
                     out[(y as usize * w as usize + x as usize) * 4 + c] = (v + 0.5) as u8;
@@ -1055,18 +917,32 @@ mod window_tests {
                     c.begin_path();
                     match kind {
                         0 => c.path.rect(-20.0, -30.0, 73.25, 45.5),
-                        1 => { c.path.ellipse(0.0, 0.0, 53.0, 31.0, 0.0, core::f64::consts::TAU, false).unwrap(); }
-                        2 => { c.path.move_to(-15.0, -20.0); c.path.line_to(60.0, 20.0); c.path.line_to(-10.0, 45.0); c.path.close_path(); }
+                        1 => {
+                            c.path
+                                .ellipse(0.0, 0.0, 53.0, 31.0, 0.0, core::f64::consts::TAU, false)
+                                .unwrap();
+                        }
+                        2 => {
+                            c.path.move_to(-15.0, -20.0);
+                            c.path.line_to(60.0, 20.0);
+                            c.path.line_to(-10.0, 45.0);
+                            c.path.close_path();
+                        }
                         _ => {
                             c.path.move_to(0.0, 0.0);
-                            c.path.bezier_curve_to(90.0, -70.0, -80.0, 100.0, 70.0, 65.0);
+                            c.path
+                                .bezier_curve_to(90.0, -70.0, -80.0, 100.0, 70.0, 65.0);
                             c.path.line_to(-30.0, 50.0);
                             c.path.close_path();
                         }
                     }
                     c.fill().unwrap();
                     let full: Vec<u8> = c.finish().chunks_exact(4).map(|p| p[3]).collect();
-                    assert_eq!(c.finish_fill_alpha().unwrap(), full, "{w}x{h}, kind={kind}, ({x},{y})");
+                    assert_eq!(
+                        c.finish_fill_alpha().unwrap(),
+                        full,
+                        "{w}x{h}, kind={kind}, ({x},{y})"
+                    );
                 }
             }
         }

@@ -15,6 +15,3 @@ pub mod stroke;
 pub mod svg;
 pub mod svg_text;
 pub mod tess;
-
-mod native;
-pub mod text;

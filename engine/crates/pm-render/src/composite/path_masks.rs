@@ -76,9 +76,7 @@ impl PathMaskPipelines {
     pub fn new(device: &wgpu::Device) -> PathMaskPipelines {
         Self::with_format(device, FORMAT)
     }
-    pub(crate) fn rgba(device: &wgpu::Device) -> PathMaskPipelines {
-        Self::with_format(device, wgpu::TextureFormat::Rgba8Unorm)
-    }
+
     fn with_format(device: &wgpu::Device, format: wgpu::TextureFormat) -> PathMaskPipelines {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render path masks"),
@@ -484,89 +482,6 @@ impl PathMaskPipelines {
             );
         }
         Ok(canvas.texture)
-    }
-
-    /// RGBA text save-layers share the mask planner, pass executor and
-    /// shader. The draw is clipped only after filtering: off-canvas glyph
-    /// pixels can contribute to pixels inside the canvas.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn blur_rgba(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        src: &pm_gpu::Target,
-        origin: [i32; 2],
-        canvas: (u32, u32),
-        crop: [u32; 4],
-        sigma: f32,
-    ) -> pm_gpu::Target {
-        assert_eq!(self.format, wgpu::TextureFormat::Rgba8Unorm);
-        let mut img = Image {
-            texture: src.texture.clone(),
-            ring: 0,
-            rect: Rect {
-                x0: origin[0],
-                y0: origin[1],
-                w: src.width(),
-                h: src.height(),
-            },
-        };
-        let plan = BlurPlan::new(canvas.0, canvas.1, sigma);
-        let (draw, linear) = if let Some(plan) = plan {
-            for pass in &plan.passes {
-                img = self.run_pass(device, queue, encoder, pass, &img);
-            }
-            (plan.draw, plan.linear)
-        } else {
-            (
-                Map {
-                    scale: [1.0; 2],
-                    translate: [0.0; 2],
-                },
-                false,
-            )
-        };
-        let out = Image::new(
-            device,
-            Rect::ltrb(
-                crop[0] as i32,
-                crop[1] as i32,
-                crop[2] as i32,
-                crop[3] as i32,
-            ),
-            0,
-            self.format,
-        );
-        let u = PassUniform {
-            src_org: img.origin(),
-            src_inv: img.inv_size(),
-            linear: u32::from(linear),
-            map_s: draw.scale,
-            map_t: [
-                draw.translate[0] + crop[0] as f32 * draw.scale[0],
-                draw.translate[1] + crop[1] as f32 * draw.scale[1],
-            ],
-            ..Default::default()
-        };
-        let view = out.texture.create_view(&Default::default());
-        self.pass(
-            device,
-            queue,
-            encoder,
-            self.over.get(),
-            &u,
-            &img,
-            &view,
-            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            [
-                0.0,
-                0.0,
-                (crop[2] - crop[0]) as f32,
-                (crop[3] - crop[1]) as f32,
-            ],
-        );
-        pm_gpu::Target::wrap(out.texture)
     }
 
     fn run_pass(

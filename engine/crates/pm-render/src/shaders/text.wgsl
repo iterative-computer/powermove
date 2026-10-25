@@ -1,17 +1,13 @@
 // The ordered paint pass of text rasters (docs/engine/text-render.md).
 //
-// Vello renders 8-bit coverage (white, area coverage) into pages laid out
-// 1:1 with device pixels; this pass paints each canvas draw in order with
-// premultiplied source-over (fixed-function ONE, ONE_MINUS_SRC_ALPHA) at
-// N32 for level 1 and working precision for level 2:
+// The shared area renderer writes float coverage pages 1:1 with device pixels.
+// This pass paints each draw in order with premultiplied source-over in
+// floating-point working precision:
 //
-// - kind 0, coverage: `color × curve(coverage)`, the profile's coverage
-//   curve (17 values at coverage i / 16, linear between them);
-// - kind 1, image: a color bitmap glyph, bilinear (the image carries a
-//   one-pixel transparent border, so edges fade as the CPU reference
-//   samples them), times the draw's alpha;
+// - kind 0, coverage: `color × coverage`;
+// - kind 1, image: original bitmap texels in the working domain, with exact
+//   area integration for downscaled output pixels, times draw alpha;
 // - kind 2, layer: a pre-painted layer (a blurred draw) copied 1:1;
-// - kind 3, glyph mask: preblended A8 coverage times the premultiplied paint.
 //
 // Targets are top-down (row 0 at the top), like images.
 
@@ -22,28 +18,114 @@ struct Item {
     map: vec4<f32>,
     // Coverage: premultiplied paint. Image: alpha multiplier in w.
     color: vec4<f32>,
-    // x: kind, zw: target size.
+    // x: kind, y: image needs area integration, zw: target size.
     params: vec4<f32>,
-    // Image: target pixel to padded image pixel, rows (a, c, e) and (b, d, f);
-    // inv1.w unused, inv0.w unused; size in `isize`.
+    // Image: target pixel to source pixel, rows (a, c, e) and (b, d, f).
     inv0: vec4<f32>,
     inv1: vec4<f32>,
-    isize: vec4<f32>,
-    curve: array<vec4<f32>, 5>,
 };
-
-fn curve_value(i: i32) -> f32 {
-    let v = it.curve[i / 4];
-    let j = i % 4;
-    if (j == 0) { return v.x; }
-    if (j == 1) { return v.y; }
-    if (j == 2) { return v.z; }
-    return v.w;
-}
 
 @group(0) @binding(0) var<uniform> it: Item;
 @group(1) @binding(0) var src: texture_2d<f32>;
-@group(1) @binding(1) var smp: sampler;
+
+fn image_texel(p: vec2<i32>) -> vec4<f32> {
+    let size = textureDimensions(src, 0);
+    if (p.x < 0 || p.y < 0 || p.x >= i32(size.x) || p.y >= i32(size.y)) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(src, p, 0);
+}
+fn image_bilinear(u: vec2<f32>) -> vec4<f32> {
+    let p = u - vec2<f32>(0.5);
+    let lo = vec2<i32>(floor(p));
+    let t = fract(p);
+    let top = mix(image_texel(lo), image_texel(lo + vec2<i32>(1, 0)), t.x);
+    let bottom = mix(image_texel(lo + vec2<i32>(0, 1)), image_texel(lo + vec2<i32>(1, 1)), t.x);
+    return mix(top, bottom, t.y);
+}
+
+struct Polygon {
+    vertices: array<vec2<f32>, 8>,
+    count: u32,
+};
+
+fn clip_polygon(input: Polygon, axis: u32, bound: f32, keep_above: bool) -> Polygon {
+    var output: Polygon;
+    output.count = 0u;
+    if (input.count == 0u) {
+        return output;
+    }
+    for (var i = 0u; i < input.count; i++) {
+        let a = input.vertices[i];
+        let b = input.vertices[(i + 1u) % input.count];
+        let av = select(a.y, a.x, axis == 0u);
+        let bv = select(b.y, b.x, axis == 0u);
+        let a_inside = select(av <= bound, av >= bound, keep_above);
+        let b_inside = select(bv <= bound, bv >= bound, keep_above);
+        if (a_inside != b_inside) {
+            let t = (bound - av) / (bv - av);
+            output.vertices[output.count] = a + t * (b - a);
+            output.count++;
+        }
+        if (b_inside) {
+            output.vertices[output.count] = b;
+            output.count++;
+        }
+    }
+    return output;
+}
+
+fn polygon_area(poly: Polygon) -> f32 {
+    if (poly.count < 3u) {
+        return 0.0;
+    }
+    // Local triangle coordinates keep tiny clipped slivers accurate even
+    // when their source texel lies far from the image origin.
+    let origin = poly.vertices[0];
+    var twice = 0.0;
+    for (var i = 1u; i + 1u < poly.count; i++) {
+        let a = poly.vertices[i] - origin;
+        let b = poly.vertices[i + 1u] - origin;
+        twice += a.x * b.y - b.x * a.y;
+    }
+    return abs(twice) * 0.5;
+}
+
+fn image_area(pixel: vec2<f32>) -> vec4<f32> {
+    var quad: Polygon;
+    quad.count = 4u;
+    let corners = array<vec2<f32>, 4>(pixel, pixel + vec2<f32>(1.0, 0.0),
+        pixel + vec2<f32>(1.0, 1.0), pixel + vec2<f32>(0.0, 1.0));
+    for (var i = 0u; i < 4u; i++) {
+        let p = vec3<f32>(corners[i], 1.0);
+        quad.vertices[i] = vec2<f32>(dot(it.inv0.xyz, p), dot(it.inv1.xyz, p));
+    }
+    let whole = polygon_area(quad);
+    if (whole <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    var lo = quad.vertices[0];
+    var hi = lo;
+    for (var i = 1u; i < 4u; i++) {
+        lo = min(lo, quad.vertices[i]);
+        hi = max(hi, quad.vertices[i]);
+    }
+    let size = vec2<i32>(textureDimensions(src, 0));
+    let begin = max(vec2<i32>(floor(lo)), vec2<i32>(0));
+    let end = min(vec2<i32>(ceil(hi)), size);
+    var sum = vec4<f32>(0.0);
+    for (var sy = begin.y; sy < end.y; sy++) {
+        for (var sx = begin.x; sx < end.x; sx++) {
+            var clipped = clip_polygon(quad, 0u, f32(sx), true);
+            clipped = clip_polygon(clipped, 0u, f32(sx + 1), false);
+            clipped = clip_polygon(clipped, 1u, f32(sy), true);
+            clipped = clip_polygon(clipped, 1u, f32(sy + 1), false);
+            let weight = polygon_area(clipped) / whole;
+            sum += image_texel(vec2<i32>(sx, sy)) * weight;
+        }
+    }
+    return sum;
+}
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -57,18 +139,17 @@ fn fs_paint(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let kind = it.params.x;
     if (kind < 0.5) {
         let t = vec2<i32>(floor(pos.xy) + it.map.xy);
-        let c = clamp(textureLoad(src, t, 0).a, 0.0, 1.0);
-        let x = c * 16.0;
-        let i = min(i32(floor(x)), 15);
-        let k = mix(curve_value(i), curve_value(i + 1), x - f32(i));
-        return it.color * k;
+        let coverage = textureLoad(src, t, 0);
+        let c = clamp(coverage.r, 0.0, 1.0);
+        return it.color * c;
     }
-    if (kind < 1.5 || kind > 2.5) {
+    if (kind < 1.5) {
+        if (it.params.y > 0.5) {
+            return image_area(floor(pos.xy)) * it.color.w;
+        }
         let p = vec3<f32>(pos.xy, 1.0);
         let u = vec2<f32>(dot(it.inv0.xyz, p), dot(it.inv1.xyz, p));
-        let s = textureSampleLevel(src, smp, u / it.isize.xy, 0.0);
-        if (kind > 2.5) { return it.color * s.a; }
-        return s * it.color.w;
+        return image_bilinear(u) * it.color.w;
     }
     let t = vec2<i32>(floor(pos.xy) + it.map.xy);
     return textureLoad(src, t, 0);

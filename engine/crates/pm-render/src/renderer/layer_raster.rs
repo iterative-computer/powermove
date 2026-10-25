@@ -196,6 +196,7 @@ impl Renderer {
                     crops: !animated,
                 }));
             };
+            self.text_gpu.begin_frame();
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -212,6 +213,7 @@ impl Renderer {
                     &mut taken,
                     &quad.plan,
                     precision,
+                    pm_protocol::color::WorkingEncoding::Standard,
                 )
                 .map_err(RenderError::Media)?;
             self.queue.submit([encoder.finish()]);

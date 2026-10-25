@@ -16,18 +16,13 @@ system = []
 level2 = ["dep:parley", "dep:parlance"]
 # The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
 corpus-tools = ["system", "level2", "dep:flate2"]
-# Glyph rendering (docs/engine/text-render.md): outlines with the
-# engine-owned stem-darkening profiles, color bitmap glyphs, the text scene
-# the renderer paints, and the `vello_cpu` coverage fallback. Off for
-# `pm-wasm` and `pm-eval`, which only lay text out.
-render = ["dep:pm-skia-path", "dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu"]
-# Level 1 glyph masks from CoreGraphics, as Canvas2D gets them on macOS
-# (`render::cgmask`), and the CoreText fonts they need.
-cg-masks = ["render", "dep:pm-skia-path", "objc2-core-graphics/CGAffineTransform", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGImage", "objc2-core-graphics/CGDataProvider", "objc2-core-graphics/CGPath"]
+# Unhinted outline coverage, float paint and color glyphs. Off for layout-only users.
+render = ["dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu", "dep:libm", "dep:pm-color", "dep:i_overlay"]
 # The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
-coretext-reference = ["cg-masks", "system"]
+coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGPath", "objc2-core-graphics/CGDataProvider"]
 
 [dependencies]
+i_overlay = { version = "9.1", optional = true }
 harfrust = "0.14"
 read-fonts = "0.45"
 icu_segmenter = "2"
@@ -44,7 +39,8 @@ kurbo = { version = "0.13.1", optional = true }
 skrifa = { version = "0.44", optional = true }
 png = { version = "0.18", optional = true }
 vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"], optional = true }
-pm-skia-path = { path = "../pm-skia-path", optional = true }
+libm = { version = "0.2", optional = true }
+pm-color = { path = "../pm-color", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 memmap2 = "0.9"
@@ -83,8 +79,3 @@ harness = false
 # the native vs WASM identity check (scripts/wasm-identity.mjs).
 name = "layout_wasm"
 crate-type = ["cdylib"]
-
-[[example]]
-# Prints a glyph's outline before and after the profile's expansion.
-name = "outline_probe"
-required-features = ["render"]

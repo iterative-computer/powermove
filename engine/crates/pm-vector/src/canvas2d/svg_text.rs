@@ -5,7 +5,6 @@ use crate::render::svg::SvgError;
 use pm_text::render::{
     bitmap::Bitmaps,
     outline::Outlines,
-    profile::Profile,
     scene::{Painter, TextScene},
 };
 use pm_text::{
@@ -26,12 +25,24 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
             bitmaps: Bitmaps::new(),
         }
     }
-    pub fn raster(&mut self, text: &usvg::Text, m: Mat, width: u32, height: u32) -> Result<Bitmap, SvgError> {
+    pub fn raster(
+        &mut self,
+        text: &usvg::Text,
+        m: Mat,
+        width: u32,
+        height: u32,
+    ) -> Result<Bitmap, SvgError> {
         if text.writing_mode() != usvg::WritingMode::LeftToRight
-            || text.dx().iter().chain(text.dy()).chain(text.rotate()).any(|v| *v != 0.0)
+            || text
+                .dx()
+                .iter()
+                .chain(text.dy())
+                .chain(text.rotate())
+                .any(|v| *v != 0.0)
         {
             return Err(SvgError(
-                "SVG per-character positioning/vertical text needs a pm-text placement adapter".into(),
+                "SVG per-character positioning/vertical text needs a pm-text placement adapter"
+                    .into(),
             ));
         }
         let matrix = kurbo::Affine::new([m.sx, m.ky, m.kx, m.sy, m.tx, m.ty].map(f64::from));
@@ -45,7 +56,10 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
             if !matches!(chunk.text_flow(), usvg::TextFlow::Linear) {
                 return Err(SvgError("SVG text-on-path placement is not matched".into()));
             }
-            pen = (chunk.x().map(f64::from).unwrap_or(pen.0), chunk.y().map(f64::from).unwrap_or(pen.1));
+            pen = (
+                chunk.x().map(f64::from).unwrap_or(pen.0),
+                chunk.y().map(f64::from).unwrap_or(pen.1),
+            );
             let mut spans = Vec::new();
             let mut advance = 0.0;
             for span in chunk.spans() {
@@ -58,24 +72,32 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
                     )
                     || !matches!(
                         span.alignment_baseline(),
-                        usvg::AlignmentBaseline::Auto | usvg::AlignmentBaseline::Baseline | usvg::AlignmentBaseline::Alphabetic
+                        usvg::AlignmentBaseline::Auto
+                            | usvg::AlignmentBaseline::Baseline
+                            | usvg::AlignmentBaseline::Alphabetic
                     )
-                    || span
-                        .baseline_shift()
-                        .iter()
-                        .any(|v| !matches!(v, usvg::BaselineShift::Baseline | usvg::BaselineShift::Number(0.0)))
+                    || span.baseline_shift().iter().any(|v| {
+                        !matches!(
+                            v,
+                            usvg::BaselineShift::Baseline | usvg::BaselineShift::Number(0.0)
+                        )
+                    })
                     || decoration.underline().is_some()
                     || decoration.overline().is_some()
                     || decoration.line_through().is_some()
                 {
-                    return Err(SvgError("SVG text feature/baseline/decoration is not matched".into()));
+                    return Err(SvgError(
+                        "SVG text feature/baseline/decoration is not matched".into(),
+                    ));
                 }
                 if span.stroke().is_some()
                     || span.word_spacing() != 0.0
                     || span.text_length().is_some()
                     || span.font().stretch() != usvg::FontStretch::Normal
                 {
-                    return Err(SvgError("SVG text stroke/spacing/stretch is not matched".into()));
+                    return Err(SvgError(
+                        "SVG text stroke/spacing/stretch is not matched".into(),
+                    ));
                 }
                 let family = span
                     .font()
@@ -96,13 +118,20 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
                         .font()
                         .variations()
                         .iter()
-                        .map(|v| (String::from_utf8_lossy(&v.tag).to_string(), f64::from(v.value)))
+                        .map(|v| {
+                            (
+                                String::from_utf8_lossy(&v.tag).to_string(),
+                                f64::from(v.value),
+                            )
+                        })
                         .collect(),
                     ..Default::default()
                 };
-                let (runs, w) = self
-                    .compat
-                    .text_runs(&content, &chunk.text()[span.start()..span.end()], f64::from(span.letter_spacing()));
+                let (runs, w) = self.compat.text_runs(
+                    &content,
+                    &chunk.text()[span.start()..span.end()],
+                    f64::from(span.letter_spacing()),
+                );
                 spans.push((span, runs, advance));
                 advance += w;
             }
@@ -119,14 +148,15 @@ impl<'a, R: FontResolver> TextRenderer<'a, R> {
                     let usvg::Paint::Color(c) = fill.paint() else {
                         return Err(SvgError("SVG text paint server is not matched".into()));
                     };
-                    let color = [f64::from(c.red) / 255.0, f64::from(c.green) / 255.0, f64::from(c.blue) / 255.0, 1.0];
+                    let color = [
+                        f64::from(c.red) / 255.0,
+                        f64::from(c.green) / 255.0,
+                        f64::from(c.blue) / 255.0,
+                        1.0,
+                    ];
                     let mut painter = Painter {
                         outlines: &mut self.outlines,
                         bitmaps: &mut self.bitmaps,
-                        masks: None,
-                        viewport: None,
-                        path_rasterizer: None,
-                        profile: Profile::CANVAS2D,
                         unsupported: Vec::new(),
                     };
                     let runs = pm_text::render::runs(self.compat.resolver(), &runs);

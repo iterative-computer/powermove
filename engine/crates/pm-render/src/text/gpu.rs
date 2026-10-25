@@ -1,32 +1,31 @@
-//! Text rasters on the GPU: native Graphite primitives, platform glyph masks
-//! and Vello coverage pages, painted in order into N32 or float canvases
+//! Text rasters on the GPU: exact float coverage pages and color glyph images,
+//! painted in order into float canvases
 //! (`shaders/text.wgsl`), with a content-keyed raster cache.
 //!
-//! Vello 0.11 renders only into `Rgba8Unorm` storage textures and submits
-//! its own command buffers, so each coverage page is rendered (and
-//! submitted) before the frame's encoder, which holds the paint passes.
-//! Pages are taken from the frame's target pool and returned after the
-//! frame is submitted, so a later layer of the same frame never overwrites
-//! a page an earlier layer's paint pass still reads. When Vello cannot run
-//! on the device, the same pages come from `vello_cpu`
-//! (`pm_text::render::cpu`) and are uploaded.
+//! Coverage is written as R32Float by the shared area renderer in the same
+//! command encoder as paint. Pages are returned to the pool after submission,
+//! so later layers cannot overwrite coverage still in use. The CPU mode is
+//! retained for raster comparisons.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use kurbo::{Affine, Rect};
+use kurbo::{Affine, BezPath, Rect};
 use pm_gpu::{Target, TargetPool, working_format};
-use pm_protocol::color::Precision;
+use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_text::render::atlas::{self, Atlas, Cell};
-use pm_text::render::bitmap::Rgba8;
-use pm_text::render::scene::{ItemContent, PathStyle, TextScene, blur_radius};
+use pm_text::render::scene::{ImagePixels, ItemContent, TextScene, blur_radius};
+use pm_vector::render::scene::PixelRect;
 
 use super::TextPlan;
+use crate::coverage::{self, AreaCoverage};
 use crate::pipelines::{UNIFORM_STRIDE, bytes_of};
 
 /// The largest coverage page side.
-pub const MAX_PAGE: u32 = 4096;
+pub const MAX_PAGE: u32 = 2048;
 /// Rasters kept across frames (bytes of texel storage).
-pub const CACHE_BYTES: u64 = 192 * 1024 * 1024;
+pub const CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -37,25 +36,23 @@ struct ItemUniform {
     params: [f32; 4],
     inv0: [f32; 4],
     inv1: [f32; 4],
-    isize: [f32; 4],
-    /// The coverage curve, 17 values (20 slots).
-    curve: [[f32; 4]; 5],
 }
 
-fn curve_slots(curve: &pm_text::render::profile::Curve) -> [[f32; 4]; 5] {
-    let mut out = [[0.0f32; 4]; 5];
-    for (i, v) in curve.iter().enumerate() {
-        out[i / 4][i % 4] = *v;
-    }
-    out
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlurUniform {
+    width: u32,
+    height: u32,
+    radius: u32,
+    axis: u32,
 }
 
 /// How coverage is produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coverage {
-    /// Vello on the GPU (the default), `vello_cpu` if Vello fails to start.
+    /// Exact GPU area coverage in R32Float pages.
     Auto,
-    /// `vello_cpu` only (the CPU fallback, and tests comparing the two).
+    /// CPU coverage for reference comparisons.
     Cpu,
 }
 
@@ -74,20 +71,18 @@ struct Cached {
 }
 
 pub struct TextGpu {
-    graphite: Option<super::graphite::Gpu>,
-    glyph_atlas: super::graphite::atlas::Atlas,
-    vello: Option<vello::Renderer>,
-    vello_failed: Option<String>,
+    area: AreaCoverage,
+    batch: coverage::Batch,
+    cpu: pm_text::render::cpu::Rasterizer,
     coverage: Coverage,
     item_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     paint: [crate::pipelines::LazyRenderPipeline; 2],
-    paint_n32: crate::pipelines::LazyRenderPipeline,
-    paint_bgra: crate::pipelines::LazyRenderPipeline,
-    filter: crate::composite::path_masks::PathMaskPipelines,
-    sampler: wgpu::Sampler,
+    blur_layout: wgpu::BindGroupLayout,
+    blur: [crate::pipelines::LazyRenderPipeline; 2],
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
-    cache: HashMap<([u64; 2], Precision), Cached>,
+    image_bytes: u64,
+    cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
     cache_bytes: u64,
     tick: u64,
     pub stats: TextStats,
@@ -101,12 +96,47 @@ fn format_index(precision: Precision) -> usize {
     }
 }
 
-fn image_key(img: &Rgba8) -> u64 {
+fn text_format(precision: Precision) -> wgpu::TextureFormat {
+    working_format(match precision {
+        Precision::Unorm8 => Precision::Float16,
+        other => other,
+    })
+}
+
+fn image_key(img: &ImagePixels, working: WorkingEncoding) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (img.width, img.height).hash(&mut h);
-    img.data.hash(&mut h);
+    working.hash(&mut h);
+    match img {
+        ImagePixels::Rgba8(i) => {
+            (0u8, i.width, i.height).hash(&mut h);
+            i.data.hash(&mut h);
+        }
+        ImagePixels::WorkingF32(i) => {
+            (1u8, i.width, i.height).hash(&mut h);
+            for v in &i.data {
+                v.to_bits().hash(&mut h);
+            }
+        }
+        ImagePixels::Colr(program) => {
+            (2u8, program.content_key()).hash(&mut h);
+        }
+    }
     h.finish()
+}
+
+fn to_working(mut rgba: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
+    if working == WorkingEncoding::LinearLight {
+        let a = rgba[3];
+        if a > 0.0 {
+            for c in &mut rgba[..3] {
+                *c = pm_color::transfer::display_decode_f32(*c / a) * a;
+            }
+        } else {
+            rgba[..3].fill(0.0);
+        }
+    }
+    rgba
 }
 
 impl TextGpu {
@@ -114,6 +144,10 @@ impl TextGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render text"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/text.wgsl").into()),
+        });
+        let blur_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm-render text Gaussian"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/text_blur.wgsl").into()),
         });
         let uniform = |binding, dynamic, size: u64| wgpu::BindGroupLayoutEntry {
             binding,
@@ -131,24 +165,16 @@ impl TextGpu {
         });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm text source"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+                count: None,
+            }],
         });
         let layout = |groups: &[&wgpu::BindGroupLayout]| {
             let groups: Vec<Option<&wgpu::BindGroupLayout>> =
@@ -160,6 +186,33 @@ impl TextGpu {
             })
         };
         let paint_layout = layout(&[&item_layout, &texture_layout]);
+        let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm text Gaussian"),
+            entries: &[
+                uniform(0, false, size_of::<BlurUniform>() as u64),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let blur_pipeline_layout = layout(&[&blur_layout]);
         let over = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
@@ -172,7 +225,8 @@ impl TextGpu {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let pipeline = |layout: &wgpu::PipelineLayout,
+        let pipeline = |module: &wgpu::ShaderModule,
+                        layout: &wgpu::PipelineLayout,
                         vs: &'static str,
                         fs: &'static str,
                         format: wgpu::TextureFormat,
@@ -213,43 +267,30 @@ impl TextGpu {
             })
         };
         let formats = [Precision::Float16, Precision::Float32].map(working_format);
-        let paint = formats.map(|f| pipeline(&paint_layout, "vs", "fs_paint", f, Some(over)));
-        let paint_n32 = pipeline(
-            &paint_layout,
-            "vs",
-            "fs_paint",
-            wgpu::TextureFormat::Rgba8Unorm,
-            Some(over),
-        );
-        let paint_bgra = pipeline(
-            &paint_layout,
-            "vs",
-            "fs_paint",
-            wgpu::TextureFormat::Bgra8Unorm,
-            Some(over),
-        );
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("pm text bilinear"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            ..Default::default()
+        let paint =
+            formats.map(|f| pipeline(&module, &paint_layout, "vs", "fs_paint", f, Some(over)));
+        let blur = formats.map(|f| {
+            pipeline(
+                &blur_module,
+                &blur_pipeline_layout,
+                "vs_blur",
+                "fs_blur",
+                f,
+                None,
+            )
         });
         TextGpu {
-            graphite: None,
-            glyph_atlas: super::graphite::atlas::Atlas::new(),
-            vello: None,
-            vello_failed: None,
+            area: AreaCoverage::new(device),
+            batch: coverage::Batch::default(),
+            cpu: pm_text::render::cpu::Rasterizer::new(),
             coverage: Coverage::Auto,
             item_layout,
             texture_layout,
             paint,
-            paint_n32,
-            paint_bgra,
-            filter: crate::composite::path_masks::PathMaskPipelines::rgba(device),
-            sampler,
+            blur_layout,
+            blur,
             images: HashMap::new(),
+            image_bytes: 0,
             cache: HashMap::new(),
             cache_bytes: 0,
             tick: 0,
@@ -263,9 +304,11 @@ impl TextGpu {
             .iter()
             .filter(|pipeline| pipeline.is_built())
             .count()
-            + usize::from(self.paint_n32.is_built())
-            + usize::from(self.paint_bgra.is_built())
-            + self.filter.built_count()
+            + self
+                .blur
+                .iter()
+                .filter(|pipeline| pipeline.is_built())
+                .count()
     }
 
     #[cfg(test)]
@@ -274,14 +317,13 @@ impl TextGpu {
         for (name, pipeline) in [
             ("paint f16", &self.paint[0]),
             ("paint f32", &self.paint[1]),
-            ("paint n32", &self.paint_n32),
-            ("paint bgra", &self.paint_bgra),
+            ("Gaussian f16", &self.blur[0]),
+            ("Gaussian f32", &self.blur[1]),
         ] {
             let start = std::time::Instant::now();
             pipeline.get();
             times.push((format!("text {name}"), start.elapsed()));
         }
-        times.extend(self.filter.probe_all());
         times
     }
 
@@ -290,9 +332,11 @@ impl TextGpu {
         self.clear();
     }
 
-    /// Why Vello is not used, when it failed to start.
-    pub fn vello_failure(&self) -> Option<&str> {
-        self.vello_failed.as_deref()
+    /// Marks a new submitted frame so area buffers can be reused without
+    /// aliasing two text pages recorded in the same command encoder.
+    pub fn begin_frame(&mut self) {
+        self.area.begin_frame();
+        self.batch.trim_scratch(8 * 1024 * 1024);
     }
 
     /// Drops cached rasters and color glyph textures.
@@ -300,69 +344,67 @@ impl TextGpu {
         self.cache.clear();
         self.cache_bytes = 0;
         self.images.clear();
-        self.glyph_atlas = super::graphite::atlas::Atlas::new();
+        self.image_bytes = 0;
     }
 
     pub fn cached_bytes(&self) -> u64 {
         self.cache_bytes
     }
 
-    fn vello(&mut self, device: &wgpu::Device) -> Option<&mut vello::Renderer> {
-        if self.coverage == Coverage::Cpu || self.vello_failed.is_some() {
-            return None;
-        }
-        if self.vello.is_none() {
-            let options = vello::RendererOptions {
-                use_cpu: false,
-                antialiasing_support: vello::AaSupport::area_only(),
-                num_init_threads: std::num::NonZeroUsize::new(1),
-                pipeline_cache: None,
-            };
-            match vello::Renderer::new(device, options) {
-                Ok(r) => self.vello = Some(r),
-                Err(e) => {
-                    self.vello_failed = Some(e.to_string());
-                    return None;
-                }
-            }
-        }
-        self.vello.as_mut()
-    }
-
     fn image(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        img: &Rgba8,
-    ) -> (wgpu::TextureView, [f32; 2]) {
-        let key = image_key(img);
-        let size = [(img.width + 2) as f32, (img.height + 2) as f32];
-        if let Some((_, v)) = self.images.get(&key) {
-            return (v.clone(), size);
+        img: &ImagePixels,
+        working: WorkingEncoding,
+    ) -> wgpu::TextureView {
+        let key = image_key(img, working);
+        let (width, height) = img.dimensions();
+        if let Some((_, view)) = self.images.get(&key) {
+            return view.clone();
         }
-        // A one-pixel transparent border: bilinear filtering at the edges
-        // then fades to transparent, as the CPU reference samples.
-        let (w, h) = (img.width + 2, img.height + 2);
-        let mut data = vec![0u8; w as usize * h as usize * 4];
-        for y in 0..img.height as usize {
-            let src = &img.data[y * img.width as usize * 4..(y + 1) * img.width as usize * 4];
-            let o = ((y + 1) * w as usize + 1) * 4;
-            data[o..o + src.len()].copy_from_slice(src);
-        }
+        // Decode premultiplied E into the project's working domain before
+        // area filtering. The original texels are retained so the shader can
+        // integrate each inverse output pixel against source texel squares.
+        let base = if let ImagePixels::Colr(program) = img {
+            let raster = program.rasterize(working);
+            debug_assert_eq!((raster.width, raster.height), (width, height));
+            raster.data
+        } else {
+            let mut base = vec![0.0f32; width as usize * height as usize * 4];
+            for (index, rgba) in base.chunks_exact_mut(4).enumerate() {
+                let o = index * 4;
+                let source: [f32; 4] = match img {
+                    ImagePixels::Rgba8(i) => {
+                        std::array::from_fn(|c| f32::from(i.data[o + c]) / 255.0)
+                    }
+                    ImagePixels::WorkingF32(i) => i.data[o..o + 4].try_into().expect("RGBA pixel"),
+                    ImagePixels::Colr(_) => unreachable!(),
+                };
+                let pixel = match img {
+                    ImagePixels::Rgba8(_) => to_working(source, working),
+                    ImagePixels::WorkingF32(_) => source,
+                    ImagePixels::Colr(_) => unreachable!(),
+                };
+                rgba.copy_from_slice(&pixel);
+            }
+            base
+        };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pm text color glyph"),
+            label: Some("pm text color glyph source"),
             size: wgpu::Extent3d {
-                width: w,
-                height: h,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let data: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -373,21 +415,26 @@ impl TextGpu {
             &data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(w * 4),
+                bytes_per_row: Some(width * 16),
                 rows_per_image: None,
             },
             wgpu::Extent3d {
-                width: w,
-                height: h,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
+        let bytes = u64::from(width) * u64::from(height) * 16;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        if self.images.len() > 1024 {
-            self.images.clear();
+        if bytes <= IMAGE_CACHE_BYTES / 2 {
+            if self.image_bytes + bytes > IMAGE_CACHE_BYTES {
+                self.images.clear();
+                self.image_bytes = 0;
+            }
+            self.image_bytes += bytes;
+            self.images.insert(key, (texture, view.clone()));
         }
-        self.images.insert(key, (texture, view.clone()));
-        (view, size)
+        view
     }
 
     /// Renders the coverage pages of `atlas` into pool targets (pushed to
@@ -396,6 +443,7 @@ impl TextGpu {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
         pool: &mut TargetPool,
         taken: &mut Vec<Target>,
         scene: &TextScene,
@@ -403,39 +451,49 @@ impl TextGpu {
     ) -> Result<Vec<wgpu::TextureView>, String> {
         let mut views = Vec::with_capacity(atlas.pages.len());
         for (page, &(w, h)) in atlas.pages.iter().enumerate() {
+            let use_gpu = self.coverage == Coverage::Auto;
+            // The atlas cells keep their exact logical coordinates. Only the
+            // R32 target allocation is bucketed so a growing text raster can
+            // reuse the same pool texture across several adjacent sizes.
+            // Paint loads integer cell texels and never samples the spare area.
+            let (target_w, target_h) = if use_gpu {
+                (w.max(1).next_power_of_two(), h.max(1).next_power_of_two())
+            } else {
+                (w.max(1), h.max(1))
+            };
             let target = pool.take(
                 device,
-                w.max(1),
-                h.max(1),
-                wgpu::TextureFormat::Rgba8Unorm,
-                wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
+                target_w,
+                target_h,
+                if use_gpu {
+                    wgpu::TextureFormat::R32Float
+                } else {
+                    wgpu::TextureFormat::R8Unorm
+                },
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | if use_gpu {
+                        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC
+                    } else {
+                        wgpu::TextureUsages::COPY_DST
+                    },
             );
             self.stats.pages += 1;
-            let drawn = match self.vello(device) {
-                Some(renderer) => {
-                    let s = vello_page(scene, atlas, page);
-                    renderer
-                        .render_to_texture(
-                            device,
-                            queue,
-                            &s,
-                            &target.view,
-                            &vello::RenderParams {
-                                base_color: vello::peniko::Color::TRANSPARENT,
-                                width: w.max(1),
-                                height: h.max(1),
-                                antialiasing_method: vello::AaConfig::Area,
-                            },
-                        )
-                        .map_err(|e| format!("Vello coverage: {e}"))
-                        .is_ok()
-                }
-                None => false,
-            };
-            if !drawn {
-                let (pw, ph, data) = pm_text::render::cpu::render_page(scene, atlas, page);
+            if use_gpu {
+                let entries = area_items(scene, atlas, page, self.cpu.coverage_cache())?;
+                let items: Vec<_> = entries
+                    .iter()
+                    .map(|entry| coverage::Item {
+                        path: &entry.path,
+                        translation: entry.translation,
+                        bounds: entry.bounds,
+                        at: entry.at,
+                    })
+                    .collect();
+                self.batch.rebuild(&items);
+                self.area
+                    .encode_reusing(device, queue, encoder, &self.batch, Some(&target.view));
+            } else {
+                let (pw, ph, data) = self.cpu.render_page_r8(scene, atlas, page);
                 self.stats.cpu_pages += 1;
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -444,10 +502,10 @@ impl TextGpu {
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    &data,
+                    data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(pw * 4),
+                        bytes_per_row: Some(pw),
                         rows_per_image: None,
                     },
                     wgpu::Extent3d {
@@ -467,16 +525,10 @@ impl TextGpu {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pm text source"),
             layout: &self.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
         })
     }
 
@@ -492,9 +544,10 @@ impl TextGpu {
         taken: &mut Vec<Target>,
         plan: &TextPlan,
         precision: Precision,
+        working: WorkingEncoding,
     ) -> Result<wgpu::TextureView, String> {
         self.tick += 1;
-        if let Some(c) = self.cache.get_mut(&(plan.key, precision)) {
+        if let Some(c) = self.cache.get_mut(&(plan.key, precision, working)) {
             c.used = self.tick;
             self.stats.cache_hits += 1;
             pm_perf::bump(pm_perf::Counter::TextCacheHits);
@@ -503,14 +556,9 @@ impl TextGpu {
         pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
         let atlas = atlas::pack(scene, MAX_PAGE);
-        let pages = self.pages(device, queue, pool, taken, scene, &atlas)?;
+        let pages = self.pages(device, queue, encoder, pool, taken, scene, &atlas)?;
         let (tw, th) = (plan.width(), plan.height());
-        let format = if plan.canvas_n32 {
-            // Chromium SharedImageFormat::N32Format on desktop platforms.
-            wgpu::TextureFormat::Bgra8Unorm
-        } else {
-            working_format(precision)
-        };
+        let format = text_format(precision);
         let raster = Target::new(
             device,
             "pm text raster",
@@ -527,47 +575,10 @@ impl TextGpu {
             cells.entry(c.item).or_default().push(*c);
         }
         // Color glyph textures (uploaded before the passes are recorded).
-        let mut images: HashMap<usize, (wgpu::TextureView, [f32; 2])> = HashMap::new();
-        self.glyph_atlas.begin_run();
+        let mut images: HashMap<usize, wgpu::TextureView> = HashMap::new();
         for (i, item) in scene.items.iter().enumerate() {
-            if let ItemContent::GlyphMask { mask, image, .. } = &item.content {
-                // Direct A8 and SDF glyphs share Skia's atlas allocator. Even
-                // when the direct mask uses its cached paint texture, its
-                // allocation affects SDF UV interpolation and rounding.
-                self.glyph_atlas
-                    .reserve_mask(device, mask, image_key(image));
-            }
-            // A full Canvas viewport may exceed Metal's texture limit even
-            // when its ink crop fits. Keep the existing CPU primitive image
-            // for those canvases; never shrink the viewport and change AA.
-            if let ItemContent::Graphite { raster, image, .. } = &item.content
-                && raster.width <= device.limits().max_texture_dimension_2d
-                && raster.height <= device.limits().max_texture_dimension_2d
-            {
-                let native = self
-                    .graphite
-                    .get_or_insert_with(|| super::graphite::Gpu::new(device, queue));
-                let drawn = native.render(
-                    device,
-                    queue,
-                    encoder,
-                    pool,
-                    taken,
-                    raster,
-                    &mut self.glyph_atlas,
-                );
-                // A distance field beyond an atlas plot keeps the CPU
-                // primitive image of the same draws.
-                let drawn = match drawn {
-                    Some(drawn) => drawn,
-                    None => self.image(device, queue, image),
-                };
-                images.insert(i, drawn);
-            } else if let ItemContent::Image { image, .. }
-            | ItemContent::GlyphMask { image, .. }
-            | ItemContent::Graphite { image, .. } = &item.content
-            {
-                images.insert(i, self.image(device, queue, image));
+            if let ItemContent::Image { image, .. } = &item.content {
+                images.insert(i, self.image(device, queue, image, working));
             }
         }
         let mut cleared = false;
@@ -587,6 +598,7 @@ impl TextGpu {
                     &pages,
                     &raster,
                     precision,
+                    working,
                     &mut cleared,
                 );
                 i += 1;
@@ -597,7 +609,7 @@ impl TextGpu {
             while i < scene.items.len() && scene.items[i].blur <= 0.0 {
                 i += 1;
             }
-            let draws = self.draws(scene, start..i, crop, (tw, th), &cells, &images);
+            let draws = self.draws(scene, start..i, crop, (tw, th), &cells, &images, working);
             self.pass(
                 device,
                 queue,
@@ -624,7 +636,7 @@ impl TextGpu {
             );
         }
         self.stats.painted += 1;
-        self.insert(plan, precision, raster.clone());
+        self.insert(plan, precision, working, raster.clone());
         Ok(raster.view)
     }
 
@@ -643,7 +655,13 @@ impl TextGpu {
         }
     }
 
-    fn insert(&mut self, plan: &TextPlan, precision: Precision, target: Target) {
+    fn insert(
+        &mut self,
+        plan: &TextPlan,
+        precision: Precision,
+        working: WorkingEncoding,
+        target: Target,
+    ) {
         let bytes = target.bytes();
         if bytes > CACHE_BYTES / 2 {
             return;
@@ -651,7 +669,7 @@ impl TextGpu {
         self.trim(CACHE_BYTES.saturating_sub(bytes));
         self.cache_bytes += bytes;
         self.cache.insert(
-            (plan.key, precision),
+            (plan.key, precision, working),
             Cached {
                 target,
                 used: self.tick,
@@ -668,19 +686,24 @@ impl TextGpu {
         origin: [f64; 2],
         size: (u32, u32),
         cells: &HashMap<usize, Vec<Cell>>,
-        images: &HashMap<usize, (wgpu::TextureView, [f32; 2])>,
+        images: &HashMap<usize, wgpu::TextureView>,
+        working: WorkingEncoding,
     ) -> Vec<Draw> {
         let (tw, th) = (size.0 as f32, size.1 as f32);
         let mut out = Vec::new();
         for i in range {
             let item = &scene.items[i];
             match &item.content {
-                ItemContent::Coverage { curve, .. } => {
+                ItemContent::Coverage { .. } => {
                     let a = item.color[3] * item.opacity;
+                    let rgb = pm_color::linear::color_to_working(
+                        [item.color[0], item.color[1], item.color[2]],
+                        working,
+                    );
                     let color = [
-                        (item.color[0] * a) as f32,
-                        (item.color[1] * a) as f32,
-                        (item.color[2] * a) as f32,
+                        (rgb[0] * a) as f32,
+                        (rgb[1] * a) as f32,
+                        (rgb[2] * a) as f32,
                         a as f32,
                     ];
                     for c in cells.get(&i).map(Vec::as_slice).unwrap_or(&[]) {
@@ -704,18 +727,15 @@ impl TextGpu {
                                 ],
                                 color,
                                 params: [0.0, 0.0, tw, th],
-                                curve: curve_slots(curve),
                                 ..Default::default()
                             },
                         });
                     }
                 }
-                ItemContent::Image { transform, .. }
-                | ItemContent::GlyphMask { transform, .. }
-                | ItemContent::Graphite { transform, .. } => {
-                    let Some((_, isize)) = images.get(&i) else {
+                ItemContent::Image { transform, .. } => {
+                    if !images.contains_key(&i) {
                         continue;
-                    };
+                    }
                     let b: Rect = item.bounds.inflate(1.0, 1.0);
                     let rect = [
                         (b.x0.floor() - origin[0]) as f32,
@@ -724,31 +744,26 @@ impl TextGpu {
                         (b.y1.ceil() - origin[1]) as f32,
                     ];
                     // Target px → device px → image px → padded image px.
-                    let inv = Affine::translate((1.0, 1.0))
-                        * transform.inverse()
-                        * Affine::translate((origin[0], origin[1]));
+                    let inv = transform.inverse() * Affine::translate((origin[0], origin[1]));
                     let [a, bb, c, d, e, f] = inv.as_coeffs();
-                    let mask = matches!(item.content, ItemContent::GlyphMask { .. });
+                    // Any source-axis footprint wider than one texel needs
+                    // area integration, including mixed shrink/enlarge maps.
+                    let xx = a * a + c * c;
+                    let xy = a * bb + c * d;
+                    let yy = bb * bb + d * d;
+                    let major =
+                        ((xx + yy + ((xx - yy).powi(2) + 4.0 * xy * xy).sqrt()) * 0.5).sqrt();
+                    let downscale = major > 1.0;
                     let alpha = (item.color[3] * item.opacity) as f32;
                     out.push(Draw {
                         page: None,
                         image: Some(i),
                         u: ItemUniform {
                             rect,
-                            color: if mask {
-                                [
-                                    item.color[0] as f32 * alpha,
-                                    item.color[1] as f32 * alpha,
-                                    item.color[2] as f32 * alpha,
-                                    alpha,
-                                ]
-                            } else {
-                                [0.0, 0.0, 0.0, alpha]
-                            },
-                            params: [if mask { 3.0 } else { 1.0 }, 1.0, tw, th],
+                            color: [0.0, 0.0, 0.0, alpha],
+                            params: [1.0, if downscale { 1.0 } else { 0.0 }, tw, th],
                             inv0: [a as f32, c as f32, e as f32, 0.0],
                             inv1: [bb as f32, d as f32, f as f32, 0.0],
-                            isize: [isize[0], isize[1], 0.0, 0.0],
                             ..Default::default()
                         },
                     });
@@ -767,7 +782,7 @@ impl TextGpu {
         target: &Target,
         draws: &[Draw],
         pages: &[wgpu::TextureView],
-        images: &HashMap<usize, (wgpu::TextureView, [f32; 2])>,
+        images: &HashMap<usize, wgpu::TextureView>,
         precision: Precision,
         cleared: &mut bool,
     ) {
@@ -800,7 +815,7 @@ impl TextGpu {
         let image_binds: HashMap<usize, wgpu::BindGroup> = draws
             .iter()
             .filter_map(|d| d.image)
-            .map(|i| (i, self.source_bind(device, &images[&i].0)))
+            .map(|i| (i, self.source_bind(device, &images[&i])))
             .collect();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pm text paint"),
@@ -823,11 +838,7 @@ impl TextGpu {
             multiview_mask: None,
         });
         *cleared = true;
-        pass.set_pipeline(match target.format() {
-            wgpu::TextureFormat::Rgba8Unorm => self.paint_n32.get(),
-            wgpu::TextureFormat::Bgra8Unorm => self.paint_bgra.get(),
-            _ => self.paint[format_index(precision)].get(),
-        });
+        pass.set_pipeline(self.paint[format_index(precision)].get());
         for (k, d) in draws.iter().enumerate() {
             let bind = match (d.page, d.image) {
                 (Some(p), _) => &page_binds[p],
@@ -840,8 +851,8 @@ impl TextGpu {
         }
     }
 
-    /// A draw painted into an N32 save layer, filtered through the shared
-    /// Canvas2D/Graphite image-filter executor, then composited.
+    /// A draw painted alone, convolved with the pixel-integrated Gaussian,
+    /// then composited into the float text target.
     #[allow(clippy::too_many_arguments)]
     fn blurred(
         &self,
@@ -853,10 +864,11 @@ impl TextGpu {
         plan: &TextPlan,
         index: usize,
         cells: &HashMap<usize, Vec<Cell>>,
-        images: &HashMap<usize, (wgpu::TextureView, [f32; 2])>,
+        images: &HashMap<usize, wgpu::TextureView>,
         pages: &[wgpu::TextureView],
         raster: &Target,
         precision: Precision,
+        working: WorkingEncoding,
         cleared: &mut bool,
     ) {
         let scene = &plan.scene;
@@ -878,9 +890,7 @@ impl TextGpu {
                 }
                 u
             }
-            ItemContent::Image { .. }
-            | ItemContent::GlyphMask { .. }
-            | ItemContent::Graphite { .. } => Some(item.bounds.inflate(1.0, 1.0)),
+            ItemContent::Image { .. } => Some(item.bounds.inflate(1.0, 1.0)),
         };
         let Some(own) = own else { return };
         let crop = Rect::new(
@@ -901,31 +911,52 @@ impl TextGpu {
             device,
             lw,
             lh,
-            wgpu::TextureFormat::Rgba8Unorm,
+            text_format(precision),
             pm_gpu::target::working_usage(),
         );
-        let draws = self.draws(scene, index..index + 1, [rx0, ry0], (lw, lh), cells, images);
+        let draws = self.draws(
+            scene,
+            index..index + 1,
+            [rx0, ry0],
+            (lw, lh),
+            cells,
+            images,
+            working,
+        );
         let mut fresh = false;
         self.pass(
             device, queue, encoder, &a, &draws, pages, images, precision, &mut fresh,
         );
-        let filtered = self.filter.blur_rgba(
+        let weights = gaussian_kernel(item.blur);
+        let tmp = pool.take(
             device,
-            queue,
-            encoder,
-            &a,
-            [rx0 as i32, ry0 as i32],
-            (scene.width, scene.height),
-            plan.crop,
-            item.blur as f32,
+            lw,
+            lh,
+            text_format(precision),
+            pm_gpu::target::working_usage(),
+        );
+        let filtered = pool.take(
+            device,
+            lw,
+            lh,
+            text_format(precision),
+            pm_gpu::target::working_usage(),
+        );
+        self.blur_pass(device, queue, encoder, &a, &tmp, &weights, 0, precision);
+        self.blur_pass(
+            device, queue, encoder, &tmp, &filtered, &weights, 1, precision,
         );
         let (tw, th) = (plan.width() as f32, plan.height() as f32);
+        let x0 = (rx0 - crop.x0).max(0.0);
+        let y0 = (ry0 - crop.y0).max(0.0);
+        let x1 = (rx0 + f64::from(lw) - crop.x0).min(f64::from(plan.width()));
+        let y1 = (ry0 + f64::from(lh) - crop.y0).min(f64::from(plan.height()));
         let copy = Draw {
             page: Some(0),
             image: None,
             u: ItemUniform {
-                rect: [0.0, 0.0, tw, th],
-                map: [0.0; 4],
+                rect: [x0 as f32, y0 as f32, x1 as f32, y1 as f32],
+                map: [(crop.x0 - rx0) as f32, (crop.y0 - ry0) as f32, 0.0, 0.0],
                 params: [2.0, 1.0, tw, th],
                 ..Default::default()
             },
@@ -941,9 +972,87 @@ impl TextGpu {
             precision,
             cleared,
         );
-        taken.push(a);
-        // The encoder retains this non-pooled filter result until submission.
+        taken.extend([a, tmp, filtered]);
     }
+
+    fn blur_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &Target,
+        target: &Target,
+        weights: &[f32],
+        axis: u32,
+        precision: Precision,
+    ) {
+        let (width, height) = (target.width(), target.height());
+        let uniform = BlurUniform {
+            width,
+            height,
+            radius: (weights.len() / 2) as u32,
+            axis,
+        };
+        let ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pm text blur uniform"),
+            size: size_of::<BlurUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&ub, 0, bytes_of(&uniform));
+        let wb = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pm text Gaussian weights"),
+            size: std::mem::size_of_val(weights) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let weight_bytes: Vec<u8> = weights.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        queue.write_buffer(&wb, 0, &weight_bytes);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pm text Gaussian"),
+            layout: &self.blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ub.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&source.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wb.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("pm text Gaussian"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(self.blur[format_index(precision)].get());
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..4, 0..1);
+    }
+}
+
+fn gaussian_kernel(sigma: f64) -> Vec<f32> {
+    pm_text::render::paint::gaussian(sigma)
+        .into_iter()
+        .map(|w| w as f32)
+        .collect()
 }
 
 struct Draw {
@@ -953,75 +1062,57 @@ struct Draw {
     u: ItemUniform,
 }
 
-/// Vello's scene for one coverage page: every cell's paths in white.
-fn vello_page(scene: &TextScene, atlas: &Atlas, page: usize) -> vello::Scene {
-    use vello::peniko::{Color, Fill};
-    let mut s = vello::Scene::new();
+struct AreaItem {
+    path: Arc<BezPath>,
+    bounds: PixelRect,
+    at: [u32; 2],
+    translation: [f64; 2],
+}
+
+/// Device-space outlines and the atlas cell each outline covers. The cache
+/// holds the f64 outline after its linear transform; glyph placement stays
+/// f64 until area rasterization.
+fn area_items(
+    scene: &TextScene,
+    atlas: &Atlas,
+    page: usize,
+    cache: &mut pm_text::render::scene::CoveragePathCache,
+) -> Result<Vec<AreaItem>, String> {
+    let mut out = Vec::new();
     for cell in atlas.cells.iter().filter(|c| c.page == page) {
         let ItemContent::Coverage { paths, .. } = &scene.items[cell.item].content else {
             continue;
         };
-        if cell.clip {
-            s.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &cell.rect());
-        }
-        let to_page = cell.transform();
-        for p in paths {
-            let t = to_page * p.transform;
-            match &p.style {
-                PathStyle::Fill => s.fill(Fill::NonZero, t, Color::WHITE, None, &*p.path),
-                PathStyle::Stroke(stroke) => s.stroke(stroke, t, Color::WHITE, None, &*p.path),
+        let (path, translation) = if let [one] = paths.as_slice() {
+            let [_, _, _, _, x, y] = one.transform.as_coeffs();
+            (cache.get(one), [x, y])
+        } else {
+            let mut combined = BezPath::new();
+            for p in paths {
+                let mut part = cache.get(p).as_ref().clone();
+                let [_, _, _, _, x, y] = p.transform.as_coeffs();
+                part.apply_affine(Affine::translate((x, y)));
+                for el in part.iter() {
+                    combined.push(el);
+                }
             }
-        }
-        if cell.clip {
-            s.pop_layer();
-        }
+            (Arc::new(combined), [0.0, 0.0])
+        };
+        let x = i32::try_from(cell.device_x).map_err(|_| "text cell x outside i32".to_owned())?;
+        let y = i32::try_from(cell.device_y).map_err(|_| "text cell y outside i32".to_owned())?;
+        out.push(AreaItem {
+            path,
+            bounds: PixelRect::new(x, y, cell.width, cell.height),
+            at: [cell.x, cell.y],
+            translation,
+        });
     }
-    s
+    Ok(out)
 }
 
 /// The CPU reference of a plan's raster (tests).
 pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
-    let full = pm_text::render::paint::render_cpu_with_format(
-        &plan.scene,
-        Some(&|img, origin, canvas, sigma| {
-            use pm_vector::canvas2d::filter::{BlurPlan, Rect};
-            let rgba = img.to_rgba8();
-            let data = if let Some(filter) = BlurPlan::new(canvas.0, canvas.1, sigma as f32) {
-                filter.run_cpu_rgba_region(
-                    &rgba,
-                    Rect {
-                        x0: origin[0],
-                        y0: origin[1],
-                        w: img.width,
-                        h: img.height,
-                    },
-                    canvas.0,
-                    canvas.1,
-                )
-            } else {
-                let mut data = vec![0.0; (canvas.0 * canvas.1 * 4) as usize];
-                let x0 = origin[0].max(0);
-                let x1 = (origin[0] + img.width as i32).min(canvas.0 as i32);
-                for y in origin[1].max(0)..(origin[1] + img.height as i32).min(canvas.1 as i32) {
-                    for x in x0..x1 {
-                        let src = (((y - origin[1]) as u32 * img.width + (x - origin[0]) as u32)
-                            * 4) as usize;
-                        let dst = ((y as u32 * canvas.0 + x as u32) * 4) as usize;
-                        for c in 0..4 {
-                            data[dst + c] = f32::from(rgba[src + c]) / 255.0;
-                        }
-                    }
-                }
-                data
-            };
-            pm_text::render::paint::Image {
-                width: canvas.0,
-                height: canvas.1,
-                data,
-            }
-        }),
-        plan.canvas_n32,
-    );
+    let full = pm_text::render::paint::render_cpu(&plan.scene);
     let (w, h) = (plan.width(), plan.height());
     let mut out = pm_text::render::paint::Image::new(w, h);
     for y in 0..h as usize {

@@ -516,6 +516,7 @@ impl Exec<'_> {
                             &mut self.taken,
                             text,
                             self.precision,
+                            self.working,
                         ) {
                             Ok(view) => {
                                 self.prepare_level2(encoder, r, view.texture(), false);
