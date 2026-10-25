@@ -71,11 +71,16 @@ nearest-even half computed in the shader.
 | Legacy scene shaded and resolved in linear light | 64.18, 61.66, 0.371 | 3.72, 0.33, 0.006 | `legacy-scene:0` interior |
 | Nearest-half 3D and working stores (Editor Library card) | 25, 5, 0.0072 (card, signed +0.0008) | 25, 5, 0.0122 (card, signed +0.0005) | Editor-view card, depth 16 |
 
+| Transmission samples the authored background (r180 `renderTransmissionPass`) | 92.57, 91.62, 2.856 | 5.61, 0.47, 0.004 | `khr-GlassVaseFlowers` interior |
+
 Library cards pass gate-policy's precision-bound rule (all 32). Their remaining
 one-code differences are the half-float working frame rounded again to 8 bits: the
 Editor card's interior mean is 0.0073 CV (today 0.0004) and its edge mean 0.1601
-(today 0.1587). The scene gate leaves `slots-and-groups:0` and `maps-placement:1`
-under investigation; glTF material cases remain red.
+(today 0.1587). The scene gate passes. In glTF, the two normal-tangent tests keep a few
+isolated HDR highlights: one of four samples carries a large specular value,
+which the linear resolve keeps a quarter of before the curve, today's
+per-sample tone mapping clamps, and the 64-sample reference dilutes; and edge
+p99.9 statistics over small edge sets sit up to a few codes above today's.
 
 ## Raster sampling and masks
 

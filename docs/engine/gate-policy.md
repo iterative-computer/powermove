@@ -44,8 +44,11 @@ also the edge maximum) within one sample, a quarter of full scale, of today's er
 Shading runs once per pixel, so a partly covered pixel can show a texel the reference
 averages away; resolving in linear light weighs it differently from today. Geometry within
 half a sample per partly covered pixel (`same_sampled_geometry`). Interiors stay at
-1 CV of today unless no interior pixel ends further from the reference than today's
-(a 3D correction with a ledger row). Preview ==
+1 CV of today unless 99.9% of interior pixels end no further from the reference than
+today's by more than 1 CV and none by more than one shading sample (a 3D correction
+with a ledger row). The 3D references model r180 exactly where the old capture path
+did not: material slots and mesh groups, and a transmission target at the output's
+size that sees the opaque authored background. Preview ==
 export: the paused viewer's frame and the export's are identical (`identical`).
 
 For a fully modelled transparent Float16 corpus frame, G-C2 measures that same 1e-3
