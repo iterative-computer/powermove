@@ -3,7 +3,7 @@
  * One run is one alternating off/on/on/off cycle of app sessions; each
  * workload is gated on its own. Scrub latency is quantised to vsync, so one
  * run against one run is noise at that resolution. Per mode and run the gate
- * computes, from each copy's first scrub (cold monitor) and its steady scrubs
+ * computes, from each copy's first seek after opening (startup excluded) and its steady scrubs
  * (every later one): first-scrub median, steady P50, P95 and P99, the count
  * of steady scrubs over one 60 Hz frame (16 ms), the filmstrip median and the
  * cold first-filmstrip median. With zero slack and at least five runs:
@@ -12,7 +12,12 @@
  *   - every native run's steady P95 <= today's worst run's, within this
  *     invocation;
  *   - every session started under the load limit (a loaded session is no
- *     measurement, so it fails rather than averages in). */
+ *     measurement, so it fails rather than averages in);
+ *   - the campaign's untimed original-media correctness evidence
+ *     (source-frame-correctness.ts) covers this build and exactly the measured
+ *     fixtures, targets and geometry, and every displayed frame matched. */
+import { correctnessFailures, type CampaignFixture, type SourceFrameCorrectness } from './source-frame-correctness';
+
 export type PerfSample = {
   workload: string; run: number; enabled: boolean; round: number; copy: number;
   scrubMs: number[]; filmstripMs: number[]; loadBefore: number[];
@@ -61,8 +66,10 @@ function gateWorkload(workload: string, samples: PerfSample[], failures: string[
   return { runs: runs.length, perRun, medians, pooled, worstLegacyP95 };
 }
 
-export function sourcePerformanceGate(samples: PerfSample[]) {
-  const failures: string[] = [];
+export type CampaignCorrectness = { evidence: SourceFrameCorrectness | null; campaign: string; build: string; fixtures: CampaignFixture[] };
+
+export function sourcePerformanceGate(samples: PerfSample[], correctness: CampaignCorrectness) {
+  const failures = correctnessFailures(correctness.evidence, correctness.campaign, correctness.build, correctness.fixtures);
   const loaded = new Set(samples.filter(s => s.loadBefore[0]! >= MAX_LOAD)
     .map(s => `${s.enabled ? 'native' : 'today'} run ${s.run} round ${s.round} at load ${s.loadBefore[0]!.toFixed(1)}`));
   for (const session of loaded) failures.push(`session ${session} >= ${MAX_LOAD}`);
