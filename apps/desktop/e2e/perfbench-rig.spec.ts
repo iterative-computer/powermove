@@ -763,7 +763,7 @@ test.describe('120 Hz rig', () => {
         const tracePath = traceDir && path.join(traceDir, 'trace.json');
         if (tracePath) await session.app.evaluate(({ contentTracing }) => contentTracing.startRecording({ included_categories: ['blink.user_timing', 'graphics.pipeline', 'viz'], excluded_categories: ['*'] }));
         const counts0 = await session.page.evaluate(() => (window as any).__pmRig.counts());
-        const m = await measureAction(session, mode, () => session.page.evaluate(async ({ ms, mode }) => {
+        const m = await measureAction(session, mode, () => session.page.evaluate(async ({ ms, mode, audio }) => {
           const PM = (window as any).PM;
           const rig = (window as any).__pmRig;
           const at: number[] = [];
@@ -801,6 +801,21 @@ test.describe('120 Hz rig', () => {
             if (run) emits.push([performance.now(), Number(e?.time)]);
             if (mode === 'today') offs.push(rig.afterWebGL(shown));
           }));
+          // Today's voices: when each starts on the audio clock, the playhead
+          // time of that first sample, and the context's output timestamp, so
+          // a sample's audible page time is known (the engine reports its own).
+          const voices: { perf: number; time: number; when: number; ctxNow: number; ts: { contextTime: number; performanceTime: number }; outputLatency: number; baseLatency: number }[] = [];
+          if (mode === 'today' && audio) {
+            const proto = AudioBufferSourceNode.prototype;
+            const begin = proto.start;
+            proto.start = function (this: AudioBufferSourceNode, when?: number, ...rest: any[]) {
+              const ctx = this.context as AudioContext;
+              const ts = ctx.getOutputTimestamp();
+              if (run) voices.push({ perf: performance.now(), time: Number(PM.time) + ((when ?? 0) - ctx.currentTime), when: when ?? 0, ctxNow: ctx.currentTime, ts: { contextTime: ts.contextTime ?? 0, performanceTime: ts.performanceTime ?? 0 }, outputLatency: ctx.outputLatency, baseLatency: ctx.baseLatency });
+              return (begin as any).call(this, when, ...rest);
+            } as any;
+            offs.push(() => { proto.start = begin; });
+          }
           let rafs = 0;
           const tick = (t: number) => { if (!run) return; rafs++; pageRafs.push(t); requestAnimationFrame(tick); };
           requestAnimationFrame(tick);
@@ -816,8 +831,8 @@ test.describe('120 Hz rig', () => {
           const pendingAtEnd = events?.pending ?? 0;
           offs.forEach((off) => off());
           const elapsed = performance.now() - start;
-          return { at, oldAt, distinct: times.size, frames: [...times].sort((a, b) => a - b), rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd, page: { start, from, pageRafs, emits, reports } };
-        }, { ms: seconds * 1000, mode }));
+          return { at, oldAt, distinct: times.size, frames: [...times].sort((a, b) => a - b), rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd, page: { start, from, pageRafs, emits, reports, voices } };
+        }, { ms: seconds * 1000, mode, audio: PLAY_AUDIO }));
         const counts1 = await session.page.evaluate(() => (window as any).__pmRig.counts());
         const p = m.value;
         if (TRACE_OUT) {
