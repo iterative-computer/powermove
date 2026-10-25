@@ -247,8 +247,12 @@ async function renderCase(c: any) {
         } else {
           if (renderer.domElement.width !== width || renderer.domElement.height !== height)
             renderer.setSize(width, height, false);
+          // r180 sizes its transmission target from the canvas: keep it at
+          // the output's size while the shading is supersampled, so
+          // transmissionSamplerSize and its roughness lod stay the 1x ones.
+          renderer.transmissionResolutionScale = 1 / scale;
           renderer.setRenderTarget(target);
-          render(width, height);
+          try { render(width, height); } finally { renderer.transmissionResolutionScale = 1; }
           const pixels = new Float32Array(width * height * 4);
           renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
           // WebGL readPixels starts at the bottom row; recorded PNGs start at
