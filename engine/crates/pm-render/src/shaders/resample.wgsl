@@ -36,6 +36,7 @@ struct Resample {
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var trilinear: sampler;
 @group(0) @binding(2) var<uniform> r: Resample;
+@group(0) @binding(3) var tail: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -132,7 +133,10 @@ fn mip_size(level: i32) -> vec2<u32> {
     if (r.origin.z > 0.5 && level == 1) {
         return max(textureDimensions(src, 0) / 2u, vec2<u32>(1u));
     }
-    return textureDimensions(src, level);
+    if (level == 0) {
+        return textureDimensions(src, 0);
+    }
+    return textureDimensions(tail, level - 1);
 }
 
 fn mip_texel(at: vec2<i32>, level: i32) -> vec4<f32> {
@@ -144,7 +148,10 @@ fn mip_texel(at: vec2<i32>, level: i32) -> vec4<f32> {
             + textureLoad(src, min(p + vec2<i32>(0, 1), last), 0)
             + textureLoad(src, min(p + vec2<i32>(1, 1), last), 0)) * 0.25;
     }
-    return textureLoad(src, at, level);
+    if (level == 0) {
+        return textureLoad(src, at, 0);
+    }
+    return textureLoad(tail, at, level - 1);
 }
 
 fn first_mip_bilinear(uv: vec2<f32>) -> vec4<f32> {
@@ -259,8 +266,17 @@ fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
         if (r.origin.z > 0.5) {
             let lod = clamp(log2(max(length(dx), length(dy))), 0.0, 1.0);
             c = mix(textureSampleLevel(src, trilinear, cuv, 0.0), first_mip_bilinear(cuv), lod);
+        } else if (r.tex.z <= 1.0) {
+            c = textureSampleLevel(src, trilinear, cuv, 0.0);
         } else {
-            c = textureSampleGrad(src, trilinear, cuv, duvx, duvy);
+            let lod = clamp(log2(max(length(dx), length(dy))), 0.0, r.tex.z - 1.0);
+            if (lod < 1.0) {
+                let base = textureSampleLevel(src, trilinear, cuv, 0.0);
+                let first = textureSampleLevel(tail, trilinear, cuv, 0.0);
+                c = mix(base, first, lod);
+            } else {
+                c = textureSampleLevel(tail, trilinear, cuv, lod - 1.0);
+            }
         }
     } else {
         c = lanczos(cuv * r.tex.xy, dx, dy);

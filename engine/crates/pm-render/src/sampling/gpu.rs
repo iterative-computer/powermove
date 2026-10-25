@@ -28,8 +28,11 @@ pub(crate) const MAX_EDGES: usize = 6;
 /// A source with its mip pyramid.
 #[derive(Clone)]
 pub(crate) struct Pyramid {
-    pub texture: wgpu::Texture,
+    /// Retained downsample levels for a physical pyramid. The source view is
+    /// borrowed as logical level zero.
+    tail: Option<wgpu::Texture>,
     pub view: wgpu::TextureView,
+    tail_view: Option<wgpu::TextureView>,
     pub width: u32,
     pub height: u32,
     pub levels: u32,
@@ -47,7 +50,7 @@ impl Pyramid {
     /// No copy, additional quantization, or retained pyramid allocation.
     pub fn base(source: &wgpu::Texture, view: Option<&wgpu::TextureView>) -> Self {
         Self {
-            texture: source.clone(),
+            tail: None,
             view: view.cloned().unwrap_or_else(|| {
                 source.create_view(&wgpu::TextureViewDescriptor {
                     base_mip_level: 0,
@@ -55,6 +58,7 @@ impl Pyramid {
                     ..Default::default()
                 })
             }),
+            tail_view: None,
             width: source.width(),
             height: source.height(),
             levels: 1,
@@ -121,18 +125,21 @@ impl PyramidCache {
         self.entries.clear();
     }
 
-    /// Bytes held (level 0 and the levels below it).
+    /// Bytes held by the downsample tail. The borrowed source is not owned by
+    /// this cache and is not counted a second time.
     pub fn bytes(&self) -> u64 {
         self.entries
             .iter()
             .map(|(_, _, p)| {
-                let px: u64 = (0..p.levels)
+                let px: u64 = (1..p.levels)
                     .map(|level| {
                         u64::from((p.width >> level).max(1)) * u64::from((p.height >> level).max(1))
                     })
                     .sum();
                 let texel = p
-                    .texture
+                    .tail
+                    .as_ref()
+                    .expect("cached pyramid has a downsample tail")
                     .format()
                     .block_copy_size(None)
                     .expect("uncompressed raster format");
@@ -155,14 +162,17 @@ pub(crate) struct Resampler {
     trilinear: wgpu::Sampler,
     /// `[format][blend]`: rgba16float, rgba32float, rgba8unorm × over, additive.
     draw: [[crate::pipelines::LazyRenderPipeline; 2]; 3],
-    copy: [crate::pipelines::LazyRenderPipeline; 3],
-    down: [crate::pipelines::LazyRenderPipeline; 3],
+    down: [crate::pipelines::LazyRenderPipeline; 2],
 }
 
 const FORMATS: [wgpu::TextureFormat; 3] = [
     wgpu::TextureFormat::Rgba16Float,
     wgpu::TextureFormat::Rgba32Float,
     wgpu::TextureFormat::Rgba8Unorm,
+];
+const MIP_FORMATS: [wgpu::TextureFormat; 2] = [
+    wgpu::TextureFormat::Rgba16Float,
+    wgpu::TextureFormat::Rgba32Float,
 ];
 
 fn format_index(format: wgpu::TextureFormat) -> usize {
@@ -217,6 +227,7 @@ impl Resampler {
                         },
                         count: None,
                     },
+                    texture(3),
                 ],
             });
         let mip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -311,16 +322,13 @@ impl Resampler {
                 )
             })
         });
-        let copy =
-            FORMATS.map(|f| pipeline(&mip_pipeline_layout, &mips, "vs_full", "fs_copy", f, None));
-        let down =
-            FORMATS.map(|f| pipeline(&mip_pipeline_layout, &mips, "vs_full", "fs_down", f, None));
+        let down = MIP_FORMATS
+            .map(|f| pipeline(&mip_pipeline_layout, &mips, "vs_full", "fs_down", f, None));
         Resampler {
             layout,
             mip_layout,
             trilinear,
             draw,
-            copy,
             down,
         }
     }
@@ -346,34 +354,46 @@ impl Resampler {
         let kept = kept.map(|(_, p)| p);
         let (width, height) = (source.width().max(1), source.height().max(1));
         let levels = kept.as_ref().map_or(levels, |p| p.levels);
-        let format = source.format();
+        // RGBA8 source texels must not quantize each box mean back to eight
+        // bits. Half precision is sufficient storage for that source; float
+        // sources retain their original precision.
+        let format = match source.format() {
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba16Float => {
+                wgpu::TextureFormat::Rgba16Float
+            }
+            wgpu::TextureFormat::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+            other => panic!("unsupported pyramid source format: {other:?}"),
+        };
         // Dynamic composition targets reuse storage but regenerate texels.
         // Static source texels can reuse both storage and content.
-        let texture = kept.as_ref().map(|p| p.texture.clone()).unwrap_or_else(|| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("pm raster pyramid"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: levels,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-        });
+        let texture = kept
+            .as_ref()
+            .and_then(|p| p.tail.clone())
+            .unwrap_or_else(|| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("pm raster pyramid"),
+                    size: wgpu::Extent3d {
+                        width: (width >> 1).max(1),
+                        height: (height >> 1).max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: levels - 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+            });
         let i = format_index(format);
         let steps = kept
             .as_ref()
             .and_then(|p| p.steps.clone())
             .unwrap_or_else(|| {
                 let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut steps = Vec::with_capacity(levels as usize);
-                for level in 0..levels {
+                let mut steps = Vec::with_capacity((levels - 1) as usize);
+                for level in 0..levels - 1 {
                     let target = texture.create_view(&wgpu::TextureViewDescriptor {
                         label: Some("pm pyramid level"),
                         base_mip_level: level,
@@ -393,7 +413,7 @@ impl Resampler {
                 }
                 std::sync::Arc::new(steps)
             });
-        for (level, step) in steps.iter().enumerate() {
+        for step in steps.iter() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm pyramid level"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -410,21 +430,25 @@ impl Resampler {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(if level == 0 {
-                self.copy[i].get()
-            } else {
-                self.down[i].get()
-            });
+            pass.set_pipeline(self.down[i].get());
             pass.set_bind_group(0, &step.bind, &[]);
             pass.draw(0..4, 0..1);
             drop(pass);
         }
         let pyramid = Pyramid {
-            view: kept
-                .as_ref()
-                .map(|p| p.view.clone())
-                .unwrap_or_else(|| texture.create_view(&Default::default())),
-            texture,
+            view: kept.as_ref().map(|p| p.view.clone()).unwrap_or_else(|| {
+                source.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: 0,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            }),
+            tail_view: Some(
+                kept.as_ref()
+                    .and_then(|p| p.tail_view.clone())
+                    .unwrap_or_else(|| texture.create_view(&Default::default())),
+            ),
+            tail: Some(texture),
             width,
             height,
             levels,
@@ -448,7 +472,6 @@ impl Resampler {
         self.draw
             .iter()
             .flat_map(|variants| variants.iter())
-            .chain(self.copy.iter())
             .chain(self.down.iter())
             .filter(|pipeline| pipeline.is_built())
             .count()
@@ -461,13 +484,16 @@ impl Resampler {
             for (name, pipeline) in [
                 ("draw over", &self.draw[i][0]),
                 ("draw additive", &self.draw[i][1]),
-                ("copy", &self.copy[i]),
-                ("down", &self.down[i]),
             ] {
                 let start = std::time::Instant::now();
                 pipeline.get();
                 times.push((format!("resample {name} {format:?}"), start.elapsed()));
             }
+        }
+        for (i, format) in MIP_FORMATS.into_iter().enumerate() {
+            let start = std::time::Instant::now();
+            self.down[i].get();
+            times.push((format!("resample down {format:?}"), start.elapsed()));
         }
         times
     }
@@ -485,6 +511,7 @@ impl Resampler {
             &self.layout,
             &self.trilinear,
             &pyramid.view,
+            pyramid.tail_view.as_ref().unwrap_or(&pyramid.view),
             buffer,
             size_of::<ResampleUniform>() as u64,
         )

@@ -1,6 +1,6 @@
-// The mip pyramid of level 2 sources (docs/engine/motion.md): level 0
-// copied texel for texel, each further level the 2×2 box mean of the level
-// above (edge texels repeat for odd sizes).
+// The physical tail of a level 2 source pyramid. The source is borrowed as
+// logical level 0; each stored level is the 2×2 box mean of the level above,
+// with the same floor-halved dimensions and clamped edge reads as before.
 
 @group(0) @binding(0) var above: texture_2d<f32>;
 
@@ -14,11 +14,6 @@ fn vs_full(@builtin(vertex_index) i: u32) -> Full {
     var o: Full;
     o.pos = vec4<f32>(a * 2.0 - 1.0, 0.0, 1.0);
     return o;
-}
-
-@fragment
-fn fs_copy(in: Full) -> @location(0) vec4<f32> {
-    return textureLoad(above, vec2<i32>(in.pos.xy), 0);
 }
 
 @fragment

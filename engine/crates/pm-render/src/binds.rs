@@ -20,7 +20,8 @@ use std::collections::HashMap;
 pub(crate) struct BindCache {
     textures: HashMap<wgpu::TextureView, (wgpu::BindGroup, u64)>,
     quads: HashMap<(wgpu::Buffer, u64), (wgpu::BindGroup, u64)>,
-    resamples: HashMap<(wgpu::TextureView, wgpu::Buffer), (wgpu::BindGroup, u64)>,
+    resamples:
+        HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer), (wgpu::BindGroup, u64)>,
     frame: u64,
 }
 
@@ -121,10 +122,11 @@ impl BindCache {
         layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
         view: &wgpu::TextureView,
+        tail: &wgpu::TextureView,
         buffer: &wgpu::Buffer,
         size: u64,
     ) -> wgpu::BindGroup {
-        let key = (view.clone(), buffer.clone());
+        let key = (view.clone(), tail.clone(), buffer.clone());
         let frame = self.frame;
         let entry = self.resamples.entry(key).or_insert_with(|| {
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -146,6 +148,10 @@ impl BindCache {
                             offset: 0,
                             size: wgpu::BufferSize::new(size),
                         }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(tail),
                     },
                 ],
             });
