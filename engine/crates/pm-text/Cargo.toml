@@ -19,7 +19,7 @@ corpus-tools = ["system", "level2", "dep:flate2"]
 # Unhinted outline coverage, float paint and color glyphs. Off for layout-only users.
 render = ["dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu", "dep:libm", "dep:pm-color", "dep:i_overlay"]
 # The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
-coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGPath", "objc2-core-graphics/CGDataProvider"]
+coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGDataProvider"]
 
 [dependencies]
 i_overlay = { version = "9.1", optional = true }
@@ -49,7 +49,7 @@ objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString", "NSVa
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSFont", "NSFontManager", "objc2-core-foundation"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-text = "0.3.2"
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGFont"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGFont", "CGPath"] }
 
 [dev-dependencies]
 flate2 = "1.1"

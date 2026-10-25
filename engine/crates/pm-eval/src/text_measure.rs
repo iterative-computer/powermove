@@ -8,11 +8,13 @@
 //! outline in font units scaled by `size / unitsPerEm`, placed at the glyph's
 //! pen position and baseline offset.
 //!
-//! Color glyphs (`sbix`/`CBDT` strikes, `COLR`) have no outline. Their box is
-//! what the renderer draws, from the painter's own placement
-//! (`pm_text::render::scene::drawn_color_glyph_ink`): the strike image at the
-//! full-em size CoreText draws it at, or the COLR paint bounds. This is also
-//! the image rectangle CoreText reports to Blink for those glyphs.
+//! Color glyphs (`sbix`/`CBDT` strikes, `COLR`) report what the renderer
+//! draws, from the painter's own placement
+//! (`pm_text::render::scene::drawn_color_glyph_ink`): the strike's nonzero
+//! texels at the full-em size CoreText draws it at, or the COLR paint bounds
+//! (TEXT-INK-1). Typography anchoring instead keeps Blink's measurement
+//! (`MeasuredLine::anchor_ink`): Skia's glyph metrics from CoreText's
+//! rectangle for path-less `sbix` glyphs, the outline box otherwise.
 //!
 //! Outlines come from the face's own bytes (`FaceInfo::data`). The
 //! metrics-and-shaping subsets `pm-wasm` receives have no outline tables, so
@@ -314,6 +316,64 @@ impl<R: FontResolver> CompatMeasure<R> {
         self.color_boxes.insert(key, computed);
         computed
     }
+
+    /// The box Canvas measured for an `sbix` glyph CoreText draws without a
+    /// path: Skia's glyph metrics (`SkScalerContext_Mac::generateMetrics`)
+    /// from CoreText's bounding rectangle, through the transform, rounded
+    /// out and outset 1 px, on the canonical 64 px strike scaled back when
+    /// the text is too large for the glyph cache (`SkStrikeSpec::
+    /// MakeCanonicalized`). `None` when Blink measures the glyph's path.
+    /// Typography anchoring uses this box, so anchors saved in today's app
+    /// keep their placement; selections show the drawn ink.
+    fn sbix_metric_box(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<RectF> {
+        let info = self.compat.resolver().face(face);
+        if !info.facts.has_sbix {
+            return None;
+        }
+        let skew = if info.synthetic_italic {
+            pm_text::render::outline::SYNTHETIC_ITALIC_SKEW as f32
+        } else {
+            0.0
+        };
+        // `ShouldDrawAsPath`: either column of the text matrix longer than
+        // the 256 px atlas side.
+        let limit = 256.0f32 * 256.0;
+        let as_path = size * size > limit || (skew * size) * (skew * size) + size * size > limit;
+        let (strike, scale) = if as_path {
+            (64.0, size / 64.0)
+        } else {
+            (size, 1.0)
+        };
+        let [x, y, w, h] = self
+            .compat
+            .resolver_mut()
+            .sbix_metric_rect(face, glyph, strike)?;
+        if w <= 0.0 || h <= 0.0 {
+            return Some(RectF::default());
+        }
+        // `CGRectApplyAffineTransform` with the skew (`x + skew × y`, y down).
+        let skew = f64::from(skew);
+        let (top, bottom) = (-(y + h), -y);
+        let (a, b) = (skew * top, skew * bottom);
+        let left = x + a.min(b);
+        let right = x + w + a.max(b);
+        // `SkRect::MakeXYWH` in float, `roundOut`, `outset(1, 1)`.
+        let (l, t) = (left as f32, top as f32);
+        let r = l + (right - left) as f32;
+        let bt = t + (bottom - top) as f32;
+        let i = [
+            l.floor() - 1.0,
+            t.floor() - 1.0,
+            r.ceil() + 1.0,
+            bt.ceil() + 1.0,
+        ];
+        Some(RectF::from_sk(
+            i[0] * scale,
+            i[1] * scale,
+            i[2] * scale,
+            i[3] * scale,
+        ))
+    }
 }
 
 struct ControlBox {
@@ -539,11 +599,15 @@ impl<R: FontResolver> CompatMeasure<R> {
     /// placed at its pen origin, an `InlineLayoutUnit` (16.16 fixed point)
     /// starting at the run's advance rounded up and advanced by the glyph
     /// advances exactly, converted to `float` per glyph.
-    fn ink(&mut self, measured: &pm_text::blink::measure::Measured) -> RectF {
-        let mut ink = RectF::default();
+    ///
+    /// Returns the drawn ink and the box typography anchoring measures
+    /// (Canvas's: [`Self::sbix_metric_box`] for path-less `sbix` glyphs);
+    /// the two differ only for color glyphs.
+    fn ink(&mut self, measured: &pm_text::blink::measure::Measured) -> (RectF, RectF) {
+        let (mut ink, mut anchor_ink) = (RectF::default(), RectF::default());
         let mut xpos = 0.0f32;
         for item in &measured.items {
-            let mut item_ink = RectF::default();
+            let (mut item_ink, mut item_anchor) = (RectF::default(), RectF::default());
             let mut run_advance = 0.0f32;
             let rtl = item.runs.iter().any(|r| r.rtl);
             let runs: Vec<&pm_text::blink::shaper::Run> = if rtl {
@@ -552,36 +616,52 @@ impl<R: FontResolver> CompatMeasure<R> {
                 item.runs.iter().collect()
             };
             for run in runs {
-                let mut bounds = GlyphBounds::default();
+                let (mut bounds, mut anchor_bounds) =
+                    (GlyphBounds::default(), GlyphBounds::default());
                 // `InlineLayoutUnit::FromFloatCeil(run_advance)`.
                 let mut origin = (run_advance * 65536.0).ceil() as i64;
                 for g in &run.glyphs {
-                    let glyph = if g.glyph == UNMATCHED_VS_GLYPH {
-                        None
-                    } else if let Some(b) = self.color_box(run.face, g.glyph, run.size, &run.coords)
-                    {
-                        Some(b)
-                    } else {
-                        self.glyph_box(run.face, g.glyph, &run.coords)
-                            .map(|(b, upem)| {
-                                let [l, t, r, bt] = skia_glyph_rect(b, upem, run.size);
-                                RectF::from_sk(l, t, r, bt)
-                            })
-                    };
-                    if let Some(glyph) = glyph {
+                    if g.glyph != UNMATCHED_VS_GLYPH {
+                        let path = |m: &mut Self| {
+                            m.glyph_box(run.face, g.glyph, &run.coords)
+                                .map(|(b, upem)| {
+                                    let [l, t, r, bt] = skia_glyph_rect(b, upem, run.size);
+                                    RectF::from_sk(l, t, r, bt)
+                                })
+                        };
+                        let drawn = self.color_box(run.face, g.glyph, run.size, &run.coords);
+                        let measured = self.sbix_metric_box(run.face, g.glyph, run.size);
+                        let (drawn, measured) = match (drawn, measured) {
+                            (Some(d), Some(m)) => (Some(d), Some(m)),
+                            (Some(d), None) => (Some(d), path(self)),
+                            (None, Some(m)) => (path(self), Some(m)),
+                            (None, None) => {
+                                let p = path(self);
+                                (p, p)
+                            }
+                        };
+                        let pen = origin as f32 / 65536.0;
                         let offset = (fixed_to_float(g.x_offset), -fixed_to_float(g.y_offset));
-                        bounds.unite(glyph, origin as f32 / 65536.0, offset);
+                        if let Some(glyph) = drawn {
+                            bounds.unite(glyph, pen, offset);
+                        }
+                        if let Some(glyph) = measured {
+                            anchor_bounds.unite(glyph, pen, offset);
+                        }
                     }
                     origin += i64::from(g.advance);
                 }
                 item_ink.union(&bounds.build());
+                item_anchor.union(&anchor_bounds.build());
                 run_advance += run.width;
             }
             item_ink.offset(xpos, 0.0);
+            item_anchor.offset(xpos, 0.0);
             ink.union(&item_ink);
+            anchor_ink.union(&item_anchor);
             xpos += item.width;
         }
-        ink
+        (ink, anchor_ink)
     }
 }
 
@@ -683,17 +763,20 @@ impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
         shaped
             .into_iter()
             .map(|(text, measured)| {
-                let r = self.ink(&measured);
-                let ink = [
-                    f64::from(r.x),
-                    f64::from(r.y),
-                    f64::from(r.right()),
-                    f64::from(r.bottom()),
-                ];
+                let (ink, anchor_ink) = self.ink(&measured);
+                let edges = |r: RectF| {
+                    [
+                        f64::from(r.x),
+                        f64::from(r.y),
+                        f64::from(r.right()),
+                        f64::from(r.bottom()),
+                    ]
+                };
                 MeasuredLine {
                     text,
                     width: f64::from(measured.width),
-                    ink,
+                    ink: edges(ink),
+                    anchor_ink: edges(anchor_ink),
                 }
             })
             .collect()

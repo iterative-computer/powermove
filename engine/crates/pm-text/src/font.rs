@@ -158,6 +158,16 @@ pub trait FontResolver {
     fn em_advance(&mut self, _face: FaceId, _size: f32) -> Option<f32> {
         None
     }
+    /// CoreText's bounding rectangle (`CGRect` x, y, width, height; y up)
+    /// of a glyph of an `sbix` face that CoreText draws without a path, at
+    /// `size` with the same exact-copy attributes. Blink measures such a
+    /// glyph by Skia's glyph metrics built from this rectangle, not by its
+    /// drawn pixels; typography anchoring keeps that measurement so saved
+    /// anchors stay where they were authored. `None` when CoreText has a
+    /// path for the glyph (Blink measures the path) or nothing can tell.
+    fn sbix_metric_rect(&mut self, _face: FaceId, _glyph: u32, _size: f32) -> Option<[f64; 4]> {
+        None
+    }
 }
 
 /// An OpenType tag from its four characters (shorter strings are padded

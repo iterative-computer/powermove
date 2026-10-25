@@ -92,17 +92,24 @@ two samplings of a Canvas raster. At depth 8, engine/reference max is
 At depths 16 and 32, maxima are 0.216 and 0.00068 CV versus 75.741 and
 75.807 CV. The per-pixel, p99.9 and mean rules also pass.
 
-**TEXT-INK-1** (owner decision 2026-10-25): color-glyph ink (selection,
-bounds and typography anchoring) is what is drawn, not Canvas metric slack.
+**TEXT-INK-1** (owner decision 2026-10-25): color-glyph ink (selection and
+bounds) is what is drawn, not Canvas metric slack. Typography anchoring is
+authored placement, not ink, so it keeps measuring Canvas's box.
 
 | Correction (rule) | Today: case 519 selection | Engine: case 519 selection | Proof |
 |---|---|---|---|
 | Color-glyph ink is the drawn area: nonzero strike texels through the painter's placement plus its reconstruction reach (bilinear enlargement: `scale/2 - 1/2` px), COLR painted/clip bounds | y0 -24, y1 201, x1 713 px: Skia's round-out plus 1 px outset of CoreText's metric rectangle, its ink edges 1 px above, 3 px below and 8 px right of the drawn pixels; the previous engine measured the `glyf` box (y0 -47, y1 175) | y0 -22.125, y1 197.625, x1 704.875 px; rounded out, exactly the nonzero-alpha box [15, -12, 694, 187] the engine drew | G-T5 case 519 (installed app, exact, RGBA8); `pm-text` painted-pixel test at 12–200 px and four sub-pixel phases, skin-tone included; `pm-eval` `color_ink` |
 
-Typography anchoring maps a layer's recorded bounds onto the current ones,
-so a project saved today with a font anchor on emoji text moves by up to
-those edge differences, depending on the anchor. G-T5 checks the offset
-exactly against the drawn selection.
+Typography anchoring maps a layer's recorded bounds (`fontAnchorBounds`,
+today's selection) onto the current ones. It measures both as Canvas does:
+for an `sbix` glyph CoreText draws without a path, Skia's glyph metrics
+from CoreText's rectangle (registry query `SbixMetric`), rounded out and
+outset 1 px, through the synthetic-italic skew, on the 64 px canonical
+strike past 256 px. A project saved today therefore renders exactly where
+today's app renders it, and engine-recorded anchors mean the same in both
+engines. `pm-eval` `color_ink` holds that box to today's `measureText` at
+12–300 px, italic included, and the resized placement to today's
+arithmetic; G-T5 holds case 519's saved anchor to today's placement.
 
 Composed-text rows outside this lane's reference coverage retain their
 original bound and remain explicit owned failures: path masks with the

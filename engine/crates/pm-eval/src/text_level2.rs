@@ -119,6 +119,8 @@ impl Frame {
             anchor_x: -r.x0,
             anchor_y: -r.y0,
             selection: s,
+            // Level 2 is the engine's own: it anchors on its resting ink.
+            anchor_box: s,
         }
     }
 }

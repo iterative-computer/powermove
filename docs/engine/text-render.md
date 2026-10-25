@@ -32,9 +32,11 @@ and WASM): the strike's nonzero texels at the full-em size with the
 authored Apple shift, grown by the bilinear reach when enlarged, or the
 COLR painted and clip bounds. A device pixel is nonzero exactly when its
 square meets that box. Canvas measured emoji by CoreText's metric
-rectangle rounded out and outset 1 px; that slack is not reproduced.
-Typography anchoring follows the drawn box. Advances and line breaks are
-unchanged.
+rectangle rounded out and outset 1 px; selections do not show that slack.
+Typography anchoring is placement, so it keeps Canvas's box
+(`MeasuredLine::anchor_ink`, `TextRaster::anchor_box`): recorded
+`fontAnchorBounds` are that box, and saved layers render where today's app
+renders them. Advances and line breaks are unchanged.
 
 ## What is drawn
 

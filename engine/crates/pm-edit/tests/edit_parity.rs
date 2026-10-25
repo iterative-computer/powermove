@@ -246,8 +246,10 @@ impl TextMeasure for Synth {
             .into_iter()
             .map(|line| {
                 let width = synth_width(d, true, &line.text);
+                let ink = synth_ink(d, width, &line.text);
                 MeasuredLine {
-                    ink: synth_ink(d, width, &line.text),
+                    ink,
+                    anchor_ink: ink,
                     text: String::from_utf16_lossy(&line.text),
                     width,
                 }

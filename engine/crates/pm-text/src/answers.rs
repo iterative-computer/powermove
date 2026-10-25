@@ -56,6 +56,11 @@ pub enum Query {
         face: FaceId,
         size: u32,
     },
+    SbixMetric {
+        face: FaceId,
+        glyph: u32,
+        size: u32,
+    },
 }
 
 impl Query {
@@ -102,6 +107,13 @@ impl Query {
             size: size.to_bits(),
         }
     }
+    pub fn sbix_metric(face: FaceId, glyph: u32, size: f32) -> Self {
+        Query::SbixMetric {
+            face,
+            glyph,
+            size: size.to_bits(),
+        }
+    }
 
     /// The font description the query was asked with, if it has one.
     pub fn desc(&self) -> Option<FontDesc> {
@@ -135,7 +147,7 @@ impl Query {
                 italic,
                 size,
             } => d(weight, italic, size),
-            Query::Variable { .. } | Query::EmAdvance { .. } => None,
+            Query::Variable { .. } | Query::EmAdvance { .. } | Query::SbixMetric { .. } => None,
         }
     }
 }
@@ -216,6 +228,9 @@ pub struct Answer {
     /// `EmAdvance` answers carry a value instead of a face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance: Option<f32>,
+    /// `SbixMetric` answers carry CoreText's rectangle instead of a face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<[f64; 4]>,
 }
 
 /// Registry answers in a serializable shape. Faces are listed once; answers
@@ -415,6 +430,16 @@ impl FontResolver for ReplayResolver {
             }
         }
     }
+    fn sbix_metric_rect(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+        let q = Query::sbix_metric(face, glyph, size);
+        match self.answers.get(&q) {
+            Some(a) => a.rect,
+            None => {
+                self.misses.push(q);
+                None
+            }
+        }
+    }
 }
 
 /// Wraps a resolver and records every answer it gives (the native side of
@@ -439,6 +464,7 @@ impl<R: FontResolver> Recorder<R> {
                 query,
                 face,
                 advance: None,
+                rect: None,
             },
         );
         face
@@ -454,7 +480,7 @@ impl<R: FontResolver> Recorder<R> {
             if let Query::Fallback { primary, .. } = a.query {
                 ids.insert(primary);
             }
-            if let Query::EmAdvance { face, .. } = a.query {
+            if let Query::EmAdvance { face, .. } | Query::SbixMetric { face, .. } = a.query {
                 ids.insert(face);
             }
         }
@@ -512,6 +538,21 @@ impl<R: FontResolver> FontResolver for Recorder<R> {
                 query,
                 face: None,
                 advance: v,
+                rect: None,
+            },
+        );
+        v
+    }
+    fn sbix_metric_rect(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+        let v = self.inner.sbix_metric_rect(face, glyph, size);
+        let query = Query::sbix_metric(face, glyph, size);
+        self.answers.insert(
+            query.clone(),
+            Answer {
+                query,
+                face: None,
+                advance: None,
+                rect: v,
             },
         );
         v
@@ -533,6 +574,15 @@ pub fn answer_query(resolver: &mut dyn FontResolver, q: &Query) -> Answer {
                 query: q.clone(),
                 face: None,
                 advance: resolver.em_advance(*face, f32::from_bits(*size)),
+                rect: None,
+            };
+        }
+        Query::SbixMetric { face, glyph, size } => {
+            return Answer {
+                query: q.clone(),
+                face: None,
+                advance: None,
+                rect: resolver.sbix_metric_rect(*face, *glyph, f32::from_bits(*size)),
             };
         }
     };
@@ -540,6 +590,7 @@ pub fn answer_query(resolver: &mut dyn FontResolver, q: &Query) -> Answer {
         query: q.clone(),
         face,
         advance: None,
+        rect: None,
     }
 }
 
@@ -561,7 +612,7 @@ pub fn answer_batch(resolver: &mut dyn FontResolver, queries: &[Query]) -> Answe
             Query::Fallback { primary, .. } => {
                 ids.insert(primary);
             }
-            Query::EmAdvance { face, .. } => {
+            Query::EmAdvance { face, .. } | Query::SbixMetric { face, .. } => {
                 ids.insert(face);
             }
             _ => {}
@@ -614,6 +665,7 @@ mod tests {
                 query: Query::family("A", &desc()),
                 face: Some(0),
                 advance: None,
+                rect: None,
             }],
         };
         for (value, generation) in [(&answers, 42), (&Answers::default(), 0)] {
@@ -638,6 +690,7 @@ mod tests {
                 query: Query::family("A", &desc()),
                 face: Some(0),
                 advance: None,
+                rect: None,
             }],
         };
         let mut r = ReplayResolver::new(&answers);
@@ -656,6 +709,7 @@ mod tests {
                 query: Query::family("B", &desc()),
                 face: Some(1),
                 advance: None,
+                rect: None,
             }],
         });
         assert_eq!(r.family("B", &desc()), Some(1));
@@ -692,6 +746,9 @@ mod tests {
         fn em_advance(&mut self, _: FaceId, size: f32) -> Option<f32> {
             Some(size)
         }
+        fn sbix_metric_rect(&mut self, _: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+            (glyph == 7).then_some([0.0, f64::from(size) / -8.0, 40.0001, 40.0001])
+        }
     }
 
     #[test]
@@ -704,9 +761,11 @@ mod tests {
             Query::family("A", &desc()),
             Query::fallback(&desc(), 0x4e00, 2, false),
             Query::em_advance(1, 20.0),
+            Query::sbix_metric(1, 7, 40.0),
+            Query::sbix_metric(1, 8, 40.0),
         ];
         let a = answer_batch(&mut r, &queries);
-        assert_eq!(a.answers.len(), 4);
+        assert_eq!(a.answers.len(), 6);
         assert_eq!(
             a.faces
                 .iter()
@@ -726,7 +785,15 @@ mod tests {
         replay.add_font("a", 0, FontBytes::new(vec![]), 0);
         assert_eq!(replay.family("A", &desc()), Some(0));
         assert_eq!(replay.family("B", &desc()), None);
+        // `None` (CoreText has a path) is an answer, not a miss.
+        assert_eq!(
+            replay.sbix_metric_rect(1, 7, 40.0),
+            Some([0.0, -5.0, 40.0001, 40.0001])
+        );
+        assert_eq!(replay.sbix_metric_rect(1, 8, 40.0), None);
         assert!(replay.misses.is_empty());
+        assert_eq!(replay.sbix_metric_rect(1, 7, 41.0), None);
+        assert_eq!(replay.misses, [Query::sbix_metric(1, 7, 41.0)]);
     }
 
     #[test]
@@ -739,11 +806,13 @@ mod tests {
                     query: Query::variable("Z"),
                     face: None,
                     advance: None,
+                    rect: None,
                 },
                 Answer {
                     query: Query::family("A", &desc()),
                     face: Some(0),
                     advance: None,
+                    rect: None,
                 },
             ],
         });

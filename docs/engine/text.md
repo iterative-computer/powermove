@@ -494,7 +494,8 @@ applied to each:
   box that ends in spaces.
 
 Anchor edits (`anchor_reference`, `capture_font_anchor`, `font_offset`)
-share `Scope::text_anchor_box`: today's raster selection at level 1 and the
+share `Scope::text_anchor_box`: today's raster selection as Canvas measured
+it at level 1 (color glyphs by their metrics, not their drawn ink) and the
 resting styled box at level 2, the box `level2_text` anchors against. Pan
 Behind on font-anchored level 2 text therefore keeps the resting text in
 place whatever the animators do at that time.

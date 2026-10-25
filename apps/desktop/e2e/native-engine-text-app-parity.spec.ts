@@ -57,7 +57,9 @@ type Box = { x0: number; y0: number; x1: number; y1: number };
  * TEXT-INK-1: a color-glyph line's selection is what is drawn. Today's Canvas
  * selection (Skia's whole-pixel round-out plus 1 px outset of CoreText's
  * metric rectangle) stays recorded as the witness; the engine's selection
- * must instead meet exactly the pixels its own raster made nonzero.
+ * must instead meet exactly the pixels its own raster made nonzero, while
+ * typography anchoring keeps measuring Canvas's box so a layer saved with
+ * these bounds stays where today's app renders it.
  */
 const DRAWN_INK: Record<string, Box & { w: number; h: number }> = {
   'sdf-scripts-0024': { x0: 4.72265625, y0: -24, x1: 713, y1: 201, w: 708.27734375, h: 225 },
@@ -73,14 +75,6 @@ function alphaBox(rgba: Uint8Array, width: number): Box {
     box.x1 = Math.max(box.x1, x + 1); box.y1 = Math.max(box.y1, y + 1);
   }
   return box;
-}
-
-/** Typography anchoring (`font-anchor.ts` / pm-eval `font_anchor_offset`). */
-function fontAnchorOffset(reference: Box, bounds: Box, ax: number, ay: number) {
-  const offset = (start: number, end: number, nextStart: number, nextEnd: number, anchor: number) =>
-    end <= start ? 0 : anchor - (nextStart + (anchor - start) / (end - start) * (nextEnd - nextStart));
-  return { x: offset(reference.x0, reference.x1, bounds.x0, bounds.x1, ax),
-    y: offset(reference.y0, reference.y1, bounds.y0, bounds.y1, ay) };
 }
 
 function compare(a: Uint8Array, b: Uint8Array) {
@@ -261,14 +255,13 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
           x0: Math.floor((sel.x0 + pad + e.anchorX) * sx), y0: Math.floor((sel.y0 + pad + e.anchorY) * sy),
           x1: Math.ceil((sel.x1 - pad + e.anchorX) * sx), y1: Math.ceil((sel.y1 - pad + e.anchorY) * sy),
         });
-        // Typography anchoring maps the recorded Canvas box onto the drawn one.
-        const b = engineSemantic.anchored, offset = fontAnchorOffset(witness, sel, b.ax, b.ay);
-        expect([b.anchorX, b.anchorY], `${id}: font anchor follows the drawn ink`).toEqual(
-          [e.anchorX - offset.x, e.anchorY - offset.y]);
-        expect([b.ax, b.ay]).toEqual([a.ax, a.ay]);
+        // The saved anchor keeps today's placement (`anchored` stays in the
+        // exact comparison below).
+        const b = engineSemantic.anchored;
+        expect([b.anchorX, b.anchorY], `${id}: saved font anchor keeps today's placement`).toEqual(
+          [a.anchorX, a.anchorY]);
         for (const side of [engineSemantic, todaySemantic]) {
           side.geometry = { ...side.geometry, selection: undefined };
-          side.anchored = undefined;
         }
       }
       expect(engineSemantic, `numeric case ${group.reference.indices[i]} (compat ${engine[i]!.compat}): exact semantics`).toEqual(todaySemantic);
