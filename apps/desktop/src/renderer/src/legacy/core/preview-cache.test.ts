@@ -7,7 +7,7 @@ function fixture() {
   const listeners = new Map<string, Array<() => void>>();
   const bitmap = { close: vi.fn() };
   const drawImage = vi.fn();
-  const canvas = { style: {}, getContext: () => ({ drawImage }), remove: vi.fn() };
+  const canvas = { width: 0, height: 0, style: {}, getContext: () => ({ drawImage }), remove: vi.fn() };
   vi.stubGlobal('document', { createElement: () => canvas });
   vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
   vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
