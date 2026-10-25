@@ -554,6 +554,7 @@ fn corpus_render_parity() {
                 }
             }
             compared += 1;
+            let mut model_png = None;
             let (line, pass) = match &three_d {
                 // The 3D class (section 25) until the 3D lane converts it.
                 Some((object, edges, class)) => {
@@ -591,6 +592,22 @@ fn corpus_render_parity() {
                     let report =
                         compare(&unit8(&ours), &unit8(&reference), &r.opaque(), &r.classes());
                     let problems = report.failures(&Bounds::EIGHT_BIT);
+                    if diffs.is_some() && !problems.is_empty() {
+                        model_png = Some(
+                            r.opaque()
+                                .chunks_exact(4)
+                                .flat_map(|pixel| {
+                                    if pixel[0].is_nan() {
+                                        [255, 0, 255, 255]
+                                    } else {
+                                        std::array::from_fn(|c| {
+                                            (pixel[c].clamp(0.0, 1.0) * 255.0).round() as u8
+                                        })
+                                    }
+                                })
+                                .collect::<Vec<u8>>(),
+                        );
+                    }
                     let line = format!("{:<40} t={:<6}{}{report}", p.name, s.time, unmodelled(&r));
                     let pass = problems.is_empty();
                     let line = if pass {
@@ -611,6 +628,9 @@ fn corpus_render_parity() {
                     let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
                     write_png(&dir.join(format!("{stem}-engine.png")), w, h, &ours);
                     write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
+                    if let Some(model) = &model_png {
+                        write_png(&dir.join(format!("{stem}-f64.png")), w, h, model);
+                    }
                     let marked: Vec<u8> = ours
                         .chunks_exact(4)
                         .zip(reference.chunks_exact(4))

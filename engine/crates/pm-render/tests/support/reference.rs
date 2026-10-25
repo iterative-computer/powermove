@@ -11,13 +11,15 @@
 //! check against today's capture still catches.
 //!
 //! Modelled so far: the composition background (solid, linear and radial
-//! gradients, none), 2D solid layers, and affine level 1 stills at
-//! mip level zero (world matrix, size anchor, fit, opacity, parametric
-//! rectangle/ellipse masks and blend) in projects that composite in E.
-//! Other image mappings leave their box unreferenced (NaN); any other content
-//! leaves the whole frame unreferenced. The comparator judges unreferenced
-//! pixels against today's capture until the lane that owns that content
-//! models it here (gate-policy.md, "Who converts what").
+//! gradients, none); 2D solids and affine level 1 stills at mip level zero;
+//! and their authored group, precomp and track-matte compositing graph
+//! (transforms, size anchor, fit, opacity, parametric rectangle/ellipse
+//! masks and blend) in projects that composite in E. Each child source is
+//! painted from its own layers into f64 pixels before the parent samples it.
+//! Other image mappings leave their box unreferenced (NaN); unsupported
+//! content leaves the frame unreferenced. The comparator judges those pixels
+//! against today's capture until their owner models them here
+//! (gate-policy.md, "Who converts what").
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,12 @@ use super::sampling_reference::Bitmap;
 
 /// Coverage cells per pixel side for paths and solids.
 pub const PATH_SAMPLES: usize = 16;
+
+#[derive(Clone, Copy)]
+struct Depth {
+    precomp: usize,
+    matte: usize,
+}
 
 /// A reference frame.
 pub struct Reference {
@@ -57,18 +65,17 @@ impl Reference {
         classify(&self.edge, &self.resampled, self.width, self.height, 2)
     }
 
-    /// The capture's opaque view: color over black clamped to 0…1, alpha 1.
+    /// The capture's opaque sRGB byte boundary: over black, independently
+    /// gamut-mapped in f64. Unknown source pixels stay explicitly unknown.
     pub fn opaque(&self) -> Vec<f64> {
         self.rgba
             .chunks_exact(4)
             .flat_map(|p| {
-                let a = if p[3].is_nan() { f64::NAN } else { 1.0 };
-                [
-                    p[0].clamp(0.0, 1.0),
-                    p[1].clamp(0.0, 1.0),
-                    p[2].clamp(0.0, 1.0),
-                    a,
-                ]
+                if p.iter().any(|v| v.is_nan()) {
+                    return [f64::NAN; 4];
+                }
+                let rgb = pm_reference::color::css_gamut_map_srgb([p[0], p[1], p[2]]);
+                [rgb[0], rgb[1], rgb[2], 1.0]
             })
             .collect()
     }
@@ -151,6 +158,72 @@ fn reference_blend(mode: BlendMode) -> Blend {
         BlendMode::Lighten => Blend::Lighten,
         BlendMode::Darken => Blend::Darken,
     }
+}
+
+/// Track-matte strength from the independently painted, premultiplied
+/// source. The authored luma mode uses encoded Rec.709 coefficients.
+fn matte_strength(matte: &Option<(Reference, bool, bool)>, index: usize) -> (f64, bool) {
+    let Some((surface, luma, inverted)) = matte else {
+        return (1.0, false);
+    };
+    let px = &surface.rgba[index * 4..][..4];
+    let value = if *luma {
+        pm_reference::composite::luma709([px[0], px[1], px[2]])
+    } else {
+        px[3]
+    };
+    (
+        if *inverted { 1.0 - value } else { value },
+        surface.edge[index] || surface.resampled[index],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_matte<'d>(
+    scope: &mut Scope<'_, 'd>,
+    root: &'d Node,
+    assets: &dyn AssetResolver,
+    layer: &'d Node,
+    seconds: f64,
+    scale_xy: (f64, f64),
+    size: (usize, usize),
+    bitmaps: &mut HashMap<PathBuf, Option<Bitmap>>,
+    depth: Depth,
+) -> Result<Option<(Reference, bool, bool)>, String> {
+    if depth.matte >= pm_render::composite::MATTE_MAX_DEPTH as usize {
+        return Ok(None);
+    }
+    let Some(source) = pm_render::composite::build::matte_source(scope.layers(), layer) else {
+        return Ok(None);
+    };
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let (luma, inverted) =
+        pm_render::composite::build::matte_mode(scope, layer, seconds).map_err(fail)?;
+    let (w, h) = size;
+    let mut surface = Reference {
+        width: w,
+        height: h,
+        rgba: vec![0.0; w * h * 4],
+        edge: vec![false; w * h],
+        resampled: vec![false; w * h],
+        unmodelled: Vec::new(),
+    };
+    draw_pass(
+        scope,
+        root,
+        assets,
+        seconds,
+        scale_xy,
+        None,
+        Some(source),
+        &mut surface,
+        bitmaps,
+        Depth {
+            matte: depth.matte + 1,
+            ..depth
+        },
+    )?;
+    Ok(Some((surface, luma, inverted)))
 }
 
 /// Independent f64 evaluation of the parametric mask's signed-distance
@@ -309,22 +382,39 @@ fn draw(
     out: &mut Reference,
     background: bool,
 ) -> Result<(), String> {
-    let (w, h) = (out.width, out.height);
     let root = document.root().ok_or("no document")?;
+    let comp = Comp::resolve(document, composition).map_err(|e| format!("{e:?}"))?;
+    let seconds = comp.seconds_at(time.get());
+    draw_comp(
+        &comp,
+        &comp,
+        root,
+        assets,
+        seconds,
+        out,
+        background,
+        Depth {
+            precomp: 0,
+            matte: 0,
+        },
+    )
+}
+
+fn draw_comp<'d>(
+    comp: &Comp<'d>,
+    project: &Comp<'d>,
+    root: &'d Node,
+    assets: &dyn AssetResolver,
+    seconds: f64,
+    out: &mut Reference,
+    background: bool,
+    depth: Depth,
+) -> Result<(), String> {
+    let (w, h) = (out.width, out.height);
     let color = pm_render::composite::color::project_color(root)?;
     if color.working() != WorkingEncoding::Standard {
         return Err("linear-light compositing".into());
     }
-    // 8-bit storage holds 0…1 only.
-    let clamp = |c: Rgba| -> Rgba {
-        if color.precision == Precision::Unorm8 {
-            c.map(|v| v.clamp(0.0, 1.0))
-        } else {
-            c
-        }
-    };
-    let comp = Comp::resolve(document, composition).map_err(|e| format!("{e:?}"))?;
-    let seconds = comp.seconds_at(time.get());
     if background {
         let fill =
             pm_render::plan::normalize_fill(comp.member("backgroundFill"), comp.member("bg"));
@@ -341,30 +431,113 @@ fn draw(
                         [c[0], c[1], c[2], 1.0]
                     }
                 };
-                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&clamp(c));
+                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&c);
             }
         }
     }
-    let (sx, sy) = pm_render::plan::derived_scale(&comp, w as u32, h as u32);
+    let scale = pm_render::plan::derived_scale(comp, w as u32, h as u32);
     let mut ev = Evaluator::new();
-    let mut scope = Scope::new(&mut ev, &comp, &comp);
-    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
-    let layers: Vec<&Node> = comp.layers().iter().collect();
+    let mut scope = Scope::new(&mut ev, comp, project);
     let mut bitmaps: HashMap<PathBuf, Option<Bitmap>> = HashMap::new();
-    let solo = layers
+    draw_pass(
+        &mut scope,
+        root,
+        assets,
+        seconds,
+        scale,
+        None,
+        None,
+        out,
+        &mut bitmaps,
+        depth,
+    )
+}
+
+/// A compositing pass, with pure transform groups flattened by pm-eval's
+/// authored group index. Boundary groups have their own transparent f64
+/// surface; their opacity and blend are applied once to the finished image.
+#[allow(clippy::too_many_arguments)]
+fn draw_pass<'d>(
+    scope: &mut Scope<'_, 'd>,
+    root: &'d Node,
+    assets: &dyn AssetResolver,
+    seconds: f64,
+    scale_xy: (f64, f64),
+    parent: Option<&'d Node>,
+    explicit: Option<&'d Node>,
+    out: &mut Reference,
+    bitmaps: &mut HashMap<PathBuf, Option<Bitmap>>,
+    depth: Depth,
+) -> Result<(), String> {
+    let (w, h) = (out.width, out.height);
+    let (sx, sy) = scale_xy;
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let all: Vec<&Node> = scope.layers().iter().collect();
+    let solo = all
         .iter()
         .any(|l| node::truthy(node::member(Some(l), "solo")));
+    let parent_id = parent.map(|layer| node::get(layer, b"id").to_js());
+    let mut boundary = |s: &mut Scope<'_, 'd>, layer: &'d Node| {
+        s.group_creates_compositing_boundary(layer, seconds, true, &|_| true)
+    };
+    let layers = if let Some(layer) = explicit {
+        vec![layer]
+    } else {
+        scope
+            .compositing_layers(&all, parent_id.as_ref(), &mut boundary)
+            .map_err(fail)?
+    };
+    let matte_sources: Vec<_> = all
+        .iter()
+        .filter_map(|layer| node::member(Some(layer), "matteSource"))
+        .map(|id| node::to_js_string(Some(id)))
+        .collect();
     // Bottom (last) to top (first), with today's skip rules.
     for &layer in layers.iter().rev() {
         let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
         let flag = |k: &str| node::truthy(node::member(Some(layer), k));
-        if flag("group") || ty == "group" || ty == "precomp" {
-            return Err("groups and precomps".into());
-        }
-        if (solo && !flag("solo")) || matches!(ty.as_str(), "null" | "audio") {
+        if explicit.is_none()
+            && matte_sources
+                .iter()
+                .any(|id| *id == node::to_js_string(node::member(Some(layer), "id")))
+        {
             continue;
         }
-        if !scope.active(layer, seconds).map_err(fail)? {
+        if matches!(ty.as_str(), "null" | "audio") {
+            continue;
+        }
+        if explicit.is_none() && solo && !flag("solo") {
+            let within_solo_group = scope
+                .group_ancestors(layer)
+                .map_err(fail)?
+                .iter()
+                .any(|group| node::truthy(node::member(Some(group), "solo")));
+            let contains_solo = if ty == "group" {
+                let mut found = false;
+                for candidate in all
+                    .iter()
+                    .filter(|candidate| node::truthy(node::member(Some(candidate), "solo")))
+                {
+                    found |= scope
+                        .group_ancestors(candidate)
+                        .map_err(fail)?
+                        .iter()
+                        .any(|group| std::ptr::eq(*group, layer));
+                }
+                found
+            } else {
+                false
+            };
+            if !within_solo_group && !contains_solo {
+                continue;
+            }
+        }
+        let active = if explicit.is_some() {
+            scope.active_forced_on(layer, seconds)
+        } else {
+            scope.active(layer, seconds)
+        };
+        if !active.map_err(fail)? {
             continue;
         }
         let opacity = scope.num(layer, "opacity", seconds).map_err(fail)? / 100.0;
@@ -376,11 +549,128 @@ fn draw(
         if opacity <= 0.001 {
             continue;
         }
-        if !matches!(ty.as_str(), "solid" | "image") {
+        if ty == "group" {
+            if flag("mblur")
+                || scope.has_renderable_effects(layer, seconds).map_err(fail)?
+                || scope
+                    .active_transition(layer, seconds, &|_| true)
+                    .map_err(fail)?
+                    .is_some()
+            {
+                return Err("group effects, motion blur or transition".into());
+            }
+            let mut child = Reference {
+                width: w,
+                height: h,
+                rgba: vec![0.0; w * h * 4],
+                edge: vec![false; w * h],
+                resampled: vec![false; w * h],
+                unmodelled: Vec::new(),
+            };
+            draw_pass(
+                scope,
+                root,
+                assets,
+                seconds,
+                scale_xy,
+                Some(layer),
+                None,
+                &mut child,
+                bitmaps,
+                depth,
+            )?;
+            let mode = reference_blend(
+                pm_render::composite::build::blend_mode(scope, layer, seconds).map_err(fail)?,
+            );
+            let world = scope.world_matrix(layer, seconds).map_err(fail)?;
+            let scaled_world = [
+                world[0] * sx,
+                world[1] * sy,
+                world[2] * sx,
+                world[3] * sy,
+                world[4] * sx,
+                world[5] * sy,
+            ];
+            let masks =
+                if pm_render::composite::build::has_masks(scope, layer, seconds).map_err(fail)? {
+                    let route = pm_render::composite::build::masks(
+                        scope,
+                        layer,
+                        seconds,
+                        scaled_world,
+                        None,
+                        w as u32,
+                        h as u32,
+                    )
+                    .map_err(fail)?;
+                    if matches!(route, MaskRoute::Path(_)) {
+                        return Err("Bezier path masks".into());
+                    }
+                    Some(route)
+                } else {
+                    None
+                };
+            let matte = if flag("matteSource") {
+                render_matte(
+                    scope,
+                    root,
+                    assets,
+                    layer,
+                    seconds,
+                    scale_xy,
+                    (w, h),
+                    bitmaps,
+                    depth,
+                )?
+            } else {
+                None
+            };
+            for i in 0..w * h {
+                let x = i % w;
+                let y = i / w;
+                let (mask, mask_edge) = masks.as_ref().map_or((1.0, false), |route| {
+                    mask_coverage(route, (x as f64 + 0.5, y as f64 + 0.5))
+                });
+                let (matte_value, matte_edge) = matte_strength(&matte, i);
+                let source = scale(
+                    [
+                        child.rgba[4 * i],
+                        child.rgba[4 * i + 1],
+                        child.rgba[4 * i + 2],
+                        child.rgba[4 * i + 3],
+                    ],
+                    opacity * mask * matte_value,
+                );
+                let destination = [
+                    out.rgba[4 * i],
+                    out.rgba[4 * i + 1],
+                    out.rgba[4 * i + 2],
+                    out.rgba[4 * i + 3],
+                ];
+                out.rgba[4 * i..4 * i + 4].copy_from_slice(&blend(mode, source, destination));
+                if mode == Blend::Normal && source[3] >= 1.0 - 1e-12 {
+                    out.edge[i] = false;
+                    out.resampled[i] = false;
+                }
+                out.edge[i] |= child.edge[i] || mask_edge || matte_edge;
+                out.resampled[i] |= child.resampled[i];
+            }
+            out.unmodelled.extend(child.unmodelled);
+            continue;
+        }
+        if ty == "adjustment" {
+            if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+                return Err("adjustment effects".into());
+            }
+            continue;
+        }
+        if !matches!(ty.as_str(), "solid" | "image" | "precomp") {
             return Err(format!("{ty} layers"));
         }
-        if flag("matteSource")
-            || flag("mblur")
+        if ty == "precomp" && depth.precomp >= pm_render::plan::PRECOMP_MAX_DEPTH as usize {
+            continue;
+        }
+        if flag("mblur")
             || flag("threeD")
             || scope.has_renderable_effects(layer, seconds).map_err(fail)?
             || scope
@@ -389,14 +679,95 @@ fn draw(
                 .is_some()
             || scope.is_3d_layer(layer).map_err(fail)?
         {
-            return Err("mattes, motion blur, 3D, effects or transitions".into());
+            return Err("motion blur, 3D, effects or transitions".into());
         }
+        let matte = if flag("matteSource") {
+            render_matte(
+                scope,
+                root,
+                assets,
+                layer,
+                seconds,
+                scale_xy,
+                (w, h),
+                bitmaps,
+                depth,
+            )?
+        } else {
+            None
+        };
         let d = scope
             .ev
             .resolve_content(scope.comp, layer, seconds)
             .map_err(fail)?;
-        let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
-        let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+        let default_width = if ty == "precomp" {
+            node::to_number(scope.comp.member("w"))
+        } else {
+            w as f64
+        };
+        let default_height = if ty == "precomp" {
+            node::to_number(scope.comp.member("h"))
+        } else {
+            h as f64
+        };
+        let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), default_width);
+        let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), default_height);
+        let (sw, sh) = if ty == "precomp" {
+            (sw.max(1.0), sh.max(1.0))
+        } else {
+            (sw, sh)
+        };
+        // Render the child from authored layers into f64 source texels. The
+        // parent then filters those texels; no native framebuffer enters the
+        // expected image.
+        let precomp = if ty == "precomp" {
+            let id = pm_render::js::string(pm_render::js::get(&d, "comp"));
+            let sub = Comp::in_root(root, &id, scope.comp.revision())
+                .map_err(|e| format!("precomp {id}: {e:?}"))?;
+            let target_w = (sw * sx).round().max(2.0);
+            let target_h = (sh * sy).round().max(2.0);
+            if !target_w.is_finite()
+                || !target_h.is_finite()
+                || target_w > 16384.0
+                || target_h > 16384.0
+            {
+                return Err(format!("precomp {id}: target outside reference bounds"));
+            }
+            let child_time = scope.source_time(layer, seconds, None).map_err(fail)?;
+            let child_time = pm_render::retime::keep_frame_rate(layer, &sub, child_time);
+            let (tw, th) = (target_w as usize, target_h as usize);
+            let mut child = Reference {
+                width: tw,
+                height: th,
+                rgba: vec![0.0; tw * th * 4],
+                edge: vec![false; tw * th],
+                resampled: vec![false; tw * th],
+                unmodelled: Vec::new(),
+            };
+            draw_comp(
+                &sub,
+                scope.project,
+                root,
+                assets,
+                child_time,
+                &mut child,
+                false,
+                Depth {
+                    precomp: depth.precomp + 1,
+                    ..depth
+                },
+            )?;
+            if !child.unmodelled.is_empty() {
+                return Err(format!("precomp {id}: {}", child.unmodelled.join(", ")));
+            }
+            Some(Bitmap {
+                width: tw,
+                height: th,
+                rgba: child.rgba,
+            })
+        } else {
+            None
+        };
         let world = scope.world_matrix(layer, seconds).map_err(fail)?;
         let offset = scope.size_anchor_offset(layer, seconds).map_err(fail)?;
         let scaled_world = [
@@ -408,9 +779,9 @@ fn draw(
             world[5] * sy,
         ];
         let masks =
-            if pm_render::composite::build::has_masks(&mut scope, layer, seconds).map_err(fail)? {
+            if pm_render::composite::build::has_masks(scope, layer, seconds).map_err(fail)? {
                 let route = pm_render::composite::build::masks(
-                    &mut scope,
+                    scope,
                     layer,
                     seconds,
                     scaled_world,
@@ -428,10 +799,14 @@ fn draw(
             };
         let device =
             kurbo::Affine::new(scaled_world) * kurbo::Affine::translate((offset.x, offset.y));
-        if ty == "image" {
+        if ty == "image" || ty == "precomp" {
             // Image quads are centered on the layer origin (ax=w/2,
             // ay=h/2); solids below use the top-left local origin.
-            let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
+            let rect = if ty == "precomp" {
+                kurbo::Rect::new(0.0, 0.0, sw, sh)
+            } else {
+                kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0)
+            };
             let coverage = fill(
                 &(device * kurbo::Shape::to_path(&rect, 1e-9)),
                 FillRule::NonZero,
@@ -442,11 +817,13 @@ fn draw(
             let asset_id = pm_render::js::string(pm_render::js::get(&d, "asset"));
             let record = root.get("assets").and_then(|v| v.get(&asset_id));
             let path = assets.path(&asset_id, record);
-            let bitmap = path.as_ref().and_then(|path| {
-                bitmaps
-                    .entry(path.clone())
-                    .or_insert_with(|| decoded_bitmap(path).ok().flatten())
-                    .as_ref()
+            let bitmap = precomp.as_ref().or_else(|| {
+                path.as_ref().and_then(|path| {
+                    bitmaps
+                        .entry(path.clone())
+                        .or_insert_with(|| decoded_bitmap(path).ok().flatten())
+                        .as_ref()
+                })
             });
             let [a, b, c, dd, e, f] = device.as_coeffs();
             let det = a * dd - b * c;
@@ -459,7 +836,11 @@ fn draw(
             let fit = pm_render::js::string(pm_render::js::get(&d, "fit"));
             let model = bitmap.and_then(|bitmap| {
                 let source = natural.unwrap_or((bitmap.width as f64, bitmap.height as f64));
-                let uv = image_uv(&fit, source, (sw, sh))?;
+                let uv = if ty == "precomp" {
+                    Some([0.0, 0.0, 1.0, 1.0])
+                } else {
+                    image_uv(&fit, source, (sw, sh))
+                }?;
                 let du = uv[2] * bitmap.width as f64 / sw;
                 let dv = uv[3] * bitmap.height as f64 / sh;
                 let dx = (du * dd / det, -dv * b / det);
@@ -467,14 +848,14 @@ fn draw(
                 (det.is_finite()
                     && det.abs() > 1e-12
                     && Bitmap::mip_zero(dx, dy)
-                    && record.is_some_and(|r| pm_render::footage::interpretation(r).is_none())
+                    && (ty == "precomp"
+                        || record.is_some_and(|r| pm_render::footage::interpretation(r).is_none()))
                     && !pm_render::sampling::is_level2(layer))
                 .then_some((bitmap, uv, dx, dy))
             });
             if let Some((bitmap, uv, dx, dy)) = model {
                 let mode = reference_blend(
-                    pm_render::composite::build::blend_mode(&mut scope, layer, seconds)
-                        .map_err(fail)?,
+                    pm_render::composite::build::blend_mode(scope, layer, seconds).map_err(fail)?,
                 );
                 for y in coverage.y0..coverage.y0 + coverage.height {
                     for x in coverage.x0..coverage.x0 + coverage.width {
@@ -485,9 +866,13 @@ fn draw(
                         let p = (x as f64 + 0.5 - e, y as f64 + 0.5 - f);
                         let local_x = (dd * p.0 - c * p.1) / det;
                         let local_y = (-b * p.0 + a * p.1) / det;
-                        let u = (uv[0] + uv[2] * (local_x / sw + 0.5)).clamp(0.0, 1.0)
+                        let u = (uv[0]
+                            + uv[2] * (local_x / sw + if ty == "precomp" { 0.0 } else { 0.5 }))
+                        .clamp(0.0, 1.0)
                             * bitmap.width as f64;
-                        let v = (uv[1] + uv[3] * (local_y / sh + 0.5)).clamp(0.0, 1.0)
+                        let v = (uv[1]
+                            + uv[3] * (local_y / sh + if ty == "precomp" { 0.0 } else { 0.5 }))
+                        .clamp(0.0, 1.0)
                             * bitmap.height as f64;
                         let (mask, mask_edge) = masks.as_ref().map_or((1.0, false), |m| {
                             mask_coverage(m, (x as f64 + 0.5, y as f64 + 0.5))
@@ -495,18 +880,22 @@ fn draw(
                         if mask <= 0.0 {
                             continue;
                         }
-                        let src = scale(bitmap.sample((u, v), dx, dy), opacity * k * mask);
                         let index = y * w + x;
+                        let (matte_value, matte_edge) = matte_strength(&matte, index);
+                        let src = scale(
+                            bitmap.sample((u, v), dx, dy),
+                            opacity * k * mask * matte_value,
+                        );
                         if mode == Blend::Normal && src[3] >= 1.0 - 1e-12 {
                             out.edge[index] = false;
                         }
-                        if k < 1.0 - 1e-12 || mask_edge {
+                        if k < 1.0 - 1e-12 || mask_edge || matte_edge {
                             out.edge[index] = true;
                         }
                         out.resampled[index] = true;
                         let px = &mut out.rgba[index * 4..][..4];
                         let dst = [px[0], px[1], px[2], px[3]];
-                        px.copy_from_slice(&clamp(blend(mode, src, dst)));
+                        px.copy_from_slice(&blend(mode, src, dst));
                     }
                 }
             } else {
@@ -542,7 +931,7 @@ fn draw(
             kurbo::Shape::to_path(&kurbo::RoundedRect::new(0.0, 0.0, sw, sh, radius), 1e-9);
         let coverage = fill(&(device * outline), FillRule::NonZero, PATH_SAMPLES, w, h);
         let mode = reference_blend(
-            pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
+            pm_render::composite::build::blend_mode(scope, layer, seconds).map_err(fail)?,
         );
         let a = paint[3] * opacity;
         let src: Rgba = [paint[0] * a, paint[1] * a, paint[2] * a, a];
@@ -559,17 +948,18 @@ fn draw(
                     continue;
                 }
                 let index = y * w + x;
-                let source = scale(src, k * mask);
+                let (matte_value, matte_edge) = matte_strength(&matte, index);
+                let source = scale(src, k * mask * matte_value);
                 if mode == Blend::Normal && source[3] >= 1.0 - 1e-12 {
                     out.edge[index] = false;
                     out.resampled[index] = false;
                 }
-                if k < 1.0 - 1e-12 || mask_edge {
+                if k < 1.0 - 1e-12 || mask_edge || matte_edge {
                     out.edge[index] = true;
                 }
                 let px = &mut out.rgba[index * 4..][..4];
                 let dst = [px[0], px[1], px[2], px[3]];
-                px.copy_from_slice(&clamp(blend(mode, source, dst)));
+                px.copy_from_slice(&blend(mode, source, dst));
             }
         }
     }
@@ -637,7 +1027,125 @@ pub fn preview_and_export(
 
 #[cfg(test)]
 mod tests {
+    use super::super::doc;
     use super::*;
+    use serde_json::json;
+
+    fn authored_graph_frame(mut project: serde_json::Value, width: u32, height: u32) -> Reference {
+        project["colorDepth"] = json!(32);
+        let loaded = pm_model::json::parse(&project.to_string()).expect("authored graph JSON");
+        let document = Document::new(Some(loaded), 1);
+        render(
+            &document,
+            &pm_render::MapResolver::default(),
+            "Ptest-root",
+            super::super::ticks(0.0),
+            width,
+            height,
+            false,
+        )
+    }
+
+    fn pixel(frame: &Reference, x: usize, y: usize) -> [f64; 4] {
+        let i = (y * frame.width + x) * 4;
+        frame.rgba[i..i + 4].try_into().expect("RGBA pixel")
+    }
+
+    fn assert_pixel(actual: [f64; 4], expected: [f64; 4]) {
+        for (a, e) in actual.into_iter().zip(expected) {
+            assert!((a - e).abs() < 1e-12, "{actual:?} != {expected:?}");
+        }
+    }
+
+    fn solid(id: &str, color: &str, width: u32, height: u32, x: f64, y: f64) -> serde_json::Value {
+        doc::layer(
+            id,
+            "solid",
+            json!({ "color": color, "w": width, "h": height }),
+            x,
+            y,
+            1.0,
+        )
+    }
+
+    #[test]
+    fn graph_reference_composites_group_once_before_opacity_and_blend() {
+        // Top green completely covers lower red within the group. A 50%
+        // multiply group over gray therefore has no red from the child.
+        let mut top = solid("top", "#00FF00", 4, 4, 0.0, 0.0);
+        top["group"] = json!("g");
+        let mut lower = solid("lower", "#FF0000", 4, 4, 0.0, 0.0);
+        lower["group"] = json!("g");
+        let mut group = doc::layer("g", "group", json!({}), 0.0, 0.0, 1.0);
+        group["blend"] = json!("multiply");
+        doc::set(&mut group, "opacity", json!(50));
+        let back = solid("back", "#808080", 4, 4, 0.0, 0.0);
+        let frame = authored_graph_frame(
+            doc::project(4, 4, 1.0, doc::no_fill(), vec![top, lower, group, back]),
+            4,
+            4,
+        );
+        assert_eq!(frame.modelled(), 1.0, "{:?}", frame.unmodelled);
+        assert_pixel(
+            pixel(&frame, 2, 2),
+            [64.0 / 255.0, 128.0 / 255.0, 64.0 / 255.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn graph_reference_paints_child_before_parent_precomp_blend() {
+        let top = solid("top", "#00FF00", 4, 4, 0.0, 0.0);
+        let lower = solid("lower", "#FF0000", 4, 4, 0.0, 0.0);
+        let mut nested = doc::layer(
+            "nested",
+            "precomp",
+            json!({ "comp": "C001", "w": 4, "h": 4 }),
+            0.0,
+            0.0,
+            1.0,
+        );
+        nested["blend"] = json!("multiply");
+        doc::set(&mut nested, "opacity", json!(50));
+        let back = solid("back", "#808080", 4, 4, 0.0, 0.0);
+        let mut project = doc::project(4, 4, 1.0, doc::no_fill(), vec![nested, back]);
+        doc::composition(&mut project, "C001", 4, 4, 1.0, vec![top, lower]);
+        let frame = authored_graph_frame(project, 4, 4);
+        assert_eq!(frame.modelled(), 1.0, "{:?}", frame.unmodelled);
+        // Opaque green hides red in C001; the parent applies multiply at 50%.
+        assert_pixel(
+            pixel(&frame, 2, 2),
+            [64.0 / 255.0, 128.0 / 255.0, 64.0 / 255.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn graph_reference_matte_source_uses_fractional_coverage_and_is_hidden() {
+        // The source spans x=.5..2.5: [half, full, half, empty] coverage.
+        // It is green with 128/255 alpha, so encoded Rec.709 luma is
+        // 0.7152 times its premultiplied alpha.
+        for (mode, luma, inverted) in [
+            ("alpha", false, false),
+            ("alpha-inverted", false, true),
+            ("luma", true, false),
+            ("luma-inverted", true, true),
+        ] {
+            let mut target = solid("target", "#FF0000", 4, 2, 0.0, 0.0);
+            target["matteSource"] = json!("matte");
+            target["matteMode"] = doc::ch(json!(mode));
+            let matte = solid("matte", "#00FF0080", 2, 2, 0.5, 0.0);
+            let frame = authored_graph_frame(
+                doc::project(4, 2, 1.0, doc::no_fill(), vec![target, matte]),
+                4,
+                2,
+            );
+            assert_eq!(frame.modelled(), 1.0, "{mode}: {:?}", frame.unmodelled);
+            for (x, coverage) in [0.5, 1.0, 0.5, 0.0].into_iter().enumerate() {
+                let source = coverage * (128.0 / 255.0) * if luma { 0.7152 } else { 1.0 };
+                let alpha = if inverted { 1.0 - source } else { source };
+                assert_pixel(pixel(&frame, x, 0), [alpha, 0.0, 0.0, alpha]);
+            }
+        }
+    }
 
     #[test]
     fn fit_windows_preserve_authored_cover_and_contain_geometry() {

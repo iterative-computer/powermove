@@ -60,8 +60,11 @@ primaries, and ICC matrix/TRC profiles with optional unclipped conversion (`colo
 `tests/engine_formulas.rs` cross-checks it against pm-color.
 `pm-render/tests/support/reference.rs` builds a document's reference frame: authored
 values from pm-eval; independent f64 coverage, compositing, and declared mip-zero
-still sampling. It models backgrounds, 2D solids, supported level-1 stills, and
-parametric masks; unsupported content remains explicitly unreferenced.
+still sampling. It models backgrounds, 2D solids, supported level-1 stills,
+parametric masks, group boundaries, precomps, and track mattes. Child sources
+are painted from authored layers in f64 before parent sampling; blends stay in
+f64 until the opaque sRGB comparison boundary. Unsupported content remains
+explicitly unreferenced.
 
 `tests/corpus.rs` (G-C2) is the model conversion; its gated frame must equal the export
 frame, and the paused preview must equal that export. Video selects from source timestamps
