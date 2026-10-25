@@ -77,7 +77,7 @@ nearest-even half computed in the shader.
 
 Library cards pass gate-policy's precision-bound rule (all 32). Their remaining
 one-code differences are the half-float working frame rounded again to 8 bits: the
-Editor card's interior mean is 0.0073 CV (today 0.0004) and its edge mean 0.1601
+Editor card's interior mean is 0.0070 CV (today 0.0004) and its edge mean 0.1601
 (today 0.1587). The scene gate passes.
 
 The weighted resolve brings edges toward the reference: per pixel, `khr-ToyCar`'s
