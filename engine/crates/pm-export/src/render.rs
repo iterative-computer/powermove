@@ -1177,12 +1177,14 @@ pub fn preview_jpeg(
             }
             let n = ((y1 - y0) * (x1 - x0)) as f32;
             let o = px * 4;
-            for k in 0..3 {
-                let v = sum[k] / n;
-                row[o + k] =
-                    (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
-            }
-            row[o + 3] = 255;
+            let pixel = crate::convert::rgba8_pixel(
+                [sum[0] / n, sum[1] / n, sum[2] / n, 1.0],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                crate::settings::ColorTags::SrgbImage,
+                [0.0; 3],
+            );
+            row[o..o + 4].copy_from_slice(&pixel);
         }
     });
     Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
@@ -1599,15 +1601,22 @@ pub fn composition_size(document: &Document, composition: &str) -> Result<(u32, 
     Ok((dim("w")?, dim("h")?))
 }
 
-/// Premultiplied working values (Standard: E-encoded, over black when the
-/// background is transparent) to 8-bit RGBA as a unorm render-target write
-/// stores them (clamp, scale, round half to even; NaN is 0), which is what
-/// today's canvas readback holds.
+/// Premultiplied, already E-encoded frame values to opaque 8-bit sRGB RGBA.
+/// The shared SDR boundary maps the over-black RGB before quantizing.
 pub fn to_rgba8(rgba: &[f32]) -> Vec<u8> {
-    rgba.iter()
-        .map(|v| {
-            let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-            (v * 255.0).round_ties_even() as u8
+    assert!(
+        rgba.len().is_multiple_of(4),
+        "RGBA has four channels per pixel"
+    );
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            crate::convert::rgba8_pixel(
+                [p[0], p[1], p[2], p[3]],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                crate::settings::ColorTags::SrgbImage,
+                [0.0; 3],
+            )
         })
         .collect()
 }
@@ -1833,8 +1842,8 @@ mod tests {
 
     #[test]
     fn rgba8_rounds_and_clamps() {
-        assert_eq!(to_rgba8(&[-0.1, 0.0, 0.5, 1.2]), vec![0, 0, 128, 255]);
-        assert_eq!(to_rgba8(&[f32::NAN]), vec![0], "NaN is 0");
+        assert_eq!(to_rgba8(&[0.0, 0.0, 0.5, 1.0]), vec![0, 0, 128, 255]);
+        assert_eq!(to_rgba8(&[f32::NAN, 0.0, 0.0, 1.0]), vec![0, 0, 0, 255]);
     }
 
     #[test]
@@ -1881,10 +1890,10 @@ mod tests {
                 }
                 let n = ((y1 - y0) * (x1 - x0)) as f32;
                 let o = (py * pw as usize + px) * 4;
+                let rgb = (sum.map(|v| v / n)).map(f64::from);
+                let mapped = pm_color::css_srgb(rgb);
                 for k in 0..3 {
-                    let v = sum[k] / n;
-                    out[o + k] =
-                        (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
+                    out[o + k] = (mapped[k] * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
                 }
                 out[o + 3] = 255;
             }

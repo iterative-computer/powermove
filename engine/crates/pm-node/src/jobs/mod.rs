@@ -1617,6 +1617,7 @@ fn run_job(
                 export.seed ^ 0x5745_424d_5247_4241,
                 plan.request.output_size,
             ),
+            plan.spec.tags,
         ),
     );
     let sink = match sink_for_with(&plan, Some(encoder)) {

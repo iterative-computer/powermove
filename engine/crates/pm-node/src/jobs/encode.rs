@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use pm_export::Error;
-use pm_export::settings::{AudioSpec, Codec};
+use pm_export::settings::{AudioSpec, Codec, ColorTags};
 use pm_export::webcodecs::{EncodeHost, EncodeOpen};
 use pm_protocol::common::{ByteSize, Bytes, Count, FrameRate, JobId, SessionId};
 use pm_protocol::envelope::{Request, Response};
@@ -79,8 +79,11 @@ impl<P: HostPort + ?Sized> HostEncoder<P> {
         queue: wgpu::Queue,
         gate: Arc<dyn pm_export::render::GpuGate>,
         pass: u64,
+        tags: ColorTags,
     ) -> Self {
-        if std::env::var_os(super::encode_gpu::ENV).is_some() {
+        // The GPU canvas accepts sRGB E. BT.709 transfer outputs use the
+        // tag-aware CPU conversion until the GPU path can re-encode transfer.
+        if !tags.bt709_transfer() && std::env::var_os(super::encode_gpu::ENV).is_some() {
             self.gpu = Some(super::encode_gpu::GpuEncoder::new(device, queue).with_gate(
                 gate,
                 self.cancel.clone(),

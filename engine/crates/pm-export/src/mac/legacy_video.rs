@@ -321,6 +321,7 @@ impl Sink for LegacyVideoSink {
                 } else {
                     AlphaOutput::None
                 },
+                tags: self.spec.tags,
                 dither: false,
                 frame: index as u32,
             },
@@ -361,6 +362,7 @@ impl Sink for LegacyVideoSink {
                 &ConvertParams {
                     working: WorkingEncoding::Standard,
                     alpha: self.spec.alpha,
+                    tags: self.spec.tags,
                     dither: false,
                     frame: index as u32,
                 },

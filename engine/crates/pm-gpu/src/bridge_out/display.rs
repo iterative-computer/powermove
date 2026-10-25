@@ -109,7 +109,14 @@ impl DisplayTransform {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("display transform"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("display.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    pm_color::wgsl::CSS_GAMUT,
+                    include_str!("display.wgsl")
+                )
+                .into(),
+            ),
         });
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,

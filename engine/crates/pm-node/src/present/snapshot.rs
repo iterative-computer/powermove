@@ -517,30 +517,20 @@ fn push_rgba8_unorm(out: &mut Vec<u8>, [r, g, b, a]: [u8; 4], pixels: SnapshotPi
 }
 
 fn push_rgba8(out: &mut Vec<u8>, [r, g, b, a]: [f32; 4], pixels: SnapshotPixels) {
-    let unorm = |v: f32| -> u8 {
-        let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-        (v * 255.0).round_ties_even() as u8
+    // Final renderer frames are premultiplied E, including LinearLight
+    // projects (pm-render's final color pass encodes those before readback).
+    let alpha = match pixels {
+        SnapshotPixels::Opaque => pm_export::AlphaOutput::None,
+        SnapshotPixels::Premultiplied => pm_export::AlphaOutput::Premultiplied,
+        SnapshotPixels::Straight => pm_export::AlphaOutput::Straight,
     };
-    match pixels {
-        SnapshotPixels::Opaque => out.extend_from_slice(&[unorm(r), unorm(g), unorm(b), 255]),
-        SnapshotPixels::Premultiplied => {
-            out.extend_from_slice(&[unorm(r), unorm(g), unorm(b), unorm(a)])
-        }
-        SnapshotPixels::Straight => {
-            // As a canvas's `getImageData` does: quantize the premultiplied
-            // value first, then divide by alpha.
-            let a8 = unorm(a);
-            if a8 == 0 {
-                out.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                let un = |v: f32| -> u8 {
-                    let p = u32::from(unorm(v));
-                    ((p * 255 + u32::from(a8) / 2) / u32::from(a8)).min(255) as u8
-                };
-                out.extend_from_slice(&[un(r), un(g), un(b), a8]);
-            }
-        }
-    }
+    out.extend_from_slice(&pm_export::convert::rgba8_pixel(
+        [r, g, b, a],
+        pm_export::WorkingEncoding::Standard,
+        alpha,
+        pm_export::ColorTags::SrgbImage,
+        [0.0; 3],
+    ));
 }
 
 /// A layer raster's pixels placed in its whole canvas (`crop` = the painted
@@ -903,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn pixels_encode_like_todays_capture() {
+    fn float_snapshot_maps_at_its_final_srgb_byte_boundary() {
         // Half-covered red over black, premultiplied.
         let px = half([0.5, 0.0, 0.0, 0.5]);
         assert_eq!(
@@ -920,9 +910,11 @@ mod tests {
         );
         // Out of range and transparent.
         let px = half([1.5, -0.25, 0.0, 0.0]);
+        let mapped = pm_reference::color::css_gamut_map_srgb([1.5, -0.25, 0.0]);
+        let expected = mapped.map(|v| (v * 255.0).round_ties_even() as u8);
         assert_eq!(
             encode_rgba8(&px, SnapshotPixels::Opaque),
-            vec![255, 0, 0, 255]
+            vec![expected[0], expected[1], expected[2], 255]
         );
         assert_eq!(
             encode_rgba8(&px, SnapshotPixels::Straight),
@@ -1041,25 +1033,38 @@ mod tests {
     }
 
     #[test]
-    fn byte_snapshot_alpha_matches_existing_float_conversion_for_all_codes() {
+    fn byte_snapshot_keeps_exact_existing_codes_for_opaque_and_premultiplied() {
         for alpha in u8::MIN..=u8::MAX {
             for value in u8::MIN..=u8::MAX {
                 let byte = [value, value, value, alpha];
-                let float = byte.map(|code| f32::from(code) / 255.0);
-                for mode in [
-                    SnapshotPixels::Opaque,
-                    SnapshotPixels::Premultiplied,
-                    SnapshotPixels::Straight,
-                ] {
-                    let mut expected = Vec::new();
-                    push_rgba8(&mut expected, float, mode);
-                    assert_eq!(
-                        encode_rgba8_unorm(&byte, mode),
-                        expected,
-                        "{mode:?} {byte:?}"
-                    );
-                }
+                assert_eq!(
+                    encode_rgba8_unorm(&byte, SnapshotPixels::Opaque),
+                    vec![value, value, value, 255],
+                    "opaque {byte:?}"
+                );
+                // An existing RGBA8 source has reached its byte boundary.
+                // Preserve every code, including hidden RGB at zero alpha.
+                assert_eq!(
+                    encode_rgba8_unorm(&byte, SnapshotPixels::Premultiplied),
+                    byte.to_vec(),
+                    "premultiplied {byte:?}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn straight_float_snapshot_unpremultiplies_before_quantizing() {
+        let float = [0.25f32, 0.01, 0.0, 0.5];
+        assert_eq!(
+            encode_rgba8_f32(&float, SnapshotPixels::Straight),
+            vec![128, 5, 0, 128],
+        );
+        // A genuine byte raster has already crossed its quantization
+        // boundary and retains the existing byte unpremultiply policy.
+        assert_eq!(
+            encode_rgba8_unorm(&[64, 3, 0, 128], SnapshotPixels::Straight),
+            vec![128, 6, 0, 128],
+        );
     }
 }

@@ -113,6 +113,7 @@ impl<S: Sink> Pipeline<S> {
         let params = ConvertParams {
             working: self.spec.working,
             alpha: self.spec.alpha,
+            tags: self.spec.tags,
             dither: self.spec.dither_enabled(),
             frame: index as u32,
         };
@@ -468,6 +469,7 @@ mod tests {
             &ConvertParams {
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
+                tags: crate::settings::ColorTags::Rec709QuickTime,
                 dither: false,
                 frame: 0,
             },

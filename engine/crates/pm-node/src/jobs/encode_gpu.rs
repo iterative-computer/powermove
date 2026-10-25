@@ -1,5 +1,6 @@
 //! GPU-resident WebM frames: float working texture → BGRA8 IOSurface →
-//! Chromium's compositor canvas. No display transform, dither or CPU pixels.
+//! Chromium's compositor canvas. CSS sRGB gamut mapping precedes byte
+//! quantization; no display transform, dither or CPU pixels.
 use pm_export::render::{GpuGate, Unrestricted};
 use pm_render::CommandBracket;
 use std::sync::atomic::AtomicBool;
@@ -74,7 +75,14 @@ impl GpuEncoder {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("WebM canvas bytes"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("encode_gpu.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    pm_color::wgsl::CSS_GAMUT,
+                    include_str!("encode_gpu.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("WebM canvas bytes"),
@@ -394,8 +402,20 @@ mod tests {
         });
         let rgba: Vec<f32> = (0..w * h)
             .flat_map(|i| {
-                let v = (i as f32 - 256.0) / 510.0;
-                [v, 1.0 - v, (i % 256) as f32 / 255.0, 0.25]
+                // Retain the original in-gamut half-code sequence: the GPU
+                // quantizer must use the exact binary32 significand, since
+                // f32 multiplication by 255 loses which side of a tie it was.
+                if (256..767).contains(&i) {
+                    let v = (i as f32 - 256.0) / 510.0;
+                    [v, 1.0 - v, (i % 256) as f32 / 255.0, 0.25]
+                } else if i % 257 == 0 {
+                    // Extended chromatic samples exercise the CSS mapper.
+                    [1.4, 0.0, 0.0, 0.25]
+                } else {
+                    // Code-grid samples retain exact channel and row parity.
+                    let v = (i % 256) as f32 / 255.0;
+                    [v, 1.0 - v, ((i / 256) % 256) as f32 / 255.0, 0.25]
+                }
             })
             .collect();
         let bytes: Vec<u8> = rgba.iter().flat_map(|v| v.to_ne_bytes()).collect();

@@ -91,19 +91,14 @@ impl JobCompat {
 fn canvas_rgba8(rgba: &[f32], working: pm_export::WorkingEncoding) -> Vec<u8> {
     let mut out = vec![0u8; rgba.len()];
     for (px, o) in rgba.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
-        let (c, _) = pm_export::convert::output_rgba(
+        let mapped = pm_export::convert::rgba8_pixel(
             [px[0], px[1], px[2], px[3]],
             working,
             pm_export::AlphaOutput::Premultiplied,
+            pm_export::ColorTags::SrgbImage,
+            [0.0; 3],
         );
-        for k in 0..3 {
-            let v = if c[k].is_nan() {
-                0.0
-            } else {
-                c[k].clamp(0.0, 1.0)
-            };
-            o[k] = (v * 255.0).round() as u8;
-        }
+        o[..3].copy_from_slice(&mapped[..3]);
         o[3] = 255;
     }
     out
@@ -341,6 +336,34 @@ mod tests {
     use super::*;
     use pm_protocol::common::Bytes;
     use pm_protocol::snapshot::CompatFrame;
+
+    #[test]
+    fn canvas_bytes_map_straight_rgb_before_opaque_premultiplied_write() {
+        use pm_reference::color::Transfer;
+
+        let source = [0.7f32, 0.0, 0.0, 0.5];
+        let mapped =
+            pm_reference::color::css_gamut_map_srgb([f64::from(source[0]) / 0.5, 0.0, 0.0]);
+        let expected = mapped.map(|v| (v * 0.5 * 255.0).round_ties_even() as u8);
+        assert!(
+            expected[1] > 0,
+            "chroma reduction must differ from a red channel clip"
+        );
+        assert_eq!(
+            canvas_rgba8(&source, pm_export::WorkingEncoding::Standard),
+            vec![expected[0], expected[1], expected[2], 255],
+        );
+
+        // Linear working RGB is encoded while straight, then premultiplied
+        // in the canvas's E domain; canvas alpha remains opaque.
+        let linear = [0.35f32, 0.0, 0.0, 0.5];
+        let encoded = Transfer::Srgb.from_linear(f64::from(linear[0]) / 0.5);
+        let red = (encoded * 0.5 * 255.0).round_ties_even() as u8;
+        assert_eq!(
+            canvas_rgba8(&linear, pm_export::WorkingEncoding::Linear),
+            vec![red, 0, 0, 255],
+        );
+    }
 
     type Answer = Box<dyn Fn(&CompatFrameRequest) -> Result<Response, String> + Send + Sync>;
 

@@ -30,7 +30,7 @@ use crate::atomic::AtomicOutput;
 use crate::convert::{EncoderInput, Plane, PlaneData, WorkingFrame};
 use crate::pipeline::Sink;
 use crate::settings::{
-    AlphaOutput, AudioCodec, Codec, Container, ExportSpec, InputFormat, Overwrite,
+    AlphaOutput, AudioCodec, Codec, ColorTags, Container, ExportSpec, InputFormat, Overwrite,
 };
 use crate::verify::{self, AudioReport, BlockSample, PixelCheck, VerifyReport};
 
@@ -200,30 +200,23 @@ pub(crate) fn canvas_rgba_to_i420(
     })
 }
 
-/// The WebCodecs path consumes premultiplied canvas bytes for opaque video.
-/// For straight-alpha WebM, divide working RGB by alpha before the REC709
-/// conversion; premultiplied alpha keeps its requested encoding. Carry the
-/// alpha byte separately. There is no legacy alpha-WebM byte boundary.
+/// Canvas RGBA8 for the native WebM encoder. Mapping happens on straight
+/// floating RGB before optional premultiplication and byte quantization.
 fn canvas_bytes(
     frame: &WorkingFrame,
     working: crate::settings::WorkingEncoding,
     alpha: AlphaOutput,
+    tags: ColorTags,
 ) -> Vec<u8> {
-    if alpha == AlphaOutput::None {
-        return crate::render::to_rgba8(frame.rgba);
-    }
     let mut rgba = Vec::with_capacity(frame.rgba.len());
     for pixel in frame.rgba.chunks_exact(4) {
-        let (rgb, a) =
-            crate::convert::output_rgba([pixel[0], pixel[1], pixel[2], pixel[3]], working, alpha);
-        for value in [rgb[0], rgb[1], rgb[2], a] {
-            let value = if value.is_nan() {
-                0.0
-            } else {
-                value.clamp(0.0, 1.0)
-            };
-            rgba.push((value * 255.0).round_ties_even() as u8);
-        }
+        rgba.extend(crate::convert::rgba8_pixel(
+            [pixel[0], pixel[1], pixel[2], pixel[3]],
+            working,
+            alpha,
+            tags,
+            [0.0; 3],
+        ));
     }
     rgba
 }
@@ -738,7 +731,7 @@ impl Sink for WebmSink {
     type Output = Delivered;
 
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
-        let rgba = canvas_bytes(frame, self.spec.working, self.spec.alpha);
+        let rgba = canvas_bytes(frame, self.spec.working, self.spec.alpha, self.spec.tags);
         if let Some(capture) = self.capture.as_mut() {
             capture
                 .rgba
@@ -1461,6 +1454,7 @@ mod canvas_conversion_tests {
             &frame,
             crate::settings::WorkingEncoding::Standard,
             AlphaOutput::Straight,
+            ColorTags::Rec709QuickTime,
         );
         assert_eq!(
             rgba,
@@ -1484,8 +1478,9 @@ mod canvas_conversion_tests {
                 &frame,
                 crate::settings::WorkingEncoding::Standard,
                 AlphaOutput::None,
+                ColorTags::Rec709QuickTime,
             ),
-            [128, 0, 0, 128]
+            [128, 0, 0, 255]
         );
     }
 

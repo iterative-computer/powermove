@@ -6,8 +6,8 @@
 //! Chromium's (pinned revisions, its GPU canvas readback to REC709 I420, its
 //! rate control), so no other encoder gives the same pictures and samples.
 //! When the job engine runs inside the desktop app, this sink renders and
-//! mixes as usual and hands each frame's canvas bytes (RGBA8, the unorm
-//! render-target write, [`crate::render::to_rgba8`]) and the mix to an
+//! mixes as usual and hands each frame's mapped, tag-encoded RGBA8 canvas
+//! bytes and the mix to an
 //! [`EncodeHost`]: the app's encoder window, which runs today's encoder code
 //! and muxer and writes the file into the export's output. The sink then
 //! verifies the file like any WebM export ([`crate::webm::verify_webm`]).
@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 use crate::convert::{EncoderInput, WorkingFrame};
 use crate::pipeline::Sink;
-use crate::settings::{AlphaOutput, AudioSpec, Codec, Container, ExportSpec, Overwrite};
+use crate::settings::{
+    AlphaOutput, AudioSpec, Codec, ColorTags, Container, ExportSpec, Overwrite, WorkingEncoding,
+};
 use crate::verify::{self, BlockSample};
 use crate::{Delivered, Error};
 
@@ -103,16 +105,21 @@ impl Capture {
     }
 }
 
-/// [`crate::render::to_rgba8`] of a frame, row-parallel at the caller's QoS
+/// Mapped, tag-encoded RGBA8 of a frame, row-parallel at the caller's QoS
 /// (a 1080p frame is 8.3 million samples).
-fn canvas_bytes(frame: &WorkingFrame) -> Vec<u8> {
+fn canvas_bytes(frame: &WorkingFrame, tags: ColorTags) -> Vec<u8> {
     let row = frame.width as usize * 4;
     let mut out = vec![0u8; frame.rgba.len()];
     crate::par::rows(&mut out, row, |y, dst| {
         let src = &frame.rgba[y * row..(y + 1) * row];
-        for (d, v) in dst.iter_mut().zip(src) {
-            let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-            *d = (v * 255.0).round_ties_even() as u8;
+        for (d, v) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            d.copy_from_slice(&crate::convert::rgba8_pixel(
+                [v[0], v[1], v[2], v[3]],
+                WorkingEncoding::Standard,
+                AlphaOutput::None,
+                tags,
+                [0.0; 3],
+            ));
         }
     });
     out
@@ -125,6 +132,7 @@ fn canvas_bytes(frame: &WorkingFrame) -> Vec<u8> {
 fn cropped_verification_blocks(
     frame: &WorkingFrame,
     index: u64,
+    tags: ColorTags,
 ) -> Result<Vec<BlockSample>, Error> {
     let regions = verify::block_regions(frame.width, frame.height);
     // WebM validates even frame dimensions. Keep the original full-frame
@@ -140,7 +148,7 @@ fn cropped_verification_blocks(
                 || !r.height.is_multiple_of(2)
         })
     {
-        let rgba = canvas_bytes(frame);
+        let rgba = canvas_bytes(frame, tags);
         let input = crate::webm::canvas_rgba_to_i420(&rgba, frame.width, frame.height, false)?;
         return Ok(verify::block_means(&input, index));
     }
@@ -156,7 +164,7 @@ fn cropped_verification_blocks(
             height: region.height,
             rgba: &crop,
         };
-        let rgba = canvas_bytes(&cropped);
+        let rgba = canvas_bytes(&cropped, tags);
         let input = crate::webm::canvas_rgba_to_i420(&rgba, region.width, region.height, false)?;
         // A region is at most 16×16, so its own grid has exactly one block.
         let mut block = verify::block_means(&input, index)
@@ -241,7 +249,7 @@ impl Sink for WebCodecsSink {
             let frame =
                 frame.ok_or_else(|| Error::InvalidFrame("missing verification sample".into()))?;
             self.blocks
-                .extend(cropped_verification_blocks(frame, index)?);
+                .extend(cropped_verification_blocks(frame, index, self.spec.tags)?);
         }
         // The GPU input capture is read from Chromium's actual encoder canvas,
         // not a parallel CPU conversion of the working frame.
@@ -251,7 +259,7 @@ impl Sink for WebCodecsSink {
     }
 
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
-        let rgba = canvas_bytes(frame);
+        let rgba = canvas_bytes(frame, self.spec.tags);
         if let Some(capture) = self.capture.as_mut() {
             capture
                 .rgba
@@ -442,7 +450,32 @@ mod tests {
             width: 8,
             height: 8,
         };
-        assert_eq!(canvas_bytes(&frame), crate::render::to_rgba8(&rgba));
+        assert_eq!(
+            canvas_bytes(&frame, ColorTags::Rec709QuickTime),
+            crate::render::to_rgba8(&rgba)
+        );
+    }
+
+    #[test]
+    fn canvas_bytes_preserve_bt709_transfer_after_mapping() {
+        use pm_reference::color::Transfer;
+
+        let rgba = [0.5f32, 0.5, 0.5, 1.0];
+        let frame = WorkingFrame {
+            rgba: &rgba,
+            width: 1,
+            height: 1,
+        };
+        let bt709 = (Transfer::Bt709.from_linear(Transfer::Srgb.to_linear(0.5)) * 255.0)
+            .round_ties_even() as u8;
+        assert_eq!(
+            canvas_bytes(&frame, ColorTags::Rec709QuickTime),
+            [128, 128, 128, 255]
+        );
+        assert_eq!(
+            canvas_bytes(&frame, ColorTags::Rec709Broadcast),
+            [bt709, bt709, bt709, 255]
+        );
     }
 
     #[test]
@@ -483,11 +516,12 @@ mod tests {
                 height,
                 rgba: &rgba,
             };
-            let full = canvas_bytes(&frame);
+            let full = canvas_bytes(&frame, ColorTags::Rec709QuickTime);
             let full = crate::webm::canvas_rgba_to_i420(&full, width, height, false).unwrap();
             let expected = verify::block_means(&full, 7);
             assert_eq!(expected.len(), count, "{width}×{height} grid");
-            let actual = cropped_verification_blocks(&frame, 7).unwrap();
+            let actual =
+                cropped_verification_blocks(&frame, 7, ColorTags::Rec709QuickTime).unwrap();
             assert_eq!(actual, expected, "{width}×{height}");
         }
     }

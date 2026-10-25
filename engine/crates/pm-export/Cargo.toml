@@ -12,6 +12,7 @@ publish.workspace = true
 test-sinks = []
 
 [dependencies]
+pm-color = { path = "../pm-color" }
 pm-gpu = { path = "../pm-gpu" }
 pm-time = { path = "../pm-time" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
@@ -47,6 +48,7 @@ objc2-video-toolbox = { version = "0.3.2", features = ["objc2-core-media", "objc
 objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "objc2-core-foundation"] }
 
 [dev-dependencies]
+pm-reference = { path = "../pm-reference" }
 sha2.workspace = true
 serde_json.workspace = true
 pm-export = { path = ".", features = ["test-sinks"] }

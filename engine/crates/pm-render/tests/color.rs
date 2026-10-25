@@ -25,7 +25,7 @@ mod support;
 
 use pm_color::transfer::unit_to_code;
 use pm_export::convert::{ConvertParams, EncoderInput, WorkingFrame, convert, ycbcr_to_rgb};
-use pm_export::settings::{AlphaOutput, InputFormat, WorkingEncoding};
+use pm_export::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
 use pm_protocol::color::{MatrixCoefficients, Precision};
 use pm_protocol::common::Size;
 use pm_render::{MapResolver, RenderRequest, Renderer};
@@ -120,6 +120,7 @@ fn params() -> ConvertParams {
     ConvertParams {
         working: WorkingEncoding::Standard,
         alpha: AlphaOutput::None,
+        tags: ColorTags::Rec709QuickTime,
         dither: false,
         frame: 0,
     }

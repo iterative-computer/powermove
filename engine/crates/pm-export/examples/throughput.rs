@@ -66,6 +66,7 @@ fn main() {
     let params = ConvertParams {
         working: WorkingEncoding::Standard,
         alpha: AlphaOutput::None,
+        tags: spec.tags,
         dither: spec.dither_enabled(),
         frame: 0,
     };

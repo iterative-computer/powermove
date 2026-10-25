@@ -302,6 +302,65 @@ fn bgra_dither_keeps_the_ten_bit_mean_and_eight_bit_values_exact() {
 }
 
 #[test]
+fn srgb8_maps_straight_color_then_quantizes_premultiplied_alpha() {
+    let gpu = gpu();
+    let size = Size::new(1, 1);
+    let pool = SurfacePool::new(&gpu.device, 1, size, SurfaceFormat::Bgra8Unorm, 4).unwrap();
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("translucent display boundary"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let coverage = 128.0f32 / 255.0;
+    let rgba = [coverage, 0.0, 0.0, coverage];
+    let bytes: Vec<u8> = rgba.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(16),
+            rows_per_image: Some(1),
+        },
+        texture.size(),
+    );
+    let source = WorkingTexture {
+        view: texture.create_view(&Default::default()),
+        texture,
+        size,
+    };
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    gpu.transform
+        .encode(
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            &source,
+            &pool.surfaces[0],
+            STANDARD_SRGB,
+        )
+        .unwrap();
+    let index = gpu.queue.submit([encoder.finish()]);
+    gpu.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: Some(std::time::Duration::from_secs(5)),
+        })
+        .unwrap();
+    let pixels = Pixels::of(&pool.surfaces[0]);
+    assert_eq!(&pixels.bytes[..4], &[0, 0, 128, 128]);
+}
+
+#[test]
 fn the_dither_moves_with_the_noise_offset_but_keeps_its_mean() {
     let gpu = gpu();
     let pool = SurfacePool::new(

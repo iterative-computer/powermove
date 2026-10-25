@@ -312,6 +312,7 @@ fn png_sequences_and_stills_at_8_and_16_bits() {
         let params = pm_export::convert::ConvertParams {
             working: WorkingEncoding::Standard,
             alpha: s.alpha,
+            tags: s.tags,
             dither: !sixteen_bit,
             frame: 3,
         };

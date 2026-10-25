@@ -718,6 +718,7 @@ mod tests {
             &ConvertParams {
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
+                tags: crate::settings::ColorTags::Rec709QuickTime,
                 dither: false,
                 frame: 0,
             },
@@ -744,6 +745,7 @@ mod tests {
             &ConvertParams {
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
+                tags: crate::settings::ColorTags::Rec709QuickTime,
                 dither: false,
                 frame: 0,
             },

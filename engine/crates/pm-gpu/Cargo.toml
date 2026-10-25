@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-color = { path = "../pm-color" }
 # decode_in (feature `decode-in`, on by default) reads pm-media frames.
 pm-media = { path = "../pm-media", optional = true }
 pm-protocol = { path = "../pm-protocol", default-features = false }

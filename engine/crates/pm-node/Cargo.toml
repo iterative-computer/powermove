@@ -35,6 +35,7 @@ napi-derive = { version = "3.6", optional = true }
 objc2 = "0.6"
 pm-bridge = { path = "../pm-bridge" }
 pm-gpu = { path = "../pm-gpu", default-features = false }
+pm-color = { path = "../pm-color" }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 # The viewer draws the document (Phase 2 tracer bullet) and the job
 # engine renders and exports (sections 17 and 20): pm-render frames,
@@ -62,6 +63,7 @@ test-hooks = []
 tempfile = "3"
 dhat = "0.3"
 pm-model = { path = "../pm-model" }
+pm-reference = { path = "../pm-reference" }
 # Export frame rates in the WebCodecs encode tests.
 pm-time = { path = "../pm-time" }
 # The audio status test holds and fails decoders (pm-audio's test hooks).
