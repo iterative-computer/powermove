@@ -297,13 +297,13 @@ not draw use the declared native resvg RGBA8 fallback, counted and named per lay
 ## Half-float stores
 
 - **Reference:** the nearest-even IEEE binary16 of each computed value.
-- **Gate:** `pm-render/tests/vector_half.rs` reads back values that a truncating
-  store keeps an ulp low.
+- **Gate:** `pm-render/tests/vector_half.rs` and `tests/text_gpu.rs` read back
+  values that a truncating store keeps an ulp low.
 - **Units:** binary16 ulps.
 
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
-| Vector paint, path-mask coverage (r16float) and SVG float outputs store the nearest half instead of Metal's truncation (IEEE 754 round to nearest even) | 1 ulp low | exact | 9/255 grey paint, 0.3 coverage edge, SVG at 16-bit depth |
+| Vector paint, path-mask coverage (r16float), SVG float outputs and text paint (outlines, images, blur passes) store the nearest half instead of Metal's truncation (IEEE 754 round to nearest even) | 1 ulp low | exact | 9/255 grey paint, 0.3 coverage edge, SVG at 16-bit depth, a text raster at 16-bit depth against the same paint at f32 |
 
 ## Source monitor
 
