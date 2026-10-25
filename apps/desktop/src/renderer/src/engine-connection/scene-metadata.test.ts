@@ -49,4 +49,24 @@ describe('native presented scene metadata', () => {
     apply.apply({ seq: 2, revision: 2, scene3dMeta: [report] }, 'new-session');
     expect(metadata.get('object').sceneWarnings).toEqual([]);
   });
+
+  it('reports a deleted cached model immediately after a native still capture and clears it on restore', () => {
+    const { apply, metadata, PM } = fixture();
+    const layer = PM.proj.layers[0] as any;
+    layer.type = 'extension';
+    layer.d.data = { object: { source: { assetId: 'model-1' } } };
+    const definition = { renderer: { kind: 'layer3d', role: 'object' } };
+    (PM as any).layerDefinition = () => definition;
+    const assets = new Map([['model-1', { mesh: {} }]]);
+    (PM as any).assets = { get: (id: string) => assets.get(id) };
+    (PM.UIState as any).getShaderMeta = (target: any) => metadata.get(target.id);
+    apply.snapshot(0);
+    expect(metadata.get('object').sceneWarnings).toBeUndefined();
+    assets.delete('model-1');
+    apply.snapshot(0);
+    expect(metadata.get('object').sceneWarnings).toEqual(['Missing model: model-1']);
+    assets.set('model-1', { mesh: {} });
+    apply.snapshot(0);
+    expect(metadata.get('object').sceneWarnings).toEqual([]);
+  });
 });

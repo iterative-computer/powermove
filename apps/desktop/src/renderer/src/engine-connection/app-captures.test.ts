@@ -66,6 +66,17 @@ describe('the app’s captures with the new engine on', () => {
     expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(0, 480, PM.proj, { captionsHidden: false });
   });
 
+  it('publishes native capture diagnostics after pixels succeed', async () => {
+    const { PM } = legacyPM();
+    const e = engine();
+    const published: number[] = [];
+    installAppCaptures(PM, e, time => published.push(time));
+    installExporter(PM);
+    PM.Export.snapshot(0.2, 320);
+    await PM.Export.snapshotAsync(0.5, 320);
+    expect(published).toEqual([0.2, 0.5]);
+  });
+
   it('snapshotAsync keeps today’s contract: playback pauses and resumes, one capture at a time', async () => {
     const { PM } = legacyPM();
     const calls: string[] = [];

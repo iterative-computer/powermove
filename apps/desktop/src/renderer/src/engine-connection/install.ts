@@ -524,7 +524,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // agent's look and observe) draw through the engine too: with the new
   // engine on, nothing asks the current engine for pixels. The exporter's
   // methods ask `PM.EngineCaptures` (it installs after this module).
-  const unrouteCaptures = installAppCaptures(PM, renderTransport);
+  const unrouteCaptures = installAppCaptures(PM, renderTransport, time => sceneMetadata.snapshot(time));
   // The kernel's raster override producer answers through it (kernel/raster-compat.ts).
   const detachRasterCompat = (PM as any).RasterCompat?.attach?.(renderTransport) ?? (() => {});
   // And the compatibility context draws over WebM export frames (kernel/compat-context.ts).

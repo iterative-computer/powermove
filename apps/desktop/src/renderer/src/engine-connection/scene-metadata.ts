@@ -48,6 +48,33 @@ export class EngineSceneMetadata {
     }
   }
 
+  /** Sync captures have no frame descriptor. Keep the missing-model warning
+   * observable through the extension metadata API immediately after one. */
+  snapshot(time: number): void {
+    const ui = this.PM.UIState;
+    if (!this.PM.EngineDoc?.enabled || !ui?.getShaderMeta || !ui?.setShaderMeta || !this.PM.assets?.get) return;
+    for (const layer of this.PM.proj?.layers ?? []) {
+      if (layer.type !== 'extension' || (this.PM.active && !this.PM.active(layer, time))) continue;
+      const definition = this.PM.layerDefinition?.(layer.d?.definition);
+      const renderer = definition?.renderer;
+      const objects = renderer?.kind === 'layer3d' && renderer.role === 'object'
+        ? [layer.d?.data?.object]
+        : renderer?.kind === 'scene3d' ? layer.d?.data?.scene?.objects ?? [] : [];
+      if (!objects.length) continue;
+      const missing: string[] = objects.flatMap((object: any) => {
+        const id = object?.source?.assetId;
+        if (!id) return [];
+        const asset = this.PM.assets?.get?.(id);
+        return asset?.mesh || asset?.object3d ? [] : [`Missing model: ${id}`];
+      });
+      const current: string[] = ui.getShaderMeta(layer)?.sceneWarnings ?? [];
+      const warnings = [...current.filter(warning => !warning.startsWith('Missing model: ')), ...missing];
+      if (warnings.length !== current.length || warnings.some((warning, i) => warning !== current[i])) {
+        ui.setShaderMeta(layer, { sceneWarnings: warnings });
+      }
+    }
+  }
+
   private composition(id: string): any {
     const project = this.PM.proj;
     if (project?.compId === id || project?.id === id) return project;

@@ -51,9 +51,14 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 /** Installs `PM.EngineCaptures`; returns its removal. */
-export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine): () => void {
+export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine, afterSnapshot?: (time: number) => void): () => void {
   const captures: EngineCaptures = {
-    snapshot: (time, maxWidth = 480) => engine.snapshotDataUrlSync(Number(time) || 0, Number(maxWidth) || 480, PM.proj, { captionsHidden: PM.captionsHidden === true }),
+    snapshot: (time, maxWidth = 480) => {
+      const at = Number(time) || 0;
+      const image = engine.snapshotDataUrlSync(at, Number(maxWidth) || 480, PM.proj, { captionsHidden: PM.captionsHidden === true });
+      afterSnapshot?.(at);
+      return image;
+    },
     snapshotAsync: async (time, maxWidth = 480, options = {}) => {
       const { signal } = options;
       if (signal?.aborted) throw cancelled(signal);
@@ -73,7 +78,7 @@ export function installAppCaptures(PM: PMRegistry, engine: CaptureEngine): () =>
         release();
         throw error;
       }
-      const settled = capture.finally(release);
+      const settled = capture.then(image => { afterSnapshot?.(Number(time) || 0); return image; }).finally(release);
       return signal ? abortable(settled, signal) : settled;
     }
   };
