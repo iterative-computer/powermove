@@ -11,8 +11,7 @@
 //! pixel; strokes as the region their joins and caps define,
 //! `pm_reference::stroke`). Today is the capture of those canvases in the
 //! app (`tools/canvas-ref` of the retired emulation, kept outside the
-//! repository as `canvas-*`); without one the gate measures the engine
-//! against the reference alone and says so.
+//! repository as `canvas-*`). The captured witness is required.
 //!
 //! Rules: interiors within 1 CV of today (the authored colours); edges at
 //! least as close to the reference as today at max, p99.9 and mean, and per
@@ -26,9 +25,9 @@ use pm_reference::compare::{Bounds, Class, Stats, classify, compare, geometry, s
 use pm_render::Renderer;
 use pm_render::vector::VectorSource;
 use pm_render::vector::cache::VectorCache;
-use pm_vector::kurbo::Affine;
+use pm_vector::kurbo::{Affine, BezPath, Cap, Circle, Join, Shape, Stroke};
 use pm_vector::path::{PathColors, PathLayer, PathNode, PathValues, Vertex};
-use pm_vector::render::scene::{CoverageScene, ItemStyle, PixelRect};
+use pm_vector::render::scene::{CoverageItem, CoverageScene, ItemStyle, PixelRect};
 use pm_vector::shape::{ShapeColors, ShapeContent, ShapeKind, ShapeRaster, shape_geometry};
 use serde_json::Value;
 
@@ -169,21 +168,16 @@ fn cv(a: &[f64], b: &[f64]) -> f64 {
 
 #[test]
 fn shapes_and_paths_meet_the_reference() {
-    let capture = support::newest_capture("canvas-");
-    match &capture {
-        Some(dir) => eprintln!("today: {}", dir.display()),
-        None => eprintln!("note: no canvas-* capture; the engine is judged against the reference alone"),
-    }
+    let capture = support::newest_capture("canvas-").expect("today's canvas-* witness is required");
     let r = Renderer::headless().unwrap();
     let mut failures = Vec::new();
     let (mut compared, mut stroked_pool, mut all_pool) = (0, Pool::default(), Pool::default());
     let mut cache = VectorCache::new();
     {
-        for c in cases() {
+        let cases = cases();
+        let expected = cases.len();
+        for c in cases {
             let id = c["id"].as_str().unwrap();
-            if std::env::var("PM_GATE_ONLY").is_ok_and(|o| !id.starts_with(&o)) {
-                continue;
-            }
             let Some(((w, h), scene)) = scene(&c) else {
                 continue;
             };
@@ -200,36 +194,32 @@ fn shapes_and_paths_meet_the_reference() {
             {
                 failures.push(format!("{id}: geometry {e}"));
             }
-            let today = capture.as_ref().map(|dir| {
-                let (cw, ch, px) = support::read_png(&dir.join(format!("{id}.png")));
-                assert_eq!((cw, ch), (w, h), "{id}: today's canvas size");
-                px.iter().map(|v| f64::from(*v) / 255.0).collect::<Vec<f64>>()
-            });
-            if let Some(today) = &today {
-                compared += 1;
-                let report = compare(&ours, today, &reference, &classes);
-                let failed = report.failures(&Bounds::EIGHT_BIT);
-                for f in &failed {
-                    failures.push(format!("{id}: {f}"));
-                }
-                // Side by side (engine, today, reference), outside the
-                // repository: PM_GATE_EVIDENCE=dir, failing cases only unless
-                // PM_GATE_EVIDENCE_ALL is set.
-                if let Ok(dir) = std::env::var("PM_GATE_EVIDENCE")
-                    && (!failed.is_empty() || std::env::var_os("PM_GATE_EVIDENCE_ALL").is_some())
-                {
-                    let dir = std::path::Path::new(&dir);
-                    std::fs::create_dir_all(dir).unwrap();
-                    let bytes = |f: &[f64]| -> Vec<u8> { f.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect() };
-                    let mut row = Vec::with_capacity(wu * hu * 12);
-                    let (e, t, r) = (bytes(&ours), bytes(today), bytes(&reference));
-                    for y in 0..hu {
-                        for img in [&e, &t, &r] {
-                            row.extend_from_slice(&img[y * wu * 4..(y + 1) * wu * 4]);
-                        }
+            let (cw, ch, px) = support::read_png(&capture.join(format!("{id}.png")));
+            assert_eq!((cw, ch), (w, h), "{id}: today's canvas size");
+            let today: Vec<f64> = px.iter().map(|v| f64::from(*v) / 255.0).collect();
+            compared += 1;
+            let report = compare(&ours, &today, &reference, &classes);
+            let failed = report.failures(&Bounds::EIGHT_BIT);
+            for f in &failed {
+                failures.push(format!("{id}: {f}"));
+            }
+            // Side by side (engine, today, reference), outside the
+            // repository: PM_GATE_EVIDENCE=dir, failing cases only unless
+            // PM_GATE_EVIDENCE_ALL is set.
+            if let Ok(dir) = std::env::var("PM_GATE_EVIDENCE")
+                && (!failed.is_empty() || std::env::var_os("PM_GATE_EVIDENCE_ALL").is_some())
+            {
+                let dir = std::path::Path::new(&dir);
+                std::fs::create_dir_all(dir).unwrap();
+                let bytes = |f: &[f64]| -> Vec<u8> { f.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect() };
+                let mut row = Vec::with_capacity(wu * hu * 12);
+                let (e, t, r) = (bytes(&ours), bytes(&today), bytes(&reference));
+                for y in 0..hu {
+                    for img in [&e, &t, &r] {
+                        row.extend_from_slice(&img[y * wu * 4..(y + 1) * wu * 4]);
                     }
-                    support::write_png(&dir.join(format!("{id}.png")), w * 3, h, &row);
                 }
+                support::write_png(&dir.join(format!("{id}.png")), w * 3, h, &row);
             }
             let stroked = scene.items.iter().any(|i| matches!(i.style, ItemStyle::Stroke(_)));
             for (i, class) in classes.iter().enumerate() {
@@ -238,13 +228,14 @@ fn shapes_and_paths_meet_the_reference() {
                 }
                 let at = |f: &[f64]| f[i * 4..i * 4 + 4].to_vec();
                 let e = cv(&at(&ours), &at(&reference));
-                let t = today.as_ref().map(|t| cv(&at(t), &at(&reference)));
+                let t = cv(&at(&today), &at(&reference));
                 for pool in [Some(&mut all_pool), stroked.then_some(&mut stroked_pool)].into_iter().flatten() {
                     pool.engine.push(e);
-                    pool.today.extend(t);
+                    pool.today.push(t);
                 }
             }
         }
+        assert_eq!(compared, expected, "every authored case needs today's witness");
     }
     let show = |name: &str, p: Pool| {
         eprintln!(
@@ -256,9 +247,47 @@ fn shapes_and_paths_meet_the_reference() {
     eprintln!("{compared} cases compared with today");
     show("edge pixels, all cases (CV vs reference)", all_pool);
     show("edge pixels, stroked cases (CV vs reference)", stroked_pool);
-    assert!(
-        capture.is_none() || compared > 450 || std::env::var_os("PM_GATE_ONLY").is_some(),
-        "the capture covers the cases"
-    );
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+#[test]
+fn authored_stroke_styles_meet_exact_regions() {
+    let r = Renderer::headless().unwrap();
+    let mut cache = VectorCache::new();
+    let mut open = BezPath::new();
+    open.move_to((18.25, 22.5));
+    open.line_to((71.5, 81.25));
+    open.line_to((114.75, 23.5));
+    let mut closed = BezPath::new();
+    closed.move_to((24.5, 25.25));
+    closed.line_to((108.25, 26.75));
+    closed.line_to((101.5, 101.25));
+    closed.line_to((20.75, 96.5));
+    closed.close_path();
+    let mut curve = BezPath::new();
+    curve.move_to((16.25, 96.5));
+    curve.curve_to((31.0, 1.0), (107.0, 3.0), (119.25, 96.5));
+    let cases = [
+        ("butt/bevel", open.clone(), Stroke::new(7.5).with_caps(Cap::Butt).with_join(Join::Bevel)),
+        ("square/miter", open.clone(), Stroke::new(7.5).with_caps(Cap::Square).with_join(Join::Miter).with_miter_limit(8.0)),
+        ("miter fallback", open, Stroke::new(7.5).with_caps(Cap::Round).with_join(Join::Miter).with_miter_limit(1.0)),
+        ("closed round", closed, Stroke::new(6.0).with_join(Join::Round)),
+        ("closed curve", Circle::new((68.0, 60.0), 38.0).to_path(1e-9), Stroke::new(6.0)),
+        ("dashed curve", curve, Stroke::new(5.0).with_caps(Cap::Round).with_dashes(3.5, [13.0, 8.0])),
+    ];
+    for (name, path, style) in cases {
+        let scene = CoverageScene { items: vec![CoverageItem {
+            path, transform: Affine::IDENTITY, style: ItemStyle::Stroke(style), color: [1.0; 4],
+        }] };
+        let ours = engine(&r, &mut cache, &scene, (136, 120));
+        let reference = support::reference::scene_pixels(&scene, 136, 120).unwrap();
+        let wanted: Vec<f64> = reference.iter().map(|p| p.0[3]).collect();
+        let actual: Vec<f64> = ours.chunks_exact(4).map(|p| p[3]).collect();
+        same_geometry(&geometry(&actual, 136), &geometry(&wanted, 136), 1e-3)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let errors: Vec<f64> = actual.iter().zip(&wanted).map(|(a, b)| (a - b).abs() * 255.0).collect();
+        let stats = Stats::of(errors);
+        eprintln!("{name}: {stats}");
+        assert!(stats.max <= 1.0, "{name}: {stats}");
+    }
 }

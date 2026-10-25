@@ -90,58 +90,6 @@ const STILL_CLASSES: &[(&str, bool)] = &[
 /// (`VideoEnd::Viewer`), exports 1 / fps (`VideoEnd::Final`).
 const PREVIEW_EXPORT_PENDING: &[(&str, f64)] = &[("retime/speed", 2.9)];
 
-/// Frames ("transparent" for the transparent float capture) with
-/// AA-corrected content inside an unmodelled effect, matte or transition
-/// footprint, and the lane that owns modelling it (the effect, matte and
-/// transition formulas in pm-reference). Solid and shape edges are drawn
-/// with exact coverage (G-V1, quality ledger "Vectors"); inside such a
-/// footprint the reference cannot judge them yet. For a listed frame only
-/// the pixels of `Reference::aa_corrected` (inside the footprint and
-/// within the layer's spatial reach + 1 px of a corrected edge) may exceed
-/// the bound against today; every other pixel keeps every rule. An entry
-/// that passes without the exemption, or that a full run never measures,
-/// fails until it is removed.
-const AA_INPUT_PENDING: &[(&str, f64, bool, &str)] = &[];
-
-/// The gate's failures for a frame, with the `AA_INPUT_PENDING` exemption
-/// when the frame is listed (`pending`), and a note of what was exempted.
-fn judge(
-    engine: &[f64],
-    today: &[f64],
-    r: &reference::Reference,
-    bounds: &Bounds,
-    pending: bool,
-) -> (Vec<String>, Option<String>) {
-    let report = compare(engine, today, &r.rgba, &r.classes());
-    let problems = report.failures(bounds);
-    if !pending {
-        return (problems, None);
-    }
-    if problems.is_empty() {
-        return (
-            vec!["passes without its exemption: remove it from AA_INPUT_PENDING".into()],
-            None,
-        );
-    }
-    // The exempt pixels take today's values; anything left fails.
-    let mut exempt_engine = engine.to_vec();
-    let (mut n, mut worst) = (0usize, 0.0f64);
-    for (i, a) in r.aa_corrected.iter().enumerate() {
-        if *a && r.rgba[i * 4..i * 4 + 4].iter().any(|v| v.is_nan()) {
-            let e = (0..4)
-                .map(|c| (engine[i * 4 + c] - today[i * 4 + c]).abs() * 255.0)
-                .fold(0.0, f64::max);
-            if e > bounds.per_pixel_cv.0 {
-                n += 1;
-                worst = worst.max(e);
-            }
-            exempt_engine[i * 4..i * 4 + 4].copy_from_slice(&today[i * 4..i * 4 + 4]);
-        }
-    }
-    let rest = compare(&exempt_engine, today, &r.rgba, &r.classes()).failures(bounds);
-    (rest, Some(format!("AA_INPUT_PENDING: {n} px beyond {} CV of today, max {worst:.1}", bounds.per_pixel_cv.0)))
-}
-
 #[test]
 fn corpus_render_parity() {
     let captures = corpus_dirs();
@@ -152,7 +100,6 @@ fn corpus_render_parity() {
     let only = std::env::var("PM_RENDER_ONLY").ok();
     let narrowed = only.is_some() || std::env::var_os("PM_ENGINE_CORPUS").is_some();
     let mut pending_seen = Vec::new();
-    let mut aa_seen: Vec<(String, f64, bool)> = Vec::new();
     let diffs = std::env::var("PM_RENDER_DIFFS")
         .ok()
         .map(std::path::PathBuf::from);
@@ -486,21 +433,21 @@ fn corpus_render_parity() {
                         );
                         let (engine, today) = (unit32(&ours), unit32(&today));
                         let report = compare(&engine, &today, &r.rgba, &r.classes());
-                        let listed = AA_INPUT_PENDING
-                            .iter()
-                            .any(|(n, t, transparent, _)| *n == p.name && *t == s.time && *transparent);
-                        if listed {
-                            aa_seen.push((p.name.clone(), s.time, true));
-                        }
-                        let (mut problems, note) = judge(&engine, &today, &r, &Bounds::HALF_FLOAT, listed);
-                        if let Some(note) = note {
-                            eprintln!("{} t={} transparent: {note}", p.name, s.time);
-                        }
+                        let mut problems = report.failures(&Bounds::HALF_FLOAT);
                         let mut shape = String::new();
                         if r.modelled() == 1.0 {
                             let alpha = |f: &[f64]| f.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
                             let wanted = geometry(&r.alpha(), r.width);
-                            let ours = geometry(&alpha(&engine), r.width);
+                            // Geometry is the renderer's, not the storage's:
+                            // judged on an f32 frame (half-float storage
+                            // rounds every partly covered pixel and each
+                            // motion-blur accumulation step).
+                            let mut exact = request.clone();
+                            exact.precision = Precision::Float32;
+                            let f32_frame = renderer
+                                .render(&p.document, &p.composition, ticks(s.time), &exact, &p.resolver)
+                                .expect("f32 transparent render");
+                            let ours = geometry(&alpha(&unit32(&renderer.read_rgba(&f32_frame).unwrap())), r.width);
                             let theirs = geometry(&alpha(&today), r.width);
                             shape = format!(
                                 " geometry: area {:.3} engine {:.3} today {:.3}",
@@ -562,16 +509,7 @@ fn corpus_render_parity() {
                     let (engine, today) = (unit8(&ours), unit8(&reference));
                     let opaque = reference::Reference { rgba: r.opaque(), ..r.clone() };
                     let report = compare(&engine, &today, &opaque.rgba, &opaque.classes());
-                    let listed = AA_INPUT_PENDING
-                        .iter()
-                        .any(|(n, t, transparent, _)| *n == p.name && *t == s.time && !*transparent);
-                    if listed {
-                        aa_seen.push((p.name.clone(), s.time, false));
-                    }
-                    let (problems, note) = judge(&engine, &today, &opaque, &Bounds::EIGHT_BIT, listed);
-                    if let Some(note) = note {
-                        eprintln!("{} t={}: {note}", p.name, s.time);
-                    }
+                    let problems = report.failures(&Bounds::EIGHT_BIT);
                     let line = format!("{:<40} t={:<6}{}{report}", p.name, s.time, unmodelled(&r));
                     let pass = problems.is_empty();
                     let line = if pass {
@@ -618,11 +556,6 @@ fn corpus_render_parity() {
         );
     }
     if !narrowed {
-        for (name, time, transparent, _) in AA_INPUT_PENDING {
-            if !aa_seen.iter().any(|(n, t, f)| n == name && t == time && f == transparent) {
-                failed.push(format!("{name} t={time}: AA_INPUT_PENDING entry not measured"));
-            }
-        }
         for (name, time) in PREVIEW_EXPORT_PENDING {
             if !pending_seen.iter().any(|(n, t)| n == name && t == time) {
                 failed.push(format!(

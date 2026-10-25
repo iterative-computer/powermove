@@ -16,7 +16,7 @@ use crate::shape::{ShapeGeometry, StrokePaint};
 
 /// Largest distance, in device pixels, between an item's curves and the
 /// line segments the coverage backends rasterize.
-pub const FLATTEN_TOLERANCE: f64 = 1e-3;
+pub const FLATTEN_TOLERANCE: f64 = 1e-4;
 
 /// Fill rule of a filled item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,7 +83,7 @@ impl CoverageItem {
     /// flattened, all within [`FLATTEN_TOLERANCE`]; then the fill rule is
     /// resolved into contours that do not overlap.
     ///
-    /// Flattening within 10⁻³ px moves an edge by less than that (chords
+    /// Flattening within 10⁻⁴ px moves an edge by less than that (chords
     /// lie inside convex curves: a coarse tolerance erodes curved edges).
     /// Area coverage sums the winding number over a pixel before the fill
     /// rule, so where overlapping pieces (a stroke's inner join through its
@@ -92,6 +92,10 @@ impl CoverageItem {
     /// where it is 3/4. Resolving the rule first leaves nothing to sum.
     pub fn device_outline(&self) -> BezPath {
         let (flat, rule) = self.flattened();
+        // One convex contour cannot overlap itself: nothing to resolve.
+        if matches!(self.style, ItemStyle::Fill(_)) && convex(&flat) {
+            return flat;
+        }
         resolve(&flat, rule)
     }
 
@@ -123,6 +127,45 @@ impl CoverageItem {
         let [r, g, b, a] = self.color;
         [r * a, g * a, b * a, a]
     }
+}
+
+/// Whether `flat` (line segments only) is one closed contour that turns
+/// one way only and once round (a convex polygon).
+fn convex(flat: &BezPath) -> bool {
+    let mut points: Vec<kurbo::Point> = Vec::new();
+    for (i, el) in flat.elements().iter().enumerate() {
+        match *el {
+            kurbo::PathEl::MoveTo(p) if i == 0 => points.push(p),
+            kurbo::PathEl::LineTo(p) => {
+                if points.last() != Some(&p) {
+                    points.push(p);
+                }
+            }
+            kurbo::PathEl::ClosePath if i + 1 == flat.elements().len() => {}
+            _ => return false,
+        }
+    }
+    if points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
+    let n = points.len();
+    if n < 3 {
+        return false;
+    }
+    let (mut sign, mut turning) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        let (a, b, c) = (points[i], points[(i + 1) % n], points[(i + 2) % n]);
+        let (d0, d1) = (b - a, c - b);
+        let cross = d0.cross(d1);
+        if cross != 0.0 {
+            if sign != 0.0 && cross.signum() != sign {
+                return false;
+            }
+            sign = cross.signum();
+        }
+        turning += cross.atan2(d0.dot(d1));
+    }
+    (turning.abs() - core::f64::consts::TAU).abs() < 1e-6
 }
 
 /// `flat` (line segments only) filled with `rule`, as disjoint contours:

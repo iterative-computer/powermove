@@ -44,11 +44,6 @@ pub struct Reference {
     /// An unmodelled layer's footprint could not be bounded: the whole
     /// frame is unreferenced.
     pub whole_frame: bool,
-    /// Inside unmodelled footprints: pixels within an unmodelled layer's
-    /// spatial reach (its effects' padding) plus 1 pixel of the edge of a
-    /// solid or shape it draws. AA corrected these edges; the corpus's
-    /// `AA_INPUT_PENDING` frames may exceed today's bound only here.
-    pub aa_corrected: Vec<bool>,
 }
 
 impl Reference {
@@ -167,7 +162,6 @@ pub fn render(
         edge: vec![false; w * h],
         unmodelled: Vec::new(),
         whole_frame: false,
-        aa_corrected: vec![false; w * h],
     };
     if let Err(why) = draw(document, composition, time, &mut out, background, samples, effects) {
         out.unmodelled.push(why);
@@ -221,7 +215,8 @@ fn draw(
         }
     }
     let (sx, sy) = pm_render::plan::derived_scale(&comp, w as u32, h as u32);
-    let mut ev = Evaluator::new();
+    // Expressions evaluate as the engine evaluates them (pm-eval with pm-expr).
+    let mut ev = Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
     let mut scope = Scope::new(&mut ev, &comp, &comp);
     let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
     let layers: Vec<&Node> = comp.layers().iter().collect();
@@ -235,12 +230,20 @@ fn draw(
             .map(|s| ((f64::from(s) + 0.5) / f64::from(samples) - 0.5) * shutter)
             .collect::<Vec<f64>>()
     });
+    // Layers used as track mattes draw only through their targets.
+    let matte_sources: Vec<pm_model::JsString> = layers
+        .iter()
+        .filter_map(|l| node::string(node::member(Some(l), "matteSource")).cloned())
+        .collect();
     // Bottom (last) to top (first), with today's skip rules.
     for &layer in layers.iter().rev() {
         let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
         let flag = |k: &str| node::truthy(node::member(Some(layer), k));
         let group = flag("group") || ty == "group";
         if (solo && !flag("solo")) || matches!(ty.as_str(), "null" | "audio") {
+            continue;
+        }
+        if node::string(node::member(Some(layer), "id")).is_some_and(|id| matte_sources.contains(id)) {
             continue;
         }
         if !group && !scope.active(layer, seconds).map_err(fail)? {
@@ -433,9 +436,7 @@ fn unreference(out: &mut Reference, outline: &kurbo::BezPath, grow: usize) {
 /// box) at every time it is drawn, grown by its effects' padding (C-K6: the
 /// sum of their `viewportPadding` parameters) and 2 pixels, is
 /// unreferenced. A footprint this cannot bound (groups, precomps, 2.5D
-/// planes, transitions, which move content) is the whole frame. The edges
-/// of solid and shape content, grown by the padding and 1 pixel, are
-/// recorded as AA-corrected input (`Reference::aa_corrected`).
+/// planes, transitions, which move content) is the whole frame.
 #[allow(clippy::too_many_arguments)]
 fn footprint<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -462,18 +463,9 @@ fn footprint<'d>(
     if !bounded || !padding.is_finite() {
         out.rgba.fill(f64::NAN);
         out.whole_frame = true;
-        // Every solid and shape edge in the frame may feed it.
-        if content {
-            for &t in times {
-                for (i, (px, edge)) in content_pixels(scope, layer, ty, t, (sx, sy), w, h)?.into_iter().enumerate() {
-                    out.aa_corrected[i] |= edge || (px[3] > 0.0 && px[3] < 1.0);
-                }
-            }
-        }
         return Ok(());
     }
     let mut covered = vec![false; w * h];
-    let mut edges = vec![false; w * h];
     let mut grow = 2;
     for &t in times {
         let world = scope.world_matrix(layer, t).map_err(fail)?;
@@ -491,7 +483,6 @@ fn footprint<'d>(
         if content {
             for (i, (px, edge)) in content_pixels(scope, layer, ty, t, (sx, sy), w, h)?.into_iter().enumerate() {
                 covered[i] |= px[3] > 0.0 || edge;
-                edges[i] |= edge || (px[3] > 0.0 && px[3] < 1.0);
             }
         } else {
             let d = scope.ev.resolve_content(scope.comp, layer, t).map_err(fail)?;
@@ -511,14 +502,11 @@ fn footprint<'d>(
             out.rgba[i * 4..][..4].fill(f64::NAN);
         }
     }
-    for (i, g) in pm_reference::compare::dilate(&edges, w, h, grow - 1).into_iter().enumerate() {
-        out.aa_corrected[i] |= g;
-    }
     Ok(())
 }
 
 /// Device-pixel tolerance of the reference's stroke outlines.
-const STROKE_TOLERANCE: f64 = 1e-3;
+const STROKE_TOLERANCE: f64 = 1e-4;
 
 /// A vector layer's own pixels (premultiplied, source-over item by item in
 /// order) over a `w × h` frame, and where any item is partially covered.
@@ -545,7 +533,7 @@ pub fn scene_pixels(
                 let c = item.transform.as_coeffs();
                 let scale = c[0].hypot(c[1]).max(c[2].hypot(c[3])).max(1e-12);
                 let region = pm_reference::stroke::outline(&item.path, stroke, STROKE_TOLERANCE / scale)
-                    .ok_or("dashed strokes")?;
+                    .ok_or("invalid stroke parameters")?;
                 // Overlapping pieces at the edge count within a cell: finer
                 // cells bound that error (1/n² of a pixel per cell).
                 let cells = if region.folds { 4 * PATH_SAMPLES } else { PATH_SAMPLES };

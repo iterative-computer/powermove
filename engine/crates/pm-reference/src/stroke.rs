@@ -29,10 +29,16 @@ pub struct Region {
     pub folds: bool,
 }
 
-/// The region `style` strokes along `path`; `None` for dashed strokes (not
-/// modelled).
+/// The region `style` strokes along `path`. Dash intervals partition the
+/// centerline before the independent cap, join and width construction.
 pub fn outline(path: &BezPath, style: &Stroke, tolerance: f64) -> Option<Region> {
-    if !style.dash_pattern.is_empty() {
+    if !style.is_finite() || style.dash_pattern.iter().any(|&d| d < 0.0) {
+        return None;
+    }
+    if !style.dash_pattern.is_empty()
+        && (!style.dash_pattern.iter().sum::<f64>().is_finite()
+            || style.dash_pattern.iter().all(|&d| d == 0.0))
+    {
         return None;
     }
     let h = style.width.abs() / 2.0;
@@ -43,7 +49,14 @@ pub fn outline(path: &BezPath, style: &Stroke, tolerance: f64) -> Option<Region>
     if !(h > 0.0) {
         return Some(out);
     }
-    for poly in polylines(path, tolerance) {
+    let dashed;
+    let centerline = if style.dash_pattern.is_empty() {
+        path
+    } else {
+        dashed = kurbo::dash(path.iter(), style.dash_offset, &style.dash_pattern).collect();
+        &dashed
+    };
+    for poly in polylines(centerline, tolerance) {
         out.folds |= stroke_polyline(&poly, style, h, tolerance, &mut out.path);
     }
     Some(out)
@@ -93,15 +106,19 @@ fn polylines(path: &BezPath, tolerance: f64) -> Vec<Polyline> {
     // The end tangent of the segment that ended at `last`, and the start
     // tangent of the subpath's first segment.
     let (mut incoming, mut first_out): (Option<Vec2>, Option<Vec2>) = (None, None);
+    let near = |a: Point, b: Point| (a - b).hypot() <= tolerance * 1e-4;
     let push = |cur: &mut Option<Polyline>, p: Point, corner: bool| {
         let poly = cur.as_mut().expect("a subpath");
-        if poly.points.last() != Some(&p) {
+        if !poly.points.last().is_some_and(|&last| near(last, p)) {
             poly.points.push(p);
             poly.corner.push(corner);
             poly.tangent_in.push(None);
             poly.tangent_out.push(None);
-        } else if corner {
-            *poly.corner.last_mut().unwrap() = true;
+        } else {
+            *poly.points.last_mut().unwrap() = p;
+            if corner {
+                *poly.corner.last_mut().unwrap() = true;
+            }
         }
     };
     // A segment starting at `last` with tangent `t`: a smooth joint there is
@@ -166,7 +183,7 @@ fn polylines(path: &BezPath, tolerance: f64) -> Vec<Polyline> {
                     // The closing line, when the subpath does not end where it
                     // began.
                     let mut into_start = incoming;
-                    if last != origin {
+                    if !near(last, origin) {
                         let mut c = Some(poly);
                         joint(&mut c, incoming, Some(origin - last));
                         poly = c.unwrap();
@@ -352,6 +369,7 @@ fn stroke_polyline(poly: &Polyline, style: &Stroke, h: f64, tolerance: f64, out:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compare::{geometry, same_geometry};
     use crate::coverage::{FillRule, fill};
     use kurbo::{Circle, Rect, Shape};
 
@@ -392,6 +410,28 @@ mod tests {
     }
 
     #[test]
+    fn tiny_flattening_seams_do_not_cut_a_curved_stroke() {
+        let center = (68.0, 60.0);
+        let circle = Circle::new(center, 38.0).to_path(1e-9);
+        let stroke = fill(&outline(&circle, &Stroke::new(6.0), 1e-4).unwrap().path, FillRule::NonZero, 16, 136, 120);
+        let mut annulus = Circle::new(center, 41.0).to_path(1e-9);
+        annulus.extend(Circle::new(center, 35.0).to_path(1e-9).reverse_subpaths());
+        let exact = fill(&annulus, FillRule::NonZero, 16, 136, 120);
+        let (mut actual, mut wanted) = (Vec::with_capacity(136 * 120), Vec::with_capacity(136 * 120));
+        let mut worst = 0.0f64;
+        for y in 0..120 {
+            for x in 0..136 {
+                let (a, b) = (stroke.at(x, y), exact.at(x, y));
+                worst = worst.max((a - b).abs() * 255.0);
+                actual.push(a);
+                wanted.push(b);
+            }
+        }
+        assert!(worst < 0.5, "{worst} CV");
+        same_geometry(&geometry(&actual, 136), &geometry(&wanted, 136), 1e-3).unwrap();
+    }
+
+    #[test]
     fn caps_extend_open_lines() {
         let mut l = BezPath::new();
         l.move_to((100.0, 200.0));
@@ -415,4 +455,33 @@ mod tests {
         let beyond = area(&outline(&v, &style.with_miter_limit(1.5), 1e-4).unwrap().path);
         assert!(within > beyond + 10.0, "{within} {beyond}");
     }
+
+    #[test]
+    fn dashes_follow_authored_intervals_and_caps() {
+        let mut line = BezPath::new();
+        line.move_to((20.0, 50.0));
+        line.line_to((120.0, 50.0));
+        let butt = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(5.0, [10.0, 10.0]);
+        let region = outline(&line, &butt, 1e-4).unwrap();
+        let cov = fill(&region.path, FillRule::NonZero, 16, 140, 100);
+        for (x, expected) in [(22, 1.0), (30, 0.0), (40, 1.0), (50, 0.0), (100, 1.0), (110, 0.0), (117, 1.0)] {
+            assert!((cov.at(x, 50) - expected).abs() < 1e-12, "x={x}");
+        }
+        // The first and last marks are 5 units; four full marks are 10.
+        assert!((area(&region.path) - 200.0).abs() < 1e-6);
+        let round = Stroke::new(4.0).with_caps(Cap::Round).with_dashes(5.0, [10.0, 10.0]);
+        let round_area = area(&outline(&line, &round, 1e-4).unwrap().path);
+        assert!((round_area - (200.0 + 6.0 * core::f64::consts::PI * 4.0)).abs() < 0.1, "{round_area}");
+        // SVG doubles odd arrays and normalizes negative phases.
+        let odd = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(-5.0, [10.0, 5.0, 5.0]);
+        let even = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(35.0, [10.0, 5.0, 5.0, 10.0, 5.0, 5.0]);
+        let a = fill(&outline(&line, &odd, 1e-4).unwrap().path, FillRule::NonZero, 16, 140, 100);
+        let b = fill(&outline(&line, &even, 1e-4).unwrap().path, FillRule::NonZero, 16, 140, 100);
+        for y in 0..100 {
+            for x in 0..140 {
+                assert!((a.at(x, y) - b.at(x, y)).abs() < 1e-12, "{x},{y}");
+            }
+        }
+    }
+
 }

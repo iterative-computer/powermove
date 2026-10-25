@@ -26,10 +26,7 @@ pub fn png_rgba(px: &[u8], unpremultiply: bool) -> Vec<u8> {
         .collect()
 }
 
-#[path = "main_thread_fonts.rs"]
-mod main_thread_fonts;
-#[cfg(target_os = "macos")]
-pub use main_thread_fonts::MainThreadFonts;
+include!("main_thread_fonts.rs");
 
 /// One face of a font file as its own font (collections split).
 #[cfg(target_os = "macos")]
