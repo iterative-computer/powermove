@@ -200,6 +200,7 @@ impl PathMaskPipelines {
                         grid: rect4(b),
                         out: rect4(b),
                         step: 1,
+                        ystep: 1,
                         ..Default::default()
                     },
                 };

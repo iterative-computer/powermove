@@ -24,6 +24,25 @@ const ART: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height
 </svg>"##;
 
 fn probe(svg: &str, scale: f64, width: u32, height: u32, box_clip: bool) -> (bool, Option<String>) {
+    probe_with(svg, Affine::scale(scale), width, height, box_clip)
+}
+
+fn probe_transform(
+    svg: &str,
+    transform: Affine,
+    width: u32,
+    height: u32,
+) -> (bool, Option<String>) {
+    probe_with(svg, transform, width, height, false)
+}
+
+fn probe_with(
+    svg: &str,
+    transform: Affine,
+    width: u32,
+    height: u32,
+    box_clip: bool,
+) -> (bool, Option<String>) {
     let gpu = pm_gpu::Gpu::new("SVG device limit test").unwrap();
     let lost = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&lost);
@@ -48,7 +67,7 @@ fn probe(svg: &str, scale: f64, width: u32, height: u32, box_clip: bool) -> (boo
             &gpu.queue,
             &mut encoder,
             &doc,
-            Affine::scale(scale),
+            transform,
             PixelRect::new(0, 0, width, height),
             &clip,
             Precision::Float16,
@@ -68,7 +87,7 @@ fn probe(svg: &str, scale: f64, width: u32, height: u32, box_clip: bool) -> (boo
         assert!(reason.is_some(), "fallback must have a runtime reason");
         // The same document must remain renderable by the declared fallback.
         let fallback = doc.raster_device(
-            Affine::scale(scale),
+            transform,
             PixelRect::new(0, 0, width, height),
             box_clip.then_some(clip.as_slice()),
         );
@@ -131,13 +150,19 @@ fn art_at_640x360_uses_native_float_without_device_loss() {
     assert!(!lost.load(Ordering::SeqCst));
 }
 
+/// Large blurs stay native in float at any size: full-frame HD and 4K,
+/// Figma layer-blur sizes included. Only a filter whose smallest canvas
+/// cannot fit the filter budget takes the declared resvg fallback, named.
 #[test]
-fn blur_budget_uses_a_named_fallback_without_losing_the_device() {
+fn large_blurs_stay_native_and_only_impossible_canvases_fall_back() {
     for (deviation, scale, width, height) in [
         (1.0, 1.0, 960, 540),
         (2.0, 4.0 / 3.0, 1280, 720),
         (0.5, 2.0, 1920, 1080),
         (3.0, 6.0, 1920, 1080),
+        (10.0, 2.0, 1920, 1080),
+        (50.0, 2.0, 1920, 1080),
+        (100.0, 4.0, 3840, 2160),
     ] {
         eprintln!("SVG blur probe: deviation={deviation}, scale={scale}, {width}×{height}");
         let svg = format!(
@@ -145,22 +170,24 @@ fn blur_budget_uses_a_named_fallback_without_losing_the_device() {
         );
         let (alive, reason) = probe(&svg, scale, width, height, false);
         assert!(alive, "GPU lost with blur {deviation} at {width}×{height}");
-        if let Some(reason) = reason {
-            assert!(
-                reason.contains("budget") || reason.contains("limit"),
-                "unexpected fallback: {reason}"
-            );
-        }
+        assert_eq!(
+            reason, None,
+            "blur {deviation} at {scale}× must stay native"
+        );
     }
-    let onscreen = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3"/></filter></defs><circle cx="160" cy="90" r="150" fill="#3366ff" filter="url(#b)"/></svg>"##;
-    let (alive, reason) = probe(onscreen, 6.0, 1920, 1080, false);
-    assert!(alive, "GPU lost on visible moderate blur");
-    eprintln!("visible over-budget blur fallback: {reason:?}");
+    // A rotated, strongly anisotropic Gaussian (no diagonal covariance on
+    // the device grid) of 4,000 px needs a canvas no tile can fit.
+    let impossible = r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><defs><filter id="b" filterUnits="userSpaceOnUse" x="-5000" y="-5000" width="11000" height="11000"><feGaussianBlur stdDeviation="2000 1"/></filter></defs><circle cx="480" cy="270" r="150" fill="#3366ff" filter="url(#b)"/></svg>"##;
+    let (alive, reason) = probe_transform(
+        impossible,
+        Affine::rotate(0.5) * Affine::scale(2.0),
+        1920,
+        1080,
+    );
+    assert!(alive, "GPU lost on an impossible blur");
     assert!(
-        reason
-            .as_deref()
-            .is_some_and(|value| value.contains("budget")),
-        "visible over-budget blur must use named fallback: {reason:?}"
+        reason.as_deref().is_some_and(|r| r.contains("budget")),
+        "an impossible blur must use the named fallback: {reason:?}"
     );
 }
 
@@ -198,16 +225,18 @@ fn sequential_large_filtered_exports_keep_the_device_and_pixels() {
         } else {
             let reason = painter.fallback_reason().expect("filtered fallback reason");
             assert!(reason.contains("budget") || reason.contains("limit"));
-            let raster = doc.raster_device(
-                Affine::IDENTITY,
-                PixelRect::new(0, 0, 512, 288),
-                None,
-            );
+            let raster = doc.raster_device(Affine::IDENTITY, PixelRect::new(0, 0, 512, 288), None);
             assert_eq!(raster.rgba.len(), 512 * 288 * 4);
         }
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        eprintln!("SVG sequential filtered export {frame}: {:.3} ms (GPU complete)", started.elapsed().as_secs_f64() * 1_000.0);
-        assert!(!lost.load(Ordering::SeqCst), "GPU lost after filtered export {frame}");
+        eprintln!(
+            "SVG sequential filtered export {frame}: {:.3} ms (GPU complete)",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+        assert!(
+            !lost.load(Ordering::SeqCst),
+            "GPU lost after filtered export {frame}"
+        );
     }
 }
 
@@ -247,7 +276,11 @@ fn frame(
             Precision::Float16,
         )
         .unwrap();
-    assert!(cache.svg_fallback_reason().is_none(), "{:?}", cache.svg_fallback_reason());
+    assert!(
+        cache.svg_fallback_reason().is_none(),
+        "{:?}",
+        cache.svg_fallback_reason()
+    );
 }
 
 #[test]
@@ -310,7 +343,11 @@ fn playback_reuses_clipped_text_and_filtered_sources() {
                 * Affine::rotate(angle + 0.1 * f64::from(step))
                 * Affine::scale(scale);
             frame(&gpu, &mut cache, &path, size, t, true);
-            assert_eq!(cache.svg_raster_cache_counts(), (u64::from(step), 1), "{name}");
+            assert_eq!(
+                cache.svg_raster_cache_counts(),
+                (u64::from(step), 1),
+                "{name}"
+            );
         }
     }
 }
@@ -322,9 +359,20 @@ fn large_playback_layers_paint_directly() {
     let path = svg_file(&dir, "large.svg", RECT);
     let doc = SvgDocument::parse(RECT.as_bytes()).unwrap();
     let t = Affine::scale(12.0);
-    let clip = [(0.0, 0.0), (320.0, 0.0), (320.0, 180.0), (0.0, 180.0)].map(|(x, y)| t * Point::new(x, y));
-    let plan = svg_sample::plan_with_clip(&doc, &path, svg::stamp(&path).unwrap(), t, &clip, &gpu.device.limits());
-    assert!(plan.is_none(), "a 4K-sized source exceeds the playback raster cap");
+    let clip =
+        [(0.0, 0.0), (320.0, 0.0), (320.0, 180.0), (0.0, 180.0)].map(|(x, y)| t * Point::new(x, y));
+    let plan = svg_sample::plan_with_clip(
+        &doc,
+        &path,
+        svg::stamp(&path).unwrap(),
+        t,
+        &clip,
+        &gpu.device.limits(),
+    );
+    assert!(
+        plan.is_none(),
+        "a 4K-sized source exceeds the playback raster cap"
+    );
     let mut cache = VectorCache::new();
     frame(&gpu, &mut cache, &path, (320.0, 180.0), t, true);
     assert_eq!(cache.svg_raster_cache_counts(), (0, 0));

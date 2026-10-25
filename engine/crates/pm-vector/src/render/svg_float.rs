@@ -41,6 +41,15 @@ pub enum FloatPaint {
         spread: usvg::SpreadMethod,
         opacity: f32,
     },
+    /// A raster the painter made itself (a filtered group's result), drawn
+    /// pixel for pixel: texel `floor(p / rate) - origin` for grid pixel `p`.
+    /// The draw's outline is the raster's rectangle on the grid.
+    Image {
+        index: usize,
+        origin: [i32; 2],
+        rate: u32,
+        opacity: f32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -167,7 +176,9 @@ fn group_node(g: &usvg::Group, parent: Affine) -> Option<Vec<FloatNode>> {
         let o = g.opacity().get();
         match &mut draw.paint {
             FloatPaint::Solid(rgba) => rgba[3] *= o,
-            FloatPaint::Gradient { opacity, .. } => *opacity *= o,
+            FloatPaint::Gradient { opacity, .. } | FloatPaint::Image { opacity, .. } => {
+                *opacity *= o
+            }
         }
         return Some(children);
     }

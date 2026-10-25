@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod svg;
+mod svg_filter;
 pub mod svg_float;
 pub mod svg_sample;
 

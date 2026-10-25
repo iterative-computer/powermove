@@ -5,9 +5,9 @@
 
 use pm_protocol::color::Precision;
 use pm_render::composite::path_masks::{PathCoverage, coverage_values};
-use pm_render::vector::svg_float::SvgPainter;
 use pm_render::vector::VectorSource;
 use pm_render::vector::cache::VectorCache;
+use pm_render::vector::svg_float::SvgPainter;
 use pm_vector::kurbo::{Affine, Rect, Shape};
 use pm_vector::render::scene::{CoverageItem, CoverageScene, FillRule, ItemStyle, PixelRect};
 use pm_vector::render::svg::SvgDocument;

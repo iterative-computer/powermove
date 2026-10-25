@@ -155,21 +155,27 @@ impl Kernel {
     /// nodes (two before and three after each output pixel's for the
     /// interpolation) and stage 2's margin.
     pub fn grid(&self, out: PixelRect) -> Grid {
-        let s = self.step;
-        if s == 1 {
-            return Grid {
-                org: [out.x, out.y],
-                size: [out.width, out.height],
-                step: 1,
-            };
-        }
-        let margin = 2 + self.coarse_radius;
-        let n = |len: u32| ((len.max(1) - 1) / s as u32 + 6) + 2 * self.coarse_radius as u32;
+        let spaced = self.step > 1;
+        let (x, w) = self.axis(out.x, out.width, spaced);
+        let (y, h) = self.axis(out.y, out.height, spaced);
         Grid {
-            org: [out.x - margin * s, out.y - margin * s],
-            size: [n(out.width), n(out.height)],
-            step: s,
+            org: [x, y],
+            size: [w, h],
+            step: self.step,
         }
+    }
+
+    /// Stage 1's nodes along one axis of `len` output pixels from `start`:
+    /// the pixels themselves, or (`spaced`) the interpolated layout, which
+    /// a kernel without spacing also takes when the other axis has it.
+    fn axis(&self, start: i32, len: u32, spaced: bool) -> (i32, u32) {
+        if !spaced {
+            return (start, len);
+        }
+        let s = self.step;
+        let margin = 2 + self.coarse_radius;
+        let n = (len.max(1) - 1) / s as u32 + 6 + 2 * self.coarse_radius as u32;
+        (start - margin * s, n)
     }
 
     /// The CPU model of the GPU passes: `src` (`channels` values per pixel
@@ -308,6 +314,14 @@ pub(crate) struct Params {
     pub pad: [i32; 2],
     pub cradius: i32,
     pub cwbase: i32,
+    /// The vertical axis's kernel (the same as the horizontal one unless
+    /// [`Params::blur_xy`] gave it another).
+    pub ystep: i32,
+    pub yradius: i32,
+    pub ywbase: i32,
+    pub ycradius: i32,
+    pub ycwbase: i32,
+    pub pad2: [i32; 3],
 }
 
 pub(crate) fn rect4(r: PixelRect) -> [i32; 4] {
@@ -319,6 +333,7 @@ impl Params {
     /// at `wbase` of the weights buffer.
     pub(crate) fn blur(kernel: &Kernel, src: PixelRect, out: PixelRect, wbase: i32) -> Params {
         let g = kernel.grid(out);
+        let cwbase = wbase + kernel.weights.len() as i32;
         Params {
             src: rect4(src),
             grid: [g.org[0], g.org[1], g.size[0] as i32, g.size[1] as i32],
@@ -327,9 +342,61 @@ impl Params {
             radius: kernel.radius,
             wbase,
             cradius: kernel.coarse_radius,
-            cwbase: wbase + kernel.weights.len() as i32,
+            cwbase,
+            ystep: g.step,
+            yradius: kernel.radius,
+            ywbase: wbase,
+            ycradius: kernel.coarse_radius,
+            ycwbase: cwbase,
             ..Default::default()
         }
+    }
+
+    /// The blur of `src` by `kx` along rows and `ky` along columns, over
+    /// `out`: each kernel's weights then coarse weights at `wbase`, `kx`'s
+    /// first. [`Params::weights`] lists them in that order.
+    pub(crate) fn blur_xy(
+        kx: &Kernel,
+        ky: &Kernel,
+        src: PixelRect,
+        out: PixelRect,
+        wbase: i32,
+    ) -> Params {
+        let spaced = kx.step > 1 || ky.step > 1;
+        let (gx, gw) = kx.axis(out.x, out.width, spaced);
+        let (gy, gh) = ky.axis(out.y, out.height, spaced);
+        let len = |k: &Kernel| (k.weights.len() + k.coarse.len()) as i32;
+        let ywbase = wbase + len(kx);
+        Params {
+            src: rect4(src),
+            grid: [gx, gy, gw as i32, gh as i32],
+            out: rect4(out),
+            step: kx.step,
+            radius: kx.radius,
+            wbase,
+            cradius: kx.coarse_radius,
+            cwbase: wbase + kx.weights.len() as i32,
+            ystep: ky.step,
+            yradius: ky.radius,
+            ywbase,
+            ycradius: ky.coarse_radius,
+            ycwbase: ywbase + ky.weights.len() as i32,
+            ..Default::default()
+        }
+    }
+
+    /// The weights [`Params::blur_xy`] indexes, from its `wbase`.
+    pub(crate) fn weights(kx: &Kernel, ky: &Kernel) -> Vec<f32> {
+        [&kx.weights, &kx.coarse, &ky.weights, &ky.coarse]
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// Whether either axis evaluates nodes with spacing.
+    pub(crate) fn spaced(&self) -> bool {
+        self.step > 1 || self.ystep > 1
     }
 
     pub(crate) fn uniform(&self, device: &wgpu::Device) -> wgpu::Buffer {
@@ -496,7 +563,7 @@ impl Separable {
         let [h, u, h2, v, ix] = b.scratch.map(|s| s.as_entire_binding());
         let uniform = || (0, b.uniform.as_entire_binding());
         let weights = || (1, b.weights.as_entire_binding());
-        let nodes = [p.grid[2] - 2 * p.cradius, p.grid[3] - 2 * p.cradius];
+        let nodes = [p.grid[2] - 2 * p.cradius, p.grid[3] - 2 * p.ycradius];
         let mut run = |pipeline: &LazyComputePipeline,
                        entries: &[(u32, wgpu::BindingResource<'_>)],
                        size: [i32; 2]| {
@@ -516,7 +583,7 @@ impl Separable {
             &[uniform(), weights(), (3, h), (8, u.clone())],
             [p.grid[2], p.grid[3]],
         );
-        if p.step == 1 {
+        if !p.spaced() {
             return;
         }
         run(
@@ -553,8 +620,8 @@ impl Separable {
 pub(crate) fn sizes(p: &Params, elem: u64) -> [u64; 5] {
     let n = |v: i32| v.max(0) as u64;
     let (gw, gh) = (n(p.grid[2]), n(p.grid[3]));
-    let (nw, nh) = (n(p.grid[2] - 2 * p.cradius), n(p.grid[3] - 2 * p.cradius));
-    if p.step == 1 {
+    let (nw, nh) = (n(p.grid[2] - 2 * p.cradius), n(p.grid[3] - 2 * p.ycradius));
+    if !p.spaced() {
         return [gw * n(p.src[3]) * elem, gw * gh * elem, 0, 0, 0];
     }
     [
