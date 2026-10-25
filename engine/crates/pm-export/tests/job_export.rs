@@ -497,7 +497,11 @@ fn png_straight_colour_is_the_working_float_divided_by_alpha_at_every_level() {
         let center = ((H / 2 * W + W / 2) * 4) as usize;
         // #336699 at 0.3% opacity: one alpha code, and the colour recovered
         // from the float (no 8-bit truncation first).
-        assert_eq!(&rgba[center..center + 4], &[51, 102, 153, 1], "compat {compat}");
+        assert_eq!(
+            &rgba[center..center + 4],
+            &[51, 102, 153, 1],
+            "compat {compat}"
+        );
     }
 }
 

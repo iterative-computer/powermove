@@ -1429,7 +1429,8 @@ mod sampled_decode_tests {
                 overwrite: Overwrite::Fail,
                 mode: None,
             };
-            let mut sink = crate::Pipeline::new(spec.clone(), WebmSink::new(&spec).unwrap()).unwrap();
+            let mut sink =
+                crate::Pipeline::new(spec.clone(), WebmSink::new(&spec).unwrap()).unwrap();
             for n in 0..frames {
                 let mut rgba = Vec::with_capacity((spec.width * spec.height * 4) as usize);
                 for y in 0..spec.height {

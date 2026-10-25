@@ -101,6 +101,11 @@ impl VideoToolboxSink {
         let audio_frames = writer.audio_frames();
         writer.finish()?;
         let temp = self.output.temp_path().to_path_buf();
+        if let Some(audio) = self.spec.audio
+            && self.spec.container == crate::settings::Container::Mov
+        {
+            crate::mp4box::add_channel_layout(&temp, audio.channels)?;
+        }
         let movie = Movie::read(&temp)?;
         let format = self.spec.input_format();
         let decoded = self

@@ -234,7 +234,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
     assert!(r.max_pixel_error_cv() <= verify::pixel_tolerance(s.codec));
     if let Some(p) = probe(
         &done.path,
-        "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,channels,nb_read_frames,codec_tag_string:stream_tags=timecode",
+        "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,channel_layout,nb_read_frames,codec_tag_string:stream_tags=timecode",
     ) {
         for want in [
             "profile=HQ",
@@ -243,7 +243,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
             "color_range=tv",
             "nb_read_frames=30",
             "TAG:timecode=01:00:00;00",
-            "channels=2",
+            "channel_layout=stereo",
         ] {
             assert!(p.contains(want), "ffprobe lacks {want}:\n{p}");
         }
