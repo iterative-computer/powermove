@@ -34,6 +34,19 @@ pub(crate) struct Pyramid {
     pub levels: u32,
 }
 
+impl Pyramid {
+    /// No pyramid allocation is needed when the draw never minifies.
+    pub fn base(source: &wgpu::Texture) -> Self {
+        Self {
+            texture: source.clone(),
+            view: source.create_view(&wgpu::TextureViewDescriptor::default()),
+            width: source.width(),
+            height: source.height(),
+            levels: 1,
+        }
+    }
+}
+
 /// Pyramids of stills, kept across frames (their textures are the media
 /// cache's, which never change content).
 pub(crate) struct PyramidCache {

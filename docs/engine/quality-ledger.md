@@ -218,3 +218,22 @@ are source frames.
 | Correction | Today vs reference | Engine vs reference | Cases |
 |---|---|---|---|
 | A seek to a leading picture of a CRA shows that picture (today: the CRA, the next keyframe) | 1 frame (frame 30, the CRA, for frame 29) | 0 | 4K HEVC Main10, keyint 30, open GOP |
+
+### Source minification
+
+- **Reference:** independent f64, normalized Lanczos-3 over binary source
+  texels with clamp-to-edge support. The previous source draw's unmipped
+  bilinear result is exact at these pixel centres. This follows the declared
+  composition sampling kernel (`pm-render::sampling`), with no monitor filter.
+- **Gate:** `source_snapshot::monitor_4k_checker_is_closer_to_f64_than_unmipped_bilinear`,
+  all 921,600 pixels classified Resampled under unchanged `EIGHT_BIT` bounds,
+  including per-pixel excess. The paused monitor equals the source export.
+- **Units:** CV, maximum channel difference.
+
+| Correction / case | Previous monitor vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean |
+|---|---|---|
+| Lanczos-3 when paused, 3840×2160 one-texel checker → 1280×720 | 127.50, 127.50, 127.500 | 0.50, 0.50, 0.500 |
+| GPU mip pyramid and trilinear playback, same checker | 127.50, 127.50, 127.500 | 4.01, 0.51, 0.500 |
+
+Playback's maximum is at the clamped outer support; every output pixel is
+closer than the previous draw. No colour or geometry tolerance is widened.

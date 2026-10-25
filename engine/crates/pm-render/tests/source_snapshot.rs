@@ -125,6 +125,7 @@ fn original_prores_uses_native_conversion_when_the_presenter_cannot_import_it() 
             SourceFit::Stretch,
             &Default::default(),
             false,
+            pm_render::sampling::Sampling::Final,
         )
         .unwrap();
     let snapshot = renderer
@@ -143,6 +144,7 @@ fn original_prores_uses_native_conversion_when_the_presenter_cannot_import_it() 
                 SourceFit::Stretch,
                 &Default::default(),
                 false,
+                pm_render::sampling::Sampling::Final,
             )
             .unwrap()
     };
@@ -212,6 +214,7 @@ fn original_rotated_anamorphic_video_has_the_same_geometry_in_monitor_and_filmst
             SourceFit::Contain,
             &Default::default(),
             false,
+            pm_render::sampling::Sampling::Final,
         )
         .unwrap();
     let display = renderer
@@ -276,6 +279,7 @@ fn original_rotated_anamorphic_video_has_the_same_geometry_in_monitor_and_filmst
                 SourceFit::Contain,
                 &interpretation,
                 false,
+                pm_render::sampling::Sampling::Final,
             )
             .unwrap();
         let strip = renderer
@@ -555,6 +559,7 @@ fn native_source_gamma_png_preserves_file_curve_depth_and_partial_alpha() {
                     SourceFit::Stretch,
                     &Default::default(),
                     false,
+                    pm_render::sampling::Sampling::Final,
                 )
                 .unwrap();
             let poster = renderer
@@ -657,6 +662,7 @@ fn native_source_heif_rejects_pq_and_hlg_container_transfers() {
                     SourceFit::Stretch,
                     &default,
                     false,
+                    pm_render::sampling::Sampling::Final,
                 )
                 .unwrap_err(),
             renderer
@@ -1189,6 +1195,7 @@ fn monitor_reads_interpret_footage_as_composition_does() {
             SourceFit::Stretch,
             &interpretation,
             false,
+            pm_render::sampling::Sampling::Final,
         )
         .unwrap();
     let probe = renderer
@@ -1199,6 +1206,7 @@ fn monitor_reads_interpret_footage_as_composition_does() {
             SourceFit::Stretch,
             &Default::default(),
             false,
+            pm_render::sampling::Sampling::Final,
         )
         .unwrap();
     let max = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
@@ -1331,6 +1339,7 @@ fn sequence_sources_share_composition_slots_and_hd_colour_reading() {
                 SourceFit::Stretch,
                 &Default::default(),
                 true,
+                pm_render::sampling::Sampling::Final,
             )
             .unwrap();
         assert_eq!(monitor, strip[i]);
@@ -1386,6 +1395,7 @@ fn sequence_sources_share_composition_slots_and_hd_colour_reading() {
                 SourceFit::Stretch,
                 &Default::default(),
                 sequence,
+                pm_render::sampling::Sampling::Final,
             )
             .unwrap();
         let filmstrip = renderer
@@ -1466,6 +1476,7 @@ fn sequence_sources_share_composition_slots_and_hd_colour_reading() {
                 SourceFit::Stretch,
                 &interpretation,
                 true,
+                pm_render::sampling::Sampling::Final,
             )
             .unwrap();
         assert_eq!(monitor, conformed[i]);
@@ -1482,5 +1493,127 @@ fn sequence_sources_share_composition_slots_and_hd_colour_reading() {
             "conformed sequence source/composition at {time:?}"
         );
         renderer.recycle(frame);
+    }
+}
+
+/// 4K -> 720p: the monitor must use composition's declared kernels, not
+/// level-zero bilinear sampling. The reference is independent f64 Lanczos-3
+/// on the actual binary texels, separable because this checker is rank two.
+/// All pixels, including the clamped outer support, use the unmodified
+/// gate-policy Resampled/EIGHT_BIT bounds.
+#[test]
+fn monitor_4k_checker_is_closer_to_f64_than_unmipped_bilinear() {
+    use pm_reference::compare::{Bounds, Class, compare};
+    use pm_render::sampling::Sampling;
+
+    const W: u32 = 3840;
+    const H: u32 = 2160;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checker.png");
+    let mut texels = Vec::with_capacity((W * H * 3) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            let v = if (x + y) % 2 == 0 { 0 } else { 255 };
+            texels.extend_from_slice(&[v; 3]);
+        }
+    }
+    let mut png = png::Encoder::new(std::fs::File::create(&path).unwrap(), W, H);
+    png.set_color(png::ColorType::Rgb);
+    png.set_depth(png::BitDepth::Eight);
+    png.write_header()
+        .unwrap()
+        .write_image_data(&texels)
+        .unwrap();
+    drop(texels);
+    let size = Size::new(1280, 720);
+    let lanczos = |x: f64| {
+        if x.abs() < 1e-12 {
+            return 1.0;
+        }
+        if x.abs() >= 3.0 {
+            return 0.0;
+        }
+        let p = std::f64::consts::PI * x;
+        3.0 * p.sin() * (p / 3.0).sin() / (p * p)
+    };
+    let axis = |n: u32| -> Vec<f64> {
+        (0..n / 3)
+            .map(|p| {
+                let center = (p as f64 + 0.5) * 3.0;
+                let (mut sum, mut norm) = (0.0, 0.0);
+                for t in (center - 9.0).floor() as i64..=(center + 9.0).ceil() as i64 {
+                    let weight = lanczos((t as f64 + 0.5 - center) / 3.0);
+                    let parity = if t.clamp(0, i64::from(n) - 1) % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    sum += weight * parity;
+                    norm += weight;
+                }
+                sum / norm
+            })
+            .collect()
+    };
+    let (xs, ys) = (axis(W), axis(H));
+    let mut reference = Vec::with_capacity((size.width * size.height * 4) as usize);
+    let mut today = Vec::with_capacity(reference.capacity());
+    for (y, py) in ys.iter().enumerate() {
+        for (x, px) in xs.iter().enumerate() {
+            let v = 0.5 - 0.5 * px * py;
+            reference.extend_from_slice(&[v, v, v, 1.0]);
+            // Old monitor's LINEAR, mip Nearest, single-level draw samples
+            // texel (3x+1,3y+1) exactly at this 3:1 scale (no rounding).
+            let old = ((x + y) % 2) as f64;
+            today.extend_from_slice(&[old, old, old, 1.0]);
+        }
+    }
+    let classes = vec![Class::Resampled; (size.width * size.height) as usize];
+    let mut renderer = Renderer::headless().unwrap();
+    for sampling in [Sampling::Final, Sampling::Playback] {
+        let start = std::time::Instant::now();
+        let pixels = renderer
+            .source_rgba8_composed(
+                &path,
+                Ticks::ZERO,
+                size,
+                SourceFit::Contain,
+                &Default::default(),
+                false,
+                sampling,
+            )
+            .unwrap();
+        let first = start.elapsed();
+        let start = std::time::Instant::now();
+        let warm = renderer
+            .source_rgba8_composed(
+                &path,
+                Ticks::ZERO,
+                size,
+                SourceFit::Contain,
+                &Default::default(),
+                false,
+                sampling,
+            )
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(pixels, warm, "deterministic {sampling:?}");
+        if sampling == Sampling::Final {
+            assert_eq!(
+                pixels,
+                renderer
+                    .source_rgba8_export(&path, Ticks::ZERO, size, SourceFit::Contain, None, false,)
+                    .unwrap(),
+                "paused monitor equals export"
+            );
+        }
+        let engine: Vec<f64> = pixels.iter().map(|&v| f64::from(v) / 255.0).collect();
+        let report = compare(&engine, &today, &reference, &classes);
+        let failures = report.failures(&Bounds::EIGHT_BIT);
+        eprintln!(
+            "monitor 4K checker {sampling:?}: {report}; first {first:?}, warm {elapsed:?} (diagnostic only; timing pending quiet window)"
+        );
+        assert!(failures.is_empty(), "{sampling:?}: {failures:?}{report}");
+        assert!(report.class(Class::Resampled).engine_vs_reference.mean < 1.0);
     }
 }
