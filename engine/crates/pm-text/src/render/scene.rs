@@ -240,14 +240,11 @@ fn certified_winding(contour: &[u32], elements: &[PathEl], point: [f64; 2]) -> O
     for index in 0..contour.len() {
         let a = raw_point(elements, contour[index]);
         let b = raw_point(elements, contour[(index + 1) % contour.len()]);
-        if a[1] <= point[1] && point[1] < b[1] {
-            if orientation_sign(a, b, point)? > 0 {
-                winding = winding.checked_add(1)?;
-            }
-        } else if b[1] <= point[1] && point[1] < a[1] {
-            if orientation_sign(a, b, point)? < 0 {
-                winding = winding.checked_sub(1)?;
-            }
+        // The two half-open spans are disjoint, so the sign test can join each.
+        if a[1] <= point[1] && point[1] < b[1] && orientation_sign(a, b, point)? > 0 {
+            winding = winding.checked_add(1)?;
+        } else if b[1] <= point[1] && point[1] < a[1] && orientation_sign(a, b, point)? < 0 {
+            winding = winding.checked_sub(1)?;
         }
     }
     Some(winding)
@@ -284,10 +281,10 @@ impl NonzeroResolver {
             return;
         }
         let contour = &mut self.raw_contours[*index];
-        if let (Some(&first), Some(&last)) = (contour.first(), contour.last()) {
-            if raw_point(elements, first) == raw_point(elements, last) {
-                contour.pop();
-            }
+        if let (Some(&first), Some(&last)) = (contour.first(), contour.last())
+            && raw_point(elements, first) == raw_point(elements, last)
+        {
+            contour.pop();
         }
         if contour.len() >= 3 {
             *index += 1;

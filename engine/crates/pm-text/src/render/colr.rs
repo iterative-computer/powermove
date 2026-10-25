@@ -561,65 +561,103 @@ impl Fill {
     }
 }
 
-/// Deposit a directed edge's signed area into each pixel row it crosses.
-/// Splitting at integer x boundaries makes the trapezoid shares exact for a
-/// linear edge: the left cell gets its area to the edge's right, and the next
-/// cell gets the remainder. A row prefix sum then recovers filled area.
-fn deposit_edge(
-    from: Point,
-    to: Point,
-    width: u32,
-    height: u32,
+/// Signed edge areas of one coverage raster, accumulated per pixel row.
+struct EdgeAreas {
     left: i32,
     top: i32,
-    differences: &mut [f64],
-    breaks: &mut Vec<f64>,
-) {
-    if !from.is_finite() || !to.is_finite() || from.y == to.y {
-        return;
+    width: u32,
+    height: u32,
+    /// Per row, `width + 1` signed area differences.
+    differences: Vec<f64>,
+    breaks: Vec<f64>,
+}
+
+impl EdgeAreas {
+    fn new(width: u32, height: u32, left: i32, top: i32) -> Self {
+        Self {
+            left,
+            top,
+            width,
+            height,
+            differences: vec![0.0; (width as usize + 1) * height as usize],
+            breaks: Vec::new(),
+        }
     }
-    let (a, b, sign) = if from.y < to.y {
-        (from, to, 1.0)
-    } else {
-        (to, from, -1.0)
-    };
-    let row_start = (a.y.floor() as i64).max(i64::from(top));
-    let row_end = (b.y.ceil() as i64).min(i64::from(top) + i64::from(height));
-    let (left_x, right_x) = (f64::from(left), f64::from(left) + f64::from(width));
-    for row in row_start..row_end {
-        let y0 = a.y.max(row as f64);
-        let y1 = b.y.min(row as f64 + 1.0);
-        if y1 <= y0 {
-            continue;
-        }
-        let x_at = |y: f64| a.x + (b.x - a.x) * ((y - a.y) / (b.y - a.y));
-        let x0 = x_at(y0);
-        let x1 = x_at(y1);
-        breaks.clear();
-        breaks.extend([0.0, 1.0]);
-        if x0 != x1 {
-            let first = (x0.min(x1).ceil() as i64).max(i64::from(left));
-            let last = (x0.max(x1).floor() as i64).min(i64::from(left) + i64::from(width));
-            for boundary in first..=last {
-                let t = (boundary as f64 - x0) / (x1 - x0);
-                if t > 0.0 && t < 1.0 {
-                    breaks.push(t);
-                }
+
+    /// Prefix-sum each row into absolute filled area per pixel.
+    fn into_coverage(self) -> Vec<f32> {
+        let width = self.width as usize;
+        let mut pixels = Vec::with_capacity(width * self.height as usize);
+        for row in self.differences.chunks_exact(width + 1) {
+            let mut winding_area = 0.0f64;
+            for share in &row[..width] {
+                winding_area += share;
+                pixels.push(winding_area.abs().clamp(0.0, 1.0) as f32);
             }
-            breaks.sort_by(f64::total_cmp);
         }
-        let row_offset = (row - i64::from(top)) as usize * (width as usize + 1);
-        for pair in breaks.windows(2) {
-            let (t0, t1) = (pair[0], pair[1]);
-            let area = sign * (y1 - y0) * (t1 - t0);
-            let mid_x = x0 + (x1 - x0) * (0.5 * (t0 + t1));
-            if mid_x <= left_x {
-                differences[row_offset] += area;
-            } else if mid_x < right_x {
-                let column = (mid_x.floor() as i64 - i64::from(left)) as usize;
-                let fraction = (mid_x - mid_x.floor()).clamp(0.0, 1.0);
-                differences[row_offset + column] += area * (1.0 - fraction);
-                differences[row_offset + column + 1] += area * fraction;
+        pixels
+    }
+
+    /// Deposit a directed edge's signed area into each pixel row it crosses.
+    /// Splitting at integer x boundaries makes the trapezoid shares exact for
+    /// a linear edge: the left cell gets its area to the edge's right, and the
+    /// next cell gets the remainder. A row prefix sum then recovers filled
+    /// area.
+    fn deposit(&mut self, from: Point, to: Point) {
+        let Self {
+            left,
+            top,
+            width,
+            height,
+            ref mut differences,
+            ref mut breaks,
+        } = *self;
+        if !from.is_finite() || !to.is_finite() || from.y == to.y {
+            return;
+        }
+        let (a, b, sign) = if from.y < to.y {
+            (from, to, 1.0)
+        } else {
+            (to, from, -1.0)
+        };
+        let row_start = (a.y.floor() as i64).max(i64::from(top));
+        let row_end = (b.y.ceil() as i64).min(i64::from(top) + i64::from(height));
+        let (left_x, right_x) = (f64::from(left), f64::from(left) + f64::from(width));
+        for row in row_start..row_end {
+            let y0 = a.y.max(row as f64);
+            let y1 = b.y.min(row as f64 + 1.0);
+            if y1 <= y0 {
+                continue;
+            }
+            let x_at = |y: f64| a.x + (b.x - a.x) * ((y - a.y) / (b.y - a.y));
+            let x0 = x_at(y0);
+            let x1 = x_at(y1);
+            breaks.clear();
+            breaks.extend([0.0, 1.0]);
+            if x0 != x1 {
+                let first = (x0.min(x1).ceil() as i64).max(i64::from(left));
+                let last = (x0.max(x1).floor() as i64).min(i64::from(left) + i64::from(width));
+                for boundary in first..=last {
+                    let t = (boundary as f64 - x0) / (x1 - x0);
+                    if t > 0.0 && t < 1.0 {
+                        breaks.push(t);
+                    }
+                }
+                breaks.sort_by(f64::total_cmp);
+            }
+            let row_offset = (row - i64::from(top)) as usize * (width as usize + 1);
+            for pair in breaks.windows(2) {
+                let (t0, t1) = (pair[0], pair[1]);
+                let area = sign * (y1 - y0) * (t1 - t0);
+                let mid_x = x0 + (x1 - x0) * (0.5 * (t0 + t1));
+                if mid_x <= left_x {
+                    differences[row_offset] += area;
+                } else if mid_x < right_x {
+                    let column = (mid_x.floor() as i64 - i64::from(left)) as usize;
+                    let fraction = (mid_x - mid_x.floor()).clamp(0.0, 1.0);
+                    differences[row_offset + column] += area * (1.0 - fraction);
+                    differences[row_offset + column + 1] += area * fraction;
+                }
             }
         }
     }
@@ -643,53 +681,25 @@ fn coverage(
         resolved.elements().len(),
         super::scene::COVERAGE_PATH_CACHE_BYTES,
     );
-    let mut differences = vec![0.0f64; (width as usize + 1) * height as usize];
-    let mut breaks = Vec::new();
+    let mut areas = EdgeAreas::new(width, height, left, top);
     let (mut start, mut last, mut open) = (Point::ZERO, Point::ZERO, false);
     for element in resolved.elements() {
         match *element {
             PathEl::MoveTo(point) => {
                 if open {
-                    deposit_edge(
-                        last,
-                        start,
-                        width,
-                        height,
-                        left,
-                        top,
-                        &mut differences,
-                        &mut breaks,
-                    );
+                    areas.deposit(last, start);
                 }
                 (start, last, open) = (point, point, true);
             }
             PathEl::LineTo(point) => {
                 if open {
-                    deposit_edge(
-                        last,
-                        point,
-                        width,
-                        height,
-                        left,
-                        top,
-                        &mut differences,
-                        &mut breaks,
-                    );
+                    areas.deposit(last, point);
                     last = point;
                 }
             }
             PathEl::ClosePath => {
                 if open {
-                    deposit_edge(
-                        last,
-                        start,
-                        width,
-                        height,
-                        left,
-                        top,
-                        &mut differences,
-                        &mut breaks,
-                    );
+                    areas.deposit(last, start);
                     open = false;
                 }
             }
@@ -699,26 +709,9 @@ fn coverage(
         }
     }
     if open {
-        deposit_edge(
-            last,
-            start,
-            width,
-            height,
-            left,
-            top,
-            &mut differences,
-            &mut breaks,
-        );
+        areas.deposit(last, start);
     }
-    let mut pixels = Vec::with_capacity(width as usize * height as usize);
-    for row in differences.chunks_exact(width as usize + 1) {
-        let mut winding_area = 0.0f64;
-        for share in &row[..width as usize] {
-            winding_area += share;
-            pixels.push(winding_area.abs().clamp(0.0, 1.0) as f32);
-        }
-    }
-    pixels
+    areas.into_coverage()
 }
 
 fn over(dst: &mut [f32], color: [f32; 4], coverage: f32) {
