@@ -417,17 +417,16 @@ pub fn convert(
             0.0
         }
     };
+    // Y′CbCr carries extended RGB within its codable range (superwhites,
+    // sub-blacks and footage's own out-of-gamut colors), so untouched
+    // footage keeps its luma; only RGB 8-bit outputs take the CSS mapping.
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
-        let map_css = matches!(
-            format,
-            InputFormat::V420 | InputFormat::V0a8 | InputFormat::I420 | InputFormat::I420a
-        );
         let (c, a) = tagged_output_rgba(
             pixel(frame, x, y),
             params.working,
             params.alpha,
             params.tags,
-            map_css,
+            false,
         );
         (rgb_to_ycbcr(c), a)
     };
@@ -1149,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn superwhites_and_subblacks_map_at_8_bits_and_clip_at_wider_depths() {
+    fn superwhites_and_subblacks_clip_to_the_codable_range() {
         let f = frame(2, 2, |x, _| {
             if x == 0 {
                 [-0.5, -0.5, -0.5, 1.0]
@@ -1163,14 +1162,7 @@ mod tests {
             rgba: &f,
         };
         let v = convert(&wf, InputFormat::V420, &params(AlphaOutput::None, false)).unwrap();
-        let reference_y = |rgb| {
-            let mapped = pm_reference::color::css_gamut_map_srgb(rgb);
-            let y = pm_reference::color::rgb_to_ycbcr(mapped, (0.2126, 0.0722))[0];
-            (y * 219.0 + 16.0).round_ties_even() as u8
-        };
-        let expected = [reference_y([-0.5; 3]), reference_y([2.0; 3])];
-        assert_eq!(expected, [16, 235]);
-        assert_eq!(&v.planes[0].u8().unwrap()[..2], &expected);
+        assert_eq!(&v.planes[0].u8().unwrap()[..2], &[1, 254]);
         let v = convert(&wf, InputFormat::V216, &params(AlphaOutput::None, false)).unwrap();
         assert_eq!(v.planes[0].u16().unwrap()[1], 256);
         assert_eq!(v.planes[0].u16().unwrap()[3], 65216);
