@@ -1,6 +1,6 @@
 //! Compiled pipelines and the uniform layouts they read.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A pipeline compiled on first use. The factory owns only handles from its
 /// device; neither it nor the device keeps a reference to this wrapper.
@@ -108,8 +108,10 @@ pub struct Pipelines {
     /// The compositing passes (`crate::composite`).
     pub(crate) ops: crate::composite::gpu::OpPipelines,
     draw: [LazyRenderPipeline; 3],
+    scene: [LazyRenderPipeline; 3],
     solid: [LazyRenderPipeline; 3],
     draw_add: [LazyRenderPipeline; 3],
+    scene_add: [LazyRenderPipeline; 3],
     solid_add: [LazyRenderPipeline; 3],
     background: [LazyRenderPipeline; 3],
     flip: [LazyRenderPipeline; 3],
@@ -139,9 +141,8 @@ impl Pipelines {
             label: Some("pm-render composite"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}\n{}",
+                    "{}\n{}",
                     pm_color::wgsl::COLOR,
-                    include_str!("shaders/scene_output.wgsl"),
                     include_str!("shaders/composite.wgsl")
                 )
                 .into(),
@@ -243,6 +244,7 @@ impl Pipelines {
                 operation: wgpu::BlendOperation::Add,
             },
         };
+        let scene_module = Arc::new(OnceLock::<wgpu::ShaderModule>::new());
         let blended = |layout: &wgpu::PipelineLayout,
                        entry: &'static str,
                        format: wgpu::TextureFormat,
@@ -250,12 +252,32 @@ impl Pipelines {
             let device = device.clone();
             let composite = composite.clone();
             let layout = layout.clone();
+            let scene_module = scene_module.clone();
             LazyRenderPipeline::new(move || {
+                let module = if entry == "fs_scene" {
+                    scene_module.get_or_init(|| {
+                        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some("pm-render scene composite"),
+                            source: wgpu::ShaderSource::Wgsl(
+                                format!(
+                                    "{}\n{}\n{}\n{}",
+                                    pm_color::wgsl::COLOR,
+                                    include_str!("shaders/scene_output.wgsl"),
+                                    include_str!("shaders/composite.wgsl"),
+                                    include_str!("shaders/scene_quad.wgsl")
+                                )
+                                .into(),
+                            ),
+                        })
+                    })
+                } else {
+                    &composite
+                };
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(entry),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
-                        module: &composite,
+                        module,
                         entry_point: Some("vs"),
                         compilation_options: Default::default(),
                         buffers: &[],
@@ -268,7 +290,7 @@ impl Pipelines {
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
-                        module: &composite,
+                        module,
                         entry_point: Some(entry),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
@@ -287,8 +309,10 @@ impl Pipelines {
                 blended(layout, entry, format, over)
             };
         let draw = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_draw", f));
+        let scene = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_scene", f));
         let solid = TARGET_FORMATS.map(|f| pipeline(&solid_layout, "fs_solid", f));
         let draw_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_draw", f, add));
+        let scene_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_scene", f, add));
         let solid_add = TARGET_FORMATS.map(|f| blended(&solid_layout, "fs_solid", f, add));
         let background = TARGET_FORMATS.map(|f| pipeline(&background_layout, "fs_background", f));
         let flip_pipeline = |format: wgpu::TextureFormat| {
@@ -481,8 +505,10 @@ impl Pipelines {
             source_layout,
             linear,
             draw,
+            scene,
             solid,
             draw_add,
+            scene_add,
             solid_add,
             background,
             flip,
@@ -507,6 +533,18 @@ impl Pipelines {
         match blend {
             PassBlend::Over => self.draw[format_index(format)].get(),
             PassBlend::Additive => self.draw_add[format_index(format)].get(),
+        }
+    }
+
+    /// The scene output curve is compiled only when a linear 3D source draws.
+    pub fn scene_with(
+        &self,
+        format: wgpu::TextureFormat,
+        blend: PassBlend,
+    ) -> &wgpu::RenderPipeline {
+        match blend {
+            PassBlend::Over => self.scene[format_index(format)].get(),
+            PassBlend::Additive => self.scene_add[format_index(format)].get(),
         }
     }
 

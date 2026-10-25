@@ -128,6 +128,39 @@ fn lanczos3(x: f32) -> f32 {
 // stronger minification reads a coarser (box-filtered) level.
 const MAX_KERNEL_SCALE: f32 = 4.0;
 
+fn mip_size(level: i32) -> vec2<u32> {
+    if (r.origin.z > 0.5 && level == 1) {
+        return max(textureDimensions(src, 0) / 2u, vec2<u32>(1u));
+    }
+    return textureDimensions(src, level);
+}
+
+fn mip_texel(at: vec2<i32>, level: i32) -> vec4<f32> {
+    if (r.origin.z > 0.5 && level == 1) {
+        let last = vec2<i32>(textureDimensions(src, 0)) - vec2<i32>(1);
+        let p = at * 2;
+        return (textureLoad(src, min(p, last), 0)
+            + textureLoad(src, min(p + vec2<i32>(1, 0), last), 0)
+            + textureLoad(src, min(p + vec2<i32>(0, 1), last), 0)
+            + textureLoad(src, min(p + vec2<i32>(1, 1), last), 0)) * 0.25;
+    }
+    return textureLoad(src, at, level);
+}
+
+fn first_mip_bilinear(uv: vec2<f32>) -> vec4<f32> {
+    let size = mip_size(1);
+    let p = uv * vec2<f32>(size) - vec2<f32>(0.5);
+    let at = vec2<i32>(floor(p));
+    let f = fract(p);
+    let last = vec2<i32>(size) - vec2<i32>(1);
+    let zero = vec2<i32>(0);
+    let a = mip_texel(clamp(at, zero, last), 1);
+    let b = mip_texel(clamp(at + vec2<i32>(1, 0), zero, last), 1);
+    let c = mip_texel(clamp(at + vec2<i32>(0, 1), zero, last), 1);
+    let d = mip_texel(clamp(at + vec2<i32>(1, 1), zero, last), 1);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 // Lanczos-3 in the principal axes of the mapping (`j` = texels per output
 // pixel along x and y), with the anti-ringing clamp to the central texels.
 fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
@@ -156,7 +189,7 @@ fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let levels = r.tex.z;
     let level = clamp(ceil(log2(s1 / MAX_KERNEL_SCALE)), 0.0, levels - 1.0);
     let k = exp2(level);
-    let size = vec2<f32>(textureDimensions(src, i32(level)));
+    let size = vec2<f32>(mip_size(i32(level)));
     let a1 = max(1.0, s1 / k);
     let a2 = max(1.0, s2 / k);
     // The sample position at this level, in texel units (centers at +0.5).
@@ -177,7 +210,7 @@ fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
             if (abs(kx) >= 3.0 || abs(ky) >= 3.0) {
                 continue;
             }
-            let c = textureLoad(src, clamp(vec2<i32>(x, y), vec2<i32>(0), last), i32(level));
+            let c = mip_texel(clamp(vec2<i32>(x, y), vec2<i32>(0), last), i32(level));
             let w = lanczos3(kx) * lanczos3(ky);
             sum += c * w;
             wsum += w;
@@ -223,7 +256,12 @@ fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
     let cuv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
     var c: vec4<f32>;
     if (r.params.z < 0.5) {
-        c = textureSampleGrad(src, trilinear, cuv, duvx, duvy);
+        if (r.origin.z > 0.5) {
+            let lod = clamp(log2(max(length(dx), length(dy))), 0.0, 1.0);
+            c = mix(textureSampleLevel(src, trilinear, cuv, 0.0), first_mip_bilinear(cuv), lod);
+        } else {
+            c = textureSampleGrad(src, trilinear, cuv, duvx, duvy);
+        }
     } else {
         c = lanczos(cuv * r.tex.xy, dx, dy);
     }

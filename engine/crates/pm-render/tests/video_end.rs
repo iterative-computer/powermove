@@ -16,6 +16,14 @@ use support::ticks;
 const FRAMES: usize = 20;
 const SIDE: u32 = 64;
 
+struct Clean(std::path::PathBuf);
+
+impl Drop for Clean {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Source frame `i` is the grey level `20 + 10 i` (the spec's levels).
 fn level(i: usize) -> f64 {
     20.0 + 10.0 * i as f64
@@ -155,12 +163,6 @@ fn today(fps: u32, padding: f64) -> Vec<usize> {
 
 #[test]
 fn every_surface_keeps_last_frames_at_matching_and_mixed_rates() {
-    struct Clean(std::path::PathBuf);
-    impl Drop for Clean {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
     let dir =
         Clean(std::env::temp_dir().join(format!("pm-render-video-end-{}", std::process::id())));
     std::fs::create_dir_all(&dir.0).unwrap();
@@ -240,6 +242,58 @@ fn every_surface_keeps_last_frames_at_matching_and_mixed_rates() {
             errors[FRAMES - 1],
             errors[FRAMES - 1],
             errors.iter().sum::<usize>() as f64 / FRAMES as f64,
+        );
+    }
+}
+
+/// A held decoded source reuses its filtered texels. A new decoded frame,
+/// including one uploaded into recycled texture storage, invalidates them.
+#[test]
+fn minified_video_reuses_only_the_same_source_revision() {
+    use pm_perf::Counter;
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-video-mips-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let path = dir.0.join("steps.mp4");
+    steps_clip(&path, 24);
+    let doc = load(&document(24, 24, false));
+    let mut assets = MapResolver::default();
+    assets.paths.insert("clip".into(), path);
+    let mut renderer = Renderer::headless().unwrap();
+    let request = RenderRequest {
+        sampling: pm_render::sampling::Sampling::Playback,
+        ..RenderRequest::at_scale(Size::new(8, 8), 0.125, Precision::Float16)
+    };
+    for source in [0, 1, 2, 8, 19] {
+        let time = source as f64 / 24.0;
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(time), &request, &assets)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let actual = renderer.read_rgba(&frame).unwrap();
+        renderer.recycle(frame);
+        for px in actual.chunks_exact(4) {
+            assert!(
+                (f64::from(px[0]) * 255.0 - level(source)).abs() < 5.0,
+                "source {source}: {px:?}"
+            );
+        }
+        let before = pm_perf::snapshot();
+        let held = renderer
+            .render(&doc, "Ptest-root", ticks(time + 0.01), &request, &assets)
+            .unwrap();
+        let work = pm_perf::snapshot().since(&before);
+        assert!(held.failures.is_empty(), "{:?}", held.failures);
+        assert_eq!(
+            renderer.read_rgba(&held).unwrap(),
+            actual,
+            "source {source}"
+        );
+        renderer.recycle(held);
+        assert!(
+            work.get(Counter::RenderPasses) <= 2,
+            "held source {source} regenerated mip texels: {} passes",
+            work.get(Counter::RenderPasses)
         );
     }
 }

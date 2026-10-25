@@ -166,6 +166,7 @@ pub(crate) struct Exec<'a> {
 /// A nested composition's target this frame, by its plan's address.
 pub(crate) struct RenderedComp {
     first: usize,
+    revision: u64,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
@@ -354,8 +355,9 @@ impl Exec<'_> {
                             && let Some(kept) = self.comps.iter().find(|c| c.first == first)
                         {
                             let texture = kept.texture.clone();
+                            let revision = kept.revision;
                             r.view = Some(kept.view.clone());
-                            self.prepare_level2(encoder, r, &texture, false);
+                            self.prepare_level2(encoder, r, &texture, Some(revision));
                             r.from_fbo = true;
                             return;
                         }
@@ -379,6 +381,7 @@ impl Exec<'_> {
                         } else {
                             self.render_comp(encoder, child, child_region, &target)
                         };
+                        let revision = self.pyramids.changed();
                         if !accumulate
                             && !self.depth_id
                             && !group
@@ -393,12 +396,13 @@ impl Exec<'_> {
                         {
                             self.comps.push(RenderedComp {
                                 first: address,
+                                revision,
                                 texture: target.texture.clone(),
                                 view: target.view.clone(),
                             });
                         }
                         r.view = Some(target.view.clone());
-                        self.prepare_level2(encoder, r, &target.texture, false);
+                        self.prepare_level2(encoder, r, &target.texture, Some(revision));
                         r.from_fbo = true;
                         // The depth and id surface sees 3D inside the
                         // composition: its own surface's depth (GL row
@@ -454,7 +458,7 @@ impl Exec<'_> {
                         ) {
                             Ok(t) => {
                                 r.view = Some(t.view.clone());
-                                self.prepare_level2(encoder, r, &t.texture, true);
+                                self.prepare_level2(encoder, r, &t.texture, Some(0));
                             }
                             Err(e) => self.fail(plan, draw, e),
                         }
@@ -484,7 +488,8 @@ impl Exec<'_> {
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());
-                                self.prepare_level2(encoder, r, &t.texture, false);
+                                let revision = self.media.texture_revision(&t.texture);
+                                self.prepare_level2(encoder, r, &t.texture, revision);
                             }
                             Ok(None) => {}
                             Err(e) => self.fail(plan, draw, e),
@@ -506,7 +511,7 @@ impl Exec<'_> {
                                 (&plan.composition, &draw.layer),
                             ) {
                                 Ok(SvgResolved::Drawn(view) | SvgResolved::Substitute(view)) => {
-                                    self.prepare_level2(encoder, r, view.texture(), false);
+                                    self.prepare_level2(encoder, r, view.texture(), None);
                                     r.view = Some(view);
                                 }
                                 Ok(SvgResolved::Missing) => {}
@@ -522,7 +527,7 @@ impl Exec<'_> {
                                 Ok(view) => {
                                     // Level 2 content on a plane is resampled
                                     // (`crate::space25d::local`).
-                                    self.prepare_level2(encoder, r, view.texture(), false);
+                                    self.prepare_level2(encoder, r, view.texture(), None);
                                     r.view = Some(view);
                                 }
                                 Err(message) => {
@@ -542,7 +547,7 @@ impl Exec<'_> {
                             self.precision,
                         ) {
                             Ok(view) => {
-                                self.prepare_level2(encoder, r, view.texture(), false);
+                                self.prepare_level2(encoder, r, view.texture(), None);
                                 r.view = Some(view);
                             }
                             Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
@@ -566,10 +571,10 @@ impl Exec<'_> {
                             // Decode the texels before linear-light reconstruction.
                             if self.working == WorkingEncoding::LinearLight && r.level2.is_some() {
                                 let linear = self.decode_sampled_source(encoder, &target);
-                                self.prepare_level2(encoder, r, &linear.texture, false);
+                                self.prepare_level2(encoder, r, &linear.texture, None);
                                 r.view = Some(linear.view.clone());
                             } else {
-                                self.prepare_level2(encoder, r, &target.texture, false);
+                                self.prepare_level2(encoder, r, &target.texture, None);
                                 r.view = Some(target.view.clone());
                                 r.encoded = true;
                             }
@@ -629,14 +634,14 @@ impl Exec<'_> {
                                         {
                                             let linear =
                                                 self.decode_sampled_source(encoder, &out.color);
-                                            self.prepare_level2(encoder, r, &linear.texture, false);
+                                            self.prepare_level2(encoder, r, &linear.texture, None);
                                             r.view = Some(linear.view.clone());
                                         } else {
                                             self.prepare_level2(
                                                 encoder,
                                                 r,
                                                 &out.color.texture,
-                                                false,
+                                                None,
                                             );
                                             r.view = Some(out.color.view.clone());
                                             r.encoded = true;
@@ -654,7 +659,7 @@ impl Exec<'_> {
                                                 encoder,
                                                 r,
                                                 &converted.texture,
-                                                false,
+                                                None,
                                             );
                                             r.view = Some(converted.view.clone());
                                         } else {
@@ -689,15 +694,17 @@ impl Exec<'_> {
         encoder: &mut wgpu::CommandEncoder,
         r: &mut Resolved,
         texture: &wgpu::Texture,
-        still: bool,
+        revision: Option<u64>,
     ) {
         if let Some(sampling) = r.level2 {
             let levels = r.mip_levels(texture, sampling);
-            if levels == 1 {
-                r.pyramid = Some(crate::sampling::gpu::Pyramid::base(
-                    texture,
-                    r.view.as_ref().filter(|v| v.texture() == texture),
-                ));
+            if levels <= 2 {
+                let view = r.view.as_ref().filter(|v| v.texture() == texture);
+                r.pyramid = Some(if levels == 1 {
+                    crate::sampling::gpu::Pyramid::base(texture, view)
+                } else {
+                    crate::sampling::gpu::Pyramid::inline_first(texture, view)
+                });
                 return;
             }
             r.pyramid = Some(self.pipelines.resample.pyramid(
@@ -705,7 +712,7 @@ impl Exec<'_> {
                 encoder,
                 texture,
                 levels,
-                still,
+                revision,
                 self.pyramids,
             ));
         }
@@ -1069,7 +1076,11 @@ impl Exec<'_> {
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);
             } else if let Some(bind) = &texture_binds[i] {
-                pass.set_pipeline(self.pipelines.draw_with(format, blend));
+                pass.set_pipeline(if r.scene.is_some() {
+                    self.pipelines.scene_with(format, blend)
+                } else {
+                    self.pipelines.draw_with(format, blend)
+                });
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.set_bind_group(1, bind, &[]);
                 pass.draw(0..4, 0..1);

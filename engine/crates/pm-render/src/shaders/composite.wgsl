@@ -55,8 +55,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 
 // `FRAG_DRAW`: no mipmaps, bilinear, hard edges outside the UV window;
 // `color.y` = 1 for sources in GL row order (`u_fromFbo`).
-@fragment
-fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
+fn sample_quad(in: VsOut) -> vec4<f32> {
     var uv = in.uv;
     if (q.color.y > 0.5) {
         uv = vec2<f32>(uv.x, 1.0 - uv.y);
@@ -65,9 +64,15 @@ fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         c = vec4<f32>(0.0);
     }
-    if (q.color.z > 1.5) {
-        c = scene_output(c, q.scene.w, vec4<f32>(q.scene.rgb, q.color.w), q.color.z < 2.5);
-    } else if (q.color.z > 0.5) {
+    return c;
+}
+
+// Ordinary 2D textures only need the authored E-to-linear decode. Keeping
+// the scene curve out of this entry point avoids compiling it for 2D draws.
+@fragment
+fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
+    var c = sample_quad(in);
+    if (q.color.z > 0.5) {
         c = pm_premultiplied_e_to_linear(c);
     }
     return c * q.color.x;

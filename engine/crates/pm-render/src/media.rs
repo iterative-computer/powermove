@@ -1122,7 +1122,8 @@ pub struct MediaCache {
     /// Open video sources with the file's size and modification time when
     /// opened: a file replaced at the same path is reopened.
     sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
-    frames: BTreeMap<FrameKey, Target>,
+    frames: BTreeMap<FrameKey, (Target, u64)>,
+    next_texture_revision: u64,
     /// "Interpret Footage" overrides by file (section 9, per-source
     /// interpretation): the color reading replaces the probe's.
     interpretations: BTreeMap<PathBuf, ColorDescription>,
@@ -1164,6 +1165,7 @@ impl MediaCache {
             images: BTreeMap::new(),
             sources: BTreeMap::new(),
             frames: BTreeMap::new(),
+            next_texture_revision: 0,
             interpretations: BTreeMap::new(),
             deinterlacer: None,
             orient: None,
@@ -1403,7 +1405,7 @@ impl MediaCache {
             linear: working == WorkingEncoding::LinearLight,
         };
         // The newest converted frame of the source (a paused redraw).
-        if let Some(t) = self.frames.get(&key_of(n)) {
+        if let Some((t, _)) = self.frames.get(&key_of(n)) {
             pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(Some(t.clone()));
         }
@@ -1447,7 +1449,7 @@ impl MediaCache {
         };
         // A stand-in may be the frame converted last.
         let key = key_of(n);
-        if let Some(t) = self.frames.get(&key) {
+        if let Some((t, _)) = self.frames.get(&key) {
             pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(Some(t.clone()));
         }
@@ -1552,7 +1554,7 @@ impl MediaCache {
         // Keep only the newest frame per source and precision. The older
         // one may still be read by this render: it is reused from the next.
         let mut retired = Vec::new();
-        self.frames.retain(|k, t| {
+        self.frames.retain(|k, (t, _)| {
             let keep = k.path != key.path
                 || k.precision != key.precision
                 || k.export != key.export
@@ -1563,7 +1565,9 @@ impl MediaCache {
             keep
         });
         self.retired_frames.extend(retired);
-        self.frames.insert(key, target.clone());
+        self.next_texture_revision += 1;
+        self.frames
+            .insert(key, (target.clone(), self.next_texture_revision));
         self.recount();
         Ok(Some(target))
     }
@@ -1608,11 +1612,20 @@ impl MediaCache {
         self.bytes = self
             .images
             .values()
-            .chain(self.frames.values())
+            .chain(self.frames.values().map(|(target, _)| target))
             .chain(&self.retired_frames)
             .chain(&self.free_frames)
             .map(Target::bytes)
             .sum();
+    }
+
+    /// The converted texels change only on a cache miss, including when a
+    /// retired texture is overwritten. A repeated or held video frame keeps
+    /// its revision, so downstream mip texels remain reusable.
+    pub(crate) fn texture_revision(&self, texture: &wgpu::Texture) -> Option<u64> {
+        self.frames
+            .values()
+            .find_map(|(target, revision)| (&target.texture == texture).then_some(*revision))
     }
 
     /// Changes whenever a display frame a scrub asked for has decoded.

@@ -33,6 +33,7 @@ pub(crate) struct Pyramid {
     pub width: u32,
     pub height: u32,
     pub levels: u32,
+    inline_first: bool,
     steps: Option<std::sync::Arc<Vec<MipStep>>>,
 }
 
@@ -57,18 +58,28 @@ impl Pyramid {
             width: source.width(),
             height: source.height(),
             levels: 1,
+            inline_first: false,
             steps: None,
         }
     }
+
+    /// Evaluate the first box-filtered mip in the sampling draw. Small
+    /// minifications need no retained texture or separate copy/downsample passes.
+    pub fn inline_first(source: &wgpu::Texture, view: Option<&wgpu::TextureView>) -> Self {
+        let mut pyramid = Self::base(source, view);
+        pyramid.levels = 2;
+        pyramid.inline_first = true;
+        pyramid
+    }
 }
 
-/// Pyramid storage kept across frames. Still texels remain valid; dynamic
-/// sources regenerate their texels before each use.
+/// Pyramid storage and texels kept by texture identity and source revision.
 pub(crate) struct PyramidCache {
-    entries: VecDeque<(wgpu::Texture, Pyramid)>,
+    entries: VecDeque<(wgpu::Texture, Option<u64>, Pyramid)>,
+    next_revision: u64,
 }
 
-/// Stills whose pyramids are kept.
+/// Sources whose pyramids are kept.
 const CACHED_PYRAMIDS: usize = 16;
 const CACHED_PYRAMID_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -76,20 +87,29 @@ impl PyramidCache {
     pub fn new() -> PyramidCache {
         PyramidCache {
             entries: VecDeque::new(),
+            next_revision: 0,
         }
     }
 
-    fn get(&mut self, source: &wgpu::Texture) -> Option<Pyramid> {
-        let i = self.entries.iter().position(|(t, _)| t == source)?;
+    /// A new write to a pooled composition texture changes its contents even
+    /// when its allocation is reused. Multiple placements of that write share
+    /// one revision; the next write gets a different one.
+    pub fn changed(&mut self) -> u64 {
+        self.next_revision += 1;
+        self.next_revision
+    }
+
+    fn get(&mut self, source: &wgpu::Texture) -> Option<(Option<u64>, Pyramid)> {
+        let i = self.entries.iter().position(|(t, _, _)| t == source)?;
         let entry = self.entries.remove(i)?;
-        let p = entry.1.clone();
+        let p = (entry.1, entry.2.clone());
         self.entries.push_front(entry);
         Some(p)
     }
 
-    fn put(&mut self, source: wgpu::Texture, pyramid: Pyramid) {
-        self.entries.retain(|(t, _)| *t != source);
-        self.entries.push_front((source, pyramid));
+    fn put(&mut self, source: wgpu::Texture, revision: Option<u64>, pyramid: Pyramid) {
+        self.entries.retain(|(t, _, _)| *t != source);
+        self.entries.push_front((source, revision, pyramid));
         self.entries.truncate(CACHED_PYRAMIDS);
         while self.bytes() > CACHED_PYRAMID_BYTES {
             self.entries.pop_back();
@@ -105,7 +125,7 @@ impl PyramidCache {
     pub fn bytes(&self) -> u64 {
         self.entries
             .iter()
-            .map(|(_, p)| {
+            .map(|(_, _, p)| {
                 let px: u64 = (0..p.levels)
                     .map(|level| {
                         u64::from((p.width >> level).max(1)) * u64::from((p.height >> level).max(1))
@@ -305,21 +325,25 @@ impl Resampler {
         }
     }
 
-    /// The mip pyramid of `source` (a working-format texture): stills come
-    /// from `cache` after their first frame.
+    /// The mip pyramid of `source` at its known content revision. Unknown
+    /// revisions reuse storage but regenerate texels before sampling.
     pub fn pyramid(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::Texture,
         levels: u32,
-        still: bool,
+        revision: Option<u64>,
         cache: &mut PyramidCache,
     ) -> Pyramid {
-        let kept = cache.get(source).filter(|p| p.levels >= levels);
-        if still && let Some(p) = &kept {
+        let kept = cache.get(source).filter(|(_, p)| p.levels >= levels);
+        if let Some((at, p)) = &kept
+            && revision.is_some()
+            && *at == revision
+        {
             return p.clone();
         }
+        let kept = kept.map(|(_, p)| p);
         let (width, height) = (source.width().max(1), source.height().max(1));
         let levels = kept.as_ref().map_or(levels, |p| p.levels);
         let format = source.format();
@@ -343,29 +367,32 @@ impl Resampler {
             })
         });
         let i = format_index(format);
-        let steps = kept.as_ref().and_then(|p| p.steps.clone()).unwrap_or_else(|| {
-            let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut steps = Vec::with_capacity(levels as usize);
-            for level in 0..levels {
-                let target = texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("pm pyramid level"),
-                    base_mip_level: level,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                });
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pm pyramid"),
-                layout: &self.mip_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&above),
-                }],
-                });
-                above = target.clone();
-                steps.push(MipStep { target, bind });
-            }
-            std::sync::Arc::new(steps)
-        });
+        let steps = kept
+            .as_ref()
+            .and_then(|p| p.steps.clone())
+            .unwrap_or_else(|| {
+                let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
+                let mut steps = Vec::with_capacity(levels as usize);
+                for level in 0..levels {
+                    let target = texture.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("pm pyramid level"),
+                        base_mip_level: level,
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    });
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("pm pyramid"),
+                        layout: &self.mip_layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&above),
+                        }],
+                    });
+                    above = target.clone();
+                    steps.push(MipStep { target, bind });
+                }
+                std::sync::Arc::new(steps)
+            });
         for (level, step) in steps.iter().enumerate() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm pyramid level"),
@@ -401,9 +428,10 @@ impl Resampler {
             width,
             height,
             levels,
+            inline_first: false,
             steps: Some(steps),
         };
-        cache.put(source.clone(), pyramid.clone());
+        cache.put(source.clone(), revision, pyramid.clone());
         pyramid
     }
 
@@ -649,7 +677,12 @@ impl Placement {
                 pyramid.levels as f32,
                 0.0,
             ],
-            origin: [self.bounds[0] as f32, self.bounds[1] as f32, 0.0, 0.0],
+            origin: [
+                self.bounds[0] as f32,
+                self.bounds[1] as f32,
+                f32::from(pyramid.inline_first),
+                0.0,
+            ],
             edges: [[0.0; 4]; MAX_EDGES],
             bounds: [0.0; 4],
         };
