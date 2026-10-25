@@ -338,8 +338,7 @@ frames, 0 failed, 11 recorded deviations (the motion and video rows above).
 `pm_render::unsupported` on the corpus, per project. "Interactive" is what the
 viewer's engine routes today (built-in definitions, no fonts); "with fonts" is
 what would still route once the hosts give their renderers fonts
-(`docs/engine/text-render.md`, "Engine hosts do not give their renderers fonts
-yet"). The job engine (exports, agent stills, `pm-cli render`) carries no
+(`docs/engine/text-render.md`, "Routing"). The job engine (exports, agent stills, `pm-cli render`) carries no
 definitions yet (`docs/engine/effects.md`, "Gaps"), so it also routes 26
 projects the viewer draws: every `render/fx-*` and `render/tr-*` case,
 `groups/transforms-and-styles`, and `layers/studio-cube` ("no definition for
