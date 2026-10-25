@@ -284,9 +284,17 @@ reader migrates (`migrateFormat`).
   (`fixtures/compat-corpus/override-builtins`).
 - The API probe at apiVersion 1, 2 and 3, trusted and as a full-access
   Store install, compared member by member with today's answers in the same
-  window; the viewport probe for every viewport and controller member; the
-  sandbox probe as a Store install.
+  window; compiled probes for the released 3D view, navigation and gizmo
+  members in each of those contexts; the sandbox probe as a Store install.
 - The rebase gates: a modified fork rebased onto the current viewer.
+
+The `v1.2.0` tag exposes `scene3d` view, navigation and gizmo methods, but
+not `Scene3DViewportAPI` or `getRendering`. Those names came from an
+unreleased October 2026 branch and are not apiVersion 1–3 release contracts.
+The checked-in "shipped" viewer matches source at `470eeaf3`, the oldest viewer
+matches `c2139713`, and neither source calls those names. The 3D probes therefore
+exercise the tagged API while the unmodified viewer forks continue to guard
+the behavior of extensions users could already have installed.
 
 ## Measuring
 
