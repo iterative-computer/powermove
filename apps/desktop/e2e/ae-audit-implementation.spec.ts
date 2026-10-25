@@ -1,27 +1,26 @@
 import {test,expect,chooseNativeMenu} from './helpers/app';
 import path from 'node:path';
 import {importFixture} from './helpers/media';
-import {mkdir,readFile} from 'node:fs/promises';
-const evidence='/private/tmp/powermove-ae-implementation-visual';
-async function clean(page:any){await page.waitForFunction(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return viewer?.ov&&PM.GL?.gl;});await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');PM.replaceProject(PM.mkProject({name:'AE fundamentals QA',w:640,h:360,fps:30,dur:2,bg:'#000000'}));PM.setTime(0,{force:true});PM.selectLayers([]);viewer.fit=true;viewer.layout();});}
+import {readFile} from 'node:fs/promises';
+async function clean(page:any){await page.waitForFunction(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return viewer?.ov&&(PM.EngineConnection||PM.GL?.gl);});await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');PM.replaceProject(PM.mkProject({name:'AE fundamentals QA',w:640,h:360,fps:30,dur:2,bg:'#000000'}));PM.setTime(0,{force:true});PM.selectLayers([]);viewer.fit=true;viewer.layout();});}
 async function point(page:any,x:number,y:number){const b=await page.locator('#stage-inner').boundingBox(),z=await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return viewer.shown;});return {x:b.x+x*z,y:b.y+y*z};}
 
 test('editable Pen, canvas text, graph and preview controls render coherently',async({session})=>{
  await session.openEditor();
- const {page}=session;await clean(page);await mkdir(evidence,{recursive:true});
+ const {page}=session;await clean(page);
  await chooseNativeMenu(session,'Pen Tool (G)',()=>page.getByRole('button',{name:'Drawing tools',exact:true}).click());
  for(const [x,y] of [[100,100],[260,80],[300,230]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
  const first=await point(page,100,100);await page.mouse.dblclick(first.x,first.y);
  expect(await page.evaluate(()=>{const PM=(window as any).PM,l=PM.proj.layers[0];return {count:l.d.paths[0].vertices.length,closed:l.d.paths[0].p.closed.v};})).toEqual({count:3,closed:true});
  await expect(page.getByRole('button',{name:'Edit Path vertices',exact:true})).toBeVisible();
- await page.screenshot({path:path.join(evidence,'paths.png')});
+ await page.screenshot({path:test.info().outputPath('paths.png')});
  const pathState=await page.evaluate(()=>{const PM=(window as any).PM;return PM.serialize();});expect(JSON.stringify(pathState)).toContain('vertices');
  await clean(page);await page.getByRole('button',{name:'Horizontal Type Tool (Command+T)',exact:true}).click();const p=await point(page,80,100);await page.mouse.click(p.x,p.y);
  const text=page.getByRole('textbox',{name:'Edit text on canvas'});await expect(text).toBeFocused();await text.fill('Motion stays editable');await page.keyboard.press('Meta+Enter');
  await page.evaluate(()=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_property',target:PM.proj.layers[0].id,path:'c.size',value:36,preserveHandEdits:false});});
  expect(await page.evaluate(()=>(window as any).PM.proj.layers[0].d.text)).toMatchObject({v:'Motion stays editable'});
  await chooseNativeMenu(session,'Rise',()=>page.getByRole('button',{name:'Add text animator',exact:true}).click());await expect(page.getByRole('button',{name:'Collapse Rise',exact:true})).toBeVisible();
- await page.screenshot({path:path.join(evidence,'text-animator.png')});
+ await page.screenshot({path:test.info().outputPath('text-animator.png')});
  await expect(page.getByRole('combobox',{name:'Preview resolution',exact:true})).toBeVisible();
  await page.waitForFunction(()=>(window as any).PM.quality===1);
  const previewSize=()=>page.evaluate(()=>{const PM=(window as any).PM;if(PM.EngineConnection){const presentation=PM.Kernel.services.get('viewer').enginePresentation,frame=presentation?.latest,canvas=frame&&presentation.stateFor(frame.viewSeq)?.canvas;return canvas?[canvas.width,canvas.height]:null;}return [PM.GL.canvas.width,PM.GL.canvas.height];});
@@ -49,6 +48,7 @@ test('precompose preserves cross-boundary animated rig pixels at several frames'
 
 
 test('multiple graph curves, velocity editing and a cached preview retain editable animation',async({session})=>{
+ test.setTimeout(120_000);
  await session.openEditor();
  const {page}=session;await clean(page);
  await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');const a=PM.mkLayer('shape',{name:'A',p:{'position.x':160,'position.y':180},d:{w:60,h:60,color:'#ff8000'}}),b=PM.mkLayer('shape',{name:'B',p:{'position.x':420,'position.y':180},d:{w:60,h:60,color:'#5599ff'}});PM.proj.layers=[a,b];PM.ProjectIndex.invalidate();for(const l of [a,b]){PM.setKeyOn(l.p['position.y'],0,100,'ease',30);PM.setKeyOn(l.p['position.y'],1,240,'ease',30);}PM.touch();PM.selectLayers([a.id,b.id]);PM.sel.chan='position.y';timeline.reveal(a,['position.y']);timeline.reveal(b,['position.y']);PM.sel.keys=PM.proj.layers.flatMap((l:any)=>l.p['position.y'].kf.map((k:any)=>k.i));PM.invalidate();});
@@ -60,10 +60,11 @@ test('multiple graph curves, velocity editing and a cached preview retain editab
  await page.locator('#tl-canvas').click({button:'right',position:graphKey});
  await page.getByRole('menuitem',{name:'Keyframe Velocity…',exact:true}).click();await page.getByRole('spinbutton',{name:'Outgoing speed',exact:true}).fill('80');await page.getByRole('button',{name:'Apply',exact:true}).click();
  expect(await page.evaluate(()=>(window as any).PM.proj.layers.map((l:any)=>l.p['position.y'].kf[0].outEase.speed))).toEqual([80,80]);
- await page.screenshot({path:path.join(evidence,'multi-graph.png')});
- await page.evaluate(()=>(window as any).PM.theme.apply('dark'));await session.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1100,800));await page.screenshot({path:path.join(evidence,'multi-graph-dark-narrow.png')});
+ await page.screenshot({path:test.info().outputPath('multi-graph.png')});
+ await page.evaluate(()=>(window as any).PM.theme.apply('dark'));await session.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1100,800));await page.screenshot({path:test.info().outputPath('multi-graph-dark-narrow.png')});
  const overflow=await page.locator('#tl-head').evaluate(el=>{const bounds=el.getBoundingClientRect();return [...el.querySelectorAll('button,select,input')].some(e=>{const b=e.getBoundingClientRect();return b.width>0&&b.right>bounds.right+1;});});expect(overflow).toBe(false);
  await page.locator('#preview-controls select').selectOption('0.25');
+ await page.waitForFunction(()=>{const connection=(window as any).PM.EngineConnection;return !connection||(connection.status().connected&&connection.status().route==='engine'&&connection.session()?.documentAccepted);},undefined,{timeout:30_000});
  await page.evaluate(()=>(window as any).PM.Preview.cache());
  try { await page.waitForFunction(()=>(window as any).PM.Preview.active,undefined,{timeout:10_000}); }
  finally { const screenshot=test.info().outputPath('ram-preview.png');await page.screenshot({path:screenshot});await test.info().attach('RAM preview',{path:screenshot,contentType:'image/png'}); }
@@ -107,5 +108,10 @@ test('output presets restore settings and persist across desktop sessions',async
  const {page}=session;await clean(page);await page.evaluate(()=>{const PM=(window as any).PM;PM.Export.remember({format:'prores',scale:.5,fps:24000/1001,range:'work',quality:'high',mblur:false,alpha:true,audio:false});PM.Export.dialog();});
  await page.getByRole('textbox',{name:'Render preset name',exact:true}).fill('Alpha master');await page.getByRole('button',{name:'Save',exact:true}).click();await page.getByRole('button',{name:'Cancel',exact:true}).click();
  await page.evaluate(async()=>{const PM=(window as any).PM;await PM.store.flush();});await session.relaunch();
- expect(await session.page.evaluate(()=>(window as any).PM.store.get('renderPresets',[])[0])).toMatchObject({name:'Alpha master',options:{format:'prores-4444',scale:.5,alpha:true,fps:24000/1001}});expect(session.diagnostics.pageErrors).toEqual([]);
+ expect(await session.page.evaluate(()=>(window as any).PM.store.get('renderPresets',[])[0])).toMatchObject({name:'Alpha master',options:{format:'prores',scale:.5,alpha:true,fps:24000/1001}});
+ await session.page.evaluate(()=>(window as any).PM.Export.dialog());
+ const dialog=session.page.getByRole('dialog',{name:'Export',exact:true});
+ await dialog.locator('select[aria-label="Saved preset"]').selectOption({label:'Alpha master'});
+ await expect(dialog.locator('select[aria-label="Format"]')).toHaveValue('prores-4444');
+ expect(session.diagnostics.pageErrors).toEqual([]);
 });

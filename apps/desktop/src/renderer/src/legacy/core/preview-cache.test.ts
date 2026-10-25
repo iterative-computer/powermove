@@ -70,6 +70,51 @@ describe('cached preview audio ownership', () => {
   });
 });
 
+it.each(['stop', 'clear'])('renders native cache frames and releases native audio on %s', async action => {
+  vi.useFakeTimers();
+  const { PM, audio, canvas } = fixture();
+  PM.proj.dur = 2; PM.proj.work = [1, 1 + 2 / 30];
+  const source = { width: 2, height: 2 };
+  const renderFrameTo = vi.fn(async () => source);
+  const pictures = [{ close: vi.fn() }, { close: vi.fn() }];
+  vi.mocked(createImageBitmap).mockImplementationOnce(async () => pictures[0] as any).mockImplementationOnce(async () => pictures[1] as any);
+  const transport = { active: () => true, setLoop: vi.fn(), play: vi.fn(), pause: vi.fn(), now: vi.fn(() => ({ time: 1 + 1 / 30, playing: true })) };
+  PM.EngineConnection = { render: { renderFrameTo }, transport };
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync(); await prepared;
+  expect(renderFrameTo.mock.calls).toEqual([
+    [1, 2, 2, { mblur: true, mbSamples: 6 }],
+    [1 + 1 / 30, 2, 2, { mblur: true, mbSamples: 6 }],
+  ]);
+  expect(PM.GL.render).not.toHaveBeenCalled();
+  expect(vi.mocked(createImageBitmap).mock.calls.every(([value]) => value === source)).toBe(true);
+  expect(transport.setLoop).toHaveBeenCalledWith([1, 1 + 2 / 30]);
+  expect(transport.play).toHaveBeenCalledWith(1);
+  expect(audio.start).not.toHaveBeenCalled();
+  const tick = vi.mocked(requestAnimationFrame).mock.calls[0]![0];
+  tick(performance.now() + 1000 / 60);
+  expect(canvas.getContext().drawImage).toHaveBeenCalledWith(pictures[1], 0, 0);
+  expect(PM.time).toBeCloseTo(1 + 1 / 30);
+  expect(audio.tick).not.toHaveBeenCalled();
+  PM.Preview[action]();
+  expect(transport.pause).toHaveBeenCalledOnce();
+  expect(transport.setLoop).toHaveBeenLastCalledWith(null);
+  expect(audio.pause).toHaveBeenCalledTimes(2); // cache setup and playback handoff
+});
+
+it('restores the project loop after a native cached preview ends', async () => {
+  vi.useFakeTimers();
+  const { PM } = fixture();
+  PM.proj.work = [0, 0.05]; PM.loop = true;
+  const transport = { active: () => true, setLoop: vi.fn(), play: vi.fn(), pause: vi.fn(), now: vi.fn() };
+  PM.EngineConnection = { render: { renderFrameTo: vi.fn(async () => ({ width: 2, height: 2 })) }, transport };
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync(); await prepared;
+  expect(transport.setLoop).toHaveBeenCalledWith([0, 2 / 30]);
+  PM.Preview.stop();
+  expect(transport.setLoop).toHaveBeenLastCalledWith([0, 0.05]);
+});
+
 it('starts at frame zero when the first RAF timestamp predates playback setup', async () => {
   vi.useFakeTimers();
   const { PM, bitmap, canvas, audio } = fixture();
