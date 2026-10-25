@@ -101,10 +101,11 @@ fn options(text: bool) -> usvg::Options<'static> {
         },
         ..usvg::Options::default()
     };
+    // The initial CSS font size affects `em`/`ex` lengths even in a document
+    // without a text element. Loading font faces remains lazy.
+    options.font_family = "Times".into();
+    options.font_size = 16.0;
     if text {
-        // Chrome's initial font: Times at `medium` (16 px).
-        options.font_family = "Times".into();
-        options.font_size = 16.0;
         options.fontdb = fonts();
     }
     options
@@ -340,6 +341,14 @@ mod tests {
         // The left half is covered: the 10 × 10 user space spans 40 × 10.
         assert_eq!(b.rgba[(5 * 40 + 10) * 4 + 3], 255);
         assert_eq!(b.rgba[(5 * 40 + 30) * 4 + 3], 0);
+    }
+
+    #[test]
+    fn initial_font_size_applies_to_geometry_without_text() {
+        let lengths = SvgDocument::parse(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1ex"><rect width="16" height="8"/></svg>"#,
+        ).unwrap();
+        assert_eq!(lengths.size(), (16.0, 8.0));
     }
 
     fn nested(levels: usize) -> String {

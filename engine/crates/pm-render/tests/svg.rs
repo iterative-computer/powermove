@@ -58,46 +58,6 @@ const SVG_BOUNDS: Bounds = Bounds {
     ..Bounds::EIGHT_BIT
 };
 
-/// Cases measured to fail the per-pixel rule, and why (reported, never
-/// passed by a wider bound). Each must still fail, and only that way: a
-/// fix moves it out of this list.
-///
-/// - `art`: gradient pixels up to 2.75 CV further from the reference than
-///   today (p99.9 about 2; interiors up to 1.1 CV from today), while the
-///   mean is closer. Vello evaluates
-///   gradients through an 8-bit ramp of 512 entries (nearest), and stores
-///   8-bit colour in its layers and output; today's raster computes each
-///   pixel's gradient in f32. Float paint for gradients is the fix.
-/// - `shapes` above 200%: usvg turns arcs (`<circle>`, `<ellipse>`, `rx`,
-///   path `A`) into cubics within 0.1 user units, so a scaled-up circle is
-///   off its true outline by 0.03% of its radius (0.04 px at 800% here,
-///   12 CV on edge pixels). Blink draws arcs as conics. The fix is usvg's
-///   tolerance (a one-constant patch), an orchestrator decision.
-const PENDING: &[(&str, &str)] = &[("art", "per pixel"), ("art", " CV ")];
-const PENDING_SCALED: &[(&str, &str)] = &[
-    ("art", "per pixel"),
-    ("art", " CV "),
-    ("shapes", "per pixel"),
-    ("shapes", "interior"),
-];
-
-/// Splits gate failures into the unexpected ones and the pending cases'.
-fn settle(failures: Vec<String>, pending_cases: &[(&str, &str)]) -> Vec<String> {
-    let (pending, unexpected): (Vec<_>, Vec<_>) = failures.into_iter().partition(|f| {
-        pending_cases
-            .iter()
-            .any(|(case, kind)| f.starts_with(&format!("{case} ")) && f.contains(kind))
-    });
-    let mut cases: Vec<&str> = pending_cases.iter().map(|(c, _)| *c).collect();
-    cases.dedup();
-    for case in cases {
-        let n = pending.iter().filter(|f| f.starts_with(&format!("{case} "))).count();
-        eprintln!("pending {case}: {n} measured failures");
-        assert!(n > 0, "{case} passes now: take it out of PENDING");
-    }
-    unexpected
-}
-
 /// A temporary directory, removed when dropped.
 struct Dir(std::path::PathBuf);
 
@@ -552,8 +512,7 @@ fn svg_images_meet_the_reference_and_todays_interiors() {
         }
     }
     evidence("gate.json", &rows);
-    let unexpected = settle(failures, PENDING);
-    assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// SVG sharpness under scale: one placement at 25% … 800%, and the frames
@@ -581,8 +540,7 @@ fn svg_sharpness_under_scale() {
         );
     }
     evidence("sharpness.json", &rows);
-    let unexpected = settle(failures, PENDING_SCALED);
-    assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A frame's SVG images are drawn together into atlas pages, always as the

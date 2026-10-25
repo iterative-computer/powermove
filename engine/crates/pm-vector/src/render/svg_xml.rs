@@ -24,6 +24,9 @@ use std::borrow::Cow;
 
 use super::svg_depth::{Tag, element_depth, for_each_tag};
 
+#[path = "svg_arcs.rs"]
+mod svg_arcs;
+
 /// usvg's deepest element nesting.
 pub(crate) const USVG_DEPTH: usize = 1024;
 
@@ -45,6 +48,9 @@ pub(crate) fn libxml2_text(text: &str) -> Result<Cow<'_, str>, usvg::roxmltree::
     if let Some(sized) = default_size(&text) {
         text = Cow::Owned(sized);
     }
+    if let Some(precise) = svg_arcs::normalize(&text) {
+        text = Cow::Owned(precise);
+    }
     if element_depth(text.as_bytes()) > USVG_DEPTH {
         text = Cow::Owned(without_plain_groups(&text));
     }
@@ -53,7 +59,10 @@ pub(crate) fn libxml2_text(text: &str) -> Result<Cow<'_, str>, usvg::roxmltree::
             Err(usvg::roxmltree::Error::UnknownEntityReference(name, pos)) => {
                 let at = offset(&text, pos)
                     .filter(|&at| text[at..].starts_with(&format!("&{name};")))
-                    .ok_or(usvg::roxmltree::Error::UnknownEntityReference(name.clone(), pos))?;
+                    .ok_or(usvg::roxmltree::Error::UnknownEntityReference(
+                        name.clone(),
+                        pos,
+                    ))?;
                 let mut owned = text.into_owned();
                 owned.replace_range(at..at + name.len() + 2, "");
                 text = Cow::Owned(owned);
@@ -72,6 +81,35 @@ pub(crate) fn libxml2_text(text: &str) -> Result<Cow<'_, str>, usvg::roxmltree::
 /// Parses text [`libxml2_text`] returned.
 pub(crate) fn parse(text: &str) -> Result<usvg::roxmltree::Document<'_>, usvg::roxmltree::Error> {
     usvg::roxmltree::Document::parse_with_options(text, options())
+}
+
+fn specified_length(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let (number, scale) = if let Some(n) = s.strip_suffix("px") {
+        (n, 1.0)
+    } else if let Some(n) = s.strip_suffix("in") {
+        (n, 96.0)
+    } else if let Some(n) = s.strip_suffix("cm") {
+        (n, 96.0 / 2.54)
+    } else if let Some(n) = s.strip_suffix("mm") {
+        (n, 96.0 / 25.4)
+    } else if let Some(n) = s.strip_suffix("pt") {
+        (n, 96.0 / 72.0)
+    } else if let Some(n) = s.strip_suffix("pc") {
+        (n, 16.0)
+    } else if let Some(n) = s.strip_suffix("em") {
+        (n, 16.0)
+    } else if let Some(n) = s.strip_suffix("ex") {
+        (n, 8.0)
+    } else {
+        (s, 1.0)
+    };
+    let value = number.trim().parse::<f64>().ok()? * scale;
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+fn absolute_length(s: &str) -> Option<f64> {
+    specified_length(s).filter(|&v| v > 0.0)
 }
 
 /// The byte offset of a roxmltree position (1-based row and char column).
@@ -136,7 +174,11 @@ fn expand_parameter_entities(text: &str) -> Cow<'_, str> {
         out.push(c);
         rest = &rest[c.len_utf8()..];
     }
-    Cow::Owned(format!("{}{out}{}", &text[..open + 1], &text[open + 1 + subset.len()..]))
+    Cow::Owned(format!(
+        "{}{out}{}",
+        &text[..open + 1],
+        &text[open + 1 + subset.len()..]
+    ))
 }
 
 /// `name "value">` after `<!ENTITY %`: the name, the literal value, and the
@@ -170,13 +212,18 @@ fn attributes(tag: &str) -> Vec<(&str, &str, core::ops::Range<usize>)> {
     let bytes = tag.as_bytes();
     let mut out = Vec::new();
     // Past `<name`.
-    let mut i = tag.find(|c: char| c.is_whitespace() || c == '>' || c == '/').unwrap_or(tag.len());
+    let mut i = tag
+        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .unwrap_or(tag.len());
     loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
         let start = i;
-        while i < bytes.len() && !matches!(bytes[i], b'=' | b'>' | b'/') && !bytes[i].is_ascii_whitespace() {
+        while i < bytes.len()
+            && !matches!(bytes[i], b'=' | b'>' | b'/')
+            && !bytes[i].is_ascii_whitespace()
+        {
             i += 1;
         }
         if i == start {
@@ -218,12 +265,14 @@ fn default_size(text: &str) -> Option<String> {
     let attrs = attributes(tag);
     let valid_view_box = attrs.iter().any(|(n, v, _)| {
         *n == "viewBox" && {
-            let n: Vec<f64> = v
+            let n: Option<Vec<f64>> = v
                 .split(|c: char| c.is_whitespace() || c == ',')
                 .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse().ok())
+                .map(|s| s.parse().ok())
                 .collect();
-            n.len() == 4 && n[2] > 0.0 && n[3] > 0.0
+            n.is_some_and(|n| {
+                n.len() == 4 && n.iter().all(|v| v.is_finite()) && n[2] > 0.0 && n[3] > 0.0
+            })
         }
     });
     if valid_view_box {
@@ -232,10 +281,7 @@ fn default_size(text: &str) -> Option<String> {
     let mut edits: Vec<(core::ops::Range<usize>, String)> = Vec::new();
     for (name, default) in [("width", "300"), ("height", "150")] {
         let found = attrs.iter().find(|(n, _, _)| *n == name);
-        let sized = found.is_some_and(|(_, v, _)| {
-            let v = v.trim();
-            !v.is_empty() && v != "auto" && !v.ends_with('%')
-        });
+        let sized = found.is_some_and(|(_, v, _)| specified_length(v).is_some());
         if sized {
             continue;
         }
@@ -314,11 +360,15 @@ mod tests {
         let doc_text = read(&ext);
         let doc = parse(&doc_text).unwrap();
         assert_eq!(
-            doc.descendants().find(|n| n.has_tag_name("text")).unwrap().text(),
+            doc.descendants()
+                .find(|n| n.has_tag_name("text"))
+                .unwrap()
+                .text(),
             Some("ab")
         );
         // An external entity: never loaded.
-        let entity = format!(r#"<!DOCTYPE svg [<!ENTITY e SYSTEM "e.xml">]><svg {ns}>{r}&e;</svg>"#);
+        let entity =
+            format!(r#"<!DOCTYPE svg [<!ENTITY e SYSTEM "e.xml">]><svg {ns}>{r}&e;</svg>"#);
         let t = read(&entity);
         assert!(parse(&t).is_ok());
         // A parameter entity declaring a general entity.
@@ -328,7 +378,10 @@ mod tests {
         let t = read(&pe);
         let doc = parse(&t).unwrap();
         assert_eq!(
-            doc.descendants().find(|n| n.has_tag_name("text")).unwrap().text(),
+            doc.descendants()
+                .find(|n| n.has_tag_name("text"))
+                .unwrap()
+                .text(),
             Some("x")
         );
         // Ordinary documents are not copied.
@@ -347,9 +400,30 @@ mod tests {
         let rect = r##"<rect width="100" height="60" fill="#1B2A4A"/>"##;
         let ns = r#"xmlns="http://www.w3.org/2000/svg""#;
         assert_eq!(size(&format!("<svg {ns}>{rect}</svg>")), (300.0, 150.0));
-        assert_eq!(size(&format!(r#"<svg {ns} width="100">{rect}</svg>"#)), (100.0, 150.0));
-        assert_eq!(size(&format!(r#"<svg width="50%" height='40' {ns}>{rect}</svg>"#)), (300.0, 40.0));
-        assert_eq!(size(&format!(r#"<svg {ns} width="auto" height="auto"/>"#)), (300.0, 150.0));
+        assert_eq!(
+            size(&format!(r#"<svg {ns} width="100">{rect}</svg>"#)),
+            (100.0, 150.0)
+        );
+        assert_eq!(
+            size(&format!(
+                r#"<svg width="50%" height='40' {ns}>{rect}</svg>"#
+            )),
+            (300.0, 40.0)
+        );
+        assert_eq!(
+            size(&format!(r#"<svg {ns} width="auto" height="auto"/>"#)),
+            (300.0, 150.0)
+        );
+        assert_eq!(
+            size(&format!(
+                r#"<svg {ns} width="bogus" height="auto">{rect}</svg>"#
+            )),
+            (300.0, 150.0)
+        );
+        assert_eq!(
+            size(&format!(r#"<svg {ns} viewBox="0 0 bad 60">{rect}</svg>"#)),
+            (300.0, 150.0)
+        );
         // A viewBox or both sizes: as written.
         let sized = format!(r#"<svg {ns} width="64" height="32">{rect}</svg>"#);
         assert!(matches!(libxml2_text(&sized).unwrap(), Cow::Borrowed(_)));
