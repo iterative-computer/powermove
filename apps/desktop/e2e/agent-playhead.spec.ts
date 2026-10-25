@@ -24,15 +24,18 @@ test('sending messages supplies composition frames while preserving the paused p
   for (const access of ['editor', 'project']) {
     await page.evaluate(access => (window as any).PM.AgentUI.setAccess(access), access);
     for (const method of ['click', 'enter']) {
+      await page.evaluate(() => { (window as any).__requestImages = null; });
       await composer.fill('Hello');
       if (method === 'click') await page.getByRole('button', { name: 'Send message', exact: true }).click();
       else await composer.press('Enter');
       await session.openAgent();
       await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe(access === 'editor' ? 'conversation' : 'result');
       expect(await page.evaluate(() => ({ time: (window as any).PM.time, playing: (window as any).PM.playing, events: (window as any).__sendTimes }))).toEqual({ time: 1.5, playing: false, events: [] });
-      // Observe the frames delivered to the provider. Native capture uses its
-      // frame job service rather than the legacy Export.snapshotAsync hook.
-      expect((await page.evaluate(() => (window as any).__requestImages)).length).toBeGreaterThanOrEqual(3);
+      // Observe the frames this send delivered to the provider. Native capture
+      // uses its frame job service rather than the legacy Export.snapshotAsync hook.
+      const images: unknown[] = await page.evaluate(() => (window as any).__requestImages);
+      expect(images.length).toBeGreaterThanOrEqual(3);
+      for (const image of images) expect(image).toMatch(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]{64,}/);
     }
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
