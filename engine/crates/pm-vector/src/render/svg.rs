@@ -3,12 +3,14 @@
 //!
 //! An SVG image is parsed once by usvg (with `<text>` laid out against the
 //! system fonts, loaded once per process and only for documents with text)
-//! and drawn natively at output resolution:
+//! and drawn through the native float painter when its features and GPU
+//! limits allow:
 //!
 //! - [`SvgDocument::gpu_paintable`] documents (paths with solid or gradient
-//!   paint, groups with opacity and blend modes, clip paths, masks, text) are
+//!   paint, groups with opacity and blend modes, clip paths, masks, text,
+//!   Gaussian blur and offset filters) are
 //!   extracted as ordered float paint operations ([`SvgDocument::float_scene`]);
-//! - filters, patterns, embedded images and `crispEdges` are drawn by resvg
+//! - unsupported filters, patterns, embedded images and `crispEdges` use resvg
 //!   ([`SvgDocument::raster_device`]).
 //!
 //! As in an `<img>`, an SVG image loads no external resources: only
@@ -57,6 +59,8 @@ pub struct SvgDocument {
     /// work over the tree runs on a stack sized to it.
     pub(crate) depth: usize,
     gpu: bool,
+    has_text: bool,
+    has_mask_or_filter: bool,
     pub(crate) filter_res: HashMap<String, Option<[u32; 2]>>,
 }
 
@@ -135,7 +139,7 @@ impl SvgDocument {
             return Err(SvgError("SVGZ (gzip) is not read".into()));
         }
         let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
-        let (tree, gpu, filter_res) = with_stack(depth, || {
+        let (tree, gpu, has_text, has_mask_or_filter, filter_res) = with_stack(depth, || {
             let xml =
                 |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
             let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
@@ -149,15 +153,20 @@ impl SvgDocument {
             let text_nodes = doc
                 .descendants()
                 .any(|n| n.is_element() && n.tag_name().name() == "text");
+            let has_mask_or_filter = doc.descendants().any(|n| {
+                n.is_element() && matches!(n.tag_name().name(), "mask" | "filter")
+            });
             let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
                 .map_err(|e| SvgError(e.to_string()))?;
             let gpu = paintable_group(tree.root()) && !unsupported_edge_mode;
-            Ok::<_, SvgError>((tree, gpu, filter_res))
+            Ok::<_, SvgError>((tree, gpu, text_nodes, has_mask_or_filter, filter_res))
         })?;
         Ok(Self {
             tree: core::mem::ManuallyDrop::new(tree),
             depth,
             gpu,
+            has_text,
+            has_mask_or_filter,
             filter_res,
         })
     }
@@ -207,10 +216,23 @@ impl SvgDocument {
         })
     }
 
-    /// Whether the float painter can draw every part of the document (no filters,
-    /// patterns, embedded images, or `crispEdges` shapes).
+    /// Whether the float painter can draw every part of the document. Gaussian
+    /// blur and offset filters are supported; patterns, embedded images,
+    /// unsupported filters and `crispEdges` shapes are not.
     pub fn gpu_paintable(&self) -> bool {
         self.gpu
+    }
+
+    /// Whether the parsed SVG has text glyphs. Small glyph edges need a
+    /// denser canonical source when a float raster is reused under motion.
+    pub fn has_text(&self) -> bool {
+        self.has_text
+    }
+
+    /// Whether the SVG declares a mask or filter, whose high-density source
+    /// can require joint fine-grid work during a cache fill.
+    pub fn has_mask_or_filter(&self) -> bool {
+        self.has_mask_or_filter
     }
 
     /// The SVG's user space stretched over `width` × `height` (an `<img>`

@@ -7,12 +7,16 @@
 //! - SVG images draw at output resolution through the float GPU painter,
 //!   or resvg for documents it cannot draw. No editor window is involved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use pm_protocol::color::Precision;
-use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
+use pm_vector::kurbo::{Affine, BezPath, Cap, Join, PathEl};
+use pm_vector::render::scene::{
+    AtlasLayout, CoverageItem, CoverageScene, FillRule, ItemStyle, OutlineScratch, PixelRect,
+};
 
-use crate::coverage::{AreaCoverage, Batch, Item};
+use crate::coverage::{AreaCoverage, Batch, InputScratch, TransformedItem};
 
 use super::VectorSource;
 
@@ -38,6 +42,194 @@ struct Paint {
     pipeline_f16: wgpu::RenderPipeline,
     pipeline_f32: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+}
+
+#[derive(Default)]
+struct ScenePage {
+    inputs: InputScratch,
+    values: Option<wgpu::Buffer>,
+    value_capacity: u64,
+    texture: Option<wgpu::Texture>,
+    view: Option<wgpu::TextureView>,
+    width: u32,
+    height: u32,
+}
+
+impl ScenePage {
+    fn ensure(&mut self, device: &wgpu::Device, width: u32, height: u32, bytes: u64) -> Result<(), String> {
+        let limits = device.limits();
+        let value_limit = limits.max_buffer_size.min(limits.max_storage_buffer_binding_size);
+        if bytes > value_limit {
+            return Err(format!("coverage values need {bytes} bytes, binding limit {value_limit}"));
+        }
+        if width > limits.max_texture_dimension_2d || height > limits.max_texture_dimension_2d {
+            return Err(format!("coverage page {width}x{height} exceeds texture limit {}", limits.max_texture_dimension_2d));
+        }
+        if bytes > self.value_capacity {
+            self.value_capacity = crate::coverage::bounded_capacity(bytes, 16, value_limit)?;
+            self.values = Some(crate::coverage::buffer(device, self.value_capacity));
+        }
+        if width > self.width || height > self.height {
+            let grown = (self.width.max(width), self.height.max(height));
+            let grown_bytes = u64::from(grown.0) * u64::from(grown.1) * 4;
+            let room = MAX_SCENE_SCRATCH_BYTES.saturating_sub(
+                self.inputs.capacity_bytes().saturating_add(self.value_capacity)
+            );
+            // Reuse the larger rectangle while it fits the scratch cap.
+            // Crossing two narrow dimensions must not allocate a huge square.
+            (self.width, self.height) = if grown_bytes <= room { grown } else { (width, height) };
+            let texture = device.create_texture(&crate::coverage::page_descriptor(
+                self.width,
+                self.height,
+            ));
+            self.view = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+            self.texture = Some(texture);
+        }
+        Ok(())
+    }
+
+    fn bytes(&self) -> u64 {
+        self.inputs.capacity_bytes()
+            + self.value_capacity
+            + u64::from(self.width) * u64::from(self.height) * 4
+    }
+}
+
+/// Scratch is kept across vector misses but never grows without a bound.
+const MAX_SCENE_SCRATCH_BYTES: u64 = 48 * 1024 * 1024;
+
+struct OutlineEntry {
+    path: Arc<BezPath>,
+    used: u64,
+    bytes: u64,
+}
+
+struct SceneOutline {
+    path: Arc<BezPath>,
+    transform: Affine,
+}
+
+/// Exactly keyed, bounded outlines with translation removed before polygon
+/// resolution. Paint is deliberately absent from the key.
+#[derive(Default)]
+struct SceneOutlines {
+    entries: HashMap<Vec<u64>, OutlineEntry>,
+    tick: u64,
+    bytes: u64,
+}
+
+impl SceneOutlines {
+    const MAX_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_ENTRIES: usize = 512;
+
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn outline(&mut self, item: &CoverageItem, scratch: &mut OutlineScratch) -> SceneOutline {
+        self.tick += 1;
+        let [a, b, c, d, tx, ty] = item.transform.as_coeffs();
+        let Some(scale) = upper_outline_scale([a, b, c, d]) else {
+            return SceneOutline {
+                path: Arc::new(item.device_outline_with(scratch)),
+                transform: Affine::IDENTITY,
+            };
+        };
+        let key = outline_key(item, scale);
+        let placement = Affine::new([a / scale, b / scale, c / scale, d / scale, tx, ty]);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.used = self.tick;
+            return SceneOutline { path: Arc::clone(&entry.path), transform: placement };
+        }
+        let canonical = Arc::new(item.device_outline_at_scale(scale, scratch));
+        let bytes = (key.capacity() * size_of::<u64>()
+            + canonical.elements().len().max(4).next_power_of_two() * size_of::<PathEl>()
+            + size_of::<Arc<BezPath>>()) as u64;
+        if bytes <= Self::MAX_BYTES {
+            while self.bytes + bytes > Self::MAX_BYTES
+                || self.entries.len() >= Self::MAX_ENTRIES
+            {
+                let Some(oldest) = self.entries.values().map(|entry| entry.used).min()
+                else {
+                    break;
+                };
+                let mut removed_bytes = None;
+                self.entries.retain(|_, entry| {
+                    if removed_bytes.is_none() && entry.used == oldest {
+                        removed_bytes = Some(entry.bytes);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                self.bytes -= removed_bytes.expect("oldest outline entry exists");
+            }
+            self.bytes += bytes;
+            self.entries.insert(key, OutlineEntry {
+                path: Arc::clone(&canonical),
+                used: self.tick,
+                bytes,
+            });
+        }
+        SceneOutline { path: canonical, transform: placement }
+    }
+}
+
+/// A power-of-two upper bound for the largest singular value of the 2x2
+/// linear transform. Padding covers rounded sums and square roots at a
+/// power-of-two boundary; unsupported extremes use the exact path.
+fn upper_outline_scale([a, b, c, d]: [f64; 4]) -> Option<f64> {
+    let (u, v, cross) = (a * a + b * b, c * c + d * d, a * c + b * d);
+    let stretch = libm::sqrt((u + v + libm::hypot(u - v, 2.0 * cross)) * 0.5);
+    if !stretch.is_finite() || !(1.0 / 4096.0..=4096.0).contains(&stretch) {
+        return None;
+    }
+    let upper = stretch * (1.0 + 16.0 * f64::EPSILON);
+    let bits = upper.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    let needs_next = (bits & ((1u64 << 52) - 1)) != 0;
+    let power = exponent + i32::from(needs_next);
+    Some(f64::from_bits(((power + 1023) as u64) << 52))
+}
+
+fn outline_key(item: &CoverageItem, scale: f64) -> Vec<u64> {
+    let mut key = Vec::with_capacity(item.path.elements().len() * 7 + 16);
+    key.push(item.path.elements().len() as u64);
+    let point = |key: &mut Vec<u64>, p: pm_vector::kurbo::Point| {
+        key.push(p.x.to_bits());
+        key.push(p.y.to_bits());
+    };
+    for el in item.path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => { key.push(0); point(&mut key, p); }
+            PathEl::LineTo(p) => { key.push(1); point(&mut key, p); }
+            PathEl::QuadTo(p, q) => { key.push(2); point(&mut key, p); point(&mut key, q); }
+            PathEl::CurveTo(p, q, r) => { key.push(3); point(&mut key, p); point(&mut key, q); point(&mut key, r); }
+            PathEl::ClosePath => key.push(4),
+        }
+    }
+    key.push(scale.to_bits());
+    match &item.style {
+        ItemStyle::Fill(FillRule::NonZero) => key.push(5),
+        ItemStyle::Fill(FillRule::EvenOdd) => key.push(6),
+        ItemStyle::Stroke(stroke) => {
+            key.push(7);
+            key.push(stroke.width.to_bits());
+            key.push(match stroke.join { Join::Bevel => 0, Join::Miter => 1, Join::Round => 2 });
+            key.push(stroke.miter_limit.to_bits());
+            for cap in [stroke.start_cap, stroke.end_cap] {
+                key.push(match cap { Cap::Butt => 0, Cap::Square => 1, Cap::Round => 2 });
+            }
+            key.push(stroke.dash_pattern.len() as u64);
+            key.extend(stroke.dash_pattern.iter().map(|v| v.to_bits()));
+            key.push(stroke.dash_offset.to_bits());
+        }
+    }
+    key
 }
 
 const PAINT_WGSL: &str = r#"
@@ -162,7 +354,20 @@ pub struct VectorCache {
     max_entries: usize,
     coverage: Option<AreaCoverage>,
     paint: Option<Paint>,
+    scene_batch: Batch,
+    outline_scratch: OutlineScratch,
+    scene_outlines: SceneOutlines,
+    scene_pages: Vec<ScenePage>,
+    paint_data: Vec<f32>,
+    paint_buffer: Option<wgpu::Buffer>,
+    paint_capacity: u64,
     svg: Option<super::svg_float::SvgPainter>,
+    svg_sample: Option<super::svg_sample::SvgSample>,
+    svg_fallback_reason: Option<String>,
+    svg_fallback_reasons: HashMap<([u8; 32], u8), String>,
+    svg_uncacheable_sources: HashSet<[u8; 32]>,
+    svg_raster_hits: u64,
+    svg_raster_misses: u64,
 }
 
 impl Default for VectorCache {
@@ -182,13 +387,37 @@ impl VectorCache {
             max_entries: DEFAULT_MAX_ENTRIES,
             coverage: None,
             paint: None,
+            scene_batch: Batch::default(),
+            outline_scratch: OutlineScratch::default(),
+            scene_outlines: SceneOutlines::default(),
+            scene_pages: Vec::new(),
+            paint_data: Vec::new(),
+            paint_buffer: None,
+            paint_capacity: 0,
             svg: None,
+            svg_sample: None,
+            svg_fallback_reason: None,
+            svg_fallback_reasons: HashMap::new(),
+            svg_uncacheable_sources: HashSet::new(),
+            svg_raster_hits: 0,
+            svg_raster_misses: 0,
         }
     }
 
-    /// Bytes of cached textures.
+    /// Bytes retained by cached textures and reusable scene resources.
     pub fn bytes(&self) -> u64 {
-        self.bytes
+        self.bytes + self.scene_scratch_bytes()
+    }
+
+    /// Why the most recent SVG miss used resvg. This is observable at runtime
+    /// without changing the texture resolve contract.
+    pub fn svg_fallback_reason(&self) -> Option<&str> {
+        self.svg_fallback_reason.as_deref()
+    }
+
+    /// Persistent source raster reuse, independent of output transform.
+    pub fn svg_raster_cache_counts(&self) -> (u64, u64) {
+        (self.svg_raster_hits, self.svg_raster_misses)
     }
 
     /// Cached textures.
@@ -208,7 +437,14 @@ impl VectorCache {
     pub fn set_budget(&mut self, max_bytes: u64, max_entries: usize) {
         self.max_bytes = max_bytes;
         self.max_entries = max_entries.max(1);
-        self.evict(self.max_bytes, self.max_entries, false);
+        if self.scene_scratch_bytes() > max_bytes {
+            self.clear_scene_scratch();
+        }
+        self.evict(
+            self.max_bytes.saturating_sub(self.scene_scratch_bytes()),
+            self.max_entries,
+            false,
+        );
     }
 
     /// The standing bound in bytes.
@@ -222,33 +458,55 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
-        self.evict(self.max_bytes, self.max_entries, false);
+        self.evict(
+            self.max_bytes.saturating_sub(self.scene_scratch_bytes()),
+            self.max_entries,
+            false,
+        );
     }
 
     /// Evicts least recently used textures until at most `budget` bytes
     /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
-        self.evict(budget, self.max_entries, true);
+        if self.scene_scratch_bytes() > budget {
+            self.clear_scene_scratch();
+        }
+        self.evict(budget.saturating_sub(self.scene_scratch_bytes()), self.max_entries, true);
+    }
+
+    fn scene_scratch_bytes(&self) -> u64 {
+        self.scene_batch.capacity_bytes()
+            + self.outline_scratch.retained_bytes()
+            + self.scene_outlines.bytes()
+            + (self.paint_data.capacity() * size_of::<f32>()) as u64
+            + self.paint_capacity
+            + self.scene_pages.iter().map(ScenePage::bytes).sum::<u64>()
+    }
+
+    fn clear_scene_scratch(&mut self) {
+        self.scene_batch = Batch::default();
+        self.outline_scratch = OutlineScratch::default();
+        self.scene_outlines.clear();
+        self.scene_pages.clear();
+        self.scene_pages.shrink_to_fit();
+        self.paint_data = Vec::new();
+        self.paint_buffer = None;
+        self.paint_capacity = 0;
     }
 
     /// Evicts least recently used entries until at most `bytes` and
     /// `entries` stay; the current frame's entries stay unless `all`.
     fn evict(&mut self, bytes: u64, entries: usize, all: bool) {
-        if self.bytes <= bytes && self.entries.len() <= entries {
-            return;
-        }
-        let frame = self.frame;
-        let mut by_age: Vec<(u64, ([u8; 32], u8))> = self
-            .entries
-            .iter()
-            .filter(|(_, e)| all || e.frame != frame)
-            .map(|(k, e)| (e.used, *k))
-            .collect();
-        by_age.sort_unstable();
-        for (_, k) in by_age {
-            if self.bytes <= bytes && self.entries.len() <= entries {
+        while self.bytes > bytes || self.entries.len() > entries {
+            let Some(k) = self
+                .entries
+                .iter()
+                .filter(|(_, e)| all || e.frame != self.frame)
+                .min_by_key(|(k, e)| (e.used, **k))
+                .map(|(k, _)| *k)
+            else {
                 break;
-            }
+            };
             // Dropping the texture is safe while recorded commands still
             // use it: wgpu keeps it alive until they complete.
             if let Some(e) = self.entries.remove(&k) {
@@ -271,6 +529,9 @@ impl VectorCache {
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
             e.frame = self.frame;
+            if matches!(source, VectorSource::SvgRaster { .. }) {
+                self.svg_fallback_reason = self.svg_fallback_reasons.get(&key).cloned();
+            }
             pm_perf::bump(pm_perf::Counter::VectorCacheHits);
             return Ok(e.view.clone());
         }
@@ -281,17 +542,83 @@ impl VectorCache {
             }
             VectorSource::SvgRaster {
                 path,
+                stamp,
                 transform,
                 rect,
                 clip,
-                ..
             } => {
+                self.svg_fallback_reason = None;
+                self.svg_fallback_reasons
+                    .retain(|entry_key, _| self.entries.contains_key(entry_key));
                 let (doc, _) = super::svg::document(path)?;
                 let transform = pm_vector::kurbo::Affine::new(*transform);
                 let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
                 if doc.gpu_paintable()
-                    && device.features().contains(wgpu::Features::FLOAT32_BLENDABLE)
+                    && device
+                        .features()
+                        .contains(wgpu::Features::FLOAT32_BLENDABLE)
                 {
+                    // Integrate the canonical high density source into every
+                    // output precision, including float exports.
+                        if let Some(plan) = super::svg_sample::plan_with_clip(
+                            &doc, path, *stamp, transform, &clip, &device.limits(),
+                        )
+                        {
+                            let raster_key = (plan.key, u8::MAX);
+                            let source = if let Some(entry) = self.entries.get_mut(&raster_key) {
+                                entry.used = self.tick;
+                                entry.frame = self.frame;
+                                self.svg_raster_hits += 1;
+                                pm_perf::bump(pm_perf::Counter::SvgRasterHits);
+                                pm_perf::bump(pm_perf::Counter::VectorCacheHits);
+                                Some(entry._texture.clone())
+                            } else if self.svg_uncacheable_sources.contains(&plan.key) {
+                                None
+                            } else {
+                                self.svg_raster_misses += 1;
+                                pm_perf::bump(pm_perf::Counter::SvgRasterMisses);
+                                let mut encoder = device.create_command_encoder(&Default::default());
+                                let raster = self
+                                    .svg
+                                    .get_or_insert_with(|| {
+                                        super::svg_float::SvgPainter::new(device).unwrap()
+                                    })
+                                    .render(
+                                        device,
+                                        queue,
+                                        &mut encoder,
+                                        &doc,
+                                        pm_vector::kurbo::Affine::scale(plan.scale),
+                                        plan.rect,
+                                        &plan.source_clip,
+                                        plan.source_precision,
+                                    )?;
+                                if let Some((texture, bytes)) = raster {
+                                    queue.submit([encoder.finish()]);
+                                    let source = texture.clone();
+                                    self.insert(raster_key, texture, bytes);
+                                    Some(source)
+                                } else {
+                                    // A canonical fill that exceeds its work/device budget
+                                    // cannot become cheaper on the next moving frame.
+                                    if self.svg_uncacheable_sources.len() >= self.max_entries {
+                                        self.svg_uncacheable_sources.clear();
+                                    }
+                                    self.svg_uncacheable_sources.insert(plan.key);
+                                    None
+                                }
+                            };
+                            if let Some(source) = source {
+                                let sampler = self
+                                    .svg_sample
+                                    .get_or_insert_with(|| super::svg_sample::SvgSample::new(device));
+                                if let Some((texture, bytes)) = sampler.render(
+                                    device, queue, &source, &plan, transform, *rect, &clip, precision,
+                                ) {
+                                    return Ok(self.insert(key, texture, bytes));
+                                }
+                            }
+                        }
                     let mut encoder =
                         device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("pm svg float"),
@@ -312,7 +639,19 @@ impl VectorCache {
                         queue.submit([encoder.finish()]);
                         return Ok(self.insert(key, drawn.0, drawn.1));
                     }
+                    self.svg_fallback_reason = painter.fallback_reason().map(str::to_owned);
+                } else {
+                    self.svg_fallback_reason = Some(if !doc.gpu_paintable() {
+                        "SVG feature requires resvg".into()
+                    } else {
+                        "GPU lacks FLOAT32_BLENDABLE".into()
+                    });
                 }
+                let reason = self.svg_fallback_reason.clone().unwrap_or_else(|| {
+                    "float SVG painter declined; resvg fallback".to_owned()
+                });
+                self.svg_fallback_reason = Some(reason.clone());
+                self.svg_fallback_reasons.insert(key, reason);
                 let b = doc.raster_device(transform, *rect, Some(&clip));
                 (
                     upload_rgba8(device, queue, b.width, b.height, &b.rgba),
@@ -335,7 +674,9 @@ impl VectorCache {
     ) -> wgpu::TextureView {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.evict(
-            self.max_bytes.saturating_sub(bytes),
+            self.max_bytes
+                .saturating_sub(bytes)
+                .saturating_sub(self.scene_scratch_bytes()),
             self.max_entries.saturating_sub(1),
             false,
         );
@@ -364,7 +705,17 @@ impl VectorCache {
         rect: PixelRect,
         precision: Precision,
     ) -> Result<(wgpu::Texture, u64), String> {
-        let max_side = device.limits().max_texture_dimension_2d.min(8192);
+        let limits = device.limits();
+        let value_limit = limits.max_buffer_size.min(limits.max_storage_buffer_binding_size);
+        let max_side = limits.max_texture_dimension_2d
+            .min(8192)
+            .min((value_limit / 4).isqrt().min(u64::from(u32::MAX)) as u32);
+        if max_side < 16 {
+            return Err(format!("coverage page limit {max_side} is below minimum tile size"));
+        }
+        if rect.width > limits.max_texture_dimension_2d || rect.height > limits.max_texture_dimension_2d {
+            return Err(format!("vector output {}x{} exceeds texture limit {}", rect.width, rect.height, limits.max_texture_dimension_2d));
+        }
         let layout = AtlasLayout::pack(scene, rect, max_side);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("pm vector"),
@@ -372,30 +723,48 @@ impl VectorCache {
         let coverage = self
             .coverage
             .get_or_insert_with(|| AreaCoverage::new(device));
-        let outlines: Vec<_> = layout
-            .cells
-            .iter()
-            .map(|c| scene.items[c.item].device_outline())
-            .collect();
-        let mut pages: Vec<wgpu::Texture> = Vec::with_capacity(layout.pages.len());
+        let mut outlines: Vec<Option<SceneOutline>> =
+            std::iter::repeat_with(|| None).take(scene.items.len()).collect();
+        for cell in &layout.cells {
+            if outlines[cell.item].is_none() {
+                outlines[cell.item] = Some(
+                    self.scene_outlines
+                        .outline(&scene.items[cell.item], &mut self.outline_scratch),
+                );
+            }
+        }
+        self.scene_pages
+            .resize_with(layout.pages.len(), ScenePage::default);
         for (i, &(w, h)) in layout.pages.iter().enumerate() {
-            let items: Vec<Item<'_>> = layout
+            let items: Vec<TransformedItem<'_>> = layout
                 .cells
                 .iter()
-                .zip(&outlines)
-                .filter(|(c, _)| c.page == i)
-                .map(|(c, path)| Item {
-                    path,
+                .filter(|c| c.page == i)
+                .map(|c| {
+                    let outline = outlines[c.item].as_ref().expect("item outline");
+                    TransformedItem {
+                    path: &outline.path,
+                    transform: outline.transform,
                     bounds: c.device,
                     at: [c.x, c.y],
+                    }
                 })
                 .collect();
-            let batch = Batch::new(&items);
-            let page = device.create_texture(&crate::coverage::page_descriptor(w, h));
-            let view = page.create_view(&wgpu::TextureViewDescriptor::default());
-            let values = crate::coverage::buffer(device, batch.bytes());
-            coverage.encode(device, &mut encoder, &batch, &values, Some(&view));
-            pages.push(page);
+            self.scene_batch.reset_transformed(&items);
+            self.scene_batch.fits_gpu_limits(&limits)?;
+            let page = &mut self.scene_pages[i];
+            page.ensure(device, w, h, self.scene_batch.bytes())?;
+            coverage.encode_pooled(
+                device,
+                queue,
+                &mut encoder,
+                &self.scene_batch,
+                crate::coverage::CoverageOutput {
+                    values: page.values.as_ref().expect("coverage values"),
+                    page: page.view.as_ref(),
+                },
+                &mut page.inputs,
+            )?;
         }
         let format = pm_gpu::working_format(precision);
         let out = device.create_texture(&wgpu::TextureDescriptor {
@@ -418,11 +787,13 @@ impl VectorCache {
         let paint = self.paint.get_or_insert_with(|| Paint::new(device));
         // Uniform globals and every instance's paint data are one upload.
         // The first 16 bytes are the uniform; the vertex slice starts there.
-        let mut paint_data = Vec::with_capacity(4 + layout.cells.len() * 10);
-        paint_data.extend_from_slice(&[rect.width as f32, rect.height as f32, 0.0, 0.0]);
+        self.paint_data.clear();
+        self.paint_data.reserve(4 + layout.cells.len() * 10);
+        self.paint_data
+            .extend_from_slice(&[rect.width as f32, rect.height as f32, 0.0, 0.0]);
         for c in &layout.cells {
             let item = &scene.items[c.item];
-            paint_data.extend_from_slice(&[
+            self.paint_data.extend_from_slice(&[
                 (c.device.x - rect.x) as f32,
                 (c.device.y - rect.y) as f32,
                 c.device.width as f32,
@@ -430,16 +801,26 @@ impl VectorCache {
                 c.x as f32,
                 c.y as f32,
             ]);
-            paint_data.extend_from_slice(&item.premultiplied());
+            self.paint_data.extend_from_slice(&item.premultiplied());
         }
-        let paint_buffer = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("pm vector paint data"),
-                contents: crate::composite::gaussian::f32_bytes(&paint_data),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::VERTEX,
-            },
-        );
+        let bytes = crate::composite::gaussian::f32_bytes(&self.paint_data);
+        if bytes.len() as u64 > limits.max_buffer_size {
+            return Err(format!("paint data needs {} bytes, buffer limit {}", bytes.len(), limits.max_buffer_size));
+        }
+        if bytes.len() as u64 > self.paint_capacity {
+            let needed = bytes.len() as u64;
+            self.paint_capacity = crate::coverage::bounded_capacity(needed, 256, limits.max_buffer_size)?;
+            self.paint_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pm vector pooled paint data"),
+                size: self.paint_capacity,
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let paint_buffer = self.paint_buffer.as_ref().expect("paint buffer");
+        queue.write_buffer(paint_buffer, 0, bytes);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm vector paint"),
@@ -469,7 +850,8 @@ impl VectorCache {
             // a draw.
             let mut i = 0;
             let cells = &layout.cells;
-            let mut binds: Vec<Option<wgpu::BindGroup>> = (0..pages.len()).map(|_| None).collect();
+            let mut binds: Vec<Option<wgpu::BindGroup>> =
+                (0..layout.pages.len()).map(|_| None).collect();
             while i < cells.len() {
                 let page = cells[i].page;
                 let mut j = i;
@@ -477,19 +859,22 @@ impl VectorCache {
                     j += 1;
                 }
                 let bind = binds[page].get_or_insert_with(|| {
-                    let view = pages[page].create_view(&wgpu::TextureViewDescriptor::default());
+                    let view = self.scene_pages[page]
+                        .view
+                        .as_ref()
+                        .expect("coverage page view");
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("pm vector paint"),
                         layout: &paint.layout,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&view),
+                                resource: wgpu::BindingResource::TextureView(view),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
                                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &paint_buffer,
+                                    buffer: paint_buffer,
                                     offset: 0,
                                     size: std::num::NonZeroU64::new(16),
                                 }),
@@ -503,6 +888,9 @@ impl VectorCache {
             }
         }
         queue.submit([encoder.finish()]);
+        if self.scene_scratch_bytes() > MAX_SCENE_SCRATCH_BYTES.min(self.max_bytes) {
+            self.clear_scene_scratch();
+        }
         Ok((
             out,
             u64::from(rect.width.max(1)) * u64::from(rect.height.max(1)) * bytes_per_pixel(format),
@@ -563,4 +951,142 @@ fn upload_rgba8(
         },
     );
     tex
+}
+
+#[cfg(test)]
+mod scene_pool_tests {
+    use super::*;
+    use pm_vector::kurbo::{Affine, BezPath};
+    use pm_vector::render::scene::{CoverageItem, FillRule, ItemStyle};
+
+    fn scene(x: f64, y: f64, size: f64) -> CoverageScene {
+        let mut path = BezPath::new();
+        path.move_to((x, y));
+        path.line_to((x + size, y));
+        path.line_to((x + size, y + size));
+        path.line_to((x, y + size));
+        path.close_path();
+        CoverageScene {
+            items: vec![CoverageItem {
+                path,
+                transform: Affine::IDENTITY,
+                style: ItemStyle::Fill(FillRule::NonZero),
+                color: [0.8, 0.3, 0.2, 0.7],
+            }],
+        }
+    }
+
+    #[test]
+    fn outline_key_tracks_geometry_not_paint_or_translation() {
+        let mut item = scene(2.25, 3.5, 30.0).items.remove(0);
+        let key = |item: &CoverageItem| {
+            let [a, b, c, d, _, _] = item.transform.as_coeffs();
+            outline_key(item, upper_outline_scale([a, b, c, d]).unwrap())
+        };
+        let original = key(&item);
+        item.color = [0.1, 0.9, 0.4, 0.2];
+        item.transform = Affine::translate((17.0, -23.0));
+        assert_eq!(key(&item), original);
+        item.transform = Affine::scale(1.125) * item.transform;
+        assert_eq!(key(&item), original);
+        item.transform = Affine::scale(2.25);
+        assert_ne!(key(&item), original);
+        item.transform = Affine::IDENTITY;
+        item.path.line_to((33.0, 33.0));
+        assert_ne!(key(&item), original);
+    }
+
+    #[test]
+    fn upper_outline_scale_bounds_rotation_and_skew() {
+        for angle in [0.0, 0.17, 0.71, 1.4, 2.9] {
+            let affine = Affine::rotate(angle) * Affine::new([1.25, 0.0, 0.6, 0.75, 0.0, 0.0]);
+            let [a, b, c, d, _, _] = affine.as_coeffs();
+            let bucket = upper_outline_scale([a, b, c, d]).unwrap();
+            for theta in 0..360 {
+                let t = f64::from(theta).to_radians();
+                let length = libm::hypot(a * t.cos() + c * t.sin(), b * t.cos() + d * t.sin());
+                assert!(length <= bucket);
+            }
+        }
+    }
+
+    #[test]
+    fn pooled_page_rejects_limits_before_creating_resources() {
+        let gpu = pm_gpu::Gpu::new("scene page preflight").expect("GPU");
+        let limits = gpu.device.limits();
+        let mut page = ScenePage::default();
+        assert!(page.ensure(&gpu.device, 1, 1, limits.max_storage_buffer_binding_size + 1).is_err());
+        assert!(page.ensure(&gpu.device, limits.max_texture_dimension_2d + 1, 1, 16).is_err());
+        assert_eq!(page.bytes(), 0);
+    }
+
+    #[test]
+    fn outline_cache_hit_shares_geometry_across_integer_translation() {
+        let mut item = scene(2.25, 3.5, 30.0).items.remove(0);
+        let mut cache = SceneOutlines::default();
+        let mut scratch = OutlineScratch::default();
+        let first = cache.outline(&item, &mut scratch);
+        item.transform = Affine::translate((17.0, -23.0));
+        let moved = cache.outline(&item, &mut scratch);
+        assert!(Arc::ptr_eq(&first.path, &moved.path));
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.tick, 2);
+        assert_eq!(moved.transform * &*moved.path, item.device_outline_with(&mut scratch));
+    }
+
+    #[test]
+    fn outline_cache_evicts_oldest_entry_at_cap() {
+        let mut cache = SceneOutlines::default();
+        for n in 0..SceneOutlines::MAX_ENTRIES {
+            cache.entries.insert(
+                vec![n as u64],
+                OutlineEntry {
+                    path: Arc::new(BezPath::new()),
+                    used: n as u64,
+                    bytes: 64,
+                },
+            );
+            cache.bytes += 64;
+        }
+        cache.tick = SceneOutlines::MAX_ENTRIES as u64;
+        let item = scene(2.25, 3.5, 30.0).items.remove(0);
+        cache.outline(&item, &mut OutlineScratch::default());
+        assert_eq!(cache.entries.len(), SceneOutlines::MAX_ENTRIES);
+        assert!(!cache.entries.contains_key(&vec![0]));
+        assert!(cache.bytes <= SceneOutlines::MAX_BYTES);
+    }
+
+    #[test]
+    fn pooled_scene_inputs_preserve_prior_submissions_and_trim() {
+        let gpu = pm_gpu::Gpu::new("scene pool test").expect("GPU");
+        let rect = PixelRect::new(0, 0, 64, 64);
+        let a = scene(2.25, 3.5, 30.0);
+        let b = scene(19.75, 18.25, 21.0);
+        let mut pooled = VectorCache::new();
+        // Both render calls submit before either result is read. Reusing one
+        // input buffer without queue ordering would overwrite A with B.
+        let (out_a, _) = pooled
+            .render_scene(&gpu.device, &gpu.queue, &a, rect, Precision::Float16)
+            .expect("A renders");
+        let (out_b, _) = pooled
+            .render_scene(&gpu.device, &gpu.queue, &b, rect, Precision::Float16)
+            .expect("B renders");
+        let mut fresh_a = VectorCache::new();
+        let (want_a, _) = fresh_a
+            .render_scene(&gpu.device, &gpu.queue, &a, rect, Precision::Float16)
+            .expect("A fresh renders");
+        let mut fresh_b = VectorCache::new();
+        let (want_b, _) = fresh_b
+            .render_scene(&gpu.device, &gpu.queue, &b, rect, Precision::Float16)
+            .expect("B fresh renders");
+        let read = |texture| pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, texture).unwrap();
+        assert_eq!(read(&out_a), read(&want_a));
+        assert_eq!(read(&out_b), read(&want_b));
+        assert!(pooled.scene_scratch_bytes() > 0);
+        assert!(pooled.scene_scratch_bytes() <= MAX_SCENE_SCRATCH_BYTES);
+        assert_eq!(pooled.bytes(), pooled.scene_scratch_bytes());
+        pooled.trim(0);
+        assert_eq!(pooled.scene_scratch_bytes(), 0);
+        assert_eq!(pooled.bytes(), 0);
+    }
 }

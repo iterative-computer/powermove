@@ -58,8 +58,9 @@ fn main() {
     use pm_render::{RenderRequest, Renderer};
     use support::*;
 
-    let narrowed = std::env::var_os("PM_ENGINE_CORPUS").is_some()
-        || std::env::var_os("PM_TEXT_ONLY").is_some();
+    // Selecting a capture directory never waives completeness. Only the
+    // explicit per-project developer filter makes this a narrowed run.
+    let narrowed = std::env::var_os("PM_TEXT_ONLY").is_some();
 
     let mut captures = corpus_dirs();
     if std::env::var("PM_ENGINE_CORPUS").is_err()

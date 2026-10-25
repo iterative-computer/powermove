@@ -21,6 +21,12 @@ use super::Renderer;
 const MAX_REUSED_SOURCE_BYTES: u64 = 16 << 20;
 const MAX_SOURCE_BATCH: usize = 16;
 
+#[derive(Clone, Copy)]
+struct SourceDecode {
+    exact_worker: bool,
+    sequence: bool,
+}
+
 #[derive(Default)]
 pub(super) struct SourceReuse {
     target: Option<Target>,
@@ -63,7 +69,17 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         sequence: bool,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, true, sequence)
+        self.source_rgba8_with_decode(
+            path,
+            time,
+            output,
+            fit,
+            interpretation,
+            SourceDecode {
+                exact_worker: true,
+                sequence,
+            },
+        )
     }
 
     /// The source as composition reads it: Interpret Footage's
@@ -86,8 +102,10 @@ impl Renderer {
             output,
             fit,
             Some(interpretation),
-            true,
-            sequence,
+            SourceDecode {
+                exact_worker: true,
+                sequence,
+            },
         )
     }
 
@@ -101,7 +119,17 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         sequence: bool,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, false, sequence)
+        self.source_rgba8_with_decode(
+            path,
+            time,
+            output,
+            fit,
+            interpretation,
+            SourceDecode {
+                exact_worker: false,
+                sequence,
+            },
+        )
     }
 
     fn source_rgba8_with_decode(
@@ -111,8 +139,7 @@ impl Renderer {
         output: Size,
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
-        exact_worker: bool,
-        sequence: bool,
+        decode: SourceDecode,
     ) -> Result<Vec<u8>, String> {
         let mut head = [0u8; 512];
         let n = std::fs::File::open(path)
@@ -127,15 +154,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pm source snapshot"),
             });
-        let source = self.source_texture(
-            path,
-            time,
-            interpretation,
-            kind,
-            &mut encoder,
-            exact_worker,
-            sequence,
-        )?;
+        let source = self.source_texture(path, time, interpretation, kind, &mut encoder, decode)?;
         self.draw_source_target(source, output, fit, encoder)
     }
 
@@ -146,8 +165,7 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         kind: pm_media::image::ImageFormat,
         encoder: &mut wgpu::CommandEncoder,
-        exact_worker: bool,
-        sequence: bool,
+        decode: SourceDecode,
     ) -> Result<(wgpu::TextureView, (f64, f64)), String> {
         // Source surfaces always read the native samples and resolved file
         // interpretation. The compatibility bitmap belongs to authored
@@ -186,8 +204,8 @@ impl Renderer {
                 WorkingEncoding::Standard,
                 Precision::Float16,
                 interpretation,
-                sequence,
-                exact_worker,
+                decode.sequence,
+                decode.exact_worker,
             );
             let target = video
                 .map_err(media_error)?
@@ -278,8 +296,10 @@ impl Renderer {
                 interpretation,
                 kind,
                 &mut encoder,
-                false,
-                sequence,
+                SourceDecode {
+                    exact_worker: false,
+                    sequence,
+                },
             )?;
             self.record_source_draw(&source, output, fit, &target, &mut encoder);
             encoder.copy_texture_to_buffer(

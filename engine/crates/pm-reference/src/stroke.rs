@@ -19,6 +19,9 @@
 
 use kurbo::{BezPath, Cap, Join, PathEl, Point, Stroke, Vec2};
 
+#[path = "dash.rs"]
+mod dash;
+
 /// The region a stroke covers ([`outline`]).
 pub struct Region {
     /// Nonzero-filled, in the path's space.
@@ -35,10 +38,7 @@ pub fn outline(path: &BezPath, style: &Stroke, tolerance: f64) -> Option<Region>
     if !style.is_finite() || style.dash_pattern.iter().any(|&d| d < 0.0) {
         return None;
     }
-    if !style.dash_pattern.is_empty()
-        && (!style.dash_pattern.iter().sum::<f64>().is_finite()
-            || style.dash_pattern.iter().all(|&d| d == 0.0))
-    {
+    if !style.dash_pattern.iter().sum::<f64>().is_finite() {
         return None;
     }
     let h = style.width.abs() / 2.0;
@@ -49,15 +49,30 @@ pub fn outline(path: &BezPath, style: &Stroke, tolerance: f64) -> Option<Region>
     if h.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Some(out);
     }
-    let dashed;
-    let centerline = if style.dash_pattern.is_empty() {
-        path
+    // SVG treats an all-zero array as an undashed stroke. Other zero
+    // entries may place a cap-only mark, which `partition` returns apart
+    // from its nonzero centerline intervals.
+    let dashed = if style.dash_pattern.is_empty() || style.dash_pattern.iter().all(|&d| d == 0.0) {
+        None
     } else {
-        dashed = kurbo::dash(path.iter(), style.dash_offset, &style.dash_pattern).collect();
-        &dashed
+        Some(dash::partition(
+            path,
+            style.dash_offset,
+            &style.dash_pattern,
+        ))
     };
+    let centerline = dashed.as_ref().map_or(path, |dashed| &dashed.path);
     for poly in polylines(centerline, tolerance) {
         out.folds |= stroke_polyline(&poly, style, h, tolerance, &mut out.path);
+    }
+    if let Some(dashed) = dashed {
+        for (point, tangent) in dashed.dots {
+            if tangent.hypot() > 0.0 {
+                let dir = tangent.normalize();
+                cap_region(&mut out.path, point, -dir, style.start_cap, h, tolerance);
+                cap_region(&mut out.path, point, dir, style.end_cap, h, tolerance);
+            }
+        }
     }
     Some(out)
 }
@@ -278,6 +293,22 @@ fn normal(d: Vec2) -> Vec2 {
     Vec2::new(-d.y, d.x) / d.hypot()
 }
 
+fn cap_region(out: &mut BezPath, end: Point, dir: Vec2, cap: Cap, h: f64, tolerance: f64) {
+    match cap {
+        Cap::Butt => {}
+        Cap::Round => {
+            let o = Vec2::new(-dir.y, dir.x) * h;
+            sector(out, end, o, dir * h, tolerance);
+            sector(out, end, dir * h, -o, tolerance);
+        }
+        Cap::Square => {
+            let o = Vec2::new(-dir.y, dir.x) * h;
+            let f = dir * h;
+            polygon(out, &[end + o, end + o + f, end - o + f, end - o]);
+        }
+    }
+}
+
 /// Appends the polyline's stroke region; whether any smooth joint folds.
 fn stroke_polyline(
     poly: &Polyline,
@@ -370,20 +401,7 @@ fn stroke_polyline(
             (p[0], -leaving(0).normalize(), style.start_cap),
             (p[n - 1], arriving(n - 1).normalize(), style.end_cap),
         ] {
-            match cap {
-                Cap::Butt => {}
-                Cap::Round => {
-                    // Two quarter sectors: the half disk beyond the end.
-                    let o = Vec2::new(-dir.y, dir.x) * h;
-                    sector(out, end, o, dir * h, tolerance);
-                    sector(out, end, dir * h, -o, tolerance);
-                }
-                Cap::Square => {
-                    let o = Vec2::new(-dir.y, dir.x) * h;
-                    let f = dir * h;
-                    polygon(out, &[end + o, end + o + f, end - o + f, end - o]);
-                }
-            }
+            cap_region(out, end, dir, cap, h, tolerance);
         }
     }
     folds
@@ -580,5 +598,42 @@ mod tests {
                 assert!((a.at(x, y) - b.at(x, y)).abs() < 1e-12, "{x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn zero_painted_dashes_use_the_authored_caps() {
+        let mut line = BezPath::new();
+        line.move_to((10.0, 10.0));
+        line.line_to((20.0, 10.0));
+        let dash = [0.0, 10.0];
+        let butt = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(0.0, dash);
+        let round = Stroke::new(4.0)
+            .with_caps(Cap::Round)
+            .with_dashes(0.0, dash);
+        let square = Stroke::new(4.0)
+            .with_caps(Cap::Square)
+            .with_dashes(0.0, dash);
+        assert!(
+            outline(&line, &butt, 1e-4)
+                .unwrap()
+                .path
+                .elements()
+                .is_empty()
+        );
+        let round_area = area(&outline(&line, &round, 1e-4).unwrap().path);
+        let square_area = area(&outline(&line, &square, 1e-4).unwrap().path);
+        // Each endpoint is a full disk or square, from the two caps of its
+        // zero-length painted dash. The endpoints are far enough apart.
+        assert!(
+            (round_area - 8.0 * core::f64::consts::PI).abs() < 0.01,
+            "{round_area}"
+        );
+        assert!((square_area - 32.0).abs() < 1e-9, "{square_area}");
+        let solid = Stroke::new(4.0).with_caps(Cap::Butt);
+        let zeros = solid.clone().with_dashes(7.0, [0.0, 0.0]);
+        assert_eq!(
+            outline(&line, &solid, 1e-4).unwrap().path,
+            outline(&line, &zeros, 1e-4).unwrap().path,
+        );
     }
 }

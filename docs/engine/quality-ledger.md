@@ -225,8 +225,9 @@ the unclipped reference over the same band centers.
 |---|---|---|---|
 | Float Gaussian and per-primitive linearRGB/sRGB domains, source halos and hard filter regions (Filter Effects, SVG 1.1) | 5.1233, 5.1233, 0.50966 | 0.7380, 0.7380, 0.01997 | Anisotropic blur, default linearRGB and explicit sRGB, hard region/source halo, zero blur |
 
-Unsupported primitives retain the declared native resvg RGBA8 fallback. Supported
-filters and oversized supported groups keep float intermediates.
+Unsupported primitives and scenes beyond the checked device, memory or filter-work
+budget use the declared native resvg RGBA8 fallback with a runtime reason.
+Supported scenes within those bounds keep float intermediates.
 
 ## Source monitor
 

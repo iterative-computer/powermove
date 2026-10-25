@@ -71,6 +71,14 @@ text values, layout, masks, animators, effects and retained transforms stay exac
 preview/export identity, render errors and modelled vector coverage remain
 blocking. Pending entries never change a global bound.
 
+L3 content inside a pending composition also runs the default independent
+own-layer corpus gate: authored outlines, opacity, masks and shutter samples
+at float32, with path-mask storage asserted at R16Float. Effective 2.5D content
+is checked locally before L4 projection. These proofs retain the full-frame
+pending measurement and identify only its surrounding L4/L6 reference gap.
+Selecting captures with `PM_ENGINE_CORPUS` never disables the full-run
+not-measured check.
+
 ## The reference
 
 `engine/crates/pm-reference` (tests only) computes in f64 from the standards and the

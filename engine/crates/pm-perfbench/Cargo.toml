@@ -21,6 +21,7 @@ png = "0.18"
 pm-media = { path = "../pm-media" }
 pm-node = { path = "../pm-node" }
 pm-render = { path = "../pm-render" }
+pm-vector = { path = "../pm-vector", features = ["render"] }
 pm-gpu = { path = "../pm-gpu", default-features = false }
 pm-export = { path = "../pm-export" }
 pm-text = { path = "../pm-text", default-features = false, features = ["system"] }

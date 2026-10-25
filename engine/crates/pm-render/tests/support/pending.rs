@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+thread_local! {
+    static MEASUREMENT_COMPONENTS: std::cell::RefCell<BTreeMap<String, [String; 4]>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+    static LAST_ENGINE_PIXELS: std::cell::RefCell<Option<Vec<f64>>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
@@ -40,6 +45,37 @@ pub fn measurement(
     reference: &[f64],
     classes: &[pm_reference::compare::Class],
 ) -> String {
+    let components = if std::env::var_os("PM_CORPUS_PENDING_COMPONENTS").is_some() {
+        let values = |pixels: &[f64]| {
+            let mut h = Sha256::new();
+            h.update((pixels.len() as u64).to_le_bytes());
+            for value in pixels {
+                let bits = if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                };
+                h.update(bits.to_le_bytes());
+            }
+            format!("{:x}", h.finalize())
+        };
+        let mut classes_hash = Sha256::new();
+        classes_hash.update((classes.len() as u64).to_le_bytes());
+        for class in classes {
+            classes_hash.update([*class as u8]);
+        }
+        Some([
+            values(engine),
+            values(today),
+            values(reference),
+            format!("{:x}", classes_hash.finalize()),
+        ])
+    } else {
+        None
+    };
+    if std::env::var_os("PM_CORPUS_PENDING_PIXELS").is_some() {
+        LAST_ENGINE_PIXELS.with(|last| *last.borrow_mut() = Some(engine.to_vec()));
+    }
     let mut hash = Sha256::new();
     for pixels in [engine, today, reference] {
         hash.update((pixels.len() as u64).to_le_bytes());
@@ -56,7 +92,13 @@ pub fn measurement(
     for class in classes {
         hash.update([*class as u8]);
     }
-    format!("{:x}", hash.finalize())
+    let measurement = format!("{:x}", hash.finalize());
+    if let Some(components) = components {
+        MEASUREMENT_COMPONENTS.with(|all| {
+            all.borrow_mut().insert(measurement.clone(), components);
+        });
+    }
+    measurement
 }
 
 impl Audit {
@@ -85,6 +127,40 @@ impl Audit {
     /// Only the caller's proven out-of-scope reference gaps are eligible.
     /// Geometry, render errors and preview/export identity never reach here.
     pub fn check(&mut self, row: Entry, eligible: bool) -> bool {
+        if let Some(dir) = std::env::var_os("PM_CORPUS_PENDING_PIXELS") {
+            let pixels = LAST_ENGINE_PIXELS
+                .with(|last| last.borrow_mut().take())
+                .expect("engine pixels immediately precede pending check");
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).expect("pending pixel evidence directory");
+            let mut bytes = Vec::with_capacity(pixels.len() * 8);
+            for pixel in pixels {
+                bytes.extend_from_slice(&pixel.to_bits().to_le_bytes());
+            }
+            std::fs::write(dir.join(format!("{}-engine.f64le", row.frame)), bytes)
+                .expect("pending pixel evidence");
+        }
+        if let Some(path) = std::env::var_os("PM_CORPUS_PENDING_COMPONENTS") {
+            use std::io::Write;
+            let components = MEASUREMENT_COMPONENTS
+                .with(|all| all.borrow().get(&row.measurement_sha256).cloned());
+            let components = components.expect("pending row has measured components");
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .expect("pending component evidence");
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "frame": row.frame, "measurement_sha256": row.measurement_sha256,
+                    "engine_sha256": components[0], "today_sha256": components[1],
+                    "reference_sha256": components[2], "classes_sha256": components[3],
+                })
+            )
+            .expect("pending component evidence");
+        }
         let known = self.entries.get(&row.frame);
         if known.is_some() {
             self.visited.insert(row.frame.clone());

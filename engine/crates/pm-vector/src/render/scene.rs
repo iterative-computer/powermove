@@ -70,7 +70,10 @@ impl CoverageItem {
                     (Cap::Square, _) | (_, Cap::Square) => core::f64::consts::SQRT_2,
                     _ => 1.0,
                 };
-                base.inflate(half * joins.max(caps) * scale, half * joins.max(caps) * scale)
+                base.inflate(
+                    half * joins.max(caps) * scale,
+                    half * joins.max(caps) * scale,
+                )
             }
         };
         let finite = r.x0.is_finite() && r.y0.is_finite() && r.x1.is_finite() && r.y1.is_finite();
@@ -91,35 +94,82 @@ impl CoverageItem {
     /// covers too much: the inner corner of a stroked rectangle drew 1
     /// where it is 3/4. Resolving the rule first leaves nothing to sum.
     pub fn device_outline(&self) -> BezPath {
-        let (flat, rule) = self.flattened();
-        // One convex contour cannot overlap itself: nothing to resolve.
-        if matches!(self.style, ItemStyle::Fill(_)) && convex(&flat) {
-            return flat;
-        }
-        resolve(&flat, rule)
+        self.device_outline_with(&mut OutlineScratch::default())
     }
 
+    /// Resolve through reusable polygon storage. This runs the same float
+    /// overlay operation as `device_outline` with the same device transform.
+    pub fn device_outline_with(&self, scratch: &mut OutlineScratch) -> BezPath {
+        self.device_outline_transformed(self.transform, scratch)
+    }
+
+    /// Resolve after removing translation from the affine transform. A
+    /// caller may cache this outline for another position with identical
+    /// geometry, style, and linear transform.
+    pub fn device_outline_at_origin(&self, scratch: &mut OutlineScratch) -> BezPath {
+        let [a, b, c, d, _, _] = self.transform.as_coeffs();
+        self.device_outline_transformed(Affine::new([a, b, c, d, 0.0, 0.0]), scratch)
+    }
+
+    /// Resolve the local outline at a conservative uniform device scale.
+    /// The caller may apply any affine whose largest stretch is at most
+    /// `scale`: flattening error after that transform remains at most the
+    /// unchanged device tolerance.
+    pub fn device_outline_at_scale(&self, scale: f64, scratch: &mut OutlineScratch) -> BezPath {
+        self.device_outline_transformed(Affine::scale(scale), scratch)
+    }
+
+    fn device_outline_transformed(
+        &self,
+        transform: Affine,
+        scratch: &mut OutlineScratch,
+    ) -> BezPath {
+        let rule = self.flattened_into(transform, &mut scratch.flat);
+        scratch.max_flat_elements = scratch.max_flat_elements.max(scratch.flat.elements().len());
+        // A single simple contour has winding magnitude one throughout its
+        // interior. Its signed area is already the exact fill coverage, even
+        // at a concave corner; polygon resolution only adds allocations.
+        if matches!(self.style, ItemStyle::Fill(_))
+            && (simple_polygon(&scratch.flat) || convex(&scratch.flat))
+        {
+            return scratch.flat.clone();
+        }
+        scratch.resolve(rule)
+    }
+
+    #[cfg(test)]
     fn flattened(&self) -> (BezPath, FillRule) {
+        let mut out = BezPath::new();
+        let rule = self.flattened_into(self.transform, &mut out);
+        (out, rule)
+    }
+
+    fn flattened_into(&self, transform: Affine, out: &mut BezPath) -> FillRule {
         let (local, rule) = match &self.style {
-            ItemStyle::Fill(rule) => (self.path.clone(), *rule),
+            ItemStyle::Fill(rule) => (std::borrow::Cow::Borrowed(&self.path), *rule),
             ItemStyle::Stroke(stroke) => {
                 // Expand finely enough that the transformed outline stays
                 // within the tolerance.
-                let c = self.transform.as_coeffs();
-                let scale = libm::hypot(c[0], c[1]).max(libm::hypot(c[2], c[3])).max(1e-9);
+                let c = transform.as_coeffs();
+                let scale = libm::hypot(c[0], c[1])
+                    .max(libm::hypot(c[2], c[3]))
+                    .max(1e-9);
                 let outline = kurbo::stroke(
                     self.path.iter(),
                     stroke,
                     &kurbo::StrokeOpts::default(),
                     FLATTEN_TOLERANCE / scale / 4.0,
                 );
-                (outline, FillRule::NonZero)
+                (std::borrow::Cow::Owned(outline), FillRule::NonZero)
             }
         };
-        let device = self.transform * local;
-        let mut out = BezPath::new();
-        kurbo::flatten(device.iter(), FLATTEN_TOLERANCE, |el| out.push(el));
-        (out, rule)
+        out.truncate(0);
+        kurbo::flatten(
+            local.iter().map(|el| transform * el),
+            FLATTEN_TOLERANCE,
+            |el| out.push(el),
+        );
+        rule
     }
 
     /// Premultiplied paint.
@@ -168,40 +218,164 @@ fn convex(flat: &BezPath) -> bool {
     (turning.abs() - core::f64::consts::TAU).abs() < 1e-6
 }
 
+/// A small single-contour polygon with no crossing or touching edges.
+/// Curved shapes with many flattened segments take the convex fast path or
+/// the general resolver; the quadratic test is deliberately bounded.
+fn simple_polygon(flat: &BezPath) -> bool {
+    let elements = flat.elements();
+    if elements.len() < 4 || elements.len() > 66 {
+        return false;
+    }
+    let mut points = [kurbo::Point::ZERO; 64];
+    let mut n = 0;
+    for (i, el) in elements.iter().enumerate() {
+        match *el {
+            kurbo::PathEl::MoveTo(p) if i == 0 && p.is_finite() => {
+                points[n] = p;
+                n += 1;
+            }
+            kurbo::PathEl::LineTo(p) if p.is_finite() && n < points.len() => {
+                points[n] = p;
+                n += 1;
+            }
+            kurbo::PathEl::ClosePath if i + 1 == elements.len() => {}
+            _ => return false,
+        }
+    }
+    if n > 1 && points[0] == points[n - 1] {
+        n -= 1;
+    }
+    if n < 3 || points[..n].windows(2).any(|w| w[0] == w[1]) {
+        return false;
+    }
+    for i in 0..n {
+        let (a, b) = (points[i], points[(i + 1) % n]);
+        if a == b {
+            return false;
+        }
+        let c = points[(i + 2) % n];
+        if (b - a).cross(c - b) == 0.0 {
+            return false;
+        }
+        for j in i + 2..n {
+            if (j + 1) % n == i {
+                continue;
+            }
+            let (c, d) = (points[j], points[(j + 1) % n]);
+            if segments_touch(a, b, c, d) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn segments_touch(a: kurbo::Point, b: kurbo::Point, c: kurbo::Point, d: kurbo::Point) -> bool {
+    let side = |p: kurbo::Point, q: kurbo::Point, r: kurbo::Point| (q - p).cross(r - p);
+    let (ab_c, ab_d, cd_a, cd_b) = (side(a, b, c), side(a, b, d), side(c, d, a), side(c, d, b));
+    // Treat collinearity and near-zero orientation conservatively: the
+    // resolver handles touching and degenerate polygons.
+    if [ab_c, ab_d, cd_a, cd_b]
+        .into_iter()
+        .any(|v| !v.is_finite() || v == 0.0)
+    {
+        return true;
+    }
+    ab_c.signum() != ab_d.signum() && cd_a.signum() != cd_b.signum()
+}
+
 /// `flat` (line segments only) filled with `rule`, as disjoint contours:
 /// outer boundaries counterclockwise, holes clockwise, so the nonzero and
 /// even-odd fills of the result agree and no pixel sums overlapping area.
-fn resolve(flat: &BezPath, rule: FillRule) -> BezPath {
-    use i_overlay::core::fill_rule::FillRule as Rule;
-    use i_overlay::float::simplify::SimplifyShape;
-    let mut contours: Vec<Vec<[f64; 2]>> = Vec::new();
-    for el in flat.elements() {
-        match *el {
-            kurbo::PathEl::MoveTo(p) => contours.push(vec![[p.x, p.y]]),
-            kurbo::PathEl::LineTo(p) => {
-                if let Some(c) = contours.last_mut() {
-                    c.push([p.x, p.y]);
+pub struct OutlineScratch {
+    flat: BezPath,
+    max_flat_elements: usize,
+    contours: Vec<Vec<[f64; 2]>>,
+    overlay: i_overlay::float::overlay::FloatOverlay<[f64; 2]>,
+    max_segments: usize,
+}
+
+impl Default for OutlineScratch {
+    fn default() -> Self {
+        Self {
+            flat: BezPath::new(),
+            max_flat_elements: 0,
+            contours: Vec::new(),
+            overlay: i_overlay::float::overlay::FloatOverlay::new_empty(
+                Default::default(),
+                Default::default(),
+                0,
+            ),
+            max_segments: 0,
+        }
+    }
+}
+
+impl OutlineScratch {
+    /// Conservative retained-memory estimate for deciding when to discard
+    /// scratch after a large one-off outline.
+    pub fn retained_bytes(&self) -> u64 {
+        (self.max_flat_elements * size_of::<kurbo::PathEl>()
+            + self.contours.capacity() * size_of::<Vec<[f64; 2]>>()
+            + self
+                .contours
+                .iter()
+                .map(|c| c.capacity() * 16)
+                .sum::<usize>()
+            + self.max_segments * 256) as u64
+    }
+
+    fn resolve(&mut self, rule: FillRule) -> BezPath {
+        use i_overlay::core::fill_rule::FillRule as Rule;
+        use i_overlay::core::overlay_rule::OverlayRule;
+        let mut count = 0;
+        for el in self.flat.elements() {
+            match *el {
+                kurbo::PathEl::MoveTo(p) => {
+                    if count == self.contours.len() {
+                        self.contours.push(Vec::new());
+                    }
+                    self.contours[count].clear();
+                    self.contours[count].push([p.x, p.y]);
+                    count += 1;
                 }
+                kurbo::PathEl::LineTo(p) if count > 0 => {
+                    self.contours[count - 1].push([p.x, p.y]);
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
-    contours.retain(|c| c.len() > 2 && c.iter().flatten().all(|v| v.is_finite()));
-    let shapes = contours.simplify_shape(match rule {
-        FillRule::NonZero => Rule::NonZero,
-        FillRule::EvenOdd => Rule::EvenOdd,
-    });
-    let mut out = BezPath::new();
-    for contour in shapes.iter().flatten() {
-        let mut points = contour.iter();
-        let Some(first) = points.next() else { continue };
-        out.move_to((first[0], first[1]));
-        for p in points {
-            out.line_to((p[0], p[1]));
+        let mut valid = 0;
+        for i in 0..count {
+            let c = &self.contours[i];
+            if c.len() > 2 && c.iter().flatten().all(|v| v.is_finite()) {
+                self.contours.swap(valid, i);
+                valid += 1;
+            }
         }
-        out.close_path();
+        self.max_segments = self
+            .max_segments
+            .max(self.contours[..valid].iter().map(Vec::len).sum());
+        self.overlay.reinit_with_subj(&self.contours[..valid]);
+        let shapes = self.overlay.overlay(
+            OverlayRule::Subject,
+            match rule {
+                FillRule::NonZero => Rule::NonZero,
+                FillRule::EvenOdd => Rule::EvenOdd,
+            },
+        );
+        let mut out = BezPath::new();
+        for contour in shapes.iter().flatten() {
+            let mut points = contour.iter();
+            let Some(first) = points.next() else { continue };
+            out.move_to((first[0], first[1]));
+            for p in points {
+                out.line_to((p[0], p[1]));
+            }
+            out.close_path();
+        }
+        out
     }
-    out
 }
 
 /// An ordered list of items.
@@ -236,7 +410,11 @@ impl CoverageScene {
         fill.set(fill_color);
         // `c.strokeStyle = d.strokeColor || '#fff'`.
         let mut stroke = StyleSlot::default();
-        stroke.set(if stroke_color.is_empty() { "#fff" } else { stroke_color });
+        stroke.set(if stroke_color.is_empty() {
+            "#fff"
+        } else {
+            stroke_color
+        });
         if geometry.fill {
             self.items.push(CoverageItem {
                 path: geometry.path.clone(),
@@ -388,23 +566,33 @@ const GUTTER: u32 = 1;
 
 impl AtlasLayout {
     /// Packs every item that intersects `clip` with shelf packing, tallest
-    /// first. Items larger than a page are clipped to the page size around
-    /// the visible region (they can only be that large when `clip` is).
+    /// first. Large visible items are tiled so a device buffer limit never
+    /// drops authored geometry at the far side of the item.
     pub fn pack(scene: &CoverageScene, clip: PixelRect, max_side: u32) -> Self {
         let max_side = max_side.max(16);
-        let mut wanted: Vec<(usize, PixelRect)> = scene
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, item)| {
-                let r = PixelRect::round_out(item.device_bounds()?).intersect(clip)?;
-                Some((i, r))
-            })
-            .collect();
-        // Cap each cell at the page size (the visible part of a huge item).
-        for (_, r) in &mut wanted {
-            r.width = r.width.min(max_side);
-            r.height = r.height.min(max_side);
+        let cell_side = max_side - GUTTER;
+        let mut wanted: Vec<(usize, PixelRect)> = Vec::new();
+        for (i, item) in scene.items.iter().enumerate() {
+            let Some(r) = item
+                .device_bounds()
+                .map(PixelRect::round_out)
+                .and_then(|r| r.intersect(clip))
+            else {
+                continue;
+            };
+            for dy in (0..r.height).step_by(cell_side as usize) {
+                for dx in (0..r.width).step_by(cell_side as usize) {
+                    wanted.push((
+                        i,
+                        PixelRect::new(
+                            r.x + dx as i32,
+                            r.y + dy as i32,
+                            (r.width - dx).min(cell_side),
+                            (r.height - dy).min(cell_side),
+                        ),
+                    ));
+                }
+            }
         }
         let mut order: Vec<usize> = (0..wanted.len()).collect();
         order.sort_by(|&a, &b| {
@@ -476,6 +664,97 @@ mod tests {
     use crate::shape::{ShapeContent, ShapeKind, shape_geometry};
 
     #[test]
+    fn reused_overlay_matches_independent_simplification() {
+        use i_overlay::core::fill_rule::FillRule as Rule;
+        use i_overlay::float::simplify::SimplifyShape;
+        let mut scratch = OutlineScratch::default();
+        for n in 0..40 {
+            let mut path = BezPath::new();
+            path.move_to((3.25, 4.5));
+            path.line_to((47.75 + f64::from(n) / 7.0, 59.25));
+            path.line_to((12.5, 60.0));
+            path.line_to((50.0, 5.75 + f64::from(n) / 11.0));
+            path.close_path();
+            let contours = vec![vec![
+                [3.25, 4.5],
+                [47.75 + f64::from(n) / 7.0, 59.25],
+                [12.5, 60.0],
+                [50.0, 5.75 + f64::from(n) / 11.0],
+            ]];
+            for (rule, overlay_rule) in [
+                (FillRule::NonZero, Rule::NonZero),
+                (FillRule::EvenOdd, Rule::EvenOdd),
+            ] {
+                let shapes = contours.simplify_shape(overlay_rule);
+                let mut expected = BezPath::new();
+                for contour in shapes.iter().flatten() {
+                    let mut points = contour.iter();
+                    let first = points.next().unwrap();
+                    expected.move_to((first[0], first[1]));
+                    for p in points {
+                        expected.line_to((p[0], p[1]));
+                    }
+                    expected.close_path();
+                }
+                scratch.flat = path.clone();
+                assert_eq!(scratch.resolve(rule), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn simple_concave_fill_bypasses_resolution_but_crossing_does_not() {
+        let mut star = BezPath::new();
+        star.move_to((0.0, 0.0));
+        star.line_to((4.0, 0.0));
+        star.line_to((2.0, 1.0));
+        star.line_to((4.0, 4.0));
+        star.line_to((0.0, 4.0));
+        star.close_path();
+        assert!(!convex(&star));
+        assert!(simple_polygon(&star));
+        let item = CoverageItem {
+            path: star.clone(),
+            transform: Affine::IDENTITY,
+            style: ItemStyle::Fill(FillRule::EvenOdd),
+            color: [1.0; 4],
+        };
+        assert_eq!(item.device_outline(), star);
+
+        let mut crossing = BezPath::new();
+        crossing.move_to((0.0, 0.0));
+        crossing.line_to((4.0, 4.0));
+        crossing.line_to((0.0, 4.0));
+        crossing.line_to((4.0, 0.0));
+        crossing.close_path();
+        assert!(!simple_polygon(&crossing));
+
+        let mut spike = BezPath::new();
+        spike.move_to((0.0, 0.0));
+        spike.line_to((4.0, 0.0));
+        spike.line_to((2.0, 0.0));
+        spike.line_to((2.0, 4.0));
+        spike.close_path();
+        assert!(!simple_polygon(&spike));
+
+        let regular_star = shape_geometry(&ShapeContent {
+            shape: ShapeKind::Star,
+            w: 100.0,
+            h: 100.0,
+            points: 5.0,
+            ..ShapeContent::default()
+        })
+        .unwrap();
+        let star_item = CoverageItem {
+            path: regular_star.path,
+            transform: Affine::rotate(0.37),
+            style: ItemStyle::Fill(FillRule::NonZero),
+            color: [1.0; 4],
+        };
+        assert!(simple_polygon(&star_item.flattened().0));
+    }
+
+    #[test]
     fn shape_items_follow_raster_shape() {
         let g = shape_geometry(&ShapeContent {
             shape: ShapeKind::Ellipse,
@@ -529,6 +808,28 @@ mod tests {
             }
         }
         assert!(layout.pages.len() > 1);
+    }
+
+    #[test]
+    fn atlas_tiles_large_visible_item_without_dropping_area() {
+        let mut scene = CoverageScene::default();
+        scene.items.push(CoverageItem {
+            path: Rect::new(0.0, 0.0, 31.0, 27.0).to_path(0.1),
+            transform: Affine::IDENTITY,
+            style: ItemStyle::Fill(FillRule::NonZero),
+            color: [1.0; 4],
+        });
+        let layout = AtlasLayout::pack(&scene, PixelRect::new(0, 0, 31, 27), 16);
+        assert_eq!(
+            layout
+                .cells
+                .iter()
+                .map(|c| u64::from(c.device.width) * u64::from(c.device.height))
+                .sum::<u64>(),
+            31 * 27
+        );
+        assert!(layout.cells.len() > 1);
+        assert!(layout.pages.iter().all(|&(w, h)| w <= 16 && h <= 16));
     }
 
     #[test]

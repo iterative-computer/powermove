@@ -431,10 +431,15 @@ fn filter_reference(name: &str, width: usize, height: usize) -> Vec<f64> {
 
 #[test]
 fn filter_witness_quality() {
-    let location = std::env::var_os("PM_SVG_FILTER_FRAME_REF").expect(
-        "SVG filter quality gate requires PM_SVG_FILTER_FRAME_REF with actual legacy-app captures",
-    );
-    let path = std::path::PathBuf::from(location);
+    // These four public synthetic witnesses are committed with the test so
+    // the default gate needs neither a private corpus nor a /tmp capture.
+    // An explicit override remains strict: missing or mismatched bytes fail.
+    let path = std::env::var_os("PM_SVG_FILTER_FRAME_REF")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/svg-filters/manifest.json")
+        });
     let manifest_path = if path.is_dir() {
         path.join("manifest.json")
     } else {

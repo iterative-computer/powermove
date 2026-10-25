@@ -20,6 +20,9 @@ fn art() -> &'static str {
 #[test]
 fn rotated_cover_blur_fits_the_float_budget_and_has_no_tile_seam() {
     let gpu = pm_gpu::Gpu::new("SVG Cover tile regression").unwrap();
+    gpu.device.set_device_lost_callback(|reason, message| {
+        eprintln!("SVG Cover device lost: {reason:?}: {message}");
+    });
     let doc = SvgDocument::parse(art().as_bytes()).unwrap();
     assert!(doc.gpu_paintable());
     let world = Affine::translate((420.0, 120.0))
@@ -48,7 +51,12 @@ fn rotated_cover_blur_fits_the_float_budget_and_has_no_tile_seam() {
                 Precision::Float32,
             )
             .unwrap()
-            .expect("the supported Cover filter stays on the float path");
+            .unwrap_or_else(|| {
+                panic!(
+                    "the supported Cover filter stays on the float path: {:?}",
+                    painter.fallback_reason()
+                )
+            });
         gpu.queue.submit([encoder.finish()]);
         pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &texture).unwrap()
     };

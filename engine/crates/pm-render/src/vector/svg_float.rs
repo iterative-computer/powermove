@@ -178,13 +178,37 @@ fn blend(b: vec3<f32>, s: vec3<f32>, mode: u32) -> vec3<f32> {
 
 const COPY: &str = r#"
 @group(0) @binding(0) var source: texture_2d<f32>;
+struct Clip { edges: vec4<f32> };
+@group(0) @binding(1) var<uniform> clip: Clip;
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(f32(i & 1u)*2.0-1.0, 1.0-f32(i >> 1u)*2.0,0.0,1.0);
 }
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    return textureLoad(source,vec2<i32>(floor(pos.xy)),0);
+    let p = floor(pos.xy);
+    let x = clamp(min(p.x + 1.0, clip.edges.z) - max(p.x, clip.edges.x), 0.0, 1.0);
+    let y = clamp(min(p.y + 1.0, clip.edges.w) - max(p.y, clip.edges.y), 0.0, 1.0);
+    return textureLoad(source,vec2<i32>(p),0) * (x * y);
 }
 "#;
+
+/// A device-space image box can be clipped exactly by its pixel area.
+/// Keeping this outside the SVG group tree avoids a 4x group grid for every
+/// ordinary image layer. Rotated/sheared boxes still use the group path.
+fn axis_clip(clip: &[Point], rect: PixelRect) -> Option<[f32; 4]> {
+    let [a, b, c, d] = clip else { return None };
+    let near = |x: f64, y: f64| (x - y).abs() <= 1e-7;
+    if !near(a.y, b.y) || !near(b.x, c.x) || !near(c.y, d.y) || !near(d.x, a.x) {
+        return None;
+    }
+    let x0 = a.x.min(c.x) - f64::from(rect.x);
+    let y0 = a.y.min(c.y) - f64::from(rect.y);
+    let x1 = a.x.max(c.x) - f64::from(rect.x);
+    let y1 = a.y.max(c.y) - f64::from(rect.y);
+    [x0, y0, x1, y1]
+        .iter()
+        .all(|v| v.is_finite() && v.abs() < 16_000_000.0)
+        .then_some([x0 as f32, y0 as f32, x1 as f32, y1 as f32])
+}
 
 const RESOLVE: &str = r#"
 struct Params { v: array<vec4<f32>, 2> };
@@ -214,6 +238,11 @@ struct Params { v: array<vec4<f32>, 2> };
 
 const GROUP_RATE: u32 = 4;
 const MAX_FINE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_FILTER_PIXEL_PASSES: u64 = 1_500_000_000;
+// The tile-wide estimate includes shader fragments outside each filter's
+// actual region. Keep the 640×360 ART native while rejecting canonical
+// oversampling that multiplies its blur into hundreds of billions of taps.
+const MAX_FILTER_KERNEL_SAMPLES: u64 = 64_000_000_000;
 
 #[derive(Clone, Copy)]
 struct FilterPaintGrid {
@@ -240,6 +269,12 @@ struct ScratchPool {
 }
 
 impl ScratchPool {
+    fn discard_unused(&mut self) {
+        debug_assert!(self.busy.is_empty());
+        self.textures.clear();
+        self.coverage.clear();
+    }
+
     fn reset(&mut self) {
         debug_assert!(
             self.busy.is_empty(),
@@ -449,6 +484,7 @@ impl ScratchProjection {
 }
 
 pub struct SvgPainter {
+    fallback_reason: Option<String>,
     coverage: AreaCoverage,
     draw: wgpu::RenderPipeline,
     draw_layout: wgpu::BindGroupLayout,
@@ -627,6 +663,24 @@ fn clear_target(encoder: &mut wgpu::CommandEncoder, target: &wgpu::Texture) {
     });
 }
 
+fn submit_tiled_batch(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: wgpu::CommandEncoder,
+) -> Result<(), String> {
+    // Each tile creates coverage inputs, stop buffers, views and bind groups.
+    // Waiting on this exact submission releases those transient resources
+    // before the next batch and bounds sequential exports as well as one SVG.
+    let submission = queue.submit([encoder.finish()]);
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .map_err(|error| format!("SVG tiled GPU submission failed: {error:?}"))?;
+    Ok(())
+}
+
 impl SvgPainter {
     /// Float blending is optional on engine devices. Reject it before
     /// constructing pipelines so the caller can use the native fallback.
@@ -681,7 +735,7 @@ impl SvgPainter {
         });
         let xl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm svg float copy"),
-            entries: &[tex_entry(0)],
+            entries: &[tex_entry(0), buffer_entry(1, false)],
         });
         let rl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm svg float resolve"),
@@ -696,6 +750,7 @@ impl SvgPainter {
             entries: &[tex_entry(0), buffer_entry(1, false)],
         });
         Some(Self {
+            fallback_reason: None,
             coverage: AreaCoverage::new(device),
             draw: pipeline(
                 device,
@@ -723,8 +778,13 @@ impl SvgPainter {
         })
     }
 
-    /// Records a float SVG render. Unsupported documents return `None` for
-    /// the caller's resvg fallback; no commands are recorded in that case.
+    /// The runtime reason for the most recent resvg fallback, if any.
+    pub fn fallback_reason(&self) -> Option<&str> {
+        self.fallback_reason.as_deref()
+    }
+
+    /// Records a float SVG render. A scene beyond the native path's limits
+    /// returns `None` so the caller can render every legacy-supported SVG.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -737,8 +797,37 @@ impl SvgPainter {
         clip: &[Point],
         precision: Precision,
     ) -> Result<Option<(wgpu::Texture, u64)>, String> {
-        let _ = queue;
-        let Some(mut scene) = doc.float_scene(transform, clip) else {
+        self.fallback_reason = None;
+        match self.render_inner(
+            device, queue, encoder, doc, transform, rect, clip, precision,
+        ) {
+            Ok(Some(image)) => Ok(Some(image)),
+            Ok(None) => {
+                self.fallback_reason = Some("SVG features require resvg".into());
+                Ok(None)
+            }
+            Err(reason) => {
+                self.fallback_reason = Some(reason);
+                Ok(None)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_inner(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        doc: &SvgDocument,
+        transform: Affine,
+        rect: PixelRect,
+        clip: &[Point],
+        precision: Precision,
+    ) -> Result<Option<(wgpu::Texture, u64)>, String> {
+        let box_clip = axis_clip(clip, rect);
+        let scene_clip = if box_clip.is_some() { &[][..] } else { clip };
+        let Some(mut scene) = doc.float_scene(transform, scene_clip) else {
             return Ok(None);
         };
         if rect.width.max(1) > device.limits().max_texture_dimension_2d
@@ -747,9 +836,10 @@ impl SvgPainter {
             return Err("SVG output exceeds device texture dimensions".into());
         }
         if has_filters(&scene) {
-            let target = self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+            let target =
+                self.render_joint_tiled(device, queue, doc, transform, rect, scene_clip)?;
             return self
-                .finish_output(device, encoder, target, rect, precision)
+                .finish_output(device, encoder, target, rect, precision, box_clip)
                 .map(Some);
         }
         let (w, h) = (rect.width.max(1), rect.height.max(1));
@@ -762,9 +852,9 @@ impl SvgPainter {
         if needs_joint_samples(&scene) {
             let Some(bounds) = path_bounds(&paths) else {
                 let target =
-                    self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+                    self.render_joint_tiled(device, queue, doc, transform, rect, scene_clip)?;
                 return self
-                    .finish_output(device, encoder, target, rect, precision)
+                    .finish_output(device, encoder, target, rect, precision, box_clip)
                     .map(Some);
             };
             let rate = GROUP_RATE;
@@ -795,12 +885,12 @@ impl SvgPainter {
                 .saturating_mul(target_count(&scene));
             if fw > max_dim || fh > max_dim || target_bytes > MAX_FINE_BYTES {
                 let target =
-                    self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+                    self.render_joint_tiled(device, queue, doc, transform, rect, scene_clip)?;
                 return self
-                    .finish_output(device, encoder, target, rect, precision)
+                    .finish_output(device, encoder, target, rect, precision, box_clip)
                     .map(Some);
             }
-            let fine_clip: Vec<_> = clip
+            let fine_clip: Vec<_> = scene_clip
                 .iter()
                 .map(|p| Point::new(p.x * f64::from(rate), p.y * f64::from(rate)))
                 .collect();
@@ -817,9 +907,9 @@ impl SvgPainter {
             let coverage_bytes = coverage_pixels(&fine_paths).saturating_mul(4);
             if target_bytes.saturating_add(coverage_bytes) > MAX_FINE_BYTES {
                 let target =
-                    self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+                    self.render_joint_tiled(device, queue, doc, transform, rect, scene_clip)?;
                 return self
-                    .finish_output(device, encoder, target, rect, precision)
+                    .finish_output(device, encoder, target, rect, precision, box_clip)
                     .map(Some);
             }
             scene = fine_scene;
@@ -827,13 +917,19 @@ impl SvgPainter {
             paint_rect = fine_rect;
             resolve = Some(bounds);
         }
-        let limit = (device.limits().max_storage_buffer_binding_size / 4).min(u64::from(u32::MAX));
+        let limits = device.limits();
+        let limit = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size)
+            .min(u64::from(u32::MAX) * 4)
+            / 4;
         // Never lower the selected sampling rate to fit storage: that would
         // silently weaken the paint integration bound.
         if coverage_pixels(&paths) > limit {
-            let target = self.render_joint_tiled(device, encoder, doc, transform, rect, clip)?;
+            let target =
+                self.render_joint_tiled(device, queue, doc, transform, rect, scene_clip)?;
             return self
-                .finish_output(device, encoder, target, rect, precision)
+                .finish_output(device, encoder, target, rect, precision, box_clip)
                 .map(Some);
         }
         let items: Vec<_> = paths
@@ -845,12 +941,22 @@ impl SvgPainter {
             })
             .collect();
         let batch = Batch::new(&items);
+        batch
+            .fits_gpu_limits(&limits)
+            .map_err(|reason| format!("SVG {reason}"))?;
+        let (stops, ranges) = collect_stops(&scene);
+        if (stops.len() as u64).saturating_mul(32)
+            > limits
+                .max_storage_buffer_binding_size
+                .min(limits.max_buffer_size)
+        {
+            return Err("SVG gradient stop buffer exceeds GPU limit".into());
+        }
         let values = coverage::buffer(device, batch.bytes());
         self.coverage.encode(device, encoder, &batch, &values, None);
         for (i, e) in paths.iter_mut().enumerate() {
             e.offset = batch.offset(i);
         }
-        let (stops, ranges) = collect_stops(&scene);
         let stop_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("pm svg float stops"),
             contents: bytes(stops.as_flattened()),
@@ -908,7 +1014,7 @@ impl SvgPainter {
         } else {
             target
         };
-        self.finish_output(device, encoder, target, rect, precision)
+        self.finish_output(device, encoder, target, rect, precision, box_clip)
             .map(Some)
     }
 
@@ -916,7 +1022,7 @@ impl SvgPainter {
     fn render_joint_tiled(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
         doc: &SvgDocument,
         transform: Affine,
         rect: PixelRect,
@@ -928,15 +1034,53 @@ impl SvgPainter {
             return Err("SVG output exceeds device texture dimensions".into());
         }
         let output = float_target(device, rect.width.max(1), rect.height.max(1));
+        let mut tile_encoder = device.create_command_encoder(&Default::default());
+        clear_target(&mut tile_encoder, &output);
         let scene = doc
             .float_scene(transform, clip)
             .ok_or_else(|| "SVG filter scene changed during tile render".to_owned())?;
+        let visible = doc.user_bounds().and_then(|bounds| {
+            PixelRect::round_out(transform.transform_rect_bbox(bounds)).intersect(rect)
+        });
+        let Some(visible) = visible else {
+            submit_tiled_batch(device, queue, tile_encoder)?;
+            return Ok(output);
+        };
         let halo = filter_halo(&scene)?;
         let smooth_resolve = smooth_filter_resolve(&scene);
         let mut scratch = ScratchPool::default();
-        const TILE: u32 = 64;
-        for y in (0..rect.height.max(1)).step_by(TILE as usize) {
-            for x in (0..rect.width.max(1)).step_by(TILE as usize) {
+        const TILE: u32 = 32;
+        const TILES_PER_SUBMIT: usize = 8;
+        let mut pending = 0;
+        let start_x = ((visible.x - rect.x) as u32 / TILE) * TILE;
+        let start_y = ((visible.y - rect.y) as u32 / TILE) * TILE;
+        let end_x = (visible.right() - rect.x) as u32;
+        let end_y = (visible.bottom() - rect.y) as u32;
+        let tiles_x = u64::from((end_x - start_x).div_ceil(TILE));
+        let tiles_y = u64::from((end_y - start_y).div_ceil(TILE));
+        let fine_w =
+            u64::from(TILE.saturating_add(halo[0].saturating_mul(2))) * u64::from(GROUP_RATE);
+        let fine_h =
+            u64::from(TILE.saturating_add(halo[1].saturating_mul(2))) * u64::from(GROUP_RATE);
+        let work = tiles_x
+            .saturating_mul(tiles_y)
+            .saturating_mul(fine_w)
+            .saturating_mul(fine_h)
+            .saturating_mul(target_count(&scene));
+        if work > MAX_FILTER_PIXEL_PASSES {
+            return Err(format!(
+                "SVG filter work budget exceeded ({work} fine pixel passes)"
+            ));
+        }
+        let kernel_samples = filter_kernel_work(&scene, fine_w.saturating_mul(fine_h))?
+            .saturating_mul(tiles_x.saturating_mul(tiles_y));
+        if kernel_samples > MAX_FILTER_KERNEL_SAMPLES {
+            return Err(format!(
+                "SVG filter convolution budget exceeded ({kernel_samples} kernel samples)"
+            ));
+        }
+        for y in (start_y..end_y).step_by(TILE as usize) {
+            for x in (start_x..end_x).step_by(TILE as usize) {
                 let tile = PixelRect::new(
                     rect.x
                         .checked_add(i32::try_from(x).map_err(|_| "SVG tile x overflow")?)
@@ -949,7 +1093,7 @@ impl SvgPainter {
                 );
                 self.render_joint_tile(
                     device,
-                    encoder,
+                    &mut tile_encoder,
                     doc,
                     transform,
                     rect,
@@ -960,7 +1104,16 @@ impl SvgPainter {
                     &output,
                     &mut scratch,
                 )?;
+                pending += 1;
+                if pending == TILES_PER_SUBMIT {
+                    submit_tiled_batch(device, queue, tile_encoder)?;
+                    tile_encoder = device.create_command_encoder(&Default::default());
+                    pending = 0;
+                }
             }
+        }
+        if pending > 0 {
+            submit_tiled_batch(device, queue, tile_encoder)?;
         }
         Ok(output)
     }
@@ -1021,6 +1174,12 @@ impl SvgPainter {
         let mut paths = Vec::new();
         collect(&scene, fine_rect, &mut paths)
             .ok_or_else(|| "SVG fine coverage coordinates overflow".to_owned())?;
+        if paths
+            .iter()
+            .all(|path| path.bounds.width == 0 || path.bounds.height == 0)
+        {
+            return Ok(());
+        }
         let coverage_bytes = coverage_pixels(&paths).saturating_mul(4);
         let mut projection = scratch.projection((!paths.is_empty()).then_some(coverage_bytes));
         let fine_size = (fine_rect.width, fine_rect.height);
@@ -1032,8 +1191,21 @@ impl SvgPainter {
         let resolved = projection.target((tile.width, tile.height));
         projection.release(painted);
         projection.release(resolved);
+        if projection.bytes > MAX_FINE_BYTES {
+            // Prior edge/split tiles can leave incompatible free allocations.
+            // Replan without them before treating the current tile as too big.
+            scratch.discard_unused();
+            projection = scratch.projection((!paths.is_empty()).then_some(coverage_bytes));
+            let painted = projection.paint_nodes(&scene, fine_size);
+            let resolved = projection.target((tile.width, tile.height));
+            projection.release(painted);
+            projection.release(resolved);
+        }
         let projected = projection.bytes;
-        let limit = device.limits().max_storage_buffer_binding_size;
+        let limits = device.limits();
+        let limit = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size);
         let oversize = fine_rect.width > device.limits().max_texture_dimension_2d
             || fine_rect.height > device.limits().max_texture_dimension_2d
             || projected > MAX_FINE_BYTES
@@ -1105,12 +1277,18 @@ impl SvgPainter {
                 })
                 .collect();
             let batch = Batch::new(&items);
+            batch
+                .fits_gpu_limits(&limits)
+                .map_err(|reason| format!("SVG tile {reason}"))?;
+            let (stops, ranges) = collect_stops(&scene);
+            if (stops.len() as u64).saturating_mul(32) > limit {
+                return Err("SVG tile gradient stop buffer exceeds GPU limit".into());
+            }
             let values = scratch.coverage(device, batch.bytes());
             self.coverage.encode(device, encoder, &batch, &values, None);
             for (i, e) in paths.iter_mut().enumerate() {
                 e.offset = batch.offset(i);
             }
-            let (stops, ranges) = collect_stops(&scene);
             let stop_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("pm svg tile stops"),
                 contents: bytes(stops.as_flattened()),
@@ -1199,6 +1377,7 @@ impl SvgPainter {
         target: wgpu::Texture,
         rect: PixelRect,
         precision: Precision,
+        box_clip: Option<[f32; 4]>,
     ) -> Result<(wgpu::Texture, u64), String> {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
         let format = pm_gpu::working_format(precision);
@@ -1208,7 +1387,7 @@ impl SvgPainter {
             wgpu::TextureFormat::Rgba32Float => (2, 16),
             _ => return Err("unsupported SVG working format".into()),
         };
-        if output == 2 {
+        if output == 2 && box_clip.is_none() {
             return Ok((target, u64::from(w) * u64::from(h) * bpp));
         }
         let result = device.create_texture(&wgpu::TextureDescriptor {
@@ -1228,13 +1407,20 @@ impl SvgPainter {
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let clip = uniform(device, &box_clip.unwrap_or([0.0, 0.0, w as f32, h as f32]));
         let bg = bind(
             device,
             &self.copy_layout,
-            &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            }],
+            &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: clip.as_entire_binding(),
+                },
+            ],
         );
         render_pass(encoder, &result, true, &self.copy[output], &bg);
         Ok((result, u64::from(w) * u64::from(h) * bpp))
@@ -1900,6 +2086,66 @@ fn smooth_filter_resolve(nodes: &[FloatNode]) -> bool {
                 && smooth_filter_resolve(&g.children)
         }
     })
+}
+
+/// Upper bound on separable Gaussian texture loads for one output tile.
+/// A canonical source at 8x can turn a modest authored blur into a
+/// thousand-tap fine-grid convolution; count those taps before encoding.
+fn filter_kernel_work(nodes: &[FloatNode], fine_pixels: u64) -> Result<u64, String> {
+    let mut work = 0u64;
+    for node in nodes {
+        if let FloatNode::Group(group) = node {
+            for filter in &group.filters {
+                if matches!(filter.resolution, Some(None)) {
+                    continue;
+                }
+                let (pixels, axes) = if let Some(Some([width, height])) = filter.resolution {
+                    let region = filter.filter.rect();
+                    let rw = f64::from(region.width());
+                    let rh = f64::from(region.height());
+                    if rw <= 0.0 || rh <= 0.0 {
+                        return Err("SVG filterRes region has no area".into());
+                    }
+                    (
+                        u64::from(width).saturating_mul(u64::from(height)),
+                        [f64::from(width) / rw, f64::from(height) / rh],
+                    )
+                } else {
+                    let c = filter.transform.as_coeffs();
+                    (
+                        fine_pixels,
+                        [c[0].hypot(c[1]) * f64::from(GROUP_RATE),
+                         c[2].hypot(c[3]) * f64::from(GROUP_RATE)],
+                    )
+                };
+                for primitive in filter.filter.primitives() {
+                    if let filter::Kind::GaussianBlur(blur) = primitive.kind() {
+                        for (sigma, axis) in [
+                            (f64::from(blur.std_dev_x().get()), axes[0]),
+                            (f64::from(blur.std_dev_y().get()), axes[1]),
+                        ] {
+                            let scaled = sigma * axis;
+                            if !scaled.is_finite() || scaled > 4096.0 {
+                                return Err(format!(
+                                    "SVG filter convolution exceeds device kernel limit (sigma {scaled})"
+                                ));
+                            }
+                            let taps = (8.0 * scaled).ceil() as u64 * 2 + 1;
+                            work = work.saturating_add(pixels.saturating_mul(taps));
+                        }
+                    }
+                }
+            }
+            work = work.saturating_add(filter_kernel_work(&group.children, fine_pixels)?);
+            if let Some(clip) = &group.clip {
+                work = work.saturating_add(filter_kernel_work(clip, fine_pixels)?);
+            }
+            if let Some(mask) = &group.mask {
+                work = work.saturating_add(filter_kernel_work(mask, fine_pixels)?);
+            }
+        }
+    }
+    Ok(work)
 }
 
 /// A conservative device-pixel support radius of every supported primitive

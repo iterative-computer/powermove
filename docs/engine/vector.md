@@ -28,6 +28,11 @@ strokes under the current transform).
   winding over a pixel before the rule, so overlapping pieces (a stroke's inner join
   through its pivot, a self-intersecting fill) would cover too much where they meet an
   edge.
+- **Reuse.** A bounded cache retains resolved local outlines at an upward scale
+  bucket that bounds the transform's largest singular value. Placement streams
+  through coverage without copying the outline; the device-space flattening
+  tolerance remains unchanged. CPU arrays, coverage buffers and atlas pages are
+  reused between submitted scenes and trimmed after large one-off work.
 - **Coverage.** `pm_render::coverage` (shared with path masks) computes each item's
   exact area coverage on the GPU, every item of a scene in one batch, into its cell of
   an `r32float` atlas (`AtlasLayout`, 1 px gutters): exact to the flattening and its
@@ -74,6 +79,12 @@ previous bound, geometry (alpha area and centroid) within 1e-3. Solids are judge
 corpus and in `tests/vector.rs`. Geometry in the corpus uses a render-only copy
 of the project at 32-bit depth, with the actual target format asserted, so half-float
 rounding of coverage and motion accumulation is not mistaken for shifted geometry.
+The default `corpus_own_layers_reference_gate` additionally isolates authored
+shape/solid content, masks and shutter samples before later-lane compositing.
+Effective 2.5D layers have a local source proof before projection. Full-frame
+pending rows still measure and ratchet their L4/L6 context; isolation cannot
+exempt a full-frame check. Dash partition in the f64 stroke reference integrates
+Bézier arclength independently of the production dash implementation.
 
 ## Path masks
 
@@ -89,7 +100,7 @@ See [composite.md](composite.md#path-masks) and `tests/path_masks.rs` (G-V2).
 
 All SVG image layers use one native route at output resolution. The layer's box,
 fit window, anchor and world transform determine the device-space drawing. There
-is no editor-window raster request or bucket-size cache. An SVG project can render
+is no editor-window raster request. An SVG project can render
 and export headlessly, including through `pm-cli`.
 
 usvg parses the document and lays out SVG text. System fonts load lazily, once per
@@ -98,6 +109,13 @@ with subcell coverage at an adaptive 1–16 samples per axis. Clips and masks sh
 a 4× grid with child paint, group opacity and W3C blending, then resolve once.
 Intermediates stay RGBA32F until the project's working-precision store.
 
+A persistent float source raster is keyed by the parsed file's path/stamp,
+effective-scale bucket and local image crop. Translation and rotation reuse it;
+scale crossing a bucket repaints it. Reprojection integrates source-cell overlap
+with each output pixel instead of bilinear point sampling. The image crop is
+painted jointly into the cached source. An axis-aligned output image-box clip
+uses rectangle bounds rather than allocating a full-frame group grid.
+
 Gaussian blur and offset run in float before the group's clip, mask and opacity.
 Filter and primitive regions clip output while retaining the source halo. Each
 primitive uses its declared `color-interpolation-filters`, defaulting to linearRGB.
@@ -105,9 +123,12 @@ SVG 1.1 `filterRes` uses its authored raster grid; zero disables the filtered el
 
 Large supported groups use ordered tiles with a shared 4× grid and Gaussian halos.
 Scratch textures return to a pool after their last encoded read. Texture scratch
-and coverage are preflighted against 128 MiB; output and command metadata are
-separate, and device limits remain enforced. Supported paint never selects RGBA8
-because of the fine-grid budget.
+and coverage are preflighted against 128 MiB and a filter work budget; output and
+command metadata are separate. Buffer sizes, binding sizes, dispatches and
+texture dimensions are checked against the actual device limits before creation.
+Work exceeding those bounds uses the declared resvg fallback rather than failing
+an export. `Renderer::svg_fallback_reason` exposes the runtime reason, including
+on a cached fallback result.
 
 Unsupported filter primitives, Gaussian duplicate/wrap edge modes, patterns,
 embedded images and crisp-edge paint use resvg at output resolution with an RGBA8
@@ -127,7 +148,7 @@ size instead of stretching the content bounds. Rounded rectangles follow SVG's
 `pm-render/tests/svg.rs` (G-V3) checks geometry, paint, scale, cache independence
 and preview/export equality against an independent f64 paint reference. It requires
 captured legacy-app frames for all placements and all Chromium semantic probes.
-`tests/svg_filters.rs` also requires actual captured filter witnesses and checks
+`tests/svg_filters.rs` includes public synthetic actual legacy filter witnesses and checks
 Gaussian color, regions, transformed covariance and filter grids against independent
 f64 math. The desktop gate uses live authored placements, checks geometry at RGBA32F
 against f64, and proves the window's RGBA8 endpoint is the same frame after rounding.

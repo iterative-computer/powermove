@@ -1187,6 +1187,13 @@ impl Renderer {
         before - self.pool.bytes()
     }
 
+    /// Native SVG fallback diagnostic for the most recently resolved SVG.
+    /// The reason names the unsupported feature or resource/device limit;
+    /// it never requires an editor window or host raster request.
+    pub fn svg_fallback_reason(&self) -> Option<&str> {
+        self.vector.svg_fallback_reason()
+    }
+
     /// The vector cache's standing bound, enforced while frames render
     /// (default: today's raster cache, 192 MiB and 4096 entries).
     pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {

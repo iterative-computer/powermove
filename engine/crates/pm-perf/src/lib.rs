@@ -168,6 +168,9 @@ counters! {
     /// Pooled render targets reused / allocated.
     TargetPoolHits = "cache.target_pool.hits",
     TargetPoolMisses = "cache.target_pool.misses",
+    /// SVG source rasters reused across output translations and rotations.
+    SvgRasterHits = "cache.svg_raster.hits",
+    SvgRasterMisses = "cache.svg_raster.misses",
 }
 
 /// The number of counters.

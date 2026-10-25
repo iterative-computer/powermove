@@ -9,6 +9,7 @@
 pub mod cache;
 pub mod svg;
 pub mod svg_float;
+pub mod svg_sample;
 
 use pm_eval::transform::Mat2d;
 use pm_eval::{JsResult, JsValue, Scope};

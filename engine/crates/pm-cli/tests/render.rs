@@ -527,8 +527,87 @@ fn svg_images_render_without_chromium() {
     let scopes = dir.join("scopes");
     let out = bare(
         "scope",
-        &[project_file.to_str().unwrap(), "-o", scopes.to_str().unwrap()],
+        &[
+            project_file.to_str().unwrap(),
+            "-o",
+            scopes.to_str().unwrap(),
+        ],
     );
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(scopes.join("scope.json").exists());
+}
+
+/// The review's plain box clip used to invalidate the Metal device at
+/// 1440×810. A subprocess also exercises subsequent quads/readback/export,
+/// which caught the original invalid `pm quads` buffer panic.
+#[test]
+fn svg_large_boxes_and_drop_shadow_sizes_export_without_a_window() {
+    for (case, width, height, box_width, box_height, sigma) in [
+        ("plain-1440", 1920, 1080, 1440, 810, None),
+        ("plain-1080p", 1920, 1080, 1920, 1080, None),
+        ("plain-4k", 3840, 2160, 3840, 2160, None),
+        ("small-blur-1080p", 1920, 1080, 1920, 1080, Some(0.5)),
+        ("shadow-1080p", 1920, 1080, 1920, 1080, Some(20.0)),
+    ] {
+        let dir = SvgProject(scratch(case));
+        let svg = dir.0.join("source.svg");
+        let source = sigma.map_or_else(
+            || r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#5A93F2"/></svg>"##.to_owned(),
+            |sigma| format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="{sigma}"/></filter></defs><circle cx="480" cy="270" r="150" fill="#5A93F2" filter="url(#b)"/></svg>"##),
+        );
+        std::fs::write(&svg, source).unwrap();
+        let mut p = project(false, false);
+        p["w"] = json!(width);
+        p["h"] = json!(height);
+        p["layers"] = json!([layer(
+            "svg",
+            "image",
+            json!({"asset":"still", "fit":"contain", "w":box_width,"h":box_height}),
+            width as f64 / 2.0,
+            height as f64 / 2.0
+        )]);
+        p["assets"] = json!({"still":{"id":"still","name":"source.svg","kind":"image","format":"svg","sourcePath":svg}});
+        let input = dir.0.join("project.json");
+        let output = dir.0.join("frame.png");
+        std::fs::write(&input, p.to_string()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+            .arg("render")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output)
+            .args(["--format", "still", "--range", "0:0.04"])
+            .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+            .env_remove("POWERMOVE_ANGLE_TOKEN")
+            .env("POWERMOVE_ANGLE_HELPER", dir.0.join("absent.cjs"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let decoder = png::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(output).unwrap(),
+        ));
+        let mut reader = decoder.read_info().unwrap();
+        let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut bytes).unwrap();
+        assert_eq!((info.width, info.height), (width, height), "{case}");
+        let channels = info.color_type.samples();
+        let center = ((height as usize / 2) * width as usize + width as usize / 2) * channels;
+        assert!(
+            (bytes[center] as i32 - 0x5a).abs() <= 1,
+            "{case}: red {}",
+            bytes[center]
+        );
+        assert!(
+            (bytes[center + 2] as i32 - 0xf2).abs() <= 1,
+            "{case}: blue {}",
+            bytes[center + 2]
+        );
+    }
 }

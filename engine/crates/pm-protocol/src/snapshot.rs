@@ -520,6 +520,9 @@ pub struct CompatNeed {
 }
 
 /// The answer to a [`HostSnapshot`].
+// Response already boxes this outcome. Boxing Rendered again would add a
+// second allocation to every source frame and snapshot.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(

@@ -38,6 +38,113 @@ mod svg_f64;
 /// Coverage cells per pixel side for paths and solids.
 pub const PATH_SAMPLES: usize = 16;
 
+/// A proof variant with only one open-composition layer drawing. The other
+/// layers remain as null transform parents, so authored world transforms do
+/// not change. Effects, mattes, and transitions belong to later lanes; the
+/// layer's content, opacity, masks and motion channels remain authored. The
+/// float project depth exposes native geometry instead of RGBA8 quantization.
+pub fn isolated_own_layer(document: &Document, index: usize) -> Document {
+    use pm_model::Value;
+    let mut root = document.to_value().expect("project root");
+    let Value::Object(fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    fields.insert("colorDepth", Value::Number(32.0));
+    let Value::Array(layers) = fields.get_mut("layers").expect("open composition layers") else {
+        panic!("open composition layers are not an array");
+    };
+    isolate_layer_list(layers, index);
+    Document::new(Some(root), document.revision())
+}
+
+/// Isolate one native source within a nested composition, at that
+/// composition's own geometry and evaluated source time. Parent precomp
+/// placement and resampling remain a separate compositing question.
+pub fn isolated_own_layer_in_comp(document: &Document, comp_id: &str, index: usize) -> Document {
+    use pm_model::Value;
+    let mut root = document.to_value().expect("project root");
+    let Value::Object(fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    fields.insert("colorDepth", Value::Number(32.0));
+    let Value::Object(comps) = fields.get_mut("comps").expect("project compositions") else {
+        panic!("project compositions are not an object");
+    };
+    let Value::Object(comp) = comps.get_mut(comp_id).expect("nested composition") else {
+        panic!("nested composition is not an object");
+    };
+    let Value::Array(layers) = comp.get_mut("layers").expect("nested composition layers") else {
+        panic!("nested composition layers are not an array");
+    };
+    isolate_layer_list(layers, index);
+    Document::new(Some(root), document.revision())
+}
+
+fn isolate_layer_list(layers: &mut [pm_model::Value], index: usize) {
+    use pm_model::Value;
+    assert!(index < layers.len());
+    for (i, layer) in layers.iter_mut().enumerate() {
+        let Value::Object(fields) = layer else {
+            panic!("layer is not an object");
+        };
+        if i == index {
+            fields.insert("fx", Value::Array(Vec::new()));
+            fields.insert("transitionIn", Value::Null);
+            fields.insert("transitionOut", Value::Null);
+            fields.insert("matteSource", Value::Null);
+            fields.insert("blend", Value::String("normal".into()));
+            fields.insert("group", Value::Null);
+        } else {
+            fields.insert("type", Value::String("null".into()));
+            fields.insert("group", Value::Null);
+            fields.insert("matteSource", Value::Null);
+            fields.insert("solo", Value::Bool(false));
+        }
+    }
+}
+
+/// The intrinsic solid source before a 2.5D plane projects it. Content,
+/// opacity, masks and motion channels remain authored. Its 3D placement and
+/// 2D pose are deliberately canonical: those belong to the projection gate.
+pub fn isolated_local_solid(document: &Document, index: usize) -> Document {
+    use pm_model::Value;
+    let mut root = isolated_own_layer(document, index)
+        .to_value()
+        .expect("isolated project");
+    let Value::Object(root_fields) = &mut root else {
+        panic!("project root is not an object");
+    };
+    let Value::Array(layers) = root_fields.get_mut("layers").expect("open layers") else {
+        panic!("open layers are not an array");
+    };
+    let Value::Object(layer) = &mut layers[index] else {
+        panic!("solid layer is not an object");
+    };
+    assert_eq!(layer.get("type").and_then(Value::as_str), Some("solid"));
+    layer.insert("threeD", Value::Bool(false));
+    let Value::Object(properties) = layer.get_mut("p").expect("solid properties") else {
+        panic!("solid properties are not an object");
+    };
+    for (name, value) in [
+        ("position.x", 0.0),
+        ("position.y", 0.0),
+        ("anchor.x", 0.0),
+        ("anchor.y", 0.0),
+        ("scale.x", 100.0),
+        ("scale.y", 100.0),
+        ("rotation", 0.0),
+        ("skew", 0.0),
+    ] {
+        let Value::Object(channel) = properties.get_mut(name).expect("pose channel") else {
+            panic!("pose channel is not a property");
+        };
+        channel.insert("v", Value::Number(value));
+        channel.insert("kf", Value::Array(Vec::new()));
+        channel.insert("expr", Value::Null);
+    }
+    Document::new(Some(root), document.revision())
+}
+
 /// A reference frame.
 #[derive(Clone)]
 pub struct Reference {

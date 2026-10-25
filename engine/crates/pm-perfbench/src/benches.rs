@@ -22,6 +22,8 @@ use serde_json::{Value, json};
 use crate::BenchReport;
 use crate::fixtures::{self, ROOT, Synthetic};
 
+mod svg_present;
+
 /// The viewer's device-pixel size in the Phase 2 rows (a 1496 × 904 stage
 /// at DPR 2).
 pub const VIEW: (u32, u32) = (1496, 904);
@@ -103,6 +105,7 @@ pub fn all() -> Vec<Bench> {
         ("blend_stack_cold", blend_stack_cold),
         ("text_cold", text_cold),
         ("playback_shapes_200", playback_shapes_200),
+        ("playback_svg_animated", playback_svg_animated),
     ]
 }
 
@@ -326,9 +329,87 @@ pub fn playback_shapes_200(ctx: &Ctx) -> BenchReport {
         v.frame(ticks(f64::from(k) / fps));
     }
     let scope = Scope::begin();
-    let wall = (2..62).map(|k| v.frame(ticks(f64::from(k) / fps))).collect();
+    let wall = (2..62)
+        .map(|k| v.frame(ticks(f64::from(k) / fps)))
+        .collect();
     let m = measured(scope);
     report("playback_shapes_200", "frames", m, wall, f.summary.clone())
+}
+
+/// A moving SVG image through the real viewer compositor. The same source
+/// is rasterized with resvg at the image box's device size for a direct
+/// warm-frame timing diagnostic; resvg work stays outside the counter scope.
+pub fn playback_svg_animated(ctx: &Ctx) -> BenchReport {
+    let f = fixtures::animated_svg();
+    let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    v.composer.set_playing(true);
+    let fps = 30.0;
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    let scope = Scope::begin();
+    let wall: Vec<_> = (2..62)
+        .map(|k| v.frame(ticks(f64::from(k) / fps)))
+        .collect();
+    let m = measured(scope);
+
+    let raster_hits = m.0.get(pm_perf::Counter::SvgRasterHits);
+    let raster_misses = m.0.get(pm_perf::Counter::SvgRasterMisses);
+    assert!(
+        raster_hits >= 58,
+        "animated SVG must reuse its warm source raster"
+    );
+    assert_eq!(raster_misses, 0, "warm SVG source raster was rebuilt");
+
+    let (svg, _) = pm_render::vector::svg::document(&f.media["art"]).expect("SVG parses");
+    // 180 × 101.25 image box in a 640 × 360 composition fitted into VIEW at
+    // DPR 2: each dimension scales by 1496/640, rounded out to pixels.
+    let (rw, rh) = (421, 237);
+    let mut resvg_wall = Vec::with_capacity(wall.len());
+    for _ in 0..wall.len() {
+        let start = Instant::now();
+        let raster = svg.raster(rw, rh);
+        std::hint::black_box(&raster.rgba);
+        resvg_wall.push(start.elapsed().as_secs_f64() * 1e3);
+    }
+    let mut sorted = resvg_wall.clone();
+    sorted.sort_by(f64::total_cmp);
+    let mut notes = f.summary.clone();
+    notes["resvg_p50_ms"] = json!(sorted[sorted.len() / 2]);
+    notes["resvg_p99_ms"] = json!(sorted[sorted.len() - 1]);
+    notes["resvg_cpu_only_p50_ms"] = json!(sorted[sorted.len() / 2]);
+    notes["resvg_cpu_only_p99_ms"] = json!(sorted[sorted.len() - 1]);
+    notes["resvg_pixels"] = json!([rw, rh]);
+    notes["warm_frame_target_ratio_to_resvg"] = json!(1.0);
+    notes["svg_raster_hits"] = json!(raster_hits);
+    notes["svg_raster_misses"] = json!(raster_misses);
+    notes["matched_presented"] = svg_present::compare(ctx, &f, &svg);
+    let trivial = fixtures::animated_svg_trivial();
+    let mut trivial_view = Viewer::new(ctx, &trivial.doc, &trivial.media);
+    trivial_view.composer.set_playing(true);
+    for k in 0..2 {
+        trivial_view.frame(ticks(f64::from(k) / fps));
+    }
+    let mut trivial_viewer_ms: Vec<_> = (2..62)
+        .map(|k| trivial_view.frame(ticks(f64::from(k) / fps)))
+        .collect();
+    trivial_viewer_ms.sort_by(f64::total_cmp);
+    let (trivial_doc, _) =
+        pm_render::vector::svg::document(&trivial.media["art"]).expect("trivial SVG parses");
+    let mut trivial_resvg_ms = Vec::with_capacity(60);
+    for _ in 0..60 {
+        let start = Instant::now();
+        let raster = trivial_doc.raster(rw, rh);
+        std::hint::black_box(&raster.rgba);
+        trivial_resvg_ms.push(start.elapsed().as_secs_f64() * 1e3);
+    }
+    trivial_resvg_ms.sort_by(f64::total_cmp);
+    notes["trivial_source_timing_only"] = json!({
+        "viewer_p50_ms": trivial_viewer_ms[trivial_viewer_ms.len() / 2],
+        "resvg_cpu_only_p50_ms": trivial_resvg_ms[trivial_resvg_ms.len() / 2],
+        "matched_presented": svg_present::compare(ctx, &trivial, &trivial_doc),
+    });
+    report("playback_svg_animated", "frames", m, wall, notes)
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn

@@ -2458,6 +2458,7 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-text",
+ "pm-vector",
  "png",
  "serde_json",
  "wgpu",

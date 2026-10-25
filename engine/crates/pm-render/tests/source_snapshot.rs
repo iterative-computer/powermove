@@ -316,7 +316,7 @@ fn source_interlaced_field_times_follow_file_and_explicit_interpretation() {
     // on the even (top) lines, field 2k+1 on the odd lines. Both field parity
     // and frame index are visible, including on a conformed grid.
     let field_luma = |field: u8| {
-        if field % 2 == 0 {
+        if field.is_multiple_of(2) {
             16 + field / 2 * 8
         } else {
             235 - field / 2 * 8
@@ -588,8 +588,10 @@ fn native_source_gamma_png_preserves_file_curve_depth_and_partial_alpha() {
                 assert!(pixel[3].abs_diff(alpha) <= 1);
             }
             if gamma != 45_455 {
-                let mut interpretation = pm_media::interpret::Interpretation::default();
-                interpretation.alpha = Some(pm_media::interpret::AlphaChoice::Ignore);
+                let mut interpretation = pm_media::interpret::Interpretation {
+                    alpha: Some(pm_media::interpret::AlphaChoice::Ignore),
+                    ..Default::default()
+                };
                 let error = renderer
                     .source_rgba8(
                         &path,

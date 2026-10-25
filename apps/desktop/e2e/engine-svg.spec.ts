@@ -358,6 +358,49 @@ const SAME = { differ: 0, max: 0 };
 test.describe('Use New Engine: SVG images', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
+  test('large plain SVGs and drop-shadow sizes keep the native device alive', async ({ session }) => {
+    test.setTimeout(240_000);
+    const { page } = session;
+    await session.openEditor();
+    await page.waitForFunction(() => Boolean((window as any).PM?.EngineRender));
+    for (const [width, height, boxWidth, boxHeight, sigma] of [
+      [1440, 810, 1440, 810, null],
+      [1920, 1080, 1440, 810, null],
+      [1920, 1080, 1920, 1080, null],
+      [3840, 2160, 3840, 2160, null],
+      [1920, 1080, 1920, 1080, 0.5],
+      [1920, 1080, 1920, 1080, 20],
+    ] as const) {
+      const measured = await page.evaluate(async ({ width, height, boxWidth, boxHeight, sigma }) => {
+        const PM = (window as any).PM;
+        const project = PM.mkProject({ name: 'SVG device limits', w: width, h: height, fps: 30, dur: 1, bg: '#000000' });
+        PM.replaceProject(project);
+        const source = sigma === null
+          ? '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#5A93F2"/></svg>'
+          : `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${sigma}"/></filter></defs><circle cx="480" cy="270" r="150" fill="#5A93F2" filter="url(#b)"/></svg>`;
+        const asset = await PM.assets.add(new File([source], 'limits.svg', { type: 'image/svg+xml' }), { newAsset: true, silent: true });
+        const layer = PM.mkLayer('image', { name: 'Native SVG', from: 0, dur: 1, d: { asset: asset.id, fit: 'contain', w: boxWidth, h: boxHeight } }, PM.proj);
+        layer.p['position.x'].v = width / 2; layer.p['position.y'].v = height / 2;
+        PM.proj.layers = [layer];
+        PM.ProjectIndex?.invalidate?.(); PM.touch(); PM.Projects?.put?.(PM.proj);
+        const snapshot = PM.EngineRender.snapshotSync({ time: 0, width, height, pixels: 'opaque', motionBlurSamples: 0, background: true });
+        const at = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
+        const center = Array.from(snapshot.data.slice(at, at + 4)) as number[];
+        // A second request catches a lost device after the first submission.
+        const next = PM.EngineRender.snapshotSync({ time: 0, width: 64, height: 36, pixels: 'opaque', motionBlurSamples: 0, background: true });
+        return { width: snapshot.width, height: snapshot.height, center, nextBytes: next.data.length, route: PM.EngineConnection.status().route };
+      }, { width, height, boxWidth, boxHeight, sigma });
+      expect([measured.width, measured.height]).toEqual([width, height]);
+      for (const [channel, value] of [0x5a, 0x93, 0xf2].entries()) {
+        expect(Math.abs(measured.center[channel]! - value), `${width}×${height} blur=${sigma} channel=${channel}`).toBeLessThanOrEqual(1);
+      }
+      expect(measured.center[3]).toBe(255);
+      expect(measured.nextBytes).toBe(64 * 36 * 4);
+      expect(measured.route).toBe('engine');
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('the engine draws SVG images natively, at least as close to f64 as today', async ({ session }, testInfo) => {
     test.setTimeout(240_000);
     const { page } = session;

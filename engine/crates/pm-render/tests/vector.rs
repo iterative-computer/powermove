@@ -330,8 +330,9 @@ fn vector_cache_stays_bounded_while_content_animates() {
         peak <= budget + one,
         "peak {peak} exceeds budget {budget} + one frame {one}"
     );
-    assert!(renderer.vector_cache_len() <= 4);
-    // The entry bound holds as well.
+    // `one` includes shared scratch as well as a texture; after pooling,
+    // this byte budget can retain more than three smaller output textures.
+    // Check the independent entry limit explicitly.
     renderer.set_vector_cache_budget(u64::MAX, 2);
     assert!(renderer.vector_cache_len() <= 2);
     for i in 0..10 {

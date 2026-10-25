@@ -127,6 +127,918 @@ fn record_frame_result(file: &mut Option<std::fs::File>, id: &str, failed: bool,
     }
 }
 
+fn sample_frame_ids(project: &str, time: f64, width: u32, height: u32) -> [String; 4] {
+    ["opaque", "transparent", "3d-opaque", "3d-transparent"]
+        .map(|side| pending::frame_id(project, time, width, height, side))
+}
+
+fn has_pending_sample(
+    frames: &std::collections::BTreeSet<String>,
+    project: &str,
+    time: f64,
+    width: u32,
+    height: u32,
+) -> bool {
+    sample_frame_ids(project, time, width, height)
+        .iter()
+        .any(|id| frames.contains(id))
+}
+
+/// Isolate every active L3 layer whose own edge can be hidden by later-lane
+/// composition. The variant retains authored transform, mask and shutter
+/// channels, while removing surrounding layers and L6 effects. It is run in
+/// addition to the full-frame pending check; it cannot exempt that check.
+fn prove_own_2d_layers(
+    renderer: &mut Renderer,
+    project: &Project,
+    sample: &Sample,
+    full_pending: bool,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use std::io::Write;
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut failures = Vec::new();
+    let mut request =
+        RenderRequest::sized(Size::new(sample.width, sample.height), Precision::Float32);
+    request.output_kind = pm_render::OutputKind::Final;
+    request.background = false;
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
+    let solo = comp
+        .layers()
+        .iter()
+        .any(|layer| node::truthy(node::member(Some(layer), "solo")));
+    for (index, layer) in comp.layers().iter().enumerate() {
+        let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+        if !matches!(ty.as_str(), "shape" | "solid") {
+            continue;
+        }
+        if (solo && !node::truthy(node::member(Some(layer), "solo")))
+            || !scope.active(layer, seconds).expect("layer active")
+        {
+            continue;
+        }
+        let has_masks = pm_render::composite::build::has_masks(&mut scope, layer, seconds)
+            .expect("enabled masks");
+        let motion = scope
+            .evaluated(
+                layer,
+                node::member(Some(layer), "mblur"),
+                seconds,
+                "l.mblur",
+            )
+            .expect("motion channel")
+            .truthy();
+        let grouped = node::member(Some(layer), "group")
+            .is_some_and(|v| !matches!(v.kind(), pm_model::NodeKind::Null));
+        let is_3d = scope.is_3d_layer(layer).expect("3D property");
+        if !(has_masks || motion || grouped || full_pending) || is_3d {
+            continue;
+        }
+        let isolated = reference::isolated_own_layer(&project.document, index);
+        let wanted = reference::render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            sample.width,
+            sample.height,
+            false,
+            20,
+            renderer.effects(),
+            &project.resolver,
+        );
+        let label = format!("{} t={} layer={index} ({ty})", project.name, sample.time);
+        if wanted.modelled() != 1.0 {
+            failures.push(format!(
+                "{label}: own-layer reference incomplete: {:?}",
+                wanted.unmodelled
+            ));
+            continue;
+        }
+        let frame = match renderer.render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            &request,
+            &project.resolver,
+        ) {
+            Ok(frame) => frame,
+            Err(e) => {
+                failures.push(format!("{label}: isolated render: {e}"));
+                continue;
+            }
+        };
+        if frame.color.format() != wgpu::TextureFormat::Rgba32Float || !frame.failures.is_empty() {
+            failures.push(format!(
+                "{label}: native float storage or layer failure: {:?} {:?}",
+                frame.color.format(),
+                frame.failures
+            ));
+            continue;
+        }
+        let native = unit32(&renderer.read_rgba(&frame).expect("isolated float readback"));
+        let max_cv = native
+            .iter()
+            .zip(&wanted.rgba)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        let width = sample.width as usize;
+        let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+        let shape = same_geometry(
+            &geometry(&alpha(&native), width),
+            &geometry(&wanted.alpha(), width),
+            1e-3,
+        );
+        let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+        if !pass {
+            failures.push(format!(
+                "{label}: own-layer max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+            ));
+        }
+        if let Some(file) = rows {
+            let classes = wanted.classes();
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-layer"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": ty, "masks": has_masks, "motion": motion,
+                "grouped": grouped, "space": "2d-precomposition", "float_storage": "rgba32float",
+                "max_cv": max_cv, "geometry": shape.err(), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &wanted.rgba, &classes),
+            });
+            writeln!(file, "{row}").expect("own-layer evidence");
+        }
+    }
+    failures
+}
+
+/// A 2.5D solid's intrinsic float source, before the L4 plane projection.
+/// The source keeps authored content, opacity, masks and shutter timing.
+fn prove_local_3d_solids(
+    renderer: &mut Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope};
+    use pm_reference::compare::{geometry, same_geometry};
+    use std::io::Write;
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut failures = Vec::new();
+    let mut request =
+        RenderRequest::sized(Size::new(sample.width, sample.height), Precision::Float32);
+    request.output_kind = pm_render::OutputKind::Final;
+    request.background = false;
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
+    for (index, layer) in comp.layers().iter().enumerate() {
+        if pm_render::js::member_string(layer, "type").as_deref() != Some("solid")
+            || !scope.is_3d_layer(layer).expect("3D property")
+            || !scope.active(layer, seconds).expect("layer active")
+        {
+            continue;
+        }
+        let isolated = reference::isolated_local_solid(&project.document, index);
+        let wanted = reference::render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            sample.width,
+            sample.height,
+            false,
+            20,
+            renderer.effects(),
+            &project.resolver,
+        );
+        let label = format!(
+            "{} t={} local 2.5D solid layer={index}",
+            project.name, sample.time
+        );
+        if wanted.modelled() != 1.0 {
+            failures.push(format!(
+                "{label}: intrinsic solid reference incomplete: {:?}",
+                wanted.unmodelled
+            ));
+            continue;
+        }
+        let frame = match renderer.render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            &request,
+            &project.resolver,
+        ) {
+            Ok(frame) => frame,
+            Err(e) => {
+                failures.push(format!("{label}: intrinsic solid render: {e}"));
+                continue;
+            }
+        };
+        if frame.color.format() != wgpu::TextureFormat::Rgba32Float || !frame.failures.is_empty() {
+            failures.push(format!(
+                "{label}: native float storage or layer failure: {:?} {:?}",
+                frame.color.format(),
+                frame.failures
+            ));
+            continue;
+        }
+        let native = unit32(
+            &renderer
+                .read_rgba(&frame)
+                .expect("intrinsic solid float readback"),
+        );
+        let native_alpha: f64 = native.chunks_exact(4).map(|p| p[3]).sum();
+        let reference_alpha: f64 = wanted.rgba.chunks_exact(4).map(|p| p[3]).sum();
+        if native_alpha <= 0.0 || reference_alpha <= 0.0 {
+            failures.push(format!(
+                "{label}: intrinsic solid proof has no painted pixels (native {native_alpha}, reference {reference_alpha})"
+            ));
+            continue;
+        }
+        let max_cv = native
+            .iter()
+            .zip(&wanted.rgba)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+        let shape = same_geometry(
+            &geometry(&alpha(&native), sample.width as usize),
+            &geometry(&wanted.alpha(), sample.width as usize),
+            1e-3,
+        );
+        let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+        if !pass {
+            failures.push(format!(
+                "{label}: intrinsic solid max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+            ));
+        }
+        if let Some(file) = rows {
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-local-solid"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": "solid", "space": "local-2.5d-preprojection",
+                "source_pose": "canonical-local", "shutter_samples": 20,
+                "float_storage": "rgba32float", "max_cv": max_cv,
+                "native_alpha_sum": native_alpha, "reference_alpha_sum": reference_alpha,
+                "geometry": shape.err(), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &wanted.rgba, &wanted.classes()),
+            });
+            writeln!(file, "{row}").expect("local solid evidence");
+        }
+    }
+    failures
+}
+
+/// Follow active precomps only when a pending root frame has no drawable L3
+/// layer of its own. Child source time uses the renderer's retiming and keep
+/// frame-rate rules at every authored parent shutter sample. This proves the
+/// child shape/solid source in its own composition geometry, before L4 places
+/// and resamples the precomp. A cycle ends at the first repeated composition.
+fn prove_nested_own_layers(
+    renderer: &mut Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    struct NestedProof<'a> {
+        renderer: &'a mut Renderer,
+        project: &'a Project,
+        root_sample: &'a Sample,
+        rows: &'a mut Option<std::fs::File>,
+        failures: Vec<String>,
+        painted: usize,
+    }
+
+    impl NestedProof<'_> {
+        fn visit(
+            &mut self,
+            comp_id: &str,
+            seconds: f64,
+            ancestry: &mut Vec<String>,
+            precomp_indices: &mut Vec<usize>,
+            shutter_trace: &mut Vec<(usize, usize)>,
+        ) {
+            let comp = Comp::resolve(&self.project.document, comp_id).expect("source composition");
+            let open = Comp::resolve(&self.project.document, &self.project.composition)
+                .expect("open composition");
+            let mut evaluator = Evaluator::new()
+                .with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+            let mut scope = Scope::new(&mut evaluator, &comp, &open);
+            let solo = comp
+                .layers()
+                .iter()
+                .any(|layer| node::truthy(node::member(Some(layer), "solo")));
+            let width = node::to_number(comp.member("w")) as u32;
+            let height = node::to_number(comp.member("h")) as u32;
+            if width == 0 || height == 0 {
+                self.failures.push(format!(
+                    "{}: nested composition has no source geometry",
+                    self.project.name
+                ));
+                return;
+            }
+            for (index, layer) in comp.layers().iter().enumerate() {
+                if (solo && !node::truthy(node::member(Some(layer), "solo")))
+                    || !scope.active(layer, seconds).expect("source layer active")
+                {
+                    continue;
+                }
+                let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+                if matches!(ty.as_str(), "shape" | "solid") && ancestry.len() > 1 {
+                    let label = format!(
+                        "{} t={} nested source depth={} layer={index} ({ty})",
+                        self.project.name,
+                        self.root_sample.time,
+                        ancestry.len() - 1
+                    );
+                    if scope.is_3d_layer(layer).expect("source 3D property") {
+                        self.failures.push(format!(
+                            "{label}: 3D child source needs local preprojection proof"
+                        ));
+                        continue;
+                    }
+                    let isolated = reference::isolated_own_layer_in_comp(
+                        &self.project.document,
+                        comp_id,
+                        index,
+                    );
+                    let mut request =
+                        RenderRequest::sized(Size::new(width, height), Precision::Float32);
+                    request.output_kind = pm_render::OutputKind::Final;
+                    request.background = false;
+                    request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
+                    let wanted = reference::render(
+                        &isolated,
+                        comp_id,
+                        ticks(seconds),
+                        width,
+                        height,
+                        false,
+                        20,
+                        self.renderer.effects(),
+                        &self.project.resolver,
+                    );
+                    if wanted.modelled() != 1.0 {
+                        self.failures.push(format!(
+                            "{label}: nested source reference incomplete: {:?}",
+                            wanted.unmodelled
+                        ));
+                        continue;
+                    }
+                    let frame = match self.renderer.render(
+                        &isolated,
+                        comp_id,
+                        ticks(seconds),
+                        &request,
+                        &self.project.resolver,
+                    ) {
+                        Ok(frame) => frame,
+                        Err(e) => {
+                            self.failures
+                                .push(format!("{label}: nested source render: {e}"));
+                            continue;
+                        }
+                    };
+                    if frame.color.format() != wgpu::TextureFormat::Rgba32Float
+                        || !frame.failures.is_empty()
+                    {
+                        self.failures.push(format!(
+                            "{label}: native float storage or layer failure: {:?} {:?}",
+                            frame.color.format(),
+                            frame.failures
+                        ));
+                        continue;
+                    }
+                    let native = unit32(
+                        &self
+                            .renderer
+                            .read_rgba(&frame)
+                            .expect("nested float readback"),
+                    );
+                    let native_alpha: f64 = native.chunks_exact(4).map(|p| p[3]).sum();
+                    let reference_alpha: f64 = wanted.rgba.chunks_exact(4).map(|p| p[3]).sum();
+                    // A source outside its own canvas contributes no pixels to
+                    // the parent; it cannot count as proof of painted content.
+                    if native_alpha <= 0.0 && reference_alpha <= 0.0 {
+                        continue;
+                    }
+                    if native_alpha <= 0.0 || reference_alpha <= 0.0 {
+                        self.failures.push(format!(
+                        "{label}: only one source painted (native {native_alpha}, reference {reference_alpha})"
+                    ));
+                        continue;
+                    }
+                    let max_cv = native
+                        .iter()
+                        .zip(&wanted.rgba)
+                        .map(|(a, b)| (a - b).abs() * 255.0)
+                        .fold(0.0_f64, f64::max);
+                    let alpha =
+                        |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+                    let shape = same_geometry(
+                        &geometry(&alpha(&native), width as usize),
+                        &geometry(&wanted.alpha(), width as usize),
+                        1e-3,
+                    );
+                    let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+                    if !pass {
+                        self.failures.push(format!(
+                            "{label}: nested source max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+                        ));
+                    }
+                    self.painted += 1;
+                    if let Some(file) = self.rows {
+                        let comp_hash = format!("{:x}", Sha256::digest(comp_id.as_bytes()));
+                        let row = serde_json::json!({
+                            "frame": pending::frame_id(&self.project.name, self.root_sample.time, self.root_sample.width, self.root_sample.height, "own-nested-source"),
+                            "pending_frame_ids": sample_frame_ids(&self.project.name, self.root_sample.time, self.root_sample.width, self.root_sample.height),
+                            "composition_sha256": comp_hash, "precomp_indices": precomp_indices,
+                            "parent_shutter_trace": shutter_trace, "child_time_seconds": seconds,
+                            "layer_index": index, "type": ty,
+                            "space": "nested-local-precomposition", "source_size": [width, height],
+                            "float_storage": "rgba32float", "shutter_samples": 20,
+                            "native_alpha_sum": native_alpha, "reference_alpha_sum": reference_alpha,
+                            "max_cv": max_cv, "geometry": shape.err(), "pass": pass,
+                            "measurement_sha256": pending::measurement(&native, &[], &wanted.rgba, &wanted.classes()),
+                        });
+                        writeln!(file, "{row}").expect("nested source evidence");
+                    }
+                } else if ty == "precomp" {
+                    let child_id = node::member(node::member(Some(layer), "d"), "comp")
+                        .and_then(|v| node::string(Some(v)))
+                        .map(|s| s.to_string_lossy());
+                    let Some(child_id) = child_id else { continue };
+                    if ancestry.contains(&child_id) {
+                        continue;
+                    }
+                    let Ok(child) = Comp::resolve(&self.project.document, &child_id) else {
+                        continue;
+                    };
+                    let blurred = scope
+                        .evaluated(
+                            layer,
+                            node::member(Some(layer), "mblur"),
+                            seconds,
+                            "l.mblur",
+                        )
+                        .expect("precomp motion channel")
+                        .truthy();
+                    let times = if blurred {
+                        let shutter = pm_render::motion::shutter_frames(comp.node())
+                            / pm_render::motion::level_fps(&comp);
+                        (0..20)
+                            .map(|s| seconds + ((f64::from(s) + 0.5) / 20.0 - 0.5) * shutter)
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![seconds]
+                    };
+                    for (shutter_index, parent_time) in times.iter().copied().enumerate() {
+                        if !scope
+                            .active(layer, parent_time)
+                            .expect("precomp shutter activity")
+                        {
+                            continue;
+                        }
+                        let child_time = scope
+                            .source_time(layer, parent_time, None)
+                            .expect("authored precomp source time");
+                        let child_time =
+                            pm_render::retime::keep_frame_rate(layer, &child, child_time);
+                        ancestry.push(child_id.clone());
+                        precomp_indices.push(index);
+                        shutter_trace.push((shutter_index, times.len()));
+                        self.visit(
+                            &child_id,
+                            child_time,
+                            ancestry,
+                            precomp_indices,
+                            shutter_trace,
+                        );
+                        shutter_trace.pop();
+                        precomp_indices.pop();
+                        ancestry.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    let comp = Comp::resolve(&project.document, &project.composition).expect("open composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let solo = comp
+        .layers()
+        .iter()
+        .any(|layer| node::truthy(node::member(Some(layer), "solo")));
+    let root_has_own = comp.layers().iter().any(|layer| {
+        matches!(
+            pm_render::js::member_string(layer, "type").as_deref(),
+            Some("shape" | "solid")
+        ) && (!solo || node::truthy(node::member(Some(layer), "solo")))
+            && scope.active(layer, seconds).expect("root layer active")
+    });
+    if root_has_own {
+        return Vec::new();
+    }
+    let mut proof = NestedProof {
+        renderer,
+        project,
+        root_sample: sample,
+        rows,
+        failures: Vec::new(),
+        painted: 0,
+    };
+    proof.visit(
+        &project.composition,
+        seconds,
+        &mut vec![project.composition.clone()],
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    if proof.painted == 0 {
+        proof.failures.push(format!(
+            "{} t={}: pending precomp has no painted nested L3 source proof",
+            project.name, sample.time
+        ));
+    }
+    proof.failures
+}
+
+/// Native float vector paint against f64 coverage before 2.5D projection.
+/// Every authored shutter sample is retained; L4 still owns the plane.
+fn prove_local_3d_vectors(
+    renderer: &Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use pm_render::vector::{VectorQuad, VectorSource, cache::VectorCache};
+    use pm_vector::kurbo::Affine;
+    use pm_vector::render::scene::PixelRect;
+    use std::io::Write;
+
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut cache = VectorCache::new();
+    let mut failures = Vec::new();
+    for (index, layer) in comp.layers().iter().enumerate() {
+        if pm_render::js::member_string(layer, "type").as_deref() != Some("shape")
+            || !scope.is_3d_layer(layer).expect("3D property")
+        {
+            continue;
+        }
+        let label = format!(
+            "{} t={} local 2.5D vector layer={index}",
+            project.name, sample.time
+        );
+        if !scope.active(layer, seconds).expect("layer active") {
+            continue;
+        }
+        let blurred = scope
+            .evaluated(
+                layer,
+                node::member(Some(layer), "mblur"),
+                seconds,
+                "l.mblur",
+            )
+            .expect("motion channel")
+            .truthy();
+        let times = if blurred {
+            let shutter = pm_render::motion::shutter_frames(comp.node())
+                / pm_render::motion::level_fps(&comp);
+            (0..20)
+                .map(|s| seconds + ((f64::from(s) + 0.5) / 20.0 - 0.5) * shutter)
+                .collect::<Vec<_>>()
+        } else {
+            vec![seconds]
+        };
+        let mut scenes = Vec::new();
+        let mut bounds: Option<PixelRect> = None;
+        for &time in &times {
+            let content = scope
+                .ev
+                .resolve_content(scope.comp, layer, time)
+                .expect("shape content");
+            let quad = pm_render::vector::plan_shape(
+                &mut scope,
+                layer,
+                &content,
+                time,
+                &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                PixelRect::new(-(1 << 29), -(1 << 29), 1 << 30, 1 << 30),
+            )
+            .expect("local vector plan");
+            if let Some(VectorQuad::Device {
+                source: VectorSource::Scene { scene, rect },
+                ..
+            }) = quad
+            {
+                bounds = Some(bounds.map_or(rect, |b| b.union(rect)));
+                scenes.push(scene);
+            }
+        }
+        let Some(rect) = bounds else { continue };
+        if rect.width == 0 || rect.height == 0 {
+            continue;
+        }
+        let (w, h) = (rect.width as usize, rect.height as usize);
+        let mut native = vec![0.0; w * h * 4];
+        let mut exact = vec![0.0; w * h * 4];
+        for scene in &scenes {
+            let source = VectorSource::Scene {
+                scene: scene.clone(),
+                rect,
+            };
+            let view = cache
+                .resolve(
+                    renderer.device(),
+                    renderer.queue(),
+                    &source,
+                    Precision::Float32,
+                )
+                .expect("native local vector");
+            assert_eq!(view.texture().format(), wgpu::TextureFormat::Rgba32Float);
+            let pixels =
+                pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), view.texture())
+                    .expect("native local vector readback");
+            let mut shifted = scene.clone();
+            for item in &mut shifted.items {
+                item.transform =
+                    Affine::translate((-f64::from(rect.x), -f64::from(rect.y))) * item.transform;
+            }
+            let reference = reference::scene_pixels(&shifted, w, h).expect("f64 local vector");
+            for (i, (&n, r)) in pixels
+                .iter()
+                .zip(reference.iter().flat_map(|p| p.0))
+                .enumerate()
+            {
+                native[i] += f64::from(n) / times.len() as f64;
+                exact[i] += r / times.len() as f64;
+            }
+        }
+        let max_cv = native
+            .iter()
+            .zip(&exact)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+        let shape = same_geometry(
+            &geometry(&alpha(&native), w),
+            &geometry(&alpha(&exact), w),
+            1e-3,
+        );
+        let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+        if !pass {
+            failures.push(format!(
+                "{label}: local preprojection max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+            ));
+        }
+        if let Some(file) = rows {
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-local-vector"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": "shape", "space": "local-2.5d-preprojection",
+                "shutter_samples": times.len(), "float_storage": "rgba32float", "max_cv": max_cv,
+                "geometry": shape.err(), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &exact,
+                    &vec![pm_reference::compare::Class::Edge; w*h]),
+            });
+            writeln!(file, "{row}").expect("local vector evidence");
+        }
+    }
+    failures
+}
+
+/// The native R16float path-mask canvas against independent f64 coverage,
+/// before a 2.5D inverse-plane sample. It uses the authored center time.
+fn prove_path_mask_canvases(
+    renderer: &Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use pm_render::composite::build::{MaskRoute, masks};
+    use pm_render::composite::path_masks::PathMaskPipelines;
+    use std::io::Write;
+
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let (sx, sy) = pm_render::plan::derived_scale(&comp, sample.width, sample.height);
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut failures = Vec::new();
+    for (index, layer) in comp.layers().iter().enumerate() {
+        let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+        if !matches!(ty.as_str(), "shape" | "solid")
+            || node::array(node::member(Some(layer), "masks")).is_none_or(|m| m.is_empty())
+            || !scope.active(layer, seconds).expect("layer active")
+        {
+            continue;
+        }
+        let is_3d = scope.is_3d_layer(layer).expect("3D property");
+        let world = if is_3d {
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        } else {
+            let m = scope.world_matrix(layer, seconds).expect("world transform");
+            [
+                m[0] * sx,
+                m[1] * sy,
+                m[2] * sx,
+                m[3] * sy,
+                m[4] * sx,
+                m[5] * sy,
+            ]
+        };
+        let MaskRoute::Path(route) = masks(
+            &mut scope,
+            layer,
+            seconds,
+            world,
+            None,
+            sample.width,
+            sample.height,
+        )
+        .expect("mask route") else {
+            continue;
+        };
+        let path = route.path.expect("path route has coverage");
+        let pipelines = PathMaskPipelines::new(renderer.device());
+        let mut encoder = renderer
+            .device()
+            .create_command_encoder(&Default::default());
+        let texture = pipelines.coverage(renderer.device(), &mut encoder, &path);
+        assert_eq!(texture.format(), wgpu::TextureFormat::R16Float);
+        renderer.queue().submit([encoder.finish()]);
+        let raw = pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &texture)
+            .expect("native float path-mask coverage");
+        let native = raw
+            .chunks_exact(2)
+            .map(|c| {
+                f64::from(pm_gpu::readback::half_to_f32(u16::from_le_bytes([
+                    c[0], c[1],
+                ])))
+            })
+            .collect::<Vec<_>>();
+        let exact = support::mask_reference::path_coverage(
+            &path.masks,
+            world,
+            sample.width as usize,
+            sample.height as usize,
+        );
+        // G-V2's published R16float store, interpolation, Gaussian-tail and
+        // exact-area error budget; each successive mask contributes once.
+        let n = path.masks.masks.len();
+        let bound =
+            255.0 * (2f64.powi(-12) + n as f64 * (2f64.powi(-12) + 1.4e-5 + 1e-4 + 6e-5 + 8e-5));
+        let max_cv = native
+            .iter()
+            .zip(&exact)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        // A float mask retains sub-CV coverage that an 8-bit canvas would
+        // quantize away. Require that observable fact where it occurs.
+        let fine = |pixels: &[f64]| {
+            pixels
+                .iter()
+                .filter(|&&v| (v * 255.0 - (v * 255.0).round()).abs() > 1e-3)
+                .count()
+        };
+        let (native_fine, reference_fine) = (fine(&native), fine(&exact));
+        let no_feather = path.masks.masks.iter().all(|m| m.feather == 0.0);
+        let shape = no_feather.then(|| {
+            same_geometry(
+                &geometry(&native, sample.width as usize),
+                &geometry(&exact, sample.width as usize),
+                1e-3,
+            )
+        });
+        let pass = max_cv <= bound
+            && shape.as_ref().is_none_or(Result::is_ok)
+            && (reference_fine == 0 || native_fine > 0);
+        let label = format!("{} t={} path-mask layer={index}", project.name, sample.time);
+        if !pass {
+            failures.push(format!("{label}: native float mask max {max_cv:.6} CV (G-V2 bound {bound:.6}); geometry {shape:?}"));
+        }
+        if let Some(file) = rows {
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-path-mask"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": ty,
+                "space": if is_3d { "local-2.5d-preprojection" } else { "2d-precomposition" },
+                "mask_center_seconds": seconds, "mask_count": n, "native_storage": "r16float",
+                "native_sub_cv_samples": native_fine, "reference_sub_cv_samples": reference_fine,
+                "max_cv": max_cv, "bound_cv": bound,
+                "geometry": shape.and_then(Result::err), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &exact,
+                    &vec![pm_reference::compare::Class::Edge; native.len()]),
+            });
+            writeln!(file, "{row}").expect("path-mask evidence");
+        }
+    }
+    failures
+}
+
+#[test]
+fn corpus_own_layers_reference_gate() {
+    let captures = corpus_dirs();
+    if captures.is_empty() {
+        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+        return;
+    }
+    let only = std::env::var("PM_RENDER_ONLY").ok();
+    let pending: std::collections::BTreeSet<String> =
+        serde_json::from_str::<Vec<pending::Entry>>(include_str!("fixtures/corpus-pending.json"))
+            .expect("pending fixture")
+            .into_iter()
+            .map(|row| row.frame)
+            .collect();
+    let mut rows = std::env::var_os("PM_L3_LAYER_PROOF")
+        .map(|path| std::fs::File::create(path).expect("own-layer proof output"));
+    let mut renderer = Renderer::headless().expect("a Metal device");
+    renderer
+        .set_definitions(&all_builtin_definitions())
+        .expect("proof definitions");
+    let mut failures = Vec::new();
+    let mut samples = 0;
+    for (capture, dir) in captures
+        .iter()
+        .flat_map(|c| projects(c).into_iter().map(move |d| (c.clone(), d)))
+    {
+        let project = load_project(&capture, &dir);
+        if only
+            .as_deref()
+            .is_some_and(|o| !project.name.starts_with(o))
+            || !project.missing_media.is_empty()
+        {
+            continue;
+        }
+        for sample in &project.samples {
+            samples += 1;
+            let full_pending = has_pending_sample(
+                &pending,
+                &project.name,
+                sample.time,
+                sample.width,
+                sample.height,
+            );
+            failures.extend(prove_own_2d_layers(
+                &mut renderer,
+                &project,
+                sample,
+                full_pending,
+                &mut rows,
+            ));
+            failures.extend(prove_local_3d_solids(
+                &mut renderer,
+                &project,
+                sample,
+                &mut rows,
+            ));
+            failures.extend(prove_local_3d_vectors(
+                &renderer, &project, sample, &mut rows,
+            ));
+            failures.extend(prove_path_mask_canvases(
+                &renderer, &project, sample, &mut rows,
+            ));
+            if full_pending {
+                failures.extend(prove_nested_own_layers(
+                    &mut renderer,
+                    &project,
+                    sample,
+                    &mut rows,
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "L3 own-layer proof visited {samples} corpus samples; {} failures",
+        failures.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn corpus_render_parity() {
     use sha2::{Digest, Sha256};
@@ -779,7 +1691,7 @@ fn corpus_render_parity() {
             );
         }
     }
-    failed.extend(pending.finish(only.is_none() && std::env::var_os("PM_ENGINE_CORPUS").is_none()));
+    failed.extend(pending.finish(only.is_none()));
     eprintln!("\nskipped (unsupported by this renderer):");
     for (name, why) in &skipped {
         eprintln!("  {name:<40} {why}");
