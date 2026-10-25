@@ -27,7 +27,7 @@ import { previewTextRaster } from '../src/renderer/src/legacy/gl/shape-raster-wi
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
 /** Side-by-sides go outside the repository (no screenshots in Git). */
-const EVIDENCE = path.join(os.tmpdir(), 'ne-extcompat-evidence');
+const EVIDENCE = process.env.POWERMOVE_E2E_EVIDENCE_DIR ?? path.join(os.tmpdir(), 'ne-extcompat-evidence');
 
 const FIXTURES: Record<string, string> = {
   'legacy-raster-assign': 'fixtures/compat-corpus/legacy-raster-assign',
@@ -381,28 +381,74 @@ test.describe('Use New Engine: the customization moat, round two', () => {
         const crops = (window as any).__crops.filter((c: any) => c.layer === 'plain' && c.scale > 16);
         const typed = (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16);
         const views = Array.from({ length: state.viewSeq }, (_, i) => viewer.enginePresentation.stateFor(i + 1)).filter(Boolean);
-        return { state, views, latest: viewer.enginePresentation.latest, crops, typed, world: PM.worldMatrix(PM.L('plain'), PM.time),
-          geometry: PM.textRasterGeometry(PM.L('plain'), crops[crops.length - 1].scale, PM.time),
+        const geometries = Object.fromEntries([...new Set(crops.map((c: any) => c.scale))]
+          .map(scale => [scale, PM.textRasterGeometry(PM.L('plain'), scale, PM.time)]));
+        return { state, views, latest: viewer.enginePresentation.latest, crops, typed, geometries,
+          world: PM.worldMatrix(PM.L('plain'), PM.time),
           size: [PM.proj.w, PM.proj.h], failures: PM.EngineConnection.status().failures };
       });
       console.log(JSON.stringify({ zoomPlan: plan }));
       expect(first.data.some((v, i) => i % 4 !== 3 && v > 180), 'the presented frame contains text pixels').toBe(true);
       const { state, world } = plan;
       expect(state.zoom, 'the requested engine zoom was reached').toBe(zoom);
-      expect(plan.crops.every((c: any) => c.scale === Math.min(32, zoom * 3))).toBe(true);
+      expect([world[1], world[2]], 'this fixture has axis-aligned text').toEqual([0, 0]);
+      const requestScale = (sx: number, sy: number) => Math.ceil(Math.max(.25,
+        Math.min(32, Math.max(Math.abs(world[0] * sx), Math.abs(world[3] * sy)))) * 4 - 1e-9) / 4;
+      for (const [scale, geometry] of Object.entries(plan.geometries) as Array<[string, any]>) {
+        const density = Math.min(Number(scale), 8192 / geometry.w, 8192 / geometry.h);
+        expect(geometry.density, `zoom ${zoom}: source density uses the existing 8192-pixel cap`).toBe(density);
+        expect([geometry.width, geometry.height]).toEqual([Math.max(1, Math.ceil(geometry.w * density)), Math.max(1, Math.ceil(geometry.h * density))]);
+      }
       // Today's compositor asks over its complete canvas, including its pan
       // buffer, rather than the screen-visible region the engine renders.
-      const plannedCrop = (canvas: any) => {
+      const plannedCrop = (canvas: any, geometry: any) => {
         const sx = canvas.width / canvas.crop.width, sy = canvas.height / canvas.crop.height;
         const visible = [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy,
           world[4] * sx - canvas.crop.x * sx, world[5] * sy - canvas.crop.y * sy];
-        return previewTextRaster(plan.geometry, visible, canvas.width, canvas.height) ?? null;
+        return previewTextRaster(geometry, visible, canvas.width, canvas.height) ?? null;
       };
-      const crop = plannedCrop(state.canvas);
-      expect(crop, `zoom ${zoom}: a cropped source is exercised`).not.toBeNull();
-      const validCrops = plan.views.map((view: any) => view.canvas && plannedCrop(view.canvas)).filter(Boolean);
-      for (const called of plan.crops) expect(validCrops, `zoom ${zoom}, density ${called.scale}: a planned view crop`).toContainEqual(called.crop);
-      expect(plan.crops.at(-1)?.crop, `zoom ${zoom}: the settled frame uses its exact crop`).toEqual(crop);
+      expect(plan.crops.some((called: any) => called.origin === 'native'), `zoom ${zoom}: the native viewer asks for a crop`).toBe(true);
+      expect(plan.crops.some((called: any) => called.origin === 'legacy'), `zoom ${zoom}: legacy preparation asks for a crop`).toBe(true);
+      const nativeWindow = (view: any, geometry: any) => {
+        const dpr = view.devicePixelRatio > 0 ? view.devicePixelRatio : 1;
+        const fullWidth = plan.size[0] * view.zoom * dpr;
+        const fullHeight = plan.size[1] * view.zoom * dpr;
+        const left = Math.round((view.size.width - fullWidth) / 2 + view.pan[0] * dpr);
+        const top = Math.round((view.size.height - fullHeight) / 2 + view.pan[1] * dpr);
+        const right = Math.round((view.size.width - fullWidth) / 2 + view.pan[0] * dpr + fullWidth);
+        const bottom = Math.round((view.size.height - fullHeight) / 2 + view.pan[1] * dpr + fullHeight);
+        const width = right - left, height = bottom - top;
+        const rx = Math.max(0, Math.floor(-left)), ry = Math.max(0, Math.floor(-top));
+        const rw = Math.max(0, Math.min(width, Math.ceil(view.size.width - left)) - rx);
+        const rh = Math.max(0, Math.min(height, Math.ceil(view.size.height - top)) - ry);
+        const sx = width / plan.size[0], sy = height / plan.size[1];
+        return { scale: requestScale(sx, sy), crop: previewTextRaster(geometry,
+          [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy,
+            world[4] * sx - rx, world[5] * sy - ry], rw, rh) ?? null };
+      };
+      for (const called of [...plan.crops, ...plan.typed]) {
+        expect(['native', 'legacy'], `zoom ${zoom}: raster caller is identified`).toContain(called.origin);
+        const view = plan.views.find((v: any) => v.viewSeq === called.viewSeq);
+        expect(view, `zoom ${zoom}: crop has a recorded view`).toBeTruthy();
+        if (called.origin === 'native') {
+          expect(view.resolution, `zoom ${zoom}: native crop uses the full output grid`).toBe('full');
+          const expected = nativeWindow(view, plan.geometries[called.scale]);
+          expect(called.scale, `zoom ${zoom}: native request density for view ${called.viewSeq}`).toBe(expected.scale);
+          if (called.layer === 'plain') expect(called.crop, `zoom ${zoom}: native request crop for view ${called.viewSeq}`).toEqual(expected.crop);
+        } else {
+          expect(called.legacyCanvas, `zoom ${zoom}: legacy caller records its actual preview canvas`).toBeTruthy();
+          const canvas = called.legacyCanvas;
+          expect(called.scale, `zoom ${zoom}: legacy request density from its backing canvas`).toBe(requestScale(canvas.width / canvas.crop.width, canvas.height / canvas.crop.height));
+          if (called.layer === 'plain') expect(called.crop, `zoom ${zoom}: legacy crop from its backing canvas`).toEqual(plannedCrop(canvas, plan.geometries[called.scale]));
+        }
+      }
+      const lastNative = plan.crops.filter((called: any) => called.origin === 'native' && called.time === .2).at(-1);
+      expect(lastNative, `zoom ${zoom}: the presented native view asked for this frame`).toBeTruthy();
+      expect(lastNative.viewSeq).toBe(state.viewSeq);
+      expect(lastNative.crop, `zoom ${zoom}: the presented native view uses its exact crop`).toEqual(nativeWindow(state, plan.geometries[lastNative.scale]).crop);
+      const lastLegacy = plan.crops.filter((called: any) => called.origin === 'legacy').at(-1);
+      expect(lastLegacy, `zoom ${zoom}: legacy preparation asked for a crop`).toBeTruthy();
+      expect(lastLegacy.crop, `zoom ${zoom}: legacy preparation uses its exact crop`).toEqual(plannedCrop(lastLegacy.legacyCanvas, plan.geometries[lastLegacy.scale]));
       // Today's typewriter definition is a renderable effect, so it keeps the full source.
       for (const called of plan.typed) expect(called.crop).toBeNull();
       expect(plan.failures).toEqual([]);
@@ -414,7 +460,8 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       await writeFile(path.join(EVIDENCE, `zoom-${zoom}-time-0.2.png`), Buffer.from(first.png.split(',')[1]!, 'base64'));
       await writeFile(path.join(EVIDENCE, `zoom-${zoom}-time-1.7.png`), Buffer.from(second.png.split(',')[1]!, 'base64'));
       expect(first.data.some((v, i) => v !== second.data[i]), `zoom ${zoom}: the typewriter advances after seeking`).toBe(true);
-      console.log(JSON.stringify({ zoom, frames: [before, frameBeforeSeek, await page.evaluate(() => (window as any).PM.EngineConnection.status().frames)], scales: [...new Set(plan.crops.map((c: any) => c.scale))], crop }));
+      console.log(JSON.stringify({ zoom, frames: [before, frameBeforeSeek, await page.evaluate(() => (window as any).PM.EngineConnection.status().frames)],
+        native: { scale: lastNative.scale, crop: lastNative.crop }, legacy: { scale: lastLegacy.scale, crop: lastLegacy.crop } }));
     }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
