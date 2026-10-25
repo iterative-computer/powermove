@@ -410,11 +410,7 @@ fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
                 _ => None,
             };
             let modeled = float_reference::display(&reference, plan.scene.exposure, background);
-            let engine = float_reference::display(
-                &actual,
-                plan.scene.exposure,
-                background,
-            );
+            let engine = float_reference::display(&actual, plan.scene.exposure, background);
             let (tw, th, today_bytes) =
                 support::read_png(&capture.join(&c.id).join(format!("{k}.msaa.png")));
             assert_eq!((tw, th), (w, h), "{}:{} today size", c.id, k);
@@ -432,13 +428,21 @@ fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
             pool.give(out.color);
         }
     }
+    let selected_outputs: usize = cases.iter().map(|case| case.outputs.len()).sum();
     assert!(
-        compared >= 150,
-        "only {compared} independent glTF references compared"
+        selected_outputs > 0,
+        "no independent glTF references selected"
     );
+    assert_eq!(compared, selected_outputs);
+    if std::env::var("PM_GLTF_ONLY").is_err() {
+        assert!(
+            compared >= 150,
+            "only {compared} independent glTF references compared"
+        );
+    }
     assert!(
         failures.is_empty(),
-        "G-D2 independent displayed reference deviations:\n{}",
+        "G-D1 independent displayed reference deviations:\n{}",
         failures.join("\n")
     );
 }
@@ -633,7 +637,7 @@ fn gltf_poses_equal_three_js() {
 }
 
 /// The draws of each output, as three.js issues them.
-fn our_draws(c: &Case) -> Vec<(usize, Vec<DrawDesc>)> {
+fn our_draws(c: &Case) -> Vec<(usize, Vec<(DrawDesc, bool)>)> {
     let mut out = Vec::new();
     let mut previous: Option<(*const Scene3d, Vec<usize>)> = None;
     for (plan, k) in &c.outputs {
@@ -641,14 +645,16 @@ fn our_draws(c: &Case) -> Vec<(usize, Vec<DrawDesc>)> {
         let mut push = |p: PassDesc| match p {
             PassDesc::Shadow { views, .. } => {
                 for (_, d) in views {
-                    draws.extend(d);
+                    draws.extend(d.into_iter().map(|draw| (draw, false)));
                 }
             }
             PassDesc::Transmission { opaque, back, .. } => {
-                draws.extend(opaque);
-                draws.extend(back);
+                draws.extend(opaque.into_iter().map(|draw| (draw, true)));
+                draws.extend(back.into_iter().map(|draw| (draw, true)));
             }
-            PassDesc::Prepass(d) | PassDesc::Color { draws: d, .. } => draws.extend(d),
+            PassDesc::Prepass(d) | PassDesc::Color { draws: d, .. } => {
+                draws.extend(d.into_iter().map(|draw| (draw, false)));
+            }
         };
         match &plan.kind {
             Render3d::Layer {
@@ -713,10 +719,10 @@ fn normalized(src: &str, shadow: bool) -> String {
 }
 
 /// Restore only r180's color-output transfer or packed shadow storage for
-/// linked-program comparison. Transmission draws already target linear
-/// light, so a color draw may match either the canvas or transmission form.
+/// linked-program comparison. The transmission target's untoned program and
+/// the canvas program are distinct draws, even when their matrices coincide.
 /// Geometry, material, light, texture and clipping source remains exact.
-fn reference_program_sources(d: &DrawDesc) -> Vec<(String, String)> {
+fn reference_program_sources(d: &DrawDesc, transmission: bool) -> Vec<(String, String)> {
     let mut p = d.params.clone();
     match p.shader_type.as_str() {
         "MeshDepthMaterial" => {
@@ -736,9 +742,12 @@ fn reference_program_sources(d: &DrawDesc) -> Vec<(String, String)> {
         _ => {
             let (vs, fs) = sources(&p).expect("r180 transmission program");
             let linear = (vs, float_reference::restore_linear_output(fs));
+            if transmission {
+                return vec![linear];
+            }
             p.tone_mapping = ToneMapping::AcesFilmic;
             p.output_srgb = true;
-            vec![linear, sources(&p).expect("r180 canvas program")]
+            vec![sources(&p).expect("r180 canvas program")]
         }
     }
 }
@@ -786,12 +795,12 @@ fn gltf_programs_and_uniforms_equal_three_js() {
             let recorded = record["draws"].as_array().unwrap();
             let mut used = vec![false; recorded.len()];
             let mut last: Option<usize> = None;
-            for (n, d) in ours.iter().enumerate() {
+            for (n, (d, transmission)) in ours.iter().enumerate() {
                 let shadow = matches!(
                     d.params.shader_type.as_str(),
                     "MeshDepthMaterial" | "MeshDistanceMaterial"
                 );
-                let program_forms: Vec<_> = reference_program_sources(d)
+                let program_forms: Vec<_> = reference_program_sources(d, *transmission)
                     .into_iter()
                     .map(|(vs, fs)| (normalized(&vs, shadow), normalized(&fs, shadow)))
                     .collect();

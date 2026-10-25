@@ -613,8 +613,9 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
             });
         }
     }
-    // Depth: opaque items of the set; a model writes depth only at layer
-    // opacity ≥ 0.999 without an enabled mask.
+    // Depth: every depth-writing material in the set, including transmissive
+    // and transparent materials. SceneRuntime's depth phase does not hide
+    // those materials; Three.js draws them with color writes disabled.
     let light_uniforms = lights::uniforms(scene, &ls, &scene.camera.view());
     let planes = camera_frustum(scene);
     let mut draws = Vec::new();
@@ -624,10 +625,7 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
             continue;
         }
         for item in items(scene, o, &planes) {
-            if item.material.transparent
-                || !item.material.depth_write
-                || loose(&scene.objects[item.object].meshes[item.mesh])
-            {
+            if !item.material.depth_write || loose(&scene.objects[item.object].meshes[item.mesh]) {
                 continue;
             }
             draws.push(shading_draw(
@@ -656,9 +654,7 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
                 continue;
             }
             all.extend(items(scene, o, &planes).into_iter().filter(|i| {
-                !i.material.transparent
-                    && i.material.depth_write
-                    && !loose(&scene.objects[i.object].meshes[i.mesh])
+                i.material.depth_write && !loose(&scene.objects[i.object].meshes[i.mesh])
             }));
         }
         all.extend(loose_items(scene, &planes, None));
