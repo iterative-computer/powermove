@@ -149,8 +149,8 @@ fn svg_diagnostics(
 pub struct Frame {
     /// Scene diagnostics of these pixels, grouped by composition and layer.
     pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
-    /// Premultiplied working values (Standard: E-encoded, Rec.709
-    /// primaries), the request's precision, the region's size.
+    /// Premultiplied output values, E-encoded after linear-light compositing,
+    /// at the project's storage precision and the requested region size.
     pub color: Target,
     /// The depth and object-id surface (`rgba16float`), when requested.
     pub depth_id: Option<Target>,
@@ -1740,6 +1740,7 @@ impl Renderer {
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
             self.binds.begin_frame();
+            self.text_gpu.begin_frame();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
@@ -2136,6 +2137,7 @@ impl Renderer {
             return Err(RenderError::Unsupported(refused));
         }
         let Some(quad) = quad else { return Ok(None) };
+        self.text_gpu.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2152,6 +2154,7 @@ impl Renderer {
                 &mut taken,
                 &quad.plan,
                 precision,
+                WorkingEncoding::Standard,
             )
             .map_err(RenderError::Media)?;
         self.queue.submit([encoder.finish()]);
@@ -2177,6 +2180,7 @@ impl Renderer {
         precision: Precision,
     ) -> Result<Vec<f32>, RenderError> {
         let plan = crate::text::TextPlan::whole(scene);
+        self.text_gpu.begin_frame();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2193,6 +2197,7 @@ impl Renderer {
                 &mut taken,
                 &plan,
                 precision,
+                WorkingEncoding::Standard,
             )
             .map_err(RenderError::Media)?;
         self.queue.submit([encoder.finish()]);

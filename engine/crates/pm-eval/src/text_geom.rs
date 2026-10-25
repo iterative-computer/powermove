@@ -27,8 +27,13 @@ pub struct MeasuredLine {
     pub width: f64,
     /// The union of the line's glyph ink boxes (`x0`, `y0`, `x1`, `y1`, y
     /// down), relative to the line's pen origin on the baseline: Blink's
-    /// `glyph_bounds`. An empty union is `[0, 0, 0, 0]`.
+    /// `glyph_bounds`. An empty union is `[0, 0, 0, 0]`. Color glyphs
+    /// contribute the area they are drawn in (TEXT-INK-1).
     pub ink: [f64; 4],
+    /// The same union as Canvas measured it, the box typography anchoring
+    /// measures so recorded anchors keep today's placement. It differs from
+    /// `ink` only where a color glyph's metrics are not its drawn area.
+    pub anchor_ink: [f64; 4],
 }
 
 /// The text measurements geometry depends on.
@@ -110,6 +115,8 @@ pub struct TextGeometry {
     pub anchor_x: f64,
     pub anchor_y: f64,
     pub selection: Selection,
+    /// `selection` from each line's `anchor_ink`: the typography anchoring box.
+    pub anchor_box: Selection,
     pub lines: Vec<String>,
     pub line_height: f64,
     pub size: f64,
@@ -133,6 +140,10 @@ pub struct TextRaster {
     pub anchor_x: f64,
     pub anchor_y: f64,
     pub selection: Selection,
+    /// The box typography anchoring measures (`fontAnchorBounds` records
+    /// it): `selection` except where color-glyph metrics differ from the
+    /// drawn ink.
+    pub anchor_box: Selection,
 }
 
 /// What `rasterAnimatedText` paints: posed glyphs (range-font advances
@@ -231,100 +242,107 @@ pub fn text_geometry(d: &Content, measure: &mut dyn TextMeasure) -> TextGeometry
     };
     let anchor_x = x;
     let anchor_y = pad;
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for (i, m) in measured.iter().enumerate() {
-        let baseline = pad + lh * i as f64 + size * 0.82;
-        // Blink's TextMetrics: offsets from the alignment point.
-        let dx = if center {
-            m.width / 2.0
-        } else if right {
-            m.width
-        } else {
-            0.0
+    let selection = |ink_of: fn(&MeasuredLine) -> [f64; 4]| {
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for (i, m) in measured.iter().enumerate() {
+            let ink = ink_of(m);
+            let baseline = pad + lh * i as f64 + size * 0.82;
+            // Blink's TextMetrics: offsets from the alignment point.
+            let dx = if center {
+                m.width / 2.0
+            } else if right {
+                m.width
+            } else {
+                0.0
+            };
+            // `text_align_dx_` and the glyph bounds are `float`, and so is the
+            // arithmetic (`-glyph_bounds.x() + text_align_dx_`).
+            let left_metric = f64::from(-(ink[0] as f32) + dx as f32);
+            let right_metric = f64::from(ink[2] as f32 - dx as f32);
+            let ascent_metric = -ink[1];
+            let descent_metric = ink[3];
+            let fallback_left = if center {
+                x - m.width / 2.0
+            } else if right {
+                x - m.width
+            } else {
+                x
+            };
+            let fallback_right = fallback_left + m.width;
+            let horizontal = left_metric.is_finite()
+                && right_metric.is_finite()
+                && (left_metric != 0.0 || right_metric != 0.0);
+            let left = if horizontal {
+                x - left_metric
+            } else {
+                fallback_left
+            };
+            let right = if horizontal {
+                x + right_metric
+            } else {
+                fallback_right
+            };
+            let top = if ascent_metric.is_finite() && ascent_metric > 0.0 {
+                baseline - ascent_metric
+            } else {
+                baseline - size * 0.8
+            };
+            let bottom = if descent_metric.is_finite() && descent_metric >= 0.0 {
+                baseline + descent_metric
+            } else {
+                baseline + size * 0.2
+            };
+            min_x = js_min(min_x, left);
+            max_x = js_max(max_x, right);
+            min_y = js_min(min_y, top);
+            max_y = js_max(max_y, bottom);
+        }
+        if !min_x.is_finite() || max_x <= min_x {
+            min_x = x - 0.5;
+            max_x = x + 0.5;
+        }
+        if !min_y.is_finite() || max_y <= min_y {
+            min_y = pad;
+            max_y = pad + size;
+        }
+        let ip = clamp(size * 0.055, 3.0, 12.0);
+        let mut sel = Selection {
+            x0: min_x - anchor_x - ip,
+            y0: min_y - anchor_y - ip,
+            x1: max_x - anchor_x + ip,
+            y1: max_y - anchor_y + ip,
+            w: 0.0,
+            h: 0.0,
         };
-        // `text_align_dx_` and the glyph bounds are `float`, and so is the
-        // arithmetic (`-glyph_bounds.x() + text_align_dx_`).
-        let left_metric = f64::from(-(m.ink[0] as f32) + dx as f32);
-        let right_metric = f64::from(m.ink[2] as f32 - dx as f32);
-        let ascent_metric = -m.ink[1];
-        let descent_metric = m.ink[3];
-        let fallback_left = if center {
-            x - m.width / 2.0
-        } else if right {
-            x - m.width
-        } else {
-            x
-        };
-        let fallback_right = fallback_left + m.width;
-        let horizontal = left_metric.is_finite()
-            && right_metric.is_finite()
-            && (left_metric != 0.0 || right_metric != 0.0);
-        let left = if horizontal {
-            x - left_metric
-        } else {
-            fallback_left
-        };
-        let right = if horizontal {
-            x + right_metric
-        } else {
-            fallback_right
-        };
-        let top = if ascent_metric.is_finite() && ascent_metric > 0.0 {
-            baseline - ascent_metric
-        } else {
-            baseline - size * 0.8
-        };
-        let bottom = if descent_metric.is_finite() && descent_metric >= 0.0 {
-            baseline + descent_metric
-        } else {
-            baseline + size * 0.2
-        };
-        min_x = js_min(min_x, left);
-        max_x = js_max(max_x, right);
-        min_y = js_min(min_y, top);
-        max_y = js_max(max_y, bottom);
-    }
-    if !min_x.is_finite() || max_x <= min_x {
-        min_x = x - 0.5;
-        max_x = x + 0.5;
-    }
-    if !min_y.is_finite() || max_y <= min_y {
-        min_y = pad;
-        max_y = pad + size;
-    }
-    let ip = clamp(size * 0.055, 3.0, 12.0);
-    let mut sel = Selection {
-        x0: min_x - anchor_x - ip,
-        y0: min_y - anchor_y - ip,
-        x1: max_x - anchor_x + ip,
-        y1: max_y - anchor_y + ip,
-        w: 0.0,
-        h: 0.0,
+        if paragraph_width > 0.0 {
+            sel.x0 = pad - anchor_x - ip;
+            sel.x1 = pad + paragraph_width - anchor_x + ip;
+            sel.y0 = pad - anchor_y - ip;
+            let height = if bh > 0.0 {
+                js_max(paragraph_height, lh)
+            } else {
+                lh * measured.len() as f64
+            };
+            sel.y1 = pad + height - anchor_y + ip;
+        }
+        sel.w = sel.x1 - sel.x0;
+        sel.h = sel.y1 - sel.y0;
+        sel
     };
-    if paragraph_width > 0.0 {
-        sel.x0 = pad - anchor_x - ip;
-        sel.x1 = pad + paragraph_width - anchor_x + ip;
-        sel.y0 = pad - anchor_y - ip;
-        let height = if bh > 0.0 {
-            js_max(paragraph_height, lh)
-        } else {
-            lh * measured.len() as f64
-        };
-        sel.y1 = pad + height - anchor_y + ip;
-    }
-    sel.w = sel.x1 - sel.x0;
-    sel.h = sel.y1 - sel.y0;
+    let sel = selection(|m| m.ink);
+    let anchor_box = selection(|m| m.anchor_ink);
     TextGeometry {
         w,
         h: hh,
         anchor_x,
         anchor_y,
         selection: sel,
+        anchor_box,
         lines: measured.into_iter().map(|m| m.text).collect(),
         line_height: lh,
         size,
@@ -348,7 +366,8 @@ impl<'d> Scope<'_, 'd> {
 
     /// The box an anchor edit on a font-anchored text layer starts from:
     /// the text as typography anchoring measures it, anchor applied. Level 1
-    /// keeps today's raster selection; level 2 is its resting styled ink,
+    /// keeps today's raster selection as Canvas measured it
+    /// ([`TextRaster::anchor_box`]); level 2 is its resting styled ink,
     /// the same box `level2_text` anchors against, so an edit never folds
     /// an animator's displacement into the recorded font bounds.
     pub fn text_anchor_box(
@@ -363,7 +382,7 @@ impl<'d> Scope<'_, 'd> {
                 .level2_text(layer, time, measure, true, true)
                 .map(|f| f.resting);
         }
-        Ok(self.text_raster(layer, time, measure)?.selection)
+        Ok(self.text_raster(layer, time, measure)?.anchor_box)
     }
 
     /// [`Self::text_raster`] with character animators and typography
@@ -407,16 +426,19 @@ impl<'d> Scope<'_, 'd> {
                 anchor_x: g.anchor_x,
                 anchor_y: g.anchor_y,
                 selection: g.selection,
+                anchor_box: g.anchor_box,
             }
         };
         let reference = BoundsValues::of(node::member(ld, "fontAnchorBounds")).filter(|_| anchor);
         if let Some(reference) = reference {
-            // Character animator movement must not be canceled by typography anchoring.
+            // Character animator movement must not be canceled by typography
+            // anchoring. The recorded bounds are Canvas's measurement, so the
+            // offset compares like with like and saved placement holds.
             let type_bounds = if has_animators {
                 self.text_raster_with(layer, time, measure, false, false)?
-                    .selection
+                    .anchor_box
             } else {
-                raster.selection
+                raster.anchor_box
             };
             let ax = self.channel(layer, "anchor.x", time)?;
             let ay = self.channel(layer, "anchor.y", time)?;
@@ -429,6 +451,7 @@ impl<'d> Scope<'_, 'd> {
             raster.anchor_x -= offset.x;
             raster.anchor_y -= offset.y;
             raster.selection = raster.selection.shifted(offset.x, offset.y);
+            raster.anchor_box = raster.anchor_box.shifted(offset.x, offset.y);
         }
         Ok(raster)
     }
@@ -449,22 +472,25 @@ impl<'d> Scope<'_, 'd> {
                 anchor_x: g.anchor_x,
                 anchor_y: g.anchor_y,
                 selection: g.selection,
+                anchor_box: g.anchor_box,
             };
         };
         let AnimatedRaster { x0, y0, x1, y1, .. } = raster;
         let w = js_max(1.0, x1 - x0);
         let h = js_max(1.0, y1 - y0);
-        let selection = if !state.styles.is_empty() {
-            Selection {
+        let (selection, anchor_box) = if !state.styles.is_empty() {
+            let s = Selection {
                 x0,
                 y0,
                 x1,
                 y1,
                 w,
                 h,
-            }
+            };
+            (s, s)
         } else {
-            text_geometry(d, measure).selection
+            let g = text_geometry(d, measure);
+            (g.selection, g.anchor_box)
         };
         TextRaster {
             w,
@@ -472,6 +498,7 @@ impl<'d> Scope<'_, 'd> {
             anchor_x: -x0,
             anchor_y: -y0,
             selection,
+            anchor_box,
         }
     }
 
@@ -575,6 +602,7 @@ impl<'d> Scope<'_, 'd> {
                 anchor_x: r.anchor_x,
                 anchor_y: r.anchor_y,
                 selection: r.selection,
+                anchor_box: r.anchor_box,
                 lines: f.layout.lines.iter().map(|l| l.text.clone()).collect(),
                 line_height: f.layout.lines.first().map_or(0.0, |l| l.height),
                 size: f.size,

@@ -4,9 +4,9 @@
 //! pixels, and an `index.html` with their scores:
 //!
 //! 1. today's Canvas2D (the capture),
-//! 2. the engine at `compat` level 1 (Canvas2D profile),
+//! 2. the engine at `compat` level 1 (exact outline coverage),
 //! 3. CoreText with font smoothing (the macOS look),
-//! 4. the engine at level 2 (CoreText profile, exact positions).
+//! 4. the engine at level 2 (exact outline coverage).
 //!
 //! Images are written outside the repository, to
 //! `~/Library/Application Support/Powermove Engine Corpus/review/text-<stamp>/`
@@ -27,7 +27,6 @@ mod review {
     use pm_text::render::bitmap::Bitmaps;
     use pm_text::render::coretext::{CoreTextReference, RefRun};
     use pm_text::render::outline::{Coords, FaceRef, Outlines};
-    use pm_text::render::profile::Profile;
     use pm_text::render::scene::{Painter, Run, TextScene};
     use serde_json::{Value, json};
     use std::fmt::Write as _;
@@ -135,7 +134,7 @@ mod review {
         std::fs::create_dir_all(&out).unwrap();
         let mut html = String::from(
             "<!doctype html><meta charset=utf-8><title>Text review</title><style>body{font:13px system-ui;background:#111;color:#ddd}figure{margin:16px 0}img{image-rendering:pixelated;display:block}figcaption{margin:4px 0 12px}</style>\
-             <h1>Text review</h1><p>Rows, top to bottom: today's Canvas2D, engine level 1 (CoreGraphics glyph masks with Canvas2D's tables on macOS; the Canvas2D profile for what they do not cover), CoreText with font smoothing, engine level 2 (CoreText profile). Scores are ink SSIM.</p>\
+             <h1>Text review</h1><p>Rows, top to bottom: today's Canvas2D, engine level 1 (exact outline coverage), CoreText with font smoothing (a witness), engine level 2 (exact outline coverage). Scores are ink SSIM.</p>\
              <p>Cases marked <em>emoji</em> hold color bitmap glyphs (Apple Color Emoji). At both levels the engine places and sizes them as Canvas2D does (amendment 10), not as CoreText does, so their level 2 vs CoreText score is low by design and is not a failure: compare their level 2 row with the Canvas2D row instead.</p>",
         );
         let mut n = 0;
@@ -223,10 +222,6 @@ mod review {
             let mut painter = Painter {
                 outlines: &mut outlines,
                 bitmaps: &mut bitmaps,
-                masks: None,
-                viewport: None,
-                path_rasterizer: None,
-                profile: Profile::CORETEXT,
                 unsupported: Vec::new(),
             };
             let mut refs: Vec<RefRun<'_>> = Vec::new();

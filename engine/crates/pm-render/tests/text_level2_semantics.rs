@@ -1,8 +1,7 @@
 //! Native-only corpus: no private capture or installed app is needed.
 //! The production served-font provider, actual renderer, bounds, picks,
-//! anchor edits, 2.5D planes and the compatibility raster, with CoreText
-//! drawing every posed frame (rotation, scale, skew, blur, color and
-//! opacity included) as the independent pixel reference.
+//! anchor edits, 2.5D planes and the compatibility raster, with independent
+//! f64 outline coverage of every posed frame.
 mod support;
 
 #[cfg(target_os = "macos")]
@@ -30,6 +29,7 @@ fn main() {
     assert!(!support::routing_forbidden(&Feature::Text(
         "text layers without configured fonts".into()
     )));
+    level1_projection_regression();
     let cases: Vec<Value> =
         serde_json::from_str(include_str!("../../../corpus/fixtures/text-level2.json")).unwrap();
     assert_eq!(cases.len(), 14, "every level 2 corpus case is exercised");
@@ -64,13 +64,15 @@ fn main() {
     let mut frames = 0;
     let mut routes = support::text::Level2Routes::new();
     let mut stats = Stats::default();
-    let mut ssim_failures = Vec::new();
+    let mut reference_failures = Vec::new();
     let make_doc = |l: Value| {
+        // The renderer takes storage precision from the project, not the
+        // request. Use float32 here so the geometry gate measures outline
+        // placement without half-float accumulation in the text target.
+        let mut project = project(640, 360, 3.0, no_fill(), vec![l]);
+        project["colorDepth"] = json!(32);
         pm_model::Document::new(
-            Some(
-                pm_model::json::parse(&project(640, 360, 3.0, no_fill(), vec![l]).to_string())
-                    .unwrap(),
-            ),
+            Some(pm_model::json::parse(&project.to_string()).unwrap()),
             1,
         )
     };
@@ -79,6 +81,11 @@ fn main() {
             .render(doc, "Ptest-root", support::ticks(t), &request, &assets)
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert_eq!(
+            frame.color.format(),
+            wgpu::TextureFormat::Rgba32Float,
+            "semantic geometry fixtures must use project-authored float32 precision"
+        );
         renderer.read_rgba(&frame).unwrap()
     };
     for case in &cases {
@@ -263,11 +270,10 @@ fn main() {
                     );
                 }
             }
-            let ssim = compare_coretext(&evaluated, &pixels, id, t);
-            stats.ssim(id, &evaluated, ssim);
-            if let Some(ink) = ssim.filter(|ink| *ink < 0.98) {
-                // Every frame is measured before the gate fails.
-                ssim_failures.push(format!("{id} at {t}: CoreText ink SSIM {ink:.4}"));
+            let score = compare_exact(&evaluated, &pixels, id, t);
+            stats.score(id, &evaluated, score);
+            if let Some(max_cv) = score.filter(|max_cv| *max_cv > 1.0) {
+                reference_failures.push(format!("{id} at {t}: outline max {max_cv:.4} CV"));
             }
 
             // The same layer on an unturned 2.5D plane (the local_text
@@ -398,21 +404,198 @@ fn main() {
     assert_eq!(routes.routed.len(), cases.len());
     assert!(routes.failures().is_empty(), "{:?}", routes.failures());
     level2_routing_contract(&make_doc);
-    level2_caption_bitmaps_snap(&mut renderer, &request, &assets);
+    level2_caption_bitmaps_exact(&mut renderer, &request, &assets);
     stats.report();
     assert!(
-        ssim_failures.is_empty(),
-        "below the 0.98 CoreText ink SSIM floor: {ssim_failures:#?}"
+        reference_failures.is_empty(),
+        "beyond the exact outline bound: {reference_failures:#?}"
     );
     println!("level 2 semantics: {frames} native frames passed");
 }
 
-/// Level 2 captions draw with the CoreText profile, so they share its
-/// `bitmap_snap: Round`: an axis-aligned color bitmap glyph sits at whole
-/// device pixels. Two sub-pixel positions that round alike draw the same
-/// pixels; one that rounds to the next pixel draws them one pixel over.
+/// Level 1 glyphs keep their source layout when drawn through a 2.5D plane.
+/// Both horizontal and vertical turns must project actual ink, not flatten it.
 #[cfg(target_os = "macos")]
-fn level2_caption_bitmaps_snap(
+fn level1_projection_regression() {
+    use pm_eval::{Comp, Evaluator, Scope};
+    use pm_protocol::{color::Precision, common::Size};
+    use pm_render::{MapResolver, RenderRequest, Renderer};
+    use serde_json::json;
+    use support::doc::{layer, no_fill, project, set};
+
+    const W: usize = 640;
+    const H: usize = 360;
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_text_fonts(Some(Box::new(support::text::MainThreadFonts(
+        pm_eval::text_measure::CompatMeasure::new(pm_text::registry::CoreTextRegistry::new()),
+        None,
+    ))));
+    let mut request = RenderRequest::sized(Size::new(W as u32, H as u32), Precision::Float32);
+    request.background = false;
+    let make = |three_d: bool, rx: f64, ry: f64| {
+        let mut text = layer(
+            "t",
+            "text",
+            json!({
+                "text": "Level one perspective 0123", "font": "SF Pro Display",
+                "size": 44, "weight": 600, "color": "#e4a64f", "align": "center"
+            }),
+            320.25,
+            180.5,
+            3.0,
+        );
+        text["compat"] = json!(1);
+        text["threeD"] = json!(three_d);
+        set(&mut text, "rotation.x", json!(rx));
+        set(&mut text, "rotation.y", json!(ry));
+        set(&mut text, "perspective", json!(36));
+        pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    &project(W as u32, H as u32, 3.0, no_fill(), vec![text]).to_string(),
+                )
+                .unwrap(),
+            ),
+            1,
+        )
+    };
+    let mut draw = |doc: &pm_model::Document| {
+        let frame = renderer
+            .render(
+                doc,
+                "Ptest-root",
+                support::ticks(0.0),
+                &request,
+                &MapResolver::default(),
+            )
+            .unwrap();
+        assert!(
+            frame.failures.is_empty(),
+            "level 1 plane: {:?}",
+            frame.failures
+        );
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        let raster = renderer
+            .text_raster(doc, "Ptest-root", "t", 0.0, 1.0, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        let signature = format!("{:?}", raster.plan.scene.items);
+        (
+            pixels,
+            signature,
+            raster.plan.crop,
+            raster.box_size,
+            raster.anchor,
+        )
+    };
+    let flat_doc = make(false, 0.0, 0.0);
+    let plane_doc = make(true, 0.0, 0.0);
+    let flat = draw(&flat_doc);
+    let plane = draw(&plane_doc);
+    assert_eq!(
+        (&flat.1, flat.2, flat.3, flat.4),
+        (&plane.1, plane.2, plane.3, plane.4),
+        "level 1 source layout changed"
+    );
+    let alpha =
+        |px: &[f32]| -> Vec<bool> { px.chunks_exact(4).map(|p| p[3] > 8.0 / 255.0).collect() };
+    let flat_ink = alpha(&flat.0);
+    let plane_ink = alpha(&plane.0);
+    let unturned = flat_ink
+        .iter()
+        .zip(&plane_ink)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        unturned < 100,
+        "unturned level 1 plane changed {unturned} ink pixels"
+    );
+    let mut grown = flat_ink.clone();
+    for _ in 0..2 {
+        grown = pm_render::parity::dilate(&grown, W, H);
+    }
+    for (case, rx, ry) in [(0, 27.0, 0.0), (1, 0.0, -38.0), (2, 22.0, 31.0)] {
+        let doc = make(true, rx, ry);
+        let turned = draw(&doc);
+        assert_eq!(
+            (&flat.1, flat.2, flat.3, flat.4),
+            (&turned.1, turned.2, turned.3, turned.4),
+            "case {case}: projected level 1 layout changed"
+        );
+        let comp = Comp::resolve(&doc, "Ptest-root").unwrap();
+        let mut eval = Evaluator::new();
+        let mut scope = Scope::open(&mut eval, &comp);
+        let layer = &scope.layers()[0];
+        let inverse =
+            pm_eval::space3d::inverse_plane(&scope.plane_matrix(layer, 0.0, false).unwrap())
+                .unwrap();
+        let flat_comp = Comp::resolve(&flat_doc, "Ptest-root").unwrap();
+        let mut flat_eval = Evaluator::new();
+        let mut flat_scope = Scope::open(&mut flat_eval, &flat_comp);
+        let world = flat_scope
+            .world_matrix(&flat_scope.layers()[0], 0.0)
+            .unwrap();
+        let turned_ink = alpha(&turned.0);
+        let changed = turned_ink
+            .iter()
+            .zip(&flat_ink)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            changed > 100,
+            "case {case}: perspective flattened level 1 text"
+        );
+        let mut core = turned_ink;
+        for _ in 0..2 {
+            core = erode_level1(&core, W, H);
+        }
+        let mut drawn = 0usize;
+        let mut off = 0usize;
+        for (i, ink) in core.iter().enumerate() {
+            if !ink {
+                continue;
+            }
+            drawn += 1;
+            let (x, y) = pm_eval::space3d::project_point(
+                &inverse,
+                (i % W) as f64 + 0.5,
+                (i / W) as f64 + 0.5,
+            );
+            let px = (world[0] * x + world[2] * y + world[4]).floor() as isize;
+            let py = (world[1] * x + world[3] * y + world[5]).floor() as isize;
+            if px < 0
+                || py < 0
+                || px >= W as isize
+                || py >= H as isize
+                || !grown[py as usize * W + px as usize]
+            {
+                off += 1;
+            }
+        }
+        println!("case {case}: level 1 plane changed {changed}, core {drawn}, off {off}");
+        assert!(
+            drawn > 100 && off == 0,
+            "case {case}: projected ink left its plane"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn erode_level1(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
+    let mut out = vec![false; mask.len()];
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            out[y * w + x] = (0..9).all(|k| mask[(y + k / 3 - 1) * w + x + k % 3 - 1]);
+        }
+    }
+    out
+}
+
+/// Apple bitmap size and downward shift stay authored, while fractional
+/// placement is continuous. An integer translation still moves the exact
+/// same pixels by one integer pixel.
+#[cfg(target_os = "macos")]
+fn level2_caption_bitmaps_exact(
     renderer: &mut pm_render::Renderer,
     request: &pm_render::RenderRequest,
     assets: &pm_render::MapResolver,
@@ -452,11 +635,30 @@ fn level2_caption_bitmaps_snap(
     };
     let a = draw(renderer, 320.3);
     let b = draw(renderer, 320.4);
-    let c = draw(renderer, 320.7);
+    let c = draw(renderer, 321.3);
     assert!(a.chunks_exact(4).any(|p| p[3] > 0), "the emoji draws");
+    assert_ne!(a, b, "fractional movement changes the emoji coverage");
+    let alpha = |pixels: &[u8]| -> Vec<f64> {
+        pixels
+            .chunks_exact(4)
+            .map(|p| f64::from(p[3]) / 255.0)
+            .collect()
+    };
+    let ag = pm_reference::compare::geometry(&alpha(&a), 640);
+    let bg = pm_reference::compare::geometry(&alpha(&b), 640);
     assert!(
-        a == b,
-        "positions that round alike draw the same bitmap pixels"
+        ((bg.centroid[0] - ag.centroid[0]) - 0.1).abs() < 0.02,
+        "fractional x translation: {:?} vs {:?}",
+        ag,
+        bg
+    );
+    assert!(
+        (bg.area - ag.area).abs() / ag.area < 1e-3,
+        "emoji area remains constant"
+    );
+    assert!(
+        (bg.centroid[1] - ag.centroid[1]).abs() < 0.02,
+        "authored downward placement remains constant"
     );
     let (w, h) = (640usize, 360usize);
     let mut shifted = vec![0u8; w * h * 4];
@@ -470,7 +672,7 @@ fn level2_caption_bitmaps_snap(
         c == shifted,
         "the next whole pixel moves the bitmap by one pixel"
     );
-    println!("level 2 captions: color bitmaps snap to whole device pixels");
+    println!("level 2 captions: fractional bitmap placement and integer translation pass");
 }
 
 /// The parity gates' level 2 routing: level 1 text is compared with the
@@ -944,7 +1146,7 @@ fn boxes_within(a: Option<[usize; 4]>, b: Option<[usize; 4]>, tol: usize) -> boo
     }
 }
 
-/// Minimum CoreText SSIM per pose class (what the frame exercises).
+/// Maximum error against exact outline coverage per pose class.
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 struct Stats {
@@ -955,8 +1157,8 @@ struct Stats {
 
 #[cfg(target_os = "macos")]
 impl Stats {
-    fn ssim(&mut self, _id: &str, frame: &pm_eval::text_level2::Frame, ssim: Option<f64>) {
-        let Some(ssim) = ssim else { return };
+    fn score(&mut self, _id: &str, frame: &pm_eval::text_level2::Frame, max_cv: Option<f64>) {
+        let Some(max_cv) = max_cv else { return };
         let visible = frame.draws.iter().filter(|d| d.opacity > 0.0);
         let mut classes = Vec::new();
         for d in visible {
@@ -978,14 +1180,14 @@ impl Stats {
         }
         classes.dedup();
         for c in classes {
-            let e = self.classes.entry(c).or_insert((1.0, 0));
-            e.0 = e.0.min(ssim);
+            let e = self.classes.entry(c).or_insert((0.0, 0));
+            e.0 = e.0.max(max_cv);
             e.1 += 1;
         }
     }
     fn report(&self) {
-        for (class, (min, n)) in &self.classes {
-            println!("CoreText ink SSIM, {class}: minimum {min:.4} over {n} frames");
+        for (class, (max, n)) in &self.classes {
+            println!("exact outline, {class}: maximum {max:.4} CV over {n} frames");
         }
         println!(
             "unturned plane: maximum mean alpha difference {:.4} CV",
@@ -998,191 +1200,139 @@ impl Stats {
     }
 }
 
-/// Draws the frame's runs with CoreText through each run's pose, alpha and
-/// color (blur from a Gaussian of the CoreText coverage, the `filter:
-/// blur(σ)` the painter applies) and compares ink SSIM. `None` for a frame
-/// with nothing visible.
+/// Renders the semantic frame from its shaped glyph poses, then judges the
+/// renderer against independent f64 outline coverage and compositing.
 #[cfg(target_os = "macos")]
-fn compare_coretext(
+fn compare_exact(
     frame: &pm_eval::text_level2::Frame,
     ours: &[f32],
     id: &str,
     time: f64,
 ) -> Option<f64> {
-    use pm_text::render::coretext::{CoreTextReference, RefRun};
-    use read_fonts::TableProvider;
-    let draws: Vec<_> = frame
-        .draws
-        .iter()
-        .filter(|d| d.opacity.is_finite() && d.opacity > 0.0)
-        .collect();
-    if draws.is_empty() {
+    use kurbo::Affine;
+    use pm_reference::compare::{Class, Stats, geometry, same_geometry};
+    use pm_text::render::bitmap::Bitmaps;
+    use pm_text::render::outline::{Coords, FaceRef, Outlines};
+    use pm_text::render::scene::{Painter, Run, TextScene};
+
+    let mut scene = TextScene {
+        width: 640,
+        height: 360,
+        items: Vec::new(),
+    };
+    let (mut outlines, mut bitmaps) = (Outlines::new(), Bitmaps::new());
+    let mut painter = Painter {
+        outlines: &mut outlines,
+        bitmaps: &mut bitmaps,
+        unsupported: Vec::new(),
+    };
+    let base = Affine::translate((frame.offset.x + 100.0, frame.offset.y + 80.0));
+    let mut visible = false;
+    for draw in &frame.draws {
+        if !draw.opacity.is_finite() || draw.opacity <= 0.0 {
+            continue;
+        }
+        visible = true;
+        let run = Run {
+            face: FaceRef {
+                data: draw.data.as_slice(),
+                index: 0,
+                id: draw.data.id(),
+            },
+            size: draw.run.size,
+            coords: Coords::Normalized(&draw.run.coords),
+            synthetic_bold: draw.run.synthetic_bold,
+            synthetic_italic: false,
+            oblique: f64::from(draw.run.skew),
+            glyphs: &draw.run.glyphs,
+            bitmap_size: None,
+        };
+        let color = pm_text::render::color::parse_or(
+            &draw.color.to_js_string().to_string_lossy(),
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        painter.fill_text(
+            &mut scene.items,
+            &[run],
+            (0.0, 0.0),
+            base * Affine::new(draw.matrix),
+            color,
+            draw.opacity,
+            draw.blur,
+        );
+    }
+    if !visible {
         return None;
     }
-    let coordinates: Vec<Vec<(u32, f32)>> = draws
-        .iter()
-        .map(|draw| {
-            let font = read_fonts::FontRef::new(draw.data.as_slice()).unwrap();
-            font.fvar()
-                .ok()
-                .and_then(|f| f.axes().ok())
-                .map(|axes| {
-                    axes.iter()
-                        .zip(&draw.run.coords)
-                        .map(|(axis, coord)| {
-                            let n = f32::from(*coord) / 16384.0;
-                            let default = axis.default_value().to_f32();
-                            let value = default
-                                + n * if n < 0.0 {
-                                    default - axis.min_value().to_f32()
-                                } else {
-                                    axis.max_value().to_f32() - default
-                                };
-                            (u32::from_be_bytes(axis.axis_tag().into_bytes()), value)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .collect();
-    let (ox, oy) = (frame.offset.x + 100.0, frame.offset.y + 80.0);
-    let mut runs = Vec::new();
-    let mut matrices = Vec::new();
-    for (draw, coords) in draws.iter().zip(&coordinates) {
-        assert!(!draw.run.synthetic_bold && draw.run.skew == 0.0);
-        let m = draw.matrix;
-        let mut color = pm_text::render::color::parse_or(
-            &draw.color.to_js_string().to_string_lossy(),
-            [1.0; 4],
-        );
-        color[3] *= draw.opacity;
-        // A translation folds into the glyph positions (the exact integer
-        // movement the earlier gate measured); other poses go through the
-        // context transform.
-        let translate = m[..4] == [1.0, 0.0, 0.0, 1.0];
-        let (gx, mut gy) = if translate {
-            (m[4] + ox, m[5] + oy)
-        } else {
-            (0.0, 0.0)
-        };
-        // Amendment 10: Apple Color Emoji placement follows Canvas2D at
-        // both levels, whole pixels below where CoreText draws it.
-        let face = pm_text::render::outline::FaceRef {
-            data: draw.data.as_slice(),
-            index: 0,
-            id: draw.data.id(),
-        };
-        if translate && pm_text::render::bitmap::is_apple_color_emoji(face) {
-            gy += pm_text::render::bitmap::apple_emoji_shift(draw.run.size, draw.run.size);
+    assert!(
+        painter.unsupported.is_empty(),
+        "{id}: {:?}",
+        painter.unsupported
+    );
+    let ideal = support::text_reference::render(&scene);
+    let mut errors = Vec::new();
+    for (i, class) in ideal.classes.iter().enumerate() {
+        if *class == Class::Unreferenced {
+            continue;
         }
-        matrices.push(if translate {
-            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        } else {
-            [m[0], m[1], m[2], m[3], m[4] + ox, m[5] + oy]
-        });
-        runs.push(RefRun {
-            data: draw.data.as_slice(),
-            index: 0,
-            size: draw.run.size,
-            coords,
-            glyphs: draw
-                .run
-                .glyphs
-                .iter()
-                .map(|g| (g.id as u16, g.x + gx, g.y + gy))
-                .collect(),
-            color,
-        });
+        let e = (0..4)
+            .map(|c| (f64::from(ours[i * 4 + c]) - ideal.rgba[i * 4 + c]).abs() * 255.0)
+            .fold(0.0, f64::max);
+        errors.push(e);
     }
-    let mut reference = CoreTextReference::new();
-    let theirs = if draws.iter().any(|d| d.blur > 0.0) {
-        // Each draw blurred on its own, then composited in order.
-        let mut out = vec![0.0f32; 640 * 360 * 4];
-        for (i, draw) in draws.iter().enumerate() {
-            let mut layer = reference.render_posed(
-                std::slice::from_ref(&runs[i]),
-                &matrices[i..=i],
-                640,
-                360,
-                true,
-            );
-            if draw.blur > 0.0 {
-                gaussian(&mut layer, 640, 360, draw.blur);
+    let stats = Stats::of(errors);
+    if ideal.unreferenced == 0 {
+        let ea: Vec<f64> = ours.chunks_exact(4).map(|p| f64::from(p[3])).collect();
+        let ra: Vec<f64> = ideal.rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let engine_geometry = geometry(&ea, 640);
+        let reference_geometry = geometry(&ra, 640);
+        if let Err(error) = same_geometry(&engine_geometry, &reference_geometry, 1e-3) {
+            for samples in [64, 256] {
+                let higher = support::text_reference::render_with_samples(
+                    &scene,
+                    pm_protocol::color::WorkingEncoding::Standard,
+                    samples,
+                );
+                let alpha: Vec<f64> = higher.rgba.chunks_exact(4).map(|p| p[3]).collect();
+                let high_geometry = geometry(&alpha, 640);
+                println!(
+                    "{id} at {time}: geometry oracle {samples} cells: engine {:?}, reference {:?}, verdict {:?}",
+                    engine_geometry,
+                    high_geometry,
+                    same_geometry(&engine_geometry, &high_geometry, 1e-3)
+                );
             }
-            for (o, s) in out.chunks_exact_mut(4).zip(layer.chunks_exact(4)) {
-                let k = 1.0 - s[3];
-                for c in 0..4 {
-                    o[c] = s[c] + o[c] * k;
-                }
-            }
+            panic!("{id} at {time}: {error}");
         }
-        out
-    } else {
-        reference.render_posed(&runs, &matrices, 640, 360, true)
-    };
-    let to8 = |pixels: &[f32]| {
-        pixels
-            .iter()
-            .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
-            .collect::<Vec<_>>()
-    };
-    let ours = to8(ours);
-    let theirs = to8(&theirs);
-    let (ink, _, _) = pm_render::parity::text_ssim(&theirs, &ours, 640, 360);
+    }
+    println!(
+        "{id} at {time}: exact outline {stats}; unmodeled image gap {} px",
+        ideal.unreferenced
+    );
     if let Some(dir) = std::env::var_os("PM_TEXT_LEVEL2_SHOTS") {
         let dir = std::path::PathBuf::from(dir);
+        assert!(
+            !dir.starts_with(support::repo_root()),
+            "shots must stay outside Git"
+        );
         std::fs::create_dir_all(&dir).unwrap();
-        let id = id.replace('/', "-");
-        for (suffix, px) in [("native", &ours), ("coretext", &theirs)] {
+        let to8 = |p: &[f64]| -> Vec<u8> {
+            p.iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect()
+        };
+        let actual: Vec<f64> = ours.iter().map(|v| f64::from(*v)).collect();
+        let stem = id.replace('/', "-");
+        for (suffix, px) in [("engine", to8(&actual)), ("outline", to8(&ideal.rgba))] {
             support::write_png(
-                &dir.join(format!("{id}-{time}-{suffix}.png")),
+                &dir.join(format!("{stem}-{time}-{suffix}.png")),
                 640,
                 360,
-                &support::text::png_rgba(px, true),
+                &support::text::png_rgba(&px, true),
             );
         }
     }
-    println!("{id} at {time}: CoreText ink SSIM {ink:.4}");
-    Some(ink)
-}
-
-/// A separable Gaussian blur of standard deviation `sigma` px over
-/// premultiplied RGBA (3σ kernel radius, edges clamped to transparent).
-#[cfg(target_os = "macos")]
-fn gaussian(px: &mut [f32], w: usize, h: usize, sigma: f64) {
-    let radius = (3.0 * sigma).ceil() as isize;
-    let kernel: Vec<f32> = (-radius..=radius)
-        .map(|i| (-(i * i) as f64 / (2.0 * sigma * sigma)).exp() as f32)
-        .collect();
-    let sum: f32 = kernel.iter().sum();
-    let kernel: Vec<f32> = kernel.iter().map(|k| k / sum).collect();
-    let pass = |src: &[f32],
-                dst: &mut [f32],
-                len: usize,
-                stride: usize,
-                lines: usize,
-                line_stride: usize| {
-        for line in 0..lines {
-            for i in 0..len as isize {
-                let mut acc = [0.0f32; 4];
-                for (k, weight) in kernel.iter().enumerate() {
-                    let j = i + k as isize - radius;
-                    if j < 0 || j >= len as isize {
-                        continue;
-                    }
-                    let at = line * line_stride + j as usize * stride;
-                    for c in 0..4 {
-                        acc[c] += src[at + c] * weight;
-                    }
-                }
-                let at = line * line_stride + i as usize * stride;
-                dst[at..at + 4].copy_from_slice(&acc);
-            }
-        }
-    };
-    let mut tmp = vec![0.0f32; px.len()];
-    pass(px, &mut tmp, w, 4, h, w * 4);
-    pass(&tmp, px, h, w * 4, w, 4);
+    Some(stats.max)
 }
 
 #[cfg(not(target_os = "macos"))]

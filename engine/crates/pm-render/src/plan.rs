@@ -946,7 +946,12 @@ pub(crate) fn layer_draw<'d>(
             // level 2 content draws at output resolution (`crate::vector`,
             // `crate::text`), except on a plane, where its layer-space raster
             // is resampled too (`crate::space25d::local`).
-            let level2 = level2.filter(|_| level2_type || plane.is_some());
+            let level2 = level2
+                .or_else(|| {
+                    (plane.is_some() && matches!(ty.as_str(), "text" | "captions"))
+                        .then_some(b.sampling)
+                })
+                .filter(|_| level2_type || plane.is_some());
             Draw {
                 layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
@@ -1957,11 +1962,50 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let world = scaled_world(scope, layer, time, scale, b.origin)?;
-    // `compat` level 2: drawn at output resolution, no raster.
-    if node::to_number(node::member(Some(layer), "compat")) >= 2.0 && scope.is_3d_layer(layer)? {
+    let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
+    if scope.is_3d_layer(layer)? {
+        // A plane with no perspective is an affine output transform. Cover
+        // level 1 outlines directly under that exact plane matrix: painting
+        // a local bitmap and sampling it through an in-plane rotation would
+        // change hundreds of edge pixels even though the glyph geometry is
+        // identical. True perspective still uses the local raster sampler.
+        if !level2
+            && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
+                .map(|p| plane_at_origin(p, b.origin))
+            && plane[2] == 0.0
+            && plane[5] == 0.0
+            && plane[8] > 0.0
+            && plane.iter().all(|v| v.is_finite())
+        {
+            let inv_w = 1.0 / plane[8];
+            let m = kurbo::Affine::new([
+                plane[0] * inv_w,
+                plane[1] * inv_w,
+                plane[3] * inv_w,
+                plane[4] * inv_w,
+                plane[6] * inv_w,
+                plane[7] * inv_w,
+            ]);
+            let plan = if ty == "text" {
+                text.text_layer_level1_device(scope, layer, time, m, target)?
+            } else {
+                text.captions_layer_level1_device(scope, layer, time, m, target)?
+            };
+            for what in text.take_unsupported() {
+                b.unsupported
+                    .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
+            }
+            return Ok(plan.map(|p| {
+                let [x0, y0, x1, y1] = p.crop.map(f64::from);
+                Quad::Device {
+                    source: Source::Text(Box::new(p)),
+                    rect: [x0, y0, x1 - x0, y1 - y0],
+                }
+            }));
+        }
         return local_text(scope, b, layer, ty, time, scale);
     }
-    if node::to_number(node::member(Some(layer), "compat")) >= 2.0 {
+    if level2 {
         let offset = scope.size_anchor_offset(layer, time)?;
         let m = mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]);
         let m = kurbo::Affine::new(m);
@@ -1983,30 +2027,28 @@ fn text_quad<'d>(
             }
         }));
     }
-    let raster_scale = crate::text::continuous_raster_scale(&world);
-    let quad = if ty == "text" {
-        text.text_layer(scope, layer, time, raster_scale)?
+    let m = kurbo::Affine::new(world);
+    let plan = if ty == "text" {
+        text.text_layer_level1_device(scope, layer, time, m, target)?
     } else {
-        text.captions_layer(scope, layer, time, raster_scale)?
+        text.captions_layer_level1_device(scope, layer, time, m, target)?
     };
     for what in text.take_unsupported() {
         b.unsupported
             .push(Unsupported::layer(&comp_id, layer, Feature::Text(what)));
     }
-    Ok(quad.map(|q| Quad::Texture {
-        source: Source::Text(Box::new(q.plan)),
-        w: q.w,
-        h: q.h,
-        ax: q.ax,
-        ay: q.ay,
-        uv: [0.0, 0.0, 1.0, 1.0],
+    Ok(plan.map(|p| {
+        let [x0, y0, x1, y1] = p.crop.map(f64::from);
+        Quad::Device {
+            source: Source::Text(Box::new(p)),
+            rect: [x0, y0, x1 - x0, y1 - y0],
+        }
     }))
 }
 
-/// Level 2 text or captions on a 2.5D plane: laid out in layer space at the
-/// plane's density (`crate::space25d::local`) and drawn through the plane by
-/// the level 2 resampler. The layout runs once at unit density, offset into
-/// a large canvas, for its bounds.
+/// Text or captions on a 2.5D plane: layout stays at its compatibility
+/// level, then the ink is painted at the plane's local density and projected
+/// through its full 3D transform.
 fn local_text<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
@@ -2020,13 +2062,15 @@ fn local_text<'d>(
     let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
         return Ok(None);
     };
-    let mut lay = |scope: &mut Scope<'_, 'd>, m: kurbo::Affine, target: (u32, u32)| {
-        if ty == "text" {
-            text.text_layer_level2(scope, layer, time, m, target)
-        } else {
-            text.captions_layer_level2(scope, layer, time, m, target)
-        }
-    };
+    let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
+    let mut lay =
+        |scope: &mut Scope<'_, 'd>, m: kurbo::Affine, target: (u32, u32)| match (ty, level2) {
+            ("text", true) => text.text_layer_level2(scope, layer, time, m, target),
+            ("captions", true) => text.captions_layer_level2(scope, layer, time, m, target),
+            ("text", false) => text.text_layer_level1_device(scope, layer, time, m, target),
+            ("captions", false) => text.captions_layer_level1_device(scope, layer, time, m, target),
+            _ => unreachable!("text and captions only"),
+        };
     let side = (2.0 * MARGIN) as u32;
     let first = lay(
         scope,

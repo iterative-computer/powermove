@@ -167,6 +167,17 @@ impl TargetPool {
         self.free.push((key, target));
     }
 
+    /// Discards a target owned by this pool without calling Texture::destroy.
+    /// Recorded command buffers or retained views may still refer to it;
+    /// dropping this handle lets wgpu release its storage when those uses end.
+    pub fn release(&mut self, target: Target) {
+        self.live_bytes = self
+            .live_bytes
+            .checked_sub(target.bytes())
+            .expect("released target was not accounted for by this pool");
+        drop(target);
+    }
+
     /// Frees idle targets until the pool holds at most `bytes`.
     pub fn trim(&mut self, bytes: u64) {
         while self.live_bytes > bytes {
@@ -189,5 +200,85 @@ impl TargetPool {
     /// Targets created so far (a steady state stops creating).
     pub fn created(&self) -> u64 {
         self.created
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_accounts_for_a_target_still_used_by_recorded_commands() {
+        let gpu = crate::device::Gpu::new("target pool release test").unwrap();
+        let mut pool = TargetPool::new();
+        let target = pool.take(
+            &gpu.device,
+            2,
+            2,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        assert_eq!(pool.bytes(), 16);
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("released target readback"),
+            size: 512,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 1.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        encoder.copy_texture_to_buffer(
+            target.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(2),
+                },
+            },
+            wgpu::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+        );
+        pool.release(target);
+        assert_eq!(pool.bytes(), 0);
+        let submission = gpu.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = slice.get_mapped_range().unwrap();
+        assert_eq!(&data[..8], &[0, 255, 0, 255, 0, 255, 0, 255]);
+        drop(data);
+        buffer.unmap();
     }
 }
