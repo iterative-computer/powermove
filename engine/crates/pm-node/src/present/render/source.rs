@@ -397,20 +397,12 @@ impl Thread {
             return;
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-        let original = doc.media().path(asset.as_str());
         let record = pm_eval::node::member(doc.document().root(), "assets")
             .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
         // Interpret Footage says how composition reads the original. The
         // monitor shows that reading of that file, drawn by the engine.
         let footage = record.and_then(pm_render::footage::interpretation);
-        let reads_original = color == SourceColor::Interpreted
-            || (color == SourceColor::Compositor && footage.is_some());
-        let path = if reads_original {
-            original.clone()
-        } else {
-            doc.source_media(asset.as_str()).flatten()
-        };
-        let Some(path) = path else {
+        let Some(path) = doc.source_read(asset.as_str(), color).flatten() else {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
                 &job,
