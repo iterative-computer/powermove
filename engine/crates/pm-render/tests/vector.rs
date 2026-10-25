@@ -511,6 +511,61 @@ fn svg_images_are_drawn_at_output_resolution() {
     );
 }
 
+/// An SVG layer drawn by the declared resvg fallback is counted in pm-perf
+/// (once, when drawn), named on the frame with its reason (every frame,
+/// cached or not), and given a layer diagnostic; a float-drawn SVG layer
+/// gets an empty one, which clears an earlier warning.
+#[test]
+fn svg_fallbacks_are_counted_and_named_per_layer() {
+    let mut renderer = Renderer::headless().unwrap();
+    let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
+    let turbulence = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><filter id="t"><feTurbulence baseFrequency="0.05"/></filter><rect width="100" height="50" filter="url(#t)"/></svg>"##;
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    let (doc, resolver, _svg) =
+        svg_project(turbulence, "turbulence.svg", 100, 50, d.clone(), 1, 0.0);
+    let doc = load(&doc);
+    for drawn in [true, false] {
+        let scope = pm_perf::Scope::begin();
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+            .unwrap();
+        let counts = scope.finish();
+        assert_eq!(
+            counts.get(pm_perf::Counter::SvgFallbackFeature),
+            u64::from(drawn),
+            "counted when drawn, not on a cache hit"
+        );
+        assert_eq!(frame.svg_fallbacks.len(), 1, "{:?}", frame.svg_fallbacks);
+        let f = &frame.svg_fallbacks[0];
+        assert_eq!(
+            (f.composition.as_str(), f.layer.as_str()),
+            ("Ptest-root", "svg")
+        );
+        assert!(f.reason.contains("feTurbulence"), "{}", f.reason);
+        let meta = frame
+            .scene3d_meta
+            .iter()
+            .find(|m| m.layers.iter().any(|l| l.as_str() == "svg"))
+            .expect("a layer diagnostic");
+        assert!(
+            meta.warnings.iter().any(|w| w.contains("feTurbulence")),
+            "{:?}",
+            meta.warnings
+        );
+    }
+    let (doc, resolver, _svg) = svg_project(SOLID_SVG, "native.svg", 100, 50, d, 1, 0.0);
+    let frame = renderer
+        .render(&load(&doc), "Ptest-root", ticks(0.0), &request, &resolver)
+        .unwrap();
+    assert!(frame.svg_fallbacks.is_empty());
+    let meta = frame
+        .scene3d_meta
+        .iter()
+        .find(|m| m.layers.iter().any(|l| l.as_str() == "svg"))
+        .expect("a layer diagnostic");
+    assert!(meta.warnings.is_empty());
+}
+
 #[test]
 fn svg_gradients_crops_and_text() {
     let mut renderer = Renderer::headless().unwrap();

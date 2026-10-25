@@ -942,6 +942,9 @@ struct View {
     reported: Option<Route>,
     /// What the shader UI was last told about this view's layers.
     layer_reports: super::layer_reports::LayerReports,
+    /// SVG files (and reasons) already logged as drawn by the declared
+    /// resvg fallback: each is logged once.
+    svg_fallbacks_logged: std::collections::HashSet<(std::path::PathBuf, String)>,
     /// A Play waits for the audio clock's first playing sample: the host
     /// µs after which it starts on the host clock instead, and the audio
     /// epoch that was current when it was asked (not the answer).
@@ -3933,6 +3936,7 @@ impl Thread {
             retry: None,
             reported: None,
             layer_reports: Default::default(),
+            svg_fallbacks_logged: Default::default(),
             awaiting: None,
             deferred_transport: None,
             deferred_forwarded: None,
@@ -5523,9 +5527,38 @@ impl Thread {
                     stats.compose_us_max = stats.compose_us_max.max(composed.cpu_us);
                     stats.compose_us_total += composed.cpu_us;
                     stats.layer_failures += composed.failures.len() as u64;
+                    let svg_fallbacks: Vec<_> = composed
+                        .svg_fallbacks
+                        .iter()
+                        .filter(|f| {
+                            view.svg_fallbacks_logged
+                                .insert((f.path.clone(), f.reason.clone()))
+                        })
+                        .map(|f| {
+                            let file = f.path.file_name().map_or_else(
+                                || "an SVG image".to_owned(),
+                                |n| n.to_string_lossy().into_owned(),
+                            );
+                            format!(
+                                "SVG {file} (layer {} in {}) is drawn by the 8-bit resvg fallback: {}",
+                                f.layer, f.composition, f.reason
+                            )
+                        })
+                        .collect();
                     stats.stand_in_frames += u64::from(stand_in);
                     stats.scrub = Some(scrub_stats);
                     drop(stats);
+                    if !svg_fallbacks.is_empty() {
+                        (self.sink)(
+                            svg_fallbacks
+                                .into_iter()
+                                .map(|message| Action::Log {
+                                    level: LogLevel::Warn,
+                                    message,
+                                })
+                                .collect(),
+                        );
+                    }
                     // Shader compile errors and missing extension layers at
                     // this frame's revision, before the frame (section 11).
                     let renderer = composer.renderer();

@@ -51,6 +51,18 @@ pub enum RenderError {
     Watchdog(String),
 }
 
+/// An SVG image layer drawn by the declared resvg fallback (RGBA8 at
+/// output resolution) instead of the float painter: it rendered, at
+/// today's precision, for the named reason (an unsupported feature such as
+/// `feTurbulence`, a device or work limit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SvgFallback {
+    pub composition: String,
+    pub layer: String,
+    pub path: std::path::PathBuf,
+    pub reason: String,
+}
+
 /// A layer that failed while the rest of the frame rendered (section 8,
 /// "Isolation": a failing node marks its layer failed and outputs
 /// transparency).
