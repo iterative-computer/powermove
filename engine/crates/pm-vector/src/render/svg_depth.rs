@@ -19,11 +19,20 @@ pub const MAX_ELEMENT_DEPTH: usize = 5000;
 /// (`svg::tests::deep_documents_are_safe_on_a_small_stack`).
 pub const INLINE_DEPTH: usize = 128;
 
-/// The deepest element nesting in `data`, counted without recursion over
-/// comments, CDATA, processing instructions, declarations, and quoted
-/// attribute values (entity expansions are not counted).
-pub fn element_depth(data: &[u8]) -> usize {
-    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+/// An element tag found by [`for_each_tag`]: its byte range in the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tag {
+    /// `<name ...>`, or `<name .../>` when `empty`.
+    Open { start: usize, end: usize, empty: bool },
+    /// `</name>`.
+    Close { start: usize, end: usize },
+}
+
+/// Calls `f` for every element tag in `data`, in order, without recursion,
+/// skipping comments, CDATA, processing instructions, declarations, and
+/// quoted attribute values (entity expansions are not seen).
+pub(crate) fn for_each_tag(data: &[u8], mut f: impl FnMut(Tag)) {
+    let mut i = 0usize;
     let skip_past =
         |i: &mut usize, end: &[u8]| match data[*i..].windows(end.len()).position(|w| w == end) {
             Some(at) => *i += at + end.len(),
@@ -34,6 +43,7 @@ pub fn element_depth(data: &[u8]) -> usize {
             break;
         };
         i += lt;
+        let start = i;
         let rest = &data[i..];
         if rest.starts_with(b"<!--") {
             i += 4;
@@ -45,7 +55,7 @@ pub fn element_depth(data: &[u8]) -> usize {
         } else if rest.starts_with(b"</") {
             i += 2;
             skip_past(&mut i, b">");
-            depth = depth.saturating_sub(1);
+            f(Tag::Close { start, end: i });
         } else if rest.starts_with(b"<!") {
             // DOCTYPE: skip to its end over an internal subset.
             i += 2;
@@ -90,12 +100,25 @@ pub fn element_depth(data: &[u8]) -> usize {
                     _ => i += 1,
                 }
             }
+            f(Tag::Open { start, end: i, empty });
+        }
+    }
+}
+
+/// The deepest element nesting in `data`, counted without recursion over
+/// comments, CDATA, processing instructions, declarations, and quoted
+/// attribute values (entity expansions are not counted).
+pub fn element_depth(data: &[u8]) -> usize {
+    let (mut depth, mut max) = (0usize, 0usize);
+    for_each_tag(data, |tag| match tag {
+        Tag::Open { empty, .. } => {
             max = max.max(depth + 1);
             if !empty {
                 depth += 1;
             }
         }
-    }
+        Tag::Close { .. } => depth = depth.saturating_sub(1),
+    });
     max
 }
 

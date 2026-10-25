@@ -205,18 +205,10 @@ pub fn canvas_placement(
     let snap = |v: f64| (v * dpr).round();
     let (x0, x1) = (snap(canvas.css.x), snap(canvas.css.x + canvas.css.width));
     let (y0, y1) = (snap(canvas.css.y), snap(canvas.css.y + canvas.css.height));
-    let whole = canvas.crop.x == 0.0
-        && canvas.crop.y == 0.0
-        && canvas.crop.width == width
-        && canvas.crop.height == height;
     let (w, h) = (f64::from(canvas.width), f64::from(canvas.height));
-    // `outputScale(W, H)`: the canvas over the composition part it holds.
-    let (sx, sy) = (w / canvas.crop.width, h / canvas.crop.height);
-    let (ox, oy) = if whole {
-        (0.0, 0.0)
-    } else {
-        (canvas.crop.x * sx, canvas.crop.y * sy)
-    };
+    let (scale, origin) = canvas_render_grid(canvas, width, height);
+    let (sx, sy) = scale.unwrap_or((w / width, h / height));
+    let (ox, oy) = origin.unwrap_or((0.0, 0.0));
     let output = Size::new(canvas.width, canvas.height);
     let fx = (x1 - x0) / w;
     let fy = (y1 - y0) / h;
@@ -264,13 +256,35 @@ pub fn canvas_placement(
         fx,
         fy,
         output,
-        scale: (!whole).then_some((sx, sy)),
-        origin: (!whole).then_some((ox, oy)),
+        scale,
+        origin,
         region,
         comp,
         clip,
         canvas: true,
     }
+}
+
+/// The unscaled backing canvas grid shared by live composition and pinned
+/// viewer snapshots. CSS placement only happens after this render.
+pub(crate) fn canvas_render_grid(
+    canvas: &pm_protocol::frame::ViewerCanvas,
+    width: f64,
+    height: f64,
+) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+    let whole = canvas.crop.x == 0.0
+        && canvas.crop.y == 0.0
+        && canvas.crop.width == width
+        && canvas.crop.height == height;
+    if whole {
+        return (None, None);
+    }
+    let sx = f64::from(canvas.width) / canvas.crop.width;
+    let sy = f64::from(canvas.height) / canvas.crop.height;
+    (
+        Some((sx, sy)),
+        Some((canvas.crop.x * sx, canvas.crop.y * sy)),
+    )
 }
 
 /// What a composed frame reports.
@@ -287,9 +301,6 @@ pub struct Composed {
     /// Video layers drawn with a stand-in while their exact frame decodes
     /// (scrub renders, docs/engine/scrub.md): the source frame each shows.
     pub stand_ins: Vec<usize>,
-    /// Level 1 SVG rasters the frame drew without (decision S1): another
-    /// bucket stood in, or the layer drew nothing (`super::svg`).
-    pub svg_misses: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -850,7 +861,6 @@ impl Composer {
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
         let mut scene3d_meta = Vec::new();
-        let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -898,22 +908,15 @@ impl Composer {
             // in place: frames of a paused time reuse the draws of layers
             // nothing changed (docs/engine/perf.md, "Draw reuse").
             self.renderer.set_draw_reuse(self.draw_reuse);
-            // A preview must use the bucket for this frame, just as today's
-            // synchronous SVG canvas redraw does. Render-ahead requests it
-            // before its display deadline; never publish a substituted bucket.
-            // A bucket the window could not draw is drawn as nothing instead
-            // (`super::wait`), as today draws the frame without a layer whose
-            // raster throws.
-            let mut renderer = self.renderer.svg_waiting_viewer();
             let rendered =
-                renderer.render_into(doc, composition, time, &request, media, scratch, None);
-            renderer.set_draw_reuse(false);
+                self.renderer
+                    .render_into(doc, composition, time, &request, media, scratch, None);
+            self.renderer.set_draw_reuse(false);
             let rendered = rendered?;
             scene3d_meta = rendered.scene3d_meta;
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
-            svg_misses = rendered.svg_misses;
         }
         // Place the region (or only clear when nothing is visible).
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -973,7 +976,6 @@ impl Composer {
             failures,
             cpu_us: super::render::now_us() - start,
             stand_ins,
-            svg_misses,
         })
     }
 }

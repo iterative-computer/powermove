@@ -352,3 +352,9 @@ fails to upload (docs/engine/scene3d.md, round 11). The same epoch in a
 later view, and transport replans, keep the pools. Absent on the wire when
 unset, so existing fixtures are unchanged. Builds as
 `protocol-7a0a3449f03f321a`.
+
+### Version note: consumers lane merge (2026-10-22)
+
+The consumers lane's additive stats and audio-peak fields
+(docs/engine/consumer-audio.md) together with `surfaceEpoch` build as
+`protocol-07ccbe7fd7aec876`. No field changed meaning.

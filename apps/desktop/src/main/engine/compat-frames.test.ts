@@ -83,34 +83,6 @@ describe('CompatFrames', () => {
     await expect(setup([]).frames.serve(request)).rejects.toMatchObject({ code: 'notHeadlessRenderable' });
   });
 
-  it('names the window SVG images need when none has the project open', async () => {
-    const svg: CompatFrameRequest = { ...request, source: 'svgImage', svg: { key: { content: 'ab'.repeat(32), width: 2, height: 2 }, asset: 'a1' } };
-    await expect(setup([]).frames.serve(svg)).rejects.toMatchObject({
-      code: 'notHeadlessRenderable',
-      message: 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
-    });
-    // A window that has it answers with the bucket's pixels.
-    const { frames, asks } = setup([3]);
-    const answer = frames.serve(svg);
-    expect(asks.get(3)![0]!.request.svg?.key.width).toBe(2);
-    frames.answer(3, { ...pixels(asks.get(3)![0]!.ask), key: `${'ab'.repeat(32)}:2x2` });
-    expect(await answer).toMatchObject({ type: 'compatFrame', key: `${'ab'.repeat(32)}:2x2`, width: 2, height: 2 });
-    // Windows open on other documents: still the named message.
-    const other = setup([4, 5]);
-    const refused = other.frames.serve(svg);
-    for (const id of [4, 5]) other.frames.answer(id, { ask: other.asks.get(id)![0]!.ask, status: 'unavailable', message: OTHER_DOCUMENT_OPEN });
-    await expect(refused).rejects.toMatchObject({
-      code: 'notHeadlessRenderable',
-      message: 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
-    });
-    // A window that has the project and fails gives its own reason.
-    const failing = setup([6, 7]);
-    const failed = failing.frames.serve(svg);
-    failing.frames.answer(6, { ask: failing.asks.get(6)![0]!.ask, status: 'unavailable', message: 'The SVG could not be decoded.' });
-    failing.frames.answer(7, { ask: failing.asks.get(7)![0]!.ask, status: 'unavailable', message: OTHER_DOCUMENT_OPEN });
-    await expect(failed).rejects.toMatchObject({ message: 'The SVG could not be decoded.' });
-  });
-
   it('only the asked windows answer, and a closed window stops being waited for', async () => {
     const { frames, asks } = setup([1, 2]);
     const answer = frames.serve(request);

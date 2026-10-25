@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-f2eb2e9f38d0cb2a";
+export const PROTOCOL_BUILD = "protocol-72637e86b5e49f8a";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -16,6 +16,7 @@ export type { AgentRunId } from "./AgentRunId";
 export type { AlphaOutput } from "./AlphaOutput";
 export type { AssetId } from "./AssetId";
 export type { AudioCoding } from "./AudioCoding";
+export type { AudioDiagnostics } from "./AudioDiagnostics";
 export type { AudioFacts } from "./AudioFacts";
 export type { AudioLevels } from "./AudioLevels";
 export type { AudioMessage } from "./AudioMessage";
@@ -258,15 +259,13 @@ export type { SnapshotRef } from "./SnapshotRef";
 export type { SnapshotRequest } from "./SnapshotRequest";
 export type { SnapshotResult } from "./SnapshotResult";
 export type { SnapshotTarget } from "./SnapshotTarget";
+export type { SnapshotViewer } from "./SnapshotViewer";
 export type { StripLevels } from "./StripLevels";
 export type { SubmitJob } from "./SubmitJob";
 export type { SurfaceDescriptor } from "./SurfaceDescriptor";
 export type { SurfaceFormat } from "./SurfaceFormat";
 export type { SurfacePool } from "./SurfacePool";
 export type { SurfaceRequest } from "./SurfaceRequest";
-export type { SvgRasterKey } from "./SvgRasterKey";
-export type { SvgRasterPixels } from "./SvgRasterPixels";
-export type { SvgRasterRequest } from "./SvgRasterRequest";
 export type { TickRange } from "./TickRange";
 export type { Ticks } from "./Ticks";
 export type { ToneMapping3d } from "./ToneMapping3d";

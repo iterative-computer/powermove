@@ -90,6 +90,16 @@ describe('legacy → runes bridge', () => {
     frameBus.clear();
   });
 
+  it('shows no legacy render counters while awaiting the first native stats', () => {
+    const PM: any = fakePM();
+    PM.EngineStats = { perf: () => null, audio: () => null };
+    const off = installLegacyRuntime(PM);
+    try {
+      PM.bus.emit('draw:status');
+      expect(perf).toMatchObject({ native: true, ms: 0, fps: 0, draws: 0, passes: 0, progs: 0, raster: 0 });
+    } finally { off(); }
+  });
+
   it('mirrors project, selection and transport, and maps bus events to ticks', () => {
     const PM = fakePM();
     const off = installLegacyRuntime(PM);

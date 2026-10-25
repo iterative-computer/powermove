@@ -6,7 +6,6 @@ import type { CompositionId } from "./CompositionId";
 import type { DocumentId } from "./DocumentId";
 import type { LayerId } from "./LayerId";
 import type { Revision } from "./Revision";
-import type { SvgRasterRequest } from "./SvgRasterRequest";
 import type { Ticks } from "./Ticks";
 
 /**
@@ -17,13 +16,9 @@ import type { Ticks } from "./Ticks";
  * document open, the producer is gone).
  * Output pixels per layer pixel the export needs.
  * The document revision the export snapshot was taken at.
- * For [`CompatSource::SvgImage`] (and only then): the raster (its
- * SVG's content hash and bucket) and the asset. The answer is that
- * bucket's premultiplied RGBA8 pixels, keyed
- * `<content>:<width>x<height>`.
  * Set only for `blenderPng`; the original file's content identity.
  */
-export type CompatFrameRequest = { document: DocumentId, composition: CompositionId, layer: LayerId, time: Ticks, source: CompatSource, scale: number, revision: Revision, svg?: SvgRasterRequest, 
+export type CompatFrameRequest = { document: DocumentId, composition: CompositionId, layer: LayerId, time: Ticks, source: CompatSource, scale: number, revision: Revision, 
 /**
  * For [`CompatSource::CompatContext`] (and only then): the export
  * frame as today's compositor canvas held it before `frame:rendered`

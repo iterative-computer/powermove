@@ -83,14 +83,8 @@ const USAGE: &str = "usage:
       --param NAME=JSON (repeatable; validates against the parameter definition)
       --ui-scale S  the editor's display scale factor, which fixes how its
                     renderer measures system-ui text (default 2)
-      --approximate-svg  level 1 SVG images are rasterized by the Chromium
-               helper (`powermove render` starts it; a bundled pm-cli starts
-               native-angle-child.cjs). Without one, a project that draws
-               them fails (svg-chromium-unavailable) unless this flag accepts
-               resvg's approximation, named in a notice
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
-                       [--svg-rasters DIR]
       compares engine renders with the legacy captures of the parity corpus
       (default: the newest v1-* and render-* captures). The renderer holds
       the built-in definitions as the kernel pushes them (--no-definitions:
@@ -98,10 +92,7 @@ const USAGE: &str = "usage:
       real/<slug> project with its media unpacked from FILE.pmv (the file the
       capture opened, checked by SHA-256). --determinism renders every
       sample again with the renderer's caches dropped and requires
-      bit-identical buffers. Level 1 SVG images are drawn from Chromium's
-      rasters in --svg-rasters DIR (missing ones are listed in its
-      needs.json for engine/crates/pm-render/tools/svg-rasters), else by
-      resvg with an \"approximate SVG\" notice
+      bit-identical buffers.
   pm-cli parity eval [options]
       evaluation parity against the corpus (see pm-cli parity eval --help)
   pm-cli scope <project.pmv|.json> -o <dir> [options]
@@ -110,7 +101,7 @@ const USAGE: &str = "usage:
       captured frame): waveform.png, parade.png, vectorscope.png, scope.json
       --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
       --motion-blur off|export|N (default export)  --transparent  --columns N
-      --definitions FILE  --approximate-svg (as for render: user GLSL programs
+      --definitions FILE (as for render: user GLSL programs
                the desktop pinned to its WebGL runner, or has not verified,
                run in the helper's Chromium, else exit 4)
       --ui-scale S (default 2)";
@@ -258,7 +249,6 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
-            "--approximate-svg" => o.approximate_svg = true,
             "--param" => o
                 .parameters
                 .push(parameters::parse(value(args, &mut i, a)?)?),
@@ -314,7 +304,6 @@ fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
             }
             "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
             "--transparent" => o.transparent = true,
-            "--approximate-svg" => o.approximate_svg = true,
             "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             "--columns" => {
@@ -348,7 +337,6 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
         real: None,
         definitions: true,
         determinism: false,
-        svg_rasters: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -361,7 +349,6 @@ fn parse_parity(args: &[String]) -> Result<render_parity::Options, String> {
             "--real" => o.real = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--no-definitions" => o.definitions = false,
             "--determinism" => o.determinism = true,
-            "--svg-rasters" => o.svg_rasters = Some(PathBuf::from(value(args, &mut i, a)?)),
             other => return Err(format!("unknown option {other}")),
         }
         i += 1;

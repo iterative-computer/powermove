@@ -7,9 +7,9 @@
 //! sampled through the layer's quad. The raster is a [`TextScene`] painted
 //! by platform masks, native Graphite primitives and Vello coverage through
 //! the ordered paint pass ([`gpu`]): N32 for level 1, float for level 2.
-//! Level 1 retains the full canvas and sampling quad so transformed bilinear
-//! interpolation matches Canvas2D uploads. Level 2 retains the ink crop;
-//! native primitives keep the full viewport while drawing so AA is unchanged.
+//! Cached rasters retain only the ink crop, drawn through the part of the
+//! layer's quad it covers; native primitives keep the full canvas viewport
+//! while drawing so AA stays unchanged.
 //!
 //! Layout is `pm-text`'s level 1 (`compat`) through the host's
 //! [`TextFonts`]; word states, animator poses, raster boxes, and font
@@ -550,17 +550,7 @@ impl TextContext {
 
     /// The scene's retained canvas and content key, or `None` without ink.
     fn finish(&self, scene: TextScene, canvas_n32: bool) -> Option<TextPlan> {
-        let ink = scene.ink()?;
-        // Level 1 is sampled with the original Canvas2D quad. Shrinking its
-        // transparent border changes the float vertex/UV interpolation and
-        // therefore the bilinear weights of transformed text, even when the
-        // cropped source pixels are identical. Keep today's full canvas and
-        // its geometry at every working depth.
-        let crop = if canvas_n32 {
-            [0, 0, scene.width.max(1), scene.height.max(1)]
-        } else {
-            ink
-        };
+        let crop = scene.ink()?;
         let mut key = scene_key(&scene, crop, self.generation);
         key[0] ^= u64::from(canvas_n32);
         Some(TextPlan {
@@ -1057,7 +1047,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compatibility_sampling_keeps_the_original_canvas_quad() {
+    fn rasters_keep_only_their_ink_through_the_same_layer_rectangle() {
         use kurbo::Shape;
         let scene = TextScene {
             width: 244,
@@ -1073,27 +1063,30 @@ mod tests {
             ],
         };
         let cx = TextContext::default();
-        let plan = cx.finish(scene.clone(), true).unwrap();
-        let quad = TextContext::quad(plan, 244.0, 128.0, 27.0, 64.0);
-        // The compositor converts this geometry to f32 before rotating it.
-        // An equivalent smaller ink quad does not interpolate the same UVs.
-        assert_eq!(
-            (quad.w, quad.h, quad.ax, quad.ay),
-            (244.0, 128.0, 27.0, 64.0)
-        );
-        assert_eq!(quad.plan.crop, [0, 0, 244, 128]);
-        assert_ne!(cx.finish(scene, false).unwrap().crop, quad.plan.crop);
-        assert!(
-            cx.finish(
-                TextScene {
-                    width: 244,
-                    height: 128,
-                    items: Vec::new()
-                },
-                true
-            )
-            .is_none()
-        );
+        for canvas_n32 in [true, false] {
+            let plan = cx.finish(scene.clone(), canvas_n32).unwrap();
+            let [x0, y0, x1, y1] = plan.crop;
+            assert_eq!(Some(plan.crop), scene.ink());
+            assert!(x1 - x0 < scene.width && y1 - y0 < scene.height);
+            // A 488 × 256 layer box over the 244 × 128 canvas: 2 layer px
+            // per canvas px, anchored at (54, 128).
+            let quad = TextContext::quad(plan, 488.0, 256.0, 54.0, 128.0);
+            assert_eq!(
+                (quad.w, quad.h, quad.ax, quad.ay),
+                (
+                    f64::from(x1 - x0) * 2.0,
+                    f64::from(y1 - y0) * 2.0,
+                    54.0 - f64::from(x0) * 2.0,
+                    128.0 - f64::from(y0) * 2.0
+                )
+            );
+        }
+        let empty = TextScene {
+            width: 244,
+            height: 128,
+            items: Vec::new(),
+        };
+        assert!(cx.finish(empty, true).is_none());
     }
 
     #[test]

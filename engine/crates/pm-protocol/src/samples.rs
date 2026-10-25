@@ -842,7 +842,6 @@ pub fn requests() -> Vec<Envelope> {
                 source: crate::snapshot::CompatSource::RasterOverride,
                 scale: 1.0,
                 revision: rev(42),
-                svg: None,
                 frame: None,
                 blender: None,
             }),
@@ -878,19 +877,6 @@ pub fn requests() -> Vec<Envelope> {
     ]
 }
 
-/// A level 1 SVG raster request (decision S1).
-pub fn svg_request() -> crate::svg_raster::SvgRasterRequest {
-    crate::svg_raster::SvgRasterRequest {
-        key: crate::svg_raster::SvgRasterKey {
-            texture: None,
-            content: "9f".repeat(32),
-            width: 2,
-            height: 2,
-        },
-        asset: "a-art".into(),
-    }
-}
-
 /// A synchronous `renderFrameTo` snapshot (the compatibility path).
 pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
     crate::snapshot::SnapshotRequest {
@@ -905,6 +891,7 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         pixels: crate::snapshot::SnapshotPixels::Opaque,
         class: crate::snapshot::SnapshotClass::Sync,
         view_seq: Some(seq(12)),
+        viewer: None,
         wait_ms: 5_000,
         blender_wait_ms: 0,
         captions_hidden: false,
@@ -1475,22 +1462,6 @@ pub fn events() -> Vec<Envelope> {
                 crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
             }],
         })),
-        event(Event::Compat(crate::snapshot::CompatMessage::SvgRequests {
-            requests: vec![svg_request()],
-        })),
-        event(Event::Compat(crate::snapshot::CompatMessage::SvgPixels(
-            crate::svg_raster::SvgRasterPixels {
-                key: svg_request().key,
-                row: 1,
-                rows: 1,
-                data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
-            },
-        ))),
-        event(Event::Compat(crate::snapshot::CompatMessage::SvgFailed {
-            key: svg_request().key,
-            reason: "stale".into(),
-            message: "the window's SVG bytes hash differently".into(),
-        })),
         event(Event::RenderStats(crate::snapshot::RenderStats {
             frames: Count::new(1_800).expect("count"),
             timed_frames: Count::new(1_790).expect("count"),
@@ -1505,6 +1476,15 @@ pub fn events() -> Vec<Envelope> {
             snapshots: Count::new(3).expect("count"),
             snapshot_us_max: 48_000,
             revision: rev(42),
+            audio: Some(crate::snapshot::AudioDiagnostics {
+                error: None,
+                problems: vec![
+                    "Audio decode exceeded 120 ms; missing voice plays as silence: music".into(),
+                ],
+                starved_renders: Count::new(4).expect("count"),
+                underruns: Count::ZERO,
+                device_overloads: Count::new(1).expect("count"),
+            }),
         })),
         event(Event::PreviewControl(crate::preview::PreviewControl {
             generation: seq(3), revision: rev(42), composition: "comp-1".into(),
@@ -1521,9 +1501,11 @@ pub fn events() -> Vec<Envelope> {
         })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
         })),
         event(Event::Audio(AudioMessage::Peaks(AudioPeaks {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
             peaks_per_second: 100.0,
             duration: 0.03,
             peaks: vec![0.0, 0.5, 0.25],

@@ -16,9 +16,14 @@ conformance = []
 # pm-wasm, which need geometry only.
 render = ["dep:pm-text", "dep:i_overlay", "usvg/text", "usvg/system-fonts", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
 
+# Native SVG painting on the engine's GPU.
+gpu = ["render", "dep:vello", "dep:wgpu"]
+
 [dependencies]
 pm-text = { path = "../pm-text", default-features = false, features = ["render"], optional = true }
 kurbo = "0.13.1"
+vello = { version = "0.11", default-features = false, features = ["wgpu"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"], optional = true }
 libm.workspace = true
 ryu-js.workspace = true
 usvg = { version = "0.48.1", default-features = false, optional = true }
@@ -30,7 +35,6 @@ i_overlay = { version = "9.1", optional = true }
 
 [dev-dependencies]
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "system"] }
-pm-skia-path = { path = "../pm-skia-path" }
 png = "0.18"
 # Exact float parsing for the bit-for-bit vector comparisons.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
@@ -43,11 +47,3 @@ required-features = ["conformance"]
 name = "digest_wasm"
 crate-type = ["cdylib"]
 required-features = ["conformance"]
-
-[[test]]
-name = "svg"
-required-features = ["render"]
-
-[[example]]
-name = "svg_compat_compare"
-required-features = ["render"]

@@ -1,18 +1,19 @@
-import { requestJobEngine } from './helpers/job-engine';
 /*
- * Level 1 SVG images with "Use New Engine" on (decision S1;
- * docs/engine/vector.md, "Level 1 SVG images"): Chromium draws today's
- * bucket rasters in the window (engine-connection/svg-rasters.ts) and the
- * engine composites them. The viewer's frames ask for them, a synchronous
- * snapshot draws them on the calling thread, and an export in the job
- * engine gets them through host services from this window. Snapshot frames
- * are compared byte for byte with today's compositor
- * (`PM.GL.renderToPixels`, the corpus capture's opaque frame) drawing the
- * same document in the same window, and the exported still with today's
- * exporter's still of the same project. The viewer's presented frames
- * cannot be read back (they are IOSurfaces in main's layer), so the viewer
- * is compared by the buckets it asks for: the same buckets today's viewer
- * rasterizes at fit, at a cropped high zoom and below fit.
+ * SVG images with "Use New Engine" on: the engine draws them natively at
+ * output resolution (docs/engine/vector.md). Same or better than today:
+ * each frame is compared, with today's compositor (`PM.GL.renderToPixels`)
+ * and the engine (`PM.EngineRender.snapshotSync`), against Chromium's own
+ * drawing of the same SVGs at 16x supersampling, box-filtered down:
+ *   (a) interior pixels (more than 2 px from any reference edge): the engine
+ *       within 1 CV of today;
+ *   (b) edge pixels: per channel |engine − ref| ≤ |today − ref| + 1 CV for
+ *       99.9%, + 4 CV for all, and the engine's mean error ≤ today's;
+ *   (c) geometry of each layer alone: alpha area and alpha centroid of the
+ *       engine within 1e-3 (relative, and px) of the reference;
+ *   (d) no window SVG raster route exists.
+ * Edits and engine restarts are compared engine to engine, exactly. The
+ * job engine's export and both CLI entry points are compared with the
+ * engine's frames.
  *
  * Run serially, one Electron at a time:
  *   pm-electron-lock bunx playwright test e2e/engine-svg.spec.ts --workers=1
@@ -26,8 +27,10 @@ import path from 'node:path';
 import type { Page } from 'playwright';
 
 import { expect, test, launchApp, type LaunchedApp } from './helpers/app';
+import { requestJobEngine } from './helpers/job-engine';
 
 const ON = { POWERMOVE_NEW_ENGINE: '1' };
+const TIMES = [0, 0.75, 1.5];
 
 /** An 8-bit RGB or RGBA, non-interlaced PNG's pixels (as RGBA). */
 function decodePng(file: Buffer): { width: number; height: number; data: Uint8Array } {
@@ -61,8 +64,23 @@ function decodePng(file: Buffer): { width: number; height: number; data: Uint8Ar
   return { width, height, data };
 }
 
-/** A gradient, a clip, a stroke, a blur and an even-odd path: the paint
- *  features whose Chromium rasterization emulation missed. */
+/** The corpus bound between two RGBA frames: 99.9% of pixels within 1 CV in
+ *  every channel, none beyond 4. */
+function expectCorpusBound(label: string, a: ArrayLike<number>, b: ArrayLike<number>, pixels: number): void {
+  expect(b.length, label).toBe(a.length);
+  let withinOne = 0, max = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    let delta = 0;
+    for (let c = 0; c < 4; c++) delta = Math.max(delta, Math.abs(a[i + c]! - b[i + c]!));
+    if (delta <= 1) withinOne++;
+    max = Math.max(max, delta);
+  }
+  console.log(`${label}: ${JSON.stringify({ fraction: withinOne / pixels, max })}`);
+  expect(withinOne / pixels, label).toBeGreaterThanOrEqual(0.999);
+  expect(max, label).toBeLessThanOrEqual(4);
+}
+
+/** A gradient, a clip, a stroke, a blur and an even-odd path. */
 const ART = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" viewBox="0 0 160 90">
 <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4C8DFF"/><stop offset="1" stop-color="#E83A5E" stop-opacity=".6"/></linearGradient>
 <clipPath id="c"><circle cx="120" cy="45" r="34"/></clipPath><filter id="b"><feGaussianBlur stdDeviation="2.5"/></filter></defs>
@@ -71,31 +89,15 @@ const ART = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" vie
 <path fill-rule="evenodd" d="M20 20 h50 v50 h-50 z M32 32 h26 v26 h-26 z" fill="#FFFFFF" filter="url(#b)"/>
 <path d="M10 80 Q 60 40 110 80" fill="none" stroke="#7CFFB2" stroke-width="3.5" stroke-dasharray="7 4" stroke-linecap="round"/>
 </svg>`;
+const RECOLORED = ART.replace('#FFD23F', '#00C2A8');
 
-/** The same layers over a PNG of the SVG at its natural size instead of
- *  the SVG (the export test's control: no SVG raster involved). */
-async function pngProject(page: Page): Promise<void> {
-  await svgProject(page);
-  await page.evaluate(async () => {
-    const PM = (window as any).PM;
-    const svg = Object.values(PM.proj.assets).find((a: any) => a.format === 'svg') as any;
-    const canvas = document.createElement('canvas');
-    canvas.width = 160; canvas.height = 90;
-    canvas.getContext('2d')!.drawImage(PM.assets.get(svg.id).el, 0, 0, 160, 90);
-    const blob: Blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b!), 'image/png'));
-    const png = await PM.assets.add(new File([blob], 'art.png', { type: 'image/png' }), { newAsset: true, silent: true });
-    for (const layer of PM.proj.layers) layer.d.asset = png.id;
-    PM.touch();
-  });
-}
-
-/** The project: three level 1 SVG image layers (contain at 100%; cover,
- *  rotated 23° at 230%; stretch with animated scale and opacity) over a
- *  solid background, 640 × 360. */
-async function svgProject(page: Page): Promise<void> {
+/** The project: three SVG image layers (contain at 100%; cover, rotated 23°
+ *  at 230%; stretch with animated scale and 70% opacity) over a solid
+ *  background, 640 × 360. */
+async function svgProject(page: Page, svg = ART): Promise<void> {
   await page.evaluate(async (svg) => {
     const PM = (window as any).PM;
-    const project = PM.mkProject({ name: 'SVG compat', w: 640, h: 360, fps: 30, dur: 2, bg: '#203040' });
+    const project = PM.mkProject({ name: 'SVG images', w: 640, h: 360, fps: 30, dur: 2, bg: '#203040' });
     project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
     PM.replaceProject(project);
     const asset = await PM.assets.add(new File([svg], 'art.svg', { type: 'image/svg+xml' }), { newAsset: true, silent: true });
@@ -114,277 +116,319 @@ async function svgProject(page: Page): Promise<void> {
     PM.ProjectIndex?.invalidate?.();
     PM.touch();
     PM.Projects?.put?.(PM.proj);
-  }, ART);
+  }, svg);
 }
 
-async function openEngine(session: LaunchedApp): Promise<void> {
-  await session.openEditor();
+/** Shows the SVG project in the editor with the engine drawing the viewer. */
+async function showEngine(session: LaunchedApp, svg = ART): Promise<void> {
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.EngineRender && (window as any).PM?.EngineSvgRasters));
-  await svgProject(page);
+  await page.waitForFunction(() => Boolean((window as any).PM?.EngineRender));
+  await svgProject(page, svg);
   await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
   await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
 }
 
-/** Today's compositor and the engine for the same frame: bytes that differ. */
-const compareFrame = (page: Page, time: number) => page.evaluate((t) => {
-  const PM = (window as any).PM;
-  const legacy: Uint8Array = PM.GL.renderToPixels(t, 640, 360, { opaque: true, topDownOpaque: true, mblur: false });
-  const engine = PM.EngineRender.snapshotSync({ time: t, width: 640, height: 360, pixels: 'opaque', motionBlurSamples: 0, background: true });
-  let differ = 0, max = 0, nonBackground = 0;
-  for (let i = 0; i < legacy.length; i++) {
-    const d = Math.abs(legacy[i]! - engine.data[i]!);
+/** (a)–(c) for one frame, measured in the window (see the header). */
+const measure = (page: Page, time: number) => page.evaluate(async (t) => {
+  const PM = (window as any).PM, W = 640, H = 360;
+  type Draw = { image: CanvasImageSource; sw: number; sh: number; fit: string; bw: number; bh: number; m: number[]; alpha: number };
+  // Bottom layer first: today's compositor draws the list from its end.
+  const drawsOf = async (layers: any[]): Promise<Draw[]> => {
+    const draws: Draw[] = [];
+    for (const L of [...layers].reverse()) {
+      const asset = PM.assets.get(L.d.asset);
+      await asset.el.decode?.();
+      draws.push({ image: asset.el, sw: asset.w, sh: asset.h, fit: L.d.fit, bw: L.d.w, bh: L.d.h, m: [...PM.worldMatrix(L, t)], alpha: Math.min(1, Math.max(0, PM.ev(L, 'opacity', t) / 100)) });
+    }
+    return draws;
+  };
+  // Chromium's drawing at S× of the region (x0, y0, w, h), box-filtered to
+  // one sample per pixel: premultiplied RGBA (0–255, unrounded), and each
+  // pixel's spread (the largest channel range among its S × S samples).
+  // Each layer is drawn as today's quad (box w × h about its centre, the
+  // image fitted as today's UV window fits it) into its own canvas, then
+  // composited with its opacity, as today's layer texture is.
+  const reference = (draws: Draw[], S: number, x0: number, y0: number, w: number, h: number, background: string | null) => {
+    const T = Math.floor(2048 / S), size = T * S;
+    const make = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      return [canvas, canvas.getContext('2d', { willReadFrequently: true })!] as const;
+    };
+    const [, ctx] = make(), [layerCanvas, layer] = make();
+    const color = new Float64Array(w * h * 4), spread = new Uint8Array(w * h);
+    for (let ty = 0; ty < h; ty += T) for (let tx = 0; tx < w; tx += T) {
+      const tw = Math.min(T, w - tx), th = Math.min(T, h - ty);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, size, size);
+      if (background) { ctx.fillStyle = background; ctx.fillRect(0, 0, size, size); }
+      for (const d of draws) {
+        layer.clearRect(0, 0, size, size);
+        layer.save();
+        const m = d.m;
+        layer.setTransform(S * m[0]!, S * m[1]!, S * m[2]!, S * m[3]!, S * (m[4]! - x0 - tx), S * (m[5]! - y0 - ty));
+        const { bw, bh } = d, ar = d.sw / d.sh, br = bw / bh;
+        if (d.fit === 'cover') {
+          layer.beginPath(); layer.rect(-bw / 2, -bh / 2, bw, bh); layer.clip();
+          const [iw, ih] = ar > br ? [bh * ar, bh] : [bw, bw / ar];
+          layer.drawImage(d.image, -iw / 2, -ih / 2, iw, ih);
+        } else if (d.fit === 'contain') {
+          const [iw, ih] = ar > br ? [bw, bw / ar] : [bh * ar, bh];
+          layer.drawImage(d.image, -iw / 2, -ih / 2, iw, ih);
+        } else {
+          layer.drawImage(d.image, -bw / 2, -bh / 2, bw, bh);
+        }
+        layer.restore();
+        ctx.globalAlpha = d.alpha;
+        ctx.drawImage(layerCanvas, 0, 0);
+        ctx.globalAlpha = 1;
+      }
+      const data = ctx.getImageData(0, 0, tw * S, th * S).data, rowBytes = tw * S * 4, n = S * S;
+      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+        let r = 0, g = 0, b = 0, a = 0, rl = 255, rh = 0, gl = 255, gh = 0, bl = 255, bh = 0;
+        for (let sy = 0; sy < S; sy++) {
+          let i = (y * S + sy) * rowBytes + x * S * 4;
+          for (let sx = 0; sx < S; sx++, i += 4) {
+            const R = data[i]!, G = data[i + 1]!, B = data[i + 2]!, A = data[i + 3]!;
+            r += R * A; g += G * A; b += B * A; a += A;
+            if (R < rl) rl = R; if (R > rh) rh = R;
+            if (G < gl) gl = G; if (G > gh) gh = G;
+            if (B < bl) bl = B; if (B > bh) bh = B;
+          }
+        }
+        const p = (ty + y) * w + tx + x;
+        color[p * 4] = r / 255 / n; color[p * 4 + 1] = g / 255 / n; color[p * 4 + 2] = b / 255 / n; color[p * 4 + 3] = a / n;
+        spread[p] = Math.max(rh - rl, gh - gl, bh - bl);
+      }
+    }
+    return { color, spread };
+  };
+  const snapshot = (pixels: string, background: boolean): Uint8ClampedArray =>
+    PM.EngineRender.snapshotSync({ time: t, width: W, height: H, pixels, motionBlurSamples: 0, background }).data;
+
+  // The frame: engine, today, and the reference over the same background.
+  const engine = snapshot('opaque', true);
+  const today: Uint8Array = PM.GL.renderToPixels(t, W, H, { opaque: true, topDownOpaque: true, mblur: false });
+  const ref = reference(await drawsOf(PM.proj.layers), 16, 0, 0, W, H, '#203040');
+  // A reference edge: a pixel whose samples spread more than 4 CV (a
+  // gradient moves about 1 CV a pixel). Interior: no edge within 2 px.
+  const near = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (ref.spread[y * W + x]! <= 4) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const yy = y + dy, xx = x + dx;
+      if (yy >= 0 && yy < H && xx >= 0 && xx < W) near[yy * W + xx] = 1;
+    }
+  }
+  const interior = { count: 0, max: 0 };
+  const edges = { pixels: 0, samples: 0, over1: 0, maxExcess: -Infinity, engineMean: 0, todayMean: 0 };
+  let nonBackground = 0;
+  for (let p = 0; p < W * H; p++) {
+    const i = p * 4;
+    if (today[i] !== 0x20 || today[i + 1] !== 0x30 || today[i + 2] !== 0x40) nonBackground++;
+    if (!near[p]) {
+      // Opaque reference pixels only (the frame is opaque throughout).
+      if (ref.color[i + 3]! < 254.5) continue;
+      interior.count++;
+      for (let c = 0; c < 3; c++) interior.max = Math.max(interior.max, Math.abs(engine[i + c]! - today[i + c]!));
+      continue;
+    }
+    edges.pixels++;
+    for (let c = 0; c < 3; c++) {
+      const e = Math.abs(engine[i + c]! - ref.color[i + c]!), d = Math.abs(today[i + c]! - ref.color[i + c]!);
+      edges.samples++;
+      if (e > d + 1) edges.over1++;
+      edges.maxExcess = Math.max(edges.maxExcess, e - d);
+      edges.engineMean += e; edges.todayMean += d;
+    }
+  }
+  edges.engineMean /= edges.samples; edges.todayMean /= edges.samples;
+
+  // Geometry: each layer alone, without the background.
+  const moments = (alpha: (x: number, y: number) => number, x0: number, y0: number, w: number, h: number) => {
+    let s = 0, sx = 0, sy = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const a = alpha(x, y);
+      s += a; sx += a * (x0 + x + 0.5); sy += a * (y0 + y + 0.5);
+    }
+    return { area: s / 255, x: sx / s, y: sy / s };
+  };
+  const geometry = [];
+  const layers = PM.proj.layers;
+  for (const L of layers) {
+    PM.proj.layers = [L]; PM.ProjectIndex?.invalidate?.(); PM.touch();
+    let alone: Uint8ClampedArray;
+    try { alone = snapshot('premultiplied', false); }
+    finally { PM.proj.layers = layers; PM.ProjectIndex?.invalidate?.(); PM.touch(); }
+    const [draw] = await drawsOf([L]);
+    // The layer's box on the frame, 2 px wider.
+    const m = draw!.m, xs: number[] = [], ys: number[] = [];
+    for (const [X, Y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      const bx = X! * draw!.bw / 2, by = Y! * draw!.bh / 2;
+      xs.push(m[0]! * bx + m[2]! * by + m[4]!); ys.push(m[1]! * bx + m[3]! * by + m[5]!);
+    }
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - 2), y0 = Math.max(0, Math.floor(Math.min(...ys)) - 2);
+    const x1 = Math.min(W, Math.ceil(Math.max(...xs)) + 2), y1 = Math.min(H, Math.ceil(Math.max(...ys)) + 2);
+    const at = (S: number) => {
+      const { color } = reference([draw!], S, x0, y0, x1 - x0, y1 - y0, null);
+      return moments((x, y) => color[(y * (x1 - x0) + x) * 4 + 3]!, x0, y0, x1 - x0, y1 - y0);
+    };
+    geometry.push({ layer: L.name, engine: moments((x, y) => alone[(y * W + x) * 4 + 3]!, 0, 0, W, H), ref16: at(16), ref8: at(8) });
+  }
+  return { nonBackground, interior, edges, geometry };
+}, time);
+
+/** Engine frames kept in the window by name. */
+const keep = (page: Page, name: string, time: number) => page.evaluate(({ name, time }) => {
+  const w = window as any;
+  (w.__svgFrames ??= {})[name] = w.PM.EngineRender.snapshotSync({ time, width: 640, height: 360, pixels: 'opaque', motionBlurSamples: 0, background: true }).data.slice();
+}, { name, time });
+
+/** Two kept frames: the bytes that differ. */
+const differ = (page: Page, a: string, b: string) => page.evaluate(({ a, b }) => {
+  const frames = (window as any).__svgFrames, x = frames[a], y = frames[b];
+  let differ = 0, max = 0;
+  for (let i = 0; i < x.length; i++) {
+    const d = Math.abs(x[i] - y[i]);
     if (d) differ++;
     if (d > max) max = d;
   }
-  for (let i = 0; i < legacy.length; i += 4) if (legacy[i] !== 0x20 || legacy[i + 1] !== 0x30 || legacy[i + 2] !== 0x40) nonBackground++;
-  return { differ, max, nonBackground, bytes: legacy.length, engineBytes: engine.data.length };
-}, time);
+  return { differ, max };
+}, { a, b });
 
-test.describe('Use New Engine: level 1 SVG images', () => {
+/** Keeps the first engine frame that differs from frame `from` as `into`. */
+const nextFrame = (page: Page, from: string, into: string, time: number) => page.evaluate(async ({ from, into, time }) => {
+  const w = window as any, old = w.__svgFrames[from];
+  const until = performance.now() + 20_000;
+  while (performance.now() < until) {
+    const now = w.PM.EngineRender.snapshotSync({ time, width: 640, height: 360, pixels: 'opaque', motionBlurSamples: 0, background: true }).data;
+    if (now.some((v: number, i: number) => v !== old[i])) { w.__svgFrames[into] = now.slice(); return true; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}, { from, into, time });
+
+const SAME = { differ: 0, max: 0 };
+
+test.describe('Use New Engine: SVG images', () => {
   test.use({ desktopLaunchOptions: { env: ON } });
 
-  test('snapshots draw Chromium’s rasters exactly as today’s compositor', async ({ session }) => {
+  test('the engine draws SVG images natively, at least as close to Chromium’s own drawing as today', async ({ session }) => {
+    test.setTimeout(240_000);
     const { page } = session;
-    await openEngine(session);
-    // The viewer's frame asked for its buckets and the window answered.
-    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
-    for (const t of [0, 0.75, 1.5]) {
-      const r = await compareFrame(page, t);
-      expect(r.engineBytes).toBe(r.bytes);
-      expect(r.nonBackground).toBeGreaterThan(20_000);
-      expect({ t, differ: r.differ, max: r.max }).toEqual({ t, differ: 0, max: 0 });
+    await session.openEditor();
+    await showEngine(session);
+    // (d) No window SVG raster route.
+    expect(await page.evaluate(() => (window as any).PM.EngineSvgRasters)).toBeUndefined();
+    for (const t of TIMES) {
+      const m = await measure(page, t);
+      console.log(`SVG frame at ${t}: ${JSON.stringify(m)}`);
+      expect(m.nonBackground).toBeGreaterThan(20_000);
+      // (a) Interiors.
+      expect(m.interior.count).toBeGreaterThan(100_000);
+      expect(m.interior.max, `interior at ${t}`).toBeLessThanOrEqual(1);
+      // (b) Edges.
+      expect(m.edges.pixels).toBeGreaterThan(1_000);
+      expect(m.edges.over1 / m.edges.samples, `edges beyond today + 1 CV at ${t}`).toBeLessThanOrEqual(0.001);
+      expect(m.edges.maxExcess, `edges beyond today at ${t}`).toBeLessThanOrEqual(4);
+      expect(m.edges.engineMean, `mean edge error at ${t}`).toBeLessThanOrEqual(m.edges.todayMean);
+      // (c) Geometry. The 16x reference is itself an approximation: its
+      // error is about its change from 8x (supersampling converges), so
+      // where that change exceeds 1e-3 it is the bound instead.
+      for (const g of m.geometry) {
+        const areaBound = Math.max(1e-3, Math.abs(g.ref16.area - g.ref8.area) / g.ref16.area);
+        const centroidBound = Math.max(1e-3, Math.hypot(g.ref16.x - g.ref8.x, g.ref16.y - g.ref8.y));
+        expect(Math.abs(g.engine.area - g.ref16.area) / g.ref16.area, `${g.layer} area at ${t}`).toBeLessThanOrEqual(areaBound);
+        expect(Math.hypot(g.engine.x - g.ref16.x, g.engine.y - g.ref16.y), `${g.layer} centroid at ${t}`).toBeLessThanOrEqual(centroidBound);
+      }
     }
-    const stats = await page.evaluate(() => ({ ...(window as any).PM.EngineSvgRasters.stats }));
-    console.log(`svg rasters: ${JSON.stringify(stats)}`);
-    expect(stats.failed).toBe(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a replaced SVG is drawn from its new bytes, never the old raster', async ({ session }) => {
+  test('a replaced SVG is drawn from its new bytes at once, as a fresh render of them', async ({ session }) => {
     const { page } = session;
-    await openEngine(session);
-    expect((await compareFrame(page, 0.5)).differ).toBe(0);
-    // A point inside the clip circle, off the stroke: the clipped rect's
-    // colour, in the contain layer.
-    const at = (x: number, y: number) => page.evaluate(({ x, y }) => {
-      const PM = (window as any).PM;
-      const engine = PM.EngineRender.snapshotSync({ time: 0.5, width: 640, height: 360, pixels: 'opaque', motionBlurSamples: 0, background: true });
-      const legacy: Uint8Array = PM.GL.renderToPixels(0.5, 640, 360, { opaque: true, topDownOpaque: true, mblur: false });
-      const i = (y * 640 + x) * 4;
-      return { engine: [...engine.data.slice(i, i + 3)], legacy: [...legacy.slice(i, i + 3)] };
-    }, { x, y });
-    const before = await at(205, 81);
-    expect(before.engine).toEqual(before.legacy);
+    await session.openEditor();
+    await showEngine(session, RECOLORED);
+    await keep(page, 'fresh', 0.5);
+    await showEngine(session);
+    await keep(page, 'before', 0.5);
+    expect(await differ(page, 'before', 'fresh')).not.toEqual(SAME);
     await page.evaluate(async (svg) => {
       const PM = (window as any).PM;
       const asset = Object.values(PM.proj.assets).find((a: any) => a.format === 'svg') as any;
-      await PM.assets.replace(asset.id, new File([svg.replace('#FFD23F', '#00C2A8')], 'art.svg', { type: 'image/svg+xml' }));
-    }, ART);
-    // The engine draws the new bytes (another content, asked for again),
-    // as today's compositor does.
-    await expect.poll(async () => (await at(205, 81)).engine, { timeout: 20_000 }).not.toEqual(before.engine);
-    const after = await at(205, 81);
-    console.log(`replace: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`);
-    expect(after.engine).toEqual([0x00, 0xC2, 0xA8]);
-    expect(after.engine).toEqual(after.legacy);
-    const replaced = await compareFrame(page, 0.5);
-    expect({ differ: replaced.differ, max: replaced.max }).toEqual({ differ: 0, max: 0 });
+      await PM.assets.replace(asset.id, new File([svg], 'art.svg', { type: 'image/svg+xml' }));
+    }, RECOLORED);
+    // The first frame that changed is the new bytes' whole frame.
+    expect(await nextFrame(page, 'before', 'replaced', 0.5)).toBe(true);
+    expect(await differ(page, 'replaced', 'fresh')).toEqual(SAME);
     // Undo draws the old bytes again, and redo the new ones.
     await page.evaluate(() => (window as any).PM.hist.undo());
-    await expect.poll(async () => (await at(205, 81)).engine, { timeout: 20_000 }).toEqual(before.engine);
-    expect((await at(205, 81)).legacy).toEqual(before.engine);
+    expect(await nextFrame(page, 'replaced', 'undone', 0.5)).toBe(true);
+    expect(await differ(page, 'undone', 'before')).toEqual(SAME);
     await page.evaluate(() => (window as any).PM.hist.redo());
-    await expect.poll(async () => (await at(205, 81)).engine, { timeout: 20_000 }).toEqual(after.engine);
-    expect((await compareFrame(page, 0.5)).differ).toBe(0);
+    expect(await nextFrame(page, 'undone', 'redone', 0.5)).toBe(true);
+    expect(await differ(page, 'redone', 'fresh')).toEqual(SAME);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a bucket change waits for its exact raster before presenting', async ({ session }) => {
+  test('a restarted engine draws the same frames', async ({ session }) => {
     const { page } = session;
-    await openEngine(session);
-    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
-    const runs = await page.evaluate(async () => {
-      const PM = (window as any).PM;
-      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
-      const contain = PM.proj.layers.find((l: any) => l.name === 'Contain');
-      const out: { standIns: number; ms: number }[] = [];
-      for (const scale of [131, 173, 219, 97, 151, 263, 117, 199, 241, 89]) {
-        const revision = PM.EngineDoc.barrier.revision;
-        let standIns = 0, done = 0;
-        const start = performance.now();
-        const off = presentation.onPresented((frame: any) => {
-          if (frame.revision <= revision) return;
-          if (frame.standIn) standIns++;
-          else if (!done) done = performance.now();
-        });
-        contain.p['scale.x'].v = scale; contain.p['scale.y'].v = scale;
-        PM.touch();
-        PM.invalidate?.('render');
-        const until = performance.now() + 5000;
-        while (!done && performance.now() < until) await new Promise((r) => requestAnimationFrame(r));
-        off();
-        out.push({ standIns, ms: done ? Math.round(done - start) : -1 });
-      }
-      return out;
-    });
-    console.log(`bucket changes: ${JSON.stringify(runs)}`);
-    // Every frame of an existing project uses its own raster bucket.
-    // Holding the prior frame until it is ready must not publish an old
-    // bucket under the edited frame's revision (amendment 22).
-    expect(runs.every((r) => r.ms >= 0)).toBe(true);
-    expect(runs.map((r) => r.standIns)).toEqual(Array(10).fill(0));
-    expect((await compareFrame(page, 0.5)).differ).toBe(0);
-    expect(session.diagnostics.pageErrors).toEqual([]);
-  });
-
-  test('playback of a scale animation presents only exact SVG buckets', async ({ session }) => {
-    // The Stretch layer scales 60% → 310% over the 2 s: every frame of it
-    // may need a new bucket. Today redraws the bucket synchronously in the
-    // frame. The engine requests it during render-ahead and holds that
-    // frame until Chromium answers; no previous bucket may stand in.
-    const { page } = session;
-    await openEngine(session);
-    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
-    const run = await page.evaluate(async () => {
-      const PM = (window as any).PM, presentation = PM.Kernel.services.get('viewer').enginePresentation;
-      let frames = 0, standIns = 0;
-      const off = presentation.onPresented((frame: any) => { frames++; if (frame.standIn) standIns++; });
-      const asked = PM.EngineSvgRasters.asks.length;
-      PM.loop = false; PM.setTime(0); PM.play();
-      const until = performance.now() + 4000;
-      while (PM.playing && performance.now() < until) await new Promise((r) => requestAnimationFrame(r));
-      PM.pause();
-      off();
-      return { frames, standIns, asks: PM.EngineSvgRasters.asks.length - asked, slowestMs: Math.round(PM.EngineSvgRasters.stats.slowestMs) };
-    });
-    console.log(`playback of a scale animation: ${JSON.stringify(run)}`);
-    expect(run.frames).toBeGreaterThan(10);
-    expect(run.standIns).toBe(0);
-    await page.evaluate(() => (window as any).PM.setTime(1.5, { raw: true, force: true }));
-    await expect.poll(async () => (await compareFrame(page, 1.5)).differ, { timeout: 20_000 }).toBe(0);
-    expect(session.diagnostics.pageErrors).toEqual([]);
-  });
-
-  test('a restarted engine starts with no rasters and asks the window for them again', async ({ session }) => {
-    const { page } = session;
-    await openEngine(session);
-    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
-    const before = await page.evaluate(() => ({ connections: (window as any).PM.EngineConnection.status().connections, posted: (window as any).PM.EngineSvgRasters.stats.posted }));
+    await session.openEditor();
+    await showEngine(session);
+    for (const t of TIMES) await keep(page, `before ${t}`, t);
+    const connections = await page.evaluate(() => (window as any).PM.EngineConnection.status().connections as number);
     const pid = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.status().interactive.pid as number);
     expect(pid).toBeGreaterThan(0);
     process.kill(pid, 'SIGKILL');
-    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(before.connections);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(connections);
     await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
-    // The new engine's viewer frame asked for the same buckets again.
-    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(before.posted + 3);
-    for (const t of [0, 1.5]) {
-      const r = await compareFrame(page, t);
-      expect({ t, differ: r.differ, max: r.max }).toEqual({ t, differ: 0, max: 0 });
+    for (const t of TIMES) {
+      await keep(page, `after ${t}`, t);
+      expect({ t, ...await differ(page, `before ${t}`, `after ${t}`) }).toEqual({ t, ...SAME });
     }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });
 
-test('an export in the job engine gets the rasters from the window: the still equals today’s exporter’s', async () => {
-  // PM_E2E_EVIDENCE keeps the stills there (outside the repository).
-  const keep = process.env.PM_E2E_EVIDENCE;
-  const root = keep ?? await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-svg-'));
-  const exportStills = async (env: Record<string, string>, tag: string) => {
-    const session = await launchApp({ env });
-    try {
-      await session.openEditor();
-      if (env.POWERMOVE_NEW_ENGINE) {
-        await requestJobEngine(session.app);
-        await expect.poll(() => session.app.evaluate(() => {
-          const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
-          return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
-        }), { timeout: 30_000 }).toBe('ready/ready');
-      }
-      const out: Record<string, { file: string; produced: number | null }> = {};
-      for (const [name, make] of [['svg', svgProject], ['png', pngProject]] as const) {
-        await make(session.page);
-        const file = path.join(root, `${tag}-${name}.png`);
-        await session.app.evaluate(({ dialog }, filePath) => {
-          dialog.showSaveDialog = async () => ({ canceled: false, filePath });
-        }, file);
-        const result = await session.page.evaluate(async () => {
-          const PM = (window as any).PM;
-          PM.setTime(1, { raw: true, force: true });
-          const before = PM.EngineSvgRasters?.stats.produced ?? 0;
-          const out = await PM.Export.run({ format: 'still', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false });
-          return { out, produced: PM.EngineSvgRasters ? PM.EngineSvgRasters.stats.produced - before : null };
-        });
-        expect(result.out).toEqual({ cancelled: false });
-        out[name] = { file, produced: result.produced };
-      }
-      expect(session.diagnostics.pageErrors).toEqual([]);
-      return out;
-    } finally {
-      await session.close();
-    }
-  };
-  const compare = async (a: string, b: string) => {
-    const [pa, pb] = [decodePng(await readFile(a)), decodePng(await readFile(b))];
-    expect([pb.width, pb.height]).toEqual([pa.width, pa.height]);
-    let differ = 0, max = 0;
-    for (let i = 0; i < pa.data.length; i++) {
-      const d = Math.abs(pa.data[i]! - pb.data[i]!);
-      if (d) differ++;
-      if (d > max) max = d;
-    }
-    return { differ, max };
-  };
-  try {
-    const today = await exportStills({}, 'today');
-    const engine = await exportStills(ON, 'engine');
-    // The job engine asked this window for the SVG buckets (host services),
-    // and for nothing in the PNG control.
-    expect(engine.svg!.produced).toBeGreaterThanOrEqual(3);
-    expect(engine.png!.produced).toBe(0);
-    const svg = await compare(today.svg!.file, engine.svg!.file);
-    const control = await compare(today.png!.file, engine.png!.file);
-    console.log(`still export against today's: svg ${JSON.stringify(svg)}, png control ${JSON.stringify(control)}`);
-    // Both must equal today's stills. The PNG control involves no SVG
-    // raster: when it differs too, the difference is the job engine's
-    // still pipeline, not the rasters (docs/engine/vector.md, "Level 1
-    // measured").
-    expect.soft({ control }).toEqual({ control: { differ: 0, max: 0 } });
-    expect({ svg }).toEqual({ svg: { differ: 0, max: 0 } });
-  } finally {
-    if (!keep) await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('powermove render draws level 1 SVG images within the desktop export corpus bound', async () => {
-  test.setTimeout(180_000);
-  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-cli-svg-'));
+test('powermove render draws SVG images as the desktop export', async () => {
+  test.setTimeout(240_000);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-svg-'));
   let session: LaunchedApp | undefined;
   const repo = path.resolve(__dirname, '../../..');
   const binary = process.env.POWERMOVE_PM_CLI ?? path.join(repo, 'engine/target/debug/pm-cli');
   const dist = path.join(repo, 'packages/cli/dist');
   const run = promisify(execFile);
   try {
-    session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
+    session = await launchApp({ env: ON });
+    const { app, page } = session;
     await session.openEditor();
-    await svgProject(session.page);
-    const projectFile = path.join(root, 'svg.pmv');
-    await session.app.evaluate(({ dialog }, filePath) => {
+    await requestJobEngine(app);
+    await expect.poll(() => app.evaluate(() => {
+      const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
+      return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
+    }), { timeout: 30_000 }).toBe('ready/ready');
+    await showEngine(session);
+    const save = (filePath: string) => app.evaluate(({ dialog }, filePath) => {
       dialog.showSaveDialog = async () => ({ canceled: false, filePath });
-    }, projectFile);
-    await session.page.evaluate(async () => { await (window as any).PM.saveProject(); });
+    }, filePath);
+    const projectFile = path.join(root, 'svg.pmv');
+    await save(projectFile);
+    await page.evaluate(async () => { await (window as any).PM.saveProject(); });
     for (const time of [0, 1, 1.5]) {
+      // The job engine's still draws the interactive engine's frame.
       const desktopFile = path.join(root, `desktop-${time}.png`);
-      await session.app.evaluate(({ dialog }, filePath) => {
-        dialog.showSaveDialog = async () => ({ canceled: false, filePath });
-      }, desktopFile);
-      const result = await session.page.evaluate(async time => {
+      await save(desktopFile);
+      const result = await page.evaluate(async (time) => {
         const PM = (window as any).PM;
         PM.setTime(time, { raw: true, force: true });
-        return PM.Export.run({ format: 'still', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false });
+        const out = await PM.Export.run({ format: 'still', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false });
+        const frame = PM.EngineRender.snapshotSync({ time, width: 640, height: 360, pixels: 'opaque', motionBlurSamples: 0, background: true });
+        return { out, frame: Array.from(frame.data as Uint8ClampedArray) };
       }, time);
-      expect(result).toEqual({ cancelled: false });
+      expect(result.out).toEqual({ cancelled: false });
       const desktop = decodePng(await readFile(desktopFile));
+      expect([desktop.width, desktop.height]).toEqual([640, 360]);
+      expectCorpusBound(`desktop export vs engine frame at ${time}`, desktop.data, result.frame, 640 * 360);
       for (const entry of ['powermove', 'pm-cli'] as const) {
         const file = path.join(root, `${entry}-${time}.png`);
         const options = ['--format', 'still', '--range', `${time}:${time + 1 / 30}`];
@@ -399,165 +443,14 @@ test('powermove render draws level 1 SVG images within the desktop export corpus
             POWERMOVE_ANGLE_HELPER: path.join(dist, 'native-angle-child.cjs') },
         });
         expect(output.stderr).not.toContain('approximate SVG');
-        expect(JSON.parse(output.stdout).approximateSvg).toBe(0);
+        expect(JSON.parse(output.stdout).approximateSvg).toBeUndefined();
         const cli = decodePng(await readFile(file));
         expect([cli.width, cli.height]).toEqual([640, 360]);
-        expect([desktop.width, desktop.height]).toEqual([cli.width, cli.height]);
-        let withinOne = 0, max = 0, nonBackground = 0;
-        for (let i = 0; i < desktop.data.length; i += 4) {
-          let delta = 0;
-          for (let c = 0; c < 4; c++) delta = Math.max(delta, Math.abs(desktop.data[i + c]! - cli.data[i + c]!));
-          if (delta <= 1) withinOne++;
-          max = Math.max(max, delta);
-          if (desktop.data[i] !== 0x20 || desktop.data[i + 1] !== 0x30 || desktop.data[i + 2] !== 0x40) nonBackground++;
-        }
-        const fraction = withinOne / (cli.width * cli.height);
-        console.log(`SVG desktop export vs ${entry}: ${JSON.stringify({ time, withinOne, fraction, max, nonBackground })}`);
-        expect(nonBackground).toBeGreaterThan(20_000);
-        expect(fraction).toBeGreaterThanOrEqual(0.999);
-        expect(max).toBeLessThanOrEqual(4);
+        expectCorpusBound(`desktop export vs ${entry} at ${time}`, desktop.data, cli.data, 640 * 360);
       }
     }
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     try { await session?.close(); } finally { await rm(root, { recursive: true, force: true }); }
-  }
-});
-
-/** A viewer state: fit, or a zoom with a pan (composition pixels). */
-type ViewerCase = { name: string; zoom: number | 'fit'; pan?: [number, number] };
-const VIEWER_CASES: ViewerCase[] = [
-  { name: 'fit', zoom: 'fit' },
-  // A cropped preview viewport (`activePreviewViewport`): part of the
-  // composition, at more than one output pixel per composition pixel.
-  { name: 'zoom 237%, panned', zoom: 2.37, pan: [-140, 60] },
-  { name: 'zoom 61%', zoom: 0.61 },
-];
-
-/** Puts the viewer in `c` (as the zoom control and a pan do). */
-const setViewer = (page: Page, c: ViewerCase) => page.evaluate((c) => {
-  const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
-  // Today's bucket log restarts with the state, before any frame of it.
-  (window as any).__svgBuckets?.clear();
-  (window as any).__svgOther?.clear();
-  if (c.zoom === 'fit') V.returnToComposition();
-  else {
-    V.setZoom(c.zoom);
-    if (c.pan) { V.pan = [...c.pan]; V.layout(); }
-  }
-  PM.invalidate?.('render');
-  return { stage: [V._sw, V._sh], shown: V.shown, fit: V.fit, pan: [...V.pan], dpr: window.devicePixelRatio, quality: Number(PM.quality ?? 0) };
-}, c);
-
-test('the viewer asks for the buckets today’s viewer rasterizes, at fit and at other zooms', async () => {
-  type Seen = { geometry: Awaited<ReturnType<typeof setViewer>>; buckets: string[] };
-  // Today's viewer: the buckets its frames pass to `PM.rasterSvgAsset`.
-  const todays = async (): Promise<Record<string, Seen>> => {
-    const session = await launchApp({ env: {} });
-    try {
-      await session.openEditor();
-      const { page } = session;
-      await svgProject(page);
-      await page.evaluate(() => {
-        const PM = (window as any).PM, w = window as any;
-        // Only the viewer's frames (`PM.GL.render`, the editor loop's
-        // call); thumbnails and captures (`renderToPixels`) draw buckets
-        // of their own sizes, kept apart.
-        w.__svgBuckets = new Set<string>();
-        w.__svgOther = new Set<string>();
-        w.__inViewer = 0;
-        const render = PM.GL.render;
-        PM.GL.render = function (...args: unknown[]) {
-          w.__inViewer++;
-          try { return render.apply(this, args); } finally { w.__inViewer--; }
-        };
-        const raster = PM.rasterSvgAsset;
-        PM.rasterSvgAsset = (asset: any, width: number, height: number) => {
-          (w.__inViewer > 0 ? w.__svgBuckets : w.__svgOther).add(`${width}x${height}`);
-          return raster(asset, width, height);
-        };
-      });
-      const out: Record<string, Seen> = {};
-      for (const c of VIEWER_CASES) {
-        const geometry = await setViewer(page, c);
-        // The viewer's next frames, settled (no new bucket over 20 frames).
-        const buckets = await page.evaluate(async () => {
-          const w = window as any, frame = () => new Promise((r) => requestAnimationFrame(r));
-          const until = performance.now() + 10_000;
-          let last = -1, quiet = 0;
-          while (performance.now() < until && quiet < 20) {
-            await frame();
-            const size = w.__svgBuckets.size;
-            quiet = size > 0 && size === last ? quiet + 1 : 0;
-            last = size;
-          }
-          return [...w.__svgBuckets].sort() as string[];
-        });
-        const other = await page.evaluate(() => { const w = window as any, o = [...w.__svgOther].sort(); w.__svgOther.clear(); return o; });
-        if (other.length) console.log(`today at ${c.name}: buckets drawn outside the viewer's frames (thumbnails, captures): ${JSON.stringify(other)}`);
-        out[c.name] = { geometry, buckets };
-      }
-      expect(session.diagnostics.pageErrors).toEqual([]);
-      return out;
-    } finally {
-      await session.close();
-    }
-  };
-  // The engine's viewer: in each state, a restarted engine (holding no
-  // raster) asks this window for every bucket its frames draw
-  // (`EngineSvgRasters.asks`).
-  const engines = async (): Promise<Record<string, Seen & { standIns: number }>> => {
-    const session = await launchApp({ env: ON });
-    try {
-      await openEngine(session);
-      const { page } = session;
-      await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
-      const out: Record<string, Seen & { standIns: number }> = {};
-      for (const c of VIEWER_CASES) {
-        const geometry = await setViewer(page, c);
-        await page.evaluate(() => new Promise((r) => setTimeout(r, 500)));
-        const before = await page.evaluate(() => ({ connections: (window as any).PM.EngineConnection.status().connections, from: (window as any).PM.EngineSvgRasters.asks.length }));
-        const pid = await session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.engine.status().interactive.pid as number);
-        process.kill(pid, 'SIGKILL');
-        await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().connections), { timeout: 45_000 }).toBeGreaterThan(before.connections);
-        await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
-        // Settled: the new engine asked, and no new ask or answer came over
-        // 60 frames (the answered rasters drew without asking again).
-        const asked = await page.evaluate(async (from) => {
-          const w = window as any, PM = w.PM, rasters = PM.EngineSvgRasters, frame = () => new Promise((r) => requestAnimationFrame(r));
-          let presented = 0, standIns = 0;
-          const off = PM.Kernel.services.get('viewer').enginePresentation.onPresented((f: any) => { presented++; if (f.standIn) standIns++; });
-          const until = performance.now() + 20_000;
-          const done = () => rasters.stats.posted + rasters.stats.failed;
-          let last = -1, answered = -1, quiet = 0;
-          while (performance.now() < until && quiet < 60) {
-            await frame();
-            const n = rasters.asks.length, a = done();
-            if (n !== last || a !== answered) { last = n; answered = a; quiet = 0; continue; }
-            quiet = n > from ? quiet + 1 : 0;
-          }
-          off();
-          return { asks: rasters.asks.slice(from).map((a: any) => `${a.width}x${a.height}`), standIns, presented, settled: quiet >= 60, stats: { ...rasters.stats } };
-        }, before.from);
-        expect(asked.settled, `the engine viewer settled at ${c.name}: ${JSON.stringify(asked)}`).toBe(true);
-        out[c.name] = { geometry, buckets: [...new Set<string>(asked.asks)].sort(), standIns: asked.standIns };
-      }
-      expect(await page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.failed)).toBe(0);
-      expect(session.diagnostics.pageErrors).toEqual([]);
-      return out;
-    } finally {
-      await session.close();
-    }
-  };
-  const today = await todays();
-  const engine = await engines();
-  for (const c of VIEWER_CASES) {
-    const t = today[c.name]!, e = engine[c.name]!;
-    console.log(`viewer ${c.name}: today ${JSON.stringify(t)} engine ${JSON.stringify(e)}`);
-    // The same viewer (stage, zoom, density, preview quality) in both.
-    expect(e.geometry).toEqual(t.geometry);
-    expect(t.buckets.length).toBeGreaterThan(0);
-    // The engine's viewer drew exactly today's buckets.
-    expect({ case: c.name, buckets: e.buckets }).toEqual({ case: c.name, buckets: t.buckets });
   }
 });

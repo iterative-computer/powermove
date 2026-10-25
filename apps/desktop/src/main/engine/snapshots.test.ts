@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
-import type { Request, Response } from '../../shared/engine-protocol';
+import type { Request, Response, SnapshotViewer } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
 import { MAX_BLENDER_WAIT_MS, MAX_FALLBACK_BYTES, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, fallbackBudgetBytes, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
@@ -55,6 +55,25 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
+  it('validates pinned viewer captures at the original backing size and rejects malformed cameras', () => {
+    const viewer: SnapshotViewer = { viewSeq: 19, canvas: { width: 4, height: 2, crop: { x: 40, y: 20, width: 100, height: 50 }, css: { x: 5, y: 6, width: 200, height: 100 } },
+      view: { camera: { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: -100, far: 100 } }, shading: 'solid', xray: true, localView: ['cube'] } };
+    expect(validSnapshotRequest(request({ viewSeq: 19, viewer }))).toBe(true);
+    expect(validSnapshotRequest(request({ viewSeq: 19, viewer: { ...viewer, view: null } }))).toBe(true);
+    const bad = (change: (v: SnapshotViewer) => void) => {
+      const pin = structuredClone(viewer); change(pin);
+      expect(validSnapshotRequest(request({ viewSeq: 19, viewer: pin }))).toBe(false);
+    };
+    bad(v => { v.canvas.width = 5; });
+    bad(v => { v.canvas.crop.width = 0; });
+    bad(v => { v.canvas.css.x = Infinity; });
+    bad(v => { v.viewSeq = -1; });
+    expect(validSnapshotRequest(request({ viewSeq: 18, viewer }))).toBe(false);
+    bad(v => { v.view!.camera!.view[0] = NaN; });
+    bad(v => { v.view!.camera!.projection = { kind: 'perspective', fovYDegrees: 180, near: .1, far: 100 }; });
+    expect(validSnapshotRequest(request({ viewSeq: 19, viewer, target: { kind: 'layer', layer: 'L1', scale: 1, crop: null } }))).toBe(false);
+  });
+
   it('accepts any positive layer raster scale, as today’s PM.raster, independently of output scale', () => {
     for (const scale of [1e-9, 0.005, 16.25, 24, 32, 33, 50, 1000, Number.MAX_VALUE, 0, -1, NaN, Infinity, -Infinity]) {
       expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale, crop: null } })), String(scale)).toBe(Number.isFinite(scale) && scale > 0);
@@ -162,7 +181,7 @@ describe('SnapshotService', () => {
       return answer;
     });
     const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
-    expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [], svg: [] });
+    expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [] });
     answer = { type: 'snapshot', outcome: 'empty', revision: 41 } as unknown as Response;
     expect(await service.snapshot(9, request())).toEqual({ status: 'empty', revision: 41 });
     answer = new RemoteError({ code: 'unsupported', scope: { kind: 'request', id: 1 }, message: 'The new engine cannot draw this frame: x.', retry: { kind: 'never' }, detail: null } as never);
@@ -290,15 +309,6 @@ describe('sync snapshots served by main’s session for the window', () => {
     expect(validSnapshotRequest(detached([{ ...full, rgba32f: new Uint8Array(15) }]))).toBe(false);
     expect(validSnapshotRequest(detached([{ ...full, rgba16f: new Uint8Array(8) }]))).toBe(false);
     expect(validSnapshotRequest(detached([{ ...full, rgba32f: undefined }]))).toBe(false);
-    const svgKey = { content: 'c'.repeat(64), width: 2, height: 1 };
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(true);
-    expect(validSnapshotRequest(request({}, { svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(4) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, content: 'C'.repeat(64) }, data: new Uint8Array(8) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, width: 9000 }, data: new Uint8Array(9000 * 4) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: true, width: 16384 }, data: new Uint8Array(16384 * 4) }] }))).toBe(true);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: true, width: 16385 }, data: new Uint8Array(16385 * 4) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: false }, data: new Uint8Array(8) }] }))).toBe(false);
   });
 
   it('snapshot main’s session, the host naming itself, with no renderer session or launch match needed', async () => {
@@ -307,7 +317,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
     expect(reply.status).toBe('rendered');
-    expect(prepare).toHaveBeenCalledWith(12, doc, [], [], []);
+    expect(prepare).toHaveBeenCalledWith(12, doc, [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
   });
@@ -318,7 +328,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reference = { id: 'doc', revision: 41, nativeKernel: true as const };
     expect(await service.snapshot(12, request({}, { session: null, generation: 0, document: reference }))).toMatchObject({ status: 'rendered' });
-    expect(prepare).toHaveBeenCalledExactlyOnceWith(12, reference, [], [], []);
+    expect(prepare).toHaveBeenCalledExactlyOnceWith(12, reference, [], []);
     expect(reference).not.toHaveProperty('owner');
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
   });

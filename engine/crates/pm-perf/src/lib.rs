@@ -127,8 +127,8 @@ counters! {
     // Engine work.
     /// GLSL programs compiled to naga IR (glslang and the rewrites).
     GlslCompiles = "engine.glsl_compiles",
-    /// Layer rasters the engine asked another process for (SVG buckets,
-    /// fallback runner pixels).
+    /// Layer rasters the engine asked another process for (fallback runner
+    /// pixels).
     RasterRequests = "engine.raster_requests",
     /// Of those, answered.
     RasterAnswers = "engine.raster_answers",
@@ -150,15 +150,12 @@ counters! {
     /// Media textures (stills, decoded video frames) found uploaded.
     MediaCacheHits = "cache.media.hits",
     MediaCacheMisses = "cache.media.misses",
-    /// Vector (shape, mask, path) rasters found.
+    /// Vector (shape, mask, path, SVG) textures found.
     VectorCacheHits = "cache.vector.hits",
     VectorCacheMisses = "cache.vector.misses",
     /// Text runs found rendered.
     TextCacheHits = "cache.text.hits",
     TextCacheMisses = "cache.text.misses",
-    /// SVG rasters found.
-    SvgCacheHits = "cache.svg.hits",
-    SvgCacheMisses = "cache.svg.misses",
     /// Layer draws given back by the paused-frame draw reuse.
     DrawReuseHits = "cache.draw_reuse.hits",
     DrawReuseMisses = "cache.draw_reuse.misses",

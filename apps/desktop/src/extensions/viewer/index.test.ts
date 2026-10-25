@@ -42,7 +42,7 @@ function apiHarness(services = serviceHarness().services) {
     onDispose: vi.fn((dispose: () => void) => { disposeCallbacks.push(dispose); }),
     commands: { register: vi.fn(() => ({ dispose() {} })) },
     keybindings: { bind: vi.fn(() => ({ dispose() {} })) },
-    project: { get: () => project },
+    project: { get: () => project, revision: () => 1 },
     selection: { layers: () => [], first: () => null, select: vi.fn() },
     groups: { ancestors: () => [], transformRoots: () => [] },
     anim: {

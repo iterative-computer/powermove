@@ -295,7 +295,7 @@ test('the engine viewer shows today’s canvas, scaled as today’s, from 25 to 
   test.setTimeout(900_000);
   const video = Array.from(await readFile(path.join(repoRoot, 'e2e/fixtures/h264-aac.mp4')));
   const run = async (engine: boolean) => {
-    const session = await launchApp({ env: engine ? { POWERMOVE_NEW_ENGINE: '1' } : {}, args: ARGS });
+    const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' }, args: ARGS });
     try {
       await session.openEditor();
       await mixedProject(session.page, video);

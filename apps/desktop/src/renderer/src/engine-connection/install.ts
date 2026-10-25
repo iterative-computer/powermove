@@ -44,10 +44,10 @@ import { viewportEngineCamera } from '../core/scene3d/viewport';
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
-import { SvgRasters } from './svg-rasters';
 import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
+import { engineCanvasViewParams, watchEngineCanvasView } from './canvas-view';
 import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -148,7 +148,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (desc.poolGeneration === generation && desc.poolIndex === poolIndex && captureCompatFrame(desc)) pendingCompatFrames.delete(key);
     }
   });
-  const drawingWarmup = new PresentationWarmup(target.document, () => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }));
+  const presentationWorker = (): Worker => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' });
+  const drawingWarmup = new PresentationWarmup(target.document, presentationWorker);
   drawingWarmup.warm();
   const hostClock = new HostClock(() => native.hostTime());
   hostClock.start();
@@ -244,25 +245,17 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     session: () => current,
     driving: () => transport.active(),
     assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
+    source: (id) => {
+      const meta = PM.proj?.assets?.[id];
+      return [meta?.contentHash, meta?.storageKey, meta?.link?.hash, meta?.link?.path];
+    },
     peaksChanged: () => {
       PM.invalidate?.('timeline');
       PM.bus?.emit?.('audio:peaks');
     }
   });
   const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
-  // Level 1 SVG images: Chromium draws today's bucket rasters for the
-  // engine (decision S1, svg-rasters.ts); their content hashes are taken
-  // ahead so a synchronous snapshot can draw one.
-  const svgRasters = new SvgRasters({
-    asset: (id) => PM.assets?.get?.(id) ?? null,
-    assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
-    log
-  });
-  svgRasters.prime();
-  const offAssets = PM.bus?.on?.('assets', () => {
-    audio.sync();
-    svgRasters.prime();
-  }) ?? (() => {});
+  const offAssets = PM.bus?.on?.('assets', () => audio.sync()) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
   // write that leaves the barrier dirty schedules one flush at the end of
@@ -344,7 +337,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
       // The `raster` override's answers (kernel/raster-compat.ts).
       onCompat: (message) => renderTransport.receiveCompat(message, session),
-      svgRasters: () => svgRasters,
       handlers: {
         message: (message, arrivedMs) => {
           if (message.type === 'frame' && !firstFrame) {
@@ -363,6 +355,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           preview.close(session);
           sessions.delete(session);
           if (current === session) {
+            stats.reset();
+            PM.invalidate?.('status');
             current = null;
             sessionReady = null;
             const handlers = viewerHandlers;
@@ -388,6 +382,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
       onOpened: () => renderTransport.syncProducers(session),
       onLoaded: () => {
+        stats.reset();
+        PM.invalidate?.('status');
+        audio.resynced();
         if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
       },
@@ -494,14 +491,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       PM.toast?.('The preview could not be rendered. See the console for details.');
     },
     captionsHidden: () => PM.captionsHidden === true,
-    svgRasters: () => svgRasters,
     log
   });
   (PM as any).EngineRender = renderTransport;
-  // The job engine's export and agent frames ask this window for the SVG
-  // rasters of the document it has open (main's `compatFrame`).
-  const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
-  (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
   // engine on, nothing asks the current engine for pixels. The exporter's
@@ -719,9 +711,20 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     service: () => service,
     composition: () => (PM.proj ? { w: Number(PM.proj.w) || 0, h: Number(PM.proj.h) || 0 } : null),
     quality: () => Number(PM.quality ?? 1),
-    present: (options) => new ViewerPresentation({ ...options, log: (level, message) => log(level, message) })
+    view: () => engineCanvasViewParams(PM),
+    // A bound viewer (a fork or override of the built-in one from before the
+    // engine) presents exactly as the built-in viewer does: in a
+    // presentation worker. Its canvas is then a placeholder the page reads
+    // back like the built-in one (the Library card copies its pixels), and
+    // playback keeps its cadence while the main thread is busy.
+    present: (options) => new ViewerPresentation({
+      ...options,
+      log: (level, message) => log(level, message),
+      createWorker: options.service.offMainThread === false ? undefined : presentationWorker
+    })
   });
   (PM as any).EngineCanvas = canvasBinding;
+  const offCanvasViewport = watchEngineCanvasView(PM, () => canvasBinding.refresh());
 
   const handle: EngineConnectionHandle = {
     hostClock,
@@ -779,7 +782,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offHomeTabs();
       offAssets();
       follower.dispose();
-      unprovideSvg();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
@@ -800,6 +802,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
       canvasBinding.unbind();
+      offCanvasViewport();
       if ((PM as any).EngineCanvas === canvasBinding) (PM as any).EngineCanvas = null;
       connection?.close('the engine connection was removed');
       connection = null;

@@ -2,7 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: '1' } } });
 
-test('SVG material maps draw the Chromium map upload through the native 3D pass', async ({ session }) => {
+test('SVG material maps are drawn natively through the 3D pass', async ({ session }) => {
   test.setTimeout(90_000);
   await session.openEditor();
   const { page } = session;
@@ -17,7 +17,7 @@ test('SVG material maps draw the Chromium map upload through the native 3D pass'
     PM.selectLayers(['mapped']);
     PM.invalidate();
   });
-  await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSvgRasters.stats.posted), { timeout: 20_000 }).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
   const compare = () => page.evaluate(() => {
     const PM = (window as any).PM;
     const native = PM.EngineRender.snapshotSync({ time: 0, width: 320, height: 180, pixels: 'premultiplied', motionBlurSamples: 0, background: false });
@@ -37,12 +37,13 @@ test('SVG material maps draw the Chromium map upload through the native 3D pass'
       interior++;
       for (let c = 0; c < 4; c++) max = Math.max(max, Math.abs(native.data[i + c] - legacy[at(x, y) + c]));
     }
-    return { nonempty, interior, max, errors: PM.EngineSvgRasters.stats.failed, route: PM.EngineConnection.status().route };
+    return { nonempty, interior, max, route: PM.EngineConnection.status().route };
   });
+  // Both draw the box once the scene reached the engine.
+  await expect.poll(async () => { const r = await compare(); return Math.min(r.nonempty, r.interior); }, { timeout: 20_000 }).toBeGreaterThan(500);
   const result = await compare();
   console.log(`SVG maps: ${JSON.stringify(result)}`);
   expect(result.route).toBe('engine');
-  expect(result.errors).toBe(0);
   expect(result.nonempty).toBeGreaterThan(500);
   expect(result.interior).toBeGreaterThan(500);
   expect(result.max).toBeLessThanOrEqual(2);

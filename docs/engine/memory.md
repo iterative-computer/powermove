@@ -147,7 +147,11 @@ The merged renderer defers 48 render pipelines: 18 2D format/blend variants,
 including the newly merged BGRA paint variant. `LazyRenderPipeline` uses a
 `OnceLock` and one-shot factory; compilation releases captured handles.
 Descriptors, shaders, formats and binding layouts are unchanged. ID/source
-compute pipelines, shader modules and decode importing remain eager.
+compute pipelines, shader modules and decode importing remain eager. Once the
+viewer has rested 250 ms, the presenter compiles the four 2D pipelines every
+frame draws with (quad, solid, row flip, background) at each viewed
+document's working format (`Renderer::prewarm`), so an import or the first
+layer of an empty project does not compile them in its frame.
 Definitions still translate and validate GLSL on the presenter thread before
 device creation; the first composer adopts prepared effects without another
 translation. Cache keys and shader watchdog policy remain intact.

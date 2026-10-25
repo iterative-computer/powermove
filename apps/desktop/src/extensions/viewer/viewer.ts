@@ -861,6 +861,13 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       // Engine frames cover the composition; the WebGL canvas underneath
       // rests (and must not show around a frame that lags a pan).
       if (V.el && V.el.style.visibility !== 'hidden') V.el.style.visibility = 'hidden';
+      // Where today's canvas sits in this frame (stage CSS px, backing px):
+      // the Library card shows the composition as that canvas
+      // (library/viewer-preview.ts).
+      const todays = presentation.stateFor(frame.viewSeq)?.canvas;
+      const box = todays ? `${todays.css.x} ${todays.css.y} ${todays.css.width} ${todays.css.height} ${todays.width} ${todays.height}` : null;
+      if (box === null) delete presentation.canvas.dataset['todaysCanvas'];
+      else if (presentation.canvas.dataset['todaysCanvas'] !== box) presentation.canvas.dataset['todaysCanvas'] = box;
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;

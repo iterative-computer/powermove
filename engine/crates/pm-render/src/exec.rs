@@ -118,8 +118,6 @@ pub(crate) struct Exec<'a> {
     /// Where screen, overlay, and soft light run with linear blending on.
     pub blend_domain: BlendDomain,
     pub export: bool,
-    /// What a level 1 SVG raster miss draws (`crate::vector::svg_rasters`).
-    pub svg_policy: crate::vector::svg_rasters::SvgMissPolicy,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
@@ -465,43 +463,18 @@ impl Exec<'_> {
                         }
                     }
                     Source::Vector(v) => {
-                        if let crate::vector::VectorSource::SvgImage { key, asset, path } = &**v {
-                            use crate::vector::cache::SvgResolved;
-                            // Chromium's raster of today's bucket (decision
-                            // S1); a miss draws the content's latest bucket
-                            // in preview, nothing otherwise.
-                            match self.vector.resolve_svg(
-                                self.device,
-                                self.queue,
-                                key,
-                                asset,
-                                path,
-                                self.svg_policy,
-                                (&plan.composition, &draw.layer),
-                            ) {
-                                Ok(SvgResolved::Drawn(view) | SvgResolved::Substitute(view)) => {
-                                    self.prepare_level2(encoder, r, view.texture(), false);
-                                    r.view = Some(view);
-                                }
-                                Ok(SvgResolved::Missing) => {}
-                                Err(message) => {
-                                    self.fail(plan, draw, MediaFailure::Failed(message))
-                                }
+                        match self
+                            .vector
+                            .resolve(self.device, self.queue, v, self.precision)
+                        {
+                            Ok(view) => {
+                                // Level 2 content on a plane is resampled
+                                // (`crate::space25d::local`).
+                                self.prepare_level2(encoder, r, view.texture(), false);
+                                r.view = Some(view);
                             }
-                        } else {
-                            match self
-                                .vector
-                                .resolve(self.device, self.queue, v, self.precision)
-                            {
-                                Ok(view) => {
-                                    // Level 2 content on a plane is resampled
-                                    // (`crate::space25d::local`).
-                                    self.prepare_level2(encoder, r, view.texture(), false);
-                                    r.view = Some(view);
-                                }
-                                Err(message) => {
-                                    self.fail(plan, draw, MediaFailure::Failed(message))
-                                }
+                            Err(message) => {
+                                self.fail(plan, draw, MediaFailure::Failed(message))
                             }
                         }
                     }
@@ -570,16 +543,8 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
-                        if !self.scene3d.prepare_svg_maps(
-                            self.device,
-                            self.queue,
-                            encoder,
-                            object,
-                            &mut self.vector.svg,
-                            &plan.composition,
-                        ) {
-                            return;
-                        }
+                        self.scene3d
+                            .prepare_svg_maps(self.device, self.queue, encoder, object);
                         match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,

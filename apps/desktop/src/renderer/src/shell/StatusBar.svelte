@@ -3,8 +3,9 @@
   import { kernelSignals } from '../kernel/signals.svelte';
   import { frameBus } from '../runtime/frame-bus';
   import { doc } from '../state/document.svelte';
-  import { perf, transport } from '../state/transport.svelte';
+  import { audioStatus, perf, transport } from '../state/transport.svelte';
   import { performanceMonitor } from '../runtime/performance-monitor';
+  import { audioStatusField } from '../engine-connection/audio-diagnostics';
 
   let { PM }: { PM: Record<string, any> } = $props();
   let refreshToken = $state(0);
@@ -70,6 +71,9 @@
     if (!transport.playing) return 'Playback paused';
     return perf.fps > 0 ? `Preview ${perf.fps} fps` : 'Measuring FPS…';
   });
+  /* The engine's audio problems, dropouts, or a device that did not open
+     (absent while playback is healthy and with the new engine off). */
+  const audioField = $derived(audioStatusField(audioStatus.health));
   const frameMs = $derived.by(() => {
     const value = perf.ms || 0;
     return typeof PM.round === 'function'
@@ -140,6 +144,9 @@
   {:else if rendererLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
 </span>
 <span class="status-field" title="Measured preview redraws per second during playback">{playbackStatus}</span>
+{#if audioField}
+  <span class="status-field" title={audioField.title}>{audioField.text}</span>
+{/if}
 <span class="status-field" title="Preview render time">{frameMs} ms</span>
 <span class="status-field">{dimensions}</span>
 {#each rightItems as entry (entry.item.id)}

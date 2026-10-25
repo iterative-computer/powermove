@@ -2,13 +2,12 @@
 //!
 //! Shapes and editable paths are drawn at output resolution: their exact
 //! geometry under the layer's world transform becomes a [`CoverageScene`],
-//! covered analytically by Vello (or `vello_cpu`) and painted in float
+//! covered exactly by the GPU and painted in float
 //! ([`cache`]). SVG images are drawn at output resolution too ([`svg`]).
 //! Solids are the composite pass's analytic quad (`fs_solid`).
 
 pub mod cache;
 pub mod svg;
-pub mod svg_rasters;
 
 use pm_eval::transform::Mat2d;
 use pm_eval::{JsResult, JsValue, Scope};
@@ -29,24 +28,14 @@ pub enum VectorSource {
         scene: CoverageScene,
         rect: PixelRect,
     },
-    /// Level 2: an SVG drawn by resvg under `transform` (user units to
-    /// target pixels) into `rect`, clipped to the polygon `clip`.
+    /// An SVG image under `transform` (user units to target pixels) drawn
+    /// into `rect`, clipped to the polygon `clip` (Vello, or resvg).
     SvgRaster {
         path: std::path::PathBuf,
         stamp: svg::Stamp,
         transform: [f64; 6],
         rect: PixelRect,
         clip: [[f64; 2]; 4],
-    },
-    /// Level 1: an SVG image's raster at today's bucket
-    /// (`rasterSvgAsset`), drawn by Chromium in the renderer that owns the
-    /// document (decision S1; `cache`, "Level 1 SVG rasters"). Only the
-    /// content and the bucket decide the pixels; the asset and its file
-    /// say where the renderer and `pm-cli` find the SVG.
-    SvgImage {
-        key: pm_protocol::svg_raster::SvgRasterKey,
-        asset: String,
-        path: std::path::PathBuf,
     },
 }
 
@@ -76,12 +65,6 @@ impl VectorSource {
                     h.update(v.to_bits().to_le_bytes());
                 }
                 h.update(format!("{rect:?}").as_bytes());
-            }
-            VectorSource::SvgImage { key, .. } => {
-                h.update(b"svgimage");
-                h.update(key.content.as_bytes());
-                h.update(key.width.to_le_bytes());
-                h.update(key.height.to_le_bytes());
             }
         }
         h.finalize().into()

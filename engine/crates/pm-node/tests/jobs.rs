@@ -158,9 +158,7 @@ struct Host {
     answers: BTreeMap<u64, Message>,
     statuses: Vec<JobStatus>,
     host_requests: Vec<&'static str>,
-    /// The editor window's answer to `compatFrame` asks (level 1 SVG
-    /// rasters): a fill colour, or the host's error words.
-    svg_window: Result<[u8; 4], String>,
+    /// `compatFrame` asks (answered as with no editor window open).
     compat_asks: Vec<pm_protocol::snapshot::CompatFrameRequest>,
 }
 
@@ -204,7 +202,6 @@ impl Host {
             answers: BTreeMap::new(),
             statuses: vec![],
             host_requests: vec![],
-            svg_window: Err("This layer is drawn by an extension in the editor; open the project in a window to export it.".into()),
             compat_asks: vec![],
         };
         host.handle(out);
@@ -426,29 +423,11 @@ impl Host {
             }
             Request::CompatFrame(ask) => {
                 self.host_requests.push("compatFrame");
-                self.compat_asks.push(ask.clone());
-                let svg = ask.svg.clone().expect("an SVG raster");
-                let fill = match &self.svg_window {
-                    Ok(fill) => *fill,
-                    Err(words) => return err(ErrorCode::NotHeadlessRenderable, words),
-                };
-                let k = svg.key;
-                Ok(Response::CompatFrame(Box::new(
-                    pm_protocol::snapshot::CompatFrame {
-                        key: format!("{}:{}x{}", k.content, k.width, k.height),
-                        width: k.width,
-                        height: k.height,
-                        format: pm_protocol::snapshot::CompatFormat::Rgba8Premultiplied,
-                        origin: [0.0, 0.0],
-                        scale: 1.0,
-                        payload: pm_protocol::snapshot::PixelPayload::Inline {
-                            bytes: Bytes(fill.repeat((k.width * k.height) as usize)),
-                        },
-                        native: false,
-                        size: None,
-                        uv: None,
-                    },
-                )))
+                self.compat_asks.push(ask);
+                err(
+                    ErrorCode::NotHeadlessRenderable,
+                    "no editor window has this project open",
+                )
             }
             other => err(ErrorCode::InvalidMessage, &format!("unexpected {other:?}")),
         }
@@ -1557,13 +1536,12 @@ fn effects_only_the_webgl_runner_draws_run_in_a_window_through_the_host() {
     assert_eq!(status.state, JobState::Done, "{:?}", status.error);
 }
 
-/// Level 1 SVG images (decision S1): the job engine asks host services for
-/// each raster (the window that owns the document draws it with today's
-/// code), once per bucket, and with no window the frame fails with the
-/// host's words instead of drawing anything else.
+/// SVG images are drawn by the job engine itself: agent frames and an
+/// export of an SVG project complete with no editor window (no
+/// compatibility source) to ask.
 #[test]
-fn level1_svg_frames_get_their_rasters_from_the_documents_window() {
-    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##;
+fn svg_projects_render_and_export_with_no_window() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/><text x="4" y="24" font-size="16" fill="#FFFFFF">Pm</text></svg>"##;
     let mut host = Host::new("svg", &[]);
     let path = host.dir.join("art.svg");
     std::fs::write(&path, svg).unwrap();
@@ -1582,61 +1560,36 @@ fn level1_svg_frames_get_their_rasters_from_the_documents_window() {
         ),
     );
     doc["assets"]["art"] = json!({ "id": "art", "name": "art.svg", "kind": "image", "format": "svg", "w": 64, "h": 36, "dur": 0, "persisted": true });
-    host.svg_window = Ok([0x4C, 0x8D, 0xFF, 0xFF]);
     let sid = host.snapshot(&doc, SessionRole::Job, 2);
     let id = host.send_request(Request::AgentFrames(frames_request(2)), Some(sid), Some(2));
     assert!(host.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
     let images = frame_images(&host.answers[&id]);
     let decoded =
         image::load_from_memory_with_format(&images[0].2, image::ImageFormat::Jpeg).unwrap();
-    let px = decoded.to_rgb8().get_pixel(270, 140).0;
+    // The rect above the text (64 × 36 at 1.25× from (230, 117.5)).
+    let px = decoded.to_rgb8().get_pixel(240, 122).0;
     assert!(
         px.iter()
             .zip([0x4C, 0x8D, 0xFF])
             .all(|(a, b)| a.abs_diff(b) <= 3),
-        "the window's raster at the layer's center: {px:?}"
+        "the SVG at the layer: {px:?}"
     );
-    // One ask for the bucket (`svgRasterDimensions(64, 36, 80, 45, …)`:
-    // 80 × 45), naming the document, the layer, and the SVG's bytes.
-    assert_eq!(host.compat_asks.len(), 1, "{:?}", host.compat_asks);
-    let ask = &host.compat_asks[0];
-    assert_eq!(ask.document.as_str(), "Ptest");
-    assert_eq!(
-        (ask.composition.as_str(), ask.layer.as_str()),
-        ("Ptest-root", "svg")
+    let snapshot = host.snapshot(&doc, SessionRole::JobSnapshot, 2);
+    host.send_request(
+        Request::SubmitJob(agent_export(
+            "job-svg",
+            "run-svg",
+            snapshot,
+            ExportFormat::H264,
+            "mp4",
+        )),
+        None,
+        None,
     );
-    assert_eq!(ask.source, pm_protocol::snapshot::CompatSource::SvgImage);
-    let raster = ask.svg.as_ref().unwrap();
-    assert_eq!(
-        (raster.key.width, raster.key.height, raster.asset.as_str()),
-        (80, 45, "art")
-    );
-    let content = pm_render::vector::svg::content_hash(&host.media["art"]).unwrap();
-    assert_eq!(raster.key.content, content);
-    assert_eq!(content.len(), 64);
-
-    // No window has the project open: the frames fail with the host's words.
-    let mut lonely = Host::new("svg-lonely", &[]);
-    let path = lonely.dir.join("art.svg");
-    std::fs::write(&path, svg).unwrap();
-    lonely.media.insert("art".into(), path);
-    let sid = lonely.snapshot(&doc, SessionRole::Job, 2);
-    let id = lonely.send_request(Request::AgentFrames(frames_request(1)), Some(sid), Some(2));
-    assert!(lonely.run_until(Duration::from_secs(60), |h| h.answers.contains_key(&id)));
-    let Message::Response {
-        body: Response::AgentFrames(result),
-        ..
-    } = &lonely.answers[&id]
-    else {
-        panic!()
-    };
-    match &result.outcomes[0] {
-        AgentFrameOutcome::Failed { error, .. } => {
-            assert!(
-                error.message.contains("open the project in a window"),
-                "{error:?}"
-            )
-        }
-        other => panic!("{other:?}"),
-    }
+    assert!(host.run_until(Duration::from_secs(120), |h| {
+        terminal(h, "job-svg").is_some()
+    }));
+    let status = terminal(&host, "job-svg").unwrap();
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    assert!(host.compat_asks.is_empty(), "{:?}", host.compat_asks);
 }

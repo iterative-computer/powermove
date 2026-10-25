@@ -3,4 +3,4 @@
 /**
  * What produced compatibility pixels.
  */
-export type CompatSource = "rasterOverride" | "compatContext" | "svgImage" | "blenderPng";
+export type CompatSource = "rasterOverride" | "compatContext" | "blenderPng";

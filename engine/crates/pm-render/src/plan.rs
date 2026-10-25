@@ -1285,111 +1285,49 @@ fn native_content_quad<'d>(
             let rec = |k: &str| node::js_value_opt(node::member(Some(record), k));
             let format = js::string(&rec("format")).to_ascii_lowercase();
             if ty == "image" && format == "svg" {
-                if !crate::vector::level2(layer) {
-                    // Level 1 (decision S1): today's `<img>` raster at
-                    // today's bucket, drawn by Chromium in the document's
-                    // renderer, sampled as today's image texture. A
-                    // document Chromium is measured to show as a broken
-                    // `<img>` paints nothing, as there.
-                    match pm_media::image::svg::broken_image_file(&path) {
-                        Err(e) => {
-                            b.failures.push(LayerFailure {
-                                composition: comp_id,
-                                layer: js::layer_id(layer),
-                                message: format!("{}: {e}", path.display()),
-                            });
-                            return Ok(None);
+                // Every SVG image is drawn at output resolution (`vector::svg`).
+                // A document Chromium shows as a broken `<img>` paints nothing.
+                let drawable = pm_media::image::svg::broken_image_file(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))
+                    .and_then(|broken| {
+                        if broken {
+                            return Ok(false);
                         }
-                        Ok(true) => return Ok(None),
-                        Ok(false) => {}
-                    }
-                    let content = match crate::vector::svg::content_hash(&path) {
-                        Ok(c) => c,
-                        Err(message) => {
-                            b.failures.push(LayerFailure {
-                                composition: comp_id,
-                                layer: js::layer_id(layer),
-                                message,
-                            });
-                            return Ok(None);
-                        }
-                    };
-                    // `const bw = d.w || W, bh = d.h || H` with the live
-                    // asset's `w`/`h` (its natural size, persisted).
-                    let sw = js::or_number(&rec("w"), 1.0);
-                    let sh = js::or_number(&rec("h"), 1.0);
-                    let bw = js::or_number(js::get(&d, "w"), wf);
-                    let bh = js::or_number(js::get(&d, "h"), hf);
-                    let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
-                    // `svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H))`.
-                    let world = scaled_world(scope, layer, time, scale, b.origin)?;
-                    let (width, height, _) = pm_vector::render::svg::svg_raster_dimensions(
-                        sw, sh, bw, bh, &world, 8192.0,
-                    );
-                    return Ok(Some(Quad::Texture {
-                        source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
-                            key: pm_protocol::svg_raster::SvgRasterKey {
-                                texture: None,
-                                content,
-                                width,
-                                height,
-                            },
-                            asset: asset_id,
-                            path,
-                        })),
-                        w: bw,
-                        h: bh,
-                        ax: bw / 2.0,
-                        ay: bh / 2.0,
-                        uv,
-                    }));
-                }
-                if let Err(message) = crate::vector::svg::document(&path) {
-                    b.failures.push(LayerFailure {
-                        composition: comp_id,
-                        layer: js::layer_id(layer),
-                        message,
+                        crate::vector::svg::document(&path).map(|_| true)
                     });
-                    return Ok(None);
+                match drawable {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(None),
+                    Err(message) => {
+                        b.failures.push(LayerFailure {
+                            composition: comp_id,
+                            layer: js::layer_id(layer),
+                            message,
+                        });
+                        return Ok(None);
+                    }
                 }
+                // `const bw = d.w || W, bh = d.h || H` with the asset's
+                // `w`/`h` (its natural size, persisted).
                 let sw = js::or_number(&rec("w"), 1.0);
                 let sh = js::or_number(&rec("h"), 1.0);
                 let bw = js::or_number(js::get(&d, "w"), wf);
                 let bh = js::or_number(js::get(&d, "h"), hf);
                 let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
-                let world = vector_world(scope, layer, time, scale, b.origin)?;
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+                // The document parsed above; a planning error is one there.
+                let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
+                    Ok(crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
+                        .ok()
+                        .flatten()
+                        .map(|q| *q))
+                };
+                if scope.is_3d_layer(layer)? {
+                    return local_level2(scope, layer, time, scale, b.origin, target, &mut plan);
+                }
+                let world = vector_world(scope, layer, time, scale, b.origin)?;
                 return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
-                    Ok(crate::vector::svg::SvgPlan::Drawn(Some(_)))
-                        if scope.is_3d_layer(layer)? =>
-                    {
-                        let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                            Ok(
-                                match crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
-                                {
-                                    Ok(crate::vector::svg::SvgPlan::Drawn(q)) => q.map(|q| *q),
-                                    _ => None,
-                                },
-                            )
-                        };
-                        local_level2(
-                            scope,
-                            layer,
-                            time,
-                            scale,
-                            b.origin,
-                            pm_vector::render::scene::PixelRect::new(0, 0, width, height),
-                            &mut plan,
-                        )
-                    }
-                    Ok(crate::vector::svg::SvgPlan::Drawn(quad)) => {
-                        Ok(quad.map(|q| device_quad(*q)))
-                    }
-                    Ok(crate::vector::svg::SvgPlan::Text) => {
-                        b.unsupported
-                            .push(Unsupported::layer(&comp_id, layer, Feature::SvgImage));
-                        Ok(None)
-                    }
+                    Ok(quad) => Ok(quad.map(|q| device_quad(*q))),
                     Err(message) => {
                         b.failures.push(LayerFailure {
                             composition: comp_id,

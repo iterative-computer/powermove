@@ -1,16 +1,11 @@
 //! SVG image layers (plan section 10, `image` (SVG); docs/engine/vector.md,
 //! "SVG images").
 //!
-//! `compat` level 1 SVG images are today's `<img>` raster at today's size
-//! bucket, drawn by Chromium itself (decision S1): the plan names the
-//! bucket and the SVG's content hash ([`content_hash`]), and the raster
-//! comes from the renderer that owns the document (`super::cache`,
-//! "Level 1 SVG rasters"). `compat` level 2 SVG images are drawn at output
-//! resolution: as vectors (Vello coverage, the float paint pass) when the
-//! SVG is solid fills and strokes inside its box, otherwise by resvg into
-//! the device rectangle with the box and viewport as an antialiased clip.
-//! Level 2 SVGs with text stay unsupported (usvg's text feature is off;
-//! SVG text goes through `pm-text`).
+//! Every SVG image (any `compat` level) is drawn at output resolution: the
+//! plan places the SVG's user space in the image box as the image quad
+//! places a bitmap (`fit`, anchor at the box center) and clips it to the
+//! box and the SVG's viewport; the cache draws it with Vello on the GPU, or
+//! resvg ([`super::cache`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -73,62 +68,6 @@ pub fn document(path: &Path) -> Result<(Arc<SvgDocument>, Stamp), String> {
     Ok((doc, stamp))
 }
 
-struct Hashed {
-    path: PathBuf,
-    stamp: Stamp,
-    content: String,
-}
-
-/// Content hashes of SVG files, most recently used last.
-static HASHES: Mutex<Vec<Hashed>> = Mutex::new(Vec::new());
-const MAX_HASHES: usize = 256;
-
-/// The SHA-256 (lowercase hex) of the file at `path` as it is on disk:
-/// the identity of a level 1 SVG raster (decision S1; the renderer hashes
-/// the bytes its `<img>` decoded and must find the same). Cached by path
-/// and stamp, so a replaced or relinked file hashes again.
-pub fn content_hash(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    let stamp = stamp(path)?;
-    {
-        let mut hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = hashes
-            .iter()
-            .position(|h| h.path == path && h.stamp == stamp)
-        {
-            let h = hashes.remove(i);
-            let content = h.content.clone();
-            hashes.push(h);
-            return Ok(content);
-        }
-    }
-    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let content: String = Sha256::digest(&data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let mut hashes = HASHES.lock().unwrap_or_else(|e| e.into_inner());
-    hashes.retain(|h| h.path != path);
-    if hashes.len() >= MAX_HASHES {
-        hashes.remove(0);
-    }
-    hashes.push(Hashed {
-        path: path.to_path_buf(),
-        stamp,
-        content: content.clone(),
-    });
-    Ok(content)
-}
-
-/// How a level 2 SVG image layer is drawn.
-#[derive(Debug)]
-pub enum SvgPlan {
-    /// The SVG has text: routed.
-    Text,
-    /// Drawn (or nothing to draw).
-    Drawn(Option<Box<VectorQuad>>),
-}
-
 /// The image box as the legacy quad places it: `bw` × `bh` layer units
 /// centered on the layer origin, sampling the texture window `uv`
 /// (`[u0, v0, us, vs]`, from `fit`). The SVG's user space spans the texture
@@ -141,15 +80,12 @@ pub fn plan_svg(
     uv: [f64; 4],
     world: &Mat2d,
     target: PixelRect,
-) -> Result<SvgPlan, String> {
+) -> Result<Option<Box<VectorQuad>>, String> {
     let (doc, stamp) = document(path)?;
-    if doc.has_text() {
-        return Ok(SvgPlan::Text);
-    }
     let (w, h) = doc.size();
     let [u0, v0, us, vs] = uv;
     if !(bw > 0.0 && bh > 0.0 && us > 0.0 && vs > 0.0) {
-        return Ok(SvgPlan::Drawn(None));
+        return Ok(None);
     }
     let to_layer = Affine::translate((-bw / 2.0 - u0 * bw / us, -bh / 2.0 - v0 * bh / vs))
         * Affine::scale_non_uniform(bw / (us * w), bh / (vs * h));
@@ -162,29 +98,17 @@ pub fn plan_svg(
         ((v0 + vs) * h).min(h),
     );
     if clip.width() <= 0.0 || clip.height() <= 0.0 {
-        return Ok(SvgPlan::Drawn(None));
+        return Ok(None);
     }
     let Some(bounds) = doc.user_bounds() else {
-        return Ok(SvgPlan::Drawn(None));
+        return Ok(None);
     };
-    let inside = bounds.x0 >= clip.x0
-        && bounds.y0 >= clip.y0
-        && bounds.x1 <= clip.x1
-        && bounds.y1 <= clip.y1;
-    if inside && let Some(scene) = doc.scene(m) {
-        return Ok(SvgPlan::Drawn(scene.pixel_bounds(target).map(|rect| {
-            Box::new(VectorQuad::Device {
-                source: VectorSource::Scene { scene, rect },
-                rect,
-            })
-        })));
-    }
     let visible = bounds.intersect(clip);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
-        return Ok(SvgPlan::Drawn(None));
+        return Ok(None);
     }
     let Some(rect) = PixelRect::round_out(m.transform_rect_bbox(visible)).intersect(target) else {
-        return Ok(SvgPlan::Drawn(None));
+        return Ok(None);
     };
     let corners = [
         Point::new(clip.x0, clip.y0),
@@ -193,7 +117,7 @@ pub fn plan_svg(
         Point::new(clip.x0, clip.y1),
     ]
     .map(|p| m * p);
-    Ok(SvgPlan::Drawn(Some(Box::new(VectorQuad::Device {
+    Ok(Some(Box::new(VectorQuad::Device {
         source: VectorSource::SvgRaster {
             path: path.to_path_buf(),
             stamp,
@@ -202,7 +126,37 @@ pub fn plan_svg(
             clip: corners.map(|p| [p.x, p.y]),
         },
         rect,
-    }))))
+    })))
+}
+
+/// The SVG image sources `plan` draws (nested compositions, layers drawn
+/// through their own targets, and matte passes included), in draw order.
+pub fn svg_sources<'p>(plan: &'p crate::plan::CompPlan, out: &mut Vec<&'p VectorSource>) {
+    use crate::plan::{Content, Source};
+    fn content<'p>(c: &'p Content, out: &mut Vec<&'p VectorSource>) {
+        match c {
+            Content::Placed(p) => content(&p.content, out),
+            Content::Texture { source, .. } => match source {
+                Source::Vector(v) if matches!(**v, VectorSource::SvgRaster { .. }) => out.push(v),
+                Source::Comp(child) | Source::Accumulate(child) => svg_sources(child, out),
+                _ => {}
+            },
+            Content::Composite(node) => {
+                if let crate::composite::Node::Layer(l) = &**node {
+                    for d in &l.content {
+                        content(&d.content, out);
+                    }
+                    if let Some(m) = &l.matte {
+                        svg_sources(&m.source, out);
+                    }
+                }
+            }
+            Content::Solid(_) => {}
+        }
+    }
+    for d in &plan.draws {
+        content(&d.content, out);
+    }
 }
 
 #[cfg(test)]
@@ -232,52 +186,53 @@ mod tests {
 
     const SOLID: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="10" y="10" width="80" height="30" fill="#4C8DFF"/></svg>"##;
 
-    #[test]
-    fn solid_svgs_inside_their_box_are_vectors() {
-        let p = write("solid.svg", SOLID);
-        // A 200 × 100 box at (100, 50) in a 400 × 200 target.
-        let world = [1.0, 0.0, 0.0, 1.0, 200.0, 100.0];
+    fn planned(p: &Path, bw: f64, bh: f64, uv: [f64; 4], world: &Mat2d) -> (PixelRect, [f64; 6], [[f64; 2]; 4]) {
         let target = PixelRect::new(0, 0, 400, 200);
-        let SvgPlan::Drawn(Some(quad)) =
-            plan_svg(&p, 200.0, 100.0, [0.0, 0.0, 1.0, 1.0], &world, target).unwrap()
+        let quad = plan_svg(p, bw, bh, uv, world, target).unwrap().expect("drawn");
+        let VectorQuad::Device {
+            source: VectorSource::SvgRaster { transform, rect: r, clip, .. },
+            rect,
+        } = *quad
         else {
-            panic!("drawn");
+            panic!("an SVG raster")
         };
-        let VectorQuad::Device { source, rect } = *quad else {
-            panic!("device")
-        };
-        assert!(matches!(source, VectorSource::Scene { .. }));
-        // The rect spans user (10..90, 10..40) × 2 from (100, 50).
-        assert_eq!(rect, PixelRect::new(120, 70, 160, 60));
+        assert_eq!(r, rect);
+        (rect, transform, clip)
     }
 
     #[test]
-    fn cropped_and_text_svgs() {
+    fn the_svg_fills_the_box_at_output_resolution() {
+        let p = write("solid.svg", SOLID);
+        // A 200 × 100 box centered at (200, 100) in a 400 × 200 target: the
+        // 100 × 50 user space spans it at 2×.
+        let world = [1.0, 0.0, 0.0, 1.0, 200.0, 100.0];
+        let (rect, transform, clip) = planned(&p, 200.0, 100.0, [0.0, 0.0, 1.0, 1.0], &world);
+        // The rect spans user (10..90, 10..40) × 2 from (100, 50).
+        assert_eq!(rect, PixelRect::new(120, 70, 160, 60));
+        assert_eq!(transform, [2.0, 0.0, 0.0, 2.0, 100.0, 50.0]);
+        assert_eq!(clip, [[100.0, 50.0], [300.0, 50.0], [300.0, 150.0], [100.0, 150.0]]);
+    }
+
+    #[test]
+    fn cover_crops_to_the_box() {
         let p = write("crop.svg", SOLID);
         let world = [1.0, 0.0, 0.0, 1.0, 200.0, 100.0];
-        let target = PixelRect::new(0, 0, 400, 200);
-        // `cover` in a square box crops the sides: resvg with a clip.
+        // `cover` in a square box crops the sides: the clip is the box,
+        // 100 × 100 centered at (200, 100).
         let uv = crate::plan::fit_uv("cover", 100.0, 50.0, 100.0, 100.0);
-        let SvgPlan::Drawn(Some(quad)) = plan_svg(&p, 100.0, 100.0, uv, &world, target).unwrap()
-        else {
-            panic!("drawn");
-        };
-        let VectorQuad::Device { source, .. } = *quad else {
-            panic!("device")
-        };
-        let VectorSource::SvgRaster { clip, .. } = source else {
-            panic!("raster")
-        };
-        // The clip is the box: 100 × 100 centered at (200, 100).
+        let (rect, _, clip) = planned(&p, 100.0, 100.0, uv, &world);
         assert_eq!(clip[0], [150.0, 50.0]);
         assert_eq!(clip[2], [250.0, 150.0]);
+        assert_eq!(rect, PixelRect::new(150, 70, 100, 60));
+    }
+
+    #[test]
+    fn text_is_planned_like_any_content() {
         let t = write(
             "text.svg",
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text x="1" y="8">a</text></svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text x="1" y="8" font-size="8">a</text></svg>"##,
         );
-        assert!(matches!(
-            plan_svg(&t, 10.0, 10.0, [0.0, 0.0, 1.0, 1.0], &world, target).unwrap(),
-            SvgPlan::Text
-        ));
+        let world = [1.0, 0.0, 0.0, 1.0, 200.0, 100.0];
+        planned(&t, 10.0, 10.0, [0.0, 0.0, 1.0, 1.0], &world);
     }
 }

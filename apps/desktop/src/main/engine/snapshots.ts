@@ -75,6 +75,26 @@ const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFi
 const safeUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 const id = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && new TextEncoder().encode(v).length <= MAX_ID;
 
+function validViewer(value: unknown, width: number, height: number): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const viewer = value as Record<string, any>;
+  const positiveRect = (r: any) => r && ['x', 'y', 'width', 'height'].every(k => finite(r[k])) && r.width > 0 && r.height > 0;
+  const canvas = viewer.canvas;
+  if (!safeUint(viewer.viewSeq) || !canvas || canvas.width !== width || canvas.height !== height
+    || !positiveRect(canvas.crop) || !positiveRect(canvas.css)) return false;
+  const view = viewer.view;
+  if (view === null) return true;
+  if (!view || !['wireframe', 'solid', 'material', 'rendered'].includes(view.shading)
+    || typeof view.xray !== 'boolean' || !Array.isArray(view.localView) || !view.localView.every(id)) return false;
+  if (view.xray && !['wireframe', 'solid'].includes(view.shading)) return false;
+  if (view.camera === null) return true;
+  const camera = view.camera, p = camera?.projection;
+  return Array.isArray(camera?.view) && camera.view.length === 16 && camera.view.every(finite)
+    && p && finite(p.near) && finite(p.far) && p.far > p.near
+    && (p.kind === 'orthographic' ? finite(p.halfHeight) && p.halfHeight > 0
+      : p.kind === 'perspective' && p.near > 0 && finite(p.fovYDegrees) && p.fovYDegrees > 0 && p.fovYDegrees < 180);
+}
+
 /** Checks a window's snapshot request (IPC input: trust nothing). */
 export function validSnapshotRequest(value: unknown): value is EngineSnapshotRequest {
   if (!value || typeof value !== 'object') return false;
@@ -87,8 +107,6 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
   const compat = v['compatEvents'];
   if (compat !== undefined && (document === undefined || !validCompatEvents(compat))) return false;
-  const svg = v['svgPixels'];
-  if (svg !== undefined && (document === undefined || !validSvgPixels(svg))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -100,6 +118,9 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (!['opaque', 'premultiplied', 'straight'].includes(s['pixels'] as string)) return false;
   if (!['sync', 'async', 'idle'].includes(s['class'] as string)) return false;
   if (s['viewSeq'] !== null && !safeUint(s['viewSeq'])) return false;
+  if (s['viewer'] != null && !validViewer(s['viewer'], w, h)) return false;
+  if (s['viewer'] != null && s['viewSeq'] !== null
+    && s['viewSeq'] !== (s['viewer'] as { viewSeq: number }).viewSeq) return false;
   if (!Number.isInteger(s['waitMs']) || (s['waitMs'] as number) < 1 || (s['waitMs'] as number) > MAX_WAIT_MS) return false;
   // A Blender wait (today's `snapshotAsync` prepares the frame): never for
   // a blocked thread.
@@ -122,6 +143,7 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
       typeof target['background'] === 'boolean' && typeof target['draft3d'] === 'boolean';
   }
   if (target['kind'] === 'layer') {
+    if (s['viewer'] != null) return false;
     const crop = target['crop'] as Record<string, unknown> | null;
     const cropOk = crop === null || (crop && typeof crop === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(crop[k])) && (crop['width'] as number) > 0 && (crop['height'] as number) > 0);
     const content = target['content'];
@@ -146,12 +168,6 @@ export const MAX_COMPAT_EVENTS = 4096;
 export function fallbackBudgetBytes(byteLength: number, colorDepth: 16 | 32): number {
   return byteLength / (colorDepth === 32 ? 2 : 1);
 }
-/** Most SVG rasters one request carries, and their bytes (a material
- *  map may be three.js's largest texture, 16384 × 16384). */
-export const MAX_SVG_PIXELS = 64;
-export const MAX_SVG_BYTES = 1024 * 1024 * 1024;
-/** Largest SVG raster edge (`svgRasterDimensions`' limit). */
-const MAX_SVG_EDGE = 8192;
 
 function validDocument(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -162,23 +178,6 @@ function validDocument(value: unknown): boolean {
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
-}
-
-function validSvgPixels(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length > MAX_SVG_PIXELS) return false;
-  let bytes = 0;
-  for (const p of value as Record<string, unknown>[]) {
-    const key = p?.['key'] as Record<string, unknown> | undefined;
-    if (!key || typeof key !== 'object' || typeof key['content'] !== 'string' || !/^[0-9a-f]{64}$/.test(key['content'])) return false;
-    if (key['texture'] !== undefined && key['texture'] !== true) return false;
-    const max = key['texture'] === true ? 16384 : MAX_SVG_EDGE;
-    const w = key['width'], h = key['height'];
-    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > max || (h as number) > max) return false;
-    const data = p['data'];
-    if (!(data instanceof Uint8Array) || data.byteLength !== (w as number) * (h as number) * 4) return false;
-    bytes += data.byteLength;
-  }
-  return bytes <= MAX_SVG_BYTES;
 }
 
 function validFallback(value: unknown): boolean {
@@ -301,7 +300,6 @@ export class SnapshotService {
             windowId,
             request.document,
             (request.fallbackPixels ?? []).map((p) => ({ ...p })),
-            (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data })),
             request.compatEvents ?? []
           ),
           new Promise<'timeout'>((resolve) => {
@@ -380,7 +378,7 @@ export class SnapshotService {
         if (textures) fallbackTextures.push({ key: r.key, textures });
       }
       return {
-        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat, svg: outcome.svg ?? [],
+        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat,
         ...(fallbackTextures.length ? { fallbackTextures } : {})
       };
     }

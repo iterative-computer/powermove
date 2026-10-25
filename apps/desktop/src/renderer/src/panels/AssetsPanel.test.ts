@@ -151,6 +151,16 @@ afterEach(async () => {
 });
 
 describe('AssetsPanel', () => {
+  it('repaints audio thumbnails when engine waveform data arrives on the live asset', () => {
+    const { PM } = setup();
+    const bars = () => [...target.querySelectorAll<HTMLElement>('[data-asset-id="audio-1"] .asset-wave i')].map(bar => bar.style.height);
+    const before = bars();
+    PM.assets.get('audio-1').peaks = Float32Array.from({ length: 100 }, () => .8);
+    doc.bump('assets'); flushSync();
+    expect(bars()).not.toEqual(before);
+    expect(new Set(bars()).size).toBe(1);
+  });
+
   it('renders media previews and details with named controls and the legacy host class', () => {
     const { PM } = setup();
 

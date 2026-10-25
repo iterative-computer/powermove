@@ -104,25 +104,6 @@ fn corpus_render_parity() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
-    // Level 1 SVG images (decision S1) draw Chromium's rasters: those the
-    // svg-rasters tool captured (PM_SVG_RASTERS, else the newest
-    // `svg-rasters-*` directory); uncaptured ones fail their frame and are
-    // listed in its needs.json. Without a directory resvg approximates them.
-    renderer.set_svg_wait(true);
-    let svg_rasters = std::env::var("PM_SVG_RASTERS")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| support::newest_capture("svg-rasters-"))
-        .map(|d| std::sync::Arc::new(pm_render::vector::svg_rasters::RasterDir::new(d)));
-    match &svg_rasters {
-        Some(dir) => renderer.set_svg_source(Some(dir.clone())),
-        None => {
-            eprintln!(
-                "no Chromium SVG rasters (PM_SVG_RASTERS): resvg approximates level 1 SVG images"
-            );
-            renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
-        }
-    }
     // The built-in effects, transitions, and extension layers as the kernel
     // snapshots them (the captures load only built-in and missing
     // definitions).
@@ -545,15 +526,6 @@ fn corpus_render_parity() {
                 }
             }
         }
-    }
-    if let Some(dir) = &svg_rasters
-        && !dir.missing().is_empty()
-    {
-        let listed = dir.write_needs().expect("needs.json");
-        eprintln!(
-            "\n{} Chromium SVG rasters were not captured ({listed} listed in needs.json; run engine/crates/pm-render/tools/svg-rasters/run.ts --needs <dir>)",
-            dir.missing().len()
-        );
     }
     if !narrowed {
         for (name, time) in PREVIEW_EXPORT_PENDING {

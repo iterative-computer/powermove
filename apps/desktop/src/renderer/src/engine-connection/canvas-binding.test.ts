@@ -22,14 +22,15 @@ function rect(el: Element, r: { left: number; top: number; width: number; height
   (el as HTMLElement).getBoundingClientRect = () => ({ ...r, x: r.left, y: r.top, right: r.left + r.width, bottom: r.top + r.height, toJSON: () => r }) as DOMRect;
 }
 
-function setup() {
+function setup(view?: () => Partial<ViewParams>, composition: () => { w: number; h: number } | null = () => ({ w: 1920, h: 1080 })) {
   const made: FakePresentation[] = [];
   const service = { exclusive: true } as unknown as EngineViewerService;
   let enabled = true;
   const binding = new EngineCanvasBinding({
     service: () => (enabled ? service : null),
-    composition: () => ({ w: 1920, h: 1080 }),
+    composition,
     quality: () => 0.5,
+    view,
     present: ({ stage, before }) => {
       const p = new FakePresentation(stage, before);
       made.push(p);
@@ -47,6 +48,74 @@ function setup() {
 }
 
 describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () => {
+  it('keeps a bound-only canvas dormant until its caller resizes it', () => {
+    const { binding, made, canvas } = setup();
+    binding.bind(canvas);
+    binding.refresh(); // A project/document-ready notification, without render.gl.resize.
+    expect(binding.bound).toBe(canvas);
+    expect(binding.presenting).toBe(false);
+    expect(made).toHaveLength(0);
+
+    binding.resize(960, 540);
+    expect(made).toHaveLength(1);
+    const first = made[0]!;
+    const canvasState = first.updates.at(-1)!.params.canvas;
+    binding.refresh();
+    expect(made).toHaveLength(1);
+    expect(first.updates.at(-1)!.params.canvas).toEqual(canvasState);
+
+    binding.unbind();
+    binding.bind(canvas);
+    binding.refresh();
+    expect(made).toHaveLength(1);
+    expect(binding.presenting).toBe(false);
+  });
+
+  it('does not turn a former self-presenting viewer into a binding on refresh', () => {
+    const { binding, made, stage, canvas } = setup();
+    stage.setAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE, '');
+    binding.bind(canvas);
+    binding.resize(1464, 824);
+    expect(made).toHaveLength(0);
+
+    stage.removeAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE);
+    binding.refresh(); // A view notification after the viewer extension unloads.
+    expect(binding.bound).toBe(canvas);
+    expect(binding.presenting).toBe(false);
+    expect(made).toHaveLength(0);
+
+    binding.resize(960, 540); // A replacement caller actually places the canvas.
+    expect(made).toHaveLength(1);
+  });
+
+  it('does not activate a dormant binding when composition appears on refresh', () => {
+    let ready = false;
+    const { binding, made, canvas } = setup(undefined, () => ready ? { w: 1920, h: 1080 } : null);
+    binding.bind(canvas);
+    binding.resize(960, 540);
+    expect(made).toHaveLength(0);
+
+    ready = true;
+    binding.refresh();
+    expect(made).toHaveLength(0);
+    binding.resize(960, 540);
+    expect(made).toHaveLength(1);
+  });
+
+  it('refreshes a fork’s camera and shading on its existing presenter without changing its canvas crop', () => {
+    let shading: ViewParams['shading'] = 'solid';
+    const camera = { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: .01, far: 100 } } as NonNullable<ViewParams['camera']>;
+    const { binding, made, canvas } = setup(() => ({ camera, shading, xray: true, localView: ['cube'] }));
+    binding.bind(canvas);
+    binding.resize(960, 540, { x: 480, y: 270, width: 480, height: 270 });
+    const crop = made[0]!.updates.at(-1)!.params.canvas;
+    shading = 'wireframe';
+    binding.refresh();
+    expect(made).toHaveLength(1);
+    expect(binding.viewerPresentation).toBe(made[0]);
+    expect(made[0]!.updates.at(-1)!.params).toMatchObject({ camera, shading: 'wireframe', xray: true, localView: ['cube'], canvas: crop });
+  });
+
   it('presents where the passed canvas sits, under the caller overlay, and hides the canvas', () => {
     const { binding, made, stage, canvas, overlay } = setup();
     expect(ENGINE_STAGE_EVENT).toBe(PRESENTATION_STAGE_EVENT);

@@ -27,9 +27,9 @@ pub mod path;
 pub mod shape;
 
 #[cfg(feature = "render")]
-pub mod canvas2d;
-#[cfg(feature = "render")]
 pub mod render;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 
 #[cfg(feature = "conformance")]
 pub mod conformance;
