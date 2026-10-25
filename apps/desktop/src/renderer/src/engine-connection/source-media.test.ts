@@ -477,6 +477,11 @@ describe('engine source consumers', () => {
       await vi.waitFor(() => expect(present).toHaveBeenCalledTimes(4));
       expect(f.snapshot).toHaveBeenLastCalledWith(expect.objectContaining({ width: 160, height: 90 }), 'async');
       expect(queries[2]!.remove).toHaveBeenCalledOnce();
+      // A resize that keeps the density neither rearms nor repaints.
+      window.dispatchEvent(new Event('resize'));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(queries).toHaveLength(4);
+      expect(f.snapshot).toHaveBeenCalledTimes(4);
       f.source.dispose();
       expect(queries[3]!.remove).toHaveBeenCalledOnce();
       queries[3]!.change!();

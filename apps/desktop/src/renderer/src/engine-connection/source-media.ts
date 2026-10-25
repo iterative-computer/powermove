@@ -360,6 +360,7 @@ export class SourceMonitor extends EventTarget {
   private readonly cancel = new AbortController();
   private readonly resize: ResizeObserver;
   private resolution: MediaQueryList | null = null;
+  private density = 0;
   private cssWidth = 0;
   private cssHeight = 0;
   private imageUrl: string | null = null;
@@ -396,17 +397,19 @@ export class SourceMonitor extends EventTarget {
     queueMicrotask(() => { if (this.surface.isConnected) void this.paint(); });
   }
 
+  /** Window resizes also land here; only a density change repaints. */
   private readonly resolutionChanged = (): void => {
-    this.resolution?.removeEventListener('change', this.resolutionChanged);
-    this.resolution = null;
-    if (this.disposed) return;
+    if (this.disposed || (devicePixelRatio || 1) === this.density) return;
     this.watchResolution();
     void this.paint();
   };
 
   private watchResolution(): void {
+    this.resolution?.removeEventListener('change', this.resolutionChanged);
+    this.resolution = null;
+    this.density = devicePixelRatio || 1;
     if (typeof matchMedia !== 'function') return;
-    this.resolution = matchMedia(`(resolution: ${devicePixelRatio || 1}dppx)`);
+    this.resolution = matchMedia(`(resolution: ${this.density}dppx)`);
     this.resolution.addEventListener('change', this.resolutionChanged);
   }
 
