@@ -51,6 +51,38 @@ const root = source ? path.dirname(source) : '';
 const readJson = async (file: string) => JSON.parse(await readFile(file, 'utf8'));
 const external = (file: string) => path.resolve(root, file);
 
+type Box = { x0: number; y0: number; x1: number; y1: number };
+
+/**
+ * TEXT-INK-1: a color-glyph line's selection is what is drawn. Today's Canvas
+ * selection (Skia's whole-pixel round-out plus 1 px outset of CoreText's
+ * metric rectangle) stays recorded as the witness; the engine's selection
+ * must instead meet exactly the pixels its own raster made nonzero.
+ */
+const DRAWN_INK: Record<string, Box & { w: number; h: number }> = {
+  'sdf-scripts-0024': { x0: 4.72265625, y0: -24, x1: 713, y1: 201, w: 708.27734375, h: 225 },
+};
+
+/** The device pixels with nonzero alpha in an RGBA8 buffer. */
+function alphaBox(rgba: Uint8Array, width: number): Box {
+  const box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  for (let i = 3; i < rgba.length; i += 4) {
+    if (!rgba[i]) continue;
+    const x = ((i - 3) / 4) % width, y = Math.floor((i - 3) / 4 / width);
+    box.x0 = Math.min(box.x0, x); box.y0 = Math.min(box.y0, y);
+    box.x1 = Math.max(box.x1, x + 1); box.y1 = Math.max(box.y1, y + 1);
+  }
+  return box;
+}
+
+/** Typography anchoring (`font-anchor.ts` / pm-eval `font_anchor_offset`). */
+function fontAnchorOffset(reference: Box, bounds: Box, ax: number, ay: number) {
+  const offset = (start: number, end: number, nextStart: number, nextEnd: number, anchor: number) =>
+    end <= start ? 0 : anchor - (nextStart + (anchor - start) / (end - start) * (nextEnd - nextStart));
+  return { x: offset(reference.x0, reference.x1, bounds.x0, bounds.x1, ax),
+    y: offset(reference.y0, reference.y1, bounds.y0, bounds.y1, ay) };
+}
+
 function compare(a: Uint8Array, b: Uint8Array) {
   expect(a.length).toBe(b.length);
   const values = new Array<number>(a.length / 4);
@@ -133,6 +165,7 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
         }
         const rows: any[] = [];
         for (const item of cases) {
+          const probe = { ...item, witness: DRAWN_INK[item.id] ?? null };
           const actual = await session.page.evaluate(item => {
             const PM = (window as any).PM;
             const api = PM.Kernel.api('e2e-text-reference-parity');
@@ -160,7 +193,18 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
             if (error) throw new Error(`GL ${error}`);
             let encoded = '';
             for (let i = 0; i < px.length; i += 32768) encoded += String.fromCharCode(...px.subarray(i, i + 32768));
+            // A layer saved today with typography anchoring records today's
+            // selection; the anchor follows the current bounds from there.
+            let anchored = null;
+            if (item.witness) {
+              const saved = PM.mkLayer('text', { id: 'probe-anchored', from: 0, dur: 10,
+                d: { ...item.d, fontAnchorBounds: item.witness } }, PM.proj);
+              const placed = api.render.raster(saved, item.scale, time);
+              anchored = { anchorX: placed.anchorX, anchorY: placed.anchorY,
+                ax: PM.ev(saved, 'anchor.x', time), ay: PM.ev(saved, 'anchor.y', time) };
+            }
             return {
+              anchored,
               compat: layer.compat ?? null,
               layout: item.kind === 'text' ? api.render.textLayout(layer, time) : null,
               captionBounds: item.kind === 'captions' ? PM.captionBounds(layer, time) : null,
@@ -172,7 +216,7 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
               rgba: btoa(encoded),
               enabled: (window as any).__powermoveTestBridge.nativeEngine.enabledSync(),
             };
-          }, item);
+          }, probe);
           if (!group.ids.includes(item.id)) continue;
           const shot = shots.cases.find((c: any) => c.id === item.id);
           expect(shot).toBeTruthy();
@@ -200,8 +244,34 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
       const { rgba: engine64, enabled: engineEnabled, ...engineSemantic } = engine[i]!;
       const { rgba: today64, enabled: todayEnabled, ...todaySemantic } = today[i]!;
       expect([engineEnabled, todayEnabled]).toEqual([true, false]);
-      expect(engineSemantic, `numeric case ${group.reference.indices[i]} (compat ${engine[i]!.compat}): exact semantics`).toEqual(todaySemantic);
       const size = engine[i]!.geometry.canvas as [number, number];
+      const id = group.ids[i]!, witness = DRAWN_INK[id];
+      if (witness) {
+        // Today keeps its recorded Canvas selection and anchors to it unmoved.
+        const { geometry: g, anchored: a } = todaySemantic;
+        expect(g.selection, `${id}: today's Canvas witness`).toEqual(witness);
+        expect([a.anchorX, a.anchorY]).toEqual([g.anchorX, g.anchorY]);
+        // The engine's unpadded selection, rounded out to device pixels, is
+        // exactly the box of nonzero alpha its raster drew.
+        const e = engineSemantic.geometry, sel = e.selection;
+        const size0 = Number(cases.find((c: any) => c.id === id)?.d?.size) || 16;
+        const pad = Math.min(12, Math.max(3, Math.max(1, size0) * 0.055));
+        const [sx, sy] = [size[0] / e.w, size[1] / e.h];
+        expect(alphaBox(Buffer.from(engine64, 'base64'), size[0]), `${id}: selection is the drawn ink`).toEqual({
+          x0: Math.floor((sel.x0 + pad + e.anchorX) * sx), y0: Math.floor((sel.y0 + pad + e.anchorY) * sy),
+          x1: Math.ceil((sel.x1 - pad + e.anchorX) * sx), y1: Math.ceil((sel.y1 - pad + e.anchorY) * sy),
+        });
+        // Typography anchoring maps the recorded Canvas box onto the drawn one.
+        const b = engineSemantic.anchored, offset = fontAnchorOffset(witness, sel, b.ax, b.ay);
+        expect([b.anchorX, b.anchorY], `${id}: font anchor follows the drawn ink`).toEqual(
+          [e.anchorX - offset.x, e.anchorY - offset.y]);
+        expect([b.ax, b.ay]).toEqual([a.ax, a.ay]);
+        for (const side of [engineSemantic, todaySemantic]) {
+          side.geometry = { ...side.geometry, selection: undefined };
+          side.anchored = undefined;
+        }
+      }
+      expect(engineSemantic, `numeric case ${group.reference.indices[i]} (compat ${engine[i]!.compat}): exact semantics`).toEqual(todaySemantic);
       const { index, pixels } = await attested(group.reference, i, 'case', size);
       const result = compare(Buffer.from(engine64, 'base64'), pixels);
       metrics.push({ case: index, ...result,

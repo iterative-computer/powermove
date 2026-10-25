@@ -232,21 +232,52 @@ pub fn apple_emoji_shift(requested: f32, size: f32) -> f64 {
     (f64::from(size) / 8.0 - 0.5).ceil()
 }
 
-/// The drawn image rectangle relative to the glyph origin, from strike
-/// metadata without decoding pixels: the draw path's strike choice and
-/// authored placement (`Bitmaps::get` with the same sizes).
-pub fn ink_bounds(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<Rect> {
+/// The drawn area of a bitmap glyph relative to its origin, at device
+/// scale 1: its nonzero-alpha texels through the authored placement (the
+/// draw path's strike and sizes), grown by the reconstruction's reach. A
+/// device pixel is nonzero exactly when its square meets this rectangle.
+/// Enlargement samples bilinearly, so texel `k` weighs on samples within
+/// `(k - 0.5, k + 1.5)` texels; as an area rectangle that is `scale / 2 -
+/// 1 / 2` px past the texel edge. Minification integrates texel area, so
+/// it reaches no further. `None` when the glyph has no color strike (the
+/// painter falls back to its outline); `Some(None)` when it draws nothing.
+pub fn ink_bounds(
+    face: FaceRef<'_>,
+    glyph: u32,
+    requested: f32,
+    size: f32,
+) -> Option<Option<Rect>> {
     let font = face.font()?;
     let bitmap = font
         .bitmap_strikes()
         .glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
-    if matches!(&bitmap.data, BitmapData::Mask(_)) || bitmap.width == 0 || bitmap.height == 0 {
-        return None;
-    }
+    let image = decode(&bitmap.data, bitmap.width, bitmap.height)?;
     let upem = f32::from(font.head().ok()?.units_per_em());
-    let (_, bounds) =
+    let (transform, _) =
         authored_placement(&bitmap, upem, is_apple_color_emoji(face), requested, size);
-    Some(bounds)
+    let Some(content) = alpha_bounds(&image) else {
+        return Some(None);
+    };
+    let reach = (f64::from(size) / f64::from(bitmap.ppem_y) / 2.0 - 0.5).max(0.0);
+    Some(Some(
+        transform.transform_rect_bbox(content).inflate(reach, reach),
+    ))
+}
+
+/// The texel rectangle of an image's nonzero alpha.
+fn alpha_bounds(image: &Rgba8) -> Option<Rect> {
+    let w = image.width as usize;
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, px) in image.data.chunks_exact(4).enumerate() {
+        if px[3] != 0 {
+            let (x, y) = (i % w, i / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    (x1 > 0).then(|| Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64))
 }
 
 fn authored_placement(
@@ -256,8 +287,8 @@ fn authored_placement(
     requested: f32,
     size: f32,
 ) -> (Affine, Rect) {
-    let scale = f64::from(size / bitmap.ppem_y);
-    let units = f64::from(size / upem);
+    let scale = f64::from(size) / f64::from(bitmap.ppem_y);
+    let units = f64::from(size) / f64::from(upem);
     let outer = if is_apple_color_emoji {
         Vec2::new(0.0, apple_emoji_shift(requested, size))
     } else {
@@ -348,37 +379,74 @@ mod tests {
         }
     }
 
+    /// The pixels the painter makes nonzero for one glyph drawn at `origin`.
+    #[cfg(target_os = "macos")]
+    fn painted_box(
+        face: FaceRef<'_>,
+        glyph: u32,
+        size: f32,
+        bitmap_size: f32,
+        origin: (f64, f64),
+    ) -> [i64; 4] {
+        use crate::render::scene::{Painter, Run, TextScene};
+        let mut outlines = crate::render::outline::Outlines::new();
+        let mut bitmaps = Bitmaps::new();
+        let mut painter = Painter {
+            outlines: &mut outlines,
+            bitmaps: &mut bitmaps,
+            unsupported: Vec::new(),
+        };
+        let glyphs = [crate::compat::PlacedGlyph {
+            id: glyph,
+            x: 0.0,
+            y: 0.0,
+        }];
+        let run = Run {
+            face,
+            size,
+            coords: crate::render::outline::Coords::Normalized(&[]),
+            synthetic_bold: false,
+            synthetic_italic: false,
+            oblique: 0.0,
+            glyphs: &glyphs,
+            bitmap_size: Some(bitmap_size),
+        };
+        let mut scene = TextScene {
+            width: 320,
+            height: 320,
+            items: Vec::new(),
+        };
+        painter.fill_text(
+            &mut scene.items,
+            &[run],
+            origin,
+            Affine::IDENTITY,
+            [1.0; 4],
+            1.0,
+            0.0,
+        );
+        let image = crate::render::paint::render_cpu(&scene);
+        let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+        // Nonzero as stored: an alpha code of at least one in RGBA8.
+        for (i, px) in image.data.chunks_exact(4).enumerate() {
+            if (px[3] * 255.0).round() >= 1.0 {
+                let (x, y) = ((i % 320) as i64, (i / 320) as i64);
+                b = [b[0].min(x), b[1].min(y), b[2].max(x + 1), b[3].max(y + 1)];
+            }
+        }
+        b
+    }
+
+    /// Ink is what the painter draws: at every size (minified below the
+    /// strike, enlarged above it, enlarged full-em draws below 24 px) and
+    /// sub-pixel phase, the nonzero pixels are exactly the pixels whose
+    /// squares meet the ink rectangle. Covers a shaped skin-tone sequence.
     #[cfg(target_os = "macos")]
     #[test]
-    fn installed_apple_emoji_ink_uses_real_strikes_and_matches_draw_placement() {
+    fn installed_apple_emoji_ink_is_the_painted_pixels() {
         let file = std::fs::File::open("/System/Library/Fonts/Apple Color Emoji.ttc")
             .expect("Apple Color Emoji system font");
         // The mapping borrows a stable, read-only system file for this test.
-        let bytes = unsafe { memmap2::MmapOptions::new().map(&file) }.unwrap();
-        let face = FaceRef {
-            data: &bytes,
-            index: 0,
-            id: 0,
-        };
-        let glyph = face.font().unwrap().charmap().map('👋').unwrap().to_u32();
-        let mut decoded = Bitmaps::new();
-        for (size, expected) in [
-            (40.0, Rect::new(0.0, -35.0, 40.0, 5.0)),
-            (96.0, Rect::new(0.0, -84.0, 96.0, 12.0)),
-            (160.0, Rect::new(0.0, -140.0, 160.0, 20.0)),
-            (200.0, Rect::new(0.0, -175.0, 200.0, 25.0)),
-        ] {
-            let ink = ink_bounds(face, glyph, size, size).unwrap();
-            assert_eq!(ink, expected, "size {size}");
-            assert_eq!(ink, decoded.get(face, glyph, size, size).unwrap().bounds);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn shaped_apple_emoji_skin_tone_ink_matches_draw_placement() {
-        let file = std::fs::File::open("/System/Library/Fonts/Apple Color Emoji.ttc")
-            .expect("Apple Color Emoji system font");
         let bytes = std::sync::Arc::new(unsafe { memmap2::MmapOptions::new().map(&file) }.unwrap());
         let face = FaceRef {
             data: &bytes[..],
@@ -387,63 +455,61 @@ mod tests {
         };
         let shared: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
         let font = read_fonts::model::Font::new(read_fonts::model::Blob::from(shared), 0).unwrap();
-        let base = face.font().unwrap().charmap().map('👋').unwrap().to_u32();
-        let mut decoded = Bitmaps::new();
-
-        for (size, expected) in [
-            (40.0, Rect::new(0.0, -35.0, 40.0, 5.0)),
-            (96.0, Rect::new(0.0, -84.0, 96.0, 12.0)),
-            (160.0, Rect::new(0.0, -140.0, 160.0, 20.0)),
-            (200.0, Rect::new(0.0, -175.0, 200.0, 25.0)),
-        ] {
+        let shape = |text: &str, size: f32| {
             let shaper = harfrust::ShaperFont::new(&font).with_scale((size * 65536.0) as i32);
             let mut buffer = harfrust::Buffer::new();
-            for (cluster, ch) in "👋🏽".char_indices() {
+            for (cluster, ch) in text.char_indices() {
                 buffer.push(ch as u32, cluster as u32);
             }
             buffer.set_direction(harfrust::Direction::LeftToRight);
             harfrust::shape(&shaper, &mut buffer, harfrust::ShapeOptions::new()).unwrap();
             let [glyph] = buffer.glyph_infos() else {
-                panic!("skin-tone sequence must shape to one color glyph at size {size}");
+                panic!("{text} must shape to one color glyph at size {size}");
             };
-            assert_ne!(glyph.glyph_id, base, "skin-tone modifier was not shaped");
-
-            let ink = crate::render::scene::drawn_color_glyph_ink(
-                face,
-                crate::render::outline::Coords::Normalized(&[]),
-                glyph.glyph_id,
-                size,
-                0.0,
-                None,
-            )
-            .unwrap();
-            assert_eq!(ink, expected, "size {size}");
-            assert_eq!(
-                ink,
-                decoded
-                    .get(face, glyph.glyph_id, size, size)
-                    .unwrap()
-                    .bounds
-            );
-
-            let resolved_size = size + 2.25;
-            let overridden = crate::render::scene::drawn_color_glyph_ink(
-                face,
-                crate::render::outline::Coords::Normalized(&[]),
-                glyph.glyph_id,
-                size,
-                0.0,
-                Some(resolved_size),
-            )
-            .unwrap();
-            assert_eq!(
-                overridden,
-                decoded
-                    .get(face, glyph.glyph_id, size, resolved_size)
-                    .unwrap()
-                    .bounds,
-                "resolved bitmap size {resolved_size}"
-            );
+            glyph.glyph_id
+        };
+        let wave = face.font().unwrap().charmap().map('👋').unwrap().to_u32();
+        // (requested, drawn): small emoji draw at an enlarged full-em size.
+        for (requested, drawn) in [
+            (12.0, 15.0),
+            (23.0, 24.0),
+            (40.0, 40.0),
+            (96.0, 96.0),
+            (200.0, 200.0),
+        ] {
+            let tone = shape("👋🏽", requested);
+            assert_ne!(tone, wave, "skin-tone modifier was not shaped");
+            for glyph in [wave, tone] {
+                let ink = crate::render::scene::drawn_color_glyph_ink(
+                    face,
+                    crate::render::outline::Coords::Normalized(&[]),
+                    glyph,
+                    requested,
+                    0.0,
+                    Some(drawn),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(Some(Some(ink)), ink_bounds(face, glyph, requested, drawn));
+                for origin in [
+                    (40.0, 250.0),
+                    (40.3, 250.7),
+                    (40.5, 250.25),
+                    (40.875, 250.5),
+                ] {
+                    let expected = [
+                        (ink.x0 + origin.0).floor() as i64,
+                        (ink.y0 + origin.1).floor() as i64,
+                        (ink.x1 + origin.0).ceil() as i64,
+                        (ink.y1 + origin.1).ceil() as i64,
+                    ];
+                    assert_eq!(
+                        painted_box(face, glyph, requested, drawn, origin),
+                        expected,
+                        "glyph {glyph} at {requested} px (drawn {drawn}), origin {origin:?}: ink {ink:?}"
+                    );
+                }
+            }
         }
     }
 }

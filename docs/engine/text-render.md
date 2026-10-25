@@ -24,15 +24,17 @@ and density, preserving its geometry and crop contract.
 Layout is an exact gate independent of pixels. Raster improvements must
 never be accepted as a reason for changing an advance or line break.
 
-Ink boxes describe what is drawn, at both levels. Outline glyphs keep their
-control boxes; level 1 keeps Blink's canonical-path arithmetic for them. A
-color glyph's box comes from the painter's own placement
-(`scene::drawn_color_glyph_ink`, shared by native and WASM): the strike
-chosen at the full-em size with the authored Apple shift, or the COLR
-painted and clip bounds. A glyph with neither outline nor color source has
-no ink. Canvas measured emoji 1–2 px larger than drawn (Skia's whole-pixel
-round-out plus a 1 px outset of CoreText's metric rectangle); that slack is
-not reproduced. Advances and line breaks are unchanged.
+Ink boxes describe what is drawn, at both levels (TEXT-INK-1). Outline
+glyphs keep their control boxes; level 1 keeps Blink's canonical-path
+arithmetic for them. A color glyph's box is its drawn area from the
+painter's own placement (`scene::drawn_color_glyph_ink`, shared by native
+and WASM): the strike's nonzero texels at the full-em size with the
+authored Apple shift, grown by the bilinear reach when enlarged, or the
+COLR painted and clip bounds. A device pixel is nonzero exactly when its
+square meets that box. Canvas measured emoji by CoreText's metric
+rectangle rounded out and outset 1 px; that slack is not reproduced.
+Typography anchoring follows the drawn box. Advances and line breaks are
+unchanged.
 
 ## What is drawn
 
@@ -197,8 +199,10 @@ records separate raw float and mapped sRGB8 results.
   text-isolated witnesses both counted.
 - `text_gpu`, `text_colors`, `text_level2` and `text_level2_semantics` check
   paint precision, color semantics, transformations and interaction.
-- `pm-eval`'s `color_ink` and `pm-text`'s bitmap tests hold color-glyph ink
-  to the painter's placement at several sizes, skin-tone sequences included.
+- `pm-text`'s bitmap test holds color-glyph ink to the painted pixels at
+  several sizes and sub-pixel phases; `pm-eval`'s `color_ink` holds level 1
+  measurement to it; G-T5 checks the installed app's selection and font
+  anchor against its own drawn pixels.
 - G-C2 checks the complete frame and preview/export contract.
 - `pm-reference` tests the independent coverage, color and blend formulas.
 

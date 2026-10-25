@@ -92,17 +92,17 @@ two samplings of a Canvas raster. At depth 8, engine/reference max is
 At depths 16 and 32, maxima are 0.216 and 0.00068 CV versus 75.741 and
 75.807 CV. The per-pixel, p99.9 and mean rules also pass.
 
-Color-glyph ink (selection, bounds and typography anchoring) is the drawn
-image or COLR paint, measured by the painter's placement code; the
-reference is that drawn rectangle, which G-T1 case 519's pixels confirm.
-At 200 px Apple Color Emoji draws y -175..25 around the baseline. The
-previous engine measured the `glyf` box (y -200..0, up to 25 px off).
-Canvas reports y -177..26 and 2 px more on the right: Skia rounds
-CoreText's metric rectangle (1e-4 larger than the image) out to whole
-pixels and outsets it 1 px for anti-aliasing. The engine is exact
-(`pm-eval` `color_ink`, five sizes including enlarged small emoji). The
-installed-app case 519 selection is therefore 2 px tighter at the top and
-right and 1 px at the bottom than today's.
+**TEXT-INK-1** (owner decision 2026-10-25): color-glyph ink (selection,
+bounds and typography anchoring) is what is drawn, not Canvas metric slack.
+
+| Correction (rule) | Today: case 519 selection | Engine: case 519 selection | Proof |
+|---|---|---|---|
+| Color-glyph ink is the drawn area: nonzero strike texels through the painter's placement plus its reconstruction reach (bilinear enlargement: `scale/2 - 1/2` px), COLR painted/clip bounds | y0 -24, y1 201, x1 713 px: Skia's round-out plus 1 px outset of CoreText's metric rectangle, its ink edges 1 px above, 3 px below and 8 px right of the drawn pixels; the previous engine measured the `glyf` box (y0 -47, y1 175) | y0 -22.125, y1 197.625, x1 704.875 px; rounded out, exactly the nonzero-alpha box [15, -12, 694, 187] the engine drew | G-T5 case 519 (installed app, exact, RGBA8); `pm-text` painted-pixel test at 12–200 px and four sub-pixel phases, skin-tone included; `pm-eval` `color_ink` |
+
+Typography anchoring maps a layer's recorded bounds onto the current ones,
+so a project saved today with a font anchor on emoji text moves by up to
+those edge differences, depending on the anchor. G-T5 checks the offset
+exactly against the drawn selection.
 
 Composed-text rows outside this lane's reference coverage retain their
 original bound and remain explicit owned failures: path masks with the

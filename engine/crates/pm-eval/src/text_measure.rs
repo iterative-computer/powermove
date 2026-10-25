@@ -55,7 +55,7 @@ pub(crate) fn level2_ink(
         skew,
         None,
     ) {
-        return Some([r.x0, r.y0, r.x1, r.y1]);
+        return r.map(|r| [r.x0, r.y0, r.x1, r.y1]);
     }
     let font = FontRef::new(data.as_slice()).ok()?;
     let coords: Vec<_> = run
@@ -302,7 +302,12 @@ impl<R: FontResolver> CompatMeasure<R> {
             skew,
             em,
         )
-        .map(|r| RectF::from_sk(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32));
+        .map(|ink| {
+            // Something drawn has a box; nothing drawn has an empty one.
+            ink.map_or_else(RectF::default, |r| {
+                RectF::from_sk(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32)
+            })
+        });
         if self.color_boxes.len() >= COLOR_BOX_LIMIT_ENTRIES {
             self.color_boxes.clear();
         }
