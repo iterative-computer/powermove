@@ -5,9 +5,9 @@
 //! creates exclusively (mode 0600, a random 96-bit name, `/pm.` and 24 hex
 //! digits) and names it in its answer to main. Producers that can write in
 //! place fill the mapping directly ([`publish_with`]). Main maps the segment
-//! once, unlinks it, and either copies the pixels into a `Buffer` it hands to
-//! the window ([`take`]) or reads them straight from the mapping ([`take_with`]). A segment nobody takes is unlinked by the engine after
-//! [`ORPHAN_AFTER`] ([`Segments::reap`]) and at shutdown.
+//! once, copies the pixels into a `Buffer` it hands to the window, and
+//! unlinks it ([`take`]). A segment nobody takes is unlinked by the engine
+//! after [`ORPHAN_AFTER`] ([`Segments::reap`]) and at shutdown.
 //!
 //! The reader runs in main, so it trusts nothing about the segment: the
 //! name must have the engine's exact shape, the segment must be a regular
@@ -141,16 +141,6 @@ fn write_into(
 /// unlinks it. Main's half: refuses names of another shape, objects of
 /// another owner, and segments shorter than `length`.
 pub fn take(name: &str, length: usize) -> io::Result<Vec<u8>> {
-    take_with(name, length, |bytes| Ok(bytes.to_vec()))
-}
-
-/// `read` sees the mapped segment's first `length` bytes, already unlinked;
-/// the mapping ends when it returns.
-fn take_with<T>(
-    name: &str,
-    length: usize,
-    read: impl FnOnce(&[u8]) -> io::Result<T>,
-) -> io::Result<T> {
     let c = c_name(name)?;
     if length == 0 || length > MAX_SEGMENT {
         return Err(io::Error::new(
@@ -167,17 +157,13 @@ fn take_with<T>(
     // and no one else can open it again.
     // SAFETY: a valid C string.
     unsafe { libc::shm_unlink(c.as_ptr()) };
-    let result = read_from(fd, length, read);
+    let result = read_from(fd, length);
     // SAFETY: fd is ours.
     unsafe { libc::close(fd) };
     result
 }
 
-fn read_from<T>(
-    fd: libc::c_int,
-    length: usize,
-    read: impl FnOnce(&[u8]) -> io::Result<T>,
-) -> io::Result<T> {
+fn read_from(fd: libc::c_int, length: usize) -> io::Result<Vec<u8>> {
     // SAFETY: zeroed stat is a valid out-parameter.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fd is open; stat is writable.
@@ -211,13 +197,13 @@ fn read_from<T>(
     if map == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the read-only mapping is `length` bytes long and lives until
-    // the munmap below; the segment is already unlinked, so no one else can
-    // open it to write.
-    let result = read(unsafe { std::slice::from_raw_parts(map.cast::<u8>(), length) });
-    // SAFETY: the mapping made above.
-    unsafe { libc::munmap(map, length) };
-    result
+    let mut out = vec![0u8; length];
+    // SAFETY: the mapping is `length` bytes long.
+    unsafe {
+        std::ptr::copy_nonoverlapping(map.cast::<u8>(), out.as_mut_ptr(), length);
+        libc::munmap(map, length);
+    }
+    Ok(out)
 }
 
 /// Whether a published segment is still waiting for its reader. `take`
@@ -312,18 +298,15 @@ mod tests {
     }
 
     #[test]
-    fn segments_are_written_and_read_in_place() {
+    fn segments_are_written_in_place() {
         let name = publish_with(5, |segment| {
             assert_eq!(segment, [0; 5], "a fresh segment starts zeroed");
             segment[1..4].copy_from_slice(&[7, 8, 9]);
             Ok(())
         })
         .unwrap();
-        let sum = take_with(&name, 5, |bytes| {
-            Ok(bytes.iter().map(|&b| u32::from(b)).sum::<u32>())
-        });
-        assert_eq!(sum.unwrap(), 24);
-        assert!(!exists(&name).unwrap(), "reading in place also unlinks");
+        assert_eq!(take(&name, 5).unwrap(), [0, 7, 8, 9, 0]);
+        assert!(!exists(&name).unwrap(), "taking unlinks");
         // A failed fill reports its own error (publish unlinks the segment).
         let mut made = None;
         let error = publish_with(5, |segment| {
