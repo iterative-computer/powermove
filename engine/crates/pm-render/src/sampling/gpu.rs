@@ -867,6 +867,27 @@ impl Placement {
         (x1 > x0 && y1 > y0).then_some([x1 - x0, 0.0, 0.0, y1 - y0, x0, y0])
     }
 
+    /// Whether every output pixel center lands on a texel center one to one
+    /// (an unscaled, unrotated draw at an integer offset): the sample is that
+    /// texel exactly, with no kernel arithmetic.
+    fn texel_aligned(&self, uv: [f64; 4], from_fbo: bool, pyramid: &Pyramid) -> bool {
+        let i = &self.inverse;
+        if i[2].abs() > 1e-12 || i[5].abs() > 1e-12 || (i[8] - 1.0).abs() > 1e-12 {
+            return false;
+        }
+        let (w, h) = (f64::from(pyramid.width), f64::from(pyramid.height));
+        let flip = if from_fbo { -1.0 } else { 1.0 };
+        // Texel coordinates per output pixel, and at the first pixel center.
+        let (jxx, jxy) = (i[0] * uv[2] * w, i[3] * uv[2] * w);
+        let (jyx, jyy) = (flip * i[1] * uv[3] * h, flip * i[4] * uv[3] * h);
+        let tx = (uv[0] + (i[0] * 0.5 + i[3] * 0.5 + i[6]) * uv[2]) * w;
+        let qy = uv[1] + (i[1] * 0.5 + i[4] * 0.5 + i[7]) * uv[3];
+        let ty = (if from_fbo { 1.0 - qy } else { qy }) * h;
+        let unit = |v: f64| (v.abs() - 1.0).abs() < 1e-9;
+        let centered = |t: f64| (t - t.floor() - 0.5).abs() < 1e-6;
+        unit(jxx) && jxy.abs() < 1e-9 && jyx.abs() < 1e-9 && unit(jyy) && centered(tx) && centered(ty)
+    }
+
     /// The draw uniform of this placement in a `frame`-sized output, or
     /// `None` when the draw misses the frame.
     #[allow(clippy::too_many_arguments)]
@@ -915,7 +936,7 @@ impl Placement {
                 self.bounds[0] as f32,
                 self.bounds[1] as f32,
                 f32::from(pyramid.inline_first),
-                0.0,
+                f32::from(u8::from(self.texel_aligned(uv, from_fbo, pyramid))),
             ],
             edges: [[0.0; 4]; MAX_EDGES],
             bounds: [

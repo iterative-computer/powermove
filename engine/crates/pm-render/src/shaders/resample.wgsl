@@ -25,7 +25,8 @@ struct Resample {
     // Source width and height at level 0, mip levels.
     tex: vec4<f32>,
     // xy: the origin the edges are relative to (output pixels), so edge
-    // distances keep their precision far from the frame's origin.
+    // distances keep their precision far from the frame's origin. z: the
+    // first mip is box-filtered inline; w: texels map one to one.
     origin: vec4<f32>,
     // Content polygon edges, unit normals: a·x + b·y + c ≥ 0 inside, with
     // (x, y) relative to `origin`.
@@ -262,7 +263,11 @@ fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
     // Pixels at the polygon's edge sample the nearest content (clamp).
     let cuv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
     var c: vec4<f32>;
-    if (r.params.z < 0.5) {
+    if (r.origin.w > 0.5) {
+        // A one-to-one draw copies its texel exactly.
+        let last = vec2<i32>(textureDimensions(src, 0)) - vec2<i32>(1);
+        c = textureLoad(src, min(vec2<i32>(floor(cuv * r.tex.xy)), last), 0);
+    } else if (r.params.z < 0.5) {
         if (r.origin.z > 0.5) {
             let lod = clamp(log2(max(length(dx), length(dy))), 0.0, 1.0);
             c = mix(textureSampleLevel(src, trilinear, cuv, 0.0), first_mip_bilinear(cuv), lod);
