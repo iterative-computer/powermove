@@ -593,6 +593,38 @@ it('draws every frame once when the frame boundaries sit at the decisions and th
   expect(steps.filter((d) => d !== 1)).toEqual([]);
 });
 
+it('draws every frame once across half-refresh BeginFrame phase changes; a missed refresh skips its frame', () => {
+  // Under load the BeginFrame phase moved by half a refresh for about a
+  // second and back; the grid relocked each time and a decision that
+  // followed it skipped or repeated a frame at every relock.
+  let now = 0;
+  const P = 1000 / 120;
+  const F120 = TICKS_PER_SECOND / 120;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const latency = 1.5 * P + 3.2;
+  const presenter = new EnginePresenter({ link, source, painter, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: Math.round(latency * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, latency);
+  const shown: number[] = [];
+  presenter.onPresented((f) => shown.push(Math.round(f.pts / F120)));
+  const missed = 1500;
+  for (let i = 0; i < 2400; i++) {
+    const k = i + 6;
+    source.arrive(1, k % 12);
+    presenter.receive({ type: 'frame', frame: desc(k + 1, { poolIndex: k % 12, pts: k * F120, duration: F120 }) }, i * P - 1);
+    if (i === missed) continue;
+    const shift = (i >= 600 && i < 720) || (i >= 1800 && i < 1950) ? P / 2 : i >= 1200 && i < 1300 ? -P / 2 : 0;
+    const raf = i * P + shift + ((i * 7919) % 11) / 10 - 0.5;
+    now = raf;
+    presenter.refresh(Math.round(raf * 10) / 10);
+    painter.finishGpu();
+  }
+  const steady = shown.slice(60);
+  const steps = steady.slice(1).map((k, i) => k - steady[i]!);
+  expect(steps.filter((d) => d !== 1)).toEqual([2]);
+});
+
 it('draws each refresh\'s timed frame inside its animation frame, one per refresh at 120 Hz', () => {
   // A worker canvas sends what the animation frame drew as the callback
   // returns; a draw deferred past it waits for the next BeginFrame.

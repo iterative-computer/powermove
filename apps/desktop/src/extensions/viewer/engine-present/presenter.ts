@@ -225,6 +225,9 @@ export class EnginePresenter implements Presenter {
   private parked: { desc: FrameDescriptor; since: number }[] = [];
   private offsetUs = 0;
   private offsetKey = '';
+  /** The last refresh's animation frame and the instant it decided for. */
+  private lastRafMs = 0;
+  private lastDecisionMs = 0;
   /** performance.now() of the last live resize step (`noteResize`). */
   private resizedAtMs: number | null = null;
   /** The last timed frame's duration (ticks), for the decision phase. */
@@ -528,22 +531,28 @@ export class EnginePresenter implements Presenter {
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
     const host = this.hostUs(decision);
     if (fit && clock && head && host !== null) {
-      // Within a run the offset follows the grid continuously: a grid that
-      // moves (the lock tracking jitter, a display-link phase change) moves
-      // the decisions with it instead of flipping them by a refresh near the
-      // half-refresh mark, which skipped or repeated a frame. It is centred
-      // again only beyond five eighths of a refresh (clock drift).
-      const run = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${resizing}`;
+      // Decisions sit halfway between frame boundaries (`next`). Within a
+      // run each refresh decides one refresh after the last: as many as
+      // its animation frame says passed, a BeginFrame up to three quarters
+      // of a refresh late or early still being the next refresh. So a grid
+      // that moves by half a refresh (a display-link phase change, early
+      // BeginFrames on an idle machine) neither skips nor repeats a frame;
+      // a missed refresh skips its frame. Decisions a refresh away from the
+      // grid's by more than one and a half are centred on it again (one
+      // frame, after phase changes that added up).
+      const run = `${clock.epoch}:${resizing}`;
       const next = decisionOffsetUs(periodMs * 1000, host, clock, head);
       const periodUs = periodMs * 1000;
-      if (run !== this.offsetKey) this.offsetUs = next;
-      else {
-        let step = (((next - this.offsetUs) % periodUs) + periodUs) % periodUs;
-        if (step > periodUs / 2) step -= periodUs;
-        this.offsetUs += step;
-        if (Math.abs(this.offsetUs) > periodUs * 0.625) this.offsetUs = next;
+      this.offsetUs = next;
+      if (run === this.offsetKey) {
+        const refreshes = Math.max(1, Math.round((rafMs - this.lastRafMs) / periodMs - 0.25));
+        const expected = this.lastDecisionMs + refreshes * periodMs;
+        const k = Math.round((expected - (decision + next / 1000)) / periodMs);
+        if (Math.abs(next + k * periodUs) <= 1.5 * periodUs) this.offsetUs = next + k * periodUs;
       }
       this.offsetKey = run;
+      this.lastRafMs = rafMs;
+      this.lastDecisionMs = decision + this.offsetUs / 1000;
     }
     return { decisionMs: decision + this.offsetUs / 1000, displayMs };
   }

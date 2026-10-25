@@ -1781,10 +1781,15 @@ the per-frame trace).
    moves it by 1/16 of its error (at most 1/16 of a refresh); twelve
    agreeing samples outside that band relock it. The engine's vsync hint
    is this timeline, re-sent when the phase moved 100 µs (at most every
-   250 ms), so the engine's plan and the viewer's decisions agree. Within a
-   run the decision offset follows the timeline instead of being re-centred
-   (re-centred only past five eighths of a refresh): a decision that jumps
-   across a frame boundary draws one frame twice and drops the next.
+   250 ms), so the engine's plan and the viewer's decisions agree.
+   Decisions sit halfway between frame boundaries, folded by the frame's
+   exact share of a refresh (not the estimated period, which a seconds-old
+   clock sample would turn). Within a run each refresh decides one refresh
+   after the last, as many as its animation frame says passed (a BeginFrame
+   up to three quarters of a refresh off is still the next refresh): a
+   BeginFrame phase that moves by half a refresh under load neither skips
+   nor repeats a frame, and a missed refresh skips its frame. Decisions
+   more than a refresh and a half from the grid's are centred again.
 2. **The worker draws timed frames in its animation frame.** A worker canvas
    hands viz what an animation frame drew when the callback returns; a frame
    drawn later in the refresh waits for the next BeginFrame. The display
