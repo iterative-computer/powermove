@@ -1150,3 +1150,168 @@ fn project_color_settings() {
         px(&rgba, 8, 2, 2)
     );
 }
+
+/// A non-normal blend has no effect outside its coverage, even after a long
+/// translucent stack. Compare bits so unpremultiply/store drift cannot return.
+#[test]
+fn blend_bounds_preserve_the_uncovered_accumulator() {
+    let mut renderer = Renderer::headless().unwrap();
+    for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+        let mut base = layer(
+            "base",
+            "solid",
+            json!({"color":"#73539A91","w":96,"h":64}),
+            0.0,
+            0.0,
+            1.0,
+        );
+        set(&mut base, "opacity", json!(63));
+        let base_doc = project(96, 64, 1.0, no_fill(), vec![base.clone()]);
+        let original = render(&mut renderer, &base_doc, precision);
+        let mut layers = Vec::new();
+        for i in 0..64 {
+            let mut l = layer(
+                &format!("blend-{i}"),
+                "solid",
+                json!({"color":"#3C86B875","w":12,"h":9}),
+                0.0,
+                0.0,
+                1.0,
+            );
+            l["blend"] = json!(["screen", "multiply", "overlay", "softlight"][i % 4]);
+            layers.push(l);
+        }
+        layers.push(base);
+        let stacked = render(
+            &mut renderer,
+            &project(96, 64, 1.0, no_fill(), layers),
+            precision,
+        );
+        for y in 20..64 {
+            for x in 24..96 {
+                let i = (y * 96 + x) * 4;
+                assert_eq!(
+                    &stacked[i..i + 4],
+                    &original[i..i + 4],
+                    "{precision:?} uncovered {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+/// The production cold snapshot endpoint, including its caller-owned output.
+/// Today's same depth-8 blend stack allocates 691,200 instrumented texture bytes.
+#[test]
+fn blend_stack_cold_texture_bytes_do_not_exceed_today() {
+    use pm_perf::Counter;
+    let mut renderer = Renderer::headless().unwrap();
+    let mut layers = Vec::new();
+    for (i, mode) in [
+        "normal",
+        "screen",
+        "multiply",
+        "overlay",
+        "softlight",
+        "add",
+        "difference",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut l = layer(
+            &format!("blend-{i}"),
+            "solid",
+            json!({"color":if i % 2 == 1 {"#32719E99"} else {"#AC539DB3"}, "w":165, "h":80}),
+            i as f64 * 22.0,
+            i as f64 * 12.0,
+            2.0,
+        );
+        l["blend"] = json!(mode);
+        set(&mut l, "opacity", json!(67));
+        layers.insert(0, l);
+    }
+    let mut under = layer(
+        "under",
+        "solid",
+        json!({"color":"#B47AEEB3","w":170,"h":110}),
+        120.0,
+        95.0,
+        2.0,
+    );
+    set(&mut under, "rotation", json!(11));
+    set(&mut under, "opacity", json!(73));
+    layers.push(under);
+    let mut doc = project(320, 180, 2.0, solid_fill("#101420"), layers);
+    doc["colorDepth"] = json!(8);
+    let doc = load(&doc);
+    let request = RenderRequest::sized(Size::new(320, 180), Precision::Unorm8);
+    let before = pm_perf::snapshot();
+    let target = pm_gpu::Target::new(
+        renderer.device(),
+        "cold blend output",
+        320,
+        180,
+        wgpu::TextureFormat::Rgba8Unorm,
+        pm_gpu::target::working_usage(),
+    );
+    let (frame, _) = renderer
+        .render_snapshot_into(
+            &doc,
+            "Ptest-root",
+            ticks(0.5),
+            &request,
+            &MapResolver::default(),
+            &target,
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let bytes = pm_perf::snapshot()
+        .since(&before)
+        .get(Counter::TextureAllocBytes);
+    eprintln!("blend stack cold textures: {bytes} bytes; today 691200");
+    assert!(
+        bytes <= 691_200,
+        "cold blend stack {bytes} exceeds today's 691200"
+    );
+}
+
+/// GLSL colors are authored in E. Linear projects must decode the source
+/// before reconstruction and encode only at output, preserving that color.
+#[test]
+fn sampled_shader_keeps_its_authored_color_in_linear_projects() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut shader = layer(
+        "gray",
+        "shader",
+        json!({
+            "code":"void main(){ fragColor = vec4(0.5, 0.5, 0.5, 1.0); }",
+            "uniforms":{}, "w":48, "h":32,
+        }),
+        24.0,
+        16.0,
+        1.0,
+    );
+    set(&mut shader, "rotation", json!(17));
+    set(&mut shader, "opacity", json!(73));
+    for linear in [false, true] {
+        let doc = with_color(
+            project(96, 64, 1.0, no_fill(), vec![shader.clone()]),
+            linear,
+            "hdrSafe",
+            "float16",
+        );
+        let rgba = render(&mut renderer, &doc, Precision::Float16);
+        let mut occupied = 0;
+        for p in rgba.chunks_exact(4).filter(|p| p[3] > 0.1) {
+            occupied += 1;
+            for c in &p[..3] {
+                assert!(
+                    (c / p[3] - 0.5).abs() < 0.001,
+                    "linear={linear}, pixel={p:?}"
+                );
+            }
+        }
+        assert!(occupied > 100, "shader drew no useful coverage");
+    }
+}

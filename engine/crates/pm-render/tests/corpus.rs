@@ -210,6 +210,22 @@ fn corpus_render_parity() {
         let mut video = false;
         let mut proxied = false;
         let root = p.document.root().unwrap();
+        // Geometry is measured at Float32 for Float16 documents: f16 alpha
+        // stores change area-weighted centroids without moving authored
+        // shapes. The ordinary Float16 pixel and preview/export gates below
+        // still run against the original document and request.
+        let geometry_document = (pm_render::composite::color::project_color(root)
+            .expect("project color")
+            .precision
+            == Precision::Float16)
+            .then(|| {
+                let mut value = p.document.to_value().expect("project root");
+                value
+                    .as_object_mut()
+                    .expect("project object")
+                    .insert("colorDepth", pm_model::Value::Number(32.0));
+                pm_model::Document::new(Some(value), p.document.revision() + 1)
+            });
         if let Some(assets) = root.get("assets")
             && let pm_model::NodeKind::Object(map) = assets.kind()
         {
@@ -460,6 +476,7 @@ fn corpus_render_parity() {
                     None => {
                         let r = reference::render(
                             &p.document,
+                            &p.resolver,
                             &p.composition,
                             ticks(s.time),
                             s.width,
@@ -477,10 +494,49 @@ fn corpus_render_parity() {
                             let ours = geometry(&alpha(&engine), r.width);
                             let theirs = geometry(&alpha(&today), r.width);
                             shape = format!(
-                                " geometry: area {:.3} engine {:.3} today {:.3}",
-                                wanted.area, ours.area, theirs.area
+                                " geometry: f64 area {:.3} centroid ({:.6}, {:.6}); engine area {:.3} centroid ({:.6}, {:.6}), delta area {:.3} centroid {:.6} px; today area {:.3} centroid ({:.6}, {:.6})",
+                                wanted.area,
+                                wanted.centroid[0],
+                                wanted.centroid[1],
+                                ours.area,
+                                ours.centroid[0],
+                                ours.centroid[1],
+                                ours.area - wanted.area,
+                                (ours.centroid[0] - wanted.centroid[0])
+                                    .abs()
+                                    .max((ours.centroid[1] - wanted.centroid[1]).abs()),
+                                theirs.area,
+                                theirs.centroid[0],
+                                theirs.centroid[1]
                             );
-                            if let Err(e) = same_geometry(&ours, &wanted, 1e-3) {
+                            if let Some(geometry_document) = &geometry_document {
+                                let mut probe = request.clone();
+                                probe.precision = Precision::Float32;
+                                let frame = renderer
+                                    .render(
+                                        geometry_document,
+                                        &p.composition,
+                                        ticks(s.time),
+                                        &probe,
+                                        &resolver,
+                                    )
+                                    .expect("Float32 geometry probe render");
+                                if !frame.failures.is_empty() {
+                                    problems.push(format!(
+                                        "Float32 geometry probe layer failures {:?}",
+                                        frame.failures
+                                    ));
+                                }
+                                let pixels = renderer.read_rgba(&frame).unwrap();
+                                let measured = geometry(&alpha(&unit32(&pixels)), r.width);
+                                shape.push_str(&format!(
+                                    "; Float32 probe area {:.3} centroid ({:.6}, {:.6})",
+                                    measured.area, measured.centroid[0], measured.centroid[1]
+                                ));
+                                if let Err(e) = same_geometry(&measured, &wanted, 1e-3) {
+                                    problems.push(format!("Float32 geometry probe {e}"));
+                                }
+                            } else if let Err(e) = same_geometry(&ours, &wanted, 1e-3) {
                                 problems.push(format!("engine {e}"));
                             }
                         }
@@ -522,6 +578,7 @@ fn corpus_render_parity() {
                 None => {
                     let r = reference::render(
                         &p.document,
+                        &p.resolver,
                         &p.composition,
                         ticks(s.time),
                         s.width,

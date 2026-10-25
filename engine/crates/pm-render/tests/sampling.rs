@@ -1,4 +1,4 @@
-//! Level 2 sampling and antialiasing (plan section 8; section 2's
+//! Raster sampling and antialiasing at every compatibility level (plan section 8; section 2's
 //! antialiasing bar; docs/engine/motion.md).
 //!
 //! - `antialiasing_bar_zone_plate`: a zone plate drawn as a `compat` 2
@@ -22,14 +22,28 @@ use pm_render::sampling::Sampling;
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::{Value, json};
 use support::doc::*;
+use support::sampling_reference::lanczos3;
 use support::ticks;
 
 /// A temporary directory outside the repository for one test's sources.
-fn scratch(test: &str) -> PathBuf {
+struct Scratch(PathBuf);
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(test: &str) -> Scratch {
     let dir =
         std::env::temp_dir().join(format!("pm-render-sampling-{}-{test}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 /// Writes an 8-bit RGB PNG.
@@ -99,18 +113,6 @@ fn render(
         .unwrap();
     assert!(f.failures.is_empty(), "{:?}", f.failures);
     renderer.read_rgba(&f).unwrap()
-}
-
-fn lanczos3(x: f64) -> f64 {
-    let ax = x.abs();
-    if ax >= 3.0 {
-        return 0.0;
-    }
-    if ax < 1e-12 {
-        return 1.0;
-    }
-    let px = std::f64::consts::PI * x;
-    3.0 * px.sin() * (px / 3.0).sin() / (px * px)
 }
 
 /// The reference frame under the final path's declared kernels: the
@@ -477,11 +479,15 @@ fn antialiasing_bar(name: &str, texel: &dyn Fn(u32, u32) -> f64, continuous: fn(
         .zip(&bounds)
         .map(|((s, r), b)| reference(*s, *r, *b, continuous))
         .collect();
-    for (sampling, precision, bar) in [
-        (Sampling::Final, Precision::Float32, 40.0),
-        (Sampling::Final, Precision::Float16, 40.0),
-        (Sampling::Playback, Precision::Float32, 34.0),
-        (Sampling::Playback, Precision::Float16, 34.0),
+    for (compat, sampling, precision, bar) in [
+        (1, Sampling::Final, Precision::Float32, 40.0),
+        (2, Sampling::Final, Precision::Float32, 40.0),
+        (1, Sampling::Final, Precision::Float16, 40.0),
+        (2, Sampling::Final, Precision::Float16, 40.0),
+        (1, Sampling::Playback, Precision::Float32, 34.0),
+        (2, Sampling::Playback, Precision::Float32, 34.0),
+        (1, Sampling::Playback, Precision::Float16, 34.0),
+        (2, Sampling::Playback, Precision::Float16, 34.0),
     ] {
         let refs = match sampling {
             Sampling::Final => &lanczos,
@@ -490,7 +496,7 @@ fn antialiasing_bar(name: &str, texel: &dyn Fn(u32, u32) -> f64, continuous: fn(
         let ours: Vec<Vec<f32>> = frames
             .iter()
             .map(|(s, r)| {
-                let (doc, resolver) = image_doc(&path, 2, *s, *r);
+                let (doc, resolver) = image_doc(&path, compat, *s, *r);
                 let mut request = RenderRequest::sized(Size::new(COMP, COMP), precision);
                 request.background = false;
                 request.sampling = sampling;
@@ -500,7 +506,7 @@ fn antialiasing_bar(name: &str, texel: &dyn Fn(u32, u32) -> f64, continuous: fn(
         let m = measure(&ours, refs, &bounds);
         let i = measure(&ours, &low_pass, &bounds);
         eprintln!(
-            "{name} {sampling:?} {precision:?}: against the declared kernel PSNR min {:.2} dB \
+            "{name} compat {compat} {sampling:?} {precision:?}: against the declared kernel PSNR min {:.2} dB \
              mean {:.2} dB, flicker {:.3}×; against the output-space low-pass PSNR min {:.2} dB mean {:.2} dB",
             m.psnr_min, m.psnr_mean, m.flicker_ratio, i.psnr_min, i.psnr_mean
         );
@@ -515,24 +521,6 @@ fn antialiasing_bar(name: &str, texel: &dyn Fn(u32, u32) -> f64, continuous: fn(
             m.flicker_ratio
         );
     }
-    // Level 1 (today's bilinear without mipmaps), measured for comparison.
-    let ours: Vec<Vec<f32>> = frames
-        .iter()
-        .map(|(s, r)| {
-            let (doc, resolver) = image_doc(&path, 1, *s, *r);
-            let mut request = RenderRequest::sized(Size::new(COMP, COMP), Precision::Float32);
-            request.background = false;
-            render(&mut renderer, &doc, &resolver, &request)
-        })
-        .collect();
-    let m = measure(&ours, &lanczos, &bounds);
-    let t = measure(&ours, &trilinear, &bounds);
-    eprintln!(
-        "{name} level 1 (today's sampling): against the Lanczos reference PSNR min {:.2} dB mean {:.2} dB, \
-         flicker {:.3}×; against the trilinear reference PSNR min {:.2} dB",
-        m.psnr_min, m.psnr_mean, m.flicker_ratio, t.psnr_min
-    );
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -593,12 +581,19 @@ fn pixel_coverage(poly: &[[f64; 2]], px: f64, py: f64) -> f64 {
 }
 
 #[test]
-fn level2_edges_are_the_exact_pixel_coverage() {
+fn raster_edges_are_the_exact_pixel_coverage_at_every_level() {
     let dir = scratch("level2_edges_are_the_exact_pixel_coverage");
     let path = dir.join("white.png");
     write_rgb(&path, 64, 64, |_, _| 1.0);
     let mut renderer = Renderer::headless().unwrap();
-    for (rotation, scale) in [(0.0, 1.0), (30.0, 1.37), (-12.5, 0.61)] {
+    for (compat, rotation, scale) in [
+        (1, 0.0, 1.0),
+        (1, 30.0, 1.37),
+        (1, -12.5, 0.61),
+        (2, 0.0, 1.0),
+        (2, 30.0, 1.37),
+        (2, -12.5, 0.61),
+    ] {
         let mut l = layer(
             "img",
             "image",
@@ -610,7 +605,7 @@ fn level2_edges_are_the_exact_pixel_coverage() {
         set(&mut l, "rotation", json!(rotation));
         set(&mut l, "scale.x", json!(scale * 100.0));
         set(&mut l, "scale.y", json!(scale * 100.0));
-        l["compat"] = json!(2);
+        l["compat"] = json!(compat);
         let mut doc = project(200, 160, 4.0, no_fill(), vec![l]);
         // This test's exact edge-coverage bar needs the 32-bit working target.
         doc["colorDepth"] = json!(32);
@@ -651,7 +646,6 @@ fn level2_edges_are_the_exact_pixel_coverage() {
             assert!(worst < 1e-4, "rotation {rotation} {sampling:?}: {worst}");
         }
     }
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -705,7 +699,6 @@ fn level2_regions_and_determinism() {
             }
         }
     }
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A precomp of an edge (left half white) scaled up 4×.
@@ -734,6 +727,55 @@ fn precomp_doc(compat: u32) -> pm_model::Document {
     composition(&mut doc, "C1", 40, 40, 4.0, vec![edge]);
     doc["comps"]["C1"]["backgroundFill"] = no_fill();
     load(&doc)
+}
+
+#[test]
+fn dynamic_precomp_mips_follow_the_requested_time() {
+    let mut fill = layer(
+        "fill",
+        "solid",
+        json!({ "color": "#FF0000", "w": 64, "h": 64 }),
+        0.0,
+        0.0,
+        4.0,
+    );
+    set(
+        &mut fill,
+        "opacity",
+        keys(json!(100), &[(0.0, json!(100)), (1.0, json!(25))]),
+    );
+    let mut pc = layer(
+        "pc",
+        "precomp",
+        json!({ "comp": "C1", "w": 64, "h": 64 }),
+        16.0,
+        16.0,
+        4.0,
+    );
+    set(&mut pc, "scale.x", json!(25));
+    set(&mut pc, "scale.y", json!(25));
+    let mut document = project(32, 32, 4.0, no_fill(), vec![pc]);
+    composition(&mut document, "C1", 64, 64, 4.0, vec![fill]);
+    document["comps"]["C1"]["backgroundFill"] = no_fill();
+    let document = load(&document);
+    let assets = MapResolver::default();
+    let mut request = RenderRequest::sized(Size::new(32, 32), Precision::Float32);
+    request.sampling = Sampling::Playback;
+    let draw = |renderer: &mut Renderer, time| {
+        let frame = renderer
+            .render(&document, "Ptest-root", ticks(time), &request, &assets)
+            .unwrap();
+        assert!(frame.failures.is_empty());
+        renderer.read_rgba(&frame).unwrap()
+    };
+    let mut warmed = Renderer::headless().unwrap();
+    let first = draw(&mut warmed, 0.0);
+    let changed = draw(&mut warmed, 1.0);
+    let center = ((16 * 32 + 16) * 4) as usize;
+    assert!((first[center + 3] - 1.0).abs() < 1e-6);
+    assert!((changed[center + 3] - 0.25).abs() < 1e-6);
+    assert_eq!(first, draw(&mut warmed, 0.0));
+    assert_eq!(changed, draw(&mut Renderer::headless().unwrap(), 1.0));
 }
 
 #[test]
