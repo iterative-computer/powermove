@@ -4,8 +4,8 @@
 //! (`3D-TONEMAP-1`), so a box resolve lets one bright sample (a specular
 //! highlight at a triangle seam, a lamp against a dark edge) dominate its
 //! pixel. Each sample instead counts with weight `w = 1 / (1 + L)`, `L` the
-//! Rec. 709 luminance of its unpremultiplied color, and coverage stays the
-//! box average:
+//! Rec. 709 luminance of its unpremultiplied color scaled as the tone
+//! curve's input (`exposure / 0.6`), and coverage stays the box average:
 //!
 //! - color = Σ aᵢwᵢcᵢ / Σ aᵢwᵢ (unpremultiplied `cᵢ`, coverage `aᵢ`)
 //! - alpha = Σ aᵢ / n
@@ -17,6 +17,12 @@
 //! resolved value holds the weights' sum too: `scene_unweight`
 //! (`shaders/scene_output.wgsl`) recovers the weighted color where the scene
 //! output tones it.
+//!
+//! Weighting only above the curve's shoulder would leave ordinary samples
+//! exact, but that weight has no linear relation to the stored channels, so
+//! the resolve could not be undone; tone mapping each sample before the
+//! resolve instead moved interiors and edges further from the plain
+//! 64-sample reference (quality ledger).
 
 /// Rec. 709 luminance of linear sRGB (the shaders' literals).
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -61,27 +67,32 @@ static float pm_nearest_half(float value) {
     return as_type<float>(sign_bit | rounded);
 }
 
+struct PmResolveParams { float exposure; float3 unused; };
+
 fragment float4 pm_weight_fs(PmWeightVertex vertex_in [[stage_in]],
                              float4 c [[color(0)]],
-                             uint sample_index [[sample_id]]) {
-    float l = max(dot(c.rgb, float3(0.2126, 0.7152, 0.0722)), 0.0);
-    // w = 1 / (1 + l / a); a sample without coverage carries no color, as
-    // the scene output already treats an uncovered pixel.
-    float w = c.a > 0.0 ? c.a / (c.a + l) : 0.0;
-    float3 rgb = c.rgb * w;
+                             uint sample_index [[sample_id]],
+                             constant PmResolveParams& params [[buffer(0)]]) {
+    // A sample without coverage carries no color, as the scene output
+    // already treats an uncovered pixel.
+    if (c.a <= 0.0) return float4(0.0);
+    // The luminance the tone curve sees: exposure / 0.6 scales its input.
+    float l = max(dot(c.rgb, float3(0.2126, 0.7152, 0.0722)), 0.0) * (params.exposure / 0.6);
+    float3 rgb = c.rgb * (c.a / (c.a + l));
     return float4(pm_nearest_half(rgb.r), pm_nearest_half(rgb.g), pm_nearest_half(rgb.b), c.a);
 }
 "#;
 
 /// `scene_unweight` (`shaders/scene_output.wgsl`) on the CPU, for readbacks
 /// of the raw scene target.
-pub fn unweight(pixels: &mut [f32]) {
+pub fn unweight(pixels: &mut [f32], exposure: f32) {
+    let k = exposure / 0.6;
     for p in pixels.chunks_exact_mut(4) {
         if p[3] <= 0.0 {
             p.fill(0.0);
             continue;
         }
-        let l = (p[0] * LUMA[0] + p[1] * LUMA[1] + p[2] * LUMA[2]).max(0.0);
+        let l = (p[0] * LUMA[0] + p[1] * LUMA[1] + p[2] * LUMA[2]).max(0.0) * k;
         let scale = p[3] / (p[3] - l).max(1.0 / 16384.0);
         for v in &mut p[..3] {
             *v *= scale;
@@ -93,6 +104,9 @@ pub fn unweight(pixels: &mut [f32]) {
 /// back end resolves the box average and reports it unweighted).
 pub(crate) struct Weighting {
     pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    /// Parameters by exposure bits.
+    groups: std::collections::HashMap<u32, wgpu::BindGroup>,
 }
 
 impl Weighting {
@@ -104,15 +118,29 @@ impl Weighting {
             .expect("weighting vertex stage");
         let fs = pm_gpu::msl::from_source(device, "3d resolve weights", WEIGHT_MSL, "pm_weight_fs")
             .expect("weighting fragment stage");
-        // Passthrough MSL stages cannot derive an implicit layout.
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("3d resolve weights"),
-            bind_group_layouts: &[],
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        // Passthrough MSL stages cannot derive an implicit layout. The
+        // fragment stage's only buffer is Metal buffer 0.
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("3d resolve weights"),
+            bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("3d resolve weights"),
-            layout: Some(&layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vs.module,
                 entry_point: Some(&vs.entry_point),
@@ -144,13 +172,49 @@ impl Weighting {
             multiview_mask: None,
             cache: None,
         });
-        Some(Weighting { pipeline })
+        Some(Weighting {
+            pipeline,
+            layout,
+            groups: Default::default(),
+        })
+    }
+
+    /// The parameters of a scene's `exposure` (few distinct values).
+    pub(crate) fn params(&mut self, device: &wgpu::Device, exposure: f32) -> wgpu::BindGroup {
+        if self.groups.len() > 16 {
+            self.groups.clear();
+        }
+        let layout = &self.layout;
+        self.groups
+            .entry(exposure.to_bits())
+            .or_insert_with(|| {
+                let words = [exposure, 0.0, 0.0, 0.0];
+                let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                let buffer = wgpu::util::DeviceExt::create_buffer_init(
+                    device,
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("3d resolve weights"),
+                        contents: &bytes,
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    },
+                );
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3d resolve weights"),
+                    layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
+            })
+            .clone()
     }
 
     /// Weights every sample of the pass's color attachment: the pass's last
     /// draw.
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, params: &wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, params, &[]);
         pass.draw(0..3, 0..1);
     }
 }
@@ -159,10 +223,14 @@ impl Weighting {
 mod tests {
     use super::*;
 
+    /// Twice the curve's unit input scale.
+    const EXPOSURE: f32 = 1.2;
+
     /// Resolves 4×1 pixels whose four samples are given (each pixel's
     /// samples from a per-sample color table), weighted, and reads them back.
     fn resolve(gpu: &pm_gpu::Gpu, samples: [[[f32; 4]; 4]; 4]) -> Vec<f32> {
-        let weighting = Weighting::new(&gpu.device, 4).expect("Metal weighting");
+        let mut weighting = Weighting::new(&gpu.device, 4).expect("Metal weighting");
+        let params = weighting.params(&gpu.device, EXPOSURE);
         let texture = |count, usage| {
             gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("weights"),
@@ -286,12 +354,12 @@ fn fs(@builtin(position) p: vec4<f32>, @builtin(sample_index) s: u32) -> @locati
             });
             pass.set_pipeline(&fill);
             pass.draw(0..3, 0..1);
-            weighting.draw(&mut pass);
+            weighting.draw(&mut pass, &params);
         }
         gpu.queue.submit([encoder.finish()]);
         let mut out = pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &resolved)
             .expect("weights readback");
-        unweight(&mut out);
+        unweight(&mut out, EXPOSURE);
         out
     }
 
@@ -304,7 +372,9 @@ fn fs(@builtin(position) p: vec4<f32>, @builtin(sample_index) s: u32) -> @locati
             if a <= 0.0 {
                 continue;
             }
-            let l: f64 = (0..3).map(|i| f64::from(s[i]) * f64::from(LUMA[i])).sum();
+            let l: f64 = (0..3).map(|i| f64::from(s[i]) * f64::from(LUMA[i])).sum::<f64>()
+                * f64::from(EXPOSURE)
+                / 0.6;
             let w = a / (a + l);
             weights += a * w;
             for i in 0..3 {
@@ -341,7 +411,7 @@ fn fs(@builtin(position) p: vec4<f32>, @builtin(sample_index) s: u32) -> @locati
             // Half stores lose about 2^-12 relative; recovering the weights'
             // sum by subtraction scales that by 1 + L (L the unpremultiplied
             // luminance), which only HDR values, toned near 1, notice.
-            let l = (0..3).map(|i| want[i] * f64::from(LUMA[i])).sum::<f64>() / want[3];
+            let l = (0..3).map(|i| want[i] * f64::from(LUMA[i])).sum::<f64>() / want[3] * 2.0;
             for i in 0..4 {
                 let got = f64::from(out[k * 4 + i]);
                 assert!(

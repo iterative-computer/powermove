@@ -1666,7 +1666,11 @@ impl Scene3dRenderer {
                 let weighting = if samples > 1 {
                     self.weighting
                         .get_or_insert_with(|| super::karis::Weighting::new(device, SAMPLES))
-                        .as_ref()
+                        .as_mut()
+                        .map(|w| {
+                            let params = w.params(device, scene.exposure as f32);
+                            (&*w, params)
+                        })
                 } else {
                     None
                 };
@@ -1708,8 +1712,8 @@ impl Scene3dRenderer {
                 for p in &list {
                     p.draw(&mut rp);
                 }
-                if let Some(w) = weighting {
-                    w.draw(&mut rp);
+                if let Some((w, params)) = &weighting {
+                    w.draw(&mut rp, params);
                 }
             }
         }
