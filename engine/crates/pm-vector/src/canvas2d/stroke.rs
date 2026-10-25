@@ -24,8 +24,6 @@ pub struct StrokeParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cap {
     Butt,
-    Round,
-    Square,
 }
 
 /// A stroke patch as written to the instance buffer.
@@ -168,15 +166,6 @@ impl Writer {
             p: [p; 4],
             conic: false,
             join: p,
-        });
-    }
-
-    fn write_square(&mut self, p: P, join_to: Option<P>) {
-        self.tolerance_n4 = 1.0;
-        self.out.push(StrokePatch {
-            p: [p, p, p, [1.0, f32::INFINITY]],
-            conic: true,
-            join: join_to.unwrap_or(p),
         });
     }
 
@@ -329,19 +318,7 @@ impl Writer {
                 None => self.join,
                 Some(cap) => {
                     let first = self.first;
-                    match cap {
-                        Cap::Butt => {}
-                        Cap::Round => {
-                            self.write_circle(self.last);
-                            self.write_circle(first);
-                        }
-                        Cap::Square => {
-                            self.write_square(self.last, Some(self.join));
-                            let last = if patch.conic { patch.p[2] } else { patch.p[3] };
-                            let cap_pt = tangent_point(patch.p[0], patch.p[1], patch.p[2], last);
-                            self.write_square(patch.p[0], Some(cap_pt));
-                        }
-                    }
+                    let Cap::Butt = cap;
                     first
                 }
             };
@@ -349,11 +326,7 @@ impl Writer {
             self.max_tolerance_n4 = self.max_tolerance_n4.max(self.n_p4);
             self.out.push(patch);
         } else if let (Some(cap), true) = (cap, self.has_verb()) {
-            match cap {
-                Cap::Butt => {}
-                Cap::Round => self.write_circle(self.first),
-                Cap::Square => self.write_square(self.first, None),
-            }
+            let Cap::Butt = cap;
         }
         self.reset(move_to);
     }
@@ -398,13 +371,21 @@ pub fn find_cubic_convex_180_chops(p: &[P]) -> (Vec<f32>, bool) {
     cusp_threshold *= cusp_threshold;
     if discr < -cusp_threshold {
         let root = qc / b_over_minus_2;
-        return if inside(root) { (vec![root], false) } else { (vec![], false) };
+        return if inside(root) {
+            (vec![root], false)
+        } else {
+            (vec![], false)
+        };
     }
     let are_cusps = discr <= cusp_threshold;
     if are_cusps {
         if qa != 0.0 || b_over_minus_2 != 0.0 || qc != 0.0 {
             let root = b_over_minus_2 / qa;
-            return if inside(root) { (vec![root], true) } else { (vec![], true) };
+            return if inside(root) {
+                (vec![root], true)
+            } else {
+                (vec![], true)
+            };
         }
         let tan0 = [
             if c[0] != 0.0 { c[0] } else { p[2][0] - p[0][0] },
@@ -427,7 +408,11 @@ pub fn find_cubic_convex_180_chops(p: &[P]) -> (Vec<f32>, bool) {
     let ins = |r: f32| r > EPS && r < 1.0 - EPS;
     if ins(roots[0]) {
         if ins(roots[1]) && roots[0] != roots[1] {
-            let (lo, hi) = if roots[0] > roots[1] { (roots[1], roots[0]) } else { (roots[0], roots[1]) };
+            let (lo, hi) = if roots[0] > roots[1] {
+                (roots[1], roots[0])
+            } else {
+                (roots[0], roots[1])
+            };
             return (vec![lo, hi], are_cusps);
         }
         return (vec![roots[0]], are_cusps);
@@ -553,7 +538,11 @@ fn quad_mid_tangent(p: &[P]) -> f32 {
     ];
     let b = [p[1][0] - p[0][0], p[1][1] - p[0][1]];
     let den = a[0] * a[0] + a[1] * a[1];
-    if den == 0.0 { 0.5 } else { (-(a[0] * b[0] + a[1] * b[1]) / den).clamp(0.0, 1.0) }
+    if den == 0.0 {
+        0.5
+    } else {
+        (-(a[0] * b[0] + a[1] * b[1]) / den).clamp(0.0, 1.0)
+    }
 }
 
 fn eval_conic(p: &[P], w: f32, t: f32) -> P {
@@ -587,7 +576,11 @@ fn cosine_between(a: P, b: P) -> f32 {
 #[inline]
 fn miter_extent(cos_theta: f32, miter_limit: f32) -> f32 {
     let x = cos_theta.mul_add(0.5, 0.5);
-    if x * miter_limit * miter_limit >= 1.0 { 1.0 / x.sqrt() } else { x.sqrt() }
+    if x * miter_limit * miter_limit >= 1.0 {
+        1.0 / x.sqrt()
+    } else {
+        x.sqrt()
+    }
 }
 
 #[inline]
@@ -788,16 +781,26 @@ fn stroked_vertex(
             combined_edge_id = 0.0;
         } else {
             let sin_epsilon = 1e-2f32;
-            let nearly_parallel = (turn.abs() * (1.0 / ((tan0[0] * tan0[0] + tan0[1] * tan0[1]) * (tan1[0] * tan1[0] + tan1[1] * tan1[1])).sqrt())) < sin_epsilon;
+            let nearly_parallel = (turn.abs()
+                * (1.0
+                    / ((tan0[0] * tan0[0] + tan0[1] * tan0[1])
+                        * (tan1[0] * tan1[0] + tan1[1] * tan1[1]))
+                        .sqrt()))
+                < sin_epsilon;
             if !nearly_parallel || tan0[0] * tan1[0] + tan0[1] * tan1[1] < 0.0 {
-                stroke_outset = if turn < 0.0 { stroke_outset.min(0.0) } else { stroke_outset.max(0.0) };
+                stroke_outset = if turn < 0.0 {
+                    stroke_outset.min(0.0)
+                } else {
+                    stroke_outset.max(0.0)
+                };
             }
         }
     } else {
         let max_combined = max_edges - num_edges_in_join - 1.0;
         let n = libm::ceilf(rotation.abs() * num_radial_segments_per_radian).max(1.0);
         num_radial_segments = n.min(max_combined);
-        num_parametric_segments = num_parametric_segments.min(max_combined - num_radial_segments + 1.0);
+        num_parametric_segments =
+            num_parametric_segments.min(max_combined - num_radial_segments + 1.0);
     }
     let rads_per_segment = rotation / num_radial_segments;
     let num_combined_segments = num_parametric_segments + num_radial_segments - 1.0;
@@ -844,7 +847,9 @@ fn stroked_vertex(
                 tt = [test.mul_add(tt[0], c_[0]), test.mul_add(tt[1], c_[1])];
                 let len = (tt[0] * tt[0] + tt[1] * tt[1]).sqrt();
                 let cos_rot = (tt[0] / len) * tan0[0] + (tt[1] / len) * tan0[1];
-                let max_rot = test.mul_add(neg_abs_rads, max_rotation0).min(core::f32::consts::PI);
+                let max_rot = test
+                    .mul_add(neg_abs_rads, max_rotation0)
+                    .min(core::f32::consts::PI);
                 if cos_rot >= libm::cosf(max_rot) {
                     last_parametric = test;
                 }
@@ -870,8 +875,16 @@ fn stroked_vertex(
         }
         q -= b_over_2;
         let five_qa = -0.5 * q * qa;
-        let root = if q.mul_add(q, five_qa).abs() < qa.mul_add(qc, five_qa).abs() { [q, qa] } else { [qc, q] };
-        let radial_t = if last_radial != 0.0 && root[1] != 0.0 { (root[0] / root[1]).clamp(0.0, 1.0) } else { 0.0 };
+        let root = if q.mul_add(q, five_qa).abs() < qa.mul_add(qc, five_qa).abs() {
+            [q, qa]
+        } else {
+            [qc, q]
+        };
+        let radial_t = if last_radial != 0.0 && root[1] != 0.0 {
+            (root[0] / root[1]).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let t = parametric_t.max(radial_t);
         let ab = umix2(p0, p1, t);
         let bc = umix2(p1, p2, t);
@@ -968,7 +981,11 @@ fn edges_needed(
     // Generous bound: join edges (at most the radial segments of half a
     // turn plus 2) plus parametric (at most the GPU's Wang count) plus
     // radial (at most half a turn per patch) plus 2.
-    let radius = if params.radius == 0.0 { 0.5 } else { max_scale * params.radius };
+    let radius = if params.radius == 0.0 {
+        0.5
+    } else {
+        max_scale * params.radius
+    };
     let per_rad = num_radial_segments_per_radian(radius);
     let half_turn = libm::ceilf(per_rad * core::f32::consts::PI).max(1.0);
     let [p0, p1, p2, p3] = patch.p;
@@ -989,7 +1006,11 @@ fn edges_needed(
     } else {
         gpu_wang_cubic(&patch.p, affine)
     };
-    let param = if param.is_finite() { param.min(16383.0) } else { 16383.0 };
+    let param = if param.is_finite() {
+        param.min(16383.0)
+    } else {
+        16383.0
+    };
     (half_turn + 2.0 + param + half_turn + 2.0) as usize
 }
 

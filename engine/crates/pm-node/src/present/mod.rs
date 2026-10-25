@@ -33,7 +33,6 @@ pub mod schedule;
 pub mod snapshot;
 pub mod source_audio;
 pub mod stats;
-pub mod svg;
 pub mod view;
 pub mod wait;
 
@@ -124,9 +123,9 @@ pub enum FrameSource {
     Document,
 }
 
-/// Caps how long a viewer frame waits for its window's SVG bucket or
-/// fallback runner pixels, in ms (tests of the wait's timeout; the
-/// defaults are `wait::Bounds::new(None)`).
+/// Caps how long a viewer frame waits for its window's fallback runner
+/// pixels, in ms (tests of the wait's timeout; the default is
+/// `wait::bound(None)`).
 pub const EXTERNAL_WAIT_ENV: &str = "POWERMOVE_ENGINE_EXTERNAL_WAIT_MS";
 
 /// `1`: play on the host clock rather than the audio device (machines

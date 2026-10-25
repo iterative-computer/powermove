@@ -84,7 +84,7 @@ pub struct TextGpu {
     paint: [crate::pipelines::LazyRenderPipeline; 2],
     paint_n32: crate::pipelines::LazyRenderPipeline,
     paint_bgra: crate::pipelines::LazyRenderPipeline,
-    filter: crate::composite::path_masks::PathMaskPipelines,
+    filter: super::legacy_blur::LegacyTextBlur,
     sampler: wgpu::Sampler,
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
     cache: HashMap<([u64; 2], Precision), Cached>,
@@ -247,7 +247,7 @@ impl TextGpu {
             paint,
             paint_n32,
             paint_bgra,
-            filter: crate::composite::path_masks::PathMaskPipelines::rgba(device),
+            filter: super::legacy_blur::LegacyTextBlur::new(device),
             sampler,
             images: HashMap::new(),
             cache: HashMap::new(),
@@ -840,8 +840,8 @@ impl TextGpu {
         }
     }
 
-    /// A draw painted into an N32 save layer, filtered through the shared
-    /// Canvas2D/Graphite image-filter executor, then composited.
+    /// A draw painted into an N32 save layer, blurred by the legacy Graphite
+    /// pass plan, then composited.
     #[allow(clippy::too_many_arguments)]
     fn blurred(
         &self,

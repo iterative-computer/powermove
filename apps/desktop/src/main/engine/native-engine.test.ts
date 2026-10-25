@@ -274,7 +274,7 @@ describe('NativeEngine with fake engines', () => {
   it('admits compatibility asks only from the job engine', async () => {
     const base: CompatFrameRequest = { document: 'doc-1', composition: 'c', layer: 'l',
       time: 0, source: 'rasterOverride', scale: 1, revision: 8 };
-    for (const source of ['rasterOverride', 'compatContext', 'svgImage', 'blenderPng'] as const) {
+    for (const source of ['rasterOverride', 'compatContext', 'blenderPng'] as const) {
       const refused = await live('interactive').ask({ type: 'compatFrame', ...base, source }, 3);
       expect(refused.message.kind === 'error' && refused.message.error.code).toBe('capabilityRejected');
     }

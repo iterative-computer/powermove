@@ -557,17 +557,10 @@ No new IPC method is implied by this snippet. Capability resolution, job and
 cancellation transport, thumbnail encoding and UI consumers belong to the
 consumers lane; deprecated browser APIs remain available at apiVersion 1–3.
 
-### SVG compatibility gap
+### SVG images
 
-`pm_vector::canvas2d::svg` now replays resolved usvg paths through the vector
-lane's Skia emulation, with original SkPath geometry, even-odd fill, strokes,
-dashes, opacity layers, gradient shaders, clip unions and linear-RGB Gaussian
-layers. Horizontal SVG text shapes and paints through the caller's `pm-text`
-resolver (`raster_compat_with_text`). This remains a diagnostic API: only
-15 of the 27 canvas SVG cases satisfy the 2D class. Text, gradients, larger
-blurs and some non-square bucket edges still fail. Level-1 `SvgImage` stays
-gated, and no 34-project composition pass is claimed. `vector.md` records
-the source pipeline and measured failures. No tolerance changed.
+SVG images are drawn natively by the engine at output resolution
+(`vector.md` holds the pipeline and its measurements).
 
 
 ### SVG/still closure: decoded bitmaps and remaining classes

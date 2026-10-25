@@ -138,8 +138,7 @@ pub enum Applied {
     /// A reuse named a raster the store evicted meanwhile: the need is
     /// asked again at once (not after [`ASK_AGAIN`]), for new pixels.
     Evicted,
-    /// Nothing changed, or not a layer raster (the SVG raster messages,
-    /// `super::svg`).
+    /// Nothing changed, or not a layer raster.
     Ignored,
 }
 
@@ -401,9 +400,6 @@ impl CompatStore {
             }
             // Needs travel the other way.
             CompatMessage::Needs { .. } => Applied::Ignored,
-            CompatMessage::SvgRequests { .. }
-            | CompatMessage::SvgPixels(_)
-            | CompatMessage::SvgFailed { .. } => Applied::Ignored,
             CompatMessage::Pixels(band) => {
                 let id = (key, band.id.clone());
                 let bytes = size(band.width, band.height, band.format);

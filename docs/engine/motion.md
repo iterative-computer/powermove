@@ -155,24 +155,17 @@ timeline order; surfaces sort by their first layer's anchor depth), 2D layers an
 object blocks are barriers. The 3D scene lane's `order_pass` does the same for
 non-model blocks and supersedes this call when the lanes merge.
 
-Drawn for every layer type: solids, images, video, precomps, groups, level 2
-shapes and editable paths, text and captions, shader and extension layers, and
-masked adjustment layers inside 3D groups. Level 1 text keeps today's raster
-density (the continuous raster scale of the 2D world matrix, as `contentQuad`
-computes it for a 3D layer outside the preview's clipping) and draws through the
-plane, and so do level 1 shapes: their Canvas2D raster draws through the
-plane. (The previous round routed level 1 shapes on planes,
-`Feature::PlaneShapeRaster`, because the plane magnified one flipped MSAA sample
-at each rounded corner of the radius-24 cards of v1 `space/groups-25d`, up to
-47 CV. The emulation now models the rasterizer's viewport round trip, which
-makes those rasters bit-exact (docs/engine/vector.md, "Viewport round trip"),
-and the route is removed: `space25d/vector` is bit-exact, and v1
-`space/groups-25d` matches today at every pixel outside its text, whose text is
-within the text class.) 3D object, light, and camera layers draw in screen
+Drawn for every layer type: solids, images, video, precomps, groups, shapes and
+editable paths, text and captions, shader and extension layers, and masked
+adjustment layers inside 3D groups. Level 1 text keeps today's raster density
+(the continuous raster scale of the 2D world matrix, as `contentQuad` computes
+it for a 3D layer outside the preview's clipping) and draws through the plane.
+Shapes and paths take the coverage-scene route below; solids draw their
+analytic quad through the plane. 3D object, light, and camera layers draw in screen
 space, as today, also inside 3D groups (`space25d/others`).
 
-**Level 2 content on planes** (`space25d/local.rs`; no legacy reference): level 2
-coverage scenes (solids, shapes, paths, plain SVG images) used to draw through the
+**Coverage scenes on planes** (`space25d/local.rs`; no legacy reference):
+coverage scenes (shapes, paths, plain SVG images) used to draw through the
 2D world matrix and ignore the plane. They are now flattened in layer space at the
 plane's densest-corner density and every vertex is projected through the
 homography (clipped at the camera plane in homogeneous coordinates), so the

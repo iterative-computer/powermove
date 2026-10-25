@@ -320,7 +320,7 @@ fn source_interlaced_field_times_follow_file_and_explicit_interpretation() {
     // on the even (top) lines, field 2k+1 on the odd lines. Both field parity
     // and frame index are visible, including on a conformed grid.
     let field_luma = |field: u8| {
-        if field % 2 == 0 {
+        if field.is_multiple_of(2) {
             16 + field / 2 * 8
         } else {
             235 - field / 2 * 8
@@ -593,8 +593,10 @@ fn native_source_gamma_png_preserves_file_curve_depth_and_partial_alpha() {
                 assert!(pixel[3].abs_diff(alpha) <= 1);
             }
             if gamma != 45_455 {
-                let mut interpretation = pm_media::interpret::Interpretation::default();
-                interpretation.alpha = Some(pm_media::interpret::AlphaChoice::Ignore);
+                let mut interpretation = pm_media::interpret::Interpretation {
+                    alpha: Some(pm_media::interpret::AlphaChoice::Ignore),
+                    ..Default::default()
+                };
                 let error = renderer
                     .source_rgba8(
                         &path,
@@ -771,82 +773,59 @@ fn source_snapshot_reads_premultiplied_alpha_for_snapshot_pixel_encoding() {
 }
 
 #[test]
-fn source_svg_uses_exact_size_chromium_raster() {
+fn source_svg_renders_natively_with_fit_alpha_and_batch_reuse() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.svg");
-    std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>"#).unwrap();
+    std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="red" fill-opacity="0.25"/></svg>"#).unwrap();
     let mut renderer = Renderer::headless().unwrap();
-    let error = renderer
-        .source_rgba8(
-            &path,
-            Ticks::ZERO,
-            Size::new(2, 2),
-            SourceFit::Stretch,
-            None,
-            false,
-        )
-        .unwrap_err();
-    assert!(error.contains("Chromium raster"), "{error}");
-    let output = Size::new(3, 2);
-    let request =
-        Renderer::source_svg_request(&path, "asset-1", output, SourceFit::Stretch, (2.0, 2.0))
+    let size = Size::new(4, 4);
+    for fit in [SourceFit::Contain, SourceFit::Cover, SourceFit::Stretch] {
+        let pixels = renderer
+            .source_rgba8(&path, Ticks::ZERO, size, fit, None, false)
             .unwrap();
-    assert_eq!((request.key.width, request.key.height), (3, 2));
-    assert_eq!(request.key.source_fit, Some(SourceFit::Stretch));
-    assert_eq!(request.asset, "asset-1");
-    assert!(
-        renderer
-            .source_svg_rgba8(&request.key, output, SourceFit::Stretch, None)
-            .unwrap()
-            .is_none()
-    );
-    let chromium = vec![
-        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 0, 255, 255, 255, 255, 0,
-        255, 255,
-    ];
-    renderer
-        .put_svg_raster(request.key.clone(), chromium.clone())
-        .unwrap();
-    assert_eq!(
-        renderer
-            .source_svg_rgba8(&request.key, output, SourceFit::Stretch, None)
-            .unwrap()
-            .unwrap(),
-        chromium
-    );
-    let contain = Renderer::source_svg_request(
-        &path,
-        "asset-1",
-        Size::new(5, 5),
-        SourceFit::Contain,
-        (2.0, 1.0),
-    )
-    .unwrap();
-    assert_eq!((contain.key.width, contain.key.height), (5, 5));
-    assert_eq!(contain.key.source_fit, Some(SourceFit::Contain));
-    assert_ne!(contain.key.upload_key(), request.key.upload_key());
+        for y in 0..4 {
+            for x in 0..4 {
+                let p = &pixels[(y * 4 + x) * 4..][..4];
+                let wanted = if fit == SourceFit::Contain && (y == 0 || y == 3) {
+                    [0, 0, 0, 0]
+                } else {
+                    [64, 0, 0, 64]
+                };
+                assert_eq!(p, wanted, "{fit:?} ({x},{y})");
+            }
+        }
+        let frames = renderer
+            .source_rgba8_batch(
+                &path,
+                &[Ticks::ZERO, Ticks::new(1).unwrap()],
+                size,
+                fit,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(frames, vec![pixels.clone(), pixels]);
+    }
 }
 
 #[test]
 fn source_svg_rejects_an_interpreted_color_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.svg");
+    std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>"#).unwrap();
     let mut renderer = Renderer::headless().unwrap();
-    let key = pm_protocol::svg_raster::SvgRasterKey {
-        content: "a".repeat(64),
-        texture: None,
-        source_fit: Some(SourceFit::Stretch),
-        width: 1,
-        height: 1,
-    };
     let interpretation = pm_media::interpret::Interpretation {
         transfer: Some(pm_protocol::color::Transfer::Linear),
         ..Default::default()
     };
     let error = renderer
-        .source_svg_rgba8(
-            &key,
+        .source_rgba8(
+            &path,
+            Ticks::ZERO,
             Size::new(1, 1),
             SourceFit::Stretch,
             Some(&interpretation),
+            false,
         )
         .unwrap_err();
     assert!(

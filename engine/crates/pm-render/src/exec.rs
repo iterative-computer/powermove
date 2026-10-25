@@ -118,8 +118,6 @@ pub(crate) struct Exec<'a> {
     /// Where screen, overlay, and soft light run with linear blending on.
     pub blend_domain: BlendDomain,
     pub export: bool,
-    /// What a level 1 SVG raster miss draws (`crate::vector::svg_rasters`).
-    pub svg_policy: crate::vector::svg_rasters::SvgMissPolicy,
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
@@ -294,11 +292,13 @@ impl Exec<'_> {
         r: &mut Resolved,
     ) {
         match content {
-            Content::Solid(c) => {
+            Content::Solid(s) => {
                 r.solid = Some(crate::composite::color::premultiplied_to_working(
-                    *c,
+                    s.color,
                     self.working,
-                ))
+                ));
+                // `fs_solid` reads the box and radius from the UV slot.
+                r.uv = [s.size[0], s.size[1], s.radius, 0.0];
             }
             // Drawn by `composite::exec` (skipped by `resolve_draws`).
             Content::Composite(_) => {}
@@ -467,43 +467,18 @@ impl Exec<'_> {
                         }
                     }
                     Source::Vector(v) => {
-                        if let crate::vector::VectorSource::SvgImage { key, asset, path } = &**v {
-                            use crate::vector::cache::SvgResolved;
-                            // Chromium's raster of today's bucket (decision
-                            // S1); a miss draws the content's latest bucket
-                            // in preview, nothing otherwise.
-                            match self.vector.resolve_svg(
-                                self.device,
-                                self.queue,
-                                key,
-                                asset,
-                                path,
-                                self.svg_policy,
-                                (&plan.composition, &draw.layer),
-                            ) {
-                                Ok(SvgResolved::Drawn(view) | SvgResolved::Substitute(view)) => {
-                                    self.prepare_level2(encoder, r, view.texture(), false);
-                                    r.view = Some(view);
-                                }
-                                Ok(SvgResolved::Missing) => {}
-                                Err(message) => {
-                                    self.fail(plan, draw, MediaFailure::Failed(message))
-                                }
+                        match self
+                            .vector
+                            .resolve(self.device, self.queue, v, self.precision)
+                        {
+                            Ok(view) => {
+                                // Level 2 content on a plane is resampled
+                                // (`crate::space25d::local`).
+                                self.prepare_level2(encoder, r, view.texture(), false);
+                                r.view = Some(view);
                             }
-                        } else {
-                            match self
-                                .vector
-                                .resolve(self.device, self.queue, v, self.precision)
-                            {
-                                Ok(view) => {
-                                    // Level 2 content on a plane is resampled
-                                    // (`crate::space25d::local`).
-                                    self.prepare_level2(encoder, r, view.texture(), false);
-                                    r.view = Some(view);
-                                }
-                                Err(message) => {
-                                    self.fail(plan, draw, MediaFailure::Failed(message))
-                                }
+                            Err(message) => {
+                                self.fail(plan, draw, MediaFailure::Failed(message))
                             }
                         }
                     }
@@ -572,16 +547,8 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
-                        if !self.scene3d.prepare_svg_maps(
-                            self.device,
-                            self.queue,
-                            encoder,
-                            object,
-                            &mut self.vector.svg,
-                            &plan.composition,
-                        ) {
-                            return;
-                        }
+                        self.scene3d
+                            .prepare_svg_maps(self.device, self.queue, encoder, object);
                         match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,
@@ -803,9 +770,14 @@ impl Exec<'_> {
         // Uniforms: one slot per draw plus the background quad.
         let slots = resolved.len() + 1;
         let mut data = vec![0u8; slots * UNIFORM_STRIDE as usize];
+        // A region's origin in the full frame's GL rows (`region_viewport`):
+        // solids compute coverage from full-frame pixel positions.
+        let region_origin = region.map_or([0.0, 0.0], |g| {
+            [g.x as f32, (fh - g.y - th) as f32]
+        });
         let quad = |m: [f64; 6], uv: [f64; 4], color: [f64; 4]| QuadUniform {
             m: m3(&m),
-            res: [fw as f32, fh as f32, 0.0, 0.0],
+            res: [fw as f32, fh as f32, region_origin[0], region_origin[1]],
             uv: uv.map(|v| v as f32),
             color: color.map(|v| v as f32),
         };
@@ -960,7 +932,11 @@ impl Exec<'_> {
                     pass.draw(0..4, 0..1);
                 }
             } else if r.solid.is_some() {
-                pass.set_pipeline(self.pipelines.solid_with(format, blend));
+                pass.set_pipeline(if r.uv[2] == 0.0 {
+                    self.pipelines.rect_with(format, blend)
+                } else {
+                    self.pipelines.solid_with(format, blend)
+                });
                 pass.set_bind_group(0, &quad_bind, &[offset]);
                 pass.draw(0..4, 0..1);
             } else if let Some(bind) = &texture_binds[i] {

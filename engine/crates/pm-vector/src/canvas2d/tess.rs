@@ -45,7 +45,10 @@ impl Vx {
 
     #[inline]
     fn apply(&self, v: [f32; 2]) -> [f32; 2] {
-        [self.c0[0] * v[0] + self.c1[0] * v[1], self.c0[1] * v[0] + self.c1[1] * v[1]]
+        [
+            self.c0[0] * v[0] + self.c1[0] * v[1],
+            self.c0[1] * v[0] + self.c1[1] * v[1],
+        ]
     }
 }
 
@@ -56,8 +59,14 @@ fn root4(x: f32) -> f32 {
 
 /// `wangs_formula::cubic_p4` (CPU).
 pub fn cubic_p4(p: &[P; 4], vx: &Vx) -> f32 {
-    let d0 = [-2.0 * p[1][0] + p[0][0] + p[2][0], -2.0 * p[1][1] + p[0][1] + p[2][1]];
-    let d1 = [-2.0 * p[2][0] + p[1][0] + p[3][0], -2.0 * p[2][1] + p[1][1] + p[3][1]];
+    let d0 = [
+        -2.0 * p[1][0] + p[0][0] + p[2][0],
+        -2.0 * p[1][1] + p[0][1] + p[2][1],
+    ];
+    let d1 = [
+        -2.0 * p[2][0] + p[1][0] + p[3][0],
+        -2.0 * p[2][1] + p[1][1] + p[3][1],
+    ];
     let (d0, d1) = (vx.apply(d0), vx.apply(d1));
     let k = (9.0 * 4.0 / 64.0) * (PRECISION * PRECISION);
     (d0[0] * d0[0] + d0[1] * d0[1]).max(d1[0] * d1[0] + d1[1] * d1[1]) * k
@@ -76,7 +85,10 @@ pub fn conic_p2(p: &[P; 3], w: f32, vx: &Vx) -> f32 {
     }
     let dot = |a: [f32; 2]| a[0] * a[0] + a[1] * a[1];
     let max_len = dot(p0).max(dot(p1).max(dot(p2))).sqrt();
-    let dp = [-2.0 * w * p1[0] + p0[0] + p2[0], -2.0 * w * p1[1] + p0[1] + p2[1]];
+    let dp = [
+        -2.0 * w * p1[0] + p0[0] + p2[0],
+        -2.0 * w * p1[1] + p0[1] + p2[1],
+    ];
     let dw = (-2.0 * w + 2.0).abs();
     let rp_minus_1 = (max_len * PRECISION - 1.0).max(0.0);
     let numer = dot(dp).sqrt() * PRECISION + rp_minus_1 * dw;
@@ -87,8 +99,14 @@ pub fn conic_p2(p: &[P; 3], w: f32, vx: &Vx) -> f32 {
 /// The vertex shader's `wangs_formula_cubic_log2` (`f32`, transformed
 /// forward differences).
 fn gpu_cubic_log2(p: &[P; 4], vx: &Vx) -> f32 {
-    let d0 = vx.apply([(-2.0f32).mul_add(p[1][0], p[2][0]) + p[0][0], (-2.0f32).mul_add(p[1][1], p[2][1]) + p[0][1]]);
-    let d1 = vx.apply([(-2.0f32).mul_add(p[2][0], p[3][0]) + p[1][0], (-2.0f32).mul_add(p[2][1], p[3][1]) + p[1][1]]);
+    let d0 = vx.apply([
+        (-2.0f32).mul_add(p[1][0], p[2][0]) + p[0][0],
+        (-2.0f32).mul_add(p[1][1], p[2][1]) + p[0][1],
+    ]);
+    let d1 = vx.apply([
+        (-2.0f32).mul_add(p[2][0], p[3][0]) + p[1][0],
+        (-2.0f32).mul_add(p[2][1], p[3][1]) + p[1][1],
+    ]);
     let m = (d0[0] * d0[0] + d0[1] * d0[1]).max(d1[0] * d1[0] + d1[1] * d1[1]);
     let k = (9.0 * 4.0 / 64.0) * (PRECISION * PRECISION);
     libm::ceilf(libm::log2f((k * m).max(1.0)) * 0.25)
@@ -107,7 +125,10 @@ fn gpu_conic_log2(p: &[P; 3], w: f32, vx: &Vx) -> f32 {
     }
     let dot = |a: [f32; 2]| a[0] * a[0] + a[1] * a[1];
     let m = dot(p0).max(dot(p1)).max(dot(p2)).sqrt();
-    let dp = [(-2.0 * w).mul_add(p1[0], p0[0]) + p2[0], (-2.0 * w).mul_add(p1[1], p0[1]) + p2[1]];
+    let dp = [
+        (-2.0 * w).mul_add(p1[0], p0[0]) + p2[0],
+        (-2.0 * w).mul_add(p1[1], p0[1]) + p2[1],
+    ];
     let dw = (-2.0f32).mul_add(w, 2.0).abs();
     let rp_minus_1 = m.mul_add(PRECISION, -1.0).max(0.0);
     let numer = dot(dp).sqrt() * PRECISION + rp_minus_1 * dw;
@@ -188,18 +209,30 @@ fn chops(n4: f32) -> i32 {
     if n4 <= MAX_PARAMETRIC_SEGMENTS_P4 {
         0
     } else {
-        libm::ceilf(root4(n4.min(MAX_SEGMENTS_PER_CURVE_P4) / MAX_PARAMETRIC_SEGMENTS_P4)) as i32
+        libm::ceilf(root4(
+            n4.min(MAX_SEGMENTS_PER_CURVE_P4) / MAX_PARAMETRIC_SEGMENTS_P4,
+        )) as i32
     }
 }
 
 fn mix4(a: [f32; 4], b: [f32; 4], t: [f32; 4]) -> [f32; 4] {
-    [(b[0] - a[0]) * t[0] + a[0], (b[1] - a[1]) * t[1] + a[1], (b[2] - a[2]) * t[2] + a[2], (b[3] - a[3]) * t[3] + a[3]]
+    [
+        (b[0] - a[0]) * t[0] + a[0],
+        (b[1] - a[1]) * t[1] + a[1],
+        (b[2] - a[2]) * t[2] + a[2],
+        (b[3] - a[3]) * t[3] + a[3],
+    ]
 }
 
 /// Splits a cubic into PatchWriter's chopped patches.
 fn chop_cubic(mut p: [P; 4], mut n: i32, out: &mut Vec<Patch>) {
     while n >= 3 {
-        let t = [1.0 / n as f32, 1.0 / n as f32, 2.0 / n as f32, 2.0 / n as f32];
+        let t = [
+            1.0 / n as f32,
+            1.0 / n as f32,
+            2.0 / n as f32,
+            2.0 / n as f32,
+        ];
         let xy = |q: P| [q[0], q[1], q[0], q[1]];
         let ab = mix4(xy(p[0]), xy(p[1]), t);
         let bc = mix4(xy(p[1]), xy(p[2]), t);
@@ -210,8 +243,14 @@ fn chop_cubic(mut p: [P; 4], mut n: i32, out: &mut Vec<Patch>) {
         let middle = mix4(abc, bcd, [t[2], t[3], t[0], t[1]]);
         let lo = |v: [f32; 4]| [v[0], v[1]];
         let hi = |v: [f32; 4]| [v[2], v[3]];
-        out.push(Patch { p: [p[0], lo(ab), lo(abc), lo(abcd)], w: None });
-        out.push(Patch { p: [lo(abcd), lo(middle), hi(middle), hi(abcd)], w: None });
+        out.push(Patch {
+            p: [p[0], lo(ab), lo(abc), lo(abcd)],
+            w: None,
+        });
+        out.push(Patch {
+            p: [lo(abcd), lo(middle), hi(middle), hi(abcd)],
+            w: None,
+        });
         p = [hi(abcd), hi(bcd), hi(cd), p[3]];
         n -= 2;
     }
@@ -223,8 +262,14 @@ fn chop_cubic(mut p: [P; 4], mut n: i32, out: &mut Vec<Patch>) {
         let abc = h(ab, bc);
         let bcd = h(bc, cd);
         let abcd = h(abc, bcd);
-        out.push(Patch { p: [p[0], ab, abc, abcd], w: None });
-        out.push(Patch { p: [abcd, bcd, cd, p[3]], w: None });
+        out.push(Patch {
+            p: [p[0], ab, abc, abcd],
+            w: None,
+        });
+        out.push(Patch {
+            p: [abcd, bcd, cd, p[3]],
+            w: None,
+        });
     } else {
         out.push(Patch { p, w: None });
     }
@@ -243,7 +288,12 @@ fn chop_conic(p: [P; 3], w: f32, mut n: i32, out: &mut Vec<Patch>) {
         let abc = mix4(ab, bc, tt);
         let mid = [abc[0] / abc[3], abc[1] / abc[3]];
         out.push(Patch {
-            p: [[h0[0] / h0[3], h0[1] / h0[3]], [ab[0] / ab[3], ab[1] / ab[3]], mid, [0.0; 2]],
+            p: [
+                [h0[0] / h0[3], h0[1] / h0[3]],
+                [ab[0] / ab[3], ab[1] / ab[3]],
+                mid,
+                [0.0; 2],
+            ],
             w: Some(ab[3] / (h0[3] * abc[3]).sqrt()),
         });
         h0 = abc;
@@ -251,7 +301,12 @@ fn chop_conic(p: [P; 3], w: f32, mut n: i32, out: &mut Vec<Patch>) {
         n -= 1;
     }
     out.push(Patch {
-        p: [[h0[0] / h0[3], h0[1] / h0[3]], [h1[0] / h1[3], h1[1] / h1[3]], [h2[0], h2[1]], [0.0; 2]],
+        p: [
+            [h0[0] / h0[3], h0[1] / h0[3]],
+            [h1[0] / h1[3], h1[1] / h1[3]],
+            [h2[0], h2[1]],
+            [0.0; 2],
+        ],
         w: Some(h1[3] / h0[3].sqrt()),
     });
 }
@@ -262,13 +317,24 @@ pub fn curve_patches(verb: Verb, pts: &[P], vx: &Vx, out: &mut Vec<Patch>) {
     match verb {
         Verb::Line => {
             let (a, b) = (pts[0], pts[1]);
-            let third = |i: f32| [(b[0] - a[0]) * (1.0 / 3.0) * i + a[0], (b[1] - a[1]) * (1.0 / 3.0) * i + a[1]];
+            let third = |i: f32| {
+                [
+                    (b[0] - a[0]) * (1.0 / 3.0) * i + a[0],
+                    (b[1] - a[1]) * (1.0 / 3.0) * i + a[1],
+                ]
+            };
             // `(p0p1.zwxy() - p0p1) * (1/3.f) + p0p1`: p1 = a + (b - a)/3,
             // p2 = b + (a - b)/3.
             let p1 = third(1.0);
-            let p2 = [(a[0] - b[0]) * (1.0 / 3.0) + b[0], (a[1] - b[1]) * (1.0 / 3.0) + b[1]];
+            let p2 = [
+                (a[0] - b[0]) * (1.0 / 3.0) + b[0],
+                (a[1] - b[1]) * (1.0 / 3.0) + b[1],
+            ];
             let _ = third;
-            out.push(Patch { p: [a, p1, p2, b], w: None });
+            out.push(Patch {
+                p: [a, p1, p2, b],
+                w: None,
+            });
         }
         Verb::Quad => {
             let (p0, p1, p2) = (pts[0], pts[1], pts[2]);
@@ -279,9 +345,18 @@ pub fn curve_patches(verb: Verb, pts: &[P], vx: &Vx, out: &mut Vec<Patch>) {
             let n = chops(n4);
             let as_cubic = |p0: P, p1: P, p2: P| {
                 // `mix(float4(p0, p2), p1.xyxy(), 2/3.f)`.
-                let c1 = [(p1[0] - p0[0]) * (2.0 / 3.0) + p0[0], (p1[1] - p0[1]) * (2.0 / 3.0) + p0[1]];
-                let c2 = [(p1[0] - p2[0]) * (2.0 / 3.0) + p2[0], (p1[1] - p2[1]) * (2.0 / 3.0) + p2[1]];
-                Patch { p: [p0, c1, c2, p2], w: None }
+                let c1 = [
+                    (p1[0] - p0[0]) * (2.0 / 3.0) + p0[0],
+                    (p1[1] - p0[1]) * (2.0 / 3.0) + p0[1],
+                ];
+                let c2 = [
+                    (p1[0] - p2[0]) * (2.0 / 3.0) + p2[0],
+                    (p1[1] - p2[1]) * (2.0 / 3.0) + p2[1],
+                ];
+                Patch {
+                    p: [p0, c1, c2, p2],
+                    w: None,
+                }
             };
             if n == 0 {
                 out.push(as_cubic(p0, p1, p2));
@@ -294,7 +369,10 @@ pub fn curve_patches(verb: Verb, pts: &[P], vx: &Vx, out: &mut Vec<Patch>) {
             let n2 = conic_p2(&p, w, vx);
             let n = chops(n2 * n2);
             if n == 0 {
-                out.push(Patch { p: [p[0], p[1], p[2], [0.0; 2]], w: Some(w) });
+                out.push(Patch {
+                    p: [p[0], p[1], p[2], [0.0; 2]],
+                    w: Some(w),
+                });
             } else {
                 chop_conic(p, w, n, out);
             }
@@ -312,9 +390,21 @@ pub fn curve_patches(verb: Verb, pts: &[P], vx: &Vx, out: &mut Vec<Patch>) {
     }
 }
 
-fn chop_quad(mut p0: P, mut p1: P, p2: P, mut n: i32, out: &mut Vec<Patch>, as_cubic: &dyn Fn(P, P, P) -> Patch) {
+fn chop_quad(
+    mut p0: P,
+    mut p1: P,
+    p2: P,
+    mut n: i32,
+    out: &mut Vec<Patch>,
+    as_cubic: &dyn Fn(P, P, P) -> Patch,
+) {
     while n >= 3 {
-        let t = [1.0 / n as f32, 1.0 / n as f32, 2.0 / n as f32, 2.0 / n as f32];
+        let t = [
+            1.0 / n as f32,
+            1.0 / n as f32,
+            2.0 / n as f32,
+            2.0 / n as f32,
+        ];
         let xy = |q: P| [q[0], q[1], q[0], q[1]];
         let ab = mix4(xy(p0), xy(p1), t);
         let bc = mix4(xy(p1), xy(p2), t);
@@ -324,7 +414,10 @@ fn chop_quad(mut p0: P, mut p1: P, p2: P, mut n: i32, out: &mut Vec<Patch>, as_c
         let lo = |v: [f32; 4]| [v[0], v[1]];
         let hi = |v: [f32; 4]| [v[2], v[3]];
         out.push(as_cubic(p0, lo(ab), lo(abc)));
-        out.push(Patch { p: [lo(abc), lo(middle), hi(middle), hi(abc)], w: None });
+        out.push(Patch {
+            p: [lo(abc), lo(middle), hi(middle), hi(abc)],
+            w: None,
+        });
         p0 = hi(abc);
         p1 = hi(bc);
         n -= 2;
@@ -376,7 +469,10 @@ pub fn fill_polygons_local(path: &SkPath, m: &Mat) -> Vec<Vec<P>> {
 /// Maps local points to device coordinates as the vertex shader does
 /// (before the viewport transform, [`Viewport::map`]).
 pub fn to_device(contours: &[Vec<P>], m: &Mat) -> Vec<Vec<P>> {
-    contours.iter().map(|c| c.iter().map(|p| device(*p, m)).collect()).collect()
+    contours
+        .iter()
+        .map(|c| c.iter().map(|p| device(*p, m)).collect())
+        .collect()
 }
 
 /// One vertex through the vertex shader: `localToDevice * float4(p, 0, 1)`
@@ -443,7 +539,9 @@ impl Viewport {
 
     /// Device triangles to window coordinates.
     pub fn map_triangles(&self, tris: &[[P; 3]]) -> Vec<[P; 3]> {
-        tris.iter().map(|t| [self.map(t[0]), self.map(t[1]), self.map(t[2])]).collect()
+        tris.iter()
+            .map(|t| [self.map(t[0]), self.map(t[1]), self.map(t[2])])
+            .collect()
     }
 }
 

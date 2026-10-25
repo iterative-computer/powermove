@@ -23,7 +23,7 @@ pm-glsl = { path = "../pm-glsl" }
 pollster = "0.4"
 serde.workspace = true
 pm-media = { path = "../pm-media" }
-pm-vector = { path = "../pm-vector", features = ["gpu"] }
+pm-vector = { path = "../pm-vector", features = ["render"] }
 # Glyph rendering (text and captions, docs/engine/text-render.md).
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2"] }
 vello = { version = "0.11", default-features = false, features = ["wgpu"] }
@@ -51,6 +51,9 @@ pm-edit = { path = "../pm-edit" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
 read-fonts = "0.45"
 png = "0.18"
+resvg = { version = "=0.48.1", default-features = false, features = ["raster-images"] }
+tiny-skia = "=0.12.0"
+usvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts"] }
 
 [[test]]
 # Runs on the main thread: the CoreText font registry uses AppKit's font
@@ -61,11 +64,6 @@ harness = false
 [[test]]
 # Runs on the main thread (the CoreText font registry).
 name = "text_corpus"
-harness = false
-
-[[test]]
-# Runs on the main thread (the CoreText font registry).
-name = "svg_corpus"
 harness = false
 
 [[test]]

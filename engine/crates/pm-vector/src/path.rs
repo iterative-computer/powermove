@@ -282,6 +282,13 @@ pub fn trace_path(v: &PathValues) -> BezPath {
     ctx.finish()
 }
 
+/// The string-valued path content (`path.fill`, `path.stroke`), per path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathColors {
+    pub fill: String,
+    pub stroke: String,
+}
+
 /// One path of a layer with its identity and group parent (`d.paths[i]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathNode {

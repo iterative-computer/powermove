@@ -1,7 +1,7 @@
 //! Canvas2D's `ctx.filter = blur(σ px)` as Chromium 152's Skia (Graphite)
-//! runs it on the GPU, planned pass for pass (docs/engine/composite.md
-//! "Path masks"). Every number here is computed in `f32` in Skia's order;
-//! pm-render executes the passes.
+//! runs it on the GPU, planned pass for pass. Text save layers retain this
+//! planner for their legacy raster contract. Every number here is computed
+//! in `f32` in Skia's order; pm-render executes the passes.
 //!
 //! Skia (`b6d106297ff9ef2ff8094033695d045e87775581`): the draw goes into a
 //! save layer whose image filter is `SkBlurImageFilter` with decal tiling.
@@ -181,7 +181,11 @@ pub struct BlurPlan {
 
 /// `SkNextLog2(v)`: the smallest `n` with `2ⁿ ≥ v` (0 for `v ≤ 1`).
 fn next_log2(v: i32) -> i32 {
-    if v <= 1 { 0 } else { 32 - ((v - 1) as u32).leading_zeros() as i32 }
+    if v <= 1 {
+        0
+    } else {
+        32 - ((v - 1) as u32).leading_zeros() as i32
+    }
 }
 
 /// `downscale_step_count`.
@@ -199,8 +203,16 @@ fn downscale_step_count(net_scale: f32) -> i32 {
 
 /// `scale_about_center`.
 fn scale_about_center(src: RectF, sx: f32, sy: f32) -> RectF {
-    let cx = if sx == 1.0 { 0.0 } else { 0.5 * src.l + 0.5 * src.r };
-    let cy = if sy == 1.0 { 0.0 } else { 0.5 * src.t + 0.5 * src.b };
+    let cx = if sx == 1.0 {
+        0.0
+    } else {
+        0.5 * src.l + 0.5 * src.r
+    };
+    let cy = if sy == 1.0 {
+        0.0
+    } else {
+        0.5 * src.t + 0.5 * src.b
+    };
     RectF {
         l: (src.l - cx) * sx,
         t: (src.t - cy) * sy,
@@ -211,7 +223,11 @@ fn scale_about_center(src: RectF, sx: f32, sy: f32) -> RectF {
 
 /// `SkBlurEngine::SigmaToRadius`.
 pub fn sigma_to_radius(sigma: f32) -> i32 {
-    if sigma <= 0.03 { 0 } else { (3.0 * sigma).ceil() as i32 }
+    if sigma <= 0.03 {
+        0
+    } else {
+        (3.0 * sigma).ceil() as i32
+    }
 }
 
 /// `Compute2DBlurKernel`, row-major, `(2rx + 1)(2ry + 1)` weights.
@@ -336,7 +352,12 @@ fn shader_blur(sigma: [f32; 2], src: Rect, dst: Rect, passes: &mut Vec<Pass>) {
     if rx > 0 {
         if ry > 0 {
             let o = dst.outset(0, ry);
-            intermediate = Rect::ltrb(o.x0, o.y0.max(outset_src.y0), o.r(), o.b().min(outset_src.b()));
+            intermediate = Rect::ltrb(
+                o.x0,
+                o.y0.max(outset_src.y0),
+                o.r(),
+                o.b().min(outset_src.b()),
+            );
             if intermediate.h == 0 {
                 return;
             }
@@ -372,8 +393,16 @@ impl BlurPlan {
         let r = (3.0 * sigma).ceil() as i32;
         let canvas = Rect::ltrb(0, 0, width as i32, height as i32);
         let src_rect = canvas.outset(r, r);
-        let scale = if sigma > MAX_LINEAR_SIGMA { MAX_LINEAR_SIGMA / sigma } else { 1.0 };
-        let steps = if scale == 1.0 { 0 } else { downscale_step_count(scale) };
+        let scale = if sigma > MAX_LINEAR_SIGMA {
+            MAX_LINEAR_SIGMA / sigma
+        } else {
+            1.0
+        };
+        let steps = if scale == 1.0 {
+            0
+        } else {
+            downscale_step_count(scale)
+        };
         let mut passes = Vec::new();
         if steps == 0 {
             // The blur at full resolution, output over the canvas and one
@@ -395,12 +424,20 @@ impl BlurPlan {
         while xs > 0 || ys > 0 {
             let mut sx = 1.0;
             if xs > 0 {
-                sx = if xs > 1 { 0.5 } else { src_f.width() * scale / step.width() };
+                sx = if xs > 1 {
+                    0.5
+                } else {
+                    src_f.width() * scale / step.width()
+                };
                 xs -= 1;
             }
             let mut sy = 1.0;
             if ys > 0 {
-                sy = if ys > 1 { 0.5 } else { src_f.height() * scale / step.height() };
+                sy = if ys > 1 {
+                    0.5
+                } else {
+                    src_f.height() * scale / step.height()
+                };
                 ys -= 1;
             }
             let dst_f = scale_about_center(step, sx, sy);
@@ -423,7 +460,10 @@ impl BlurPlan {
         // double with the round epsilon), bounded by the image outset by
         // the blur's reach, plus one pixel for the upscale.
         let (sx, sy) = (f64::from(to_layer.scale[0]), f64::from(to_layer.scale[1]));
-        let (tx, ty) = (f64::from(to_layer.translate[0]), f64::from(to_layer.translate[1]));
+        let (tx, ty) = (
+            f64::from(to_layer.translate[0]),
+            f64::from(to_layer.translate[1]),
+        );
         let e = f64::from(ROUND_EPSILON);
         let l = (0.0 - tx) / sx;
         let rr = (f64::from(width) - tx) / sx;
@@ -448,7 +488,6 @@ impl BlurPlan {
         })
     }
 }
-
 
 /// An 8-bit single-channel image on its pixel rectangle, transparent
 /// outside.
@@ -475,19 +514,28 @@ impl Image {
         // Match sample_at's normalized coordinates before the sampler's
         // fixed-point interpolation. The initial RGBA layer has no ring;
         // filter intermediates and path-mask inputs have a 1-pixel ring.
-        let (w,h) = ((self.rect.w+2*ring) as f32, (self.rect.h+2*ring) as f32);
-        let u = ((x-(self.rect.x0-ring as i32) as f32)*(1.0/w))*w - ring as f32 - 0.5;
-        let v = ((y-(self.rect.y0-ring as i32) as f32)*(1.0/h))*h - ring as f32 - 0.5;
+        let (w, h) = (
+            (self.rect.w + 2 * ring) as f32,
+            (self.rect.h + 2 * ring) as f32,
+        );
+        let u = ((x - (self.rect.x0 - ring as i32) as f32) * (1.0 / w)) * w - ring as f32 - 0.5;
+        let v = ((y - (self.rect.y0 - ring as i32) as f32) * (1.0 / h)) * h - ring as f32 - 0.5;
         let (i, j) = (libm::floorf(u), libm::floorf(v));
-        let (fx, fy) = ((256.0 * (u - i)).round()/256.0, (256.0 * (v - j)).round()/256.0);
+        let (fx, fy) = (
+            (256.0 * (u - i)).round() / 256.0,
+            (256.0 * (v - j)).round() / 256.0,
+        );
         let (i, j) = (i as i32 + self.rect.x0, j as i32 + self.rect.y0);
         // Interpolate integer channel values before normalization. The
         // hardware's 8-bit weights and 4 fractional output bits make this
         // exact fixed-point arithmetic, including halfway decisions.
         let at = |x: i32, y: i32| {
-            let (x,y) = (x-self.rect.x0, y-self.rect.y0);
-            if x < 0 || y < 0 || x >= self.rect.w as i32 || y >= self.rect.h as i32 { 0.0 }
-            else { f32::from(self.px[y as usize*self.rect.w as usize+x as usize]) }
+            let (x, y) = (x - self.rect.x0, y - self.rect.y0);
+            if x < 0 || y < 0 || x >= self.rect.w as i32 || y >= self.rect.h as i32 {
+                0.0
+            } else {
+                f32::from(self.px[y as usize * self.rect.w as usize + x as usize])
+            }
         };
         let a = at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
         let b = at(i, j + 1) * (1.0 - fx) + at(i + 1, j + 1) * fx;
@@ -506,17 +554,34 @@ impl BlurPlan {
     /// Premultiplied RGBA, with the same plan and per-pass N32 storage as
     /// scalar coverage. Each channel follows precisely the same arithmetic.
     pub fn run_cpu_rgba(&self, rgba: &[u8], width: u32, height: u32) -> Vec<f32> {
-        self.run_cpu_rgba_region(rgba, Rect::ltrb(0, 0, width as i32, height as i32), width, height)
+        self.run_cpu_rgba_region(
+            rgba,
+            Rect::ltrb(0, 0, width as i32, height as i32),
+            width,
+            height,
+        )
     }
 
     /// The input need not cover the canvas: save layers may include
     /// off-canvas ink. Quantize the final filtered draw to N32 too.
-    pub fn run_cpu_rgba_region(&self, rgba: &[u8], rect: Rect, width: u32, height: u32) -> Vec<f32> {
+    pub fn run_cpu_rgba_region(
+        &self,
+        rgba: &[u8],
+        rect: Rect,
+        width: u32,
+        height: u32,
+    ) -> Vec<f32> {
         assert_eq!(rgba.len(), (rect.w * rect.h * 4) as usize);
-        let mut out = vec![0.0; (width*height*4) as usize];
+        let mut out = vec![0.0; (width * height * 4) as usize];
         for c in 0..4 {
-            let img = Image { rect, px: rgba.chunks_exact(4).map(|p| p[c]).collect() };
-            for (p, v) in out.chunks_exact_mut(4).zip(self.run_cpu_ring(&img, width, height, 0)) {
+            let img = Image {
+                rect,
+                px: rgba.chunks_exact(4).map(|p| p[c]).collect(),
+            };
+            for (p, v) in out
+                .chunks_exact_mut(4)
+                .zip(self.run_cpu_ring(&img, width, height, 0))
+            {
                 p[c] = f32::from(unorm8(v)) / 255.0;
             }
         }
@@ -540,9 +605,12 @@ impl BlurPlan {
                     let v = match pass {
                         Pass::Rescale { sample, .. } => img.bilinear_ring(
                             cx.mul_add(sample.scale[0], sample.translate[0]),
-                            cy.mul_add(sample.scale[1], sample.translate[1]), ring,
+                            cy.mul_add(sample.scale[1], sample.translate[1]),
+                            ring,
                         ),
-                        Pass::Blur2d { weights, offsets, .. } => {
+                        Pass::Blur2d {
+                            weights, offsets, ..
+                        } => {
                             let mut sum = 0.0f32;
                             for (w, o) in weights.iter().zip(offsets) {
                                 sum = w.mul_add(img.nearest(cx + o[0], cy + o[1]), sum);
@@ -552,7 +620,14 @@ impl BlurPlan {
                         Pass::Blur1d { dir, taps, .. } => {
                             let mut sum = 0.0f32;
                             for (o, w) in taps {
-                                sum = w.mul_add(img.bilinear_ring(o.mul_add(dir[0], cx), o.mul_add(dir[1], cy), ring), sum);
+                                sum = w.mul_add(
+                                    img.bilinear_ring(
+                                        o.mul_add(dir[0], cx),
+                                        o.mul_add(dir[1], cy),
+                                        ring,
+                                    ),
+                                    sum,
+                                );
                             }
                             sum
                         }
@@ -571,7 +646,11 @@ impl BlurPlan {
                     cx.mul_add(self.draw.scale[0], self.draw.translate[0]),
                     cy.mul_add(self.draw.scale[1], self.draw.translate[1]),
                 );
-                out[(y * width + x) as usize] = if self.linear { img.bilinear_ring(sx, sy, ring) } else { img.nearest(sx, sy) };
+                out[(y * width + x) as usize] = if self.linear {
+                    img.bilinear_ring(sx, sy, ring)
+                } else {
+                    img.nearest(sx, sy)
+                };
             }
         }
         out
@@ -584,11 +663,14 @@ mod tests {
 
     #[test]
     fn bilinear_uses_integer_channels_before_normalizing() {
-        let img = Image { rect: Rect::ltrb(0, 0, 2, 1), px: vec![0,255] };
+        let img = Image {
+            rect: Rect::ltrb(0, 0, 2, 1),
+            px: vec![0, 255],
+        };
         // 9/256 of 255 is 8.96484375; the sampler rounds it to
         // 8.9375 code values before converting to normalized float.
-        assert_eq!(img.bilinear(0.5+9.0/256.0, 0.5), 143.0/4080.0);
-        assert_eq!(img.bilinear(0.5+8.0/256.0, 0.5), 8.0/255.0);
+        assert_eq!(img.bilinear(0.5 + 9.0 / 256.0, 0.5), 143.0 / 4080.0);
+        assert_eq!(img.bilinear(0.5 + 8.0 / 256.0, 0.5), 8.0 / 255.0);
     }
 
     #[test]
@@ -621,10 +703,19 @@ mod tests {
         let p = BlurPlan::new(100, 80, 0.5).unwrap();
         assert!(matches!(p.passes.as_slice(), [Pass::Blur2d { .. }]));
         let p = BlurPlan::new(100, 80, 0.7).unwrap();
-        assert!(matches!(p.passes.as_slice(), [Pass::Blur1d { .. }, Pass::Blur1d { .. }]));
+        assert!(matches!(
+            p.passes.as_slice(),
+            [Pass::Blur1d { .. }, Pass::Blur1d { .. }]
+        ));
         assert!(BlurPlan::new(100, 80, 0.03).is_none());
         let p = BlurPlan::new(480, 300, 12.0).unwrap();
-        assert_eq!(p.passes.iter().filter(|p| matches!(p, Pass::Rescale { .. })).count(), 2);
+        assert_eq!(
+            p.passes
+                .iter()
+                .filter(|p| matches!(p, Pass::Rescale { .. }))
+                .count(),
+            2
+        );
         assert!(p.linear);
     }
 }

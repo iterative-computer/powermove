@@ -55,9 +55,6 @@ pub enum Feature {
     ProjectColor,
     /// A project that requires native-engine features.
     RequiresEngine,
-    /// `compat` level 2 SVG images with `<text>` (level 1 SVG images are
-    /// Chromium's rasters, decision S1).
-    SvgImage,
     /// Animated images and image sequences.
     ImageSequence,
     /// A media file this renderer cannot read (format, color profile).
@@ -109,7 +106,6 @@ impl fmt::Display for Feature {
             Feature::CompatLevel2 => write!(f, "compat level 2 content"),
             Feature::ProjectColor => write!(f, "non-default project color settings"),
             Feature::RequiresEngine => write!(f, "native-engine features"),
-            Feature::SvgImage => write!(f, "level 2 SVG images with text"),
             Feature::ImageSequence => write!(f, "animated images and image sequences"),
             Feature::Media(m) => write!(f, "media: {m}"),
             Feature::Request(r) => write!(f, "request: {r}"),
@@ -629,28 +625,8 @@ fn check_media(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ty == "image" && format == "svg" {
-        // Level 1 SVG images are drawn: Chromium's raster at today's
-        // bucket, from the document's renderer (decision S1; broken and
-        // unreadable documents are handled at execution).
-        if !crate::vector::level2(layer) {
-            return;
-        }
-        // Level 2: unreadable SVGs are named layer failures at execution.
-        let has_text = match assets {
-            Some(assets) => {
-                let Some(path) = assets.path(&asset_id, Some(record)) else {
-                    return;
-                };
-                match crate::vector::svg::document(&path) {
-                    Ok((doc, _)) => doc.has_text(),
-                    Err(_) => return,
-                }
-            }
-            None => false,
-        };
-        if has_text {
-            add(layer, Feature::SvgImage);
-        }
+        // SVG images are drawn natively (`crate::vector::svg`); broken and
+        // unreadable documents are handled at execution.
         return;
     }
     if ty == "video"

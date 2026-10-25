@@ -11,7 +11,7 @@
 //! 3-Clause license.
 
 use super::msaa::{SUBPIXEL_BITS, snap};
-use super::skpath::{Mat, P};
+use super::skpath::Mat;
 
 const K_MITER: f32 = 1.0;
 const K_BEVEL: f32 = 0.0;
@@ -39,18 +39,8 @@ pub struct Instance {
 pub enum Geometry {
     /// A filled rectangle `[l, t, r, b]`.
     FillRect([f32; 4]),
-    FillRRect {
-        rect: [f32; 4],
-        radii: [f32; 2],
-    },
     /// A stroked rectangle with the stroke radius and join (`StrokeStyle`
     /// convention: negative round, zero bevel, positive miter limit).
-    StrokeRRect {
-        rect: [f32; 4],
-        corner_radius: f32,
-        radius: f32,
-        join: f32,
-    },
     StrokeRect {
         rect: [f32; 4],
         radius: f32,
@@ -92,13 +82,6 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
     let mut center_weight = SOLID_INTERIOR;
     let (a, b, c, center_xy, intersects);
     match *g {
-        Geometry::FillRRect { rect: r, radii } => {
-            a = [radii[0]; 4];
-            b = [radii[1]; 4];
-            c = r;
-            center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
-            intersects = (r[2] - r[0]) <= 2.0 * aa_radius || (r[3] - r[1]) <= 2.0 * aa_radius;
-        }
         Geometry::FillRect(r) => {
             a = [-1.0; 4];
             b = [r[0], r[2], r[2], r[0]];
@@ -107,36 +90,11 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
             // opposite_insets_intersect for an all-AA rect quad.
             intersects = (r[2] - r[0]) <= 2.0 * aa_radius || (r[3] - r[1]) <= 2.0 * aa_radius;
         }
-        Geometry::StrokeRRect {
+        Geometry::StrokeRect {
             rect: r,
-            corner_radius,
             radius,
             join,
         } => {
-            let size = [r[2] - r[0], r[3] - r[1]];
-            if (size[0] <= 2.0 * radius || size[1] <= 2.0 * radius) && radius > 0.0 {
-                stroke_inset = -radius;
-            } else {
-                center_weight = STROKE_INTERIOR;
-                stroke_inset = radius;
-            }
-            a = [
-                -2.0,
-                0.0,
-                radius,
-                if join > 0.0 {
-                    if join < core::f32::consts::SQRT_2 { 0.0 } else { 1.0 }
-                } else {
-                    join
-                },
-            ];
-            b = [corner_radius; 4];
-            c = r;
-            center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
-            let inset = stroke_inset + 2.0 * aa_radius;
-            intersects = inset >= size[0] - corner_radius || inset >= size[1] - corner_radius;
-        }
-        Geometry::StrokeRect { rect: r, radius, join } => {
             let size = [r[2] - r[0], r[3] - r[1]];
             let gap = [size[0] - 2.0 * radius, size[1] - 2.0 * radius];
             if (gap[0] <= 0.0 || gap[1] <= 0.0) && radius > 0.0 {
@@ -160,10 +118,13 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
             b = [0.0; 4];
             c = r;
             center_xy = [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5];
-            intersects = size[0] <= 2.0 * (stroke_inset + aa_radius) || size[1] <= 2.0 * (stroke_inset + aa_radius);
+            intersects = size[0] <= 2.0 * (stroke_inset + aa_radius)
+                || size[1] <= 2.0 * (stroke_inset + aa_radius);
         }
         Geometry::StrokeLine { line, radius, cap } => {
-            let len = ((line[2] - line[0]) * (line[2] - line[0]) + (line[3] - line[1]) * (line[3] - line[1])).sqrt();
+            let len = ((line[2] - line[0]) * (line[2] - line[0])
+                + (line[3] - line[1]) * (line[3] - line[1]))
+                .sqrt();
             let size = [len, 0.0];
             let gap = [size[0] - 2.0 * radius, size[1] - 2.0 * radius];
             if (gap[0] <= 0.0 || gap[1] <= 0.0) && radius > 0.0 {
@@ -172,11 +133,8 @@ pub fn instance(g: &Geometry, m: &Mat) -> Instance {
                 center_weight = STROKE_INTERIOR;
                 stroke_inset = radius;
             }
-            let join_style = match cap {
-                super::stroke::Cap::Round => -1.0,
-                super::stroke::Cap::Butt => 0.0,
-                super::stroke::Cap::Square => 1.0,
-            };
+            let super::stroke::Cap::Butt = cap;
+            let join_style = 0.0;
             a = [-2.0, 1.0, radius, join_style];
             b = [0.0; 4];
             c = line;
@@ -338,9 +296,21 @@ fn inverse3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     let det = a00 * b01 + a01 * b11 + a02 * b21;
     let inv = 1.0 / det;
     [
-        [b01 * inv, (-a22 * a01 + a02 * a21) * inv, (a12 * a01 - a02 * a11) * inv],
-        [b11 * inv, (a22 * a00 - a02 * a20) * inv, (-a12 * a00 + a02 * a10) * inv],
-        [b21 * inv, (-a21 * a00 + a01 * a20) * inv, (a11 * a00 - a01 * a10) * inv],
+        [
+            b01 * inv,
+            (-a22 * a01 + a02 * a21) * inv,
+            (a12 * a01 - a02 * a11) * inv,
+        ],
+        [
+            b11 * inv,
+            (a22 * a00 - a02 * a20) * inv,
+            (-a12 * a00 + a02 * a10) * inv,
+        ],
+        [
+            b21 * inv,
+            (-a21 * a00 + a01 * a20) * inv,
+            (a11 * a00 - a01 * a10) * inv,
+        ],
     ]
 }
 
@@ -376,7 +346,11 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
             x_radii = inst.radii_or_quad_xs;
             y_radii = x_radii;
             stroke_params = [xr[2], xr[3]];
-            join_scale = if stroke_params[1] < 0.0 { K_ROUND } else { sign(stroke_params[1]) };
+            join_scale = if stroke_params[1] < 0.0 {
+                K_ROUND
+            } else {
+                sign(stroke_params[1])
+            };
         }
     } else if xr.iter().any(|&v| v > 0.0) {
         xs = [l[0], l[2], l[2], l[0]];
@@ -451,7 +425,10 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
             edge_sq = mixv(yzwx(edge_sq), edge_sq, edge_mask);
             edge_aa = mixv(yzwx(edge_aa), edge_aa, edge_mask);
             if !triangle && join_scale == K_BEVEL {
-                stroke_radius = [stroke_radius[0] * edge_mask[corner], stroke_radius[1] * edge_mask[next]];
+                stroke_radius = [
+                    stroke_radius[0] * edge_mask[corner],
+                    stroke_radius[1] * edge_mask[next],
+                ];
                 for i in 0..4 {
                     edge_bias[i] = (edge_mask[i] - 1.0) * stroke_params[0];
                 }
@@ -475,18 +452,30 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
         } else {
             let aa = center[3];
             let inset = if bidirectional {
-                [corner_radii[0] - stroke_radius[0], corner_radii[1] - stroke_radius[1]]
+                [
+                    corner_radii[0] - stroke_radius[0],
+                    corner_radii[1] - stroke_radius[1],
+                ]
             } else {
-                [corner_radii[0] + stroke_radius[0], corner_radii[1] + stroke_radius[1]]
+                [
+                    corner_radii[0] + stroke_radius[0],
+                    corner_radii[1] + stroke_radius[1],
+                ]
             };
             if join_scale == K_MITER || inset[0] <= aa || inset[1] <= aa {
                 local = [inset[0] - aa, inset[1] - aa];
             } else {
-                local = [inset[0] * position[0] - aa * normal[0], inset[1] * position[1] - aa * normal[1]];
+                local = [
+                    inset[0] * position[0] - aa * normal[0],
+                    inset[1] * position[1] - aa * normal[1],
+                ];
             }
         }
     } else {
-        let s = [corner_radii[0] + stroke_radius[0], corner_radii[1] + stroke_radius[1]];
+        let s = [
+            corner_radii[0] + stroke_radius[0],
+            corner_radii[1] + stroke_radius[1],
+        ];
         local = [
             s[0] * (position[0] + join_scale * position[1]),
             s[1] * (position[1] + join_scale * position[0]),
@@ -523,8 +512,10 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
         let mut gx = [0.0f32; 4];
         let mut gy = [0.0f32; 4];
         for i in 0..4 {
-            gx[i] = -dy[i] * (inv[0][0] - inv[0][2] * xs[i]) + dx[i] * (inv[0][1] - inv[0][2] * ys[i]);
-            gy[i] = -dy[i] * (inv[1][0] - inv[1][2] * xs[i]) + dx[i] * (inv[1][1] - inv[1][2] * ys[i]);
+            gx[i] =
+                -dy[i] * (inv[0][0] - inv[0][2] * xs[i]) + dx[i] * (inv[0][1] - inv[0][2] * ys[i]);
+            gy[i] =
+                -dy[i] * (inv[1][0] - inv[1][2] * xs[i]) + dx[i] * (inv[1][1] - inv[1][2] * ys[i]);
         }
         for i in 0..4 {
             edge[i] *= 1.0 / (gx[i] * gx[i] + gy[i] * gy[i]).sqrt();
@@ -532,7 +523,9 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
         }
         let dxs = yzwx(dx);
         let dys = yzwx(dy);
-        let ortho: f32 = (0..4).map(|i| (dx[i] * dxs[i] + dy[i] * dys[i]).abs()).sum();
+        let ortho: f32 = (0..4)
+            .map(|i| (dx[i] * dxs[i] + dy[i] * dys[i]).abs())
+            .sum();
         let subpixel = edge_aa == [1.0; 4] && ortho < K_EPSILON;
         if subpixel {
             let dim = [edge[0] + edge[2], edge[1] + edge[3]];
@@ -548,8 +541,14 @@ pub fn vertex(inst: &Instance, vid: usize) -> Varyings {
         let perp = |v: [f32; 2]| [-v[1], v[0]];
         let px = vj(perp([-y_axis[0], -y_axis[1]]));
         let py = vj(perp(x_axis));
-        let mut nx = [corner_aspect[0] * ean[0] * px[0], corner_aspect[0] * ean[0] * px[1]];
-        let mut ny = [corner_aspect[1] * ean[1] * py[0], corner_aspect[1] * ean[1] * py[1]];
+        let mut nx = [
+            corner_aspect[0] * ean[0] * px[0],
+            corner_aspect[0] * ean[0] * px[1],
+        ];
+        let mut ny = [
+            corner_aspect[1] * ean[1] * py[0],
+            corner_aspect[1] * ean[1] * py[1],
+        ];
         let is_mid = ean[0] != 0.0 && ean[1] != 0.0;
         if join_scale == K_MITER && is_mid {
             let norm = |v: [f32; 2]| {
@@ -621,7 +620,12 @@ fn inverse_grad_len(g: [f32; 2], j: &[f32; 4]) -> f32 {
     1.0 / (d[0] * d[0] + d[1] * d[1]).sqrt()
 }
 
-fn elliptical_distance(uv: [f32; 2], radii: [f32; 2], stroke_radius: f32, j: &[f32; 4]) -> [f32; 2] {
+fn elliptical_distance(
+    uv: [f32; 2],
+    radii: [f32; 2],
+    stroke_radius: f32,
+    j: &[f32; 4],
+) -> [f32; 2] {
     let inv_r2 = [
         1.0 / (radii[0] * radii[0] + stroke_radius * stroke_radius),
         1.0 / (radii[1] * radii[1] + stroke_radius * stroke_radius),
@@ -633,12 +637,24 @@ fn elliptical_distance(uv: [f32; 2], radii: [f32; 2], stroke_radius: f32, j: &[f
     [width - f, width + f]
 }
 
-fn corner_distance(dist: &mut [f32; 2], j: &[f32; 4], stroke: [f32; 2], edge: [f32; 2], flip: [f32; 2], radii: [f32; 2]) {
+fn corner_distance(
+    dist: &mut [f32; 2],
+    j: &[f32; 4],
+    stroke: [f32; 2],
+    edge: [f32; 2],
+    flip: [f32; 2],
+    radii: [f32; 2],
+) {
     let uv = [radii[0] - edge[0], radii[1] - edge[1]];
     if uv[0] > 0.0 && uv[1] > 0.0 {
         if (radii[0] > 0.0 && radii[1] > 0.0) || (stroke[0] > 0.0 && stroke[1] < 0.0) {
-            let mut d = elliptical_distance([uv[0] * flip[0], uv[1] * flip[1]], radii, stroke[0], j);
-            d[1] = if radii[0] - stroke[0] <= 0.0 { 1.0 } else { -d[1] };
+            let mut d =
+                elliptical_distance([uv[0] * flip[0], uv[1] * flip[1]], radii, stroke[0], j);
+            d[1] = if radii[0] - stroke[0] <= 0.0 {
+                1.0
+            } else {
+                -d[1]
+            };
             dist[0] = dist[0].min(d[0]);
             dist[1] = dist[1].min(d[1]);
         } else if stroke[1] == 0.0 {
@@ -663,12 +679,21 @@ pub fn coverage(v: &Varyings) -> f32 {
     }
     let j = v.jacobian;
     let s = v.stroke;
-    let igl = [inverse_grad_len([1.0, 0.0], &j), inverse_grad_len([0.0, 1.0], &j)];
-    let outer = [igl[0] * (s[0] + e[0].min(e[2])), igl[1] * (s[0] + e[1].min(e[3]))];
+    let igl = [
+        inverse_grad_len([1.0, 0.0], &j),
+        inverse_grad_len([0.0, 1.0], &j),
+    ];
+    let outer = [
+        igl[0] * (s[0] + e[0].min(e[2])),
+        igl[1] * (s[0] + e[1].min(e[3])),
+    ];
     let mut d = [outer[0].min(outer[1]), -1.0f32];
     let (scale, bias);
     if v.control[0] > -0.95 {
-        let dim = [igl[0] * (e[0] + e[2] + 2.0 * s[0]), igl[1] * (e[1] + e[3] + 2.0 * s[0])];
+        let dim = [
+            igl[0] * (e[0] + e[2] + 2.0 * s[0]),
+            igl[1] * (e[1] + e[3] + 2.0 * s[0]),
+        ];
         scale = dim[0].min(dim[1]).min(1.0);
         bias = coverage_bias(scale);
     } else {
@@ -688,10 +713,38 @@ pub fn coverage(v: &Varyings) -> f32 {
             bias = 1.0;
         }
     }
-    corner_distance(&mut d, &j, s, [e[0], e[1]], [-1.0, -1.0], [v.x_radii[0], v.y_radii[0]]);
-    corner_distance(&mut d, &j, s, [e[2], e[1]], [1.0, -1.0], [v.x_radii[1], v.y_radii[1]]);
-    corner_distance(&mut d, &j, s, [e[2], e[3]], [1.0, 1.0], [v.x_radii[2], v.y_radii[2]]);
-    corner_distance(&mut d, &j, s, [e[0], e[3]], [-1.0, 1.0], [v.x_radii[3], v.y_radii[3]]);
+    corner_distance(
+        &mut d,
+        &j,
+        s,
+        [e[0], e[1]],
+        [-1.0, -1.0],
+        [v.x_radii[0], v.y_radii[0]],
+    );
+    corner_distance(
+        &mut d,
+        &j,
+        s,
+        [e[2], e[1]],
+        [1.0, -1.0],
+        [v.x_radii[1], v.y_radii[1]],
+    );
+    corner_distance(
+        &mut d,
+        &j,
+        s,
+        [e[2], e[3]],
+        [1.0, 1.0],
+        [v.x_radii[2], v.y_radii[2]],
+    );
+    corner_distance(
+        &mut d,
+        &j,
+        s,
+        [e[0], e[3]],
+        [-1.0, 1.0],
+        [v.x_radii[3], v.y_radii[3]],
+    );
     let outset = v.control[1].min(0.0);
     let fc = scale * ((d[0] + outset).min(-d[1]) + bias);
     fc.clamp(0.0, 1.0)
@@ -700,47 +753,40 @@ pub fn coverage(v: &Varyings) -> f32 {
 /// Per-sample coverage of one instance: for each covered sample, the
 /// fragment coverage of the first triangle (in primitive order) covering it.
 pub struct Samples {
-    pub width: u32,
-    pub height: u32,
     /// `width × height × samples per pixel`; `None` where no triangle covers
     /// the sample.
     pub coverage: Vec<Option<f32>>,
 }
 
-/// Rasterizes an instance's mesh.
-pub fn rasterize(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]]) -> Samples {
-    rasterize_window(inst, width, height, pattern, [0, 0])
-}
-
 /// Rasterize a crop without changing device coordinates or interpolants.
-pub fn rasterize_region(inst: &Instance, width: u32, height: u32,
-                        pattern: &[[f64; 2]], origin: [i32; 2]) -> Samples {
-    let verts: Vec<Varyings> = (0..36).map(|i| {
-        let mut v = vertex(inst, i);
-        v.pos[0] -= origin[0] as f32;
-        v.pos[1] -= origin[1] as f32;
-        v
-    }).collect();
+pub fn rasterize_region(
+    inst: &Instance,
+    width: u32,
+    height: u32,
+    pattern: &[[f64; 2]],
+    origin: [i32; 2],
+) -> Samples {
+    let verts: Vec<Varyings> = (0..36)
+        .map(|i| {
+            let mut v = vertex(inst, i);
+            v.pos[0] -= origin[0] as f32;
+            v.pos[1] -= origin[1] as f32;
+            v
+        })
+        .collect();
     rasterize_verts(&verts, width, height, pattern, [0, 0])
 }
 
-/// Device bounds include the analytic mesh's antialiasing outset.
-pub(super) fn device_bounds(inst: &Instance) -> Vec<P> {
-    (0..36).map(|i| vertex(inst, i).pos).collect()
-}
-
-/// Rasterizes a window without moving vertices or fragment interpolation.
-pub(super) fn rasterize_window(inst: &Instance, width: u32, height: u32, pattern: &[[f64; 2]], origin: [u32; 2]) -> Samples {
-    let verts: Vec<Varyings> = (0..36).map(|i| vertex(inst, i)).collect();
-    rasterize_verts(&verts, width, height, pattern, origin)
-}
-
 /// Rasterizes mesh vertices into a `width × height` window at `origin`.
-fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64; 2]], origin: [u32; 2]) -> Samples {
+fn rasterize_verts(
+    verts: &[Varyings],
+    width: u32,
+    height: u32,
+    pattern: &[[f64; 2]],
+    origin: [u32; 2],
+) -> Samples {
     let n = pattern.len();
     let mut out = Samples {
-        width,
-        height,
         coverage: vec![None; (width * height) as usize * n],
     };
     let one = 1i64 << SUBPIXEL_BITS;
@@ -750,15 +796,42 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
             verts[INDICES[k - 1] as usize],
             verts[INDICES[k] as usize],
         ];
-        let p: Vec<(i64, i64)> = tri.iter().map(|v| (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1])))).collect();
+        let p: Vec<(i64, i64)> = tri
+            .iter()
+            .map(|v| (snap(f64::from(v.pos[0])), snap(f64::from(v.pos[1]))))
+            .collect();
         let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[2].0 - p[0].0) * (p[1].1 - p[0].1);
         if area == 0 {
             continue;
         }
-        let minx = p.iter().map(|q| q.0).min().unwrap().div_euclid(one).max(i64::from(origin[0]));
-        let maxx = p.iter().map(|q| q.0).max().unwrap().div_euclid(one).min(i64::from(origin[0] + width) - 1);
-        let miny = p.iter().map(|q| q.1).min().unwrap().div_euclid(one).max(i64::from(origin[1]));
-        let maxy = p.iter().map(|q| q.1).max().unwrap().div_euclid(one).min(i64::from(origin[1] + height) - 1);
+        let minx = p
+            .iter()
+            .map(|q| q.0)
+            .min()
+            .unwrap()
+            .div_euclid(one)
+            .max(i64::from(origin[0]));
+        let maxx = p
+            .iter()
+            .map(|q| q.0)
+            .max()
+            .unwrap()
+            .div_euclid(one)
+            .min(i64::from(origin[0] + width) - 1);
+        let miny = p
+            .iter()
+            .map(|q| q.1)
+            .min()
+            .unwrap()
+            .div_euclid(one)
+            .max(i64::from(origin[1]));
+        let maxy = p
+            .iter()
+            .map(|q| q.1)
+            .max()
+            .unwrap()
+            .div_euclid(one)
+            .min(i64::from(origin[1] + height) - 1);
         if maxx < minx || maxy < miny {
             continue;
         }
@@ -773,7 +846,8 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
                 let mut covered = [false; 4];
                 let mut any = false;
                 for (si, s) in pattern.iter().enumerate() {
-                    let idx = ((py as u32 - origin[1]) * width + px as u32 - origin[0]) as usize * n + si;
+                    let idx =
+                        ((py as u32 - origin[1]) * width + px as u32 - origin[0]) as usize * n + si;
                     if out.coverage[idx].is_some() {
                         continue;
                     }
@@ -793,10 +867,13 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
                 let b1 = ((cx - x0) * (y2 - y0) - (x2 - x0) * (cy - y0)) / det;
                 let b2 = ((x1 - x0) * (cy - y0) - (cx - x0) * (y1 - y0)) / det;
                 let b0 = 1.0 - b1 - b2;
-                let lerp = |a: f32, b: f32, c: f32| (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32;
+                let lerp = |a: f32, b: f32, c: f32| {
+                    (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32
+                };
                 let mut v = tri[0];
                 for i in 0..4 {
-                    v.jacobian[i] = lerp(tri[0].jacobian[i], tri[1].jacobian[i], tri[2].jacobian[i]);
+                    v.jacobian[i] =
+                        lerp(tri[0].jacobian[i], tri[1].jacobian[i], tri[2].jacobian[i]);
                     v.edge[i] = lerp(tri[0].edge[i], tri[1].edge[i], tri[2].edge[i]);
                 }
                 for i in 0..2 {
@@ -805,7 +882,10 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
                 let c = coverage(&v);
                 for (si, &cov) in covered.iter().enumerate().take(n) {
                     if cov {
-                        out.coverage[((py as u32 - origin[1]) * width + px as u32 - origin[0]) as usize * n + si] = Some(c);
+                        out.coverage[((py as u32 - origin[1]) * width + px as u32 - origin[0])
+                            as usize
+                            * n
+                            + si] = Some(c);
                     }
                 }
             }

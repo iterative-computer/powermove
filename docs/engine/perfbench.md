@@ -37,9 +37,9 @@ The counters are always on, in release builds too. A `Scope` diffs a thread's
 | `gpu.copies`, `gpu.texture_to_buffer_bytes` | every recorded copy; the bytes of texture-to-buffer copies |
 | `cpu.heap_allocs` / `cpu.heap_alloc_bytes` | `pm_perf::CountingAlloc`, installed by bench and test binaries (growing `realloc`s count their new size) |
 | `engine.glsl_compiles` | GLSL programs through glslang (`pm-gpu` `glsl.rs`) |
-| `engine.raster_requests` / `engine.raster_answers` | level 1 SVG rasters asked of the window and put back; fallback runner jobs and their pixels |
+| `engine.raster_requests` / `engine.raster_answers` | fallback runner jobs and their pixels |
 | `engine.layers_planned`, `engine.comp_passes` | layers planned from scratch; composition passes built (`pm-render` `plan.rs`) |
-| `cache.{pipeline,program,media,vector,text,svg,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector rasters, text rasters, SVG rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
+| `cache.{pipeline,program,media,vector,text,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector textures (shapes, masks, paths, SVG images), text rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
 
 **GPU calls without call-site edits.** `engine/third_party/wgpu` is wgpu
 30.0.1's front crate, vendored unchanged except one marked counter line in each
@@ -114,6 +114,8 @@ the cold work is the point.
 | `typing_60` | key | 60 keystrokes into a 96 px SF Pro title, each a revision drawn paused |
 | `open_large_2000` | open | the 2,000-layer project's text parsed, given to a new view, routed, and drawn by a new composer |
 | `import_3d_600k` | frame | the first frame of a lit, shadowed scene placing the 600k-vertex model, then 10 frames turning it |
+| `playback_shapes_200` | frame | 60 playing frames of the synthetic project with 200 animated shape layers (rectangles, ellipses, polygons and stars, some stroked) |
+| `playback_svg_animated` | frame | 60 playing frames of one translating, rotating SVG image (gradient, clip path, blur, 120 motifs); every frame reuses its playback source raster. Notes carry resvg's CPU time for the same document at its device size |
 
 `examples/source_media.rs` is a diagnostic, not a ratcheted bench: it reports
 these counters and GPU-complete wall times for 24 scattered source-monitor

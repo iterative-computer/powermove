@@ -142,7 +142,7 @@ pub fn integer(args: &Value, key: &str) -> Result<u64, String> {
     let n = member(args, key)
         .and_then(Value::as_f64)
         .ok_or_else(|| format!("{key} must be an integer"))?;
-    if n.is_finite() && n >= 0.0 && n <= 9_007_199_254_740_991.0 && n.fract() == 0.0 {
+    if n.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&n) && n.fract() == 0.0 {
         Ok(n as u64)
     } else {
         Err(format!("{key} must be a safe nonnegative integer"))

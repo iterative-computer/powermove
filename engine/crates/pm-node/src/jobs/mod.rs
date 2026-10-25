@@ -41,7 +41,6 @@ mod fallback;
 pub mod gate;
 mod qos;
 mod source;
-mod svg;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -1060,17 +1059,6 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         // for: the requesting port's window, or the window main opened the
         // session for (an export).
         r.set_text_seed_scope(work.seed_scope());
-        // Level 1 SVG rasters come from the document's window through host
-        // services (decision S1); job frames (exports, agent frames) never
-        // draw a stand-in for one.
-        r.set_svg_wait(true);
-        let document = match &work {
-            Work::Frames { document, .. } | Work::Export { document, .. } => document,
-        };
-        r.set_svg_source(Some(Arc::new(svg::HostSvgRasters::new(
-            shared.clone(),
-            document,
-        ))));
         match work {
             Work::Frames {
                 port,
@@ -1111,7 +1099,6 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 );
             }
         }
-        r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
         r.trim(64 << 20);
     }

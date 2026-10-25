@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod mask_reference;
 pub mod reference;
 pub mod reference_substitutions;
 pub mod text;
@@ -394,9 +395,9 @@ pub fn todays_chroma_rendition(path: &Path, dir: &Path) -> PathBuf {
         assert_eq!(f.bits, 8, "8-bit sources only");
         let (w, h) = (f.width, f.height);
         if n == 0 {
-            write!(
+            writeln!(
                 file,
-                "YUV4MPEG2 W{w} H{h} F{}:{} Ip A1:1 C444 XYSCSS=444\n",
+                "YUV4MPEG2 W{w} H{h} F{}:{} Ip A1:1 C444 XYSCSS=444",
                 rate.num(),
                 rate.den()
             )

@@ -49,42 +49,19 @@ fn has_video(p: &Project) -> bool {
     })
 }
 
-/// A transparent float frame against the capture: the alpha class, or the
-/// video class on the reference's patch interiors. Video values are
-/// clamped to [0, 1] first: the legacy decode clips to 8 bits, the engine
-/// keeps out-of-range values until output (section 9).
-fn compare_float(ours: &[f32], reference: &[f32], w: u32, video: bool) -> (f64, String) {
-    if video {
-        let clamp = |v: &[f32]| v.iter().map(|x| x.clamp(0.0, 1.0)).collect::<Vec<f32>>();
-        let (ours, reference) = (clamp(ours), clamp(reference));
-        let r8 = rgba8(&reference);
-        let h = (reference.len() / 4) as u32 / w;
-        let mask = interior(&r8, w, h);
-        let max = float_max_cv_masked(&ours, &reference, &mask);
-        let n = mask.iter().filter(|m| **m).count();
-        (max, format!("{n} interior px, video class"))
-    } else {
-        let max = float_max_cv(ours, reference);
-        // Where the largest difference is, for the report.
-        let (i, _) = ours
-            .iter()
-            .zip(reference)
-            .map(|(a, b)| (f64::from(*a) - f64::from(*b)).abs())
-            .enumerate()
-            .fold((0, 0.0), |m, (i, d)| if d > m.1 { (i, d) } else { m });
-        let px = i / 4;
-        let at = |v: &[f32]| [v[px * 4], v[px * 4 + 1], v[px * 4 + 2], v[px * 4 + 3]];
-        (
-            max,
-            format!(
-                "alpha class; at {},{} ours {:?} legacy {:?}",
-                px as u32 % w,
-                px as u32 / w,
-                at(ours),
-                at(reference)
-            ),
-        )
-    }
+/// A transparent float frame against the capture: the video class on the
+/// reference's patch interiors. Values are clamped to [0, 1] first: the
+/// legacy decode clips to 8 bits, the engine keeps out-of-range values until
+/// output (section 9).
+fn compare_float(ours: &[f32], reference: &[f32], w: u32) -> (f64, String) {
+    let clamp = |v: &[f32]| v.iter().map(|x| x.clamp(0.0, 1.0)).collect::<Vec<f32>>();
+    let (ours, reference) = (clamp(ours), clamp(reference));
+    let r8 = rgba8(&reference);
+    let h = (reference.len() / 4) as u32 / w;
+    let mask = interior(&r8, w, h);
+    let max = float_max_cv_masked(&ours, &reference, &mask);
+    let n = mask.iter().filter(|m| **m).count();
+    (max, format!("{n} interior px, video class"))
 }
 
 /// Recorded deviations of this corpus (docs/engine/motion.md):
@@ -148,10 +125,14 @@ fn motion_corpus_parity() {
             routed.push(format!("{}: {issues:?}", p.name));
         }
         let video = has_video(&p);
-        if video {
-            // Today's readings the engine corrects (support::restate_today).
-            support::restate_today_for_videos(&mut renderer, &p.resolver);
+        // Frames without video are judged against the reference by the
+        // corpus gate (tests/corpus.rs, G-C2, which reads this capture too):
+        // vector and solid edges are drawn exactly, not as today's capture.
+        if !video {
+            continue;
         }
+        // Preserve the video lane's corrected source interpretation.
+        support::restate_today_for_videos(&mut renderer, &p.resolver);
         let blur_video = p.name == "motion/blur-video";
         let fps = pm_eval::node::to_number(p.document.root().unwrap().get("fps"));
         for s in &p.samples {
@@ -180,49 +161,36 @@ fn motion_corpus_parity() {
             let ours = opaque8(&render(&mut renderer, &request, s.time));
             let (w, h, reference) = read_png(&s.png);
             compared += 1;
-            let (pass, line) = if video {
-                let mut mask = interior(&reference, w, h);
-                if blur_video {
-                    // Only the unblurred clip, [280, 440) × [135, 225).
-                    for (i, m) in mask.iter_mut().enumerate() {
-                        let (x, y) = (i as u32 % w, i as u32 / w);
-                        *m &= (280..440).contains(&x) && (135..225).contains(&y);
-                    }
+            let (pass, line) = {
+            let mut mask = interior(&reference, w, h);
+            if blur_video {
+                // Only the unblurred clip, [280, 440) × [135, 225).
+                for (i, m) in mask.iter_mut().enumerate() {
+                    let (x, y) = (i as u32 % w, i as u32 / w);
+                    *m &= (280..440).contains(&x) && (135..225).contains(&y);
                 }
-                let (max, n) = masked_max(&ours, &reference, &mask);
-                let mut pass = max <= 2 && n > 0;
-                let mut note = String::new();
-                if !pass && max <= FRAME_IDENTITY_CV && n > 0 {
-                    let later = opaque8(&render(&mut renderer, &request, s.time + 1.0 / fps));
-                    let (wrong, _) = masked_max(&later, &reference, &mask);
-                    if wrong > WRONG_FRAME_CV {
-                        pass = true;
-                        note = format!(
-                            "; DEVIATION video decode (one frame later differs by {wrong})"
-                        );
-                    }
+            }
+            let (max, n) = masked_max(&ours, &reference, &mask);
+            let mut pass = max <= 2 && n > 0;
+            let mut note = String::new();
+            if !pass && max <= FRAME_IDENTITY_CV && n > 0 {
+                let later = opaque8(&render(&mut renderer, &request, s.time + 1.0 / fps));
+                let (wrong, _) = masked_max(&later, &reference, &mask);
+                if wrong > WRONG_FRAME_CV {
+                    pass = true;
+                    note = format!(
+                        "; DEVIATION video decode (one frame later differs by {wrong})"
+                    );
                 }
-                let line = format!(
-                    "{:<34} t={:<5} opaque 16  {n:>7} interior px (video class) max {max}{note}",
-                    p.name, s.time
-                );
-                if !note.is_empty() {
-                    deviations.push(line.clone());
-                }
-                (pass, line)
-            } else {
-                let d = Diff::of(&ours, &reference);
-                (
-                    d.passes(),
-                    format!(
-                        "{:<34} t={:<5} opaque 16  exact {:>6.2}%  ≤1 {:>7.3}%  max {}",
-                        p.name,
-                        s.time,
-                        100.0 * d.exact as f64 / d.pixels as f64,
-                        100.0 * d.fraction_within_one(),
-                        d.max
-                    ),
-                )
+            }
+            let line = format!(
+                "{:<34} t={:<5} opaque 16  {n:>7} interior px (video class) max {max}{note}",
+                p.name, s.time
+            );
+            if !note.is_empty() {
+                deviations.push(line.clone());
+            }
+            (pass, line)
             };
             eprintln!("{line}");
             if !pass {
@@ -294,16 +262,9 @@ fn motion_corpus_parity() {
                 request.motion_blur = MotionBlur::Samples(n);
                 let ours = render(&mut renderer, &request, s.time);
                 let reference = read_float(file);
-                let (max, class) = compare_float(&ours, &reference, w, video);
+                let (max, class) = compare_float(&ours, &reference, w);
                 compared += 1;
-                // Blurred stills sample today's 8-bit texture and accumulate
-                // in the same half float target with the same rounding, so
-                // they are held to the alpha class like everything else.
-                let (limit, deviation_limit) = if video {
-                    (2.0, f64::from(FRAME_IDENTITY_CV))
-                } else {
-                    (1.0, 1.0)
-                };
+                let (limit, deviation_limit) = (2.0, f64::from(FRAME_IDENTITY_CV));
                 let mut line = format!(
                     "{:<34} t={:<5} float {n:>3}  max {max:.4} CV ({class})",
                     p.name, s.time
@@ -421,7 +382,9 @@ fn accumulation_counts_covered_samples() {
     ] {
         let doc = slider(true, None, color_depth);
         for n in [1u32, 4, 7, 16, 20] {
-            let tolerance = per_sample * f64::from(n);
+            // Plus the analytic coverage's f32 arithmetic (within 1e-5,
+            // where `fs_solid` snaps).
+            let tolerance = per_sample * f64::from(n) + 1e-5;
             let mut request = RenderRequest::sized(Size::new(160, 40), precision);
             request.motion_blur = MotionBlur::Samples(n);
             let frame = renderer
@@ -431,17 +394,17 @@ fn accumulation_counts_covered_samples() {
             assert_eq!(frame.color.format(), format);
             let rgba = renderer.read_rgba(&frame).unwrap();
             for x in 0..160usize {
-                // The rasterizer covers a pixel center when it lies in
-                // [left, left + 20).
-                let center = x as f64 + 0.5;
-                let covered = (0..n)
-                    .filter(|&s| {
+                // Each sample covers the part of the pixel [x, x + 1) that
+                // lies in [left, left + 20).
+                let px = x as f64;
+                let covered: f64 = (0..n)
+                    .map(|s| {
                         let ts = t + pm_render::motion::sample_offset(s, n, 0.5, 30.0);
                         let left = 0.3 + 300.0 * ts;
-                        left <= center && center < left + 20.0
+                        ((left + 20.0).min(px + 1.0) - left.max(px)).max(0.0)
                     })
-                    .count();
-                let want = covered as f64 / f64::from(n);
+                    .sum();
+                let want = covered / f64::from(n);
                 let px = &rgba[(20 * 160 + x) * 4..(20 * 160 + x) * 4 + 4];
                 for (c, v) in px.iter().enumerate() {
                     assert!(
@@ -643,26 +606,40 @@ fn planes_cover_what_their_homography_covers() {
     };
     let plane = placed.plane.expect("a plane");
     let rgba = render(&mut renderer, &doc, 0.0, &request);
-    let mut inside = 0;
+    let (mut inside, mut partial) = (0, 0);
     for y in 0..120usize {
         for x in 0..200usize {
-            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
             let a = rgba[(y * 200 + x) * 4 + 3];
-            match unproject(&plane, px, py) {
-                Some((u, v)) => {
-                    let margin = 1e-3;
-                    if u > margin && u < 1.0 - margin && v > margin && v < 1.0 - margin {
-                        assert_eq!(a, 1.0, "inside at {x},{y} (u {u} v {v})");
-                        inside += 1;
-                    } else if u < -margin || u > 1.0 + margin || v < -margin || v > 1.0 + margin {
-                        assert_eq!(a, 0.0, "outside at {x},{y}");
-                    }
-                }
-                None => assert_eq!(a, 0.0, "behind the camera at {x},{y}"),
+            // The pixel square's corners on the plane: a pixel wholly on
+            // the plane is covered, one wholly off it is not, and one on its
+            // edge is partly covered.
+            let corners: Vec<Option<(f64, f64)>> = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                .iter()
+                .map(|(dx, dy)| unproject(&plane, x as f64 + dx, y as f64 + dy))
+                .collect();
+            let margin = 1e-3;
+            let all_in = corners.iter().all(|c| {
+                c.is_some_and(|(u, v)| u > margin && u < 1.0 - margin && v > margin && v < 1.0 - margin)
+            });
+            let off = |f: &dyn Fn(f64, f64) -> bool| corners.iter().all(|c| c.is_some_and(|(u, v)| f(u, v)));
+            let all_out = off(&|u, _| u < -margin)
+                || off(&|u, _| u > 1.0 + margin)
+                || off(&|_, v| v < -margin)
+                || off(&|_, v| v > 1.0 + margin)
+                || corners.iter().all(Option::is_none);
+            if all_in {
+                assert_eq!(a, 1.0, "inside at {x},{y}");
+                inside += 1;
+            } else if all_out {
+                assert_eq!(a, 0.0, "outside at {x},{y}");
+            } else {
+                assert!((0.0..=1.0).contains(&a), "edge at {x},{y}: {a}");
+                partial += usize::from(a > 0.0 && a < 1.0);
             }
         }
     }
     assert!(inside > 2000, "{inside} covered pixels");
+    assert!(partial > 100, "{partial} antialiased edge pixels");
 }
 
 #[test]
@@ -700,12 +677,19 @@ fn planes_crossing_the_camera_plane_are_clipped() {
     for y in 0..120usize {
         for x in 0..200usize {
             let a = rgba[(y * 200 + x) * 4 + 3];
-            assert!(a == 0.0 || a == 1.0);
+            assert!((0.0..=1.0).contains(&a));
             if a == 1.0 {
                 drawn += 1;
                 let (u, v) = unproject(&plane, x as f64 + 0.5, y as f64 + 0.5)
-                    .expect("drawn pixels are in front of the camera");
+                    .expect("covered pixels are in front of the camera");
                 assert!((-1e-3..=1.0 + 1e-3).contains(&u) && (-1e-3..=1.0 + 1e-3).contains(&v));
+            } else if a > 0.0 {
+                // A partly covered pixel reaches the plane in front of the
+                // camera with part of its square.
+                let reaches = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)]
+                    .iter()
+                    .any(|(dx, dy)| unproject(&plane, x as f64 + dx, y as f64 + dy).is_some());
+                assert!(reaches, "{x},{y}: {a} behind the camera");
             }
         }
     }

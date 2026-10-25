@@ -1,5 +1,5 @@
 // Float transform-operation oracle for Chromium 152's SkCanvas/SkM44.
-// Build/link as counts.cpp. No project data or fonts required.
+// Link against the pinned Skia CPU library. No project data or fonts required.
 #include "include/core/SkM44.h"
 #include "include/core/SkMatrix.h"
 #include <bit>

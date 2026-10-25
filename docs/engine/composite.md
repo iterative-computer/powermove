@@ -28,7 +28,7 @@ today, and what is not done.
 | Linear blending, HDR-safe and run-in-E blend domains | Drawn | `tests/linear.rs` (section 2 bar), `tests/color.rs` (invariants with linear blending), `tests/composite.rs` |
 | 16- and 32-bit precision, project precision as a floor | Drawn | `tests/composite.rs` |
 | Region of interest with effect padding | Drawn | `tests/composite.rs`: regions equal the full frame bit for bit with masks, mattes, blends, adjustments, and padded effects |
-| Bezier path masks: today's Canvas2D coverage route with every other mask of the layer, feather (Chromium's blur), add, subtract, subtract-only, animated vertices, transforms, and modes, masks switching off, on solids, images, shapes, text, captions, groups, precomps, adjustment layers, 3D planes, layers in 3D groups, 3D object layers, and with motion blur | Drawn (below) | `tests/path_masks.rs`: 54 coverage canvases bit-exact; `composite/path-masks`, `composite/path-masks-nested`, `composite/path-masks-more`: bit-exact opaque and float (3D object: 3D class, max 1 CV); `composite/path-masks-text`: text class |
+| Bezier path masks with every other mask of the layer, feather (exact Gaussian), add, subtract, subtract-only, animated vertices, transforms, and modes, masks switching off, on solids, images, shapes, text, captions, groups, precomps, adjustment layers, 3D planes, layers in 3D groups, 3D object layers, and with motion blur | Drawn (below) | `tests/path_masks.rs` (G-V2): 54 coverage canvases within 0.08 CV of the f64 reference, today up to 95 CV off |
 | Masks on 3D object layers, animated and keyed | Drawn | `composite/3d-mask`, `composite/3d-blend-mask`, v1 `3d/transparency`, `motion/blur-3d`: 3D class, max 1 CV (below) |
 | Masks that are not an array | A named layer failure, as today's `.some` throws | `tests/composite.rs` |
 | Motion blur with masks, blend modes, mattes, effects, styled groups | Drawn (the accumulated samples are the layer target) | `motion/blur-slow`: bit-exact float, opaque ≤ 1 CV |
@@ -112,65 +112,52 @@ texture). With both, `composite/blend-modes-alpha` is bit-exact in the opaque
 and transparent float frames (was 252 float pixels over 1 CV, max 4.61 CV), and
 the corpus test's drift exemption is removed.
 
-## Path masks (today's Canvas2D coverage route)
+## Path masks
 
-When any enabled mask of a layer has a path, today's `applyPathMasks` takes
-every enabled mask (parametric ones too, with no count limit): each is filled
-white on its own canvas of the output size (the item) through the layer's
-`scaledWorld` and the mask's `translate`/`rotate` (and the path's own
-`translate`/`rotate`/`scale`, then `tracePath` closed and untrimmed; a
-parametric mask as `ellipse` or signed `rect`), and drawn onto one coverage
-canvas with `ctx.filter = blur(max(0, feather) · |world x| / 2 px)` and
-`source-over` (add) or `destination-out` (subtract); the canvas starts white when
-no mask adds. The layer is multiplied by the canvas's alpha, sampled with
-`texFor`'s linear filtering at each output pixel (through the inverse plane
-composed with the world matrix for a 3D layer, `u_covTransform`), zero outside
-the canvas.
+When any enabled mask of a layer has a path, every enabled mask (parametric
+ones too, with no count limit) is a filled outline (nonzero) in output pixels:
+the layer's `scaledWorld`, the mask's `translate`/`rotate`, and for a bezier
+mask its path's own `translate`/`rotate`/`scale` and `tracePath` closed and
+untrimmed; a parametric mask is an `ellipse` or a signed `rect`
+(`pm_vector::mask`). Each is feathered by the Gaussian of
+σ = max(0, feather) · |world x| / 2 px, transparent outside the output, and
+drawn in order onto one coverage canvas with `source-over` (add) or
+`destination-out` (subtract); the canvas starts covered when no mask adds. The
+layer is multiplied by the canvas (the composite op's `FLAG_PATH_MASKS` step),
+sampled at each output pixel, through the inverse plane composed with the world
+matrix for a 3D layer, zero outside the canvas.
 
-The engine (`composite/path_masks.rs`, `path_masks.wgsl`;
-`pm_vector::canvas2d::{mask, filter}`):
+The engine (`composite/path_masks.rs`, `path_masks.wgsl`, `gaussian.rs`,
+`gaussian.wgsl`, and `coverage.rs`, `coverage.wgsl`, shared with vector
+shapes), all on the GPU but the outline:
 
-- **Items** are filled by pm-vector's Canvas2D emulation on the CPU (the same
-  path, `rect`, and `ellipse` calls; Blink's `rect` was added to it) and kept
-  across frames (least recently used dropped past 192 MB), so a static mask is
-  filled once.
-- **The blur** is Chromium 152's Skia Graphite blur image filter
-  (`b6d106297ff9ef2ff8094033695d045e87775581`), planned pass for pass in `f32`
-  by `pm_vector::canvas2d::filter::BlurPlan` and run on the GPU in 8-bit
-  single-channel images with a transparent 1-pixel border: the save layer
-  (the canvas outset by ⌈3σ⌉), `IsEffectivelyIdentity` (σ ≤ 0.03), the
-  downscale steps of `FilterResult::rescale` about the layer's center
-  (`downscale_step_count`, `scale_about_center`, `RoundOut` with
-  `kRoundEpsilon`), the low resolution σ, the single 2D pass (nearest, area ≤
-  28) or two 1D passes with `Compute1DBlurLinearKernel`'s paired bilinear taps
-  (padded to the effect's loop count), the output bounds and their 1-pixel
-  outset, and the final draw (pixel aligned, or bilinear back up). The SkSL
-  effects declare `half` sums, weights, and offsets, but Graphite evaluates
-  them at full precision on Metal: `f32` sums are bit-exact with today's
-  canvases, `f16` sums leave thousands of pixels 1 code value off.
-- **The composite** onto the coverage canvas is hardware blending into an 8-bit
-  target (`One`/`OneMinusSrcAlpha` or `Zero`/`OneMinusSrcAlpha`), as Graphite's.
-- **The apply** is the composite op's `FLAG_PATH_MASKS` step, fused with the
-  matte as the parametric masks are (rounded between steps as today's separate
-  passes store them).
+- **Coverage.** The outline is flattened to 10⁻⁴ px, clipped to its pixel
+  bounds in the output and fixed to 1/16384 px. Each edge adds its exact signed
+  area per pixel into integer atomics (rounded shares sum exactly, so a closed
+  row ends at exactly zero); a row scan turns the running sum into
+  `min(1, |area|)`. Exact for outlines that do not overlap themselves; where
+  one does, a pixel's winding areas add before the clamp.
+- **Feather.** The exact separable Gaussian of the box-reconstructed pixels
+  (`pm_reference::gaussian`'s weights, 4.5σ, normalized). Up to σ ≈ 5.6 every
+  pixel is summed; beyond, the blur is exact at nodes ⌊0.36σ⌋ px apart (σₐ = s
+  at the nodes, the rest on the node lattice) and 6-point Lagrange in between:
+  within 2⁻¹² of the exact blur at any σ, `O(1)` taps per pixel. σ is the
+  authored one (no 532 px cap, no 0.03 px threshold); a non-finite σ draws no
+  blur, as CSS rejects it.
+- **Composite.** Add and subtract in f32 over the union of the masks' blurred
+  bounds; a layer's only mask is drawn straight onto the start. The canvas is
+  `r16float`, rounded to nearest in the shader.
+- **Bounds.** Work covers each mask's pixel bounds (coverage) and those grown
+  by ⌈4.5σ⌉ (feather and composite); outside, the canvas keeps its start.
+  Scratch buffers persist across frames.
 
-Measured: `tests/path_masks.rs` compares 54 coverage canvases captured from
-today's code by `pm-vector/tools/mask-ref` (the coverage half of
-`applyPathMasks`, sliced verbatim from `compositor.ts` and run in the app's
-Electron; capture `masks-20261018-171840-8e3cd12e`): a feather sweep from 0 to
-160 across every pass structure (identity, one 2D pass, 1D passes, 1 to 5
-downscale steps), odd canvas sizes and fractional placement, masks crossing the
-canvas edges, rotated and scaled worlds, add, subtract, and subtract-only
-combinations, 10 parametric masks with a path, signed rectangles, and 1920 ×
-1080 and 3840 × 2160 canvases: **every case bit-exact**. The corpus cases
-`composite/path-masks` (3 samples), `composite/path-masks-nested` (2) and
-`composite/path-masks-more` (2: motion blur, a 3D group member, an adjustment
-layer, a 3D object) are bit-exact in opaque and transparent float frames (the 3D
-object within the 3D class, max 1 CV); `composite/path-masks-text` (text and
-captions) is within the text class with every other pixel exact. v1
-`masks/path` holds an SVG image (the media lane's routing) and is not compared.
-`pm-vector`'s `tests/mask_coverage.rs` runs the same plan on the CPU with exact
-bilinear weights as a model: within 2 CV (the GPU's filter weights differ).
+The text animator's `blur()` is the same Gaussian on its RGBA save layer
+(`gaussian::RgbaBlur`, an `rgba16float` result).
+
+Precision per pixel (`tests/path_masks.rs`): the `r16float` store (2⁻¹²), and
+per mask the interpolation (≤ 2⁻¹²), kernel tails, flattening and fixed point
+(≤ 2.6·10⁻⁴); masks add at most. G-V2 measures 0.04 to 0.08 CV on every case,
+feathers 0 to 160, HD and UHD.
 
 ## Masks on 3D object layers
 
@@ -263,8 +250,8 @@ outside the repository.)
 | `tests/color.rs` | Invariant (2), pipeline transparency (ProRes 4444 XQ → `y416`, ProRes 422 HQ → `v216`), and invariant (1) for 4:2:0, each with linear blending on too | Pass: 0 samples differ |
 | `tests/corpus.rs` | Every supported corpus project of the default captures (v1, render, effects, composite, motion, compclose, compclose2, compclose3), by the gate policy (gate-policy.md): interior within 1 CV of today, edges at least as close to the reference as today, preview == export | Pass |
 | `tests/text_corpus.rs` | Text and captions projects of the same captures, with the built-in definitions | 2026-10-19: `space/groups-25d` drawn: text within the text class, every other pixel exact (max 0); `space/layers-25d` skipped (SVG images, the SVG route) |
-| `tests/path_masks.rs` | 54 path mask coverage canvases against today's (`pm-vector/tools/mask-ref`) | Pass: bit-exact |
-| `pm-vector` `tests/mask_coverage.rs`, `canvas2d::filter` unit tests | Item rasters exact where nothing is blurred; the CPU model of the blur within 2 CV; Skia's step counts and kernels | Pass |
+| `tests/path_masks.rs` (G-V2) | 54 path mask coverage canvases (the sweep of today's capture `masks-20261018-171840-8e3cd12e`) against `pm_reference` coverage ⊗ exact Gaussian: within the precision bound, at least as close as today (two-part rule), unfeathered geometry within 10⁻³, repeatable | Pass: engine ≤ 0.08 CV, today up to 95 CV |
+| `composite::gaussian` unit tests | The plan within 2⁻¹² of `pm_reference::gaussian` (steps, bands, impulses, checkerboards, σ 0.02 to 60, both sides of each node spacing); GPU passes equal the CPU model within one f16 step | Pass |
 | `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | Pass: 338,211 drawn pixels, all picked; level 2 placement 0 misses (motion.md). Samples where a layer draws nothing (today's capture is transparent there too) check no box |
 | `pm-vector` `tests/canvas2d.rs` | Level 1 shape and path rasters against today's, including the viewport sweep | 529 cases: 503 exact, 22 within 1, 4 pinned; the radius-24 cases and every `viewport-*` case must be bit-exact |
 | `pm-color` unit tests | Composite and matte references | Pass |
@@ -275,14 +262,6 @@ Recapture the corpus cases with
 
 ## Gaps
 
-- **Animated path masks fill on the CPU every frame.** An item is the whole
-  output-size canvas through pm-vector's emulation: 33 to 40 ms per mask at
-  1920 × 1080 with pm-vector optimized (`tests/mask_coverage.rs`, `hd-*`; 2 ms
-  at 480 × 300), about four times that at 3840 × 2160; the GPU blur and
-  composite are small next to it. Static masks are filled once (the item
-  cache). Filling only the path's device bounds (a windowed MSAA target in
-  canvas coordinates, so the samples stay exact) is the next step for real-time
-  animated masks at UHD; not measured in the viewer.
 - **Level 2 text** draws animators, range styles and typography anchoring
   through its shared evaluated frame (`text.md`). Its projects are included
   in `allProjects`; the corpus routing checks forbid any return of the old
@@ -331,52 +310,6 @@ Recapture the corpus cases with
 - App: `legacy/ui/project-settings.ts` (Color section), `settings/install.ts`,
   `settings/project-color.ts` (new), `shared/project-color.ts` (new),
   `shared/engine-stamp.ts` (project color is native-only), `e2e/project-color.spec.ts`.
-
-## COMPCLOSE-2 follow-up: windowed mask fills
-
-The animated-mask CPU-fill gap above is superseded by a windowed white-fill
-path in `pm_vector::canvas2d::Context`. Tessellation and the viewport transform
-still use the original output canvas, including its f32 round trip. The raster
-window is the resulting device mesh bounds, clipped to the canvas with a one-pixel
-AA/snapping margin. MSAA and analytic samples keep **global** pixel coordinates;
-vertices and fragment interpolation are never translated to the window. White
-fill alpha resolves directly from the sample mask/analytic coverage, avoiding a
-full-canvas multisampled RGBA allocation and resolve.
-
-Polygon fills use exact rational scanline crossing thresholds and fill winding
-spans, rather than comparing every pixel with every edge. Both nonzero and even-odd
-rules retain the original top-left/sample tests. Alpha outside the window is still
-present and transparent in the full-sized item returned to pm-render. The blur's
-save-layer bounds, feather margin, downsample phase, GPU passes and composite
-therefore stay unchanged; cropping the blur source would change pixels.
-
-Verification on the existing captures: every one of the 54 GPU mask canvases is
-bit-exact, including HD, UHD, all feather pass structures, off-canvas paths and
-subtract-only combinations. The composite path-mask corpus and a direct full-canvas
-versus windowed-fill test cover placement, clipping, reflections, analytic and
-polygon/triangle paths at 317×233, 1920×1080 and 3840×2160. The 529-case Canvas2D
-gate retains exactly its previous result: 503 exact, 22 within one, four pre-existing
-pinned cases; no reference, tolerance or exception was changed. Those existing
-pins remain the vector lane's gaps, not accepted differences from this change.
-
-The GPU/item cache and full-sized alpha/blur upload are unchanged. Windowing saves
-CPU fill work; it does not establish that every animated-mask project beats today's
-GPU Canvas2D path. Paired viewer results and remaining limits are recorded in perf.md.
-
-Round 4 (after merging the wave 5 lanes, including perf2's pm-render caching and
-svgcompat): `tests/path_masks.rs` (54 canvases bit-exact), the pm-vector canvas2d
-unit tests and the 529-case Canvas2D gate (503 exact, 22 within one, the same four
-known exceptions, capture `canvas-20261018-220349-9a95e00c`) pass on the merged
-head. A new unit test, `windowed_pixel_aligned_rects_equal_full_canvas_at_every_pixel`,
-covers the non-AA bounds renderer (`Polygons { msaa: false }`, the 1X pattern) that
-the window test did not: device-aligned rectangles, within the pixel tolerance,
-mirrored, quarter-turned and partly or wholly offscreen, at 317x233, HD and UHD,
-asserting that path is taken. The windowing code is unchanged since round 1; the
-composite `path-masks*` corpus was not rerun this round: no pm-cli build exists in
-this worktree, and building one with 45 GB free risked the 40 GB disk floor. Its
-round 1 result (bit-exact) stands. The
-playback cadence tail is issue P4 (perf3 lane).
-
 
 ## DEPTH-1 project depth
 

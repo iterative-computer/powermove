@@ -302,7 +302,7 @@ mod tests {
         }
         fn finish(mut self) -> Vec<u8> {
             self.bits.push(1);
-            while self.bits.len() % 8 != 0 {
+            while !self.bits.len().is_multiple_of(8) {
                 self.bits.push(0);
             }
             self.bits

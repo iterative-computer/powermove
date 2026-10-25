@@ -1,17 +1,15 @@
-//! Vector layers (plan section 10; docs/engine/vector.md): `compat` level 2
-//! shapes at output resolution with analytic edges, Vello on the GPU
-//! against the `vello_cpu` fallback, the solid `radius` on level 2 only, and
-//! the vector cache's memory accounting.
+//! Vector layers (plan section 10; docs/engine/vector.md): shapes and
+//! solids at output resolution with analytic edges whatever their `compat`
+//! level, the solid `radius`, and the vector cache's memory accounting.
 //!
-//! Level 2 references are computed here, not captured: each pixel's exact
-//! coverage of the transformed geometry, estimated with 16 × 16 samples.
+//! References are computed here, not captured: each pixel's exact coverage
+//! of the transformed geometry, estimated with 16 × 16 samples.
 
 mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
-use pm_render::vector::cache::CoverageBackend;
-use pm_render::{Feature, MapResolver, RenderRequest, Renderer, unsupported_with_media};
+use pm_render::{MapResolver, RenderRequest, Renderer, unsupported_with_media};
 use serde_json::{Value, json};
 use support::doc::*;
 use support::ticks;
@@ -139,7 +137,7 @@ fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
 }
 
 #[test]
-fn level2_edges_are_analytic() {
+fn shape_edges_are_analytic_at_every_compat_level() {
     let mut renderer = Renderer::headless().unwrap();
     let (rotation, scale) = (17.0, 130.0);
     let ellipse = json!({ "shape": "ellipse", "w": 150, "h": 96, "color": "#FFFFFF", "stroke": 0 });
@@ -186,112 +184,34 @@ fn level2_edges_are_analytic() {
             &mut renderer,
             vec![placed(name, "shape", d, 1, rotation, scale)],
         );
-        let e2 = edge_error(&level2, &reference);
-        let e1 = edge_error(&level1, &reference);
+        assert_eq!(level1, level2, "{name}: `compat` does not change vector pixels");
+        let e = edge_error(&level2, &reference);
         eprintln!(
-            "{name}: level 2 over {} edge pixels: rms {:.5} ({:.1} dB), max {:.4}; level 1 rms {:.5} ({:.1} dB), max {:.4}",
-            e2.edge_pixels, e2.rms, e2.psnr_db, e2.max_any, e1.rms, e1.psnr_db, e1.max_any
+            "{name}: {} edge pixels: rms {:.5} ({:.1} dB), max {:.4}",
+            e.edge_pixels, e.rms, e.psnr_db, e.max_any
         );
-        assert!(e2.edge_pixels > 300, "{name}: the shape has edges");
-        assert!(
-            e2.psnr_db >= 40.0,
-            "{name}: level 2 edges are analytic ({:.1} dB)",
-            e2.psnr_db
-        );
-        assert!(
-            e2.max_any <= 0.03,
-            "{name}: level 2 largest error {}",
-            e2.max_any
-        );
-        assert!(
-            e2.rms * 2.0 < e1.rms,
-            "{name}: level 2 is sharper than the level 1 raster ({:.5} vs {:.5})",
-            e2.rms,
-            e1.rms
-        );
+        assert!(e.edge_pixels > 300, "{name}: the shape has edges");
+        assert!(e.psnr_db >= 40.0, "{name}: edges are analytic ({:.1} dB)", e.psnr_db);
+        assert!(e.max_any <= 0.03, "{name}: largest error {}", e.max_any);
     }
 }
 
+/// SOLID-RADIUS-1: the inspector edits and animates a solid's corner
+/// radius, so every solid rounds its corners as authored.
 #[test]
-fn gpu_and_cpu_coverage_agree() {
-    let mut renderer = Renderer::headless().unwrap();
-    let layers = || {
-        vec![
-            placed(
-                "star",
-                "shape",
-                json!({ "shape": "star", "w": 180, "h": 180, "points": 9, "color": "#4C8DFF", "stroke": 6, "strokeColor": "#F2C14E" }),
-                2,
-                -23.0,
-                110.0,
-            ),
-            placed(
-                "rect",
-                "shape",
-                json!({ "shape": "rect", "w": 120, "h": 70, "radius": 18, "color": "#3FCF8E", "stroke": 0 }),
-                2,
-                41.0,
-                90.0,
-            ),
-        ]
-    };
-    renderer.set_vector_backend(CoverageBackend::Auto);
-    let gpu = render_alpha(&mut renderer, layers());
-    assert_eq!(
-        renderer.last_vector_backend(),
-        Some("vello"),
-        "Vello draws on the GPU"
-    );
-    renderer.set_vector_backend(CoverageBackend::Cpu);
-    let cpu = render_alpha(&mut renderer, layers());
-    assert_eq!(renderer.last_vector_backend(), Some("vello_cpu"));
-    let (mut max, mut sum, mut differing) = (0.0f32, 0.0f64, 0usize);
-    for (a, b) in gpu.iter().zip(&cpu) {
-        let e = (a - b).abs();
-        max = max.max(e);
-        sum += f64::from(e);
-        differing += usize::from(e > 0.0);
-    }
-    let mean = sum / gpu.len() as f64;
-    eprintln!("Vello GPU vs vello_cpu: {differing} pixels differ, max {max:.4}, mean {mean:.6}");
-    assert!(
-        max <= 3.0 / 255.0 + 1e-6,
-        "coverage agrees within 3/255 (max {max})"
-    );
-    assert!(mean <= 1e-3, "mean difference {mean}");
-}
-
-#[test]
-fn solid_radius_is_honored_on_level2_only() {
+fn solid_radius_is_honored() {
     let mut renderer = Renderer::headless().unwrap();
     let d = json!({ "color": "#FFFFFF", "w": 120, "h": 80, "radius": 30 });
-    let mut l1 = layer("solid", "solid", d.clone(), 60.0, 70.0, 2.0);
-    let level1 = render_alpha(&mut renderer, vec![l1.clone()]);
-    l1["compat"] = json!(2);
-    let level2 = render_alpha(&mut renderer, vec![l1]);
-    // The solid's box, as level 1 draws it (today's quad, radius ignored).
-    let opaque: Vec<(u32, u32)> = (0..H)
-        .flat_map(|y| (0..W).map(move |x| (x, y)))
-        .filter(|(x, y)| level1[(y * W + x) as usize] > 0.5)
-        .collect();
-    let (x0, y0) = (
-        opaque.iter().map(|p| p.0).min().unwrap(),
-        opaque.iter().map(|p| p.1).min().unwrap(),
-    );
-    let (x1, y1) = (
-        opaque.iter().map(|p| p.0).max().unwrap() + 1,
-        opaque.iter().map(|p| p.1).max().unwrap() + 1,
-    );
-    assert_eq!((x1 - x0, y1 - y0), (120, 80), "level 1 draws the full box");
-    let at = |a: &[f32], x: u32, y: u32| a[(y * W + x) as usize];
-    assert_eq!(at(&level1, x0, y0), 1.0, "level 1 ignores the radius");
-    assert_eq!(at(&level2, x0, y0), 0.0, "level 2 rounds the corner");
-    assert_eq!(
-        at(&level2, x0 + 60, y0),
-        1.0,
-        "level 2 keeps the straight edges"
-    );
-    // Level 2 against the exact rounded rectangle.
+    let mut l = layer("solid", "solid", d.clone(), 60.0, 70.0, 2.0);
+    let level1 = render_alpha(&mut renderer, vec![l.clone()]);
+    l["compat"] = json!(2);
+    assert_eq!(level1, render_alpha(&mut renderer, vec![l]), "`compat` does not change solids");
+    // The box, from its straight edges (the anchor is its top-left corner).
+    let (x0, y0, x1, y1) = opaque_bounds(&level1);
+    assert_eq!((x1 - x0, y1 - y0), (120, 80), "the full box");
+    let at = |x: u32, y: u32| level1[(y * W + x) as usize];
+    assert_eq!(at(x0, y0), 0.0, "the corner is rounded");
+    assert_eq!(at(x0 + 60, y0), 1.0, "the straight edges are kept");
     let (fx0, fy0) = (f64::from(x0), f64::from(y0));
     let reference = coverage(|x, y| {
         let (u, v) = (x - fx0, y - fy0);
@@ -302,7 +222,7 @@ fn solid_radius_is_honored_on_level2_only() {
         let cy = v.clamp(30.0, 50.0);
         (u - cx).powi(2) + (v - cy).powi(2) <= 900.0
     });
-    let e = edge_error(&level2, &reference);
+    let e = edge_error(&level1, &reference);
     eprintln!(
         "solid radius 30: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}",
         e.edge_pixels, e.rms, e.psnr_db, e.max_any
@@ -325,7 +245,7 @@ fn opaque_bounds(a: &[f32]) -> (u32, u32, u32, u32) {
 }
 
 #[test]
-fn level2_solids_without_radius_have_analytic_edges() {
+fn solids_without_radius_have_analytic_edges() {
     let mut renderer = Renderer::headless().unwrap();
     // Radius 0, a missing radius, and a negative one are plain rectangles.
     for d in [
@@ -346,6 +266,11 @@ fn level2_solids_without_radius_have_analytic_edges() {
             &mut renderer,
             vec![placed("solid", "solid", d.clone(), 2, rotation, scale)],
         );
+        assert_eq!(
+            ours,
+            render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 1, rotation, scale)]),
+            "{d}: `compat` does not change solids"
+        );
         let reference = coverage(|x, y| {
             let (u, v) = to_layer(x, y, rotation, scale);
             (bx..=bx + 120.0).contains(&u) && (by..=by + 80.0).contains(&v)
@@ -353,7 +278,7 @@ fn level2_solids_without_radius_have_analytic_edges() {
         let e = edge_error(&ours, &reference);
         let partial = ours.iter().filter(|a| **a > 0.02 && **a < 0.98).count();
         eprintln!(
-            "level 2 solid {d}: rotated {rotation} at {scale}%: {} edge pixels ({partial} partial), rms {:.5} ({:.1} dB), max {:.4}",
+            "solid {d}: rotated {rotation} at {scale}%: {} edge pixels ({partial} partial), rms {:.5} ({:.1} dB), max {:.4}",
             e.edge_pixels, e.rms, e.psnr_db, e.max_any
         );
         assert!(
@@ -368,22 +293,6 @@ fn level2_solids_without_radius_have_analytic_edges() {
             e.max_any
         );
     }
-    // For contrast: level 1 keeps today's single-sample quad.
-    let level1 = render_alpha(
-        &mut renderer,
-        vec![placed(
-            "solid",
-            "solid",
-            json!({ "color": "#FFFFFF", "w": 120, "h": 80 }),
-            1,
-            23.0,
-            115.0,
-        )],
-    );
-    assert!(
-        level1.iter().all(|a| *a == 0.0 || *a == 1.0),
-        "level 1 solids are aliased as today"
-    );
 }
 
 #[test]
@@ -421,8 +330,9 @@ fn vector_cache_stays_bounded_while_content_animates() {
         peak <= budget + one,
         "peak {peak} exceeds budget {budget} + one frame {one}"
     );
-    assert!(renderer.vector_cache_len() <= 4);
-    // The entry bound holds as well.
+    // `one` includes shared scratch as well as a texture; after pooling,
+    // this byte budget can retain more than three smaller output textures.
+    // Check the independent entry limit explicitly.
     renderer.set_vector_cache_budget(u64::MAX, 2);
     assert!(renderer.vector_cache_len() <= 2);
     for i in 0..10 {
@@ -523,6 +433,15 @@ fn vector_textures_are_accounted_and_trimmed() {
     assert_eq!(first, rebuilt);
 }
 
+/// A test's SVG file, removed with its directory when dropped.
+struct TempSvg(std::path::PathBuf);
+
+impl Drop for TempSvg {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// An SVG image layer (`d.asset` → `path`), `compat` level `compat`.
 fn svg_project(
     svg: &str,
@@ -532,8 +451,8 @@ fn svg_project(
     d: Value,
     compat: u32,
     rotation: f64,
-) -> (Value, MapResolver) {
-    let dir = std::env::temp_dir().join(format!("pm-render-vector-{}", std::process::id()));
+) -> (Value, MapResolver, TempSvg) {
+    let dir = std::env::temp_dir().join(format!("pm-render-vector-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, svg).unwrap();
@@ -547,21 +466,29 @@ fn svg_project(
     asset(&mut doc, "art", "image", "svg", w, h, 0.0);
     let mut resolver = MapResolver::default();
     resolver.paths.insert("art".into(), path);
-    (doc, resolver)
+    (doc, resolver, TempSvg(dir))
 }
 
 const SOLID_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="10" y="10" width="80" height="30" fill="#FFFFFF"/><circle cx="50" cy="25" r="8" fill="#000000"/></svg>"##;
 
+/// Every SVG image (`compat` level 1 and 2 alike) is drawn at output
+/// resolution with analytic edges: a rotated rect against its exact
+/// coverage.
 #[test]
-fn level2_svg_images_are_vectors_at_output_resolution() {
+fn svg_images_are_drawn_at_output_resolution() {
     let mut renderer = Renderer::headless().unwrap();
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
-    let (doc, resolver) = svg_project(SOLID_SVG, "solid.svg", 100, 50, d.clone(), 2, 23.0);
-    assert_eq!(
-        unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
-        vec![]
-    );
-    let rgba = render_rgba(&mut renderer, doc, &resolver);
+    let mut frames = Vec::new();
+    for compat in [1, 2] {
+        let (doc, resolver, _svg) = svg_project(SOLID_SVG, &format!("solid{compat}.svg"), 100, 50, d.clone(), compat, 23.0);
+        assert_eq!(
+            unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
+            vec![]
+        );
+        frames.push(render_rgba(&mut renderer, doc, &resolver));
+    }
+    assert!(frames[0] == frames[1], "the levels draw the same pixels");
+    let rgba = &frames[0];
     let alpha: Vec<f32> = rgba.chunks(4).map(|p| p[3]).collect();
     // The 200 × 100 box centered at (128, 128) rotated 23°: user units ×2.
     let reference = coverage(|x, y| {
@@ -574,7 +501,7 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         "SVG rect: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}",
         e.edge_pixels, e.rms, e.psnr_db, e.max_any
     );
-    assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03);
+    assert!(e.psnr_db >= 45.0 && e.max_any <= 0.02);
     // The circle is black and opaque over the white rect.
     let center = (128 * W + 128) as usize * 4;
     assert!(
@@ -582,22 +509,15 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         "{:?}",
         &rgba[center..center + 4]
     );
-    // Level 1 SVG images are drawn (Chromium's rasters; tests/svg_level1.rs).
-    let (doc1, resolver1) = svg_project(SOLID_SVG, "solid1.svg", 100, 50, d, 1, 23.0);
-    assert_eq!(
-        unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
-        vec![]
-    );
 }
 
 #[test]
-fn level2_svg_fallbacks_and_text() {
+fn svg_gradients_crops_and_text() {
     let mut renderer = Renderer::headless().unwrap();
-    // A gradient is drawn by resvg; `cover` crops the 2:1 SVG to the
-    // square box.
+    // `cover` crops the 2:1 SVG to the square box.
     let gradient = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><defs><linearGradient id="g"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.5"/></linearGradient></defs><rect width="100" height="50" fill="url(#g)"/></svg>"##;
     let d = json!({ "asset": "art", "fit": "cover", "w": 100, "h": 100 });
-    let (doc, resolver) = svg_project(gradient, "gradient.svg", 100, 50, d, 2, 0.0);
+    let (doc, resolver, _svg) = svg_project(gradient, "gradient.svg", 100, 50, d, 1, 0.0);
     assert_eq!(
         unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
         vec![]
@@ -612,31 +532,31 @@ fn level2_svg_fallbacks_and_text() {
     assert!(a(128, 78) > 0.5);
     // The gradient's middle half shows: alpha 0.875 at the left edge,
     // 0.625 at the right.
-    assert!((a(79, 128) - 0.87).abs() < 0.02, "{}", a(79, 128));
-    assert!((a(176, 128) - 0.63).abs() < 0.02, "{}", a(176, 128));
-    // SVG text is routed.
-    let text = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="5" y="30">Powermove</text></svg>"##;
-    let (doc, resolver) = svg_project(
+    assert!((a(79, 128) - 0.87).abs() < 0.01, "{}", a(79, 128));
+    assert!((a(176, 128) - 0.63).abs() < 0.01, "{}", a(176, 128));
+    // SVG text is drawn natively (usvg's layout with the system fonts).
+    let text = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="5" y="30" font-family="Helvetica" font-size="16" fill="#FFFFFF">Powermove</text></svg>"##;
+    let (doc, resolver, _svg) = svg_project(
         text,
         "text.svg",
         100,
         50,
         json!({ "asset": "art", "w": 100, "h": 50 }),
-        2,
+        1,
         0.0,
     );
-    let u = unsupported_with_media(&load(&doc), "Ptest-root", &resolver);
     assert_eq!(
-        u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-        vec![Feature::SvgImage]
+        unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
+        vec![]
     );
+    let rgba = render_rgba(&mut renderer, doc, &resolver);
+    let ink = rgba.chunks(4).filter(|p| p[3] > 0.5).count();
+    assert!(ink > 100, "the text's ink: {ink} pixels");
 }
 
 /// SVG bytes in another encoding Chromium honors (an XML declaration's
-/// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images: level
-/// 1 asks the renderer for Chromium's raster of the bytes as they are (no
-/// layer failure), level 2 decodes them as Chromium does and draws the
-/// same pixels as the UTF-8 file.
+/// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images,
+/// decoded as Chromium decodes them: the same pixels as the UTF-8 file.
 #[test]
 fn svg_images_in_declared_encodings_are_not_failures() {
     let mut renderer = Renderer::headless().unwrap();
@@ -655,47 +575,32 @@ fn svg_images_in_declared_encodings_are_not_failures() {
         b
     };
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
-    let (doc, resolver) = svg_project(utf8, "declared-utf8.svg", 100, 50, d.clone(), 2, 0.0);
+    let (doc, resolver, _svg) = svg_project(utf8, "declared-utf8.svg", 100, 50, d.clone(), 1, 0.0);
     let reference = render_rgba(&mut renderer, doc, &resolver);
+    assert!(reference.iter().any(|&v| v > 0.0));
     for (name, bytes) in [("latin1.svg", &latin1), ("utf16.svg", &utf16)] {
-        let (doc1, resolver1) = svg_project(utf8, name, 100, 50, d.clone(), 1, 0.0);
-        std::fs::write(resolver1.paths["art"].clone(), bytes).unwrap();
+        let (doc, resolver, _svg) = svg_project(utf8, name, 100, 50, d.clone(), 1, 0.0);
+        std::fs::write(resolver.paths["art"].clone(), bytes).unwrap();
         assert_eq!(
-            unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
-            vec![],
-            "{name}"
-        );
-        // Rendering asks for the raster, never reports a corrupt file.
-        let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
-        let frame = renderer
-            .render(&load(&doc1), "Ptest-root", ticks(0.0), &request, &resolver1)
-            .unwrap();
-        assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
-        assert_eq!(frame.svg_misses.len(), 1, "{name}");
-
-        let (doc2, resolver2) = svg_project(utf8, name, 100, 50, d.clone(), 2, 0.0);
-        std::fs::write(resolver2.paths["art"].clone(), bytes).unwrap();
-        assert_eq!(
-            unsupported_with_media(&load(&doc2), "Ptest-root", &resolver2),
+            unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
             vec![],
             "{name}"
         );
         assert!(
-            render_rgba(&mut renderer, doc2, &resolver2) == reference,
+            render_rgba(&mut renderer, doc, &resolver) == reference,
             "{name}"
         );
     }
 }
 
-/// Level 1 SVGs that roxmltree rejects but Chromium's libxml2 paints (an
-/// external DTD subset with undeclared entities, a declared external
-/// entity, a parameter entity, nesting at Blink's 5,000-element limit) are
-/// Chromium's rasters like any other: the frame asks the renderer for
-/// them, never paints them empty. Documents Chromium shows as a broken
+/// SVGs that roxmltree rejects but Chromium's libxml2 paints (an external
+/// DTD subset with undeclared entities, a declared external entity, a
+/// parameter entity, nesting at Blink's 5,000-element limit) draw their
+/// content, as Chromium draws them. Documents Chromium shows as a broken
 /// `<img>` (an undeclared entity without a DTD, nesting past the limit)
-/// draw nothing and ask for nothing, as today.
+/// draw nothing, as today.
 #[test]
-fn level1_svgs_libxml2_accepts_are_asked_for_not_blank() {
+fn svgs_draw_where_libxml2_paints_them() {
     let mut renderer = Renderer::headless().unwrap();
     let r = r#"<rect width="8" height="8" fill="red"/>"#;
     let ns = r#"xmlns="http://www.w3.org/2000/svg" width="8" height="8""#;
@@ -728,25 +633,20 @@ fn level1_svgs_libxml2_accepts_are_asked_for_not_blank() {
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
     for (i, svg) in painted.iter().chain(&broken).enumerate() {
         let name = format!("libxml2-{i}.svg");
-        let (doc, resolver) = svg_project(svg, &name, 8, 8, d.clone(), 1, 0.0);
+        let (doc, resolver, _svg) = svg_project(svg, &name, 8, 8, d.clone(), 1, 0.0);
         let doc = load(&doc);
-        let u = unsupported_with_media(&doc, "Ptest-root", &resolver);
-        let result = renderer.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver);
-        assert_eq!(u, vec![], "{name}");
-        let frame = result.unwrap();
-        assert!(frame.failures.is_empty(), "{name}");
+        assert_eq!(unsupported_with_media(&doc, "Ptest-root", &resolver), vec![], "{name}");
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
+        let rgba = renderer.read_rgba(&frame).unwrap();
+        // The layer's center: the red rect, or nothing.
+        let center = &rgba[((128 * W + 128) * 4) as usize..][..4];
         if i < painted.len() {
-            assert_eq!(frame.svg_misses.len(), 1, "{name}");
+            assert_eq!(center, &[1.0, 0.0, 0.0, 1.0], "{name}");
         } else {
-            assert!(frame.svg_misses.is_empty(), "{name}");
-            assert!(
-                renderer
-                    .read_rgba(&frame)
-                    .unwrap()
-                    .iter()
-                    .all(|&v| v == 0.0),
-                "{name}"
-            );
+            assert!(rgba.iter().all(|&v| v == 0.0), "{name}");
         }
     }
 }

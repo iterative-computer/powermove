@@ -190,7 +190,7 @@ pub enum AudioMessage {
         time: Ticks,
         playing: bool,
         generation: u32,
-        /// Original media's presentation endpoint; absent when unavailable.
+        // Original media's presentation endpoint; absent when unavailable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         duration: Option<Ticks>,

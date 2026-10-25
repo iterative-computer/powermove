@@ -7,13 +7,10 @@ import type { PMRegistry } from '../legacy/registry';
 import { EngineRenderTransport } from '../engine-connection/render-transport';
 import { installAppCaptures } from '../engine-connection/app-captures';
 import { ShaderFallbackRunner } from '../engine-connection/shader-fallback';
-import { SvgRasters } from '../engine-connection/svg-rasters';
 
 export function installHiddenCpu(PM: PMRegistry): void {
   const log = (level: string, message: string) => console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`[native CPU] ${message}`);
   const runner = new ShaderFallbackRunner();
-  const svg = new SvgRasters({ asset: id => PM.assets?.get?.(id) ?? null, assets: () => PM.assets?.map?.values?.() ?? [], log });
-  PM.bus?.on?.('assets', () => svg.prime());
   const payload = (request: EngineSnapshotRequest) => encodeFrame({ project: PM.proj.id, request, definitions: (PM as any).EngineDefinitions?.publisher.all() ?? [] });
   const native = {
     snapshotSync(request: EngineSnapshotRequest): EngineSnapshotReply {
@@ -33,7 +30,7 @@ export function installHiddenCpu(PM: PMRegistry): void {
   const render = new EngineRenderTransport({ native, documentOnly: true, session: () => null,
     revision: () => { PM.EngineDoc?.barrier?.flush(); return PM.EngineDoc?.barrier?.revision ?? null; },
     composition: () => String(PM.proj.compId ?? PM.proj.id), document: () => String(PM.proj.id), viewSeq: () => null,
-    fallbackRunner: () => runner, svgRasters: () => svg, usesBlender: () => false, log,
+    fallbackRunner: () => runner, usesBlender: () => false, log,
     windowDocument: () => {
       const doc = PM.EngineDoc, barrier = doc?.barrier;
       if (!doc?.enabled || !barrier || !doc.ready) return null;
@@ -44,9 +41,7 @@ export function installHiddenCpu(PM: PMRegistry): void {
       } };
     }
   });
-  render.provideCompat('svgImage', request => svg.produce(request));
   (PM as any).EngineRender = render;
-  (PM as any).EngineSvgRasters = svg;
   installAppCaptures(PM, render);
   let bound: HTMLCanvasElement | null = null, output: HTMLCanvasElement | null = null, originalVisibility = '';
   const syncStyle = () => {

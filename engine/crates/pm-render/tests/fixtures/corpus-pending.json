@@ -1,0 +1,1964 @@
+[
+  {
+    "frame": "0368025ca399124a8a921bb218b89505bb783cdb31eb32a7fb25f05667f4c05b",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 79.94 p99.9 46.07 mean 0.124 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "6186787f72bd362d71c799b0b7594b026f4373c0b144cad1c5731046751ac8aa"
+  },
+  {
+    "frame": "08758cf03b2c1456223e966070cb81dd3a230dd90925fd976e4f0cf9c3099149",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 126.00 p99.9 86.00 mean 0.333 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "2831ad1b1205ab037d9a792e80d51dba6d18532ee9e78a9a325b54651126bc21"
+  },
+  {
+    "frame": "08cb4bcd84e027bf452cf4253bc227eadfdf981f8e23c203e01b5103afe47a41",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 164.17 p99.9 89.77 mean 0.275 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ae2b4b1fdf360fec52ebd3909efa425517f4e5ce2ba9aaf55a42b1ce63d2837c"
+  },
+  {
+    "frame": "099298f7501d28e483dbf4eac20fc3b0a1d3c31bc82d364e8dfe4964ecfdefb2",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 133.00 p99.9 82.00 mean 0.318 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "7ae13d9361c668a5184d3e4dbb3cd6fc4bd46561e0c41c039eb7d877d1bcd112"
+  },
+  {
+    "frame": "09e22929cc633ec505c80da29b5307e209a52847badd7afb7ad6a3d1606f8f9e",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 73.00 p99.9 42.00 mean 0.112 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "bc82ab32f5a2e077d59379d27220818e4e0e33483461dbbd8b4626b49012c0c6"
+  },
+  {
+    "frame": "09ff543d5f6cc7f31f6f60d04cb7ea0fe19ac9d5c3f264757c0b44de1935182c",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 174.57 p99.9 120.78 mean 0.630 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "1ae758b429cf5291ce87eab3b4a8ef8858343013005474b93dd6b9b1866167d1"
+  },
+  {
+    "frame": "0a48897d52117aad98b37c4b33a3600adfd084d3551c901495e29a4aae66f82c",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "9a434336fd10b3e35373f0196b8a3fe623098693816bc308a88651ffe98c2826"
+  },
+  {
+    "frame": "0f34c96500ab3f92ff328413164ea4858a16a85743ff2a7fb00b26e187d8aa5b",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 62.00 p99.9 10.00 mean 0.048 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "266120c237fefd89951431f412e00f872dba7f2ac9a722abea8fc068d7708dd5"
+  },
+  {
+    "frame": "0fad46528dbfe5d815dddb164ed9b117a6c85b39a9cbc16736932756fd84bc5d",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 109.00 p99.9 65.00 mean 0.200 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "dfb0a37ad2dec65831d985f5535bffd3207ec8537817e973cbbbbb2828a274ef"
+  },
+  {
+    "frame": "1142efc60428a11f4c21ae0963a9d98048534b2a870456faa3bc4130066e9102",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 149.60 p99.9 81.87 mean 0.280 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ea4e9a0585df87c43b6b0b6ae2bdf5e5d561294157f3d8bb828743b4d6cde5ab"
+  },
+  {
+    "frame": "11b2ad411c2f31e777e8df2628029dc376d5f827c3e0e19f47bf0854d76a71e6",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.996231422089; rest max 5; fraction within 2 0.996296296296; max outside edges 5; SSIM None"
+    ],
+    "measurement_sha256": "a14c9d7e999114dc39b1c1fbafb280ead4463a61e820b025d9a46b5ed9dcfe26"
+  },
+  {
+    "frame": "120476408e1ac47e33495a0e91e2f8a40eabf24d87f6aeea95bf799ebf02a0c1",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 11.27 p99.9 7.02 mean 0.098 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ad24f2a0277dd1d4feb01f07f0d18f761f1164f856feac3e84eb64c1e613d236"
+  },
+  {
+    "frame": "197fab35ff1a517344905f72b73d78994ec965edf504b6ee1c97ca9bf408231f",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 67.00 p99.9 52.00 mean 0.162 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b542aca4e143432a24be343d324566ef3cf521c47f2103755f7f2de9d9b9523f"
+  },
+  {
+    "frame": "1a3406c20d169719f3b753d794180336c5e6ce06570a212249cba4c7d2be1e6c",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 92.00 p99.9 33.00 mean 0.479 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "f26d194d6bfb3c4f14950b49781db6f2a9bf7d5bf6f4ef699ed7c53946ea7e4e"
+  },
+  {
+    "frame": "1cb8b06703eb0de4c2985eb00e411d00d49910e4e1b9f7e9fc1d19284593a130",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 123.00 p99.9 32.00 mean 0.095 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "80310c3c54c200443da17aef9290fc0b8de0f3ae78d53420081edecae2eb4794"
+  },
+  {
+    "frame": "1d199c133d0827116174cdabaeeba9cc2e073127c712af5925b2192d75d115cd",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 67.00 p99.9 50.00 mean 0.159 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "f302ed03237f6a7e790b6e8f1a333ce2ac3a8d5cf4a96334e5392ff0051b0aa6"
+  },
+  {
+    "frame": "1e26e8f85e0d9276c13738ed2dad8c61b121f52a6432a9b0ff70d043abb571a0",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 92.00 p99.9 35.00 mean 0.083 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "4dd7dd5240e6c1145162d47b77c346b86e7355327cc5b963ffb51922340fd709"
+  },
+  {
+    "frame": "1ea591c20f077401d798fb4d1aa544da3524a2e82d54a81bf9fefa1404cb8bfe",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 47.00 mean 0.103 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "6ee213607936f71fc09b8a0a89735087aa651b1cd31086993a6a7c62e61dca0e"
+  },
+  {
+    "frame": "21a2da3e2f59d0a5d35abfb4c38ca1c5b36420c26771403bf3631fc2393ee4e6",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 125.00 p99.9 84.00 mean 0.396 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "1067982a0613a9953dd20f708e68831822ae6889d36ca2524358163fa82e6a5e"
+  },
+  {
+    "frame": "220d74f3ce8602f080d9d43b7d427e489cbb6ae30de6b8151b43058d2fd4d430",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 67.00 p99.9 6.00 mean 0.023 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "6027e2b1706211c8fcb6241b1016dc0d699873b129ef968cf4333eb2bd9a6e6f"
+  },
+  {
+    "frame": "22455e9f9701137b4c0938669654e832f73d46438c18b7d1ba105224a509743b",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.995111111111; rest max 25; fraction within 2 0.998069444444; max outside edges 25; SSIM None"
+    ],
+    "measurement_sha256": "131bd610057544c6ed11648dc113bcdc039860a3c3b091fae195b8208628f7cb"
+  },
+  {
+    "frame": "228709b58fb26eef53fbb017d2ecb26d4a88ae9c808c1137b201b6681fbbcab9",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 94.88 p99.9 41.45 mean 0.456 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "16f34e789850d504c129ea700fb8e6c611d8372d275988aa190a46c4d9646a3e"
+  },
+  {
+    "frame": "230edf299df2b7b5cecdd14a472d9ed68c38cdb654b1326f92b0d36284ee42d3",
+    "owner": "L6",
+    "reason": "resampled image content, mattes, effects, groups and precomps",
+    "checks": [
+      "unreferenced: max 88.08 p99.9 21.57 mean 0.127 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "af45c4ef206703c2c01d01aa6d28bc04d62d684997004cb90cfb3e4d059bd2b5"
+  },
+  {
+    "frame": "23d8f6f00109e098aed8c4f8ec94850cb289d349be72d7d6212a2b7de9e5f628",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "84da8dbdd7cabc4b6f5651086657459253c4ce99c82c0602dd66fbd8f15a9a39"
+  },
+  {
+    "frame": "255572853e7b494ca945fc59bb78dfc31c7c6abbada79f46a37390d38d495c6e",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 182.35 p99.9 115.30 mean 0.545 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ba314af0f2f72fa88a153c65b90c34d0a6ebbc43a1cb7f83b0dc235b445cf105"
+  },
+  {
+    "frame": "28e7bdb6bcd005050884d0533345ade17354b2d113fd0174c519c1149ae8331a",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 78.00 p99.9 16.00 mean 0.072 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "9444ab08fec5fe814f3a644fe66aea0b0b3c3cb6a2baca51ccead6b6ecf6dc60"
+  },
+  {
+    "frame": "2aa091190f1359245cd64e2e82c4630da47f902351bfc92b5fcbd386bbb49b35",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 92.00 p99.9 52.00 mean 0.248 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "07f3c2852fa2a996891876094e7d74ebccc822f42ddfa92106d76bd81290778a"
+  },
+  {
+    "frame": "2b727b3ff2a235afb9818323748f84d3468fb964cfe40d0798e2c7aaf8098a3f",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.998247969454; rest max 34; fraction within 2 0.998576388889; max outside edges 34; SSIM Some(0.999945990748938)"
+    ],
+    "measurement_sha256": "49448d61d1789084655dcc38ee8b1e75ca505a8194ca5e4fa79058fdfd0f8bb6"
+  },
+  {
+    "frame": "2d1e93523efa4ca45e1ea6c072950c98e07d9e42abb8813764a1b012c5b73c77",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 44.00 p99.9 34.00 mean 0.107 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "55beb001e4538f4b2530674431ca9d127e15abb8108b84165c6ab67b7188a649"
+  },
+  {
+    "frame": "304a949372f7db658f9893823ee09f7f15b854c54e8ca430c9052575392115b2",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 69.79 mean 0.251 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "00ad6a4d51d6b18f400205a91160c3fbdb8345327c92c0213dbd0cfc0d69839d"
+  },
+  {
+    "frame": "3066015a8617e6c7a1fed0dbeb023153e7234bad44071653f6f71542433ed01f",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "5fa8ef2770c37bf5c17671460174bf89828e8d5a9fd09200a4449c5abbd1982c"
+  },
+  {
+    "frame": "30800fa75c13c0a1374e41213041c1971fb7934e5b4039cb33223fb18239cb38",
+    "owner": "L4",
+    "reason": "2.5D planes, groups and precomps",
+    "checks": [
+      "unreferenced: max 127.87 p99.9 59.14 mean 0.296 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ad5fcc5fc786ebddecb16cad160b70853971263039ee2053c0c4135b8b48ea1b"
+  },
+  {
+    "frame": "30de8aae75d648ea7692faaf3a6259cd285036d8de1a3c5c70df5c7bc88d6596",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "5eaeb444b422506a33dcbc3fd982e53ec978d11d5910e782709ec40e66132cca"
+  },
+  {
+    "frame": "310a37fb0ccb2d4567304c7189fce1e9894974d255e063542b9d508ccec1e28a",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 62.00 mean 0.194 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "eaeafe6c505b00bc9a5968a8740d27bed63148a3e0eb5d17dd815b2728cc3acc"
+  },
+  {
+    "frame": "3497a4c1c3c0890286a9689df97bfd909c3b6cd9df32dd83b169c4920170f0b3",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 108.64 p99.9 43.70 mean 0.101 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "a41d8d62a7b8fab7441b8dce9278b3c666335345aaba0fa84118715cbd7fb5e3"
+  },
+  {
+    "frame": "352f5cd107f4ace6d0a1d37cdd8602fc71f7ddc46212c102831f4c77c6898e59",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 109.00 p99.9 79.00 mean 0.268 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "96d794a33c6aff72f2a7be2fe4685445e3499717320abd391c41a6aa88c72d5c"
+  },
+  {
+    "frame": "35503f8d38b6c2c8f8a9487372b34f0a118ac66469bb0f12329d17c8b0a14006",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 122.00 p99.9 80.00 mean 0.273 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b3308e69097e7084ef7a65dfbef9cb6c8fa8e607d92dff4ef92d7ead6848ff3a"
+  },
+  {
+    "frame": "35949b5ffc691aee44f2fb1c4674ea22f3585a6cd535d435eedad9bc9d024672",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 68.85 p99.9 11.52 mean 0.052 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "c0d1c8a44c16607b147217e54fba9de73d13d12429a33f3bf82bd9fb33ef3077"
+  },
+  {
+    "frame": "3aa024ef9313a3b992b18ea5ce7cb61d278c6fc2bf2a20c27e771c4e86a8e637",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 107.00 p99.9 0.00 mean 0.032 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "a9a596bbe61aeba6f2c26fcc33e3d323008efe3ed5fc63a95b816e144e256074"
+  },
+  {
+    "frame": "3b4655f02df0be15a189aa35e68e73ec2e4ddee03d4698167d0d38c3bcaa8bc3",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 71.66 mean 0.255 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8083247c8d3c014f21344004fd0c13d62b4bea55db85b14e9ac505ea784578cf"
+  },
+  {
+    "frame": "3b86e357b182d00f6bbf04d9cdb12d2e22a67904b88464eeba54ba1edbc75738",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8dbdbe57842c754dca7f4292c7ae044b261efaec7747bc000b8021501344bedd"
+  },
+  {
+    "frame": "3bbf4e4f67b1f1e196f5c11d40775d8a509aff64ae9f2d9532fbfe20a7a2f231",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 75.45 p99.9 15.94 mean 0.057 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ae61cc8150cab34d1e8bccd815ae43c5c895e3e5eb4ff429232e0e696f8c60a7"
+  },
+  {
+    "frame": "3c2cc621c9eff35f2189f387654ab3ecc5058309ec8aec331451e427df0788ca",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 36.23 p99.9 36.23 mean 0.478 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "4accdaf9992ff2cf81036768b396ec3fdd28aaad1bc52cf53e8dcab365e1daec"
+  },
+  {
+    "frame": "3f1a37cefa2bfd3448ed67370e672345ac85691f424fccba808b0a1fbe1ece90",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 108.00 p99.9 62.00 mean 0.176 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "5699ada21ae056f8a76a33f232dd0efce87c54ab1543e5f338d8dc5c4fc119d0"
+  },
+  {
+    "frame": "40021c65744ae142ed3141804f30fa38dae8bce0b6a123c59f8c6ccdc5ab6a3d",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 150.29 p99.9 115.42 mean 0.362 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "016074ea467474fe7b784000c426d49a230512a7c43c1a6c789683f14d37e73b"
+  },
+  {
+    "frame": "4574ea2a61ad821aa545506d7bfca9a3630a23d4ae5a6b4db7bca354f20523c6",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 21.67 p99.9 21.67 mean 0.127 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "411346cafce3df59bdcbca48b6f2927453e636d02596541789da028e1ddaa401"
+  },
+  {
+    "frame": "46bfc39be08dedb1f7c22781279ac65883b76667e4e0e7d30646626dfc28b36b",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 63.00 mean 0.197 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b51ab0a29f91958a4320798e394ad11b36e30352acb1e722c68c3af4a8862424"
+  },
+  {
+    "frame": "470695e4b6e789e300bf13f134611eed9d01e8fc42263518226d963b40fb2a2f",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 96.00 p99.9 37.00 mean 0.082 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "14985728bb5d129f41c62715541c5d216bc01a305fe2c80be89a9e35b5368757"
+  },
+  {
+    "frame": "478f83fba6d6d4b9f86e7b5c4de6ce37ed34408d9d6ca679d590a77f9394084e",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 110.85 p99.9 44.70 mean 0.104 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "b5e8bcb8d1e38ea8985f8f1c099291db7f52e1762e1825d267ea27cc8fe9d4af"
+  },
+  {
+    "frame": "487498e832632d3af0fae1dbb9eac29863972b4d482b461a4c3fa4e642029cde",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 99.00 p99.9 36.00 mean 0.138 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "bdf6dd11b64821c9d379d2be13c6b6da124a9aa6242f01498ee58a42c285fd94"
+  },
+  {
+    "frame": "48bdec40a494857753959823bd7d55a99ed0e389be1097a7fff0a5e8114c43e0",
+    "owner": "L4",
+    "reason": "resampled image content, 2.5D planes",
+    "checks": [
+      "unreferenced: max 90.92 p99.9 36.48 mean 0.216 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "d15df6bb0405a9b7dc0ac39940bf79ee9c27a8e28da5ac8124511b9669c10bdb"
+  },
+  {
+    "frame": "4aa4e6cbe2b852c5de1a9df0a6f05e9347e3fc1f63e579459d37c4383e33bf5f",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 106.00 p99.9 81.00 mean 0.255 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "efdce0745d1801719b3893e2140f0188eaf3a5d030cf288a34d78f5a912edca0"
+  },
+  {
+    "frame": "4b84a2a2ebd4dabb48805461235167c3f55ee7138c3c0cd80eff94fac8ac7eeb",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 98.00 p99.9 24.00 mean 0.065 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "366e0728c90efe8f0723d417d0b5c5b457d375708ccf26ad9beb5146a41ad372"
+  },
+  {
+    "frame": "4b98f0ecbb7eac92e0ca0c739dcdcfd8ff8bd7171fac6e1423bc27704e2ee111",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 99.86 p99.9 51.30 mean 0.482 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "55786b119bdf2d1edbddcfd83b4be4e9c74ce89f8a17ba4966cf8f3c536efa18"
+  },
+  {
+    "frame": "4bc98669e595f799d83374d7d0335e3e791a93113df996984d5bb7b931b8e76b",
+    "owner": "L4",
+    "reason": "resampled image content, 2.5D planes",
+    "checks": [
+      "unreferenced: max 88.00 p99.9 40.00 mean 0.243 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "152e6035a288c9bffb68daae9ceba2144cb19ce5c18596ec85ce172fd9521064"
+  },
+  {
+    "frame": "4c862669d118ee5c90cdff374c9c8a85f450e2a5ae67e2611546e91ba259ca85",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.994742631827; rest max 66; fraction within 2 0.997437500000; max outside edges 66; SSIM Some(0.999859647939944)"
+    ],
+    "measurement_sha256": "e17fc4b9316ee4713cfd78091dcfb87d06008e5be352a7df1223afe53454a46b"
+  },
+  {
+    "frame": "4d79ed42007f3b9437981bcf1faac4f3f4790605a61404118caf6cbc28551c4c",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 124.00 p99.9 81.00 mean 0.235 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "060e3947f4d71f362edb6d6450cb9f4d9a0ec7046846f03c4dc2190d0a3cb35a"
+  },
+  {
+    "frame": "4dba8c66a93a3c2dc583c5df0d7a428e6f39288ca7f37d594d27053f3dbe5240",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 144.00 p99.9 84.00 mean 0.229 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b0cf15f4bada206f78d52c80a0c40035c299062d82785f80e6d25eac7dc4df55"
+  },
+  {
+    "frame": "4dd83f74d43bfc53f445d4185746c603058f111c957fe703f805a2c72ba92484",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.997777777778; rest max 65; fraction within 2 0.997962962963; max outside edges 65; SSIM None"
+    ],
+    "measurement_sha256": "9c924fe14c03b21a90fc7bb9cdffcb96c683ebfdc606f39615bab33c77515e1a"
+  },
+  {
+    "frame": "4fbf2614971c2c6df9a37b658d6e56a2b371aaef408848c5916d2a7180a8b497",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 105.09 p99.9 24.65 mean 0.068 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "7edea84d5c8fa897f9855914cdb78b5db09f8b0597a5759c9a33e4179a6e5c2b"
+  },
+  {
+    "frame": "507c27d4b6b67537f6b7500597f828c12bf9a9daf856a811c56263c4ec5b3667",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 113.00 p99.9 71.00 mean 0.222 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "3cdab697eda6fed80ad85395f54faceafe890d7528215bf7e395134dc390152e"
+  },
+  {
+    "frame": "52861dc6d547dc9a66cbba5f170cebb00f5627ff302f411a230ddbce924aec11",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 96.00 p99.9 34.00 mean 0.081 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "8eb77ef4d1acb679cc07c82191832af33b1c8504ed405e1ef3d4811749b8f003"
+  },
+  {
+    "frame": "54ab2140c27c20d622f6c43afa0e12cb8fda3cc78620d572244b2c89dab522ea",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 12.00 p99.9 12.00 mean 0.095 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "8322af0d9116acc85293bece15e0ac31769894aaf8cb63abc8beec5e1bf6f300"
+  },
+  {
+    "frame": "56ac0968cb6d1a929b0f16704cd1b5ca015277da6e3eec8331c24772566bfeca",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 137.83 p99.9 107.33 mean 0.352 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8d031c73a5a7b3caedcb65b8a86d7dd535ba30edd3bf459d4cdbc2535429cdfa"
+  },
+  {
+    "frame": "5a7a1fd6a75bf0b3034fc012652ecd0ed3c0e1f884788fee5921ca484ba6d6de",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 64.00 p99.9 16.00 mean 0.039 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "18b34c2c2779d72f100e595ea89292c87c0e69dce9b0d5087282e1c80a18aff9"
+  },
+  {
+    "frame": "5b43da726a7307d34ef65d1c0e6febbbf2c85a0225684b60fc52e97317e2cd27",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 61.00 p99.9 10.00 mean 0.045 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "4d62e9825aaadfc6599c94efa60c8ac94e541f98d402c80888ac07fe1fa1f394"
+  },
+  {
+    "frame": "5bc5b7c873e4520b62a09b37728ce8ebfb26084bbde1a75ee326affb1c78040b",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "4a5e34c1247a4bbee677631d89a61198a07f3c9e9fc5b8d943c88dc47e2a2b0f"
+  },
+  {
+    "frame": "6029c2cbfc049eab8bc3a21939710bbde09dd962a11ce9df9f21d87b47fa737e",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ccd2d8fe04d41478f909320ad8028caf8775efce2356fef3c3bcd741d8831bee"
+  },
+  {
+    "frame": "604e9b66a98bd79f74171ebdb95c29443d2a0389d4c06aa43c7ab7fd2d3cf030",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 24.653320312 CV; fraction within 2 0.998069444444; max outside edges 25; SSIM None"
+    ],
+    "measurement_sha256": "f68b9b38534a682a6faffdb32de5ae2ac4c2eb910bf15fa096704cd5ee0f435c"
+  },
+  {
+    "frame": "605952839fd5b58c528d30715ceec1605710e4e7b1e8b3a1ce220e203af79ae4",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 123.27 p99.9 32.12 mean 0.095 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "e8378b96eab8fb24c3436b0b343585093a68e024d5c3cf3228a60ba49463c8da"
+  },
+  {
+    "frame": "64f8d21a0a9c37fb40473c8917e88186497b5273e994469fd1126313e5d8bfca",
+    "owner": "L4",
+    "reason": "groups and precomps, mattes, other layer types",
+    "checks": [
+      "unreferenced: max 60.82 p99.9 27.02 mean 0.124 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8c96b5b845480b0dbdd16c16772ccf1457f44bab5e1a06530f2cde531c9f5b35"
+  },
+  {
+    "frame": "659a2b3ce10aa2b54439700ea611e5b8c370c0105b66569044db9f148db82f6b",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 135.00 p99.9 40.00 mean 0.120 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "1121c538c730f3058cd38f56fdf78e6d63d0f9c1a6cb127457383aac3819dc95"
+  },
+  {
+    "frame": "674c774582e32655dbc75964a29ed79248f9d09a65c40f900987526693bb5011",
+    "owner": "L4",
+    "reason": "resampled image content, 2.5D planes",
+    "checks": [
+      "unreferenced: max 91.00 p99.9 37.00 mean 0.226 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "a6d05b7bfc28ecbf4b1e8a8afb163e328146090ebf1ad58e7e552d38b6fb4473"
+  },
+  {
+    "frame": "6995345e6f4f9a467d3d776b6850af185fcf4720f1a32635f4c7408693d49278",
+    "owner": "L6",
+    "reason": "resampled image content, mattes, effects, groups and precomps",
+    "checks": [
+      "unreferenced: max 85.00 p99.9 22.00 mean 0.114 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "571f3ecba72f007e7b44ec9c16e999b647200179833f8ff4037fdc5d979f5341"
+  },
+  {
+    "frame": "6c001cc46ff96ecab3d243639a24aaa7668b69aacaeb9e52563b26919e0e97dc",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 61.00 mean 0.189 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "0eca85a8da6e04d4807ddec11fcbe3dd4957efebcc0a24a8e95652d2a7de8be0"
+  },
+  {
+    "frame": "6c102e4c5c6644d69af2221e5ec6cafca1c632146f394bd98036a4ce6e625854",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 118.00 p99.9 92.00 mean 0.404 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "6d37a92e155f2327d3104d993df5ff94def4e46302bba1b834ae62ea8bf0aa18"
+  },
+  {
+    "frame": "6cf8b2f8a5e6d9a0dc45a52ece2be6e5808d42694831c3d796de2d29f01fa705",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "43f54e09aedca2cc29219d9f339946618ad9f9d4f76b4875c5f36598cfb51c38"
+  },
+  {
+    "frame": "6de31bfb53382591e090f4fa78fdfde74e18c4437eeed6209dd458a03e6a0ea3",
+    "owner": "L6",
+    "reason": "resampled image content, mattes, effects, groups and precomps",
+    "checks": [
+      "unreferenced: max 92.14 p99.9 26.02 mean 0.136 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "d1c9ddc4210f67b334bcc55334139efd3e381d7ef7b1b415425da9fd145ac096"
+  },
+  {
+    "frame": "6eb720330dd06ba65b137911a06a85439d84768170d1b1b2d6c973e7d4e81d66",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 63.00 mean 0.197 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "33d58f57e4ddb454bb0546c8e172da7c84909e0bb72807d5c7c38b24d2c51894"
+  },
+  {
+    "frame": "6ff3b5b576a792e6fa783eacb50b7be21dec367f1e52e485dbe296852c6a27a1",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 41.21 p99.9 11.14 mean 0.057 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ec3697d5335bf9d9bb11dfa96917a722629dbe0e5a7499b0e1ca6082346427fe"
+  },
+  {
+    "frame": "70dad2a046eba83f7dc1160e4df9c687a67a148f723650233e8ac030ca9ee071",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 7.00 p99.9 5.00 mean 0.064 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "8f5e2fe81c36a153449efa49332f0f70870de77e37792a8ec4482c66d15ea693"
+  },
+  {
+    "frame": "714fce7e578c9cf9fd2235e4fd2fcd967c2e27b4382172688cb43d8f35f79611",
+    "owner": "L6",
+    "reason": "effects, mattes, transitions, other layer types",
+    "checks": [
+      "unreferenced: max 1.68 p99.9 0.00 mean 0.000 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "15f4ce9eeacdff5675ed2573be6e3d4bb73b78e3c5dcf99a07efaec05f8f3a6e"
+  },
+  {
+    "frame": "7154a05ce18bb0440a72c550a5a746a69fd2fcc38c244523e703275008f68292",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 118.00 p99.9 77.00 mean 0.246 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "c9b9773320dc378007bf5298b2825cdcc1a54c8ec8dcb9868ca25c6104772dcf"
+  },
+  {
+    "frame": "73741438a3a1e3a34921b3510c663677e8d4b5c91a52543f4f6afcd70c553a1e",
+    "owner": "L6",
+    "reason": "effects, mattes, other layer types",
+    "checks": [
+      "unreferenced: max 1.73 p99.9 0.00 mean 0.000 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "683097ac1881d82a12a741b2df99de131683f3f8409690fa83071442acbff02e"
+  },
+  {
+    "frame": "74cf067d9f27a595a44501bb958307e7cb0ae9850db29f24359fad6b18cdc939",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 127.56 p99.9 112.68 mean 0.432 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "1c32b95445c93565d5301dec107a1dee91612a7482a5b6dc2431879071476f33"
+  },
+  {
+    "frame": "761a2a16bd9eaf9d2af181f78535ee9b5642808d4777f8b9c2cbbebd7a145831",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 42.00 p99.9 33.00 mean 0.104 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d9571713c356a2810b06cd0aa673844efe5877502338089759634fd239482f84"
+  },
+  {
+    "frame": "7811335bff428b6103d6de68de318c2cad817df053da23efbce475a4183c20ed",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "beba1e6d4402d439815bc379dd3e63da3b70517b7c42aaaa53547d83ac2eaaf3"
+  },
+  {
+    "frame": "788f5c43c6e67f238fc0481dfc639cdb2339f70a27046425989a69e3f06fc7be",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 228.04 p99.9 150.66 mean 0.517 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "96b94d71f6daf71093bb93c7e95fa105079161a648f69274615c893225ac267e"
+  },
+  {
+    "frame": "7ba8416c66cd1c1e03b3ebb9fe1917124f284db10c611d01666ae37c5838db58",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 39.53 p99.9 12.70 mean 0.116 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "5d487fc373e2868f899baff7b746a094f97bce5f4e84de2e710d38292078a4ed"
+  },
+  {
+    "frame": "7bd5bf73cda609e57d92f6aa8cfc36faadfab23cbc923f58f60a45936178e5e6",
+    "owner": "L4",
+    "reason": "2.5D planes, groups and precomps",
+    "checks": [
+      "unreferenced: max 86.00 p99.9 36.00 mean 0.175 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "972d39ccb046b288e663ec8ead1a7ad68f295ff8f5a35694cd57f4746833ef30"
+  },
+  {
+    "frame": "7cbb50692ed9c2ccdc42151e8e3cbbdf599c904d58937f3b8d60a388f4917fec",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 74.00 p99.9 21.00 mean 0.053 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b495d1b06f687dc3b2b6598940f099303b0bb2e4fd7a95eef288d6b978102e1d"
+  },
+  {
+    "frame": "7e10be6228d86bb58ad828a8770fbb4dbb655d14f34f8e474a101c9ca13fef1b",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 21.42 p99.9 9.71 mean 0.040 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "cc1aa80bef8caba83d267aefc1fa981a5527f6e243a68ee6b159ee2dc40d2faf"
+  },
+  {
+    "frame": "7f191413504de7e44323cecfcc762f1f520769a9491d09a7e25718f639501a71",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "79fa95f94f6c06362cb431092eeac5f8b27f222ee5ef12b6ab531d2552cfb354"
+  },
+  {
+    "frame": "80e875bb75643f49a2d838392726cb3a49281967f48d2f397b284a4944051626",
+    "owner": "L4",
+    "reason": "resampled image content, 2.5D planes",
+    "checks": [
+      "unreferenced: max 91.39 p99.9 38.10 mean 0.214 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "c7eb9bcc724fbf2278fe59b38b914781bff5599c2d87d7ed97e7b16276602f35"
+  },
+  {
+    "frame": "8138c19e10fef06c5af5bd5058f73903d711cdf505dd30d22929e357d593c910",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 4.00 p99.9 2.00 mean 0.060 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "19a8e8b5c67ba2ac4dc3a654392e41abe280884f900f0df4bc42cfec64951351"
+  },
+  {
+    "frame": "815d60693cc4916cae5e0647e3ddc51a78b771cafd580ec5746cc2199398f0a1",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.996222376125; rest max 5; fraction within 2 0.996296296296; max outside edges 5; SSIM None"
+    ],
+    "measurement_sha256": "7ce09ac94ddb004474f645028985ac3b9b8c65eb1d7da892377ec4a89ed14a1d"
+  },
+  {
+    "frame": "8268a63475d5e90d32254919cfc755a79173bffa68fe03248b663b3f9a081cac",
+    "owner": "L4",
+    "reason": "mattes",
+    "checks": [
+      "unreferenced: max 59.00 p99.9 17.00 mean 0.135 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "eb51c5b2d6a52a44b944267aab97afa9c1d9e49f1f5fc747ebcc26955fceeba9"
+  },
+  {
+    "frame": "83e8ab00df50c40bdd8695d4fbc1bc953ae3f238a730b8b4b8f380eff1d63f8b",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 6.00 p99.9 4.00 mean 0.050 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "bcd418b86000f47cc1ed36f94117b10074b79277645f93790505b9e66b529944"
+  },
+  {
+    "frame": "8478c59782e88ee264fbfcf84ff133657c957a70c06e6bba1aeb6b962b58dc61",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "cd1151448e2739103f18b83dbe84c058e922ab98f0955b0fce9a01c89bc5daed"
+  },
+  {
+    "frame": "84f309340715b88950c86c94ed38648e94bb112dd8578ca0e6f62d68734f7f36",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 79.94 p99.9 46.07 mean 0.124 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "080b6bdcf86094448a72d20f6559267689a7801c6070dfbd6289bdaa49f85ca3"
+  },
+  {
+    "frame": "875cb86a74b52e40a140fd25f481990315d12038f3aac899e19002891512b070",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 23.00 p99.9 23.00 mean 0.303 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "97fbafddaff645ba8b85fd54adfae023bbc2314e439e82155c32651299af3405"
+  },
+  {
+    "frame": "884104fd1a454ee72991401180c27053717185771670f4d3741b376dde4d85be",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 72.00 p99.9 17.00 mean 0.060 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "f425d97bc7ccfa4ac84777aa158ff749032fdcdd23b1ee498516bc04cc2300b9"
+  },
+  {
+    "frame": "8882173d4bf7a07d6f30aa900ca0230d538900845be93bc38baa02db5524e6f0",
+    "owner": "L6",
+    "reason": "resampled image content, mattes, effects, groups and precomps",
+    "checks": [
+      "unreferenced: max 93.07 p99.9 24.43 mean 0.130 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "62634158ea74565780e3e6fffe0616420ca10fe49e3e3980d91b213f9f17e0c5"
+  },
+  {
+    "frame": "88c7e59831cde0fcf0e05219295d67229ff8ac67630304c00a93f5cb6d3cb710",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 48.00 p99.9 37.00 mean 0.114 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b3995bf2526d44eb7b6de2449bc60390cd545ae89c2a86d97677844e8abcb46a"
+  },
+  {
+    "frame": "8a625fc322e42faeadf3d3a517269fd06ae692f2773698daa5b17dc6cb792bc3",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 86.60 p99.9 18.30 mean 0.086 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "2927bbd4807ab0c402a17558a313b25631bcbf27d9664e116c2079f12817a529"
+  },
+  {
+    "frame": "8cd18cd7ef254d08c7e344df317404f8568e6889e6b01d323a18d46175181c95",
+    "owner": "L4",
+    "reason": "mattes",
+    "checks": [
+      "unreferenced: max 110.91 p99.9 40.96 mean 0.562 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "a2723a2c2483ad330a87fe18eadfccc09251a35a529960128d3e8aa6bad4e39f"
+  },
+  {
+    "frame": "8d74d7631dad1179471298ca81c63d22805aadca8e20a2c8e43985e5b1d85b0a",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 35.00 p99.9 27.00 mean 0.085 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "bf9e6a35c071424ff4eb0627926ed843d045406f80149ff820f4d826dd211bc7"
+  },
+  {
+    "frame": "8d8256681e9392d34a0f048d692ea6236fde61c1233cb0cc4285aa9da85f591a",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 92.00 p99.9 65.00 mean 0.197 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "02e7d1662a3daed78cf66dc0c870572967abc004727cc44e4014d81232151d84"
+  },
+  {
+    "frame": "8f6f2195659b2bed753803524bc0965c47492ecc5a424021cf08d3a8b4efc2a7",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 80.00 p99.9 14.00 mean 0.073 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "fc956c4da4af9eb55530e61c7f9f549696ff72dae5ff4e07d53ddab250f14c1d"
+  },
+  {
+    "frame": "8f9bb06cfb890b088c09ea572f9bc46d0f32c5fec3c0ee1b1f761e0d4cf80af3",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 5.17 p99.9 2.93 mean 0.062 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "caf828526e1fe523189dedce12964c28f8772cb1d2d7ac889da1506e316c92dd"
+  },
+  {
+    "frame": "923c9bba78850f0561f14e5df2278c584d5168ad50b60246deaf9a4c235b5e75",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 6.38 p99.9 6.35 mean 0.012 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "e982f3e83ceefbf6f0c765251c24264581edecbbebdf1bd415bb47ea2d682f08"
+  },
+  {
+    "frame": "92414bfb7c2e9b443d802bdb8f5e39bb8442d99f3e764566fc07dd8d5e820f6f",
+    "owner": "L4",
+    "reason": "resampled image content, groups and precomps",
+    "checks": [
+      "unreferenced: max 54.22 p99.9 9.28 mean 0.024 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "f92df76e23c1e609c11829bd5007ec423813d33be3918d19f99247cf305b6999"
+  },
+  {
+    "frame": "96fea6d99671919685087d90a8fdc785bdec35f6b77c83075c64068683619f55",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 76.00 p99.9 16.00 mean 0.060 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "f7e411525239599c54b5adf3155ff1a7fe0f4018e4b00182418d64a219e50a65"
+  },
+  {
+    "frame": "979cf13ee81e2bdccc848ecfd502dbaf9461ecbf42097284f8389acd27f4ca3e",
+    "owner": "L6",
+    "reason": "effects, mattes, other layer types",
+    "checks": [
+      "unreferenced: max 1.62 p99.9 0.00 mean 0.000 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "b31adb275e68f813c4d7055430eaf102d5e03a11967fe079e750f15117959b6d"
+  },
+  {
+    "frame": "9849ba14b028dd445e5a39bc86c65acbf348240e20766df5963830c4608dd81e",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 71.00 p99.9 18.00 mean 0.058 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "abb716734e02186d0121c630cdc90dc5ef6e0bfc1561d144f96f554186cd3465"
+  },
+  {
+    "frame": "99e039ff1e54c7ae020486e05a94c6d5f42ee67660a1d311a9c67fde6b8f7234",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 95.00 p99.9 72.00 mean 0.678 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "40094602c7c51562d5b6c70fe3838d90b8b7884a88c6581e40e088a8b7ef60e6"
+  },
+  {
+    "frame": "9bebecb7f594fb3872c47277e1b57e98f9e7ea97875b0020aead81b8ff126021",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 3.24 p99.9 2.18 mean 0.050 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "7607adfe56f69adc49d2f26d94706a961ac170508e076e6b5bf0510e919cf606"
+  },
+  {
+    "frame": "9c548eda8f59f30fba8471a38c8be5f3c5f52f136c8c982a9ec2c9ce205f2d30",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 100.46 p99.9 40.47 mean 0.095 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "affdaa49c422850cc6f85b90309d0e35747419d2e28b11e9736ef19948834592"
+  },
+  {
+    "frame": "9d362a90245de130b0cc1241202189b6bfd29e4927245b0b91324564058b8e48",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 8.00 p99.9 5.00 mean 0.063 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d1627d0f275eb22f50677bd1533666de0d360c7f2476e88135cfa88096a51e35"
+  },
+  {
+    "frame": "9e1dc6bee514cfa73f87acf881d4594d250b7ed3d496e1ba402098d9d298ec7a",
+    "owner": "L4",
+    "reason": "mattes",
+    "checks": [
+      "unreferenced: max 59.00 p99.9 16.00 mean 0.096 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "ce377a2b42f779a7254aa729df5b1c465ae45bc21ca8909d4b7d416f35352971"
+  },
+  {
+    "frame": "9e8eb8701a541db39d232d59c6a5230667e6557d8ad32c2236822e618c12d1ad",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "b38123c4b8ad1cb0978471bd2e789812e728b3646019efcb038ec5e13fcd4d70"
+  },
+  {
+    "frame": "a05186ea911e6f948dfa710453974050adcdaec45c51bfa6276c2191e88bec76",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 61.00 p99.9 10.00 mean 0.046 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "75364a7a9160b6dd56ee3afdcaaed8452e62d9df836d2f991fb3c96f7f6c5a11"
+  },
+  {
+    "frame": "a09b33e98033d57a065bcde839bded66c2b6b377a6c5b157a2986a03d8a46f62",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 115.80 p99.9 31.50 mean 0.094 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "c190d926effee12383b6eadb65adeb31628ce1c1a02d9f750691b4b11afa1d6b"
+  },
+  {
+    "frame": "a0d0e80c36e95025826d652877e04818c841808174ee6250c0d807e4ce4849e6",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 111.00 p99.9 77.00 mean 0.286 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "25fba3d7dfa156c08e0b3eb4a9f0d82f0b12271a4ebe7711d058e2852786d765"
+  },
+  {
+    "frame": "a13d934af4a03fc0f736406b7b4b15289ea2858759ab39bac5596253c4185142",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 95.41 p99.9 74.21 mean 0.620 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "d6b03ea7d3bd58b2e919f082a4e197df9c6bdd2a29903979c5de82714fdfef09"
+  },
+  {
+    "frame": "a1aaaef6b52d2f928f5a70c32b2292a3437ff14ec9c78546977430a549779dc8",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 3.00 p99.9 2.00 mean 0.052 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "e5edc042a4805e08b90a2eac10e1281d7639cb9bc0a1cbb01628b9d15503daa8"
+  },
+  {
+    "frame": "a1c270ac6e132a220eecd91b53ef80a53f9285a57967c50f56a2c83d8c9b3d19",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 8.47 p99.9 5.60 mean 0.074 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "62e08c3cb6447abc31542e35878e74922685fee12d96cf2b59c29ca0f8696f85"
+  },
+  {
+    "frame": "a39fc1ae0266a188dcb24ce1caf18ebd495d8846e6fd7613385d3ad1a8b76960",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 113.80 p99.9 47.19 mean 0.154 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "651ac7e3a633fcd06bd278d2768421d3f65b660e02ec609d3e042a19b356e19a"
+  },
+  {
+    "frame": "a3fe64f84d135ed0577e6656382f6dd64b9a12e27b48ce95c5fa5ef041b5af0d",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 78.94 p99.9 21.04 mean 0.056 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ee45fe68912eeb4a3af2ae78ca4ab5ee57a6752353eca3174e968e754c7b4749"
+  },
+  {
+    "frame": "a4d0a1022d646087cb9b5b90b9ffb53bd39a23b043f24d5541768e3cd41579fc",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 112.12 p99.9 42.58 mean 0.640 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "c77d1de6d15a246226c86d92bcf3b2bcf5599e7fe9181fe36818f6410884ca08"
+  },
+  {
+    "frame": "a5b4a11c727c4794c6bced7d3c5bf28dbb64451223d51aedd37d484b0175f6c8",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 58.15 p99.9 12.70 mean 0.047 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "95bc237c434b7520ef89a391579f3cb85556a1803a23d24d3195d33d99c920b2"
+  },
+  {
+    "frame": "a755d686c32c35ae5b168d1a6c3123b8a9b486356bf598782ff913d6b1945a6e",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "26de4443e5595ac74138a96e234b2a72938fd8a1f5fbfc1da531ac0085727b7f"
+  },
+  {
+    "frame": "a8da08326de6aff0915fb00429722b751e4ff82f993680d806533d622bf5960e",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 14.00 p99.9 14.00 mean 0.080 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "aa9fa9d48be6e0cde426486dbcb4b56dc04fd9bd31dee938bac92b57fb8dddb9"
+  },
+  {
+    "frame": "a9a470b0335d00e22607b4a426dde896570d6aef43bfcd199b4ba6efed54c566",
+    "owner": "L4",
+    "reason": "resampled image content, groups and precomps",
+    "checks": [
+      "unreferenced: max 116.00 p99.9 46.00 mean 0.166 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "2eb2d074b972ec4535845e4745c36bef0b2cd7829f37444aa7ec3c3355b82997"
+  },
+  {
+    "frame": "ac1e2e63b47ab4eab7b9e89a01953762759ba5dbb633cecee0443dbeb1ae1e1d",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 72.03 mean 0.160 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "c4483c01e6deb684ff57ec941e9838c997e8e03ab957f8d56bcf4e201896e0e7"
+  },
+  {
+    "frame": "ac4375329252dad2f302a224e1731698b3facae37e484439f36b717cd8522fee",
+    "owner": "L4",
+    "reason": "groups and precomps, mattes, other layer types",
+    "checks": [
+      "unreferenced: max 35.00 p99.9 14.00 mean 0.066 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "9a15f1e0fe4a2fa0fbbd51f54d2b8428d06851c39d87f9e95fb29d9d5a99964c"
+  },
+  {
+    "frame": "ad51c92015c3e35ad20b207c278606f8bf85372f6719d9f7adfda6fdb03ab47d",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "3e98c8358beff3f0568bdbec27993e04963b4ed8272088d4dc6721ee13a55e7d"
+  },
+  {
+    "frame": "ae2f70d7f0196fe754d70e23698adbd2cc813b81cb47ddb1ba24177d77918c4b",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 144.00 p99.9 75.00 mean 0.250 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "4f045345d611bcf1f31d26a1bf886235c6ebe2ac4b689723d61e5da27bdc849e"
+  },
+  {
+    "frame": "af4e62a806407550b9076d07a8a1df05b97876c00f8eacbe0c910a12d29bbed2",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 48.00 mean 0.200 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "05d35691d2d858d8a5ae0e1f63fb79d7dc118efc21bb88af7ffb47f72b0a3839"
+  },
+  {
+    "frame": "af889b7c3222964a40796757f24740c81c177a49a03abca5201c5afce9aaf026",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "a96a06843401f29b860a7c417e6a4ae476a18d33f122bad395cc483c9e60b142"
+  },
+  {
+    "frame": "b024e3e054808b3f692615974fe29e6841fd176834ad9ac36d03dd2c454e9d3a",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 71.00 p99.9 21.00 mean 0.088 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b365a060b2191674117aa76f0feda0b782f19b8099133fc052b762a43ebc224f"
+  },
+  {
+    "frame": "b0968d93d3308e73bb4788ee11be63b99b310df5fbad0485150a13baffb37b96",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "b38123c4b8ad1cb0978471bd2e789812e728b3646019efcb038ec5e13fcd4d70"
+  },
+  {
+    "frame": "b1bd88201a070696e22187ae9a057a142fea678a45c589cd3f51775483d6d2e5",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 42.00 p99.9 8.00 mean 0.047 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "da65b2140557932d920f47ad042edcdb4816968d8d7d532ec5920a67cca872c0"
+  },
+  {
+    "frame": "b41b98963e40d5823d2ad389d080fd027311eec3ba22d3b164d2dd9f2ad8702a",
+    "owner": "L4",
+    "reason": "mattes",
+    "checks": [
+      "unreferenced: max 111.00 p99.9 33.00 mean 0.454 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "9ed52c4e84c35fd737644837ec590da2f225f271a13dcfc27c9c804e3fa7a2c1"
+  },
+  {
+    "frame": "b499cd91372feebc9dfbda52e2ac493d924a1a175a73bdc6d624dee79642f528",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 79.94 p99.9 44.01 mean 0.119 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8cfbcae2b1df3b6a2e27671e19f477cc4c29956d2a76ef852a6dc870a7d565cc"
+  },
+  {
+    "frame": "b577a9c63919ad9b3ef14cbc1883471e85f89aa3f74935363a4b2be64ee6b06c",
+    "owner": "L4",
+    "reason": "groups and precomps, mattes, other layer types",
+    "checks": [
+      "unreferenced: max 35.00 p99.9 14.00 mean 0.066 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "9a15f1e0fe4a2fa0fbbd51f54d2b8428d06851c39d87f9e95fb29d9d5a99964c"
+  },
+  {
+    "frame": "b9b7f481f90bb67ac231838503e9cd68f378f09c2585540ca13ff686fea2afda",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 160.50 p99.9 122.08 mean 0.641 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "878376aa380c9c045cb6eaffdff88696d2022f98414bd10a8b798df26cfeef3b"
+  },
+  {
+    "frame": "b9b8c273b710307d915cfba950df6bbaf30cdb52aad0240489f5b72a3e640e89",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 104.84 p99.9 24.65 mean 0.068 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "6be56c74ae701b95dcaa303f9ff3b598be0d7a87e28e141f71a487eb612d6025"
+  },
+  {
+    "frame": "bb2204b9093b34606b1b283b3d4e6e5c2d0f5cc50c568e765b3b8c4fce4e23f2",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 71.47 p99.9 15.56 mean 0.057 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "11aba36ab3d87e4738ecdfd02e76a5e9f681bfc609df15d0916fd944671d84ec"
+  },
+  {
+    "frame": "bb512d2ea2122a04d3243f22a9714d3411c7db38d972cc4ceeab9acfe15c8c53",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 68.00 p99.9 19.00 mean 0.052 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "4d934c94e1870f56b670390e43576b25a67404cfac0e71c8c98bf4d0642714a2"
+  },
+  {
+    "frame": "bc76037ac10f3b52653cadb5876a632fc3e3c1c7e842f7d8e817795f4ccc43b7",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 113.62 p99.9 46.38 mean 0.129 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "5ea796cc1b92daffb42b10134ce7c56301f618416585a37462372ea07b1b3c62"
+  },
+  {
+    "frame": "bdba848f886001ba1a11b1b515ea495dbe517940a13b2bd07a898733d87741df",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 108.00 p99.9 81.00 mean 0.246 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "aefb7a39691df6400b5d37cab8404e33f81c224f8a1e738edad7e614756107e1"
+  },
+  {
+    "frame": "bf035c185e6ae1989bfd71eb1685c9163742b633eef1ccbea8de42de51e73c55",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 6.00 p99.9 3.00 mean 0.007 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d94d099a8e6cda794977482d52c56ca58a87cdef1997045cce67f3424861244c"
+  },
+  {
+    "frame": "bf52f486f906a889bcf3adec3fd243e591b78ad25f194882735b554a640b35d8",
+    "owner": "L4",
+    "reason": "mattes",
+    "checks": [
+      "unreferenced: max 73.34 p99.9 27.77 mean 0.126 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "92fc81b8534036b60226562d84277bebd887e635304cc58fc0abd03b35a4652d"
+  },
+  {
+    "frame": "c18d3478b0a1b77468cccb921e7bd850b5d401965cdef6854bf89fdf460b04be",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 71.00 p99.9 29.00 mean 0.088 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "a7c5c2cc4919c356bbf27cb844ff0ad56b269aee81c155f4fceb301ebc93aac3"
+  },
+  {
+    "frame": "c2caad56f9d7090945754c54004b89626ca08702068495341036b3a11e328999",
+    "owner": "L6",
+    "reason": "effects, mattes, transitions, other layer types",
+    "checks": [
+      "unreferenced: max 1.68 p99.9 0.00 mean 0.000 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "defdaad66c112eba04bb6c0b0ee002c4b936de8258ce40cecc7d328df39c399a"
+  },
+  {
+    "frame": "c3dc620b57fe3afa300381f45f041df71d5cda4985922a04ab3c31a781e96012",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 96.00 p99.9 74.00 mean 0.586 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "41cd4c8a38e7e9d29f8a2dfec01780f42e63c7354635094cda01d77df7a9c319"
+  },
+  {
+    "frame": "c5e5e33bbfb79c25a4b2374dd914c443b1cb5deedf1bf7b05804ac0d21c2681f",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 106.58 p99.9 0.00 mean 0.032 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "b89f0e43814e989a4efeb841d891dd14df0169d563817a0dfe3537d180bb53a3"
+  },
+  {
+    "frame": "c6038e68c739dbf6cb636b7217a39a17ee9f2cb780d1b6aaebfabdcdbbbd83ae",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 14.00 p99.9 6.00 mean 0.026 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "953b661e9b63c824c0775eb53871e34f14caa65fac3182d02a3aa1a7f1868a62"
+  },
+  {
+    "frame": "c635d9cb96100012dbc623d92ed0003f6af0ab624c8fad656dab5c861b1631d7",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 12.08 p99.9 7.09 mean 0.097 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "4cbeeadd4b2008556bfed67e684543db038f4c22edd2c46c947c7ca675230f73"
+  },
+  {
+    "frame": "c90b41d7db893ea035b61c0cc34694c34f4971e4e380a02512aadefa93b9865b",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 75.00 p99.9 21.00 mean 0.061 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "ddb50c1317a0a0ba41fd5a465580fec8b5748de1822db6f94c9647703f2e67cb"
+  },
+  {
+    "frame": "c9296b14b615530c1d12eb39d1f2ffcff8e0ed516560cac30824adbd7baf50d5",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 318.25 p99.9 216.90 mean 0.683 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "955dbb108ef5717dc5ba8f8e21bf667acdf095f93071f6e623f2998615ccb299"
+  },
+  {
+    "frame": "c9c39ee0b59d26fdeaf7823fe955c9910453de3e85c1c2749c3e04a1d1eb33a5",
+    "owner": "L4",
+    "reason": "2.5D planes, groups and precomps",
+    "checks": [
+      "unreferenced: max 94.00 p99.9 43.00 mean 0.218 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d74672efe315c4d4137b18d7c75a858c4a01800455a06cfa4f73da4fc5f1f238"
+  },
+  {
+    "frame": "cb0445c8bb59ccc2d79f542be9b580e2a6016b083e0cd3cd7669b60aa7c5d16c",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 104.84 p99.9 29.14 mean 0.079 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "32da9a6b12c5486605e42ab83e550ed533805fe06c4005af1e413d227e203c48"
+  },
+  {
+    "frame": "cb3a24f4541a86fc38878f80839c42e05f8c968c87e8112aae8a3843009990bb",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 134.53 p99.9 40.59 mean 0.121 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "42b156c194e2dc87dbf7a6b532362bdae2aa7b2de22e19d5d8c4a45bd9cb7014"
+  },
+  {
+    "frame": "cb595b44e94dedaec89ad3b27a51f5313cc7cc02aa6f2bfd6d7e0be78df7e37d",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 127.50 p99.9 101.73 mean 0.261 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "71cc249439635c10fb1ad44a0d8002182422f6edffe8381264605bdaf9566749"
+  },
+  {
+    "frame": "cbcd47246622eb53056c3b24a1efe89ecb91590d916b594ad97590d8a2d66481",
+    "owner": "L4",
+    "reason": "mattes",
+    "checks": [
+      "unreferenced: max 73.34 p99.9 32.00 mean 0.190 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "f7f4d85dd3141a11af4f0004cb6c4fbfd8a03024349525c30a65b911d7231776"
+  },
+  {
+    "frame": "cc45d535c15ec6e66446ea025b539dc43098d6343ecea3aef3b6e304582507b3",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 146.00 p99.9 82.00 mean 0.243 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "8ab2dd2c729e4873afac3a201b561ae4ac90a25af997f42a0d94f368c0328dea"
+  },
+  {
+    "frame": "cd06a2accbd5225db4b314cbfb9f161f6b4454c32378b42e7469811a83add12a",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 113.43 p99.9 46.82 mean 0.116 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "32227f72d820f36d93ae6d51a03d7a4634180291bb39526c2a01d28b1ba18aa6"
+  },
+  {
+    "frame": "cd25b221465e381456f894f8828598a8a3d6c2680c44599c1454fa364ce512d7",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 66.364746094 CV; fraction within 2 0.997458333333; max outside edges 66; SSIM Some(0.999859647939944)"
+    ],
+    "measurement_sha256": "0290a2ef0277acbeadf552ff9172e0b2fce307c6d713e9435f7de6bf2d4211f1"
+  },
+  {
+    "frame": "cd4611e6f6dc57e4eebe891dd5e668c36dcb31eba6553e6705b58a93299acb64",
+    "owner": "L4",
+    "reason": "2.5D planes, groups and precomps",
+    "checks": [
+      "unreferenced: max 114.89 p99.9 46.69 mean 0.223 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "5dbae87ef29c7109cc6b82877f8f34f8f5ed45f6245ebbedaaa269660f9351bb"
+  },
+  {
+    "frame": "cd4cfb6d27afa70ec6f8d5f1733e6ad2e3da97a1e9278fc4014db4b893e356b8",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "26747a16e41098b28e0263d2d65f70ed5e430f2a3e06ef90fc1454c34fa7a70e"
+  },
+  {
+    "frame": "cfdc8d810713b1304a584e0b3894f23532e778e72b8dd5e30b031190a0275c64",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 83.00 p99.9 64.00 mean 0.197 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "97d71c38b230c625effc1d26a61e722ddbf6efe1537078f9e68223fee51e5b88"
+  },
+  {
+    "frame": "d085476d27cd3d458b777f9af8bbbeff795c1856fc2b372760bd1ac131d7b074",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ef9202541d02c5e5fec1fd7abf9d3cf32d54a159557f1a20258428f536dfe7d5"
+  },
+  {
+    "frame": "d0b22c353da60807b5da857243599b46cd646bfb748740dbeff5d0028ad9cd79",
+    "owner": "L4",
+    "reason": "groups and precomps, mattes, other layer types",
+    "checks": [
+      "unreferenced: max 60.82 p99.9 27.02 mean 0.124 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8c96b5b845480b0dbdd16c16772ccf1457f44bab5e1a06530f2cde531c9f5b35"
+  },
+  {
+    "frame": "d1ba5c73ee87924894d9d989c55328b9bf1c373430c374b33096f9e8d797d390",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "e5e2e10784e62aaae84ae3417aadd4a91d73d27cde5970ea86a32ab1abc81841"
+  },
+  {
+    "frame": "d1db45661c00a5b7cf783883b4bf803bb5d8a99dd567b5f22f1e12db5efd4780",
+    "owner": "L4",
+    "reason": "resampled image content, 2.5D planes",
+    "checks": [
+      "unreferenced: max 88.15 p99.9 39.22 mean 0.231 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "1897f06ce337bec7ff6790d942662c10672bdf0641d2d3b322b782570e965008"
+  },
+  {
+    "frame": "d416f538d3f8d6416f575e50f096fe4c5157e652da5af0a3008c7d05b04e53da",
+    "owner": "L4",
+    "reason": "resampled image content, groups and precomps",
+    "checks": [
+      "unreferenced: max 54.00 p99.9 9.00 mean 0.024 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "282935b05dae44b75edee4922923db1ab07735db9198f2ae7781fc2e01e65940"
+  },
+  {
+    "frame": "d4268511ba0b07885463dce5806cb1f9d2a9a621faf649c1dbc05b9794da7019",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "a17b66b924de2c6c33070782efe8ef221bc7d0d21208920a87f95133d69466da"
+  },
+  {
+    "frame": "d8b44e2f29042a88b064ea20f092ff2c94657670b51194808cf040605af4fd6d",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 1.31 p99.9 0.81 mean 0.015 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "2ae9d3a5f5d6fffea5638112cfeccc9ccd6f6c39967352b8d25afeb9af0461f6"
+  },
+  {
+    "frame": "d937f06ed32da553f26cec73a3f349a439cc12e08b0932494ac77100d2f254ac",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 101.00 p99.9 77.00 mean 0.244 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "33e6e3b6fbe1661b433864fb65221c124c7dc13ad33018b0e3e3509a2b92c11c"
+  },
+  {
+    "frame": "dbd5d8820389d33f8ac9326167df4ed62d39de096ba4dd3d612c0370fc23dff4",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 164.36 p99.9 126.19 mean 0.396 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "ca754acda3e4f8ac554a76fec189bd4c7e9a953187bbe4bbda8e4c39903c44e4"
+  },
+  {
+    "frame": "dc43028b19036e191a8d3a2588158aae662f54c6a5a0679bf3ffa80b0cbe4e87",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 126.44 p99.9 96.99 mean 0.305 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "fcd543d1722b1c365e792280c1948274c48423ff223d19e0ff211b3c3a75140b"
+  },
+  {
+    "frame": "dc77ea5f9e1960eb67fc49e2b7734f8fcac908bcddbdccbdde6debc2bb925710",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 118.00 p99.9 92.00 mean 0.238 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "0c269e65c6bb0f0d776da0e20485fa6a224809f00a3a65253957eee1706ebb42"
+  },
+  {
+    "frame": "ddd2545bf756ccb4aa92b1b92ca81d25a9fe9eb1b823a50ed12066f97ae93a9d",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 40.00 p99.9 14.00 mean 0.120 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "04d2e31cdbebc044bf788d372fe81f58af5b2d878aaff4173ec5876af326dbe5"
+  },
+  {
+    "frame": "df04389ab9ce71285be8afbf82164609947a431eb92e2ccd83b33379463317e7",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 68.85 p99.9 11.52 mean 0.052 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "8cdee65f988e422fa4f2d19e46726fb1905398b1219065f6f5c220272efc66fb"
+  },
+  {
+    "frame": "e03f0a51ea042f56a558b84fc2ad5bb096c8dfda9bf652525bdf3b054e54ce1e",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 98.00 p99.9 24.00 mean 0.065 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "366e0728c90efe8f0723d417d0b5c5b457d375708ccf26ad9beb5146a41ad372"
+  },
+  {
+    "frame": "e1c7ff8d3c795af6469aeff365e35a899eef4dc2a08dd0762d9c09f070bbe495",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 78.00 p99.9 38.00 mean 0.390 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b58e4a84f88934da0bba693a102ced096c557fbcc3906cb3359b5bee24c80dda"
+  },
+  {
+    "frame": "e20da6d8a4e1133a6d6ef9dff0a1bc2c6390fdda57405f574ebb7d8a494d0399",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 62.00 mean 0.192 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d2e1fce117f917da591183f80651280747a41fbfee6bfb76e389ea20542cac97"
+  },
+  {
+    "frame": "e27cb6133a9051a440260a384f455f3d22b2970bacc4c8ceedfedd5d2fecf8f2",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 86.00 p99.9 66.00 mean 0.209 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "bf160303cbfdfcc50001e95a318c138baaa29487ba8af602fc8fb6c8cb9f702b"
+  },
+  {
+    "frame": "e46d7f964a8d650b766eb91047d2e2fa769d2ffed3b3c0b2072abd097a5e1767",
+    "owner": "L4",
+    "reason": "2.5D planes, groups and precomps",
+    "checks": [
+      "unreferenced: max 77.00 p99.9 37.00 mean 0.203 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b5a363348229a4d98ee737607a0a5d0ef76e05c4b986ece68a7492accf2319c4"
+  },
+  {
+    "frame": "e497e7af659395c2983acd72396c56eee86097d16ebd6c21a5a5c0c348957a2a",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 67.00 p99.9 52.00 mean 0.162 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "b542aca4e143432a24be343d324566ef3cf521c47f2103755f7f2de9d9b9523f"
+  },
+  {
+    "frame": "e5ab280ff9be142816f629835159b382c86723017a19b96bc53d43981325f7fb",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 63.00 p99.9 49.00 mean 0.153 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "20b7c291f3d97545e939653c8b084bdb78aead8372ca6cce6bae8e2bc4390893"
+  },
+  {
+    "frame": "e7396685f5c2b2d72d71a6cc6c8d27bb55a0996f93299a5ed7fb107919fcf605",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 73.00 p99.9 42.00 mean 0.112 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "4560071d8a46925cf9d5cb47ec60b8c01f369a027666e85dcccdf2d07a9f095e"
+  },
+  {
+    "frame": "e84a91faa5cb37e1a67a27e7f6308fae7edbcc94c0825091ff446272e8444574",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 86.00 p99.9 66.00 mean 0.207 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "12a449018d28ad946490d2f5cccdfb52c7668d0239125cdf60972688a202f948"
+  },
+  {
+    "frame": "e8a844426ef9e54adfe8be50a733ebe7385430bf9c5fc13d0fc695749e82baab",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 68.85 p99.9 11.52 mean 0.052 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "b98ce0d97d744ab51b2e49df8478b9f4bd0316323456d31b00e7d025d602f67f"
+  },
+  {
+    "frame": "e9bfab59af65fa70d39780598946f81a3f6f8ae16577f9d6cc197b6baa9faed3",
+    "owner": "L4",
+    "reason": "resampled image content",
+    "checks": [
+      "unreferenced: max 18.30 p99.9 18.30 mean 0.116 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "a024a3536b5b997903abc5a78c86289e85204a8a3956e4df7737ef7e0774eced"
+  },
+  {
+    "frame": "e9e095bc1d9d92c5d3e0fd676f00cf446851f72a2faac0829d3cb0d73a09a4be",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 102.47 p99.9 60.11 mean 0.267 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "5aadfbe75f511694afcf1306579bb4ec56b28e78796475ffefdf80209798bf10"
+  },
+  {
+    "frame": "ebc8e96c2187be04e563ea3ae6776fcc7487e0732102358b0590aa80cb38791c",
+    "owner": "L4",
+    "reason": "2.5D planes, groups and precomps",
+    "checks": [
+      "unreferenced: max 86.16 p99.9 43.77 mean 0.261 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "4f6900382d29a28ec4d166bf783e97ce303415719260338f3d8b221d8d70f257"
+  },
+  {
+    "frame": "ebd3de50b3c212ecd4f2dc0ad37603e8cb63356eb0590fe22593c560ed200e5b",
+    "owner": "L4",
+    "reason": "2.5D planes",
+    "checks": [
+      "unreferenced: max 110.82 p99.9 40.90 mean 0.143 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "cd9c7d79b99abd4084260920f971b875e5faec8c5d90fb7a1d81da7b3754cf11"
+  },
+  {
+    "frame": "ec0fb0dff003fd689f4da6f3826fdecc16a125d499792b096d41d250e66c7fb0",
+    "owner": "L4",
+    "reason": "resampled image content, 2.5D planes",
+    "checks": [
+      "unreferenced: max 91.00 p99.9 38.00 mean 0.225 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "4ac6dbb9ce36489fa49b32eed326e3a06af45ff25d14524d33d954bb3e0b4b84"
+  },
+  {
+    "frame": "ec9bcd4be728ededf9b77d91a88b77a9376ae507386e1b133b36914b5237879c",
+    "owner": "L6",
+    "reason": "resampled image content, mattes, effects, groups and precomps",
+    "checks": [
+      "unreferenced: max 85.00 p99.9 23.00 mean 0.122 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "6cd200d6965d9deab057a368f41dd20f1073a29b41f3ab8714fb6e90a77bf557"
+  },
+  {
+    "frame": "eca1166d74e0d1a9d030b42a533de315cccabfec817b6703fc280a17a7cb3316",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 71.00 p99.9 53.00 mean 0.167 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "6a1f957cd2b9410a84ac31b85f05f07583274c775ddf6e407bf0f8ca707b15aa"
+  },
+  {
+    "frame": "ed549539cf28d8a035554e86c57bcf376363ee850e298c8d657a83a5d1d4d82e",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 101.00 p99.9 64.00 mean 0.197 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d34cedddef195d534c673522eedcd681a46de810cb847cd33531b616e692b4d5"
+  },
+  {
+    "frame": "ee65f3951dafabc6d1ac1403e45008c9fe0ee5e2fc1ee86440235cc768a5f956",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 59.00 p99.9 13.00 mean 0.049 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "15abb894f939db8d3c4c58516356aadf11026bb417fbededa25f6adb2a95967d"
+  },
+  {
+    "frame": "efced2106a2002cff49a08b1253c83cecea3fdb5f59bead6cba5f1e416a5362f",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 82.00 p99.9 47.00 mean 0.198 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "337d272ef582495679166a35695c43341d65f8f887b1dc3b252f79ab894d46c5"
+  },
+  {
+    "frame": "f036cbfab60901c06f495b90dec326380c7088a9ae311c9142f565dae97c9c95",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 26.00 p99.9 22.00 mean 0.115 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "f5a90ac8a0c8ef9eec691886ab45576f8293889e587bc9ee5874f1dc9e4ac447"
+  },
+  {
+    "frame": "f2f691d78ec6db43047e5cb9c8ff5cc638722f961d3519bcaaa40216af25a1bc",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 40.25 p99.9 34.12 mean 0.178 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "c72201534f05f11dac88d9f72390a5e43ad84df3d6213d3c291809b6a9b4f297"
+  },
+  {
+    "frame": "f386b363a3b930f6ad37c4e1ccc81d8de2294e1ea97b99e4ce4b10df6bc11549",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 73.00 p99.9 40.00 mean 0.108 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "d5a0787cba8a4d504deae5e3e203124b09ded93adbb45c89776254ee4f68cd6c"
+  },
+  {
+    "frame": "f495dc956546e58fc63f48d8a4a298aae6711da3792548fe8c9ef72bcc2cd371",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 86.47 p99.9 15.04 mean 0.085 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "2f3cc4de10277df44243b44b135c345ac434d49354554e0df6a94ada524280e6"
+  },
+  {
+    "frame": "f7462fd0de03e7195bc3549de587c98db14deff4e277a166198a6992594b9c79",
+    "owner": "L4",
+    "reason": "groups and precomps",
+    "checks": [
+      "unreferenced: max 81.00 p99.9 44.00 mean 0.406 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "85ed98485431dad0512e2f924c6a380143c32c64183c4090cc556ccdbf3cacbe"
+  },
+  {
+    "frame": "f782e60b0b24fdce520d045d0468f7d58d3e007c2f29f8fd822244d007436f3f",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D alpha: outside max 57.337646484 CV; fraction within 2 0.998402777778; max outside edges 57; SSIM Some(0.9999461635146422)"
+    ],
+    "measurement_sha256": "d56cf85159007d5f2185a357bf9018b8db37477c46accc1edd9b7a5446425819"
+  },
+  {
+    "frame": "f7b063ff3285eb295690b0340f52c1b4e0fb9c13f7e46a6ba331fa7011558854",
+    "owner": "L6",
+    "reason": "resampled image content, mattes, effects, groups and precomps",
+    "checks": [
+      "unreferenced: max 79.00 p99.9 19.00 mean 0.116 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "78f9c1c2c5e493f3b85760e1e8c8e7598206ee46dd9a15318cb7e859650182f0"
+  },
+  {
+    "frame": "f942a438569a44ac26f5567a09dfb37ce2e83a608be0a4592d860764c379bf95",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 104.84 p99.9 24.65 mean 0.068 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "6be56c74ae701b95dcaa303f9ff3b598be0d7a87e28e141f71a487eb612d6025"
+  },
+  {
+    "frame": "f99cbc491c6425b3c2981dba60cb6d6fe06b8d1036611159e541c337cf85261a",
+    "owner": "L4",
+    "reason": "3D surfaces and composition",
+    "checks": [
+      "3D opaque: rest fraction within 1 0.997722974798; rest max 68; fraction within 2 0.997785493827; max outside edges 68; SSIM Some(0.9999975394307506)"
+    ],
+    "measurement_sha256": "6bc3eeeefe4491f372f0edad17ffb5874f429e019c6116e3a4cb11aade554808"
+  },
+  {
+    "frame": "fa59d79f6d1dc851e8e62a2c46e146c1cd4c71ca69479ad0e608e86a5bcf91f1",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 98.36 p99.9 24.28 mean 0.060 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "bc5806fe4b060ad4acb1daf283b2616b93d43dbf532d9eca58869ed712348a18"
+  },
+  {
+    "frame": "fcc42b3dea9cab9072cb611c9090c916f84aa3b62733ad07922265eebed34b1c",
+    "owner": "L4",
+    "reason": "resampled image content, mattes",
+    "checks": [
+      "unreferenced: max 98.00 p99.9 23.00 mean 0.065 from today (bound p99.9 1, max 4)"
+    ],
+    "measurement_sha256": "a3d163bd9196eb261b23d19a0f2441a41b8ec1a30f1435edbe7b2063a369ac50"
+  },
+  {
+    "frame": "ffb6ae65cca0ffea8eb4f1b71ae615ff808602ddeb225bd8971ad1444dfcc778",
+    "owner": "L6",
+    "reason": "effects",
+    "checks": [
+      "unreferenced: max 150.29 p99.9 115.42 mean 0.362 from today (bound p99.9 1, max 1)"
+    ],
+    "measurement_sha256": "db395e8a7eb7296d5b5d16322b2dd0d9e6d784d143961b860729432bf9666f46"
+  }
+]

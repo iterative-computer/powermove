@@ -1,119 +1,67 @@
-// Today's bezier path mask coverage (`applyPathMasks`; docs/engine/
-// composite.md "Path masks"): Canvas2D's `blur(σ px)` filter as Chromium
-// 152's Skia Graphite runs it (`pm_vector::canvas2d::filter`), and the
-// item drawn onto the coverage canvas with `source-over` or
-// `destination-out`.
+// Bezier path masks (`path_masks.rs`; docs/engine/composite.md "Path
+// masks"), with `gaussian.wgsl` appended.
 //
-// Path masks use one 8-bit channel (each white premultiplied channel is
-// coverage); text save layers use premultiplied RGBA8. Both share these
-// passes and a transparent 1-pixel border on filter intermediates,
-// sampled with clamp to edge, so samples outside an image are transparent
-// as Skia's decal tiling and pixel-outset images make them. The SkSL blur
-// effects declare `half` sums, weights, and offsets, which Graphite runs at
-// full precision on Metal: the passes sum in f32 (bit-exact with today's
-// canvases; docs/engine/composite.md).
+// Per mask, its coverage (`crate::coverage`, f32 over its pixel bounds
+// `p.src`) is feathered by the Gaussian passes and `composite` draws it onto
+// the f32 canvas `acc` (over `p.dst`, where any mask reaches) with
+// `source-over` (mode 0) or `destination-out` (1). `fill` sets the canvas's
+// start, `fs_store` writes it to r16float; a layer's only mask skips the
+// canvas (`fs_single`).
 
-struct Pass {
-    // Destination space coordinate of the target's texel (0, 0) corner.
-    dst_org: vec2<f32>,
-    // Source space coordinate of the source texture's (0, 0) corner.
-    src_org: vec2<f32>,
-    // 1 / source texture size.
-    src_inv: vec2<f32>,
-    // Taps (1D: pairs of taps; 2D: groups of four).
-    n: u32,
-    linear: u32,
-    // Destination to source space (rescale and final draw).
-    map_s: vec2<f32>,
-    map_t: vec2<f32>,
-    dir: vec2<f32>,
-    mode: vec2<u32>,
-    // 2D: weights, four per entry.
-    k: array<vec4<f32>, 7>,
-    // 1D: (offset, weight, offset, weight); 2D: offsets (x, y, x, y).
-    o: array<vec4<f32>, 14>,
-};
+alias Elem = f32;
 
-@group(0) @binding(0) var<uniform> p: Pass;
-@group(0) @binding(1) var src: texture_2d<f32>;
-@group(0) @binding(2) var bilinear: sampler;
+@group(0) @binding(2) var<storage, read> cov: array<f32>;
+@group(0) @binding(7) var<storage, read_write> acc: array<f32>;
 
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    let a = vec2<f32>(f32(i & 1u), f32(i >> 1u));
-    return vec4<f32>(a.x * 2.0 - 1.0, 1.0 - a.y * 2.0, 0.0, 1.0);
+fn src_at(i: i32, j: i32) -> f32 {
+    return cov[u32(j * p.src.z + i)];
 }
 
-// Bilinear at a source space position.
-fn sample_at(s: vec2<f32>) -> vec4<f32> {
-    let v = textureSampleLevel(src, bilinear, (s - p.src_org) * p.src_inv, 0.0);
-    if (p.mode.x == 0u) { return vec4<f32>(v.r); }
-    return v;
+fn canvas(x: i32, y: i32) -> u32 {
+    return u32((y - p.dst.y) * p.dst.z + x - p.dst.x);
 }
 
-// The texel containing a source space position.
-fn texel_at(s: vec2<f32>) -> vec4<f32> {
-    let size = vec2<i32>(textureDimensions(src));
-    let t = clamp(vec2<i32>(floor(s - p.src_org)), vec2<i32>(0), size - 1);
-    let v = textureLoad(src, t, 0);
-    if (p.mode.x == 0u) { return vec4<f32>(v.r); }
-    return v;
-}
-
-fn dst_center(pos: vec4<f32>) -> vec2<f32> {
-    return pos.xy + p.dst_org;
-}
-
-// A rescale step (`FilterResult::rescale`): bilinear from the previous
-// image through the step's inverse scale.
-@fragment
-fn fs_rescale(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let c = dst_center(pos);
-    let v = sample_at(c * p.map_s + p.map_t);
-    return vec4<f32>(v);
-}
-
-// `make_blur_1D_shader`.
-@fragment
-fn fs_blur1d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let coord = dst_center(pos);
-    let dir = vec2<f32>(p.dir);
-    var sum = vec4<f32>(0.0);
-    for (var i = 0u; i < p.n; i++) {
-        let s = vec4<f32>(p.o[i]);
-        sum += s.y * vec4<f32>(sample_at(coord + vec2<f32>(s.x * dir)));
-        sum += s.w * vec4<f32>(sample_at(coord + vec2<f32>(s.z * dir)));
+@compute @workgroup_size(16, 16)
+fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
+    let q = vec2<i32>(id.xy);
+    if (q.x < p.dst.z && q.y < p.dst.w) {
+        acc[u32(q.y * p.dst.z + q.x)] = f32(p.mode);
     }
-    return sum;
 }
 
-// `make_blur_2D_shader` (nearest sampling).
-@fragment
-fn fs_blur2d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let coord = dst_center(pos);
-    var sum = vec4<f32>(0.0);
-    for (var i = 0u; i < p.n; i++) {
-        let k = vec4<f32>(p.k[i]);
-        var o = vec4<f32>(p.o[2u * i]);
-        sum += k.x * vec4<f32>(texel_at(coord + vec2<f32>(o.xy)));
-        sum += k.y * vec4<f32>(texel_at(coord + vec2<f32>(o.zw)));
-        o = vec4<f32>(p.o[2u * i + 1u]);
-        sum += k.z * vec4<f32>(texel_at(coord + vec2<f32>(o.xy)));
-        sum += k.w * vec4<f32>(texel_at(coord + vec2<f32>(o.zw)));
+@compute @workgroup_size(16, 16)
+fn composite(@builtin(global_invocation_id) id: vec3<u32>) {
+    let q = vec2<i32>(id.xy);
+    if (q.x >= p.out.z || q.y >= p.out.w) {
+        return;
     }
-    return sum;
+    let x = p.out.x + q.x;
+    let y = p.out.y + q.y;
+    let v = clamp(grid_at(x, y), 0.0, 1.0);
+    let i = canvas(x, y);
+    acc[i] = draw(acc[i], v);
 }
 
-// The item (or its blur) drawn onto the coverage canvas; the pipeline's
-// blend state is the composite operation.
-@fragment
-fn fs_draw(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let s = pos.xy * p.map_s + p.map_t;
-    var v: vec4<f32>;
-    if (p.linear == 1u) {
-        v = sample_at(s);
-    } else {
-        v = texel_at(s);
+fn draw(a: f32, v: f32) -> f32 {
+    if (p.mode == 0) {
+        return v + a * (1.0 - v);
     }
-    return vec4<f32>(v);
+    return a * (1.0 - v);
+}
+
+// Values are rounded to the nearest f16 here: the target's own store may
+// truncate.
+@fragment
+fn fs_store(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let q = vec2<i32>(floor(pos.xy));
+    return vec4<f32>(quantizeToF16(acc[canvas(q.x, q.y)]), 0.0, 0.0, 1.0);
+}
+
+// A layer's only mask, drawn straight onto the start: covered exactly when
+// it subtracts.
+@fragment
+fn fs_single(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let q = vec2<i32>(floor(pos.xy));
+    let v = clamp(grid_at(q.x, q.y), 0.0, 1.0);
+    return vec4<f32>(quantizeToF16(draw(f32(p.mode), v)), 0.0, 0.0, 1.0);
 }

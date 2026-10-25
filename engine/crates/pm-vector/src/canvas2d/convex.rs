@@ -57,7 +57,11 @@ impl Convexicator {
             return Dir::Unknown;
         }
         if cross == 0.0 {
-            return if l[0] * cur[0] + l[1] * cur[1] < 0.0 { Dir::Backwards } else { Dir::Straight };
+            return if l[0] * cur[0] + l[1] * cur[1] < 0.0 {
+                Dir::Backwards
+            } else {
+                Dir::Straight
+            };
         }
         if cross > 0.0 { Dir::Right } else { Dir::Left }
     }
@@ -154,7 +158,11 @@ fn by_sign(points: &[P]) -> Option<bool> {
 impl SkPath {
     /// `SkPath::isConvex()`.
     pub fn is_convex(&self) -> bool {
-        if !self.pts.iter().all(|p| p[0].is_finite() && p[1].is_finite()) {
+        if !self
+            .pts
+            .iter()
+            .all(|p| p[0].is_finite() && p[1].is_finite())
+        {
             return false;
         }
         let verbs = &self.verbs;

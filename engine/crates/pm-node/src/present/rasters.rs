@@ -508,16 +508,8 @@ pub fn layer_snapshot(
             ));
         }
     };
-    let (painted, painted_crop) = match &raster.pixels {
-        pm_render::LayerPixels::Float { pixels, crop } => (
-            super::snapshot::encode_rgba8_f32(pixels, job.request.pixels),
-            *crop,
-        ),
-        pm_render::LayerPixels::Rgba8(rgba) => (
-            super::snapshot::encode_rgba8_unorm(rgba, job.request.pixels),
-            [0, 0, raster.canvas.0, raster.canvas.1],
-        ),
-    };
+    let painted = super::snapshot::encode_rgba8_f32(&raster.pixels.pixels, job.request.pixels);
+    let painted_crop = raster.pixels.crop;
     // Today's raster crops plain text and shapes only; the others come
     // back whole whatever the crop asked.
     let window = if raster.crops { *crop } else { None };

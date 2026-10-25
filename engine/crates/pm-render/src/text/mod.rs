@@ -18,6 +18,7 @@
 mod canvas;
 pub mod gpu;
 mod graphite;
+mod legacy_blur;
 pub mod served;
 
 use std::hash::{Hash, Hasher};
