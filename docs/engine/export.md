@@ -563,6 +563,20 @@ EXPORT-DITHER-1) and the f32 mix:
   AES17), not Chromium's 1/32767 above zero (`pm_media::audio`).
 - A frame today's mux drops (COMPCLOSE-1) is moot: every frame is written.
 
+**Open: the 4:2:0 decimation filter (CHROMA-420-1).** `VERTICAL_420` and point
+decimation across are the exact inverse of the renderer's upsamplers (invariant (1)),
+but on content not upsampled from 4:2:0 they alias: across, the alias band (3π/4)
+passes at 1.0. Against a supersampled 4:4:4 truth, decimation alone, after the
+renderer's upsampler: graphics 35.4 dB (today's swscale path 34.5), bars 41.2 (38.7),
+a noisy photo-like field 38.6 (39.4), and the largest graphics error 146 codes (119).
+`bars.rs`'s matched-rate chroma (34.4 against Apple's 41.7) measures agreement with
+AVFoundation's own 4:2:2 → 4:2:0, not with the truth. Any decimation of the form
+`D' = L + (I − L·U)·D` (U the upsampler, D today's inverse, L a low-pass) keeps
+invariant (1) exactly (`D'·U = I`). With L = `[1,2,1]/4` across and `[1,3,3,1]/8`
+down, D' is `[1,0,−8,16,46,16,−8,0,1]/64` across and `[3,−9,−7,45,45,−7,−9,3]/64`
+down: graphics 36.4 dB, bars 42.2, photo 39.8, largest error 107, at or above today
+on every content.
+
 ## Phase 3c agents: strict batches, host packing and CLI delivery
 
 This section supersedes the capability-routing behavior described above for
