@@ -55,7 +55,9 @@ pub struct Delivered {
 pub enum OutputSink {
     #[cfg(target_os = "macos")]
     VideoToolbox(Box<mac::VideoToolboxSink>),
-    Webm(Box<webm::WebmSink>),
+    /// libvpx encodes on the calling thread, so it runs one frame behind
+    /// the conversion.
+    Webm(Box<pipeline::Overlapped<webm::WebmSink>>),
     Png(Box<png::PngSink>),
 }
 
@@ -79,7 +81,9 @@ impl OutputSink {
                     ))
                 }
             }
-            Container::Webm => Ok(OutputSink::Webm(Box::new(webm::WebmSink::new(spec)?))),
+            Container::Webm => Ok(OutputSink::Webm(Box::new(pipeline::Overlapped::new(
+                webm::WebmSink::new(spec)?,
+            )?))),
             Container::PngSequence | Container::PngStill => {
                 Ok(OutputSink::Png(Box::new(png::PngSink::new(spec)?)))
             }
@@ -96,6 +100,15 @@ impl Sink for OutputSink {
             OutputSink::VideoToolbox(s) => s.video(index, input),
             OutputSink::Webm(s) => s.video(index, input),
             OutputSink::Png(s) => s.video(index, input),
+        }
+    }
+
+    fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
+        match self {
+            #[cfg(target_os = "macos")]
+            OutputSink::VideoToolbox(s) => s.video(index, &input),
+            OutputSink::Webm(s) => s.video_owned(index, input),
+            OutputSink::Png(s) => s.video(index, &input),
         }
     }
 
@@ -121,7 +134,7 @@ impl Sink for OutputSink {
         match self {
             #[cfg(target_os = "macos")]
             OutputSink::VideoToolbox(s) => s.finish_with_cancel(cancel),
-            OutputSink::Webm(s) => s.finish(),
+            OutputSink::Webm(s) => s.finish_with_cancel(cancel),
             OutputSink::Png(s) => s.finish(),
         }
     }

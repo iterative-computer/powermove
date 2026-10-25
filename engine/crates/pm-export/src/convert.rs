@@ -393,17 +393,13 @@ pub fn convert(
         });
         u8_plane(chroma, w, h / 2)
     };
-    // Planar Cb or Cr (`yuv420p`).
-    let chroma_plane8 = |ch: u32| {
-        let cw = w / 2;
-        let mut out = vec![0u8; cw * (h / 2)];
-        crate::par::rows(&mut out, cw, |cy, row| {
-            for (cx, o) in row.iter_mut().enumerate() {
-                let (cb, cr) = chroma420(cx, cy);
-                *o = chroma8(if ch == 1 { cb } else { cr }, cx, cy, ch);
-            }
-        });
-        u8_plane(out, cw, h / 2)
+    // Planar Cb and Cr (`yuv420p`): one chroma pass, split.
+    let chroma_planes8 = || {
+        let PlaneData::U8(cbcr) = cbcr_plane8().data else {
+            unreachable!("8-bit chroma")
+        };
+        let (cb, cr): (Vec<u8>, Vec<u8>) = cbcr.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
+        [u8_plane(cb, w / 2, h / 2), u8_plane(cr, w / 2, h / 2)]
     };
     let planes = match format {
         InputFormat::Y416 => {
@@ -444,13 +440,14 @@ pub fn convert(
         }
         InputFormat::V420 => vec![luma_plane8(), cbcr_plane8()],
         InputFormat::V0a8 => vec![luma_plane8(), cbcr_plane8(), alpha_plane8()],
-        InputFormat::I420 => vec![luma_plane8(), chroma_plane8(1), chroma_plane8(2)],
-        InputFormat::I420a => vec![
-            luma_plane8(),
-            chroma_plane8(1),
-            chroma_plane8(2),
-            alpha_plane8(),
-        ],
+        InputFormat::I420 => {
+            let [cb, cr] = chroma_planes8();
+            vec![luma_plane8(), cb, cr]
+        }
+        InputFormat::I420a => {
+            let [cb, cr] = chroma_planes8();
+            vec![luma_plane8(), cb, cr, alpha_plane8()]
+        }
         InputFormat::X420 => {
             let mut luma = vec![0u16; w * h];
             crate::par::rows(&mut luma, w, |y, row| {
