@@ -18,7 +18,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use kurbo::{Affine, Rect, Vec2};
-use skrifa::bitmap::{BitmapData, BitmapFormat, Origin};
+use skrifa::bitmap::{BitmapData, BitmapFormat, BitmapGlyph as StrikeGlyph, Origin};
 use skrifa::instance::Size;
 use skrifa::raw::TableProvider;
 use skrifa::{GlyphId, MetadataProvider};
@@ -127,6 +127,9 @@ fn decode(data: &BitmapData<'_>, width: u32, height: u32) -> Option<Rgba8> {
                 }
                 let mut buf = vec![0; reader.output_buffer_size()?];
                 let info = reader.next_frame(&mut buf).ok()?;
+                if info.width != width || info.height != height {
+                    return None;
+                }
                 let px = info.width as usize * info.height as usize;
                 return Some(premultiply(Rgba8 {
                     width: info.width,
@@ -229,19 +232,30 @@ pub fn apple_emoji_shift(requested: f32, size: f32) -> f64 {
     (f64::from(size) / 8.0 - 0.5).ceil()
 }
 
-fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<BitmapGlyph> {
+/// The drawn image rectangle relative to the glyph origin, from strike
+/// metadata without decoding pixels: the draw path's strike choice and
+/// authored placement (`Bitmaps::get` with the same sizes).
+pub fn ink_bounds(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<Rect> {
     let font = face.font()?;
-    let strikes = font.bitmap_strikes();
-    if strikes.is_empty() {
+    let bitmap = font
+        .bitmap_strikes()
+        .glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
+    if matches!(&bitmap.data, BitmapData::Mask(_)) || bitmap.width == 0 || bitmap.height == 0 {
         return None;
     }
-    let bitmap = strikes.glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
-    let image = decode(&bitmap.data, bitmap.width, bitmap.height)?;
     let upem = f32::from(font.head().ok()?.units_per_em());
-    let is_apple_color_emoji = strikes.format() == Some(BitmapFormat::Sbix)
-        && font
-            .localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME)
-            .any(|name| name.chars().eq("AppleColorEmoji".chars()));
+    let (_, bounds) =
+        authored_placement(&bitmap, upem, is_apple_color_emoji(face), requested, size);
+    Some(bounds)
+}
+
+fn authored_placement(
+    bitmap: &StrikeGlyph<'_>,
+    upem: f32,
+    is_apple_color_emoji: bool,
+    requested: f32,
+    size: f32,
+) -> (Affine, Rect) {
     let scale = f64::from(size / bitmap.ppem_y);
     let units = f64::from(size / upem);
     let outer = if is_apple_color_emoji {
@@ -259,7 +273,7 @@ fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<Bit
             -f64::from(bitmap.inner_bearing_y),
         ));
     if bitmap.placement_origin == Origin::BottomLeft {
-        transform *= Affine::translate((0.0, -f64::from(image.height)));
+        transform *= Affine::translate((0.0, -f64::from(bitmap.height)));
     }
     // Keep the source strike at native resolution. `transform` carries the
     // complete strike-to-device scale; the GPU integrates its footprint
@@ -267,9 +281,23 @@ fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<Bit
     let bounds = transform.transform_rect_bbox(Rect::new(
         0.0,
         0.0,
-        f64::from(image.width),
-        f64::from(image.height),
+        f64::from(bitmap.width),
+        f64::from(bitmap.height),
     ));
+    (transform, bounds)
+}
+
+fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<BitmapGlyph> {
+    let font = face.font()?;
+    let strikes = font.bitmap_strikes();
+    if strikes.is_empty() {
+        return None;
+    }
+    let bitmap = strikes.glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
+    let image = decode(&bitmap.data, bitmap.width, bitmap.height)?;
+    let upem = f32::from(font.head().ok()?.units_per_em());
+    let (transform, bounds) =
+        authored_placement(&bitmap, upem, is_apple_color_emoji(face), requested, size);
     Some(BitmapGlyph {
         image: Arc::new(image),
         transform,
@@ -289,5 +317,133 @@ mod tests {
         assert_eq!(apple_emoji_shift(36.0, 36.0), 4.0);
         assert_eq!(apple_emoji_shift(37.0, 37.0), 5.0);
         assert_eq!(apple_emoji_shift(4.0, 6.0), 1.0);
+    }
+
+    #[test]
+    fn emoji_ink_bounds_follow_the_authored_strike_placement_at_several_sizes() {
+        let strike = StrikeGlyph {
+            data: BitmapData::Png(&[]),
+            bearing_x: 0.0,
+            bearing_y: 0.0,
+            inner_bearing_x: 2.0,
+            inner_bearing_y: 30.0,
+            ppem_x: 40.0,
+            ppem_y: 40.0,
+            advance: None,
+            width: 40,
+            height: 40,
+            placement_origin: Origin::TopLeft,
+        };
+        for (size, expected) in [
+            (40.0, Rect::new(2.0, -25.0, 42.0, 15.0)),
+            (80.0, Rect::new(4.0, -50.0, 84.0, 30.0)),
+            (200.0, Rect::new(10.0, -125.0, 210.0, 75.0)),
+        ] {
+            let (transform, ink) = authored_placement(&strike, 1000.0, true, size, size);
+            assert_eq!(ink, expected);
+            assert_eq!(
+                transform.transform_rect_bbox(Rect::new(0.0, 0.0, 40.0, 40.0)),
+                ink
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_apple_emoji_ink_uses_real_strikes_and_matches_draw_placement() {
+        let file = std::fs::File::open("/System/Library/Fonts/Apple Color Emoji.ttc")
+            .expect("Apple Color Emoji system font");
+        // The mapping borrows a stable, read-only system file for this test.
+        let bytes = unsafe { memmap2::MmapOptions::new().map(&file) }.unwrap();
+        let face = FaceRef {
+            data: &bytes,
+            index: 0,
+            id: 0,
+        };
+        let glyph = face.font().unwrap().charmap().map('👋').unwrap().to_u32();
+        let mut decoded = Bitmaps::new();
+        for (size, expected) in [
+            (40.0, Rect::new(0.0, -35.0, 40.0, 5.0)),
+            (96.0, Rect::new(0.0, -84.0, 96.0, 12.0)),
+            (160.0, Rect::new(0.0, -140.0, 160.0, 20.0)),
+            (200.0, Rect::new(0.0, -175.0, 200.0, 25.0)),
+        ] {
+            let ink = ink_bounds(face, glyph, size, size).unwrap();
+            assert_eq!(ink, expected, "size {size}");
+            assert_eq!(ink, decoded.get(face, glyph, size, size).unwrap().bounds);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shaped_apple_emoji_skin_tone_ink_matches_draw_placement() {
+        let file = std::fs::File::open("/System/Library/Fonts/Apple Color Emoji.ttc")
+            .expect("Apple Color Emoji system font");
+        let bytes = std::sync::Arc::new(unsafe { memmap2::MmapOptions::new().map(&file) }.unwrap());
+        let face = FaceRef {
+            data: &bytes[..],
+            index: 0,
+            id: 0,
+        };
+        let shared: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
+        let font = read_fonts::model::Font::new(read_fonts::model::Blob::from(shared), 0).unwrap();
+        let base = face.font().unwrap().charmap().map('👋').unwrap().to_u32();
+        let mut decoded = Bitmaps::new();
+
+        for (size, expected) in [
+            (40.0, Rect::new(0.0, -35.0, 40.0, 5.0)),
+            (96.0, Rect::new(0.0, -84.0, 96.0, 12.0)),
+            (160.0, Rect::new(0.0, -140.0, 160.0, 20.0)),
+            (200.0, Rect::new(0.0, -175.0, 200.0, 25.0)),
+        ] {
+            let shaper = harfrust::ShaperFont::new(&font).with_scale((size * 65536.0) as i32);
+            let mut buffer = harfrust::Buffer::new();
+            for (cluster, ch) in "👋🏽".char_indices() {
+                buffer.push(ch as u32, cluster as u32);
+            }
+            buffer.set_direction(harfrust::Direction::LeftToRight);
+            harfrust::shape(&shaper, &mut buffer, harfrust::ShapeOptions::new()).unwrap();
+            let [glyph] = buffer.glyph_infos() else {
+                panic!("skin-tone sequence must shape to one color glyph at size {size}");
+            };
+            assert_ne!(glyph.glyph_id, base, "skin-tone modifier was not shaped");
+
+            let ink = crate::render::scene::drawn_color_glyph_ink(
+                face,
+                crate::render::outline::Coords::Normalized(&[]),
+                glyph.glyph_id,
+                size,
+                0.0,
+                None,
+            )
+            .unwrap();
+            assert_eq!(ink, expected, "size {size}");
+            assert_eq!(
+                ink,
+                decoded
+                    .get(face, glyph.glyph_id, size, size)
+                    .unwrap()
+                    .bounds
+            );
+
+            let resolved_size = size + 2.25;
+            let overridden = crate::render::scene::drawn_color_glyph_ink(
+                face,
+                crate::render::outline::Coords::Normalized(&[]),
+                glyph.glyph_id,
+                size,
+                0.0,
+                Some(resolved_size),
+            )
+            .unwrap();
+            assert_eq!(
+                overridden,
+                decoded
+                    .get(face, glyph.glyph_id, size, resolved_size)
+                    .unwrap()
+                    .bounds,
+                "resolved bitmap size {resolved_size}"
+            );
+        }
     }
 }

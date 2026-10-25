@@ -103,20 +103,28 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
     const capture = external(group.dir);
     const corpus = await readJson(path.join(capture, 'cases.json'));
     const shots = await readJson(path.join(capture, 'manifest.json'));
-    const cases = corpus.cases.filter((c: any) =>
-      group.replayPrefix ? c.id.startsWith(group.replayPrefix) : group.ids.includes(c.id));
+    // Preserve the capture's measurement-cache warmup order through the last
+    // selected case, even when only a few buffers are attested.
+    const last = corpus.cases.reduce((last: number, c: any, i: number) =>
+      group.ids.includes(c.id) ? i : last, -1);
+    const cases = corpus.cases.slice(0, last + 1).filter((c: any) =>
+      !group.replayPrefix || c.id.startsWith(group.replayPrefix));
     expect(cases.filter((c: any) => group.ids.includes(c.id)).length).toBe(group.ids.length);
     expect(group.reference.indices.length).toBe(group.ids.length);
 
     const run = async (mode: Mode) => {
-      const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: mode === 'on' ? '1' : '0' } });
+      // Native reference font-cache seeds use the captured DPR 2 environment.
+      const session = await launchApp({ args: ['--force-device-scale-factor=2', '--force-color-profile=srgb'],
+        env: { POWERMOVE_NEW_ENGINE: mode === 'on' ? '1' : '0' } });
       try {
         await session.openEditor();
+        expect(await session.page.evaluate(() => window.devicePixelRatio)).toBe(2);
         await session.page.evaluate(() => {
           const PM = (window as any).PM;
           PM.pause();
           PM.replaceProject(PM.mkProject({ w: 1920, h: 1080, dur: 10, name: 'Text parity' }));
         });
+        await session.page.evaluate(async () => { await document.fonts.ready; });
         if (mode === 'on') {
           await expect.poll(
             () => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route),
@@ -153,6 +161,7 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
             let encoded = '';
             for (let i = 0; i < px.length; i += 32768) encoded += String.fromCharCode(...px.subarray(i, i + 32768));
             return {
+              compat: layer.compat ?? null,
               layout: item.kind === 'text' ? api.render.textLayout(layer, time) : null,
               captionBounds: item.kind === 'captions' ? PM.captionBounds(layer, time) : null,
               geometry: {
@@ -191,7 +200,7 @@ for (const [groupIndex, group] of (manifest.rasters ?? []).entries()) {
       const { rgba: engine64, enabled: engineEnabled, ...engineSemantic } = engine[i]!;
       const { rgba: today64, enabled: todayEnabled, ...todaySemantic } = today[i]!;
       expect([engineEnabled, todayEnabled]).toEqual([true, false]);
-      expect(engineSemantic).toEqual(todaySemantic);
+      expect(engineSemantic, `numeric case ${group.reference.indices[i]} (compat ${engine[i]!.compat}): exact semantics`).toEqual(todaySemantic);
       const size = engine[i]!.geometry.canvas as [number, number];
       const { index, pixels } = await attested(group.reference, i, 'case', size);
       const result = compare(Buffer.from(engine64, 'base64'), pixels);
@@ -211,14 +220,17 @@ for (const [groupIndex, group] of (manifest.frames ?? []).entries()) {
     const dir = external(group.dir);
     const doc = await readJson(path.join(dir, group.project, 'loaded.json'));
     const project = (await readJson(path.join(dir, 'manifest.json'))).projects.find(
-      (p: any) => p.id === group.project);
+      (p: any) => p.dir === group.project);
     expect(project).toBeTruthy();
     expect(group.reference.indices.length).toBe(group.times.length);
 
     const run = async (mode: Mode) => {
-      const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: mode === 'on' ? '1' : '0' } });
+      // Native reference font-cache seeds use the captured DPR 2 environment.
+      const session = await launchApp({ args: ['--force-device-scale-factor=2', '--force-color-profile=srgb'],
+        env: { POWERMOVE_NEW_ENGINE: mode === 'on' ? '1' : '0' } });
       try {
         await session.openEditor();
+        expect(await session.page.evaluate(() => window.devicePixelRatio)).toBe(2);
         await session.page.evaluate(doc => {
           const PM = (window as any).PM;
           PM.replaceProject(doc); PM.pause();
@@ -238,8 +250,8 @@ for (const [groupIndex, group] of (manifest.frames ?? []).entries()) {
             const PM = (window as any).PM;
             const api = PM.Kernel.api('e2e-text-reference-parity');
             if (mode === 'on') {
-              // At full preview resolution, one backing pixel maps to one
-              // export pixel. Keep the real viewer active while paused.
+              // Match the reference density so one composition pixel on
+              // screen maps to one export pixel. Keep the viewer active.
               const viewer = PM.Kernel.services.get('viewer');
               const dpr = window.devicePixelRatio || 1;
               for (const [key, value] of Object.entries({
@@ -247,8 +259,8 @@ for (const [groupIndex, group] of (manifest.frames ?? []).entries()) {
                 'min-width': `${width / dpr}px`, 'min-height': `${height / dpr}px`,
                 'max-width': 'none', 'max-height': 'none',
               })) viewer.stage.style.setProperty(key, value as string, 'important');
-              PM.previewResolution = '1'; PM.quality = 1; PM.perf.auto = false;
-              viewer.fit = false; viewer.zoom = 1 / dpr; viewer.pan = [0, 0];
+              PM.previewResolution = 'auto'; PM.quality = 1; PM.perf.auto = false;
+              viewer.fit = false; viewer.zoom = width / (PM.proj.w * dpr); viewer.pan = [0, 0];
               viewer.layout();
             }
             PM.pause(); PM.setTime(time, { raw: true, force: true });
@@ -273,15 +285,31 @@ for (const [groupIndex, group] of (manifest.frames ?? []).entries()) {
               while (true) {
                 const frame = viewer.engineFrame();
                 const surface = viewer.enginePresentation?.canvas as HTMLCanvasElement | undefined;
-                if (frame?.current && surface && viewer.enginePresentation?.presenting
-                  && surface.width === width && surface.height === height) {
+                const state = frame ? viewer.enginePresentation.stateFor(frame.viewSeq) : null;
+                if (frame && !frame.standIn && frame.pts === Math.round(time * 705_600_000)
+                  && frame.revision === PM.EngineDoc.barrier.revision
+                  && frame.viewSeq === viewer.enginePresentation.states.at(-1)?.viewSeq
+                  && state?.canvas.width === width && state?.canvas.height === height && surface) {
                   const copy = document.createElement('canvas');
                   copy.width = width; copy.height = height;
-                  copy.getContext('2d')!.drawImage(surface, 0, 0);
+                  // Presentation covers the whole stage, including letterbox
+                  // space. Read the composition rectangle from this frame's
+                  // committed state at exactly one device pixel per output pixel.
+                  const rect = state.canvas.css, dpr = state.devicePixelRatio;
+                  const crop = [rect.x * dpr, rect.y * dpr, rect.width * dpr, rect.height * dpr];
+                  if (crop.some(value => !Number.isInteger(value))
+                    || crop[2] !== width || crop[3] !== height) throw new Error(`Nonintegral viewer crop ${crop}`);
+                  copy.getContext('2d')!.drawImage(surface, crop[0]!, crop[1]!, width, height, 0, 0, width, height);
                   viewerRgba = encode(copy);
                   break;
                 }
-                if (performance.now() > deadline) throw new Error('Paused viewer did not present the full-size frame');
+                if (performance.now() > deadline) throw new Error(`Paused viewer size/state: ${JSON.stringify({
+                  expected: [width, height], surface: surface && [surface.width, surface.height],
+                  canvas: state?.canvas && [state.canvas.width, state.canvas.height],
+                  shown: viewer.shown, dpr: window.devicePixelRatio,
+                  revision: frame?.revision, wantedRevision: PM.EngineDoc.barrier.revision,
+                  pts: frame?.pts, wantedPts: Math.round(time * 705_600_000),
+                })}`);
                 await new Promise(resolve => requestAnimationFrame(resolve));
               }
             }

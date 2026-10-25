@@ -860,6 +860,48 @@ fn device_residual(m: Affine, scale: f64) -> Affine {
     Affine::new([a / scale, b / scale, c / scale, d / scale, 0.0, 0.0])
 }
 
+fn image_bounds(transform: Affine, width: u32, height: u32) -> Rect {
+    transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))
+}
+
+/// The drawn bounds of a bitmap or COLR glyph relative to its baseline
+/// origin, from the draw path's own placement: the chosen strike and its
+/// authored placement for a bitmap face (`bitmap_size` is the resolved
+/// full-em size the painter passes, the requested `size` when absent), and
+/// the unrounded painted/clip bounds of the COLR program. `None` means the
+/// glyph is an ordinary outline.
+pub fn drawn_color_glyph_ink(
+    face: FaceRef<'_>,
+    coords: Coords<'_>,
+    glyph: u32,
+    size: f32,
+    skew: f64,
+    bitmap_size: Option<f32>,
+) -> Option<Rect> {
+    if has_bitmaps(face)
+        && let Some(bounds) =
+            super::bitmap::ink_bounds(face, glyph, size, bitmap_size.unwrap_or(size))
+    {
+        return Some(bounds);
+    }
+    if !super::bitmap::is_colr_glyph(face, glyph) {
+        return None;
+    }
+    let program = super::colr::Cache::default()
+        .get(super::colr::ColrRequest {
+            face,
+            coords,
+            id: glyph,
+            size,
+            skew: skew as f32,
+            linear: Affine::IDENTITY,
+            origin: (0.0, 0.0),
+            foreground: [1.0; 4],
+        })
+        .ok()??;
+    Some(program.painted_bounds)
+}
+
 impl Painter<'_> {
     #[allow(clippy::too_many_arguments)]
     fn draw(
@@ -912,8 +954,7 @@ impl Painter<'_> {
                     let image = ImagePixels::Rgba8(bitmap.image.clone());
                     let (w, h) = image.dimensions();
                     out.push(Item {
-                        bounds: transform
-                            .transform_rect_bbox(Rect::new(0.0, 0.0, w as f64, h as f64)),
+                        bounds: image_bounds(transform, w, h),
                         content: ItemContent::Image { image, transform },
                         color,
                         opacity,
@@ -943,8 +984,7 @@ impl Painter<'_> {
                             let image = ImagePixels::Colr(program);
                             let (w, h) = image.dimensions();
                             out.push(Item {
-                                bounds: transform
-                                    .transform_rect_bbox(Rect::new(0.0, 0.0, w as f64, h as f64)),
+                                bounds: image_bounds(transform, w, h),
                                 content: ItemContent::Image { image, transform },
                                 // Canvas fill-style alpha applies to the whole
                                 // color glyph, including palette-only paints.

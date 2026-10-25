@@ -91,42 +91,9 @@ fn main() {
                 painter.unsupported
             );
             let ideal = support::text_reference::render(&scene);
-            let diagnostic_scene = (count < 5
-                && std::env::var_os("PM_TEXT_LEVEL2_ORACLE").is_some())
-            .then(|| scene.clone());
             let actual = renderer
                 .paint_text_scene(scene, Precision::Float32)
                 .unwrap();
-            if let Some(scene) = diagnostic_scene {
-                let (pixel, difference) = actual
-                    .chunks_exact(4)
-                    .zip(ideal.rgba.chunks_exact(4))
-                    .enumerate()
-                    .map(|(i, (a, r))| {
-                        (
-                            i,
-                            (0..4)
-                                .map(|c| (f64::from(a[c]) - r[c]).abs() * 255.0)
-                                .fold(0.0, f64::max),
-                        )
-                    })
-                    .max_by(|a, b| a.1.total_cmp(&b.1))
-                    .unwrap();
-                let (x, y) = (pixel % 640, pixel / 640);
-                println!(
-                    "case {count}: worst pixel ({x},{y}) {difference:.3} CV, alpha engine {:.6}, reference {:.6}",
-                    actual[pixel * 4 + 3],
-                    ideal.rgba[pixel * 4 + 3]
-                );
-                for (item, path, area32, winding256) in
-                    support::text_reference::point_oracle(&scene, x, y)
-                {
-                    println!(
-                        "case {count}: oracle item {item} path {path} area32 {area32:.6} winding256 {winding256:.6} delta {:.3} CV",
-                        (area32 - winding256).abs() * 255.0
-                    );
-                }
-            }
             let errors: Vec<f64> = actual
                 .chunks_exact(4)
                 .zip(ideal.rgba.chunks_exact(4))

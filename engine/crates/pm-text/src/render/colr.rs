@@ -32,7 +32,10 @@ pub struct Program {
     pub width: u32,
     pub height: u32,
     pub transform: Affine,
+    /// Whole-pixel raster extent used by the image renderer.
     pub bounds: Rect,
+    /// Unrounded union of the authored painted paths and clips.
+    pub painted_bounds: Rect,
     phase: (f64, f64),
     foreground: [f32; 4],
     ops: Vec<Op>,
@@ -60,6 +63,10 @@ impl Program {
             self.bounds.y0.to_bits(),
             self.bounds.x1.to_bits(),
             self.bounds.y1.to_bits(),
+            self.painted_bounds.x0.to_bits(),
+            self.painted_bounds.y0.to_bits(),
+            self.painted_bounds.x1.to_bits(),
+            self.painted_bounds.y1.to_bits(),
         ]
         .hash(&mut hash);
         self.ops.len().hash(&mut hash);
@@ -968,6 +975,7 @@ pub fn program(request: ColrRequest<'_>) -> Result<Option<Program>, String> {
             left as f64 + width as f64,
             top as f64 + height as f64,
         ),
+        painted_bounds: b,
         ops: painter.ops,
     }))
 }
@@ -1214,6 +1222,7 @@ mod tests {
             foreground: [0.0, 0.0, 0.0, 1.0],
             transform: Affine::IDENTITY,
             bounds: Rect::new(0.0, 0.0, 4.0, 4.0),
+            painted_bounds: Rect::new(0.0, 0.0, 4.0, 4.0),
             ops: vec![Op::SolidGlyph(path, [0.5, 0.25, 0.0, 0.5])],
         };
         let Op::SolidGlyph(_, encoded) = &program.ops()[0] else {
@@ -1240,6 +1249,7 @@ mod tests {
             foreground: [0.0, 0.0, 0.0, 1.0],
             transform: Affine::IDENTITY,
             bounds: Rect::new(0.0, 0.0, 4.0, 4.0),
+            painted_bounds: Rect::new(0.0, 0.0, 4.0, 4.0),
             ops: vec![
                 Op::Clip(Some(path.clone())),
                 Op::Fill(

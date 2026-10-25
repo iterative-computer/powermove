@@ -520,7 +520,7 @@ impl TextContext {
             };
             // The compatibility raster API still works for new text. Its
             // pixels come from the same output-resolution painter, with
-            // transparent room for the smoothing profile around the ink.
+            // the existing transparent ink margin.
             let (w, h) = (raster.w + 8.0, raster.h + 8.0);
             let (ax, ay) = (raster.anchor_x + 4.0, raster.anchor_y + 4.0);
             let density = js_min(js_min(scale, 8192.0 / w), 8192.0 / h);
