@@ -847,34 +847,25 @@ pub fn apply_transition(
     let result = pm_reference::effects::transition(id, params, &from, &to, progress)
         .expect("a modelled transition");
     let open_below = out.open.iter().any(Option::is_some);
-    let mut moved_pixels = vec![false; w * h];
-    for i in 0..w * h {
-        fn px(img: &Image, i: usize) -> &[f64] {
-            &img.rgba[i * 4..][..4]
-        }
-        let moved = px(&from, i) != px(&to, i) || px(&result.image, i) != px(&to, i);
-        if !moved {
-            continue;
-        }
-        moved_pixels[i] = true;
+    fn px(img: &Image, i: usize) -> &[f64] {
+        &img.rgba[i * 4..][..4]
+    }
+    let moved: Vec<bool> = (0..w * h)
+        .map(|i| px(&from, i) != px(&to, i) || px(&result.image, i) != px(&to, i))
+        .collect();
+    for i in (0..w * h).filter(|&i| moved[i]) {
         if open_below {
-            result_nan(out, i);
+            out.rgba[i * 4..][..4].fill(f64::NAN);
+            out.open[i] = None;
             continue;
         }
         out.rgba[i * 4..][..4].copy_from_slice(px(&result.image, i));
-        if result.resampled {
-            out.resampled[i] = true;
-        }
+        out.resampled[i] |= result.resampled;
         if let Some(open) = &result.open[i] {
             out.open[i] = Some(open.clone());
         }
     }
-    moved_pixels
-}
-
-fn result_nan(out: &mut Reference, i: usize) {
-    out.rgba[i * 4..][..4].fill(f64::NAN);
-    out.open[i] = None;
+    moved
 }
 
 /// A built-in effect chain: each step's definition and parameters.
