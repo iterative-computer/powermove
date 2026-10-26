@@ -1183,9 +1183,11 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // published, so both texts stay the document's.
     let texts = PM.Projects.texts?.(project) ?? null;
     // The new engine's copy of the document is prepared while media finishes
-    // restoring and this window checkpoints the project: most of it is the
-    // engine process parsing and hashing, not this thread.
-    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project, texts?.canonical));
+    // restoring: most of it is the engine process parsing as the text
+    // arrives, and hashing, not this thread.
+    let streamed!: () => void;
+    const sent = new Promise<void>(resolve => { streamed = resolve; });
+    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project, texts?.canonical, streamed));
     preparing.catch(() => {});
     release = () => { void preparing.then(() => PM.EngineDoc?.discardPrepared?.(project), () => {}); };
     if (restoring) await restoring;
@@ -1223,6 +1225,10 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // The text a checkpoint writes is at hand only during the call that
     // writes it: the opened file's hash then needs no serialization of its own.
     let openedJSON: string | null = null;
+    // The checkpoint posts the whole document to main as well: once main has
+    // the engine's copy, while the engine parses it.
+    await Promise.race([sent, preparing.then(() => {}, () => {})]);
+    if (!current()) return abandon();
     // Without the text (a serialization error), the checkpoint reports it as before.
     const slot: string | undefined = texts ? await texts.slot.catch(() => undefined) : undefined;
     texts = null;

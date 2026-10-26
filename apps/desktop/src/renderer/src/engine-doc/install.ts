@@ -123,8 +123,9 @@ export interface EngineDoc {
   check(reason: string): ConsistencyResult | null;
   checkAsync(reason: string): Promise<ConsistencyResult | null>;
   /** `text`: the project's canonical JSON text in pieces, already made
-   *  (legacy/core/project-text.ts); without it the shadow is serialized. */
-  prepare(project: any, text?: AsyncIterable<string>): void | Promise<void>;
+   *  (legacy/core/project-text.ts); without it the shadow is serialized.
+   *  `streamed`: called once main has all of that text. */
+  prepare(project: any, text?: AsyncIterable<string>, streamed?: () => void): void | Promise<void>;
   /** Release an unused prepared project without canceling a newer request. */
   discardPrepared?(project: any): void;
   /** Restore a remote document before a new native engine launch opens sessions. */
@@ -562,7 +563,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     try { unused.instance.bridge.call('{"op":"cancel"}'); }
     catch (error) { console.warn('[engine-doc] unused preparation cleanup failed', error); }
   }
-  async function prepareNative(project: any, text?: AsyncIterable<string>) {
+  async function prepareNative(project: any, text?: AsyncIterable<string>, onStreamed?: () => void) {
     const host = hostBridge()?.nativeEngine;
     const native = host?.documentKernel;
     if (!native) throw new Error('The native document transport is unavailable');
@@ -597,7 +598,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (text) {
       let streamed!: () => void;
       const sent = new Promise<void>(resolve => { streamed = resolve; });
-      ingesting = ingestDocumentPieces(native, text, documentId(project.id), revision, streamed);
+      ingesting = ingestDocumentPieces(native, text, documentId(project.id), revision, () => { streamed(); onStreamed?.(); });
       ingesting.catch(() => {});
       await Promise.race([sent, ingesting.then(() => {}, () => {})]);
     }
@@ -659,7 +660,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       }
       throw new Error('The project kept changing during its consistency check');
     },
-    prepare(project, text) {
+    prepare(project, text, streamed) {
       project = unwrap(project);
       const native = hostBridge()?.nativeEngine?.documentKernel;
       if (!options.strict || !native || options.headless) return;
@@ -670,7 +671,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         // after this open may itself be queued behind it.
         if (!state.ready) throw notReady;
         discardPrepared();
-        preparedProject = { project, ...await prepareNative(project, text) };
+        preparedProject = { project, ...await prepareNative(project, text, streamed) };
       };
       return (async () => {
         for (let attempt = 0; attempt < 2; attempt++) {
