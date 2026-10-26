@@ -668,6 +668,27 @@ impl CompatStore {
         CompatAnswer::Raster(drawn)
     }
 
+    /// Whether every one of `needs` has an answer at `revision` or newer
+    /// that [`Self::answer`] can draw.
+    pub fn answers_all(&mut self, key: Key, revision: Revision, needs: &[CompatNeed]) -> bool {
+        needs.iter().all(|n| {
+            let time = n.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+            !matches!(
+                self.answer(
+                    key,
+                    n.composition.as_str(),
+                    n.layer.as_str(),
+                    time,
+                    n.scale,
+                    n.source,
+                    n.crop,
+                    revision
+                ),
+                pm_render::compat::CompatAnswer::Missing
+            )
+        })
+    }
+
     /// Of a frame's needs, the ones to send now: not asked yet at
     /// `revision` or newer, or asked longer than [`ASK_AGAIN`] ago. They
     /// are recorded as asked.
@@ -980,6 +1001,52 @@ mod tests {
             store.apply(session(1), CompatMessage::Producers { sources: vec![] }),
             Applied::Producers
         );
+    }
+
+    #[test]
+    fn a_frame_is_answered_only_once_every_one_of_its_needs_is() {
+        let mut store = CompatStore::default();
+        let s = session(1);
+        store.apply(
+            s,
+            CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        );
+        let revision = Revision::new(3).unwrap();
+        let need = |layer: &str| CompatNeed {
+            composition: "c".into(),
+            layer: layer.into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 1.0,
+            crop: None,
+        };
+        let needs = [need("L1"), need("L2"), need("L3")];
+        assert!(!store.answers_all(s, revision, &needs));
+        let native = |layer: &str, revision: Revision| {
+            CompatMessage::Native(pm_protocol::snapshot::CompatNative {
+                composition: "c".into(),
+                layer: layer.into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 1.0,
+                revision,
+                crop: None,
+            })
+        };
+        store.apply(s, native("L1", revision));
+        assert!(!store.answers_all(s, revision, &needs));
+        // An answer made at an older revision does not count for this frame.
+        store.apply(s, native("L2", Revision::new(2).unwrap()));
+        assert!(!store.answers_all(s, revision, &needs));
+        store.apply(s, native("L2", revision));
+        // Pixels count once every band arrived.
+        store.apply(s, band(id("L3", "k"), 1, 2, 0, 1, 1));
+        assert!(!store.answers_all(s, revision, &needs));
+        store.apply(s, band(id("L3", "k"), 1, 2, 1, 1, 1));
+        assert!(store.answers_all(s, revision, &needs));
+        assert!(store.answers_all(s, revision, &[]));
     }
 
     #[test]

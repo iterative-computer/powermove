@@ -101,6 +101,10 @@ export type EngineSnapshotOptions = {
   layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null; content?: Uint8Array | null };
   /** Original media at source time, without composition effects or transforms. */
   source?: { asset: string; fit?: 'stretch' | 'contain' | 'cover'; color?: 'display' | 'interpreted' | 'compositor' };
+  /** The output size of a layer raster is a guess at its largest result: a
+   *  larger one is refused without a failure report, for the caller to ask
+   *  again with the whole bound. */
+  guessedBound?: boolean;
 };
 
 /** A rendered snapshot. `data` is RGBA8, top-down, in `pixels`'s encoding. */
@@ -224,24 +228,28 @@ export type CompatAnswerResult =
     }
   | null;
 
-/** Answers the engine's needs for one source (the raster override's producer). */
-/** Frames of compatibility answers kept ahead of the clock during playback. */
+/** Frames of compatibility answers prepared ahead of the clock during
+ *  playback, at least (600 ms at 30 fps: well beyond the engine's
+ *  render-ahead). The horizon reaches further while a layer's answers take
+ *  longer, by their time plus {@link HORIZON_MARGIN_MS}, up to
+ *  {@link COMPAT_MAX_LOOKAHEAD} frames: a frame whose wrappers wait for bases
+ *  is then started early enough to be complete when the engine draws it. */
 export const COMPAT_LOOKAHEAD = 18;
-/** A bounded paused prefill; never an ongoing paused timer. A changing
- *  base needs enough turns to fill the pipeline, including worker startup. */
-export const COMPAT_WARM_MS = 500;
-/** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
+export const COMPAT_MAX_LOOKAHEAD = 60;
+const HORIZON_MARGIN_MS = 250;
+/** Main-thread time one playback turn may take (ms). A frame once started
+ *  is prepared whole; the next one waits for a later task, so presentation
+ *  events and input run between frames. */
 const LOOKAHEAD_BUDGET_MS = 6;
-const LOOKAHEAD_MAX_ANSWERS = 16;
-const LOOKAHEAD_POLL_MS = 4;
-/** Base-raster preparations for the answer horizon in flight at once. */
-export const COMPAT_PREPARE_IN_FLIGHT = 2;
-/** Frames of asynchronously prepared compatibility work ahead of the clock.
- *  The producer resolves every base dependency before retaining its result;
- *  only the shorter answer horizon is uploaded to the engine. */
-export const COMPAT_PREFETCH = 24;
-/** Speculative base preparations in flight at once (beyond the answer horizon's). */
-export const COMPAT_PREFETCH_IN_FLIGHT = 1;
+/** Playback preparations waiting on engine bases or readbacks at once.
+ *  Pass-through answers finish in their frame's turn and take none; paused
+ *  frames on screen have their own. */
+export const COMPAT_PREPARE_IN_FLIGHT = 24;
+/** The most frames ahead of the clock the engine asks for: its render-ahead
+ *  (pm-node `schedule::MAX_LEAD`, 28) plus the frames it names ahead of each
+ *  one it drew (`render::ask_ahead_frames`, at most the furthest horizon). A
+ *  need further ahead along a loop is a late one from before the wrap. */
+const ENGINE_AHEAD_FRAMES = 28 + COMPAT_MAX_LOOKAHEAD;
 
 /** The playable span the clock wraps by while it loops, in ticks, `[start, end)`. */
 export type PlaybackLoop = { start: number; end: number };
@@ -272,16 +280,34 @@ export function intoLoop(time: number, loop: PlaybackLoop | null): number {
 /** `loop`: the clock's loop in the entry's own time (a nested composition's
  *  times are the open one's shifted), while playback loops and the shift
  *  is known. */
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null;
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null;
+  /** The needs the engine asked for by time (a frame it waits for, or one
+   *  ahead of playback it will draw), each with its own crop window. */
+  required: Map<number, CompatNeed>;
+  /** The engine asked for this layer with another crop window than the
+   *  last (a moving layer partly in view): its frames ahead are only the
+   *  ones the engine names, never guessed from the last window. */
+  askedOnly: boolean;
+  /** Whether its last preparation waited for bases (null: none yet). A
+   *  layer answered at once never waits for the playback budget. */
+  waits: boolean | null;
+  /** The layer's own time span in the open composition (ticks), at `revision`. */
+  span?: { start: number; end: number } | null;
+  /** How long this layer's answers take to complete (ms, weighted): a
+   *  pass-through is ready in its frame's turn, a wrapper that reads bases
+   *  waits for the engine. Playback starts it where it can still be in time. */
+  readyMs: number | null;
   /** Ends the waiting turns of a non-urgent preparation in flight, per time. */
   promote?: Map<number, () => void> };
 
 /** `urgent`: the paused frame the engine waits for (no yielded turns);
- *  `promoted`: settles when a preparation that began speculatively became
- *  that frame's, so it goes on as urgent; `due`: a frame the running clock
- *  shows within the answer horizon (its turns go ahead of ordinary tasks). */
+ *  `promoted`: settles when a playback preparation became that frame's, so
+ *  it goes on as urgent; `due`: a frame the running clock shows (its later
+ *  turns go ahead of ordinary tasks). */
 export type CompatPrepareOptions = { urgent?: boolean; promoted?: Promise<void>; due?: boolean };
-export type CompatPreparer = (need: CompatNeed, revision: number, options?: CompatPrepareOptions) => Promise<void>;
+/** Runs the producer for one need now. Null: its answer is ready on return
+ *  (a pass-through); else it settles once the answer is ready. */
+export type CompatPreparer = (need: CompatNeed, revision: number, options?: CompatPrepareOptions) => Promise<void> | null;
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
@@ -312,6 +338,10 @@ export type RenderTransportOptions = {
    *  clock wraps by it (today's looping playback, the default): the frames
    *  after the wrap are prepared before it, as the frames ahead. */
   span?: () => { start: number; end: number; loop?: boolean } | null;
+  /** A layer's own time span in the open composition, `[start, end)` in
+   *  ticks (null elsewhere): playback prepares no answer for it outside. */
+  layerSpan?: (composition: string, layer: string) => { start: number; end: number } | null;
+
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -383,10 +413,10 @@ export class EngineRenderTransport {
   /** Producers of viewer frames' and snapshots' compatibility answers. */
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
   private readonly preparers = new Map<CompatSource, CompatPreparer>();
+  /** Playback preparations waiting on bases or readbacks. */
   private aheadInFlight = 0;
-  /** Of those, the ones the paused frame on screen waits for. */
+  /** Preparations the paused frame on screen waits for (their own budget). */
   private aheadUrgentInFlight = 0;
-  private prefetchInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
   private readonly reused = new Set<string>();
@@ -394,7 +424,7 @@ export class EngineRenderTransport {
   /** The latest answer posted for each layer and time (`layer`, `time` in
    *  ticks), with its revision and kind, most recent last; at most
    *  {@link ANSWER_LOG_LIMIT}. Counts answers by the frame they are for,
-   *  wherever they were made (a need, the lookahead, the paused warm-up). */
+   *  wherever they were made (a need, the lookahead, a paused edit). */
   private readonly answerLog = new Map<string, { revision: number; kind: 'raster' | 'reuse' | 'native'; key?: string }>();
   /** What was last posted for each exact need (layer, time, source, density
    *  and window): `native`, or `raster:` and its key. A paused redraw tells
@@ -404,13 +434,17 @@ export class EngineRenderTransport {
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
-  private pausedEditRevision: number | null = null;
+  /** The next playback turn: a frame later, or at once after a turn the budget cut. */
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
-  private aheadTurn = 0;
   private pumpingAhead = false;
-  /** How long one asynchronous preparation takes, on average (ms). */
-  private prepareMs: number | null = null;
-  readonly lookaheadStats = { prepareMs: 0, latePrepareSkips: 0, prefetched: 0, maxPrefetchInFlight: 0, answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
+  /** Counts pumps: a continuation of an older turn does not run. */
+  private aheadTurn = 0;
+  /** A completion asked for a turn (one per task, however many completed). */
+  private pumpQueued = false;
+  /** Frames prepared ahead of the clock now (see {@link COMPAT_LOOKAHEAD}). */
+  private horizon = COMPAT_LOOKAHEAD;
+  /** `frames`: frames whose preparation a turn started; `pumps`: turns. */
+  readonly lookaheadStats = { frames: 0, pumps: 0, latePrepareSkips: 0, answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -426,7 +460,6 @@ export class EngineRenderTransport {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
     this.aheadTimer = null;
     this.ahead.clear();
-    this.pausedEditRevision = null;
     this.producers.clear();
     this.answerers.clear();
     this.preparers.clear();
@@ -488,14 +521,15 @@ export class EngineRenderTransport {
     const playing = !!this.options.playing?.();
     const clock = playing ? this.options.playhead?.() : null;
     const frame = this.options.frameTicks?.() ?? 0;
+    const loop = this.playbackLoop();
     for (const need of needs) {
       // A delayed request is no longer the frame the engine can present.
       // Answer the clock's frame instead of filling an obsolete FIFO.
-      // In a loop a frame after the wrap is ahead of the clock's last ones.
-      const loop = this.playbackLoop();
+      // In a loop a frame after the wrap is ahead of the clock's last ones;
+      // the engine never asks further ahead than its render-ahead.
       const stale = !!clock && need.composition === this.options.composition() && frame > 0
-        && (loop && loop.end - loop.start > (COMPAT_PREFETCH + 1) * frame
-          ? runAhead(clock.time, need.time, Math.sign(clock.rate || 1) * frame, loop) > COMPAT_PREFETCH * frame
+        && (loop && loop.end - loop.start > (ENGINE_AHEAD_FRAMES + 1) * frame
+          ? runAhead(clock.time, need.time, Math.sign(clock.rate || 1) * frame, loop) > ENGINE_AHEAD_FRAMES * frame
           : !loop && Math.sign(clock.rate) * (clock.time - need.time) > frame);
       // Compositor needs stay asynchronous across Play/Stop boundaries too.
       // The engine's stopped clock can arrive before its final frame is
@@ -514,189 +548,226 @@ export class EngineRenderTransport {
       if (asynchronous && !stale) {
         const entry = this.ahead.get(this.aheadTag(need));
         entry?.sent.delete(need.time);
-        if (!playing) entry?.required.add(need.time);
+        entry?.required.set(need.time, need);
       }
     }
-    if (playing || this.preparers.size) this.presentedWhilePlaying(!playing);
+    if (playing || this.preparers.size) this.pump();
   }
 
-  /** Clock-driven replenishment also runs when no frame was presented. */
-  presentedWhilePlaying(warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
-    if (warm && !this.options.playing?.() && performance.now() >= warmUntil
-      && ![...this.ahead.values()].some(entry => entry.required.size > 0)) return;
-    if ((!this.options.playing?.() && !warm) || this.pumpingAhead) return;
+  /**
+   * Prepares what the viewer shows next. Playing: complete frames in
+   * playback order, ahead of the clock (every layer of a frame in one task,
+   * then the next frame); paused: only the frame on screen. Runs on the
+   * engine's needs, a completed preparation, a presented frame, and while
+   * playing once a frame (or at once after a turn its budget cut short),
+   * never as a poll.
+   */
+  pump(): void {
+    if (this.pumpingAhead) return;
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
+    this.aheadTimer = null;
+    this.aheadTurn++;
+    const playing = !!this.options.playing?.();
+    let more = false;
     this.pumpingAhead = true;
     try {
-      const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
-      const playhead = this.options.playhead?.();
-      const clock = this.options.playing?.() ? playhead : null;
-      const revision = this.options.revision();
-      const span = this.options.span?.() ?? null;
-      const loop = this.playbackLoop(span);
-      const entries = [...this.ahead.values()].filter(entry => {
-        if (entry.session.closed || !this.answerers.has(entry.need.source)) {
-          this.ahead.delete(this.aheadTag(entry.need));
-          return false;
-        }
-        const step = (this.options.frameTicks?.() ?? Math.abs(entry.step)) * (playhead && playhead.rate < 0 ? -1 : 1);
-        const clockCursor = clock ? Math.max(0, Math.floor(clock.time / Math.abs(step)) * Math.abs(step)) : null;
-        const cursor = clockCursor === null ? entry.cursor : entry.need.composition === this.options.composition()
-          ? clockCursor : entry.cursor + (entry.clockCursor === null ? 0 : clockCursor - entry.clockCursor);
-        entry.clockCursor = clockCursor;
-        // The loop in this entry's time: the open composition's own, or a
-        // nested one's shifted as the clock moves it (playing only).
-        const open = entry.need.composition === this.options.composition();
-        const shift = open ? 0 : clockCursor === null ? null : cursor - clockCursor;
-        const entryLoop = loop && shift !== null ? { start: loop.start + shift, end: loop.end + shift } : null;
-        // A wrap is the run moving on, not a seek: only a move back (or
-        // further than the horizon at once) starts the windows over.
-        const moved = runAhead(entry.cursor, cursor, step, entryLoop);
-        if (revision !== entry.revision || Math.sign(step) !== Math.sign(entry.step)
-          || moved < 0 || (entryLoop && moved > COMPAT_PREFETCH * Math.abs(step))) { entry.sent.clear(); entry.prefetched.clear(); }
-        if (runAhead(entry.posted, cursor, step, entryLoop) > Math.abs(step)) this.lookaheadStats.recoveries++;
-        entry.revision = revision;
-        entry.step = step;
-        entry.cursor = cursor;
-        entry.loop = entryLoop;
-        for (const time of entry.sent) {
-          const distance = runAhead(cursor, time, step, entryLoop);
-          if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.sent.delete(time);
-        }
-        for (const time of entry.prefetched) {
-          const distance = runAhead(cursor, time, step, entryLoop);
-          if (distance < -Math.abs(step) || distance > COMPAT_PREFETCH * Math.abs(step)) entry.prefetched.delete(time);
-        }
-        for (const time of entry.required) {
-          const distance = runAhead(cursor, time, step, entryLoop);
-          if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.required.delete(time);
-        }
-        return step !== 0;
-      });
-      // Breadth first: every layer's current frame precedes speculative
-      // work. A slow producer gets at most one turn before another layer.
-      // A preparation started for a frame the clock reaches before it can
-      // finish is wasted, and when every one is, playback never catches up
-      // (it would keep preparing the frame at the clock). Frames sooner than
-      // a preparation takes are left to the engine's own asks; the horizon
-      // starts where answers can still arrive in time.
-      const frameMs = ((this.options.frameTicks?.() ?? 0) / ticks(1)) * 1000;
-      // Only while the line moves: a Play held in the engine's preroll
-      // (rate 0) waits for exactly the frames at the clock.
-      const lead = clock && clock.rate !== 0 && this.prepareMs !== null && frameMs > 0
-        ? Math.min(COMPAT_LOOKAHEAD, Math.ceil((this.prepareMs * Math.abs(clock.rate)) / frameMs)) : 0;
-      let done = 0, pending = 0;
-      const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
-      // An edit needs its current pixels first. Preparing an entire paused
-      // playback horizon at every revision competes with the next pointer
-      // move, and those future answers are invalidated by that move anyway.
-      const horizon = !this.options.playing?.() && revision === this.pausedEditRevision ? 0 : COMPAT_LOOKAHEAD;
-      for (let offset = 0; offset <= horizon; offset++) {
-        for (let i = 0; i < entries.length; i++) {
-          const entry = entries[(i + this.aheadTurn) % entries.length]!;
-          // Past the loop's end, the frames after the wrap.
-          const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
-          if (outside(entry, time) || entry.sent.has(time)) continue;
-          if (entry.pending.has(time)) {
-            // The paused frame on screen waits for a preparation that began
-            // speculatively: it goes on without yielding.
-            if (this.urgentAhead(entry, time)) entry.promote?.get(time)?.();
-            continue;
-          }
-          if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
-          if (offset < lead && this.preparers.has(entry.need.source)) { this.lookaheadStats.latePrepareSkips++; continue; }
-          pending++;
-          if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
-          const prepare = this.preparers.get(entry.need.source);
-          // The paused frame on screen is never queued behind speculative
-          // preparations: urgent ones have slots of their own.
-          if (prepare && (this.urgentAhead(entry, time) ? this.aheadUrgentInFlight : this.aheadInFlight) >= COMPAT_PREPARE_IN_FLIGHT) continue;
-          done++;
-          if (prepare) {
-            this.prepareAhead(entry, time, revision ?? 0, prepare, warm, warmUntil);
-            pending--;
-            continue;
-          }
-          if (this.answerNeed({ ...entry.need, time }, entry.session)) {
-            entry.sent.add(time);
-            entry.posted = time;
-            this.lookaheadStats.answered++;
-            pending--;
-          }
-        }
-      }
-      // Speculative preparation past the answer horizon, never ahead of it:
-      // only while no layer's nearer frame is still waiting to start.
-      if (pending === 0 && clock) {
-        for (let offset = COMPAT_LOOKAHEAD + 1; offset <= COMPAT_PREFETCH && this.prefetchInFlight < COMPAT_PREFETCH_IN_FLIGHT; offset++) {
-          for (const entry of entries) {
-            if (this.prefetchInFlight >= COMPAT_PREFETCH_IN_FLIGHT) break;
-            const prepare = this.preparers.get(entry.need.source);
-            const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
-            if (!prepare || outside(entry, time) || entry.prefetched.has(time)) continue;
-            entry.prefetched.add(time);
-            this.prefetchAhead(entry.need, time, revision ?? 0, prepare);
-          }
-        }
-      }
-      this.aheadTurn++;
-      this.lookaheadStats.pending = pending;
-      this.lookaheadStats.maxPending = Math.max(this.lookaheadStats.maxPending, pending);
+      this.lookaheadStats.pumps++;
+      const entries = this.aheadEntries(playing);
+      if (playing) more = this.pumpPlayback(entries);
+      else this.pumpShown(entries);
     } finally { this.pumpingAhead = false; }
-    this.scheduleAhead();
+    this.scheduleAhead(more);
   }
 
   playbackStarted(): void {
-    this.presentedWhilePlaying();
+    this.pump();
   }
 
-  /** Prepares one frame's compatibility work ahead; the answer horizon reaching
-   *  that frame finds them ready (raster-compat `prepare`). A failure is
-   *  reported when that frame's own preparation repeats it. */
-  private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: CompatPreparer): void {
-    this.prefetchInFlight++;
-    this.lookaheadStats.prefetched++;
-    this.lookaheadStats.maxPrefetchInFlight = Math.max(this.lookaheadStats.maxPrefetchInFlight, this.prefetchInFlight);
-    void Promise.resolve().then(() => prepare({ ...need, time }, revision)).catch(() => {}).finally(() => {
-      this.prefetchInFlight--;
-      if (this.options.playing?.()) this.presentedWhilePlaying();
+  /** The layers the engine asks for, each at the clock's position (its
+   *  windows start over on a seek, a reversal, or a new revision). */
+  private aheadEntries(playing: boolean): AheadEntry[] {
+    const playhead = this.options.playhead?.();
+    const clock = playing ? playhead : null;
+    const revision = this.options.revision();
+    const loop = this.playbackLoop();
+    return [...this.ahead.values()].filter(entry => {
+      if (entry.session.closed || !this.answerers.has(entry.need.source)) {
+        this.ahead.delete(this.aheadTag(entry.need));
+        return false;
+      }
+      const step = (this.options.frameTicks?.() ?? Math.abs(entry.step)) * (playhead && playhead.rate < 0 ? -1 : 1);
+      const clockCursor = clock ? Math.max(0, Math.floor(clock.time / Math.abs(step)) * Math.abs(step)) : null;
+      const cursor = clockCursor === null ? entry.cursor : entry.need.composition === this.options.composition()
+        ? clockCursor : entry.cursor + (entry.clockCursor === null ? 0 : clockCursor - entry.clockCursor);
+      entry.clockCursor = clockCursor;
+      // The loop in this entry's time: the open composition's own, or a
+      // nested one's shifted as the clock moves it (playing only).
+      const open = entry.need.composition === this.options.composition();
+      const shift = open ? 0 : clockCursor === null ? null : cursor - clockCursor;
+      const entryLoop = loop && shift !== null ? { start: loop.start + shift, end: loop.end + shift } : null;
+      // A wrap is the run moving on, not a seek: only a move back (or
+      // further than the horizon at once) starts the windows over.
+      const moved = runAhead(entry.cursor, cursor, step, entryLoop);
+      if (revision !== entry.revision || Math.sign(step) !== Math.sign(entry.step)
+        || moved < 0 || (entryLoop && moved > this.horizon * Math.abs(step))) entry.sent.clear();
+      if (revision !== entry.revision || entry.span === undefined) entry.span = this.options.layerSpan?.(String(entry.need.composition), String(entry.need.layer)) ?? null;
+      if (runAhead(entry.posted, cursor, step, entryLoop) > Math.abs(step)) this.lookaheadStats.recoveries++;
+      entry.revision = revision;
+      entry.step = step;
+      entry.cursor = cursor;
+      entry.loop = entryLoop;
+      for (const times of [entry.sent, entry.required]) {
+        for (const time of times.keys()) {
+          const distance = runAhead(cursor, time, step, entryLoop);
+          if (distance < -Math.abs(step) || distance > COMPAT_MAX_LOOKAHEAD * Math.abs(step)) times.delete(time);
+        }
+      }
+      return step !== 0;
     });
   }
 
-  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: CompatPreparer, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
-    const need = { ...entry.need, time };
-    const urgent = this.urgentAhead(entry, time);
-    let promote!: () => void;
-    const promoted = new Promise<void>(resolve => { promote = resolve; });
-    if (!urgent) (entry.promote ??= new Map()).set(time, promote);
-    entry.pending.add(time);
-    this.aheadInFlight++;
-    if (urgent) this.aheadUrgentInFlight++;
-    this.lookaheadStats.inFlight = this.aheadInFlight;
-    this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
-    const began = performance.now();
-    this.trace.record('prepare dispatched', revision, time);
-    const due = !!this.options.playing?.();
-    void Promise.resolve().then(() => prepare(need, revision, urgent ? { urgent } : { urgent, promoted, ...(due ? { due } : {}) })).then(() => {
-      this.trace.record('prepare ready', revision, time, began);
-      const ms = performance.now() - began;
-      this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
-      this.lookaheadStats.prepareMs = Math.round(this.prepareMs * 10) / 10;
-      const clock = this.options.playing?.() ? this.options.playhead?.() : null;
-      const cursor = clock && need.composition === this.options.composition()
-        ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
-      const distance = runAhead(cursor, time, entry.step, entry.loop ?? null);
-      if ((!this.options.playing?.() && !entry.required.has(time) && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
-        || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
-        this.lookaheadStats.obsolete++;
-        return;
+  /** Whether playback never shows `entry`'s layer at `time`: before zero,
+   *  outside the open composition's playable span, or more than a frame
+   *  outside the layer's own time span (the engine asks only for layers it
+   *  draws; a wrapper run there could fail on a base that draws nothing). */
+  private outside(entry: AheadEntry, time: number, span: { start: number; end: number } | null): boolean {
+    if (time < 0) return true;
+    const open = entry.need.composition === this.options.composition();
+    if (open && span && (time < span.start || time >= span.end)) return true;
+    const frame = Math.abs(entry.step);
+    return !!entry.span && (time < entry.span.start - frame || time >= entry.span.end + frame);
+  }
+
+  /**
+   * Playback: frames in order from the clock's, each prepared whole (every
+   * layer's wrapper in this task: pass-through answers are posted at once,
+   * wrappers that read bases continue as the engine draws them). A layer
+   * whose answers take longer than the clock leaves starts where it can
+   * still be in time (only while the line moves: a Play held in its preroll
+   * waits for exactly the frames at the clock). Returns whether the turn's
+   * budget left frames to prepare.
+   */
+  private pumpPlayback(entries: AheadEntry[]): boolean {
+    const clock = this.options.playhead?.() ?? null;
+    const revision = this.options.revision() ?? 0;
+    const span = this.options.span?.() ?? null;
+    const frameMs = ((this.options.frameTicks?.() ?? 0) / ticks(1)) * 1000;
+    const speed = clock ? Math.abs(clock.rate) : 0;
+    const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
+    let pending = 0, more = false, started = false, held = false;
+    let slowest = 0;
+    for (const entry of entries) if (entry.waits && entry.readyMs !== null) slowest = Math.max(slowest, entry.readyMs);
+    this.horizon = frameMs > 0 && speed > 0
+      ? Math.max(COMPAT_LOOKAHEAD, Math.min(COMPAT_MAX_LOOKAHEAD, Math.ceil((slowest * speed + HORIZON_MARGIN_MS) / frameMs)))
+      : COMPAT_LOOKAHEAD;
+    // The frames the engine named reach further: a layer coming into view.
+    let reach = this.horizon;
+    for (const entry of entries) {
+      for (const time of entry.required.keys()) reach = Math.max(reach, Math.round(runAhead(entry.cursor, time, entry.step, entry.loop ?? null) / Math.abs(entry.step)));
+    }
+    reach = Math.min(reach, COMPAT_MAX_LOOKAHEAD);
+    /** `entry`'s need at `offset` frames from its cursor, if one is to be prepared. */
+    const candidate = (entry: AheadEntry, offset: number): CompatNeed | null => {
+      // Past the loop's end, the frames after the wrap.
+      const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
+      const asked = entry.required.get(time);
+      if (((entry.askedOnly || offset > this.horizon) && !asked) || this.outside(entry, time, span) || entry.sent.has(time) || entry.pending.has(time)) return null;
+      return asked ?? { ...entry.need, time };
+    };
+    // A layer slower than every frame it has left, with none on its way,
+    // still starts its furthest one: its next answer measures it again (it
+    // would otherwise never be prepared while playing).
+    const last = new Map<AheadEntry, number>();
+    for (const entry of entries) {
+      if (entry.pending.size) continue;
+      for (let offset = reach; offset >= 0; offset--) if (candidate(entry, offset)) { last.set(entry, offset); break; }
+    }
+    for (let offset = 0; offset <= reach; offset++) {
+      const frame: { entry: AheadEntry; need: CompatNeed }[] = [];
+      for (const entry of entries) {
+        const need = candidate(entry, offset);
+        if (!need) continue;
+        if (speed > 0 && frameMs > 0 && entry.readyMs !== null && Math.min(entry.readyMs * speed, (last.get(entry) ?? Infinity) * frameMs) > Math.max(offset, 0.5) * frameMs && this.preparers.has(entry.need.source)) {
+          this.lookaheadStats.latePrepareSkips++;
+          continue;
+        }
+        // Frames stay in order: a layer that waits for bases and cannot
+        // start holds its later frames; layers answered at once go on.
+        if (held && entry.waits !== false) { pending++; continue; }
+        frame.push({ entry, need });
       }
-      const answered = this.answerNeed(need, entry.session, true);
-      entry.sent.add(time);
-      if (answered) {
+      if (!frame.length) continue;
+      if (more || (started && performance.now() >= deadline)) {
+        more = true;
+        pending += frame.length;
+        continue;
+      }
+      if (this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT) held = true;
+      started = true;
+      this.lookaheadStats.frames++;
+      for (const { entry, need } of frame) {
+        if (held && entry.waits !== false) { pending++; continue; }
+        this.prepareAhead(entry, need, revision, false);
+      }
+    }
+    this.lookaheadStats.pending = pending;
+    this.lookaheadStats.maxPending = Math.max(this.lookaheadStats.maxPending, pending);
+    return more;
+  }
+
+  /** Paused: the frame on screen (each layer's own need, else the cursor),
+   *  urgently, with nothing ahead of it. A preparation playback started for
+   *  it goes on without yielding. */
+  private pumpShown(entries: AheadEntry[]): void {
+    const revision = this.options.revision() ?? 0;
+    const span = this.options.span?.() ?? null;
+    for (const entry of entries) {
+      const needs = new Map(entry.required);
+      if (!entry.sent.has(entry.cursor) && !needs.has(entry.cursor) && !this.outside(entry, entry.cursor, span)) needs.set(entry.cursor, { ...entry.need, time: entry.cursor });
+      for (const need of needs.values()) {
+        if (entry.pending.has(need.time)) { entry.promote?.get(need.time)?.(); continue; }
+        this.prepareAhead(entry, need, revision, true);
+      }
+    }
+  }
+
+  /** Runs `entry`'s producer for `need` and posts its answer once ready. */
+  private prepareAhead(entry: AheadEntry, need: CompatNeed, revision: number, urgent: boolean): void {
+    const time = need.time;
+    const prepare = this.preparers.get(need.source);
+    if (!prepare) {
+      // A synchronous producer answers now.
+      if (this.answerNeed(need, entry.session)) {
+        entry.sent.add(time);
         entry.posted = time;
         this.lookaheadStats.answered++;
       }
-    }).catch(error => {
+      entry.required.delete(time);
+      return;
+    }
+    let promote!: () => void;
+    const promoted = urgent ? null : new Promise<void>(resolve => { promote = resolve; });
+    const began = performance.now();
+    this.trace.record('prepare dispatched', revision, time);
+    const due = !!this.options.playing?.();
+    let result: Promise<void> | null;
+    try {
+      result = prepare(need, revision, urgent ? { urgent } : { promoted: promoted!, ...(due ? { due } : {}) });
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    entry.waits = result !== null;
+    if (result === null) {
+      this.prepared(entry, need, revision, prepare, began);
+      return;
+    }
+    if (!urgent) (entry.promote ??= new Map()).set(time, promote);
+    entry.pending.add(time);
+    if (urgent) this.aheadUrgentInFlight++;
+    else this.aheadInFlight++;
+    this.lookaheadStats.inFlight = this.aheadInFlight;
+    this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
+    result.then(() => this.prepared(entry, need, revision, prepare, began), error => {
       // Retry only after a fresh native need or clock position, never a
       // self-sustaining chain of immediately rejected microtasks.
       entry.sent.add(time);
@@ -705,29 +776,68 @@ export class EngineRenderTransport {
     }).finally(() => {
       entry.pending.delete(time);
       entry.required.delete(time);
-      if (entry.promote?.get(time) === promote) entry.promote.delete(time);
-      this.aheadInFlight--;
+      if (!urgent && entry.promote?.get(time) === promote) entry.promote.delete(time);
       if (urgent) this.aheadUrgentInFlight--;
+      else this.aheadInFlight--;
       this.lookaheadStats.inFlight = this.aheadInFlight;
-      // Each completed answer is independent: a slower sibling does not
-      // hold its ready pixels behind a Promise.all barrier.
-      this.presentedWhilePlaying(warm || [...this.ahead.values()].some(e => e.required.size > 0), warmUntil);
+      this.pumpSoon();
     });
   }
 
-  /** Whether `time` is the paused frame the engine waits for (its own need, or the cursor's). */
-  private urgentAhead(entry: AheadEntry, time: number): boolean {
-    return !this.options.playing?.() && (time === entry.cursor || entry.required.has(time));
+  /** Posts a prepared answer, unless it no longer counts: another revision,
+   *  a frame the clock left behind or beyond the horizon, or (paused) a
+   *  frame not on screen. */
+  private prepared(entry: AheadEntry, need: CompatNeed, revision: number, prepare: CompatPreparer, began: number): void {
+    const time = need.time;
+    const ms = performance.now() - began;
+    entry.readyMs = entry.readyMs === null ? ms : entry.readyMs * 0.75 + ms * 0.25;
+    this.trace.record('prepare ready', revision, time, began);
+    const playing = !!this.options.playing?.();
+    const clock = playing ? this.options.playhead?.() : null;
+    const cursor = clock && need.composition === this.options.composition()
+      ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
+    const distance = runAhead(cursor, time, entry.step, entry.loop ?? null);
+    if ((!playing && !entry.required.has(time) && time !== entry.cursor) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
+      || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_MAX_LOOKAHEAD * Math.abs(entry.step)) {
+      this.lookaheadStats.obsolete++;
+      return;
+    }
+    const answered = this.answerNeed(need, entry.session, true);
+    entry.sent.add(time);
+    entry.required.delete(time);
+    if (answered) {
+      entry.posted = time;
+      this.lookaheadStats.answered++;
+    }
   }
 
-  private scheduleAhead(): void {
-    // A timer, rather than a presented-frame callback, breaks the deadlock
-    // when one late answer consumed the entire presentation horizon.
-    if (!this.options.playing?.() || !this.options.playhead || this.aheadTimer !== null || !this.ahead.size) return;
+  /** One turn for every preparation that completed in this task. */
+  private pumpSoon(): void {
+    if (this.pumpQueued) return;
+    this.pumpQueued = true;
+    queueMicrotask(() => {
+      this.pumpQueued = false;
+      this.pump();
+    });
+  }
+
+  private scheduleAhead(more: boolean): void {
+    // The horizon moves on with the clock even when no answer completes and
+    // no frame is presented (one late answer can hold every frame).
+    if (!this.options.playing?.() || !this.options.playhead || !this.ahead.size) return;
+    // The rest of a turn the budget cut is the next task (a nested timeout
+    // would wait at least 4 ms); a later pump supersedes it.
+    const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' }) => Promise<void> } }).scheduler;
+    if (more && scheduler?.postTask) {
+      const turn = this.aheadTurn;
+      void scheduler.postTask(() => { if (turn === this.aheadTurn) this.pump(); }, { priority: 'user-visible' }).catch(() => {});
+      return;
+    }
+    const frameMs = ((this.options.frameTicks?.() ?? 0) / ticks(1)) * 1000;
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null;
-      this.presentedWhilePlaying();
-    }, LOOKAHEAD_POLL_MS);
+      this.pump();
+    }, more ? 0 : Math.max(1, frameMs || 1000 / 30));
   }
 
   /** An exact need's identity (layer, time, source, density, window). */
@@ -749,14 +859,16 @@ export class EngineRenderTransport {
     const frame = this.options.frameTicks?.() ?? 0;
     if (!frame) return;
     const previous = this.ahead.get(tag);
-    const same = previous?.session === session && previous.need.scale === need.scale
-      && JSON.stringify(previous.need.crop) === JSON.stringify(need.crop);
+    const same = previous?.session === session && previous.need.scale === need.scale;
     const clock = this.options.playhead?.();
     const step = frame * (clock && clock.rate < 0 ? -1 : 1);
     const entry: AheadEntry = same ? previous : {
       need, session, step, cursor: need.time, posted: need.time,
-      sent: new Set<number>(), pending: new Set<number>(), required: new Set<number>(), prefetched: new Set<number>(), revision: this.options.revision(), clockCursor: null
+      sent: new Set<number>(), pending: new Set<number>(), required: new Map(), revision: this.options.revision(), clockCursor: null,
+      readyMs: previous?.readyMs ?? null, waits: previous?.waits ?? null, askedOnly: false
     };
+    // Another crop window at the same density: the window moves.
+    if (same && JSON.stringify(previous.need.crop) !== JSON.stringify(need.crop)) entry.askedOnly = true;
     entry.need = need;
     // Never infer reverse playback from a late need. Only the transport's
     // rate determines direction; an explicit seek resets the sent window.
@@ -809,12 +921,11 @@ export class EngineRenderTransport {
     return changed;
   }
 
-  /** An edit while paused: prepares the frames around the playhead at the
-   *  new revision at once (the paused warm-up the engine's ask would start). */
+  /** An edit while paused: prepares the frame on screen at the new
+   *  revision at once, beside the engine's render that will ask for it. */
   prepareShown(): void {
     if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
-    this.pausedEditRevision = this.options.revision();
-    this.presentedWhilePlaying(true);
+    this.pump();
   }
 
   private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false, beforePost?: (answer: string) => void): boolean {
@@ -940,7 +1051,7 @@ export class EngineRenderTransport {
   private async answerRoundAsync(compat: CompatNeed[]): Promise<void> {
     if (!compat.length) return;
     const revision = this.options.revision() ?? 0;
-    await Promise.allSettled(compat.map((need) => this.preparers.get(need.source)?.(need, revision)));
+    await Promise.allSettled(compat.map(async (need) => this.preparers.get(need.source)?.(need, revision)));
     const session = this.options.session();
     if (!session) throw new EngineSnapshotError('unavailable', 'The window has no engine session to post compatibility pixels on.');
     const unprepared = compat.filter((need) => !(this.preparers.has(need.source) && this.answerNeed(need, session, true)));
@@ -1178,10 +1289,10 @@ export class EngineRenderTransport {
    * (today's capture waits for the GPU), retried as slots free up, within
    * the class's own wait.
    */
-  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>): Promise<EngineSnapshotReply> {
+  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>, bytes: number): Promise<EngineSnapshotReply> {
     const until = performance.now() + (cls === 'idle' ? IDLE_WAIT_MS : ASYNC_WAIT_MS);
     for (let attempt = 0; ; attempt++) {
-      const reply = await this.slots.run(cls, ask);
+      const reply = await this.slots.run(cls, ask, bytes);
       if (reply.status !== 'failed' || reply.code !== 'refused' || performance.now() >= until) return reply;
       await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
     }
@@ -1205,7 +1316,8 @@ export class EngineRenderTransport {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
         const began = performance.now();
-        const reply = await this.admitted(cls, () => this.askSnapshot(request, options.signal));
+        const { width, height } = request.snapshot.outputSize;
+        const reply = await this.admitted(cls, () => this.askSnapshot(request, options.signal), width * height * 4);
         this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
         if (reply.status === 'rendered') {
           this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));
@@ -1237,6 +1349,7 @@ export class EngineRenderTransport {
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
+      if (error instanceof EngineSnapshotError && error.code === 'budgetExceeded' && options.guessedBound) throw error;
       throw this.fail(error, 'snapshot');
     }
   }
@@ -1314,18 +1427,37 @@ export class EngineRenderTransport {
    * sync priority: ordinary async snapshots yield to a due viewer frame,
    * which itself cannot render until this compatibility answer arrives. */
   async rasterForCompat(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): Promise<EngineSnapshot | null> {
+    // Main reserves each raster's bound until its reply (a whole 8192²
+    // canvas: four at once). The bound is twice the largest raster this
+    // window got so far; a larger one is asked again with the whole bound.
+    const edge = options.maxEdge ?? MAX_RASTER_EDGE;
+    const guess = this.rasterArea > 0 ? Math.min(edge, Math.ceil(Math.sqrt(2 * this.rasterArea))) : edge;
+    const ask = (maxEdge: number) => this.snapshotAsyncAt({ ...this.rasterOptions(layer, scale, time, crop, { ...options, maxEdge }), ...(maxEdge < edge ? { guessedBound: true } : {}) }, 'sync');
     try {
-      return await this.snapshotAsyncAt(this.rasterOptions(layer, scale, time, crop, options), 'sync');
+      let snapshot: EngineSnapshot;
+      try { snapshot = await ask(guess); }
+      catch (error) {
+        if (!(error instanceof EngineSnapshotError && error.code === 'budgetExceeded' && guess < edge)) throw error;
+        snapshot = await ask(edge);
+      }
+      this.rasterArea = Math.max(this.rasterArea, snapshot.width * snapshot.height);
+      return snapshot;
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
       throw error;
     }
   }
 
+  /** The largest compatibility base raster this window received (pixels). */
+  private rasterArea = 0;
+
   private rasterOptions(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null, options: RasterOptions): EngineSnapshotOptions {
     scale = layerRasterScale(scale);
     const edge = options.maxEdge ?? MAX_RASTER_EDGE;
-    return { time, width: edge, height: edge, pixels: 'premultiplied', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
+    // Straight alpha, as the canvas the raster becomes takes it: the engine
+    // divides the quantized premultiplied pixels by alpha exactly as
+    // `unpremultiply` does, off this thread.
+    return { time, width: edge, height: edge, pixels: 'straight', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
   }
 
   /* ── today's render API shapes (apiVersion 1 to 3 and the async siblings) ── */
@@ -1342,7 +1474,9 @@ export class EngineRenderTransport {
     out.height = snapshot.height;
     // `putImageData` takes straight alpha; opaque pixels are the same either way.
     const straight = snapshot.pixels === 'premultiplied' ? unpremultiply(snapshot.data) : snapshot.data;
-    out.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(straight), snapshot.width, snapshot.height), 0, 0);
+    // The reply's own buffer when it may back an ImageData (not shared memory).
+    const data = (straight.buffer instanceof ArrayBuffer ? straight : new Uint8ClampedArray(straight)) as Uint8ClampedArray<ArrayBuffer>;
+    out.getContext('2d')!.putImageData(new ImageData(data, snapshot.width, snapshot.height), 0, 0);
     return out;
   }
 

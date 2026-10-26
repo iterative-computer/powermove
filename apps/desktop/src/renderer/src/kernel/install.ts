@@ -428,20 +428,41 @@ function rasterHost(PM: LegacyPM): RasterHost {
  * is keyed by its composition and id as well; a detached copy a wrapper
  * rasterizes (a typed prefix) by its content alone, as today.
  */
+/** Whether a stored value changes with time: a channel with keyframes or
+ *  an expression anywhere in it. */
+function animated(value: unknown, depth = 0): boolean {
+  if (!value || typeof value !== 'object' || depth > 8) return false;
+  const v = value as Record<string, unknown>;
+  if (v['expr'] || (Array.isArray(v['kf']) && v['kf'].length)) return true;
+  for (const member of Object.values(v)) if (animated(member, depth + 1)) return true;
+  return false;
+}
+
 export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: number, crop?: { x: number; y: number; width: number; height: number } | null): { key: string; persistent: boolean } | null {
   const d = layer?.d;
   if (!d || typeof d !== 'object') return null;
   if (layer.type === 'shape') { if (d.paths?.length) return null; }
-  else if (layer.type === 'text') { if (d.animators?.length || d.styles?.length || d.fontAnchorBounds || d.paths?.length) return null; }
+  else if (layer.type === 'text') { if (d.animators?.length || d.styles?.length || d.paths?.length || Number(layer.compat) >= 2) return null; }
   else return null;
   const evaluator = native(PM);
   if (!evaluator) return null;
   const where = rasterHost(PM).locate(layer);
   const owner = where.own ? ['own', where.composition, String(layer.id ?? '')] : ['detached'];
   try {
+    // Content without keyframes or expressions is its own resolution: the
+    // stored members name the raster without asking the evaluator (a
+    // synchronous round trip per base on a native document).
+    const content = animated(d) ? ['resolved', evaluator.resolveContent(layer, time)] : ['stored', d];
+    // Font anchoring places the raster by the layer's anchor at `time` as
+    // well (pm-eval `text_raster_with`; today's `fontAnchorOffset`).
+    const anchor = (key: string) => {
+      const channel = layer.p?.[key];
+      return channel && typeof channel === 'object' && animated(channel) ? String(evaluator.ev(layer, key, time)) : channel ?? null;
+    };
+    const placement = layer.type === 'text' && d.fontAnchorBounds ? [anchor('anchor.x'), anchor('anchor.y')] : null;
     // A plain shape's raster is its resolved content at a density: the key
     // holds across revisions. Text depends on the fonts too.
-    return { key: JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), scale, crop ?? null]), persistent: layer.type === 'shape' };
+    return { key: JSON.stringify([layer.type, owner, content, placement, scale, crop ?? null]), persistent: layer.type === 'shape' };
   } catch {
     return null;
   }

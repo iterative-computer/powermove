@@ -635,6 +635,8 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Needs sent for frames ahead of playback (`ask_ahead`).
+    pub compat_asked_ahead: u64,
     /// Frames of provisional revisions: parked until confirmed, confirmed
     /// revisions, and parked frames dropped because a later update
     /// superseded their revision (never presented).
@@ -995,6 +997,11 @@ struct View {
     /// extensions would hear `frame:rendered` for it again, which today's
     /// compositor never sends.
     compat_paused_wait: Option<i64>,
+    /// What the waiting frame (timed or paused) lacked when it was last
+    /// drawn, at the revision it drew: it is drawn again once all of them
+    /// are answered, not at each answer (every attempt plans the whole
+    /// composition again, and a frame's answers arrive one by one).
+    compat_missing: Option<(Revision, Vec<pm_protocol::snapshot::CompatNeed>)>,
     /// The compatibility needs the last render consulted, and the media
     /// time it drew (unwrapped ticks).
     compat_needs: Option<(i64, Vec<pm_protocol::snapshot::CompatNeed>)>,
@@ -1079,6 +1086,16 @@ pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
 /// way. Today's compositor shows its first frame 130 to 230 ms after Play;
 /// the bound keeps the engine's first frame within that.
 pub const PREROLL_FRAMES: i64 = 6;
+/// How far ahead of each played frame the window hears the needs it has
+/// not answered: a second of frames (longer than a wrapper that reads bases
+/// takes on a busy window), at least 12 and at most 60 (the window's
+/// furthest horizon, `COMPAT_MAX_LOOKAHEAD`).
+pub fn ask_ahead_frames(frame_ticks: i64) -> i64 {
+    if frame_ticks <= 0 {
+        return 12;
+    }
+    ((TICKS_PER_SECOND + frame_ticks - 1) / frame_ticks).clamp(12, 60)
+}
 pub const PREROLL_MAX_US: i64 = 80_000;
 
 /// A Play waiting in the native preroll.
@@ -1809,6 +1826,65 @@ impl Thread {
 
     fn compat_store(&self) -> std::sync::MutexGuard<'_, super::compat::CompatStore> {
         self.compat.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// While playing, the window's producers hear what the frame
+    /// [`ask_ahead_frames`] after `k` will need and they have not answered
+    /// (a layer coming into view, a crop window that moved): its answers are
+    /// made before that frame is drawn, instead of the frame waiting for
+    /// them then. Only its plan is built.
+    fn ask_ahead(&mut self, key: Key, k: i64) {
+        let Some(view) = self.views.get(&key) else {
+            return;
+        };
+        let ahead = k + super::schedule::Schedule::step(&view.clock)
+            * ask_ahead_frames(view.clock.frame_ticks());
+        let media = view.clock.wrap(ahead * view.clock.frame_ticks());
+        if media < 0 || view.clock.end().is_some_and(|end| media >= end) {
+            return;
+        }
+        let (Some(gpu), Some(doc)) = (self.gpu.as_mut(), self.docs.get(&key)) else {
+            return;
+        };
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let Some(compat) = compat_view(&self.compat, key, revision, None) else {
+            return;
+        };
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
+        composer.renderer().set_compat_rasters(Some(compat));
+        let needs = composer.compat_missing(
+            doc.document(),
+            view.state.composition.as_str(),
+            doc.media(),
+            Ticks::new(media).unwrap_or(Ticks::ZERO),
+            &view.state,
+        );
+        composer.renderer().set_compat_rasters(None);
+        if needs.is_empty() {
+            return;
+        }
+        let fresh = self
+            .compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .to_ask(key, revision, needs, std::time::Instant::now());
+        for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
+            let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
+            if let Ok(bytes) = codec::encode(&envelope) {
+                (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+            }
+        }
+        self.stats().compat_asked_ahead += fresh.len() as u64;
+    }
+
+    /// Whether the store answers everything the waiting frame of `key`
+    /// lacked (true when it did not say).
+    fn compat_answered(&self, key: Key) -> bool {
+        let Some((revision, needs)) = self.views.get(&key).and_then(|v| v.compat_missing.as_ref())
+        else {
+            return true;
+        };
+        self.compat_store().answers_all(key, *revision, needs)
     }
 
     fn stats(&self) -> std::sync::MutexGuard<'_, Stats> {
@@ -2700,16 +2776,24 @@ impl Thread {
                     stats.compat_answers = answers.0 as u64;
                     stats.compat_asked = answers.1 as u64;
                 }
-                // A frame waiting on the producer's answers draws now; a
-                // changed producer list, or answers the producer took back
-                // (an invalidation), redraw what is shown.
-                if let Some(view) = self.views.get_mut(&key)
-                    && applied
-                        .redraws(view.compat_blocked.is_some() || view.compat_paused_wait.is_some())
-                {
+                // A frame waiting on the producer's answers draws once it
+                // has them all; a changed producer list, or answers the
+                // producer took back (an invalidation), redraw what is shown.
+                let waiting = self
+                    .views
+                    .get(&key)
+                    .is_some_and(|v| v.compat_blocked.is_some() || v.compat_paused_wait.is_some());
+                let redraw = match applied {
+                    super::compat::Applied::Complete | super::compat::Applied::Answered => {
+                        waiting && self.compat_answered(key)
+                    }
+                    applied => applied.redraws(waiting),
+                };
+                if redraw && let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                     view.compat_blocked = None;
                     view.compat_paused_wait = None;
+                    view.compat_missing = None;
                 }
                 self.refresh_audio_ingress(key);
             }
@@ -3958,6 +4042,7 @@ impl Thread {
             preroll: None,
             compat_blocked: None,
             compat_paused_wait: None,
+            compat_missing: None,
             compat_needs: None,
             armed: Vec::new(),
             paused_sent: None,
@@ -5274,6 +5359,9 @@ impl Thread {
                     }
                     view.compat_blocked = None;
                     view.schedule.rendered(&view.clock, k);
+                    if rendered.is_some() {
+                        self.ask_ahead(key, k);
+                    }
                     if let Some(descriptor) = rendered {
                         if remote {
                             self.present_remote(key, &descriptor, shown_from);
@@ -5526,6 +5614,7 @@ impl Thread {
             match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    view.compat_missing = None;
                     overlay = composed.overlay;
                     scene3d_meta = composed.scene3d_meta;
                     chrome_legend = composed.chrome_legend;
@@ -5624,6 +5713,7 @@ impl Thread {
                     // override): ask the view's renderer, and render the
                     // frame again when every answer arrived.
                     let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    view.compat_missing = Some((revision, needs.clone()));
                     if timing.is_some() {
                         view.compat_blocked = Some(k);
                     } else if viewer_frame {
@@ -7090,6 +7180,16 @@ fn compat_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_hears_a_second_of_frames_ahead_within_its_horizon() {
+        let at = |fps: i64| ask_ahead_frames(TICKS_PER_SECOND / fps);
+        assert_eq!(at(30), 30);
+        assert_eq!(at(24), 24);
+        assert_eq!(at(120), 60);
+        assert_eq!(at(5), 12);
+        assert_eq!(ask_ahead_frames(0), 12);
+    }
 
     #[test]
     fn wake_lateness_excludes_the_requested_wait_and_early_commands() {

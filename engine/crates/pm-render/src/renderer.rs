@@ -1546,6 +1546,59 @@ impl Renderer {
         out
     }
 
+    /// The compatibility needs a frame of `composition` at `time` would ask
+    /// the producers for and they have not answered yet, without drawing
+    /// it: only its plan is built (the presenter tells the window what the
+    /// frames ahead of playback will need, `pm-node` `present`).
+    pub fn compat_missing(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<Vec<crate::compat::CompatNeed>, RenderError> {
+        if self.compat.is_none() {
+            return Ok(Vec::new());
+        }
+        request.validate()?;
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = request
+            .scale
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        let options3d = self.options3d.for_request(request);
+        self.open_channel_memo(document);
+        let (_, build) = plan::build_reusing(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            options3d,
+            Some(&mut self.text),
+            build_options(&comp, request, self.shaders.fallback_runner),
+            self.compat.as_deref(),
+            None,
+        );
+        self.evaluator.close_channel_memo();
+        Ok(build.compat_missing)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_into_once(
         &mut self,
