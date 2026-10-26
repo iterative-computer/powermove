@@ -38,7 +38,6 @@
  */
 import type { CompatNeed } from '../../../shared/engine-protocol';
 import type { CompatAnswerOptions, CompatPrepareOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
-import { COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT } from '../engine-connection/render-transport';
 import { compatKey } from '../../../shared/protocol-strings';
 import type { Disposable } from './api';
 import { compositorPixels } from './raster-pixels';
@@ -102,8 +101,10 @@ export interface RasterCompatHandle {
   reset(): void;
   /** Answers one need (tests, the transport); `fresh`: never `reuse` (an export frame). */
   answer(need: CompatNeed, revision: number, options?: CompatAnswerOptions): CompatAnswerResult;
-  /** Prepare an interactive answer and all its base dependencies asynchronously. */
-  prepare(need: CompatNeed, revision: number, options?: CompatPrepareOptions): Promise<void>;
+  /** Prepare an interactive answer and all its base dependencies: the
+   *  chain runs now; null when the answer is ready on return, else a promise
+   *  that settles once its bases and readback arrived. */
+  prepare(need: CompatNeed, revision: number, options?: CompatPrepareOptions): Promise<void> | null;
   /** Where base pixels came from (diagnostics; the cadence gates log it). */
   readonly stats: RasterCompatStats;
   dispose(): void;
@@ -311,12 +312,11 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   // A missing base unwinds only this preparation attempt. Retry with its
   // real pixels; never hand a wrapper a placeholder it could cache.
   const suspended = Symbol('raster preparation suspended');
-  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
+  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => CompatAnswerResult | Promise<CompatAnswerResult>) | null } | null = null;
   const preparing = new Map<string, Preparing>();
-  const running = new Set<Promise<void>>();
   const bases = new Map<string, { surface: any; bytes: number; persistent: boolean }>();
   let baseBytes = 0;
-  let pending = 0, generation = 0, readyRevision: number | null = null;
+  let generation = 0, readyRevision: number | null = null;
   let serial = 0;
   const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0,
     readbacks: 0, readbackMs: 0, readbackMsMax: 0, preparations: 0, prepareMs: 0, prepareMsMax: 0,
@@ -510,123 +510,157 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         // waits for these pixels: read them here, without the worker's two
         // message hops (measured 3 ms of a 5 ms round trip under load).
         const urgent = preparation.urgent;
-        preparation.readback = async () => {
+        preparation.readback = () => {
           const began = performance.now();
-          try { return finish(urgent ? readPixels(source) : await readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs))); }
-          finally { transport?.trace?.record('override readback', revision, need.time, began); }
+          const traced = () => transport?.trace?.record('override readback', revision, need.time, began);
+          if (urgent) {
+            try { return finish(readPixels(source)); } finally { traced(); }
+          }
+          return readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs)).then(finish).finally(traced);
         };
         return null;
       }
       return finish(readPixels(source));
     },
 
-    async prepare(need: CompatNeed, revision: number, prepareOptions?: CompatPrepareOptions): Promise<void> {
-      if (!options.engineRasterAsync || !wrapped()) return;
+    prepare(need: CompatNeed, revision: number, prepareOptions?: CompatPrepareOptions): Promise<void> | null {
+      if (!options.engineRasterAsync || !wrapped()) return null;
       sampleRevision(revision);
       const layer = findLayer(PM, String(need.composition), String(need.layer));
-      if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
+      if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return null;
       const key = sampleKey(need, revision);
       // Only duplicate required viewer needs share a retained answer.
       // Async captures keep today's fresh wrapper evaluation semantics.
       if (!prepareOptions?.urgent && ready.get(key)?.retained) ready.delete(key);
-      if (ready.get(key)?.layer === layer) return;
+      if (ready.get(key)?.layer === layer) return null;
       const existing = preparing.get(key);
       if (existing) {
-        if (existing.layer !== layer) return;
-        // The frame on screen asks for what a speculative preparation is
+        if (existing.layer !== layer) return null;
+        // The frame on screen asks for what a playback preparation is
         // already making: it goes on without waiting for its next turn.
         if (prepareOptions?.urgent) promote(existing);
         else void prepareOptions?.promoted?.then(() => promote(existing));
-        await existing.promise;
-        return;
-      }
-      // An urgent ask (the paused frame on screen) never waits behind
-      // speculative preparations for a slot.
-      if (!prepareOptions?.urgent && pending >= COMPAT_PREPARE_IN_FLIGHT + COMPAT_PREFETCH_IN_FLIGHT) {
-        const waitingGeneration = generation;
-        await Promise.race(running);
-        if (generation !== waitingGeneration) return;
-        return handle.prepare(need, revision, prepareOptions);
+        return existing.promise;
       }
       const epoch = generation;
-      pending++;
       const beganPreparation = performance.now();
       stats.preparations++;
       const valid = () => generation === epoch && findLayer(PM, String(need.composition), String(need.layer)) === layer && wrapped();
       const entry: Preparing = { layer, promise: null!, urgent: !!prepareOptions?.urgent, due: !!prepareOptions?.due, promote: null };
       void prepareOptions?.promoted?.then(() => promote(entry));
-      const promise = Promise.resolve().then(async () => {
-        const samples = new Map<string, any>();
-        const tainted = new WeakSet<object>();
-        try {
-          // A wrapper may ask for detached/retimed/cropped bases only after
-          // reading an earlier one (the typewriter's prefix). Discover each
-          // dependency with the actual previous pixels, then resume on a
-          // later turn. The finite bound also rejects a nonconvergent chain.
-          for (let phase = 0; phase < 64 && valid(); phase++) {
-            const queued = performance.now();
-            await preparationTurn(entry);
-            transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
-            if (!valid()) return;
-            const attempt = { samples, tainted, urgent: entry.urgent, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
-            let answer: CompatAnswerResult = null;
-            preparation = attempt;
-            const beganCpu = performance.now();
-            try { answer = handle.answer(need, revision, { fresh: true }); }
-            catch (error) { if (!attempt.missing) throw error; }
-            finally {
-              preparation = null;
-              const ms = performance.now() - beganCpu;
-              transport?.trace?.record('wrapper cpu', revision, need.time, beganCpu, phase);
-              stats.prepareCpuMs += ms; stats.prepareCpuMsMax = Math.max(stats.prepareCpuMsMax, ms);
-              if (ms > 8) { stats.slowPreparations.push({ time: Number(need.time) / TICKS_PER_SECOND, ms }); if (stats.slowPreparations.length > 20) stats.slowPreparations.shift(); }
-            }
-            const missing = attempt.missing;
-            if (!missing) {
-              if (attempt.readback) {
-                const beganReadback = performance.now();
-                stats.readbacks++;
-                try { answer = await attempt.readback(); }
-                finally {
-                  const ms = performance.now() - beganReadback;
-                  stats.readbackMs += ms; stats.readbackMsMax = Math.max(stats.readbackMsMax, ms);
-                }
-              }
-              if (!valid()) return;
-              if (answer?.kind === 'native') stats.passThroughSkips++;
-              ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: entry.urgent });
-              keepReady();
-              return;
-            }
-            stats.asyncLoads++;
-            const began = performance.now();
-            const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
-            transport?.trace?.record('base dependency', revision, need.time, began);
-            const ms = performance.now() - began;
-            stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
-            if (!valid()) return;
-            samples.set(missing.key, loaded?.surface ?? null);
-            // Cached under the key read when it was asked for, only if the
-            // engine drew it at that same revision: a document edited while
-            // it was on its way keeps it for this preparation alone.
-            if (loaded && loaded.revision === missing.revision) rememberBase(missing.content, loaded.surface);
-          }
-          if (valid()) throw new Error('The raster override did not converge after 64 asynchronous base dependencies.');
-        } catch (error) {
-          log(`asynchronous raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
-          throw error;
-        }
+      const samples = new Map<string, any>();
+      const tainted = new WeakSet<object>();
+      const finished = () => {
+        const ms = performance.now() - beganPreparation;
+        transport?.trace?.record('override prepared', revision, need.time, beganPreparation);
+        stats.prepareMs += ms; stats.prepareMsMax = Math.max(stats.prepareMsMax, ms);
+      };
+      const store = (answer: CompatAnswerResult) => {
+        if (!valid()) return;
+        if (answer?.kind === 'native') stats.passThroughSkips++;
+        ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: entry.urgent });
+        keepReady();
+      };
+      const readBack = async (read: () => CompatAnswerResult | Promise<CompatAnswerResult>) => {
+        const beganReadback = performance.now();
+        stats.readbacks++;
+        try { return await read(); }
         finally {
-          const ms = performance.now() - beganPreparation;
-          transport?.trace?.record('override prepared', revision, need.time, beganPreparation);
-          stats.prepareMs += ms; stats.prepareMsMax = Math.max(stats.prepareMsMax, ms);
-          pending--; running.delete(promise); if (preparing.get(key)?.promise === promise) preparing.delete(key);
+          const ms = performance.now() - beganReadback;
+          stats.readbackMs += ms; stats.readbackMsMax = Math.max(stats.readbackMsMax, ms);
         }
+      };
+      /** One run of the chain with the bases known so far: the base it
+       *  still misses, the readback its result waits for, or null when the
+       *  answer is stored. An urgent answer's readback runs here. */
+      const attempt = (phase: number): { missing: Dependency } | { read: () => Promise<CompatAnswerResult> } | null => {
+        const run = { samples, tainted, urgent: entry.urgent, missing: null as Dependency | null, readback: null as (() => CompatAnswerResult | Promise<CompatAnswerResult>) | null };
+        let answer: CompatAnswerResult = null;
+        preparation = run;
+        const beganCpu = performance.now();
+        try { answer = handle.answer(need, revision, { fresh: true }); }
+        catch (error) { if (!run.missing) throw error; }
+        finally {
+          preparation = null;
+          const ms = performance.now() - beganCpu;
+          transport?.trace?.record('wrapper cpu', revision, need.time, beganCpu, phase);
+          stats.prepareCpuMs += ms; stats.prepareCpuMsMax = Math.max(stats.prepareCpuMsMax, ms);
+          if (ms > 8) { stats.slowPreparations.push({ time: Number(need.time) / TICKS_PER_SECOND, ms }); if (stats.slowPreparations.length > 20) stats.slowPreparations.shift(); }
+        }
+        if (run.missing) return { missing: run.missing };
+        const read = run.readback;
+        if (read && !entry.urgent) return { read: () => readBack(read) };
+        if (read) {
+          stats.readbacks++;
+          answer = read() as CompatAnswerResult;
+        }
+        store(answer);
+        return null;
+      };
+      // A wrapper may ask for detached/retimed/cropped bases only after
+      // reading an earlier one (the typewriter's prefix). Discover each
+      // dependency with the actual previous pixels, then resume on a later
+      // turn. The finite bound also rejects a nonconvergent chain.
+      const drive = async (first: Exclude<ReturnType<typeof attempt>, null>): Promise<void> => {
+        let step: ReturnType<typeof attempt> = first;
+        for (let phase = 1; step; phase++) {
+          if ('read' in step) {
+            const answer = await step.read();
+            store(answer);
+            return;
+          }
+          if (phase >= 64) throw new Error('The raster override did not converge after 64 asynchronous base dependencies.');
+          const missing = step.missing;
+          stats.asyncLoads++;
+          const began = performance.now();
+          const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+          transport?.trace?.record('base dependency', revision, need.time, began);
+          const ms = performance.now() - began;
+          stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
+          if (!valid()) return;
+          samples.set(missing.key, loaded?.surface ?? null);
+          // Cached under the key read when it was asked for, only if the
+          // engine drew it at that same revision: a document edited while
+          // it was on its way keeps it for this preparation alone.
+          if (loaded && loaded.revision === missing.revision) rememberBase(missing.content, loaded.surface);
+          const queued = performance.now();
+          await preparationTurn(entry);
+          transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
+          if (!valid()) return;
+          step = attempt(phase);
+        }
+      };
+      const failed = (error: unknown) => {
+        log(`asynchronous raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      };
+      // The first run is now, in the caller's task: a frame's pass-through
+      // layers are answered together, before anything else runs, and their
+      // answers are ready when this returns null. Only a wrapper that reads
+      // a base, or a readback, continues later. Inside a run of the chain
+      // (a wrapper that asked for a capture) the first run waits a turn.
+      let later: Promise<void>;
+      if (preparation || producing) {
+        later = Promise.resolve().then(async () => {
+          await preparationTurn(entry);
+          if (!valid()) return;
+          const step = attempt(0);
+          if (step) await drive(step);
+        });
+      } else {
+        let step: ReturnType<typeof attempt>;
+        try { step = attempt(0); }
+        catch (error) { finished(); return Promise.resolve().then(() => failed(error)); }
+        if (!step) { finished(); return null; }
+        later = drive(step);
+      }
+      const promise = later.catch(failed).finally(() => {
+        finished();
+        if (preparing.get(key)?.promise === promise) preparing.delete(key);
       });
       entry.promise = promise;
       preparing.set(key, entry);
-      running.add(promise);
-      await promise;
+      return promise;
     },
 
     attach(next: EngineRenderTransport): () => void {

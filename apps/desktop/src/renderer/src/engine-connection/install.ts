@@ -492,6 +492,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const duration = Number((PM.curComp?.() ?? PM.proj)?.dur);
       return duration > 0 ? { start: 0, end: ticks(duration) } : null;
     },
+    layerSpan: (composition, layer) => {
+      if (composition !== String(PM.proj?.compId ?? PM.proj?.id ?? '')) return null;
+      const found = PM.L?.(layer);
+      const from = Number(found?.from), dur = Number(found?.dur);
+      return Number.isFinite(from) && Number.isFinite(dur) ? { start: ticks(from), end: ticks(from + dur) } : null;
+    },
     // A snapshot's own failure (an extension's request): recorded, never on the stage.
     onFailure: (code, message) => current?.reportFailure(code, message, undefined, false),
     onProducerError: (error) => {
@@ -530,7 +536,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // And the compatibility context draws over WebM export frames (kernel/compat-context.ts).
   const detachContextExports = (PM as any).CompatContextExports?.attach?.(renderTransport) ?? (() => {});
   // Playback: keep compatibility answers ahead of the clock (render-transport.ts).
-  const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.presentedWhilePlaying());
+  const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.pump());
   let wasPlaying = !!PM.playing;
   const offTransport = PM.bus?.on?.('transport', () => {
     const playing = !!PM.playing;
