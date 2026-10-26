@@ -240,8 +240,12 @@ export class EngineSourceMedia {
   private async jobRequest(asset: string, signal?: AbortSignal): Promise<EngineMediaJobRequest> {
     const project = this.host.project();
     const revision = this.host.revision();
-    // Copy before awaiting bindings, so later edits never mix source identities.
-    const frozen = JSON.stringify(project);
+    // Copy before awaiting bindings, so later edits never mix source
+    // identities. A source job reads only the project's id and this source's
+    // record (main's `sourceOnlyProject`); the whole project of a large
+    // document took a long task here, and as long again to parse in main,
+    // for every poster and filmstrip.
+    const frozen = JSON.stringify({ id: project.id, assets: { [asset]: project.assets?.[asset] } });
     await cancellable(this.bindSource(asset), signal);
     return { asset, revision, project: frozen, requestId: crypto.randomUUID() };
   }

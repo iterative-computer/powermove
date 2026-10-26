@@ -513,7 +513,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     session: snapshotSession,
     wake: wakeStandby,
     bind: async () => { await (PM as any).HostMedia?.flushBindings?.(PM.proj); },
-    changed: () => PM.bus?.emit?.('assets'),
+    // A poster arriving is runtime media state, not a document write: an
+    // unmarked `assets` makes the document barrier diff the whole project
+    // and the app autosave it (legacy/app.ts), once per poster.
+    changed: () => PM.bus?.emit?.('assets', { runtimeOnly: true }),
     error: error => log('error', `source media: ${error instanceof Error ? error.message : String(error)}`)
   });
   (PM as any).EngineSourceMedia = sourceMedia;

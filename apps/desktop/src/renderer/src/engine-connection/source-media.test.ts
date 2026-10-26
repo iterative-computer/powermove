@@ -323,6 +323,17 @@ describe('engine source consumers', () => {
     } finally { f.source.dispose(); }
   });
 
+  it('sends a source job only the project id and that source\'s record', async () => {
+    const f = fixture();
+    Object.assign(f.project as any, { layers: [{ id: 'l', type: 'video', d: { asset: 'clip' } }], comps: { c: { layers: [] } } });
+    (f.project.assets as any).other = { id: 'other', kind: 'image', w: 4, h: 4 };
+    f.strip.mockResolvedValue({ width: 4, height: 2, count: 1, data: new Uint8Array(32) });
+    await f.source.filmstrip('clip', [0], 4, 2);
+    const request = f.strip.mock.calls[0]![0] as any;
+    expect(JSON.parse(request.project)).toEqual({ id: 'project', assets: { clip: f.project.assets.clip } });
+    f.source.dispose();
+  });
+
   it('freezes the original before waiting for bindings and cancels the owning job', async () => {
     const f = fixture();
     let bound!: () => void;
