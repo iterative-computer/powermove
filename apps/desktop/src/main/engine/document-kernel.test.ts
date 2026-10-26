@@ -419,3 +419,45 @@ it('expires abandoned stream and digest tokens but not a write in flight', async
     expect(await readdir(cache)).toEqual([]);
   } finally { held.release(); held.restore(); await stop(); vi.useRealTimers(); await rm(cache, { recursive: true, force: true }); }
 });
+
+it('names the staging file to the utility as a stream begins and tells it how much is written after every chunk', async () => {
+  const cache = await mkdtemp(path.join(os.tmpdir(), 'pm-kernel-test-'));
+  const ipc = new Ipc(), event = owner(7);
+  const told: Array<{ op: string; args: any; bytes?: number }> = [];
+  const call = vi.fn(async (_id: number, request: string) => {
+    const { op, args } = JSON.parse(request);
+    const entry: { op: string; args: any; bytes?: number } = { op, args };
+    told.push(entry);
+    // What the file holds (at least) when the utility hears of it.
+    if (op === 'grow') entry.bytes = (await readFile(args.path)).byteLength;
+    if (op === 'load') return JSON.stringify({ ok: true, value: { pending: false, revision: args.revision, hash: 'c'.repeat(64), integrity: 'checked' } });
+    return '{"ok":true,"value":null}';
+  });
+  const stop = installDocumentKernelIpc({ ipc: ipc as unknown as IpcMain, cache, trusted: () => true, call });
+  try {
+    const token = await ipc.invoke(IPC.begin, event, 5);
+    await ipc.invoke(IPC.write, event, token, new TextEncoder().encode('{"a":'));
+    await ipc.invoke(IPC.write, event, token, new TextEncoder().encode('[1,2]}'));
+    await ipc.invoke(IPC.commit, event, token, 'document', 5);
+    const file = told[0]!.args.path;
+    expect(told.map(t => t.op)).toEqual(['preparse', 'grow', 'grow', 'load']);
+    expect(told[0]!.args).toEqual({ path: file, revision: 5 });
+    const grown = told.filter(t => t.op === 'grow');
+    expect(grown.map(t => [t.args.path, t.args.length])).toEqual([[file, 5], [file, 11]]);
+    // Never ahead of the file.
+    for (const t of grown) expect(t.bytes).toBeGreaterThanOrEqual(t.args.length);
+    expect(told[3]!.args.path).toBe(file);
+    // An abandoned stream ends the utility's parse; one without a revision never starts one.
+    told.length = 0;
+    const abandoned = await ipc.invoke(IPC.begin, event, 6);
+    await ipc.invoke(IPC.write, event, abandoned, new Uint8Array([1]));
+    await ipc.invoke(IPC.abort, event, abandoned);
+    expect(told.map(t => t.op)).toEqual(['preparse', 'grow', 'preparseEnd']);
+    told.length = 0;
+    const plain = await ipc.invoke(IPC.begin, event);
+    await ipc.invoke(IPC.write, event, plain, new Uint8Array([1]));
+    await ipc.invoke(IPC.abort, event, plain);
+    expect(told).toEqual([]);
+    expect(await readdir(cache)).toEqual([]);
+  } finally { await stop(); await rm(cache, { recursive: true, force: true }); }
+});

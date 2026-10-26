@@ -23,7 +23,9 @@ export interface DocumentKernelBridge {
   readonly automaticRecovery?: true;
   /** The trusted host supplies the owner. The page cannot name a file or another window. */
   call(request: string, bytes?: Uint8Array): string;
-  begin(): Promise<string>;
+  /** `revision`: the revision the document will be committed at, so the
+   *  engine can parse the text as it arrives (main's `preparse`). */
+  begin(revision?: number): Promise<string>;
   write(token: string, chunk: Uint8Array): Promise<void>;
   commit(token: string, document: string, revision: number): Promise<DocumentKernelReceipt>;
   abort(token: string): Promise<void>;

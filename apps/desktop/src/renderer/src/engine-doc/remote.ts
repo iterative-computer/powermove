@@ -184,7 +184,7 @@ export function ingestDocumentPieces(bridge: DocumentKernelBridge, pieces: Async
 
 /** `onStreamed`: called once main has every byte, as the engine starts parsing. */
 async function ingest(bridge: DocumentKernelBridge, produce: (emit: (text: string) => Promise<void>) => Promise<void>, document: string, revision: number, onStreamed?: () => void): Promise<DocumentKernelReceipt> {
-  const token = await bridge.begin();
+  const token = await bridge.begin(revision);
   let complete = false;
   try {
     const encoder = new TextEncoder();

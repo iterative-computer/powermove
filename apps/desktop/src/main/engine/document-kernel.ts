@@ -7,7 +7,10 @@ import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 import { DOCUMENT_CHUNK_BYTES, DOCUMENT_KERNEL_IPC, DOCUMENT_QUEUED_WRITES, type DocumentKernelReceipt } from '../../shared/document-kernel';
 
 type Sender = IpcMainEvent | IpcMainInvokeEvent;
-type Stream = { owner: number; generation: number; dir: string; file: FileHandle; hash: Hash; bytes: number; closed: boolean; cancelled: boolean; pendingWrites: number; queuedBytes: number; tail: Promise<void>; idle?: NodeJS.Timeout; cleanup?: Promise<void> };
+/** `written`: bytes on disk, in order; `parsing`: the utility parses the
+ *  file as it grows (`preparse`, then `grow` after every chunk) until a load
+ *  takes it or the stream ends without one. */
+type Stream = { owner: number; generation: number; dir: string; file: FileHandle; hash: Hash; bytes: number; written: number; parsing: boolean; closed: boolean; cancelled: boolean; pendingWrites: number; queuedBytes: number; tail: Promise<void>; idle?: NodeJS.Timeout; cleanup?: Promise<void> };
 type Digest = { owner: number; hash: Hash; bytes: number; idle?: NodeJS.Timeout };
 type Owner = { generation: number; retiring?: Promise<void>; beginning: Set<Promise<string>>; commits: Set<Promise<DocumentKernelReceipt>>; unwatch: () => void };
 const LIMIT = 512 * 1024 * 1024;
@@ -44,10 +47,15 @@ export function installDocumentKernelIpc(options: {
     d.idle = setTimeout(() => { if (digests.get(token) === d) digests.delete(token); }, IDLE_MS);
     d.idle.unref();
   };
+  /** Tells the utility, without waiting, about the stream's file. */
+  const tell = (s: Stream, op: string, args: object): void => {
+    void options.call(s.owner, JSON.stringify({ op, args })).catch(() => {});
+  };
   const cleanup = (token: string, s: Stream): Promise<void> => {
     if (s.cleanup) return s.cleanup;
     s.closed = s.cancelled = true;
     clearTimeout(s.idle);
+    if (s.parsing) { s.parsing = false; tell(s, 'preparseEnd', {}); }
     s.cleanup = (async () => {
       try {
         await s.tail.catch(() => {});
@@ -126,7 +134,7 @@ export function installDocumentKernelIpc(options: {
       if (!event.sender.isDestroyed()) event.returnValue = answer;
     });
   });
-  options.ipc.handle(DOCUMENT_KERNEL_IPC.begin, async event => {
+  options.ipc.handle(DOCUMENT_KERNEL_IPC.begin, async (event, revision?: unknown) => {
     const owner = ownerOf(event);
     const state = owners.get(owner)!;
     const generation = state.generation;
@@ -143,8 +151,11 @@ export function installDocumentKernelIpc(options: {
         const file = await open(path.join(dir, 'canonical.json'), 'wx', 0o600);
         if (disposed || event.sender.isDestroyed() || generation !== state.generation) { await file.close(); throw new Error('The document owner closed'); }
         const token = randomUUID();
-        const stream: Stream = { owner, generation, dir, file, hash: createHash('sha256'), bytes: 0, closed: false, cancelled: false, pendingWrites: 0, queuedBytes: 0, tail: Promise.resolve() };
+        // A revision the page names lets the utility parse the text as it arrives.
+        const parsing = Number.isSafeInteger(revision) && (revision as number) >= 0;
+        const stream: Stream = { owner, generation, dir, file, hash: createHash('sha256'), bytes: 0, written: 0, parsing, closed: false, cancelled: false, pendingWrites: 0, queuedBytes: 0, tail: Promise.resolve() };
         streams.set(token, stream);
+        if (parsing) tell(stream, 'preparse', { path: path.join(dir, 'canonical.json'), revision });
         expireStream(token, stream);
         return token;
       } catch (error) { if (dir) await rm(dir, { recursive: true, force: true }); throw error; }
@@ -160,6 +171,8 @@ export function installDocumentKernelIpc(options: {
     if (s.pendingWrites >= QUEUED_WRITES || s.queuedBytes + bytes.byteLength > QUEUED_WRITES * CHUNK_LIMIT) throw new Error('Document stream backpressure: await pending writes');
     clearTimeout(s.idle);
     s.bytes += bytes.byteLength; s.pendingWrites++; s.queuedBytes += bytes.byteLength;
+    // Chunks arrive in order: hashed now, while earlier ones are still written.
+    s.hash.update(bytes);
     const job = s.tail.then(async () => {
       let offset = 0;
       while (offset < bytes.byteLength) {
@@ -169,7 +182,8 @@ export function installDocumentKernelIpc(options: {
         offset += written.bytesWritten;
       }
       if (s.cancelled) throw new Error('The document stream is closed');
-      s.hash.update(bytes);
+      s.written += bytes.byteLength;
+      if (s.parsing) tell(s, 'grow', { path: path.join(s.dir, 'canonical.json'), length: s.written });
     });
     s.tail = job.finally(() => { s.pendingWrites--; s.queuedBytes -= bytes.byteLength; expireStream(token as string, s); });
     await s.tail;
@@ -188,6 +202,8 @@ export function installDocumentKernelIpc(options: {
         if (!current()) throw new Error('The document owner closed');
         await s.file.close();
         const hash = s.hash.digest('hex');
+        // The load takes the utility's parse of this file (at this revision).
+        s.parsing = false;
         const request = async (op: string, args?: object): Promise<any> => {
           if (!current()) throw new Error('The document owner closed');
           const reply = JSON.parse(await options.call(s.owner, JSON.stringify({ op, args })));
