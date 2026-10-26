@@ -238,10 +238,15 @@ export class EngineSourceMedia {
   }
 
   private async jobRequest(asset: string, signal?: AbortSignal): Promise<EngineMediaJobRequest> {
-    const project = this.host.project();
+    const project = this.host.project(), meta = project.assets?.[asset];
+    if (!meta) throw new EngineSnapshotError('mediaOffline', 'This source is no longer in the project.');
     const revision = this.host.revision();
     // Copy before awaiting bindings, so later edits never mix source identities.
-    const frozen = JSON.stringify(project);
+    // A source job reads only its source (main's sourceOnlyProject): the rest
+    // of a large document would be serialized here and parsed twice in main
+    // for every poster and filmstrip.
+    const { poster: _poster, ...source } = meta;
+    const frozen = JSON.stringify({ id: project.id, assets: { [asset]: source } });
     await cancellable(this.bindSource(asset), signal);
     return { asset, revision, project: frozen, requestId: crypto.randomUUID() };
   }

@@ -91,4 +91,23 @@ describe('legacy ui-state install', () => {
     expect(PM.UIState.getGroupCollapsed(layer)).toBe(true);
     expect(PM.UIState.getLayerCollapsed(layer)).toBe(true);
   });
+  it('prunes handles of removed keys, keeps present ones, and migrates stored legacy handles once', () => {
+    const { PM, layer, key } = uiStateRegistry();
+    const stored: any = { i: 'key-b', t: 1, v: 0, _ho: [1, 2] };
+    layer.p.opacity.kf.push(stored);
+    PM.UIState.prune(PM.proj);
+    expect(PM.UIState.getKeyHandles(stored)).toEqual({ ho: [1, 2] });
+    expect(JSON.stringify(stored).includes('_ho')).toBe(false);
+    key._hi = [5, 6];
+    const descriptor = Object.getOwnPropertyDescriptor(key, '_hi');
+    // A re-prune keeps the shared accessors and the present keys' handles.
+    PM.UIState.prune(PM.proj);
+    expect(Object.getOwnPropertyDescriptor(key, '_hi')).toEqual(descriptor);
+    expect(PM.UIState.getKeyHandles(key)).toEqual({ hi: [5, 6] });
+    layer.p.opacity.kf = [key];
+    PM.UIState.prune(PM.proj);
+    expect(PM.UIState.keyHandles.has('key-b')).toBe(false);
+    expect(stored._ho).toBeUndefined();
+    expect(key._hi).toEqual([5, 6]);
+  });
 });

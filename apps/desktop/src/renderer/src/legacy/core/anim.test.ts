@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
+import v8 from 'node:v8';
 import { install } from './anim';
+import { install as installUiState } from './ui-state';
 import { makePM } from '../__tests__/make-pm';
 
 function animRegistry(): PMRegistry {
@@ -167,6 +169,33 @@ describe('legacy animation install', () => {
     expect(result[0].inInterp).toBe('linear'); // First key has no incoming segment.
     expect(result[0].i).toBeTruthy();
     expect(result[1].t).toBe(2);
+  });
+
+  it('keeps opened native-ease keys in one fast shape, through adoption and the legacy views', () => {
+    // A dense project holds about a million keys: a key in dictionary mode,
+    // or with a shape of its own, costs several times the memory.
+    v8.setFlagsFromString('--allow-natives-syntax');
+    const fast = new Function('o', 'return %HasFastProperties(o)') as (o: object) => boolean;
+    const same = new Function('a', 'b', 'return %HaveSameMap(a, b)') as (a: object, b: object) => boolean;
+    const PM = animRegistry();
+    PM.bus = { on() {}, emit() {} };
+    installUiState(PM);
+    const ease = { speed: 0, influence: 100 / 3 };
+    const stored = [0, 1, 2].map(t => ({ t, v: t * 10, i: `k${t}`, outInterp: 'linear', outEase: { ...ease }, inInterp: 'linear', inEase: { ...ease }, autoBezier: false, continuous: false }));
+    const keys = PM.normalizeKeyframes(JSON.parse(JSON.stringify(stored)), 0, 30, 0, { stable: true });
+    PM.proj = { layers: [{ id: 'L', p: { x: { v: 0, kf: keys } } }], comps: {} };
+    PM.UIState.prune(PM.proj);
+    for (const key of keys) {
+      expect(fast(key)).toBe(true);
+      expect(same(key, keys[0])).toBe(true);
+    }
+    // The stored JSON is what opened; the legacy fields are views of it.
+    expect(JSON.parse(JSON.stringify(keys))).toEqual(stored);
+    expect(keys[0].eo).toEqual([0, 0]);
+    expect(keys[1].hold).toBe(false);
+    keys[1]._ho = [3, 4];
+    expect(PM.UIState.getKeyHandles(keys[1])).toEqual({ ho: [3, 4] });
+    expect(keys[0]._ho).toBeUndefined();
   });
 
   it('replaces missing and repeated ids deterministically when opening a document', () => {

@@ -1084,13 +1084,19 @@ async function openProjectFile(file: any, association?: { path: string; projectI
   const loading = beginProjectLoading(association?.projectId || null, file.name || 'project');
   // A newer open (picked, dropped, or from Projects) or a newer load wins.
   const current = () => loadGeneration === loading && isCurrentOpen(generation);
+  // Releases the engine's prepared copy of a document this open abandons.
+  let release = () => {};
   try {
     await yieldLoad();
-    let o: any, mediaRestored = false;
+    // Embedded media streamed from main's project reader is restored while the
+    // document hydrates: neither needs the other, and the copy is main's work.
+    let o: any, restoring: Promise<void> | null = null;
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
       const { token, media, documentRange } = file.native;
-      await withProjectReader(async () => {
+      let documentRead!: (document: any) => void;
+      const read = new Promise<any>(resolve => { documentRead = resolve; });
+      restoring = withProjectReader(async () => {
         // A large PMV4 document stays in the file; others arrive as JSON text.
         const ranged = typeof file.native.documentJSON !== 'string';
         const documentBytes = ranged ? documentRange?.length || 0 : 0;
@@ -1100,11 +1106,14 @@ async function openProjectFile(file: any, association?: { path: string; projectI
             completed => opening.update({ label: file.name, completed, total }))
           : openedDocument(file.native);
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
+        documentRead(document);
         await settleAssetRestores();
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           completed => opening.update({ label: file.name, completed: documentBytes + completed, total }), token);
-        o = document; mediaRestored = true;
       }, () => bridge.close(token));
+      // Awaited after hydration; a failure before the document is read fails the read.
+      restoring.catch(() => {});
+      o = await Promise.race([read, restoring.then(() => read)]);
     } else if (file.native) o = unpackProjectFile(file.native.data);
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
@@ -1120,11 +1129,21 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     source.id = association?.projectId || PM.uid('project');
     const project = await hydrateAsync(source, current);
     if (!project || !current()) { opening.close(); return false; }
-    if (!mediaRestored) { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
     // Parsing and restoring media have already overlapped module loading.
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);
     if (!current()) { opening.close(); return false; }
+    // The new engine's copy of the document is prepared while media finishes
+    // restoring and this window checkpoints the project: most of it is the
+    // engine process parsing and hashing, not this thread. Nothing below
+    // writes the project before it is published.
+    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project));
+    preparing.catch(() => {});
+    release = () => { void preparing.then(() => PM.EngineDoc?.discardPrepared?.(project), () => {}); };
+    const abandon = () => { release(); opening.close(); return false; };
+    if (restoring) await restoring;
+    else { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
+    if (!current()) return abandon();
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.
@@ -1151,14 +1170,17 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (archive && PM.store.set(`agentThreads.${project.id}`, archive) === false) {
       throw new Error('Could not restore agent threads: project storage is unavailable or full');
     }
-    if (!await captureProjectSessionAsync(current) || !current()) { opening.close(); return false; }
+    if (!await captureProjectSessionAsync(current) || !current()) return abandon();
     const historyToken = await PM.hist.prepareImport?.(o.history, current, project.compId);
-    if (!current()) { opening.close(); return false; }
+    if (!current()) return abandon();
     if (PM.Projects.recoverAsync) await PM.Projects.recoverAsync(project, undefined, current);
     else PM.Projects.put(project);
-    if (!current()) { opening.close(); return false; }
-    await PM.EngineDoc?.prepare?.(project);
-    if (!current()) { PM.EngineDoc?.discardPrepared?.(project); opening.close(); return false; }
+    if (!current()) return abandon();
+    await preparing;
+    if (!current()) return abandon();
+    // A file's state starts here, so the switch does not serialize a local
+    // baseline of the whole document: the file's fingerprint replaces it.
+    if (association && !fileStates.has(project.id)) fileStates.set(project.id, { path: association.path, dirty: true });
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
     const state = fileState(project.id);
     state.path = association?.path;
@@ -1179,6 +1201,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     PM.ProjectsScreen?.hide?.();
     return true;
   } catch (e: any) {
+    release();
     opening.close();
     if (current()) PM.toast('Could not open project: ' + e.message, 4500);
     return false;

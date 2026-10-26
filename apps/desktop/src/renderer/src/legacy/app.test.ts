@@ -397,6 +397,38 @@ describe('legacy app install', () => {
     expect(toasts).toContain('Opened Finder Project.pmv');
   });
 
+  it('checkpoints an opened file while the engine prepares it, without a second baseline', async () => {
+    let externalOpen!: (result: any) => Promise<void>;
+    const { PM } = appRegistry(true, undefined, undefined, { onProjectOpenExternal: (callback: typeof externalOpen) => { externalOpen = callback; return () => {}; } });
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    PM.ProjectsScreen = { hide: vi.fn() };
+    let finishPrepare!: () => void;
+    const checkpointed: string[] = [];
+    PM.EngineDoc = { prepare: vi.fn(() => { checkpointed.push('prepare'); return new Promise<void>(resolve => { finishPrepare = resolve; }); }), discardPrepared: vi.fn() };
+    const recover = PM.Projects.recoverAsync, put = PM.Projects.put;
+    if (recover) PM.Projects.recoverAsync = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return recover(project, ...rest); };
+    else PM.Projects.put = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return put(project, ...rest); };
+    const document = { proj: { ...PM.proj, id: 'from-finder', name: 'Finder Project' } };
+
+    const opening = externalOpen({ ok: true, path: '/tmp/Finder Project.pmv', projectId: 'from-finder', data: new TextEncoder().encode(JSON.stringify(document)) });
+    await vi.waitFor(() => expect(checkpointed).toContain('from-finder'));
+    expect(checkpointed.indexOf('prepare')).toBeGreaterThanOrEqual(0);
+    expect(checkpointed.indexOf('prepare')).toBeLessThan(checkpointed.indexOf('from-finder'));
+    expect(PM.proj.id).not.toBe('from-finder');
+    finishPrepare();
+    await opening;
+    expect(PM.proj.id).toBe('from-finder');
+    const state = PM.projectFileState('from-finder');
+    expect(state.path).toBe('/tmp/Finder Project.pmv');
+    expect(state.savedHash).toMatch(/\S/);
+    expect(state.baselineHash).toBeUndefined();
+    expect(state.dirty).toBe(false);
+    expect(PM.EngineDoc.discardPrepared).not.toHaveBeenCalled();
+  });
+
   it('reopens negative strip starts and their earlier local keys, including nested compositions', () => {
     const { PM } = appRegistry();
     const layer = {
@@ -1587,6 +1619,36 @@ it.each([false, true])('reads a streamed document range, then lets main copy its
     expect(PM.proj.id).toBe('ranged-open');
     expect(PM.proj.name).toBe('Ranged');
   }
+});
+
+it.each([true, false])('publishes a streamed project only after main copied its media, while the engine prepares it (copy succeeds: %s)', async succeeds => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  const project = PM.mkProject({ id: 'source', name: 'Ranged', assets: { clip: { id: 'clip', kind: 'video', storageKey: 'media:clip' } } });
+  const bytes = new TextEncoder().encode(JSON.stringify({ proj: project, history: { version: 1, index: -1, entries: [] } }));
+  const offset = 9, media = [{ id: 'clip', type: 'video/mp4', offset: offset + bytes.length, length: 4096, revision: 'saved', sha256: 'a'.repeat(64) }];
+  const read = vi.fn(async (_token: string, at: number, length: number) => bytes.subarray(at - offset, at - offset + length));
+  let copied!: (ok: boolean) => void;
+  const putProjectRange = vi.fn(() => new Promise<boolean>((resolve, reject) => { copied = ok => ok ? resolve(true) : reject(new Error('The project media checksum does not match.')); }));
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true), putProjectRange };
+  PM.EngineDoc = { prepare: vi.fn(async () => {}), discardPrepared: vi.fn() };
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Ranged.pmv', projectId: 'ranged-open', token: 'ranged-reader',
+    size: offset + bytes.length + 4096, media, documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }),
+    projectRead: { read, close: vi.fn(async () => undefined) } } as any);
+  const opening = PM.openProject();
+  await vi.waitFor(() => expect(putProjectRange).toHaveBeenCalledOnce());
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(PM.proj.id).not.toBe('ranged-open');
+  // The engine prepares the hydrated document while the copy runs.
+  expect(PM.EngineDoc.prepare).toHaveBeenCalledOnce();
+  copied(succeeds);
+  await opening;
+  await Promise.resolve();
+  expect(PM.proj.id === 'ranged-open').toBe(succeeds);
+  expect(PM.EngineDoc.discardPrepared).toHaveBeenCalledTimes(succeeds ? 0 : 1);
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(!succeeds);
 });
 
 it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {
