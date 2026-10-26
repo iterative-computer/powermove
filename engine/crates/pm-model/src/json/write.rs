@@ -29,9 +29,8 @@ use super::{JsString, Value};
 
 /// A read-only view over a JSON-shaped tree, so one writer serves [`Value`] and
 /// the revisioned document tree.
-pub trait JsonTree {
-    type Child: JsonTree;
-    fn view(&self) -> View<'_, Self::Child>;
+pub trait JsonTree: Sized {
+    fn view(&self) -> View<'_, Self>;
 }
 
 /// One node of a [`JsonTree`].
@@ -45,7 +44,6 @@ pub enum View<'a, C> {
 }
 
 impl JsonTree for Value {
-    type Child = Value;
     fn view(&self) -> View<'_, Value> {
         match self {
             Value::Null => View::Null,
@@ -82,8 +80,77 @@ pub fn write_canonical<T: JsonTree, S: Sink>(value: &T, sink: &mut S) {
         sink,
         buf: String::with_capacity(8192),
     };
-    write_tree(value, &mut buffer);
+    write_tree(value, &mut buffer, &mut Whole);
     buffer.flush();
+}
+
+/// The canonical serialization of `value` with the members `split` picks
+/// (array elements and object values, asked before each is written; never
+/// inside a picked one) left out: the text around them, one piece more than
+/// members picked, and those members, in order. Writing each member's
+/// canonical serialization between the pieces gives [`write_canonical`]'s.
+pub(crate) fn write_canonical_split<'a, T: JsonTree>(
+    value: &'a T,
+    split: impl FnMut(&'a T) -> bool,
+) -> (Vec<String>, Vec<&'a T>) {
+    let mut pieces = Pieces::default();
+    let mut cut = Split {
+        members: Vec::new(),
+        split,
+    };
+    let mut buffer = Buffered {
+        sink: &mut pieces,
+        buf: String::with_capacity(8192),
+    };
+    write_tree(value, &mut buffer, &mut cut);
+    buffer.flush();
+    pieces.texts.push(pieces.current);
+    (pieces.texts, cut.members)
+}
+
+/// Decides, before a member is written, whether it is written elsewhere.
+trait Cut<'a, T, S: Sink> {
+    fn cut(&mut self, member: &'a T, out: &mut Buffered<'_, S>) -> bool;
+}
+
+/// Every member written in place.
+struct Whole;
+
+impl<T, S: Sink> Cut<'_, T, S> for Whole {
+    #[inline(always)]
+    fn cut(&mut self, _: &T, _: &mut Buffered<'_, S>) -> bool {
+        false
+    }
+}
+
+#[derive(Default)]
+struct Pieces {
+    texts: Vec<String>,
+    current: String,
+}
+
+impl Sink for Pieces {
+    fn push_str(&mut self, s: &str) {
+        self.current.push_str(s);
+    }
+}
+
+struct Split<'a, T, F> {
+    members: Vec<&'a T>,
+    split: F,
+}
+
+impl<'a, T, F: FnMut(&'a T) -> bool> Cut<'a, T, Pieces> for Split<'a, T, F> {
+    fn cut(&mut self, member: &'a T, out: &mut Buffered<'_, Pieces>) -> bool {
+        if !(self.split)(member) {
+            return false;
+        }
+        out.flush();
+        let text = core::mem::take(&mut out.sink.current);
+        out.sink.texts.push(text);
+        self.members.push(member);
+        true
+    }
 }
 
 struct Buffered<'a, S: Sink> {
@@ -171,7 +238,11 @@ impl<S: Sink> Buffered<'_, S> {
     }
 }
 
-fn write_tree<T: JsonTree, S: Sink>(value: &T, out: &mut Buffered<'_, S>) {
+fn write_tree<'a, T: JsonTree, S: Sink, C: Cut<'a, T, S>>(
+    value: &'a T,
+    out: &mut Buffered<'_, S>,
+    cut: &mut C,
+) {
     match value.view() {
         View::Null => out.push("null"),
         View::Bool(true) => out.push("true"),
@@ -190,21 +261,25 @@ fn write_tree<T: JsonTree, S: Sink>(value: &T, out: &mut Buffered<'_, S>) {
                 if i > 0 {
                     out.push_char(',');
                 }
-                write_tree(item, out);
+                if !cut.cut(item, out) {
+                    write_tree(item, out, cut);
+                }
             }
             out.push_char(']');
         }
         View::Object(map) => {
             out.push_char('{');
             let mut first = true;
-            let mut entry = |key: &JsString, child: &T::Child, out: &mut Buffered<'_, S>| {
+            let mut entry = |key: &JsString, child: &'a T, out: &mut Buffered<'_, S>| {
                 if !first {
                     out.push_char(',');
                 }
                 first = false;
                 out.quoted(key);
                 out.push_char(':');
-                write_tree(child, out);
+                if !cut.cut(child, out) {
+                    write_tree(child, out, cut);
+                }
             };
             if map.keys().all(|k| utf16_order_matches_bytes(k.as_bytes())) {
                 for (key, child) in map {

@@ -48,7 +48,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use crate::hash::canonical_digest;
+use crate::hash::canonical_digest_parallel;
 use crate::json::write::{JsonTree, View};
 use crate::json::{JsString, Map, ObjectMap, Value};
 use crate::ops::{self, Op};
@@ -123,7 +123,7 @@ impl Node {
     /// tree as `Node::from_value(parse_bytes(bytes)?, rev)` without building
     /// the intermediate `Value` (for a large document, its memory again).
     pub fn parse_bytes(bytes: &[u8], rev: u64) -> Result<Node, crate::json::ParseError> {
-        crate::json::parse_bytes_with(bytes, &mut NodeBuilder { rev })
+        crate::json::parse_bytes_parallel(bytes, &mut NodeBuilder { rev })
     }
 
     /// The revision at which this subtree last changed.
@@ -280,6 +280,7 @@ fn same_array(old: &[Node], new: &[Value]) -> bool {
 }
 
 /// Builds [`Node`]s while parsing (`Node::parse_bytes`).
+#[derive(Clone)]
 struct NodeBuilder {
     rev: u64,
 }
@@ -316,10 +317,10 @@ impl crate::json::TreeBuilder for NodeBuilder {
             kind: NodeKind::Array(Arc::new(items)),
         }
     }
-    fn object(&mut self, members: Vec<(JsString, Node)>) -> Node {
+    fn object(&mut self, members: &mut Vec<(JsString, Node)>, start: usize) -> Node {
         Node {
             rev: self.rev,
-            kind: NodeKind::Object(Arc::new(members.into_iter().collect())),
+            kind: NodeKind::Object(Arc::new(ObjectMap::from_members(members, start))),
         }
     }
 }
@@ -539,7 +540,6 @@ impl Tree for Node {
 }
 
 impl JsonTree for Node {
-    type Child = Node;
     fn view(&self) -> View<'_, Node> {
         match self.kind() {
             NodeKind::Null => View::Null,
@@ -850,7 +850,7 @@ impl Document {
     pub fn canonical_digest(&self) -> Option<[u8; 32]> {
         *self
             .digest
-            .get_or_init(|| self.root.as_ref().map(canonical_digest))
+            .get_or_init(|| self.root.as_ref().map(canonical_digest_parallel))
     }
 }
 

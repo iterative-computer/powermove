@@ -17,3 +17,9 @@ ryu-js.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+
+# sha2 uses the ARMv8 SHA-256 instructions only with `asm` (about four
+# times faster: the canonical hash and the integrity digest of a large
+# document hash its whole canonical text).
+[target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }

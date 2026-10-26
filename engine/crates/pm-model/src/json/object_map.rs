@@ -90,14 +90,36 @@ where
     for key in keys.clone() {
         key.hash(&mut hash);
     }
+    let hash = hash.finish();
+    // A thread's recent schemas first: threads parsing one document side by
+    // side (json::parse_bytes_parallel) would otherwise queue on the lock
+    // for every keyframe. Its entries are weak hints too.
+    let slot = (hash as usize) % RECENT_SCHEMAS;
+    let recent = RECENT.with(|recent| {
+        let (key, schema) = &recent.borrow()[slot];
+        if *key == hash { schema.upgrade() } else { None }
+    });
+    if let Some(schema) = recent
+        && schema.keys.iter().eq(keys.clone())
+    {
+        return schema;
+    }
     static INTERNER: OnceLock<Mutex<SchemaInterner>> = OnceLock::new();
     // No user code runs while locked. Recovering poison remains safe because
     // entries are only weak hints and the map validates all key bytes.
-    INTERNER
+    let schema = INTERNER
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .intern(keys, hash.finish())
+        .intern(keys, hash);
+    RECENT.with(|recent| recent.borrow_mut()[slot] = (hash, Arc::downgrade(&schema)));
+    schema
+}
+
+const RECENT_SCHEMAS: usize = 64;
+thread_local! {
+    static RECENT: core::cell::RefCell<[(u64, Weak<KeySchema>); RECENT_SCHEMAS]> =
+        core::cell::RefCell::new(core::array::from_fn(|_| (0, Weak::new())));
 }
 
 /// Unique `JsString` keys, sorted, each with a separately stored value.
@@ -300,25 +322,35 @@ impl<V> ObjectMap<V> {
     }
 }
 
+impl<V> ObjectMap<V> {
+    /// The map of `members[start..]` (moved out; earlier members stay): sorted
+    /// by key, the last of equal keys kept. Its values get a vector of exactly
+    /// their number, and the pairs are never collected into one of their own
+    /// (the JSON parser's members stay on its stack until here).
+    pub(crate) fn from_members(members: &mut Vec<(JsString, V)>, start: usize) -> Self {
+        let tail = &mut members[start..];
+        if !tail.windows(2).all(|w| w[0].0 < w[1].0) {
+            // Stable, so equal keys stay in arrival order: keep each run's last.
+            tail.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut kept = start;
+            for at in start..members.len() {
+                if at + 1 < members.len() && members[at].0 == members[at + 1].0 {
+                    continue;
+                }
+                members.swap(kept, at);
+                kept += 1;
+            }
+            members.truncate(kept);
+        }
+        let schema = schema_for(members[start..].iter().map(|(key, _)| key));
+        let values = members.drain(start..).map(|(_, value)| value).collect();
+        Self { schema, values }
+    }
+}
+
 impl<V> FromIterator<(JsString, V)> for ObjectMap<V> {
     fn from_iter<I: IntoIterator<Item = (JsString, V)>>(iter: I) -> Self {
-        let mut entries: Vec<(JsString, V)> = iter.into_iter().collect();
-        if !entries.windows(2).all(|w| w[0].0 < w[1].0) {
-            // Stable, so equal keys stay in arrival order; the last one wins.
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut out: Vec<(JsString, V)> = Vec::with_capacity(entries.len());
-            for entry in entries {
-                match out.last_mut() {
-                    Some(last) if last.0 == entry.0 => *last = entry,
-                    _ => out.push(entry),
-                }
-            }
-            entries = out;
-        }
-        let schema = schema_for(entries.iter().map(|(key, _)| key));
-        let mut values: Vec<V> = entries.into_iter().map(|(_, value)| value).collect();
-        values.shrink_to_fit();
-        Self { schema, values }
+        Self::from_members(&mut iter.into_iter().collect(), 0)
     }
 }
 

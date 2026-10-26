@@ -394,6 +394,9 @@ export function install(PM: PMRegistry): void {
       return false;
     }
     if (serialized === undefined) { saveErrors.set(service, 'value is not JSON-serialisable'); return false; }
+    return postSerializedSlot(service, serialized);
+  };
+  const postSerializedSlot = (service: string, serialized: string): boolean => {
     const version = writeVersions.get(service);
     saveErrors.delete(service);
     cached.delete(legacyKey(service));
@@ -413,6 +416,13 @@ export function install(PM: PMRegistry): void {
       });
     asyncWrites.set(service, write);
     return true;
+  };
+  /** A write replaces whatever this window held or had posted for the key. */
+  const beginWrite = (service: string) => {
+    encoded.delete(service);
+    stale.delete(service); lazy.delete(service);
+    writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
+    posted.delete(service); digests.delete(service);
   };
   const refill = (service: string) => {
     const get = bridge.store.getEncodedSync || bridge.store.getSync;
@@ -532,10 +542,7 @@ export function install(PM: PMRegistry): void {
     },
     set(key: any, value: any) {
       const service = serviceKey(key);
-      encoded.delete(service);
-      stale.delete(service); lazy.delete(service);
-      writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
-      posted.delete(service); digests.delete(service);
+      beginWrite(service);
       if (serializedSlot(service)) return setSerializedSlot(service, value);
       try {
         const copy = packStoredHistory(service, cloneValue(value), historyRecords);
@@ -549,6 +556,14 @@ export function install(PM: PMRegistry): void {
         saveErrors.set(service, errorText(error, 'Save failed'));
         return false;
       }
+    },
+    /** `set` with the value's JSON text already made (a project slot
+     *  serialized in slices); false where slots are not posted as text. */
+    setText(key: string, text: string): boolean {
+      const service = serviceKey(key);
+      if (!serializedSlot(service)) return false;
+      beginWrite(service);
+      return postSerializedSlot(service, text);
     },
     /** The digest (json-slices) of the JSON text this window last wrote for a
      *  project slot; null when unknown (another writer, or a deletion since). */

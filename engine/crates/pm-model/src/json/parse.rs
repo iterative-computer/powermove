@@ -35,10 +35,18 @@ pub trait TreeBuilder {
     fn number(&mut self, n: f64) -> Self::Out;
     fn string(&mut self, s: JsString) -> Self::Out;
     fn array(&mut self, items: Vec<Self::Out>) -> Self::Out;
-    /// Members in source order; the last duplicate key wins.
-    fn object(&mut self, members: Vec<(JsString, Self::Out)>) -> Self::Out;
+    /// The object of `members[start..]`, in source order (the last duplicate
+    /// key wins), which it moves out; earlier members stay.
+    fn object(&mut self, members: &mut Vec<(JsString, Self::Out)>, start: usize) -> Self::Out;
+    /// The value at byte `pos` when it was built ahead of this parse, with the
+    /// offset just past its text (the last pass of [`parse_bytes_parallel`]).
+    #[inline(always)]
+    fn prebuilt(&mut self, _pos: usize) -> Option<(Self::Out, usize)> {
+        None
+    }
 }
 
+#[derive(Clone)]
 struct ValueBuilder;
 
 impl TreeBuilder for ValueBuilder {
@@ -58,8 +66,8 @@ impl TreeBuilder for ValueBuilder {
     fn array(&mut self, items: Vec<Value>) -> Value {
         Value::Array(items)
     }
-    fn object(&mut self, members: Vec<(JsString, Value)>) -> Value {
-        Value::Object(members.into_iter().collect::<Map>())
+    fn object(&mut self, members: &mut Vec<(JsString, Value)>, start: usize) -> Value {
+        Value::Object(Map::from_members(members, start))
     }
 }
 
@@ -73,11 +81,7 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
 
 /// [`parse`] into the tree `builder` makes.
 pub fn parse_with<B: TreeBuilder>(text: &str, builder: &mut B) -> Result<B::Out, ParseError> {
-    let mut parser = Parser {
-        bytes: text.as_bytes(),
-        pos: 0,
-        depth: 0,
-    };
+    let mut parser = Parser::new(text.as_bytes(), 0, 0);
     parser.skip_whitespace();
     let value = parser.value(builder)?;
     parser.skip_whitespace();
@@ -99,6 +103,152 @@ pub fn parse_bytes_with<B: TreeBuilder>(
     parse_with(text, builder)
 }
 
+/// Inputs smaller than this parse on one thread.
+const PARALLEL_MIN_BYTES: usize = 8 << 20;
+/// The containers a parallel parse hands to its workers: the outermost whose
+/// text is at most `UNIT_MAX_BYTES` long, if it is at least `UNIT_MIN_BYTES`.
+const UNIT_MAX_BYTES: usize = 1 << 20;
+const UNIT_MIN_BYTES: usize = 16 << 10;
+
+/// A container a worker parses: its text is `start..end`, inside `depth`
+/// enclosing containers.
+struct Unit {
+    start: usize,
+    end: usize,
+    depth: usize,
+}
+
+/// The units of a parallel parse, in source order, found by one pass over
+/// the text that follows only strings and brackets. `None` when that pass
+/// finds the text malformed (the sequential parse reports how).
+fn units(bytes: &[u8]) -> Option<Vec<Unit>> {
+    let mut units: Vec<Unit> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                loop {
+                    match *bytes.get(i)? {
+                        b'"' => break,
+                        b'\\' => i += 2,
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'{' | b'[' => {
+                if open.len() >= MAX_DEPTH {
+                    return None;
+                }
+                open.push(i);
+            }
+            b'}' | b']' => {
+                let start = open.pop()?;
+                let end = i + 1;
+                if end - start <= UNIT_MAX_BYTES {
+                    // It contains the units found since it opened.
+                    while units.last().is_some_and(|unit| unit.start > start) {
+                        units.pop();
+                    }
+                    if end - start >= UNIT_MIN_BYTES {
+                        units.push(Unit {
+                            start,
+                            end,
+                            depth: open.len(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    open.is_empty().then_some(units)
+}
+
+/// The skeleton pass of a parallel parse: `inner` builds everything but the
+/// units, which come from `parsed`.
+struct Assemble<'u, B: TreeBuilder> {
+    inner: &'u mut B,
+    units: core::iter::Peekable<
+        core::iter::Zip<core::slice::Iter<'u, Unit>, std::vec::IntoIter<B::Out>>,
+    >,
+}
+
+impl<B: TreeBuilder> TreeBuilder for Assemble<'_, B> {
+    type Out = B::Out;
+    fn null(&mut self) -> B::Out {
+        self.inner.null()
+    }
+    fn bool(&mut self, b: bool) -> B::Out {
+        self.inner.bool(b)
+    }
+    fn number(&mut self, n: f64) -> B::Out {
+        self.inner.number(n)
+    }
+    fn string(&mut self, s: JsString) -> B::Out {
+        self.inner.string(s)
+    }
+    fn array(&mut self, items: Vec<B::Out>) -> B::Out {
+        self.inner.array(items)
+    }
+    fn object(&mut self, members: &mut Vec<(JsString, B::Out)>, start: usize) -> B::Out {
+        self.inner.object(members, start)
+    }
+    fn prebuilt(&mut self, pos: usize) -> Option<(B::Out, usize)> {
+        let (unit, _) = self.units.peek()?;
+        if unit.start != pos {
+            return None;
+        }
+        let (unit, value) = self.units.next()?;
+        Some((value, unit.end))
+    }
+}
+
+/// [`parse_bytes_with`] on several threads ([`crate::parallel`]) for a large
+/// input: the same tree, built by the same builder calls, and the same
+/// errors. Containers of up to a mebibyte of text are parsed by workers, then
+/// one pass parses the rest around them. Anything unexpected (malformed text)
+/// parses again on one thread, which reports exactly what
+/// [`parse_bytes_with`] would.
+pub fn parse_bytes_parallel<B: TreeBuilder + Clone + Send + Sync>(
+    bytes: &[u8],
+    builder: &mut B,
+) -> Result<B::Out, ParseError>
+where
+    B::Out: Send,
+{
+    let text = core::str::from_utf8(bytes).map_err(|e| ParseError {
+        offset: e.valid_up_to(),
+        message: "invalid UTF-8",
+    })?;
+    if bytes.len() < PARALLEL_MIN_BYTES || crate::parallel::workers() < 2 {
+        return parse_with(text, builder);
+    }
+    let Some(units) = units(bytes).filter(|units| units.len() > 1) else {
+        return parse_with(text, builder);
+    };
+    let shared = &*builder;
+    let parsed = crate::parallel::map(units.len(), |i| {
+        let unit = &units[i];
+        let mut parser = Parser::new(bytes, unit.start, unit.depth);
+        let value = parser.value(&mut shared.clone()).ok()?;
+        (parser.pos == unit.end).then_some(value)
+    });
+    let Some(parsed) = parsed.into_iter().collect::<Option<Vec<_>>>() else {
+        return parse_with(text, builder);
+    };
+    let mut assemble = Assemble {
+        inner: builder,
+        units: units.iter().zip(parsed).peekable(),
+    };
+    match parse_with(text, &mut assemble) {
+        Ok(value) if assemble.units.peek().is_none() => Ok(value),
+        _ => parse_with(text, builder),
+    }
+}
+
 /// Parses UTF-8 bytes; invalid sequences fail (use [`parse_file_text`] for
 /// `TextDecoder` behaviour).
 pub fn parse_bytes(bytes: &[u8]) -> Result<Value, ParseError> {
@@ -118,13 +268,30 @@ pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
     parse(&text)
 }
 
-struct Parser<'a> {
+struct Parser<'a, O> {
     bytes: &'a [u8],
     pos: usize,
     depth: usize,
+    /// The members and elements of the containers being parsed, innermost
+    /// last. Each container's move out at its end into a vector of exactly
+    /// their number (an object's, its values): one allocation, where growing
+    /// one vector per container reallocated, and an object's pairs had a
+    /// vector of their own besides its values'.
+    members: Vec<(JsString, O)>,
+    items: Vec<O>,
 }
 
-impl Parser<'_> {
+impl<'a, O> Parser<'a, O> {
+    fn new(bytes: &'a [u8], pos: usize, depth: usize) -> Self {
+        Parser {
+            bytes,
+            pos,
+            depth,
+            members: Vec::new(),
+            items: Vec::new(),
+        }
+    }
+
     fn error(&self, message: &'static str) -> ParseError {
         ParseError {
             offset: self.pos,
@@ -155,7 +322,11 @@ impl Parser<'_> {
         }
     }
 
-    fn value<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
+    fn value<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
+        if let Some((value, end)) = b.prebuilt(self.pos) {
+            self.pos = end;
+            return Ok(value);
+        }
         match self.peek() {
             None => Err(self.error("unexpected end of JSON input")),
             Some(b'{') => self.object(b),
@@ -183,17 +354,17 @@ impl Parser<'_> {
         Ok(())
     }
 
-    fn object<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
+    fn object<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
         self.enter()?;
         self.pos += 1; // {
         // Members are collected, then sorted once (already sorted in
         // canonical JSON) into a map holding exactly them.
-        let mut members: Vec<(JsString, B::Out)> = Vec::new();
+        let base = self.members.len();
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(b.object(members));
+            return Ok(b.object(&mut self.members, base));
         }
         loop {
             self.skip_whitespace();
@@ -208,7 +379,7 @@ impl Parser<'_> {
             self.pos += 1;
             self.skip_whitespace();
             let value = self.value(b)?;
-            members.push((key, value));
+            self.members.push((key, value));
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -220,22 +391,23 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
-        Ok(b.object(members))
+        Ok(b.object(&mut self.members, base))
     }
 
-    fn array<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
+    fn array<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
         self.enter()?;
         self.pos += 1; // [
-        let mut items = Vec::new();
+        let base = self.items.len();
         self.skip_whitespace();
         if self.peek() == Some(b']') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(b.array(items));
+            return Ok(b.array(Vec::new()));
         }
         loop {
             self.skip_whitespace();
-            items.push(self.value(b)?);
+            let item = self.value(b)?;
+            self.items.push(item);
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -247,7 +419,7 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
-        items.shrink_to_fit();
+        let items = self.items.drain(base..).collect();
         Ok(b.array(items))
     }
 
@@ -459,6 +631,86 @@ mod tests {
         let v = parse_file_text(b"\xef\xbb\xbf\"a\xffb\"").unwrap();
         assert_eq!(v.as_str(), Some("a\u{fffd}b"));
         assert!(parse_bytes(b"\"a\xffb\"").is_err());
+    }
+
+    /// About 12 MB of layers of keyframes: units on both sides of their
+    /// bounds, duplicate keys, escapes, and text outside any unit.
+    fn large_document() -> String {
+        let layer = |i: usize| {
+            let frames: Vec<String> = (0..[3, 400, 9000][i % 3])
+                .map(|k| format!(r#"{{"t":{k},"v":[{k}.25,-{i}e-3,"a\"\\\u00e9\ud800"],"t":{k}}}"#))
+                .collect();
+            format!(
+                r#"{{"id":"L{i}","keys":[{}],"id":"M{i}","x":{{"y":[[],{{}}]}}}}"#,
+                frames.join(",")
+            )
+        };
+        let layers: Vec<String> = (0..60).map(layer).collect();
+        format!(
+            r#" {{ "name" : "p\n", "comps":{{"c":{{"layers":[ {} ]}}}}, "tail": [1, 2, 3] }} "#,
+            layers.join(" , ")
+        )
+    }
+
+    #[test]
+    fn parallel_parsing_builds_the_same_tree() {
+        let text = large_document();
+        assert!(text.len() > PARALLEL_MIN_BYTES);
+        assert!(units(text.as_bytes()).is_some_and(|units| units.len() > 8));
+        let parallel = parse_bytes_parallel(text.as_bytes(), &mut ValueBuilder).unwrap();
+        assert!(parallel == parse(&text).unwrap());
+        assert_eq!(
+            parallel
+                .get("comps")
+                .unwrap()
+                .get("c")
+                .unwrap()
+                .get("layers")
+                .unwrap()
+                .as_array()
+                .unwrap()[4]
+                .get("id")
+                .unwrap()
+                .as_str(),
+            Some("M4")
+        );
+    }
+
+    #[test]
+    fn parallel_parsing_reports_the_sequential_error() {
+        let text = large_document();
+        let at = |needle: &str, nth: usize| text.match_indices(needle).nth(nth).unwrap().0;
+        let mut broken = Vec::new();
+        // Inside a unit: a bad token, a control character, a mismatched
+        // bracket, an unterminated document.
+        for (needle, nth, with) in [
+            (r#""t":7,"#, 25, "\"t\":07,"),
+            (r#""t":8,"#, 30, "\"t\":\"\u{1}\","),
+            ("]}", 50, "}}"),
+            ("]", 30, "]]"),
+        ] {
+            let mut t = text.clone();
+            let i = at(needle, nth);
+            t.replace_range(i..i + needle.len(), with);
+            broken.push(t);
+        }
+        // In the text around the units.
+        let mut t = text.clone();
+        t.replace_range(at(r#""tail""#, 0)..at(r#""tail""#, 0) + 6, "tail");
+        broken.push(t);
+        broken.push(text[..text.len() - 3].to_owned());
+        broken.push(text.replacen(
+            r#""keys":["#,
+            &format!(r#""keys":{}["#, "[".repeat(MAX_DEPTH)),
+            1,
+        ));
+        for t in broken {
+            let sequential = parse(&t).unwrap_err();
+            assert_eq!(
+                parse_bytes_parallel(t.as_bytes(), &mut ValueBuilder).unwrap_err(),
+                sequential
+            );
+        }
     }
 
     #[test]

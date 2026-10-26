@@ -653,7 +653,7 @@ fn read(work: &Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, String
     drop(chunk);
     metrics.input(bytes.capacity());
     // The stream's checksum and the parse each read every byte: side by side.
-    let (sha256, document) = pm_wasm::kernel::join(
+    let (sha256, document) = pm_model::parallel::join(
         || work.text.then(|| pm_model::hash::sha256_hex(&bytes)),
         || PreparedDocument::parse_tree(&bytes, work.revision),
     );
