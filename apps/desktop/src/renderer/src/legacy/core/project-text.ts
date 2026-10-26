@@ -179,6 +179,8 @@ export function projectTexts(version: string, project: any, pause: Pause = nextT
       const realized = record(Object.keys(project).map((key): [string, string[] | undefined] =>
         [key, key === 'comps' && compsRecord ? record([...Object.keys(compsRecord)].map(comp => [comp, comps.get(comp)])) : members.get(key)]));
       if (!canonicalForm) push(...realized);
+      // The pieces are the document again: kept only until they are sent.
+      members.clear(); comps.clear();
       return `{"v":${JSON.stringify(version)},"proj":${realized.join('')}}`;
     } catch (error) {
       failure = error;
@@ -192,7 +194,11 @@ export function projectTexts(version: string, project: any, pause: Pause = nextT
   const canonical: AsyncIterable<string> = {
     async *[Symbol.asyncIterator]() {
       for (let next = 0; ;) {
-        while (next < pieces.length) yield pieces[next++]!;
+        while (next < pieces.length) {
+          const piece = pieces[next]!;
+          pieces[next++] = '';
+          yield piece;
+        }
         if (finished) {
           if (failure !== null) throw failure;
           if (next >= pieces.length) return;
