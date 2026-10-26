@@ -282,6 +282,17 @@ const UIState = PM.UIState = {
   },
 };
 
-PM.bus.on('project', () => prune(PM.proj));
-PM.bus.on('layers', () => { if (PM.proj) prune(PM.proj); });
+/* Pruning walks every keyframe of the document. An announcement after which
+   no layer, effect or keyframe can have changed (a composition setting: the
+   evaluator's version and the layer index both stand) has nothing to prune. */
+let pruned: { project: any; evaluation: unknown; structure: unknown } | null = null;
+const pruneChanged = () => {
+  const evaluation = PM.evaluationVersion?.(), structure = PM.ProjectIndex?.generation?.();
+  if (pruned && pruned.project === PM.proj && evaluation !== undefined && structure !== undefined
+    && pruned.evaluation === evaluation && pruned.structure === structure) return;
+  prune(PM.proj);
+  pruned = { project: PM.proj, evaluation, structure };
+};
+PM.bus.on('project', pruneChanged);
+PM.bus.on('layers', () => { if (PM.proj) pruneChanged(); });
 }

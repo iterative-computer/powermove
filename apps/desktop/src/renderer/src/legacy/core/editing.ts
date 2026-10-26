@@ -10,6 +10,7 @@ import { reparentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
+import { LAYER_FREE_SETTINGS, UNRENDERED_SETTINGS, settingsOnly } from './anim';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateSceneLayer } from '../../core/scene3d/operations';
@@ -101,9 +102,7 @@ function layerPath(target: any): any[] | null {
 function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
-  if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain']];
-  }
+  if (type === 'set_composition') return compositionPaths(command.patch);
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker' || type === 'remove_marker') return [['markers']];
   if (type === 'create_section' || type === 'update_section') return [['library']];
@@ -112,6 +111,22 @@ function commandScopes(command: any): any[][] {
   const layer = findLayer(command?.target || command?.layer || command?.targetId);
   const path = layerPath(layer);
   return path ? [path] : [[]];
+}
+
+/** The project members a composition patch writes (setComposition). */
+const COMPOSITION_FIELDS: Record<string, string[]> = {
+  name: ['name'], width: ['w'], height: ['h'], fps: ['fps', 'fpsRational'],
+  background: ['bg', 'backgroundFill'], backgroundFill: ['bg', 'backgroundFill'],
+  shutter: ['shutter'], workArea: ['work'], colorDepth: ['colorDepth'], audioGain: ['audioGain'],
+};
+function compositionPaths(patch: any): any[][] {
+  const keys = new Set<string>();
+  for (const [key, value] of Object.entries(patch && typeof patch === 'object' ? patch : {})) {
+    if (value == null) continue;
+    if (key === 'duration') { keys.add('dur'); if (patch.workArea == null) keys.add('work'); }
+    else for (const field of COMPOSITION_FIELDS[key] || []) keys.add(field);
+  }
+  return [...keys].map(key => [key]);
 }
 
 function trackCommands(list: any[]) {
@@ -132,7 +147,8 @@ function liveCheckpoint(list: any[]): Patch[] {
     [...target!.path, 'p', target!.channel], [...target!.path, 'locked_intent'],
     [...target!.path, 'd', 'fontAnchorBounds'], [...target!.path, 'd', 'sizeAnchorBounds'],
   ]) : list.flatMap(commandScopes);
-  const paths = [['revision'], ['edits'], ...scopes];
+  // A live gesture records its revision and edit log at its commit.
+  const paths = scopes;
   const captionUpdates = list.every(command => command.type === 'edit_captions' && ['update', 'style'].includes(command.op));
   // Restore this call's affected source without ending the enclosing gesture
   // or replaying its earlier commands. Parent paths cover their descendants.
@@ -620,7 +636,7 @@ function setComposition(command: any) {
     if (end <= start) throw new Error('workArea end must be after its start');
     p.work = [start, end];
   }
-  PM.touch();
+  PM.touch(compositionPaths(patch));
   return { keys: Object.keys(patch) };
 }
 
@@ -1101,13 +1117,25 @@ function recordedCommand(command: any, submitted: any) {
   return recorded;
 }
 
-function changed(notify: any = true) {
-  PM.touch();
+/** The paths a list of edits wrote, when it is made only of composition
+ *  settings (with the provenance `record` wrote); otherwise undefined: unknown. */
+function settingPaths(list: any[], recorded = true): any[][] | undefined {
+  if (!list.length || !list.every((command: any) => command?.type === 'set_composition')) return undefined;
+  return [...(recorded ? [['revision'], ['edits']] : []), ...list.flatMap((command: any) => compositionPaths(command.patch))];
+}
+
+/** `paths`: what the edit wrote, when settingPaths knows. A setting no layer
+ *  depends on announces no layer change; one no pixel depends on redraws only
+ *  the panels that show it, not the viewer. */
+function changed(notify: any = true, paths?: any[][]) {
+  PM.touch(paths);
+  const layerFree = settingsOnly(paths, LAYER_FREE_SETTINGS);
   if (notify) {
-    PM.bus.emit('layers');
+    if (!layerFree) PM.bus.emit('layers');
     PM.bus.emit('project');
   }
-  PM.invalidate();
+  if (layerFree && settingsOnly(paths, UNRENDERED_SETTINGS)) { PM.invalidate('timeline'); PM.invalidate('ui'); }
+  else PM.invalidate();
   if (notify) inspectorService(PM)?.refresh();
 }
 
@@ -1275,7 +1303,7 @@ const Edit: any = {
         const executed: any = runCommands(list, meta);
         const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
         executed.forEach(({ command }: any) => rememberLive(command));
-        changed(false);
+        changed(false, settingPaths(list, false));
         const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore, keyframeWrites(executed)) : null;
         const notices: any = [...executed.map((item: any) => item.message), denseNote].filter(Boolean);
         return pass(['Source updated', ...notices].join('. '), { results, revision: PM.proj.revision || 0 });
@@ -1293,7 +1321,7 @@ const Edit: any = {
       const applied: any = executed.map((item: any, index: any) => recordedCommand(item.command, list[index]));
       const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
       record(meta.label, meta.origin, applied);
-      changed();
+      changed(true, settingPaths(list));
       PM.hist.commit(meta.label || 'Edit source');
       const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore, keyframeWrites(executed)) : null;
       const notices: any = [...executed.map((item: any) => item.message), denseNote].filter(Boolean);
@@ -1375,7 +1403,7 @@ const Edit: any = {
       return pass('No source changes');
     }
     record(label || transaction.label, transaction.origin, transaction.commands);
-    changed();
+    changed(true, settingPaths(transaction.commands));
     PM.hist.commit(label || transaction.label);
     return pass(label || transaction.label, { revision: PM.proj.revision });
   },

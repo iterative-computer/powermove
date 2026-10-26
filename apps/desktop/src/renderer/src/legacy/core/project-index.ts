@@ -133,6 +133,8 @@ export function installProjectIndex(PM: PMRegistry): void {
       keyframes = null;
       keyframeLayers = null;
     },
+    /** Advances whenever the layer structure was announced changed (invalidate). */
+    generation: () => generation,
     invalidateKeyframes() {
       keyframes = null;
       keyframeLayers = null;

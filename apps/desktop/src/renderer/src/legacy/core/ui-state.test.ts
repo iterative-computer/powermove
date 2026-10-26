@@ -32,6 +32,30 @@ function uiStateRegistry() {
 }
 
 describe('legacy ui-state install', () => {
+  it('prunes on an announcement only when layers or keyframes may have changed', () => {
+    const { PM, layer } = uiStateRegistry();
+    let evaluation = 0, structure = 0;
+    PM.evaluationVersion = () => evaluation;
+    PM.ProjectIndex = { generation: () => structure };
+    const removed: any = { i: 'key-b', t: 1, v: 0 };
+    layer.p.opacity.kf.push(removed);
+    PM.UIState.setKeyHandles(removed, { ho: [1, 1] });
+    PM.bus.emit('project');
+    const version = PM.UIState.timelineVersion();
+    layer.p.opacity.kf.pop();
+    // A composition setting: neither the evaluator nor the layer index moved.
+    PM.bus.emit('project'); PM.bus.emit('layers');
+    expect(PM.UIState.timelineVersion()).toBe(version);
+    expect(PM.UIState.keyHandles.has('key-b')).toBe(true);
+    evaluation++;
+    PM.bus.emit('layers');
+    expect(PM.UIState.keyHandles.has('key-b')).toBe(false);
+    PM.UIState.setKeyHandles(removed, { ho: [1, 1] });
+    structure++;
+    PM.bus.emit('project');
+    expect(PM.UIState.keyHandles.has('key-b')).toBe(false);
+  });
+
   it('versions timeline row changes without invalidating on read-only access or repeated values', () => {
     const { PM, layer, key } = uiStateRegistry();
     const initial = PM.UIState.timelineVersion();

@@ -9,17 +9,43 @@ import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge
 import { applyUnitCurve } from '../../core/anim/temporal-ease';
 import { derivedId } from './derived-id';
 
+/** Composition settings no layer, keyframe or evaluation depends on. */
+export const LAYER_FREE_SETTINGS: ReadonlySet<string> = new Set(['name', 'work', 'audioGain', 'bg', 'backgroundFill', 'shutter', 'colorDepth']);
+/** Of those, the ones no rendered pixel depends on either. */
+export const UNRENDERED_SETTINGS: ReadonlySet<string> = new Set(['name', 'work', 'audioGain']);
+/** Whether every path (as writers or history give them: `['work']` or
+ *  `['comps', id, 'work']`) is one of `settings` or the edit's provenance. */
+export function settingsOnly(paths: unknown, settings: ReadonlySet<string>): boolean {
+  if (!Array.isArray(paths) || !paths.length) return false;
+  return paths.every(path => {
+    if (!Array.isArray(path)) return false;
+    if (path.length === 1) return path[0] === 'revision' || path[0] === 'edits' || settings.has(String(path[0]));
+    return path.length === 3 && path[0] === 'comps' && settings.has(String(path[2]));
+  });
+}
+
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
 let defaultHandles: any = { eo: [.33, 0], ei: [.67, 1] };
 try { defaultHandles = Ease.handles('power') || defaultHandles; } catch (e) { }
 
+/* `version` advances on every document write (PM.animVersion: "did anything
+   change"); `evaluation` only on writes that can change what layers and
+   keyframes evaluate to. A composition setting (the work area, the name, the
+   background) keeps every prepared track and hierarchy memo: re-preparing
+   them walks every keyframe of the document. */
 let version = 0;
+let evaluation = 0;
 let parentIndexes = new WeakMap<object, any>();
 let staticTransforms = new WeakMap<object, { values: any[]; matrix: number[] }>();
-PM.touch = () => {
-  PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
+PM.touch = (paths?: unknown) => {
   version++;
+  if (settingsOnly(paths, LAYER_FREE_SETTINGS)) {
+    if (!settingsOnly(paths, UNRENDERED_SETTINGS)) PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
+    return;
+  }
+  PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
+  evaluation++;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
   woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); memoT = null;
@@ -27,6 +53,7 @@ PM.touch = () => {
   staticTransforms = new WeakMap();
 };
 PM.animVersion = () => version;
+PM.evaluationVersion = () => evaluation;
 let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
@@ -35,12 +62,12 @@ function evalKfs(kf: any, t: any, interpolateColor = false) {
   const n = Array.isArray(kf) ? kf.length : 0;
   if (n === 0) return null;
   if (typeof t !== 'number' || !Number.isFinite(t)) return kf[0]?.v ?? null;
-  if (typeof kf[0].v === 'number' && typeof kf[n-1].v === 'number') return temporalEvaluate(kf,t,version,Ease.spring);
+  if (typeof kf[0].v === 'number' && typeof kf[n-1].v === 'number') return temporalEvaluate(kf,t,evaluation,Ease.spring);
   if (t <= kf[0].t) return kf[0].v;
   if (t >= kf[n - 1].t) return kf[n - 1].v;
   let lo = 0, hi = n - 1;
   while (hi - lo > 1) { const m = (lo + hi) >> 1; kf[m].t <= t ? (lo = m) : (hi = m); }
-  temporalKeys(kf,version);
+  temporalKeys(kf,evaluation);
   const a = kf[lo], b = kf[hi];
   if (a.hold) return a.v;
   const hexColor = (v: any) => typeof v === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v);
@@ -142,12 +169,12 @@ function motionPathValue(comp: any, layerId: string, channel: string, progress: 
   if (!cache) { cache = new Map(); pathTimings.set(layer, cache); }
   const key = `${start}:${end}`;
   let entry = cache.get(key);
-  if (!entry || entry.version !== version) {
+  if (!entry || entry.version !== evaluation) {
     const channels = axes.map(axis => layer.p[axis]);
     const sample = (time: number) => channels.map(prop => prop.kf?.length ? Number(evalKfs(prop.kf, time)) : Number(prop.v));
     const timing = createPathTiming(sample, channels.flatMap(prop => prop.kf.map((k: any) => k.t)), start, end);
     if (cache.size >= 16) cache.delete(cache.keys().next().value!);
-    entry = { version, timing }; cache.set(key, entry);
+    entry = { version: evaluation, timing }; cache.set(key, entry);
   }
   return entry.timing.position(progress)[index]!;
 }

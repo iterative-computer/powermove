@@ -387,7 +387,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       record(paths, { canonical });
       if (!PM.hist?.scoped?.()) held.clear();
     } else unknownWrite();
-    return legacyTouch?.();
+    // The paths reach the legacy evaluator too: a composition setting keeps its caches.
+    return legacyTouch?.(paths, canonical);
   };
   // Writers that skip touch() still announce on the bus (PM.addLayer,
   // PM.removeLayers, settings, asset changes): diff what they may have written.
