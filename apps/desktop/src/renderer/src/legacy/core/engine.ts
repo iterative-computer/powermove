@@ -522,7 +522,19 @@ for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event,
   previewQuality.reset(window.performance.now());
 });
 
-PM.bus.on('draw', () => { needsDraw = true; });
+/* While the engine presents, a draw is a request to announce the frame on
+   screen again (or to redraw what changed). One raised by a listener of
+   that announcement (`frame:rendered`, `overlay`) asks for nothing new:
+   answering it would announce the same frame at every animation frame for
+   as long as the listener invalidates. */
+let redrawRequested = true;
+let overlayEmissions = 0;
+const announcing = () => overlayEmissions > 0 || !!(PM as any).EnginePresentedEvents?.announcing;
+const emitOverlay = () => {
+  overlayEmissions++;
+  try { PM.bus.emit('overlay'); } finally { overlayEmissions--; }
+};
+PM.bus.on('draw', () => { needsDraw = true; if (!announcing()) redrawRequested = true; });
 
 function frame(now: any) {
   window.requestAnimationFrame(frame);
@@ -570,8 +582,11 @@ function frame(now: any) {
       needsDraw = false;
       // Today's paused redraw announces the frame it draws (`preview:presented`,
       // then `overlay`); the engine presents one only for a change.
-      if (!PM.playing) (PM as any).EngineRedraw?.();
-      PM.bus.emit('overlay');
+      if (redrawRequested) {
+        redrawRequested = false;
+        if (!PM.playing) (PM as any).EngineRedraw?.();
+        emitOverlay();
+      }
     }
     return;
   }

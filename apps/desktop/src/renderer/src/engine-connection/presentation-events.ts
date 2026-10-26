@@ -126,6 +126,27 @@ export class PresentedEvents {
     return this.queue.length;
   }
 
+  private announcements = 0;
+  /**
+   * Whether a frame is being announced now: its listeners (`frame:rendered`,
+   * `overlay`) are running. A redraw they request asks for nothing new, as
+   * the frame they react to is the one on screen; answering it with that
+   * frame again would announce it once per animation frame for as long as
+   * a listener invalidates (the frame loop ignores those requests).
+   */
+  get announcing(): boolean {
+    return this.announcements > 0;
+  }
+
+  private announce<T>(fn: () => T): T {
+    this.announcements++;
+    try {
+      return fn();
+    } finally {
+      this.announcements--;
+    }
+  }
+
   /** Why the latest redraw request announced nothing (diagnostics). */
   lastRedraw: string | null = null;
   /** Main-thread time the emissions' listeners took (ms), and the slowest. */
@@ -162,7 +183,7 @@ export class PresentedEvents {
       this.last = next;
       this.emitted++;
       const started = performance.now();
-      this.emit(next.frame, next.quality);
+      this.announce(() => this.emit(next.frame, next.quality));
       const ms = performance.now() - started;
       this.listenersMs += ms;
       this.slowestMs = Math.max(this.slowestMs, ms);
@@ -213,7 +234,7 @@ export class PresentedEvents {
     if (current.pts !== null && Math.abs(current.pts - last.frame.pts) >= Math.max(1, current.frameTicks) / 2) return skip(`time ${current.pts} after ${last.frame.pts}`);
     // `announce` declines when the redraw changed what the engine draws (it
     // presents the new frame itself).
-    if (!announce(last.frame, last.quality)) return skip('the producers\' output changed');
+    if (!this.announce(() => announce(last.frame, last.quality))) return skip('the producers\' output changed');
     this.lastRedraw = 'announced';
     this.redraws++;
     return true;
