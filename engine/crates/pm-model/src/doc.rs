@@ -317,10 +317,10 @@ impl crate::json::TreeBuilder for NodeBuilder {
             kind: NodeKind::Array(Arc::new(items)),
         }
     }
-    fn object(&mut self, members: Vec<(JsString, Node)>) -> Node {
+    fn object(&mut self, members: &mut Vec<(JsString, Node)>, start: usize) -> Node {
         Node {
             rev: self.rev,
-            kind: NodeKind::Object(Arc::new(members.into_iter().collect())),
+            kind: NodeKind::Object(Arc::new(ObjectMap::from_members(members, start))),
         }
     }
 }

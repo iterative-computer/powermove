@@ -322,27 +322,35 @@ impl<V> ObjectMap<V> {
     }
 }
 
+impl<V> ObjectMap<V> {
+    /// The map of `members[start..]` (moved out; earlier members stay): sorted
+    /// by key, the last of equal keys kept. Its values get a vector of exactly
+    /// their number, and the pairs are never collected into one of their own
+    /// (the JSON parser's members stay on its stack until here).
+    pub(crate) fn from_members(members: &mut Vec<(JsString, V)>, start: usize) -> Self {
+        let tail = &mut members[start..];
+        if !tail.windows(2).all(|w| w[0].0 < w[1].0) {
+            // Stable, so equal keys stay in arrival order: keep each run's last.
+            tail.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut kept = start;
+            for at in start..members.len() {
+                if at + 1 < members.len() && members[at].0 == members[at + 1].0 {
+                    continue;
+                }
+                members.swap(kept, at);
+                kept += 1;
+            }
+            members.truncate(kept);
+        }
+        let schema = schema_for(members[start..].iter().map(|(key, _)| key));
+        let values = members.drain(start..).map(|(_, value)| value).collect();
+        Self { schema, values }
+    }
+}
+
 impl<V> FromIterator<(JsString, V)> for ObjectMap<V> {
     fn from_iter<I: IntoIterator<Item = (JsString, V)>>(iter: I) -> Self {
-        let mut entries: Vec<(JsString, V)> = iter.into_iter().collect();
-        if !entries.windows(2).all(|w| w[0].0 < w[1].0) {
-            // Stable, so equal keys stay in arrival order; the last one wins
-            // (moved into the first of its run, which is kept).
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            entries.dedup_by(|later, kept| {
-                let same = later.0 == kept.0;
-                if same {
-                    core::mem::swap(later, kept);
-                }
-                same
-            });
-        }
-        let schema = schema_for(entries.iter().map(|(key, _)| key));
-        // A vector of its own: collected in place, the values would keep the
-        // pairs' allocation and need shrinking (a reallocation).
-        let mut values: Vec<V> = Vec::with_capacity(entries.len());
-        values.extend(entries.into_iter().map(|(_, value)| value));
-        Self { schema, values }
+        Self::from_members(&mut iter.into_iter().collect(), 0)
     }
 }
 

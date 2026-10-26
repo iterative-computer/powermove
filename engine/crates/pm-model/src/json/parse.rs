@@ -35,8 +35,9 @@ pub trait TreeBuilder {
     fn number(&mut self, n: f64) -> Self::Out;
     fn string(&mut self, s: JsString) -> Self::Out;
     fn array(&mut self, items: Vec<Self::Out>) -> Self::Out;
-    /// Members in source order; the last duplicate key wins.
-    fn object(&mut self, members: Vec<(JsString, Self::Out)>) -> Self::Out;
+    /// The object of `members[start..]`, in source order (the last duplicate
+    /// key wins), which it moves out; earlier members stay.
+    fn object(&mut self, members: &mut Vec<(JsString, Self::Out)>, start: usize) -> Self::Out;
     /// The value at byte `pos` when it was built ahead of this parse, with the
     /// offset just past its text (the last pass of [`parse_bytes_parallel`]).
     #[inline(always)]
@@ -65,8 +66,8 @@ impl TreeBuilder for ValueBuilder {
     fn array(&mut self, items: Vec<Value>) -> Value {
         Value::Array(items)
     }
-    fn object(&mut self, members: Vec<(JsString, Value)>) -> Value {
-        Value::Object(members.into_iter().collect::<Map>())
+    fn object(&mut self, members: &mut Vec<(JsString, Value)>, start: usize) -> Value {
+        Value::Object(Map::from_members(members, start))
     }
 }
 
@@ -192,8 +193,8 @@ impl<B: TreeBuilder> TreeBuilder for Assemble<'_, B> {
     fn array(&mut self, items: Vec<B::Out>) -> B::Out {
         self.inner.array(items)
     }
-    fn object(&mut self, members: Vec<(JsString, B::Out)>) -> B::Out {
-        self.inner.object(members)
+    fn object(&mut self, members: &mut Vec<(JsString, B::Out)>, start: usize) -> B::Out {
+        self.inner.object(members, start)
     }
     fn prebuilt(&mut self, pos: usize) -> Option<(B::Out, usize)> {
         let (unit, _) = self.units.peek()?;
@@ -273,8 +274,9 @@ struct Parser<'a, O> {
     depth: usize,
     /// The members and elements of the containers being parsed, innermost
     /// last. Each container's move out at its end into a vector of exactly
-    /// their number: one allocation, where growing one vector per container
-    /// reallocated (twice for an object: its values were shrunk to fit too).
+    /// their number (an object's, its values): one allocation, where growing
+    /// one vector per container reallocated, and an object's pairs had a
+    /// vector of their own besides its values'.
     members: Vec<(JsString, O)>,
     items: Vec<O>,
 }
@@ -362,7 +364,7 @@ impl<'a, O> Parser<'a, O> {
         if self.peek() == Some(b'}') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(b.object(Vec::new()));
+            return Ok(b.object(&mut self.members, base));
         }
         loop {
             self.skip_whitespace();
@@ -389,8 +391,7 @@ impl<'a, O> Parser<'a, O> {
             }
         }
         self.depth -= 1;
-        let members = self.members.drain(base..).collect();
-        Ok(b.object(members))
+        Ok(b.object(&mut self.members, base))
     }
 
     fn array<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {

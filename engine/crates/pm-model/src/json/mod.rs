@@ -122,6 +122,11 @@ impl Map {
     pub fn into_members(self) -> ObjectMap<Value> {
         self.0
     }
+
+    /// [`ObjectMap::from_members`].
+    pub(crate) fn from_members(members: &mut Vec<(JsString, Value)>, start: usize) -> Map {
+        Map(ObjectMap::from_members(members, start))
+    }
 }
 
 impl From<ObjectMap<Value>> for Map {
