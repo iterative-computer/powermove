@@ -222,6 +222,7 @@ the unclipped reference over the same band centers.
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Honor the authored solid radius (SOLID-RADIUS-1); today ignores it | 224, 224, 50.888 | 0.62, 0.57, 0.121 | Three captured solid placements; interior engine error is at most 0.50 CV |
+| Exact area coverage of solid edges replaces pixel-centre rasterization (the box-filtered area coverage of the vector rows) | 81.6, 81.6, 81.6 | 0.60, 0.60, 0.500 | `pm-node/tests/compose.rs` crop far from the origin: a solid's two fractional edge columns (0.6 and 0.4 covered, 400 pixels) at 500% on a 2x display, through f16 compositing and the 8-bit display |
 
 ## Path mask coverage and feather
 

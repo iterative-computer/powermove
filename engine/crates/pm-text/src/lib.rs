@@ -29,7 +29,7 @@ pub mod font;
 #[cfg(feature = "level2")]
 pub mod level2;
 pub mod registry;
-#[cfg(feature = "render")]
+#[cfg(feature = "ink")]
 pub mod render;
 pub mod sanitize;
 pub mod served;

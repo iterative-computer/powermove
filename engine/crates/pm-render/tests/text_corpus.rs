@@ -61,22 +61,31 @@ fn stats_json(s: &pm_reference::compare::Stats) -> serde_json::Value {
     serde_json::json!({ "max": s.max, "p999": s.p999, "mean": s.mean, "pixels": s.pixels })
 }
 
+/// The modeled reference of one frame: opaque pixels, their classes, and
+/// the text's dilated reach.
+#[cfg(target_os = "macos")]
+struct Outlined {
+    rgba: Vec<f64>,
+    classes: Vec<pm_reference::compare::Class>,
+    reach: Vec<bool>,
+}
+
 #[cfg(target_os = "macos")]
 fn outlined_frame(
     renderer: &mut pm_render::Renderer,
-    doc: &pm_model::Document,
+    project: &support::Project,
     hidden: &pm_model::Document,
-    comp_id: &str,
     time: f64,
     size: (u32, u32),
-    resolver: &pm_render::MapResolver,
     hidden_pixels: &[u8],
     engine_pixels: &[u8],
-) -> Result<(Vec<f64>, Vec<pm_reference::compare::Class>, Vec<bool>), String> {
+) -> Result<Outlined, String> {
     use pm_protocol::{color::Precision, common::Size};
     use pm_reference::compare::{Class, dilate};
     use pm_reference::composite::{Blend, Operator, blend, porter_duff};
 
+    let doc = &project.document;
+    let (comp_id, resolver) = (project.composition.as_str(), &project.resolver);
     let (w, h) = (size.0 as usize, size.1 as usize);
     if hidden_pixels.len() != w * h * 4 {
         return Err("hidden frame size".into());
@@ -280,7 +289,11 @@ fn outlined_frame(
         classes[i] = Class::Edge;
     }
     let engine: Vec<f64> = engine_pixels.iter().map(|v| f64::from(*v) / 255.0).collect();
-    Ok((base.opaque_resolved(&engine).rgba, classes, reach))
+    Ok(Outlined {
+        rgba: base.opaque_resolved(&engine).rgba,
+        classes,
+        reach,
+    })
 }
 
 /// A text reference gap, judged after the isolation captures are read.
@@ -491,24 +504,18 @@ fn main() {
                 // float paint, captions and image glyph sampling where the
                 // flat document has no intervening feature. Unsupported
                 // text composition remains a failing reference gap.
-                let ideal = outlined_frame(
-                    &mut renderer,
-                    &p.document,
-                    &hidden,
-                    &p.composition,
-                    s.time,
-                    (w, h),
-                    &p.resolver,
-                    &base,
-                    &ours,
-                );
+                let ideal = outlined_frame(&mut renderer, &p, &hidden, s.time, (w, h), &base, &ours);
                 let mut why = Vec::new();
                 let mut gap = None;
                 let mut modeled_reach = None;
                 let mut unreferenced_text = 0usize;
                 let mut reference_metrics = serde_json::Value::Null;
                 match ideal {
-                    Ok((rgba, classes, reached)) => {
+                    Ok(Outlined {
+                        rgba,
+                        classes,
+                        reach: reached,
+                    }) => {
                         use pm_reference::compare::{Bounds, Class, compare};
                         let e: Vec<f64> = ours.iter().map(|x| f64::from(*x) / 255.0).collect();
                         let t: Vec<f64> = reference.iter().map(|x| f64::from(*x) / 255.0).collect();

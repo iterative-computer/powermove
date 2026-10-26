@@ -240,14 +240,11 @@ fn certified_winding(contour: &[u32], elements: &[PathEl], point: [f64; 2]) -> O
     for index in 0..contour.len() {
         let a = raw_point(elements, contour[index]);
         let b = raw_point(elements, contour[(index + 1) % contour.len()]);
-        if a[1] <= point[1] && point[1] < b[1] {
-            if orientation_sign(a, b, point)? > 0 {
-                winding = winding.checked_add(1)?;
-            }
-        } else if b[1] <= point[1] && point[1] < a[1] {
-            if orientation_sign(a, b, point)? < 0 {
-                winding = winding.checked_sub(1)?;
-            }
+        // The two half-open spans are disjoint, so the sign test can join each.
+        if a[1] <= point[1] && point[1] < b[1] && orientation_sign(a, b, point)? > 0 {
+            winding = winding.checked_add(1)?;
+        } else if b[1] <= point[1] && point[1] < a[1] && orientation_sign(a, b, point)? < 0 {
+            winding = winding.checked_sub(1)?;
         }
     }
     Some(winding)
@@ -284,10 +281,10 @@ impl NonzeroResolver {
             return;
         }
         let contour = &mut self.raw_contours[*index];
-        if let (Some(&first), Some(&last)) = (contour.first(), contour.last()) {
-            if raw_point(elements, first) == raw_point(elements, last) {
-                contour.pop();
-            }
+        if let (Some(&first), Some(&last)) = (contour.first(), contour.last())
+            && raw_point(elements, first) == raw_point(elements, last)
+        {
+            contour.pop();
         }
         if contour.len() >= 3 {
             *index += 1;
@@ -862,46 +859,6 @@ fn device_residual(m: Affine, scale: f64) -> Affine {
 
 fn image_bounds(transform: Affine, width: u32, height: u32) -> Rect {
     transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))
-}
-
-/// The drawn area of a bitmap or COLR glyph relative to its baseline
-/// origin at device scale 1, from the draw path's own placement: the
-/// strike's nonzero texels and reconstruction reach for a bitmap face
-/// (`bitmap::ink_bounds`; `bitmap_size` is the resolved full-em size the
-/// painter passes, the requested `size` when absent), or the unrounded
-/// painted/clip bounds of the COLR program. `None` means the glyph is an
-/// ordinary outline; `Some(None)` that it draws nothing.
-pub fn drawn_color_glyph_ink(
-    face: FaceRef<'_>,
-    coords: Coords<'_>,
-    glyph: u32,
-    size: f32,
-    skew: f64,
-    bitmap_size: Option<f32>,
-) -> Option<Option<Rect>> {
-    if has_bitmaps(face)
-        && let Some(ink) = super::bitmap::ink_bounds(face, glyph, size, bitmap_size.unwrap_or(size))
-    {
-        return Some(ink);
-    }
-    if !super::bitmap::is_colr_glyph(face, glyph) {
-        return None;
-    }
-    // The painter draws nothing for a program it cannot build.
-    let program = super::colr::Cache::default()
-        .get(super::colr::ColrRequest {
-            face,
-            coords,
-            id: glyph,
-            size,
-            skew: skew as f32,
-            linear: Affine::IDENTITY,
-            origin: (0.0, 0.0),
-            foreground: [1.0; 4],
-        })
-        .ok()
-        .flatten();
-    Some(program.map(|p| p.painted_bounds))
 }
 
 impl Painter<'_> {

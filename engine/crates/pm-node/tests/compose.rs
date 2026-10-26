@@ -336,14 +336,27 @@ fn a_crop_far_from_the_origin_is_drawn_at_todays_scale_in_todays_box() {
     assert!((ox - 17888.6).abs() < 1e-6 && (oy - 4444.0).abs() < 1e-6);
     let red = [0, 0, 255, 255];
     let bg = [0xCC, 0x66, 0x33, 255];
-    // A solid's quad covers the texels whose centers it holds: texel 911
-    // (center 911.5 ≥ 911.4) is red, at frame pixel 399, through 1311
-    // (center 1311.5 > 1311.4: not) at frame 799; a 1:1 box samples each
-    // texel exactly.
-    assert_eq!(bgra(&bytes, bpr, 399, 400), red);
+    // A solid covers each texel by its exact area (quality-ledger.md, "Solid
+    // corner radius"): texel 911 (911.4 to 912) is 0.6 red, at frame pixel 399, and
+    // texel 1311 (1311 to 1311.4) 0.4 red, at frame 799. A 1:1 box samples
+    // each texel exactly. The default 16-bit project composites into half
+    // floats (one 2⁻¹¹ step in [0.5, 1)) and the display stores 8 bits
+    // (0.5 CV), so each edge is within the sum of the f64 composite.
+    let bound = 0.5 + 255.0 / 2048.0;
+    let over = |c: f64| -> [f64; 4] {
+        std::array::from_fn(|k| f64::from(red[k]) * c + f64::from(bg[k]) * (1.0 - c))
+    };
+    for (x, c) in [(399, 0.6), (799, 0.4)] {
+        let got = bgra(&bytes, bpr, x, 400);
+        let error = (0..4)
+            .map(|k| (f64::from(got[k]) - over(c)[k]).abs())
+            .fold(0.0, f64::max);
+        assert!(error <= bound, "frame {x}: {got:?} vs {:?}", over(c));
+    }
     assert_eq!(bgra(&bytes, bpr, 398, 400), bg);
+    assert_eq!(bgra(&bytes, bpr, 400, 400), red);
     assert_eq!(bgra(&bytes, bpr, 798, 400), red);
-    assert_eq!(bgra(&bytes, bpr, 799, 400), bg);
+    assert_eq!(bgra(&bytes, bpr, 800, 400), bg);
     assert_eq!(bgra(&bytes, bpr, 600, 300), red);
     assert_eq!(bgra(&bytes, bpr, 600, 299), bg);
     assert_eq!(bgra(&bytes, bpr, 600, 499), red);
