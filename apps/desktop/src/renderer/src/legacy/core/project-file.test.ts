@@ -322,6 +322,43 @@ describe('linked media and the host media store (section 21)', () => {
     expect(progress.at(-1)).toEqual([6, 6]);
   });
 
+  it('has main copy several embedded ranges at once, never more than four', async () => {
+    const ids = Array.from({ length: 9 }, (_, i) => `m${i}`);
+    const document = { proj: { assets: Object.fromEntries(ids.map(id => [id, { id }])) } };
+    const media = ids.map((id, i) => ({ id, type: 'image/png', offset: i, length: 1 }));
+    let active = 0, peak = 0;
+    const putProjectRange = vi.fn(async (_token: string, source: any, _asset: any, onBytes?: (bytes: number) => void) => {
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      active--;
+      onBytes?.(source.length);
+      return true;
+    });
+    const progress: number[] = [];
+    await restoreProjectFileStream(document, media, { get: async () => null, put: vi.fn(async () => true), putProjectRange },
+      async () => new Uint8Array([0]), done => progress.push(done), 'reader-1');
+    expect(putProjectRange.mock.calls.map(call => call[1].id)).toEqual(ids);
+    expect(peak).toBe(4);
+    expect(progress.at(-1)).toBe(9);
+  });
+
+  it('lets copies already running finish before refusing a range whose checksum does not match', async () => {
+    const document = { proj: { assets: { a: { id: 'a' }, b: { id: 'b' }, c: { id: 'c' } } } };
+    const media = ['a', 'b', 'c'].map((id, i) => ({ id, type: '', offset: i, length: 1, sha256: 'f'.repeat(64) }));
+    const finished: string[] = [];
+    const putProjectRange = vi.fn(async (_token: string, source: any) => {
+      if (source.id === 'a') throw new Error('MediaStoreError: The project media checksum does not match.');
+      await new Promise(resolve => setTimeout(resolve, 5));
+      finished.push(source.id);
+      return true;
+    });
+    const put = vi.fn(async () => true);
+    await expect(restoreProjectFileStream(document, media, { get: async () => null, put, putProjectRange },
+      async () => new Uint8Array([1]), undefined, 'reader-1')).rejects.toThrow(/checksum/);
+    expect(finished.sort()).toEqual(['b', 'c']);
+    expect(put).not.toHaveBeenCalled();
+  });
+
   it('does not fall back to the page when main finds the file no longer matches its checksum', async () => {
     const document = { proj: { assets: { a: { id: 'a' } } } };
     const put = vi.fn(async () => true);

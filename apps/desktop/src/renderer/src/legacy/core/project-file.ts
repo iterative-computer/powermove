@@ -214,19 +214,28 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
      store itself, verified against the file's checksum, so the bytes never
      pass through this page (section 21). */
   if (readToken && store.putProjectRange) {
-    const remaining: ProjectMediaRange[] = [];
-    for (const source of sources) {
-      let copied = 0;
-      const stored = await store.putProjectRange(readToken, source, assets[source.id], bytes => { copied += bytes; advance(bytes); })
-        .catch((error: unknown) => {
-          // A checksum mismatch is the file's fault: the page would find the same bytes.
-          if (/checksum/i.test(String((error as Error)?.message))) throw error;
-          return false;
-        });
-      if (stored) continue;
-      completed -= copied;
-      remaining.push(source);
-    }
+    /* A few copies at a time: each one ends with main syncing and hashing
+       its file, which leaves the reader idle (a project with fifty embedded
+       stills spent 1.7 s here one by one). */
+    const copiedBy = new Map<ProjectMediaRange, boolean>();
+    let next = 0, refused: unknown = null;
+    const copy = async () => {
+      while (next < sources.length && refused === null) {
+        const source = sources[next++]!;
+        let copied = 0;
+        const stored = await store.putProjectRange!(readToken, source, assets[source.id], bytes => { copied += bytes; advance(bytes); })
+          .catch((error: unknown) => {
+            // A checksum mismatch is the file's fault: the page would find the same bytes.
+            if (/checksum/i.test(String((error as Error)?.message))) refused ??= error;
+            return false;
+          });
+        if (!stored) completed -= copied;
+        copiedBy.set(source, stored);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(PROJECT_RANGE_COPIES, sources.length) }, copy));
+    if (refused !== null) throw refused;
+    const remaining = sources.filter(source => !copiedBy.get(source));
     if (!remaining.length) return;
     sources = remaining;
   }
@@ -265,5 +274,7 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
   }
 }
 
+/** Embedded media ranges main copies into the media store at once. */
+const PROJECT_RANGE_COPIES = 4;
 /** Bytes of restored media the page holds before folding them into a Blob. */
 const RESTORE_FOLD_BYTES = 64 * 1024 * 1024;
