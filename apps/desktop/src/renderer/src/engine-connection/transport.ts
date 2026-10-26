@@ -243,12 +243,14 @@ export class EngineTransport implements TransportDriver {
   }
 
   /** Where a stopped line rests (ticks): the last seek sent, else the
-   *  clock's position. Null without a clock. */
+   *  clock's position. Null without a clock, or while the line runs
+   *  without one (a cached preview plays the engine with the editor
+   *  stopped). */
   resting(): number | null {
     const s = this.session();
     if (this.seekSent && this.seekSent.session === s) return this.seekSent.time;
     const position = this.now(performance.now());
-    return position ? ticks(position.time) : null;
+    return position && !position.playing ? ticks(position.time) : null;
   }
 
   setLoop(range: readonly [number, number] | null): void {

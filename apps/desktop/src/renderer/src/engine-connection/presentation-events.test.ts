@@ -219,6 +219,10 @@ describe('the exclusive transport ("Use New Engine" on)', () => {
     sample = { seq: 1, epoch: 2, state: 'stopped', hostTime: 0, mediaTime: 5 * 705_600_000, rate: { num: 0, den: 1 } };
     transport.pause();
     expect(transport.resting()).toBe(5 * 705_600_000);
+    // A line played with the editor stopped (a cached preview) rests nowhere.
+    transport.play(5);
+    sample = { seq: 2, epoch: 3, state: 'playing', hostTime: 0, mediaTime: 5 * 705_600_000, rate: { num: 1, den: 1 } };
+    expect(transport.resting()).toBeNull();
   });
 
   it('is unchanged when not exclusive', () => {
