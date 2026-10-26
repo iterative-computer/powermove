@@ -820,6 +820,8 @@ describe('compatibility answers during playback', () => {
     const { t, session, state } = rig(false);
     const { prepared, answered } = passThrough(t);
     try {
+      // The clock rests on frame 4, which the engine draws.
+      state.time = 4 * frame;
       t.receiveCompat({ compat: 'needs', needs: layers.map(l => need(4 * frame, l)) }, session);
       expect(prepared).toEqual(layers.map(layer => ({ layer, time: 4 * frame, options: { urgent: true } })));
       expect(answered.map(a => a.layer)).toEqual(layers);
@@ -837,6 +839,43 @@ describe('compatibility answers during playback', () => {
       t.playbackStarted();
       expect(prepared.slice(6).map(p => p.time)).toEqual(frames(12, COMPAT_LOOKAHEAD + 1).flatMap(time => [time, time, time]));
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('answers a paused seek\'s frame before the seek, and never a frame shown earlier', () => {
+    const state = { time: 4 * frame, revision: 5 };
+    const { t, session } = rig(false, {
+      playhead: () => ({ time: state.time, rate: 1 }), revision: () => state.revision,
+      layerSpan: (composition: string, layer: string) => composition === 'P-root' && layer === 'intro' ? { start: 0, end: 10 * frame } : null
+    });
+    const { prepared, answered } = passThrough(t);
+    const nested = (time: number) => ({ ...need(time, 'inner'), composition: 'nested' });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(4 * frame), need(4 * frame, 'intro'), nested(7 * frame)] }, session);
+      expect(answered.map(a => [a.layer, a.time / frame])).toEqual([['title', 4], ['intro', 4], ['inner', 7]]);
+      prepared.length = 0; answered.length = 0;
+      // A seek to frame 40: the open composition's layers there, before the
+      // engine asks; not `intro` (it ends at frame 10), nor the nested layer
+      // (its time at frame 40 is the engine's to name).
+      t.prepareShown(40 * frame);
+      expect(prepared.map(p => [p.layer, p.time / frame])).toEqual([['title', 40]]);
+      expect(answered.map(a => [a.layer, a.time / frame])).toEqual([['title', 40]]);
+      // The engine asks for what is left at frame 40: only that is answered,
+      // and nothing at the frames shown before.
+      state.time = 40 * frame;
+      prepared.length = 0;
+      t.receiveCompat({ compat: 'needs', needs: [nested(43 * frame)] }, session);
+      expect(prepared.map(p => [p.layer, p.time / frame])).toEqual([['inner', 43]]);
+      // An edit there: every layer of frame 40 at the new revision, each at
+      // its time in that frame; still nothing at frames 4 or 7.
+      state.revision++;
+      prepared.length = 0;
+      t.prepareShown();
+      expect(prepared.map(p => [p.layer, p.time / frame]).sort()).toEqual([['inner', 43], ['title', 40]]);
+      // Answered once per revision.
+      prepared.length = 0;
+      t.prepareShown();
+      expect(prepared).toEqual([]);
+    } finally { t.dispose(); }
   });
 
   it('starts the paused frame on screen beside playback preparations holding the budget, and promotes one already making it', async () => {

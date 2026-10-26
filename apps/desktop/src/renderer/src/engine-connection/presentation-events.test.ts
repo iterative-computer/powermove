@@ -190,6 +190,23 @@ describe('the exclusive transport ("Use New Engine" on)', () => {
     expect(transport.active()).toBe(true);
   });
 
+  it('runs what a seek\'s frame needs before the seek leaves, and rests where it was sent until the line moves', () => {
+    const order: string[] = [];
+    let sample: unknown = null;
+    const session = { closed: false, route: 'engine', frames: 1, id: 4, get clock() { return sample; }, transport: (c: { command: string }) => order.push(c.command) };
+    const transport = new EngineTransport(() => session as never, clock, {
+      beforeSeek: (time) => order.push(`answers ${time}`)
+    });
+    expect(transport.resting()).toBeNull();
+    transport.seek(2, true);
+    expect(order).toEqual(['audioScrub', `answers ${2 * 705_600_000}`, 'seek']);
+    expect(transport.resting()).toBe(2 * 705_600_000);
+    // A pause rests where the clock stopped.
+    sample = { seq: 1, epoch: 2, state: 'stopped', hostTime: 0, mediaTime: 5 * 705_600_000, rate: { num: 0, den: 1 } };
+    transport.pause();
+    expect(transport.resting()).toBe(5 * 705_600_000);
+  });
+
   it('is unchanged when not exclusive', () => {
     const transport = new EngineTransport(() => null, clock);
     expect(transport.active()).toBe(false);

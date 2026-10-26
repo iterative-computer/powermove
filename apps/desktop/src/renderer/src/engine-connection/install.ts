@@ -183,7 +183,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     prepare: follower.follow,
     // Today's Play draws the frame at the playhead first; the engine shows
     // it already, so its `frame:rendered` comes again at the next frame.
-    fromRest: () => { presentedEvents.replay(shownState()); }
+    fromRest: () => { presentedEvents.replay(shownState()); },
+    // A paused seek: the frame it goes to is answered ahead of it.
+    beforeSeek: (time) => { if (!PM.playing) renderTransport.prepareShown(time); }
   });
   const preview = new EnginePreview(
     () => current, openComposition, () => Number(PM.time) || 0,
@@ -287,7 +289,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       flushing = true;
       const began = performance.now();
       try {
-        const before = barrier?.revision ?? null;
         // A paused write without paths: the layers it most likely wrote
         // leave first, as a provisional revision the engine draws but does
         // not present while the rest of the document is compared. That
@@ -313,10 +314,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         }
         noteVersion();
         renderTransport.trace.record('edit flushed', barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
-        // An edit while paused: the producers prepare the frame on screen at
-        // the new revision now, beside the engine's render that will ask
-        // for it (today draws an edit in the frame it happens).
-        if (before !== null && (barrier?.revision ?? null) !== before) renderTransport.prepareShown();
+        // An edit while paused: the producers answer the frame on screen at
+        // the new revision now, right behind its patches, so the engine
+        // draws it in one pass (today draws an edit in the frame it
+        // happens). The edit may have left already (flushed before the
+        // document's listeners): answers already posted are not posted again.
+        renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -479,6 +482,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const ticks = rate ? (TICKS_PER_SECOND * rate.den) / rate.num : 0;
       return Number.isInteger(ticks) && ticks > 0 ? ticks : null;
     },
+    shown: () => transport.resting(),
     playhead: () => {
       const position = transport.now(performance.now());
       const rate = current?.clock?.rate;

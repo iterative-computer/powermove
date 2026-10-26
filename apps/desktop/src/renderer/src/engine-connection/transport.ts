@@ -90,6 +90,9 @@ export class EngineTransport implements TransportDriver {
       /** A forward Play from a line resting where it plays from: the
        *  frame on screen is the run's first (`PresentedEvents.replay`). */
       fromRest?: () => void;
+      /** A seek is about to be sent (`time` in ticks): what the frame
+       *  there needs can go ahead of it. */
+      beforeSeek?: (time: number) => void;
     } = {}
   ) {}
 
@@ -235,7 +238,17 @@ export class EngineTransport implements TransportDriver {
     if (this.hold({ time })) return;
     if (scrub) this.syncScrub();
     if (this.run) this.run = { before: this.session()?.clock?.epoch ?? null, played: false };
+    this.options.beforeSeek?.(ticks(time));
     this.send({ command: 'seek', time: ticks(time), mode: scrub ? 'scrub' : 'exact' });
+  }
+
+  /** Where a stopped line rests (ticks): the last seek sent, else the
+   *  clock's position. Null without a clock. */
+  resting(): number | null {
+    const s = this.session();
+    if (this.seekSent && this.seekSent.session === s) return this.seekSent.time;
+    const position = this.now(performance.now());
+    return position ? ticks(position.time) : null;
   }
 
   setLoop(range: readonly [number, number] | null): void {
