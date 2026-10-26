@@ -125,7 +125,7 @@ describe('the raster override producer', () => {
       let promote!: () => void;
       const promoted = new Promise<void>(resolve => { promote = resolve; });
       let done = false;
-      const speculative = compat.prepare(need('box', 1), 4, { promoted }).then(() => { done = true; });
+      const speculative = Promise.resolve(compat.prepare(need('box', 1), 4, { promoted })).then(() => { done = true; });
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(postTask).toHaveBeenCalledOnce();
       expect(postTask.mock.calls[0]![1]).toEqual({ priority: 'user-visible' });
@@ -136,7 +136,7 @@ describe('the raster override producer', () => {
       expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'ahead' });
       // An urgent ask for an answer still waiting for its turn joins it, and ends the wait.
       done = false;
-      const waiting = compat.prepare(need('box', 2), 4).then(() => { done = true; });
+      const waiting = Promise.resolve(compat.prepare(need('box', 2), 4)).then(() => { done = true; });
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(done).toBe(false);
       await compat.prepare(need('box', 2), 4, { urgent: true });
@@ -264,7 +264,7 @@ describe('the raster override producer', () => {
     const held = new Promise<void>(resolve => { release = resolve; });
     engineRasterAsync.mockImplementation(async (layer: any, scale: number, time: number) => {
       await held;
-      return { surface: { cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time }, revision: 1 };
+      return { surface: { cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: `engine:${layer.id}` }, revision: 1 };
     });
     // Five frames start before the first base arrives: one raster for all of them.
     const times = [0.2, 0.25, 0.3, 0.35, 0.4];

@@ -1459,7 +1459,7 @@ export class EngineRenderTransport {
     // `putImageData` takes straight alpha; opaque pixels are the same either way.
     const straight = snapshot.pixels === 'premultiplied' ? unpremultiply(snapshot.data) : snapshot.data;
     // The reply's own buffer when it may back an ImageData (not shared memory).
-    const data = straight.buffer instanceof ArrayBuffer ? straight : new Uint8ClampedArray(straight);
+    const data = (straight.buffer instanceof ArrayBuffer ? straight : new Uint8ClampedArray(straight)) as Uint8ClampedArray<ArrayBuffer>;
     out.getContext('2d')!.putImageData(new ImageData(data, snapshot.width, snapshot.height), 0, 0);
     return out;
   }
