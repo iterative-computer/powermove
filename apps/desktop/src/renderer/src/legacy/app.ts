@@ -1207,6 +1207,8 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     state.baselineReady = (openedJSON ? projectFingerprint(openedJSON) : fingerprintJSON(project)).then(hash => {
       if (association) state.savedHash = hash; else state.baselineHash = hash;
     });
+    // The checkpoint wrote this very document (not only journaled its id).
+    const storedAsOpened = openedJSON !== null;
     openedJSON = null;
     fileStates.set(project.id, state);
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
@@ -1215,9 +1217,10 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     rememberFile(project.id, state);
     const workspace = rememberedWorkspace || o.ws;
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
-    // The session only: the document was stored as it opened, and verifying
-    // that slot again would serialize the whole document.
-    captureProjectSession(false);
+    // The session only when the checkpoint wrote this document as it opened:
+    // verifying that slot again would serialize the whole document.
+    if (storedAsOpened) captureProjectSession(false);
+    else await captureProjectSessionAsync(current);
     await paintProject();
     if (!current()) { opening.close(); return false; }
     opening.finish('Opened ' + file.name, 2200);
