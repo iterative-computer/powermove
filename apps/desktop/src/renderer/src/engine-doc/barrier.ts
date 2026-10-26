@@ -170,7 +170,7 @@ export function changesShape(path: readonly PathPart[]): boolean {
  * Where to diff for a dirty path: the path itself, cut at the first array
  * whose length or `id` order differs between the shadow and the live
  * document (so structural changes become id-keyed operations), or at the
- * first missing member.
+ * first member one side lacks (the parent when that side is not an object).
  */
 export function anchorPath(shadow: any, live: any, path: readonly PathPart[]): PathPart[] {
   let a = shadow, b = live;
@@ -181,7 +181,10 @@ export function anchorPath(shadow: any, live: any, path: readonly PathPart[]): P
       if (typeof index === 'number' && idOf(a[index]) !== idOf(b[index])) return path.slice(0, i);
     }
     const part = path[i]!;
-    if (!hasOwn(a, part) || !hasOwn(b, part)) return path.slice(0, i);
+    // A member one side lacks is still its own path (an insertion or a
+    // deletion there); widening to its parent would diff the whole parent
+    // (a composition's every layer for an optional setting it never had).
+    if (!hasOwn(a, part) || !hasOwn(b, part)) return isRecord(a) && isRecord(b) ? path.slice(0, i + 1) : path.slice(0, i);
     a = a[part as any];
     b = b[part as any];
   }
