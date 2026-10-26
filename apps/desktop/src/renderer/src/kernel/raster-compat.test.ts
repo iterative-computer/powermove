@@ -576,6 +576,27 @@ describe('the raster override producer', () => {
     expect(engineRaster).toHaveBeenLastCalledWith(text, 8, 0.5, window);
   });
 
+  it('lets the engine draw a window of a whole base a wrapper asked for without the crop, unless density-capped', async () => {
+    // A legacy `PM.raster` assignment calls the chain without `crop`: today
+    // the compositor draws that whole raster on the quad, the window alone
+    // on screen, so the engine's raster of the window is the same pixels.
+    const { services, compat, engineRaster, engineRasterAsync, readPixels, need } = setup(true, (layer, scale, time, crop) => JSON.stringify([layer.id, scale, time, crop ?? null]));
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, scale: number, time: number) => original(layer, scale, time));
+    const window = { x: 256, y: 0, width: 512, height: 256 };
+    expect(compat.answer({ ...need('box', 0.5, 8), crop: window }, 3)).toEqual({ kind: 'native' });
+    expect(engineRaster).toHaveBeenLastCalledWith(shape, 8, 0.5, undefined);
+    // Prepared during playback: the whole base is a dependency like any other, and no readback.
+    const ahead = { ...need('box', 0.6, 8), crop: window };
+    await compat.prepare(ahead, 3);
+    expect(engineRasterAsync).toHaveBeenLastCalledWith(shape, 8, 0.6, undefined);
+    expect(compat.answer(ahead, 3, { prepared: true })).toEqual({ kind: 'native' });
+    expect(readPixels).not.toHaveBeenCalled();
+    // At 8,192 pixels a side the whole raster's density was capped: today's pixels are the result's.
+    engineRaster.mockImplementationOnce((layer: any, scale: number, time: number) => ({ cv: { width: 8192, height: 4096 }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: 'engine:box' }));
+    expect(compat.answer({ ...need('box', 0.7, 400), crop: window }, 3)).toMatchObject({ kind: 'raster', width: 8192, height: 4096 });
+  });
+
   it('maps a cropped text result\'s sourceWindow onto the uploaded raster as today\'s draw-window program samples it', () => {
     const { services, compat, need } = setup();
     // Today: `uv = (v_uv * [gw, gh] - [x, y]) / textureSize`, the quad the whole layer box.

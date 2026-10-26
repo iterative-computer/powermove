@@ -20,4 +20,18 @@ describe('page :has() rules', () => {
     );
     expect(descendant).toEqual([]);
   });
+
+  /* `.a:not(:has(> .b)) > :last-child` restyled the whole page (3,800
+     elements, 11 ms) whenever any node anywhere was inserted or removed:
+     Chromium invalidates body's subtree for a negated structural `:has()`.
+     A negated pointer state (`:not(:has(button:hover))`) changes only with
+     that state. The app's stylesheets apply for the whole session. */
+  it('never negate a structural :has()', () => {
+    const negated = sheets.filter((file) => file.endsWith('.css')).flatMap((file) =>
+      [...readFileSync(file, 'utf8').matchAll(/:not\(\s*:has\(([^)]*)\)/g)]
+        .filter((m) => !/:(?:hover|active|focus(?:-visible|-within)?)\b/.test(m[1]!))
+        .map((m) => `${path.basename(file)}: ${m[0]}`)
+    );
+    expect(negated).toEqual([]);
+  });
 });
