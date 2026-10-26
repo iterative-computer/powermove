@@ -1,39 +1,12 @@
-type Box = { type: string; start: number; end: number };
+import { mp4BoxReader, mp4VideoTracks } from './mp4-boxes';
 
 /** Read MP4/MOV sample timing without loading the compressed video into memory.
  * Fractional rates (such as 30000/1001) stay fractional. For variable frame
  * timing, a composition's single frame rate is the source's average rate. */
 export async function mp4FrameRate(blob: Blob): Promise<number | undefined> {
-  let remaining = 4096;
-  async function boxes(start: number, end: number): Promise<Box[]> {
-    const result: Box[] = [];
-    while (start + 8 <= end && remaining-- > 0) {
-      const bytes = await blob.slice(start, Math.min(start + 16, end)).arrayBuffer();
-      const view = new DataView(bytes);
-      let size = view.getUint32(0), header = 8;
-      const type = new TextDecoder().decode(new Uint8Array(bytes, 4, 4));
-      if (size === 1) {
-        if (bytes.byteLength < 16) return [];
-        size = Number(view.getBigUint64(8)); header = 16;
-      } else if (size === 0) size = end - start;
-      if (!Number.isSafeInteger(size) || size < header || start + size > end) return [];
-      result.push({ type, start: start + header, end: start + size });
-      start += size;
-    }
-    return result;
-  }
+  const boxes = mp4BoxReader(blob);
   try {
-    const root = await boxes(0, blob.size);
-    const moov = root.find(box => box.type === 'moov');
-    if (!moov) return;
-    for (const track of (await boxes(moov.start, moov.end)).filter(box => box.type === 'trak')) {
-      const mdia = (await boxes(track.start, track.end)).find(box => box.type === 'mdia');
-      if (!mdia) continue;
-      const media = await boxes(mdia.start, mdia.end);
-      const handler = media.find(box => box.type === 'hdlr');
-      if (!handler || handler.end - handler.start < 12) continue;
-      const kind = await blob.slice(handler.start + 8, handler.start + 12).text();
-      if (kind !== 'vide') continue;
+    for (const media of await mp4VideoTracks(blob, boxes)) {
       const mdhd = media.find(box => box.type === 'mdhd');
       const minf = media.find(box => box.type === 'minf');
       if (!mdhd || !minf) continue;

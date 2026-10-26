@@ -9,6 +9,7 @@ import {
   fitBudget,
   frameArgs,
   parseLoudness,
+  parseColorGroup,
   parseProbe,
   parseSilences,
   pickInformativeTimes,
@@ -66,7 +67,8 @@ describe('probe parsing', () => {
   it('reads container, duration and every stream of an mp4', () => {
     const probe = parseProbe(MP4_BANNER);
     expect(probe).toMatchObject({ format: 'mov/mp4', duration: 8, start: 0, bitrateKbps: 114, otherStreams: 1 });
-    expect(probe.video).toEqual([{ index: 0, codec: 'h264', profile: 'High', pixelFormat: 'yuv420p', width: 1920, height: 1080, fps: 29.97, bitrateKbps: 6, alpha: false, rotation: -90 }]);
+    expect(probe.video).toEqual([{ index: 0, codec: 'h264', profile: 'High', pixelFormat: 'yuv420p', width: 1920, height: 1080, fps: 29.97, bitrateKbps: 6, alpha: false, rotation: -90,
+      color: { range: 'tv', matrix: 'bt709', primaries: 'bt709', transfer: 'bt709' } }]);
     expect(probe.audio).toEqual([{ index: 1, codec: 'aac', profile: 'LC', sampleRate: 48000, layout: 'stereo', channels: 2, sampleFormat: 'fltp', bitrateKbps: 97, language: 'eng' }]);
     expect(displaySize(probe.video[0])).toEqual({ width: 1080, height: 1920 });
   });
@@ -80,6 +82,18 @@ describe('probe parsing', () => {
     expect(prores.duration).toBeCloseTo(62.04, 5);
     expect(prores.video[0]).toMatchObject({ codec: 'prores', profile: '4444', pixelFormat: 'yuva444p12le', alpha: true, width: 3840, height: 2160, fps: 23.98, bitrateKbps: 119000 });
     expect(prores.audio[0]).toMatchObject({ codec: 'pcm_s24le', channels: 2, layout: '2 channels', sampleRate: 48000 });
+  });
+
+  it('reads HDR and log color tags from the pixel format group', () => {
+    const hlg = parseProbe(`Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'IMG_0001.MOV':
+  Stream #0:0[0x1](und): Video: hevc (Main 10) (hvc1 / 0x31637668), yuv420p10le(tv, bt2020nc/bt2020/arib-std-b67), 3840x2160, 28000 kb/s, 29.97 fps, 29.97 tbr, 600 tbn (default)`);
+    expect(hlg.video[0]).toMatchObject({ pixelFormat: 'yuv420p10le', alpha: false,
+      color: { range: 'tv', matrix: 'bt2020nc', primaries: 'bt2020', transfer: 'arib-std-b67' } });
+    expect(parseProbe(PRORES).video[0]!.color).toEqual({ matrix: 'bt709', primaries: 'bt709', transfer: 'bt709' });
+    expect(parseProbe(WEBM_ALPHA).video[0]!.color).toEqual({ range: 'tv' });
+    expect(parseColorGroup('tv, bt2020nc/bt2020/unknown, top first')).toEqual({ range: 'tv', matrix: 'bt2020nc', primaries: 'bt2020' });
+    expect(parseColorGroup('pc, smpte170m')).toEqual({ range: 'pc', matrix: 'smpte170m', primaries: 'smpte170m', transfer: 'smpte170m' });
+    expect(parseColorGroup('progressive')).toBeUndefined();
   });
 
   it('reads audio-only files and a non-zero start', () => {

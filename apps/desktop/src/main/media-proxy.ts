@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -18,6 +19,8 @@ import { IpcValidationError } from '../shared/guards';
 import { orderedSequence, validSequenceFps } from '../shared/image-sequence';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
 import { CONVERTED_VIDEO_EXTENSIONS, NATIVE_VIDEO_EXTENSIONS, mediaExtension, needsImageConversion } from '../shared/media-formats';
+import { videoColorTreatment, type VideoColor } from '../shared/video-color';
+import { parseProbe, type ProbedVideoStream } from './agent-tools/media-ffmpeg';
 import { spawnWithRetry } from './spawn-retry';
 import { isRendererUnavailable } from './renderer-recovery';
 
@@ -29,6 +32,7 @@ const VIDEO_EXTENSIONS = new Set([...NATIVE_VIDEO_EXTENSIONS, ...CONVERTED_VIDEO
 const MAX_ANIMATION_FRAME_BYTES = 64 * 1024 * 1024;
 const MAX_STILL_IMAGE_BYTES = 512 * 1024 * 1024;
 const TRANSCODE_TIMEOUT_MS = 60 * 60 * 1000;
+const PROBE_TIMEOUT_MS = 30 * 1000;
 export const MAX_PROXY_CHUNK_BYTES = 4 * 1024 * 1024;
 
 type ProxyEntry = {
@@ -40,36 +44,121 @@ type ProxyEntry = {
   animation?: { fps: number; repeats: number[]; written: number[]; queue: Promise<void>; finishing: boolean };
 };
 type Convert = (source: string, output: string) => Promise<void>;
+/** A playback converter may write an MP4 beside `output` instead of WebM. */
+type PlaybackOutput = { file: string; type: 'video/mp4' };
+type ConvertPlayback = (source: string, output: string) => Promise<void | PlaybackOutput>;
 
-export function playbackConverter(binary: string): Convert {
+/** The first video stream as FFmpeg reads it. Probing never blocks a
+ * conversion: without an answer, encoding keeps its alpha-preserving defaults. */
+export async function probeVideoStream(binary: string, source: string, decoder: string[] = []): Promise<ProbedVideoStream | undefined> {
+  let banner = '';
+  try {
+    // Without an output FFmpeg prints the input and exits with an error.
+    banner = String((await execFileAsync(binary, ['-hide_banner', '-nostdin', ...decoder, '-i', source],
+      { timeout: PROBE_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 })).stderr);
+  } catch (error) { banner = String((error as { stderr?: unknown })?.stderr ?? ''); }
+  return parseProbe(banner).video[0];
+}
+
+/* HLG and PQ are linearized at the BT.2408 reference white (203 cd/m²), so
+   diffuse content keeps its SDR level. A Möbius shoulder above 90% of white
+   rolls highlights into range up to a 1000 cd/m² peak instead of clipping.
+   zimg performs every matrix step: swscale would silently keep BT.2020
+   coefficients when converting between two YUV formats. */
+const tonemapFilter = (alpha: boolean) => `zscale=t=linear:npl=203:p=bt709,format=${alpha ? 'gbrapf32le' : 'gbrpf32le'},`
+  + 'tonemap=tonemap=mobius:param=0.9:peak=4.926:desat=0,zscale=t=bt709:m=bt709:r=tv';
+const REC709_TAGS = ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv'];
+
+/** Filters and output tags that settle tagged HDR or wide-gamut color. */
+export function proxyColorArgs(color: VideoColor | undefined, pixelFormat: string): string[] {
+  const treatment = videoColorTreatment(color);
+  if (!treatment) return ['-pix_fmt', pixelFormat];
+  // A log curve is not a transfer to undo: keep R'G'B' and change only the matrix.
+  const conversion = treatment === 'tonemap' ? tonemapFilter(pixelFormat.startsWith('yuva')) : 'zscale=m=bt709:r=tv';
+  // Format the last step explicitly so zimg, not swscale, writes the new matrix.
+  return ['-vf', `${conversion},format=${pixelFormat}`, ...REC709_TAGS];
+}
+
+/** An alpha plane is a second VP9 stream, and Chromium decodes alpha VP9 in
+ * software. Opaque footage must not pay for one. Unknown sources keep alpha. */
+function proxyPixelFormat(stream: ProbedVideoStream | undefined): string {
+  return !stream || stream.alpha ? 'yuva420p' : 'yuv420p';
+}
+
+/** Realtime libvpx matches the quality of `good` at CRF 18 within a few
+ * hundredths of a dB here, while encoding 4K camera footage about ten times faster. */
+const VP9_SPEED = ['-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1', '-threads', '4'];
+
+export function playbackProxyArgs(source: string, output: string, stream: ProbedVideoStream | undefined): string[] {
+  // Chromium decodes VP9 alpha; H.264 proxies flatten ProRes 4444 cutouts.
+  // Keep full dimensions, timing, and optional audio, with bounded workers.
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', source,
+    '-map', '0:v:0', '-map', '0:a:0?',
+    ...proxyColorArgs(stream?.color, proxyPixelFormat(stream)),
+    '-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '18',
+    // Bound random seeks to half a second of decode at 30 fps. Long GOPs
+    // make timeline scrubbing and frame-by-frame exports decode seconds repeatedly.
+    '-g', '15', ...VP9_SPEED,
+    '-c:a', 'libopus', '-b:a', '192k', '-f', 'webm', '-y', output
+  ];
+}
+
+/** The packaged helper sits beside FFmpeg; development uses the node-gyp build. */
+export function hdrProxyHelper(appPath: string, resourcesPath?: string): string | undefined {
+  if (process.platform !== 'darwin') return undefined;
+  const helper = resourcesPath
+    ? path.join(resourcesPath, 'encoder', 'powermove-hdr-proxy')
+    : path.join(appPath, 'node_modules', '@powermove', 'macos-haptics', 'build', 'Release', 'powermove-hdr-proxy');
+  return existsSync(helper) ? helper : undefined;
+}
+
+/* FFmpeg's float tone map runs below real time for 4K on the CPU, so opaque
+   HDR footage goes to powermove-hdr-proxy (packages/macos-haptics) when it is
+   available: the media engine decodes and encodes HEVC and Metal applies the
+   same curve, several times faster. Alpha needs VP9, and any failure of the
+   helper falls back to FFmpeg. */
+export function playbackConverter(binary: string, hdrProxy?: string): ConvertPlayback {
   return async (source, output) => {
-    // Chromium decodes VP9 alpha; H.264 proxies flatten ProRes 4444 cutouts.
-    // Keep full dimensions, timing, and optional audio, with bounded workers.
-    await execFileAsync(binary, [
-      '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', source,
-      '-map', '0:v:0', '-map', '0:a:0?',
-      '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '18',
-      // Bound random seeks to half a second of decode at 30 fps. Long GOPs
-      // make timeline scrubbing and frame-by-frame exports decode seconds repeatedly.
-      '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
-      '-c:a', 'libopus', '-b:a', '192k', '-f', 'webm', '-y', output
-    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    const stream = await probeVideoStream(binary, source);
+    if (hdrProxy && stream && !stream.alpha && videoColorTreatment(stream.color) === 'tonemap') {
+      const file = path.join(path.dirname(output), 'playback.mp4');
+      try {
+        await execFileAsync(hdrProxy, [source, file], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+        return { file, type: 'video/mp4' };
+      } catch (error) {
+        console.warn('GPU HDR conversion failed; converting with FFmpeg.', error);
+        await rm(file, { force: true });
+      }
+    }
+    await execFileAsync(binary, playbackProxyArgs(source, output, stream),
+      { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
+}
+
+const PREVIEW_SCALE = "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2";
+
+export function previewArgs(source: string, output: string, stream: ProbedVideoStream | undefined): string[] {
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
+    // libvpx preserves WebM alpha; the native VP9 decoder discards it.
+    ...(path.extname(source) === '.webm' ? ['-c:v', 'libvpx-vp9'] : []),
+    '-i', source, '-map', '0:v:0', '-an',
+    // The preview stands in for the element it is built from, which Chromium
+    // color-manages itself. Its tags carry through unchanged.
+    '-vf', `${PREVIEW_SCALE},format=${proxyPixelFormat(stream)}`,
+    '-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '18',
+    '-g', '1', '-deadline', 'realtime', '-cpu-used', '6', '-row-mt', '1', '-threads', '4',
+    '-f', 'webm', '-y', output,
+  ];
 }
 
 /** All-intra preview frames avoid decoding a long 4K GOP for every arrow press. */
 export function previewConverter(binary: string): Convert {
   return async (source, output) => {
-    await execFileAsync(binary, [
-      '-hide_banner', '-loglevel', 'error', '-nostdin',
-      // libvpx preserves WebM alpha; the native VP9 decoder discards it.
-      ...(path.extname(source) === '.webm' ? ['-c:v', 'libvpx-vp9'] : []),
-      '-i', source, '-map', '0:v:0', '-an',
-      '-vf', "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-      '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '18',
-      '-g', '1', '-deadline', 'realtime', '-cpu-used', '6', '-row-mt', '1', '-threads', '4',
-      '-f', 'webm', '-y', output,
-    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    const decoder = path.extname(source) === '.webm' ? ['-c:v', 'libvpx-vp9'] : [];
+    await execFileAsync(binary, previewArgs(source, output, await probeVideoStream(binary, source, decoder)),
+      { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
 }
 
@@ -148,7 +237,7 @@ export class MediaProxyService {
 
   constructor(
     private readonly tempRoot: string,
-    private readonly convert: Convert,
+    private readonly convert: ConvertPlayback,
     private readonly convertSequence?: ConvertSequence,
     private readonly convertPreview?: Convert,
     private readonly convertStill?: ConvertStill
@@ -240,7 +329,7 @@ export class MediaProxyService {
     finally { delete entry.finish; }
   }
 
-  async create(sourcePath: string): Promise<{ token: string; size: number }> {
+  async create(sourcePath: string): Promise<{ token: string; size: number; type: 'video/webm' | 'video/mp4' }> {
     if (!path.isAbsolute(sourcePath) || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
       throw new Error('This video container is not one Powermove can convert');
     }
@@ -253,11 +342,12 @@ export class MediaProxyService {
     const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-media-proxy-'));
     const output = path.join(directory, 'playback.webm');
     try {
-      await this.convert(resolved, output);
-      const converted = await stat(output);
+      const written = await this.convert(resolved, output);
+      const file = written && path.dirname(written.file) === directory ? written.file : output;
+      const converted = await stat(file);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The playback proxy was empty');
-      const token = this.#add({ directory, file: output, size: converted.size });
-      return { token, size: converted.size };
+      const token = this.#add({ directory, file, size: converted.size });
+      return { token, size: converted.size, type: written && file === written.file ? written.type : 'video/webm' };
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
       throw error;
@@ -543,7 +633,7 @@ export function registerMediaProxyIpc(
       return {
         ok: true,
         token: proxy.token,
-        type: 'video/webm',
+        type: proxy.type,
         size: proxy.size
       };
     } catch (error) {

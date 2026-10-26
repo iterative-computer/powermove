@@ -7,6 +7,7 @@
  */
 
 import { formatClock } from '../../shared/media-tools';
+import type { VideoColor } from '../../shared/video-color';
 
 /* ── probe ───────────────────────────────────────────────── */
 
@@ -22,6 +23,8 @@ export interface ProbedVideoStream {
   alpha: boolean;
   /** Display rotation in degrees (ffmpeg applies it when decoding). */
   rotation?: number;
+  /** Tagged range, matrix, primaries and transfer; absent when untagged. */
+  color?: VideoColor;
   language?: string;
 }
 
@@ -79,6 +82,27 @@ function codecAndProfile(head: string): { codec: string; profile?: string } {
   return { codec, ...(profile ? { profile } : {}) };
 }
 
+const RANGES = new Set(['tv', 'pc']);
+const FIELD_ORDERS = new Set(['progressive', 'top first', 'bottom first', 'top coded first (swapped)', 'bottom coded first (swapped)']);
+
+/** "tv, bt2020nc/bt2020/arib-std-b67, progressive": ffmpeg prints one name
+ *  when matrix, primaries and transfer agree, and the triple otherwise. */
+export function parseColorGroup(group: string): VideoColor | undefined {
+  const color: VideoColor = {};
+  for (const token of group.split(',').map(part => part.trim()).filter(Boolean)) {
+    if (RANGES.has(token)) { color.range = token; continue; }
+    if (FIELD_ORDERS.has(token)) continue;
+    const names = token.split('/');
+    if (names.length !== 1 && names.length !== 3) continue;
+    if (!names.every(name => /^[a-z0-9-]+$/.test(name))) continue;
+    const [matrix, primaries = matrix, transfer = matrix] = names as [string, string?, string?];
+    if (matrix !== 'unknown') color.matrix = matrix;
+    if (primaries !== 'unknown') color.primaries = primaries;
+    if (transfer !== 'unknown') color.transfer = transfer;
+  }
+  return Object.keys(color).length ? color : undefined;
+}
+
 const ALPHA_FORMATS = /^(yuva|rgba|bgra|argb|abgr|gbrap|ya8|ya16|rgba64|bgra64)/;
 
 function number(text: string | undefined): number | undefined {
@@ -123,7 +147,11 @@ export function parseProbe(stderr: string): MediaProbe {
           const bitrate = /^(\d+) kb\/s/.exec(part);
           if (bitrate) { video.bitrateKbps = Number(bitrate[1]); continue; }
           const pix = /^([a-z0-9_]+)(\(.*\))?$/.exec(part);
-          if (pix && video.pixelFormat === undefined && !/tb[rnc]$/.test(part)) video.pixelFormat = pix[1]!;
+          if (pix && video.pixelFormat === undefined && !/tb[rnc]$/.test(part)) {
+            video.pixelFormat = pix[1]!;
+            const color = pix[2] ? parseColorGroup(pix[2].slice(1, -1)) : undefined;
+            if (color) video.color = color;
+          }
         }
         if (video.pixelFormat && ALPHA_FORMATS.test(video.pixelFormat)) video.alpha = true;
         probe.video.push(video); current = video;

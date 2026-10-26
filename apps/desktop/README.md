@@ -164,6 +164,12 @@ macOS packaging is currently ad-hoc signed for development distribution; see the
   editing proxy while the original media stays embedded in the editable project.
 - Containers Chromium cannot open — MKV, AVI, WMV, FLV, MPEG-PS/TS, MXF and the
   rest — convert on import through the same proxy path.
+- HDR footage (HLG/PQ, including iPhone HDR) is tone mapped to Rec.709 once on
+  import, and BT.2020-tagged camera log keeps its code values for LUTs and
+  grading, so the viewer, previews and exports show the same color. Opaque HDR
+  converts on the GPU (`powermove-hdr-proxy`, built with
+  `@powermove/macos-haptics`) at several times real time for 4K, with FFmpeg
+  as the fallback.
 - Export includes playable H.264/AAC MP4, frame-exact WebM/VP9/Opus,
   realtime WebM, still PNG, and PNG-sequence delivery.
 - Local builds remain ad-hoc signed. `bun run dist:release` is the guarded

@@ -309,7 +309,7 @@ export interface MediaProxyRequest {
   name: string;
 }
 export type MediaProxyResult =
-  | { ok: true; token: string; type: 'video/webm' | 'image/png'; size: number }
+  | { ok: true; token: string; type: 'video/webm' | 'video/mp4' | 'image/png'; size: number }
   | { ok: false; error: string };
 export interface MediaProxyReadRequest {
   token: string;
