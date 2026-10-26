@@ -145,6 +145,23 @@ describe('the raster override producer', () => {
     } finally { compat.dispose(); vi.unstubAllGlobals(); }
   });
 
+  it('turns a frame the running clock is about to show ahead of ordinary tasks', async () => {
+    const postTask = vi.fn(async (_callback: () => void, _options: { priority: string }) => {});
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'due' }));
+    try {
+      const priorities = () => postTask.mock.calls.map(call => call[1].priority);
+      await compat.prepare(need('box', 1), 4, { due: true });
+      const due = priorities().length;
+      expect(due).toBeGreaterThan(0);
+      expect(new Set(priorities())).toEqual(new Set(['user-blocking']));
+      await compat.prepare(need('box', 2), 4);
+      expect(new Set(priorities().slice(due))).toEqual(new Set(['user-visible']));
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('reads a paused edit\'s own answer back on the window\'s thread, and other preparations on the worker', async () => {
     const readPixelsAsync = vi.fn(async (source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4) }));
     const { services, compat, readPixels, need } = setup(true, undefined, readPixelsAsync);

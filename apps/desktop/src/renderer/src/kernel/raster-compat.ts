@@ -268,28 +268,32 @@ const NOT_UPLOADED = (_key: string): undefined => undefined;
 const TRANSPARENT: CompatAnswerResult = { kind: 'raster', key: 'powermove:empty', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
 
 /** A preparation in progress: an urgent ask for the same answer promotes it. */
-type Preparing = { layer: unknown; promise: Promise<void>; urgent: boolean; promote: (() => void) | null };
+type Preparing = { layer: unknown; promise: Promise<void>; urgent: boolean; due: boolean; promote: (() => void) | null };
 
-/** Give frame delivery and input a turn before non-urgent wrapper work.
- *  Native replies often arrive together; chaining their continuations as
- *  microtasks would run several wrappers before a presentation event. The
- *  turn is an ordinary task (`user-visible`), not `background`: background
- *  tasks run only when no other task is queued, and a long sliced job (a
- *  project fingerprint posts a task every few milliseconds for tens of
- *  seconds on a large document) starved them, with the frame on screen
- *  waiting behind them. An urgent ask for the same answer ends the turn. */
+/** Makes a preparation urgent, ending the turn it waits for. */
 function promote(entry: Preparing): void {
   entry.urgent = true;
   entry.promote?.();
 }
 
+/** Give frame delivery and input a turn before non-urgent wrapper work.
+ *  Native replies often arrive together; chaining their continuations as
+ *  microtasks would run several wrappers before a presentation event. The
+ *  turn is a task of its own, never `background`: background tasks run only
+ *  when no other task is queued, and a long sliced job (a project
+ *  fingerprint, for tens of seconds on a large document) starved them, with
+ *  the frame on screen waiting behind them. A frame the running clock is
+ *  about to show (`due`) goes ahead of ordinary tasks (`user-blocking`): on a
+ *  busy window an ordinary turn waited 40 to 150 ms (measured), and every
+ *  answer that late made its frame late, so playback skipped it. An urgent
+ *  ask for the same answer ends the turn. */
 async function preparationTurn(entry: Preparing): Promise<void> {
   if (entry.urgent) return;
-  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' }) => Promise<void> } }).scheduler;
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' | 'user-blocking' }) => Promise<void> } }).scheduler;
   if (!scheduler?.postTask) return;
   await new Promise<void>(resolve => {
     entry.promote = resolve;
-    void scheduler.postTask(() => {}, { priority: 'user-visible' }).then(resolve, resolve);
+    void scheduler.postTask(() => {}, { priority: entry.due ? 'user-blocking' : 'user-visible' }).then(resolve, resolve);
   });
   entry.promote = null;
 }
@@ -549,7 +553,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const beganPreparation = performance.now();
       stats.preparations++;
       const valid = () => generation === epoch && findLayer(PM, String(need.composition), String(need.layer)) === layer && wrapped();
-      const entry: Preparing = { layer, promise: null!, urgent: !!prepareOptions?.urgent, promote: null };
+      const entry: Preparing = { layer, promise: null!, urgent: !!prepareOptions?.urgent, due: !!prepareOptions?.due, promote: null };
       void prepareOptions?.promoted?.then(() => promote(entry));
       const promise = Promise.resolve().then(async () => {
         const samples = new Map<string, any>();

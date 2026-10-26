@@ -794,11 +794,13 @@ describe('compatibility answers during playback', () => {
   it('bounds async preparations, presents ready answers independently, and drops obsolete completions', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(true);
-    const pending: Array<{ time: number; done: () => void }> = [];
-    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, n => new Promise(resolve => pending.push({ time: n.time, done: resolve })));
+    const pending: Array<{ time: number; done: () => void; due: boolean }> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, (n, _revision, options) => new Promise(resolve => pending.push({ time: n.time, done: resolve, due: !!options?.due })));
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
+      // Frames the running clock is about to show.
+      expect(pending.every(p => p.due)).toBe(true);
       expect(pending.map(p => p.time)).toEqual(Array.from({ length: COMPAT_PREPARE_IN_FLIGHT }, (_, i) => i * frame));
       expect(asked).toEqual([]);
       // The second result lands while the first remains slow.

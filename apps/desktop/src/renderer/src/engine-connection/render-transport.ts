@@ -278,8 +278,9 @@ type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; c
 
 /** `urgent`: the paused frame the engine waits for (no yielded turns);
  *  `promoted`: settles when a preparation that began speculatively became
- *  that frame's, so it goes on as urgent. */
-export type CompatPrepareOptions = { urgent?: boolean; promoted?: Promise<void> };
+ *  that frame's, so it goes on as urgent; `due`: a frame the running clock
+ *  shows within the answer horizon (its turns go ahead of ordinary tasks). */
+export type CompatPrepareOptions = { urgent?: boolean; promoted?: Promise<void>; due?: boolean };
 export type CompatPreparer = (need: CompatNeed, revision: number, options?: CompatPrepareOptions) => Promise<void>;
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
@@ -674,7 +675,8 @@ export class EngineRenderTransport {
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
     this.trace.record('prepare dispatched', revision, time);
-    void Promise.resolve().then(() => prepare(need, revision, urgent ? { urgent } : { urgent, promoted })).then(() => {
+    const due = !!this.options.playing?.();
+    void Promise.resolve().then(() => prepare(need, revision, urgent ? { urgent } : { urgent, promoted, ...(due ? { due } : {}) })).then(() => {
       this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
