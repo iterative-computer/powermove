@@ -511,8 +511,9 @@ counters, and `api.host.pm`.
    frame boundaries.
 6. **Dual-answer mode** (Phase 1 tests): every synchronous query answered by the
    legacy code and by `pm-wasm`, compared with the section 25 tolerances.
-7. **Production consistency check.** On idle, before save, and before every export
-   or agent export, the renderer compares a canonical hash of `PM.proj` with
+7. **Production consistency check.** Before a save the user asks for and before
+   every export or agent export (and, in the test modes, on idle and before every
+   autosave), the renderer compares a canonical hash of `PM.proj` with
    `pm-wasm`'s hash for that revision. A mismatch forces a canonical resync before
    the save or export proceeds and records a telemetry event.
 
