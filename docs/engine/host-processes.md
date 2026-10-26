@@ -673,6 +673,15 @@ The writes are also coalesced (`core/projects.ts`):
   checkpoint. The check understands a journal that holds only such entries.
 - Main owns a project's durability (SAVE-1, below); the window only posts
   slot snapshots and journal entries, in order.
+- The periodic checkpoint that keeps the journal short (every 50 revisions,
+  or once this window's copy of the journal passes 4 MiB) is serialized in
+  slices for a large slot, and posted (`PM.store.setText`) only if nothing
+  changed while it was read: no announced change, document write, engine
+  barrier epoch, open history transaction or other slot write. It is then
+  the document as it was when posted, with exactly the entries posted before
+  it, as main numbers it. Otherwise it stays due and the next autosave tries
+  again; main keeps every entry meanwhile. Written in one task it was a 0.5
+  to 1 s freeze every 50 edits of the private project.
 
 **SAVE-1: one owner for a project's durability.** Three review rounds
 patched a protocol in which the window decided when the journal was deleted

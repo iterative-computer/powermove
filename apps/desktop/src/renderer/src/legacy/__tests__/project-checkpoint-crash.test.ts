@@ -417,6 +417,63 @@ describe('a project checkpoint that fails to reach disk', () => {
   });
 });
 
+describe('periodic checkpoints of a large project', () => {
+  const edit = (PM: any, project: any, revision: number, layer: number, name: string) => {
+    project.revision = revision;
+    project.layers[layer].name = name;
+    PM.bus.emit('history:project-patch', { projectId: project.id, revision, patches: [{ path: ['layers', layer, 'name'], exists: true, value: name }, { path: ['revision'], exists: true, value: revision }] });
+  };
+
+  it('are serialized in slices and posted only if nothing changed while they were read', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    const store = createStore(await temporaryDirectory(), { fs: loggingFs(log), writeDelayMs: 0 });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('W');
+    PM.proj = project;
+    const states: string[] = [];
+    const marks: Record<string, number> = {};
+    const step = async (name: string) => {
+      await settle(PM, store);
+      states.push(JSON.stringify(project));
+      marks[name] = log.length;
+    };
+    const slotWrites = () => log.filter(op => op.kind === 'rename' && path.basename(op.to) === 'project.W.json').length;
+    const set = vi.spyOn(PM.store, 'set');
+
+    PM.Projects.put(project);
+    await step('opened');
+    edit(PM, project, 49, 0, 'Forty-nine');
+    PM.Projects.recover(project);
+    await step('journaled');
+    expect(slotWrites()).toBe(1);
+    // The fiftieth revision checkpoints; an edit lands while it is read.
+    edit(PM, project, 50, 1, 'Fifty');
+    set.mockClear();
+    PM.Projects.recover(project);
+    edit(PM, project, 51, 2, 'While read');
+    await step('changed while read');
+    // Never serialized in one task, and not posted: the journal holds both edits.
+    expect(set.mock.calls.filter(([key]) => key === 'project.W')).toHaveLength(0);
+    expect(slotWrites()).toBe(1);
+    // Still due: the next autosave checkpoints, though 51 is no multiple of 50.
+    PM.Projects.recover(project);
+    await step('checkpointed');
+    expect(set.mock.calls.filter(([key]) => key === 'project.W')).toHaveLength(0);
+    expect(slotWrites()).toBe(2);
+    // And no more until the next one is due.
+    edit(PM, project, 52, 3, 'After');
+    PM.Projects.recover(project);
+    await step('journaled after');
+    expect(slotWrites()).toBe(2);
+
+    for (const name of ['changed while read', 'checkpointed', 'journaled after']) {
+      expect(jsonDiff(states[Object.keys(marks).indexOf(name)]!, await recover(stateAfter(log, marks[name]!), 'W')), name).toEqual([]);
+    }
+    await expectEveryCrashPointSafe(log, states, 'W');
+  });
+});
+
 describe('edits while a checkpoint is failing', () => {
   const edit = (PM: any, project: any, revision: number, layer: number, name: string) => {
     project.revision = revision;
