@@ -434,7 +434,7 @@ describe('legacy app install', () => {
     expect(toasts).toContain('Opened Finder Project.pmv');
   });
 
-  it('checkpoints an opened file while the engine prepares it, without a second baseline', async () => {
+  it('checkpoints an opened file once main has the engine\'s copy, while the engine prepares it, without a second baseline', async () => {
     let externalOpen!: (result: any) => Promise<void>;
     const { PM } = appRegistry(true, undefined, undefined, { onProjectOpenExternal: (callback: typeof externalOpen) => { externalOpen = callback; return () => {}; } });
     PM.pause = vi.fn();
@@ -442,15 +442,23 @@ describe('legacy app install', () => {
     PM.WS.activate = vi.fn();
     PM.touch = vi.fn();
     PM.ProjectsScreen = { hide: vi.fn() };
-    let finishPrepare!: () => void;
+    let finishPrepare!: () => void, streamed!: () => void;
     const checkpointed: string[] = [];
-    PM.EngineDoc = { prepare: vi.fn(() => { checkpointed.push('prepare'); return new Promise<void>(resolve => { finishPrepare = resolve; }); }), discardPrepared: vi.fn() };
+    PM.EngineDoc = { prepare: vi.fn((_project: any, _text: any, sent: () => void) => {
+      checkpointed.push('prepare'); streamed = sent;
+      return new Promise<void>(resolve => { finishPrepare = resolve; });
+    }), discardPrepared: vi.fn() };
     const recover = PM.Projects.recoverAsync, put = PM.Projects.put;
     if (recover) PM.Projects.recoverAsync = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return recover(project, ...rest); };
     else PM.Projects.put = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return put(project, ...rest); };
     const document = { proj: { ...PM.proj, id: 'from-finder', name: 'Finder Project' } };
 
     const opening = externalOpen({ ok: true, path: '/tmp/Finder Project.pmv', projectId: 'from-finder', data: new TextEncoder().encode(JSON.stringify(document)) });
+    // The checkpoint posts the document to main too: not while the engine's copy streams there.
+    await vi.waitFor(() => expect(checkpointed).toContain('prepare'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(checkpointed).not.toContain('from-finder');
+    streamed();
     await vi.waitFor(() => expect(checkpointed).toContain('from-finder'));
     expect(checkpointed.indexOf('prepare')).toBeGreaterThanOrEqual(0);
     expect(checkpointed.indexOf('prepare')).toBeLessThan(checkpointed.indexOf('from-finder'));
