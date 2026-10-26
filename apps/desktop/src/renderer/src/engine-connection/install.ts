@@ -513,7 +513,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     session: snapshotSession,
     wake: wakeStandby,
     bind: async () => { await (PM as any).HostMedia?.flushBindings?.(PM.proj); },
-    changed: () => PM.bus?.emit?.('assets'),
+    // A new poster picture is runtime media readiness, not a document write.
+    changed: () => PM.bus?.emit?.('assets', { runtimeOnly: true }),
     error: error => log('error', `source media: ${error instanceof Error ? error.message : String(error)}`)
   });
   (PM as any).EngineSourceMedia = sourceMedia;

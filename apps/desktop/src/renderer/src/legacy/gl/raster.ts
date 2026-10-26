@@ -1494,18 +1494,22 @@ PM.assets = {
         if (epoch !== assetEpoch || PM.proj !== project) return;
         const available = completed.filter(Boolean);
         if (!available.length) return;
+        // A poster's pixels are runtime media; only a newly set `poster` flag
+        // is a document write (an asset whose flag was already set only lost
+        // its stored picture).
+        const marked: any[][] = [];
         let applied = 0;
         available.forEach(({ id, blob, meta, asset }: any) => {
           if (project.assets?.[id] !== meta || PM.assets.map.get(id) !== asset) return;
-          meta.poster = true;
+          if (meta.poster !== true) { meta.poster = true; marked.push(['assets', id, 'poster']); }
           setPoster(id, blob);
           applied++;
         });
-        if (applied) {
-          PM.touch(available.map(({ id }: any) => ['assets', id, 'poster']));
+        if (marked.length) {
+          PM.touch(marked);
           checkpointAssetMetadata(project);
-          notifyDocument(PM, 'assets');
-        }
+          notifyDocument(PM, 'assets', marked);
+        } else if (applied) PM.bus.emit('assets', { runtimeOnly: true });
       })();
     }, 0);
     await cloudMedia.scan(project, missing);

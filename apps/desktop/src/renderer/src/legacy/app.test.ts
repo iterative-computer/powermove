@@ -270,6 +270,8 @@ describe('legacy app install', () => {
       return fingerprint(value);
     });
     try {
+      // A write outside history since the open: the restoration compares again.
+      PM.autosave();
       release();
       await vi.waitFor(() => expect(hashing).toHaveBeenCalled());
       PM.proj.name = 'Newer edit during comparison'; PM.autosave();
@@ -303,6 +305,41 @@ describe('legacy app install', () => {
     handlers.forEach((run: any) => run());
     expect(PM.app.saveTimer).not.toBe(previous.timer);
     expect(PM.app.dirty).toBe(true);
+  });
+
+  it('opens a saved file unchanged: no autosave, and no whole-document comparison after its media restore', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const autosave = vi.spyOn(PM, 'autosave');
+    const fingerprint = vi.spyOn(fingerprints, 'fingerprintJSON');
+    // Panels hearing about the document again is not an edit either.
+    PM.__busHandlers.get('assets').forEach((run: any) => run({ runtimeOnly: true }));
+    release(); await PM.projectAssetsReady;
+    expect(autosave).not.toHaveBeenCalled();
+    expect(fingerprint).not.toHaveBeenCalled();
+    expect(PM.app.dirty).toBe(false);
+  });
+
+  it('keeps history commits changed without hashing the document, and compares again after any other write', async () => {
+    const { PM, timers } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.Projects.recoverAsync = vi.fn(async () => true);
+    const fingerprint = vi.spyOn(fingerprints, 'fingerprintJSON');
+    const name = PM.proj.name;
+    PM.proj.name = 'Committed edit'; PM.autosave('history');
+    await timers.get(PM.app.saveTimer)();
+    expect(fingerprint).not.toHaveBeenCalled();
+    expect(PM.projectFileState().dirty).toBe(true);
+    // An announcement inside an open history transaction is that transaction's commit.
+    PM.hist.busy = () => true;
+    PM.__busHandlers.get('layers').forEach((run: any) => run());
+    PM.hist.busy = () => false;
+    await timers.get(PM.app.saveTimer)();
+    expect(fingerprint).not.toHaveBeenCalled();
+    // Undo, redo and writers outside history may return to the file's content.
+    PM.proj.name = name; PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(fingerprint).toHaveBeenCalled();
+    expect(PM.projectFileState().dirty).toBe(false);
   });
 
   it('checks autosave file status once while retaining exact Close comparisons', async () => {
