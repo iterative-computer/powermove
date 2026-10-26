@@ -6,6 +6,7 @@ import { writeDocument } from '../../engine-doc/write';
 import { parseAsync } from './parse-async';
 import { yieldTask } from './yield-task';
 import { digestJSON, serializeInSlices } from './json-slices';
+import { projectTexts } from './project-text';
 import { applyPatches, entriesAfter, recoverProject, supersede } from '../../../../shared/project-journal';
 
 export { supersede };
@@ -181,6 +182,11 @@ R.writtenJSON = (proj: any): string | null => {
   return entry.text.startsWith(prefix) && entry.text.endsWith('}') ? entry.text.slice(prefix.length, -1) : null;
 };
 
+/** The slot's text and the engine's canonical text of a project, from one
+ *  serialization in slices (project-text.ts); null when it has to be
+ *  serialized as a whole. */
+R.texts = (proj: any) => projectTexts(PM.version || '1.0.0', proj);
+
 /** `serialized`: the envelope's JSON text, already made (`checkpointInSlices`). */
 function writeSlot(proj: any, serialized?: string) {
   const envelope = { v: PM.version || '1.0.0', proj };
@@ -248,8 +254,9 @@ function checkSlot(proj: any): void {
   PM.store.track?.(R.SLOT + id, work);
 }
 
-/** Upsert registry metadata for a project and persist its data. */
-R.put = (proj: any, thumb: any) => {
+/** Upsert registry metadata for a project and persist its data.
+ *  `serialized`: the slot's text, already made (projectTexts, for an open). */
+R.put = (proj: any, thumb: any, serialized?: string) => {
   if (!proj || !proj.id) return;
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
@@ -265,7 +272,7 @@ R.put = (proj: any, thumb: any) => {
   const slot = unsaved.has(proj.id) ? undefined : slots.get(proj.id);
   if (slot && slot.project === proj && slot.digest && slot.chars >= VERIFY_MIN_CHARS && slot.journal !== 'other'
     && (slot.journal === 'assets' || !journaledSince(proj.id))) checkSlot(proj);
-  else writeSlot(proj);
+  else writeSlot(proj, serialized);
   return meta;
 };
 
@@ -326,14 +333,14 @@ async function checkpointInSlices(proj: any) {
 }
 
 /** Lightweight crash recovery: compact typed-history patches between checkpoints. */
-R.recover = (proj: any, thumb: any) => {
+R.recover = (proj: any, thumb: any, serialized?: string) => {
   if (!proj?.id) return null;
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
   const entries = mainKeepsJournal() ? sinceCheckpoint(proj.id) : journal(proj.id);
-  if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length) return R.put(proj, thumb);
+  if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length) return R.put(proj, thumb, serialized);
   const bytes = journalBytes(entries);
   if (checkpointsDue.has(proj.id) || bytes > MAX_JOURNAL_BYTES || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
     if (!sliceable(proj, bytes)) return R.put(proj, thumb);
@@ -358,9 +365,9 @@ function sliceable(proj: any, journaled: number): boolean {
  * When main keeps the journal (SAVE-1) the slot is posted synchronously: main
  * numbers a slot against the entries posted before it, so a snapshot captured
  * earlier and posted later would claim edits it does not hold. */
-R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
+R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean, serialized?: string) => {
   if (!proj?.id || !isCurrent()) return false;
-  if (!PM.store.setSnapshotAsync || mainKeepsJournal()) { R.recover(proj, thumb); return true; }
+  if (!PM.store.setSnapshotAsync || mainKeepsJournal()) { R.recover(proj, thumb, serialized); return true; }
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);

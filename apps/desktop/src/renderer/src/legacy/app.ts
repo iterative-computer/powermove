@@ -1174,11 +1174,14 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);
     if (!current()) return abandon();
+    // One serialization writes both the local checkpoint and the new engine's
+    // copy (project-text.ts). Nothing below writes the project before it is
+    // published, so both texts stay the document's.
+    let texts = PM.Projects.texts?.(project) ?? null;
     // The new engine's copy of the document is prepared while media finishes
     // restoring and this window checkpoints the project: most of it is the
-    // engine process parsing and hashing, not this thread. Nothing below
-    // writes the project before it is published.
-    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project));
+    // engine process parsing and hashing, not this thread.
+    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project, texts?.canonical));
     preparing.catch(() => {});
     release = () => { void preparing.then(() => PM.EngineDoc?.discardPrepared?.(project), () => {}); };
     if (restoring) await restoring;
@@ -1216,12 +1219,16 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // The text a checkpoint writes is at hand only during the call that
     // writes it: the opened file's hash then needs no serialization of its own.
     let openedJSON: string | null = null;
+    // Without the text (a serialization error), the checkpoint reports it as before.
+    const slot: string | undefined = texts ? await texts.slot.catch(() => undefined) : undefined;
+    texts = null;
+    if (!current()) return abandon();
     if (PM.Projects.recoverAsync) {
-      const storing = PM.Projects.recoverAsync(project, undefined, current);
+      const storing = PM.Projects.recoverAsync(project, undefined, current, slot);
       openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
       await storing;
     } else {
-      PM.Projects.put(project);
+      PM.Projects.put(project, undefined, slot);
       openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
     }
     if (!current()) return abandon();

@@ -171,7 +171,19 @@ export async function remoteCanonicalHash(bridge: DocumentKernelBridge, value: a
  * canonical hash; main checks the file against its own hash of the stream.
  * About a tenth of the cost of the canonical stream (sorted members, a
  * generator step per token) for the large private project. */
-export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
+export function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
+  return ingest(bridge, emit => serializeInSlices(shadow, emit), document, revision);
+}
+
+/** The same, from text made elsewhere: `JSON.stringify` of the document in
+ *  pieces, streamed as they come (an open's canonical text,
+ *  legacy/core/project-text.ts). */
+export function ingestDocumentPieces(bridge: DocumentKernelBridge, pieces: AsyncIterable<string> | Iterable<string>, document: string, revision: number, onStreamed?: () => void): Promise<DocumentKernelReceipt> {
+  return ingest(bridge, async emit => { for await (const piece of pieces) await emit(piece); }, document, revision, onStreamed);
+}
+
+/** `onStreamed`: called once main has every byte, as the engine starts parsing. */
+async function ingest(bridge: DocumentKernelBridge, produce: (emit: (text: string) => Promise<void>) => Promise<void>, document: string, revision: number, onStreamed?: () => void): Promise<DocumentKernelReceipt> {
   const token = await bridge.begin();
   let complete = false;
   try {
@@ -185,7 +197,7 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
     // The text has no lone surrogates (JSON.stringify escapes them): it
     // encodes as it would whole, a chunk ending where the next character
     // does not fit.
-    await serializeInSlices(shadow, async text => {
+    await produce(async text => {
       for (let read = 0; read < text.length;) {
         const result = encoder.encodeInto(read ? text.slice(read) : text, chunk.subarray(filled));
         read += result.read; filled += result.written;
@@ -200,7 +212,9 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
     });
     if (filled) await send(chunk.slice(0, filled));
     await Promise.all(inFlight);
-    const receipt = await bridge.commit(token, document, revision);
+    const committing = bridge.commit(token, document, revision);
+    onStreamed?.();
+    const receipt = await committing;
     complete = true;
     return receipt;
   } finally { if (!complete) await bridge.abort(token).catch(() => {}); }

@@ -1,7 +1,8 @@
 import { canonicalProject } from '../../../shared/canonical-json';
 import { jsonCloneSliced } from '../../../shared/canonical-async';
+import { yieldTask } from '../legacy/core/yield-task';
 import { ConsistencyHash } from './consistency-hash';
-import { ingestDocumentText, RemotePmWasm, remoteCanonicalHash } from './remote';
+import { ingestDocumentPieces, ingestDocumentText, RemotePmWasm, remoteCanonicalHash } from './remote';
 import { documentId } from '../../../shared/engine-document-id';
 /*
  * Installs the document mirror (pm-wasm), the write barrier, and the native
@@ -26,6 +27,7 @@ import { documentId } from '../../../shared/engine-document-id';
  *   autosave, and run the auditor and dual answers.
  */
 import type { PathPart } from '../../../shared/patch';
+import type { DocumentKernelReceipt } from '../../../shared/document-kernel';
 import type { PMRegistry } from '../legacy/registry';
 import { DocumentBarrier, type ConsistencyResult, type PatchBatch } from './barrier';
 import { ShadowAuditor } from './auditor';
@@ -120,7 +122,9 @@ export interface EngineDoc {
   settled(): Promise<boolean>;
   check(reason: string): ConsistencyResult | null;
   checkAsync(reason: string): Promise<ConsistencyResult | null>;
-  prepare(project: any): void | Promise<void>;
+  /** `text`: the project's canonical JSON text in pieces, already made
+   *  (legacy/core/project-text.ts); without it the shadow is serialized. */
+  prepare(project: any, text?: AsyncIterable<string>): void | Promise<void>;
   /** Release an unused prepared project without canceling a newer request. */
   discardPrepared?(project: any): void;
   /** Restore a remote document before a new native engine launch opens sessions. */
@@ -558,7 +562,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     try { unused.instance.bridge.call('{"op":"cancel"}'); }
     catch (error) { console.warn('[engine-doc] unused preparation cleanup failed', error); }
   }
-  async function prepareNative(project: any) {
+  async function prepareNative(project: any, text?: AsyncIterable<string>) {
     const host = hostBridge()?.nativeEngine;
     const native = host?.documentKernel;
     if (!native) throw new Error('The native document transport is unavailable');
@@ -580,15 +584,34 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       }
     }
     const began = performance.now();
-    const shadow = await jsonCloneSliced(canonicalProject(project));
-    const cloned = performance.now();
+    const revision = Math.max(barrier?.revision ?? 0, barrier?.recoveryRevision ?? 0, wasm?.revision() ?? 0) + 1;
     // Main hashes the canonical stream as it arrives, and the utility derives
     // the canonical hash of the tree it parsed from it; ingestion fails unless
-    // they agree, so the tree is exactly the shadow's canonical JSON. The
-    // renderer's integrity digests (a third pass over the whole document, and
-    // a round trip per batch) are no longer computed before publication: the
-    // first consistency check fills them and compares them with the tree's.
-    const receipt = await ingestDocumentText(native, shadow, documentId(project.id), Math.max(barrier?.revision ?? 0, barrier?.recoveryRevision ?? 0, wasm?.revision() ?? 0) + 1);
+    // they agree, so the tree is exactly the document's canonical JSON, which
+    // the shadow copies. The renderer's integrity digests (a third pass over
+    // the whole document, and a round trip per batch) are no longer computed
+    // before publication: the first consistency check fills them and
+    // compares them with the tree's. Text already made streams first, and
+    // the shadow is copied while the engine parses it.
+    let ingesting: Promise<DocumentKernelReceipt> | null = null;
+    if (text) {
+      let streamed!: () => void;
+      const sent = new Promise<void>(resolve => { streamed = resolve; });
+      ingesting = ingestDocumentPieces(native, text, documentId(project.id), revision, streamed);
+      ingesting.catch(() => {});
+      await Promise.race([sent, ingesting.then(() => {}, () => {})]);
+    }
+    let shadow: any;
+    // Its slices resume ahead of other tasks (an open's checkpoint digest
+    // shares the thread meanwhile; nothing waits for that one).
+    try { shadow = await jsonCloneSliced(canonicalProject(project), { yieldTask }); }
+    catch (error) {
+      // The streamed copy must not stay prepared behind a failed open.
+      void ingesting?.then(() => { try { native.call('{"op":"cancel"}'); } catch {} }, () => {});
+      throw error;
+    }
+    const cloned = performance.now();
+    const receipt = await (ingesting ?? ingestDocumentText(native, shadow, documentId(project.id), revision));
     preparationTiming = { cloneMs: cloned - began, ingestMs: performance.now() - cloned };
     return { shadow, integrity: new ConsistencyHash(), instance: new RemotePmWasm(native, receipt) };
   }
@@ -636,7 +659,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       }
       throw new Error('The project kept changing during its consistency check');
     },
-    prepare(project) {
+    prepare(project, text) {
       project = unwrap(project);
       const native = hostBridge()?.nativeEngine?.documentKernel;
       if (!options.strict || !native || options.headless) return;
@@ -647,7 +670,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         // after this open may itself be queued behind it.
         if (!state.ready) throw notReady;
         discardPrepared();
-        preparedProject = { project, ...await prepareNative(project) };
+        preparedProject = { project, ...await prepareNative(project, text) };
       };
       return (async () => {
         for (let attempt = 0; attempt < 2; attempt++) {
