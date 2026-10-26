@@ -466,9 +466,26 @@ impl TemporalTrack {
         let mut times = Vec::with_capacity(keys.len());
         let mut values = Vec::with_capacity(keys.len());
         let mut numeric = true;
+        // Where `t` and `v` are in the keys of the last key schema seen:
+        // keys of one shape are read without a key search each.
+        let mut schema = (usize::MAX, None, None);
         for (index, key) in keys.iter().enumerate() {
-            times.push(KeyTime::from_got(&node::get(key, b"t")).1);
-            let v = node::js_value_opt(node::member(Some(key), "v"));
+            let (t, v) = match key.kind() {
+                NodeKind::Object(map) => {
+                    if map.schema_id() != schema.0 {
+                        schema = (
+                            map.schema_id(),
+                            map.position(b"t".as_slice()),
+                            map.position(b"v".as_slice()),
+                        );
+                    }
+                    let at = |i: Option<usize>| i.and_then(|i| map.value_at(i));
+                    (at(schema.1).map_or(Got::Undefined, Got::Node), at(schema.2))
+                }
+                _ => (node::get(key, b"t"), node::member(Some(key), "v")),
+            };
+            times.push(KeyTime::from_got(&t).1);
+            let v = node::js_value_opt(v);
             values.push(v.to_number());
             // A segment's base is its first key's value.
             numeric &= index + 1 == keys.len() || matches!(v, JsValue::Number(_));
