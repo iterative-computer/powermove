@@ -397,6 +397,38 @@ describe('legacy app install', () => {
     expect(toasts).toContain('Opened Finder Project.pmv');
   });
 
+  it('checkpoints an opened file while the engine prepares it, without a second baseline', async () => {
+    let externalOpen!: (result: any) => Promise<void>;
+    const { PM } = appRegistry(true, undefined, undefined, { onProjectOpenExternal: (callback: typeof externalOpen) => { externalOpen = callback; return () => {}; } });
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    PM.ProjectsScreen = { hide: vi.fn() };
+    let finishPrepare!: () => void;
+    const checkpointed: string[] = [];
+    PM.EngineDoc = { prepare: vi.fn(() => { checkpointed.push('prepare'); return new Promise<void>(resolve => { finishPrepare = resolve; }); }), discardPrepared: vi.fn() };
+    const recover = PM.Projects.recoverAsync, put = PM.Projects.put;
+    if (recover) PM.Projects.recoverAsync = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return recover(project, ...rest); };
+    else PM.Projects.put = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return put(project, ...rest); };
+    const document = { proj: { ...PM.proj, id: 'from-finder', name: 'Finder Project' } };
+
+    const opening = externalOpen({ ok: true, path: '/tmp/Finder Project.pmv', projectId: 'from-finder', data: new TextEncoder().encode(JSON.stringify(document)) });
+    await vi.waitFor(() => expect(checkpointed).toContain('from-finder'));
+    expect(checkpointed.indexOf('prepare')).toBeGreaterThanOrEqual(0);
+    expect(checkpointed.indexOf('prepare')).toBeLessThan(checkpointed.indexOf('from-finder'));
+    expect(PM.proj.id).not.toBe('from-finder');
+    finishPrepare();
+    await opening;
+    expect(PM.proj.id).toBe('from-finder');
+    const state = PM.projectFileState('from-finder');
+    expect(state.path).toBe('/tmp/Finder Project.pmv');
+    expect(state.savedHash).toMatch(/\S/);
+    expect(state.baselineHash).toBeUndefined();
+    expect(state.dirty).toBe(false);
+    expect(PM.EngineDoc.discardPrepared).not.toHaveBeenCalled();
+  });
+
   it('reopens negative strip starts and their earlier local keys, including nested compositions', () => {
     const { PM } = appRegistry();
     const layer = {
