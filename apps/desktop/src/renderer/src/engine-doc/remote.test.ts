@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { canonicalStringify } from '../../../shared/canonical-json';
+import { DOCUMENT_CHUNK_BYTES } from '../../../shared/document-kernel';
 import { ingestDocumentText, RemotePmWasm } from './remote';
 import { RealKernelBridge, realWasm } from './test-helpers/real-kernel';
 
@@ -36,7 +37,7 @@ it('constructs a prepared facade without activating or changing the published do
 it('streams the text in full chunks, cut only between characters', async () => {
   const bridge = await RealKernelBridge.create();
   // Three- and four-byte characters across every chunk boundary.
-  const text = Array.from({ length: 900_000 }, (_, i) => (i % 3 ? '€' : '😀') + (i % 7 ? '' : '"\\')).join('');
+  const text = Array.from({ length: 3_000_000 }, (_, i) => (i % 3 ? '€' : '😀') + (i % 7 ? '' : '"\\')).join('');
   const large = { ...project, name: text, comps: { c: { ...project.comps.c, notes: [text.slice(0, 1000), 'x'] } } };
   const chunks: Uint8Array[] = [];
   const write = bridge.write.bind(bridge);
@@ -45,8 +46,8 @@ it('streams the text in full chunks, cut only between characters', async () => {
   expect(new TextDecoder().decode(bridge.lastStream!)).toBe(JSON.stringify(large));
   expect(chunks.length).toBeGreaterThan(2);
   for (const chunk of chunks.slice(0, -1)) {
-    expect(chunk.byteLength).toBeGreaterThan(1024 * 1024 - 4);
-    expect(chunk.byteLength).toBeLessThanOrEqual(1024 * 1024);
+    expect(chunk.byteLength).toBeGreaterThan(DOCUMENT_CHUNK_BYTES - 4);
+    expect(chunk.byteLength).toBeLessThanOrEqual(DOCUMENT_CHUNK_BYTES);
     expect(chunk.buffer.byteLength).toBe(chunk.byteLength);
   }
 });

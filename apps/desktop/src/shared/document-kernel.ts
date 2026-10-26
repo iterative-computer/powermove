@@ -4,6 +4,13 @@ export const DOCUMENT_KERNEL_IPC = {
   write: 'engine:document-write', commit: 'engine:document-commit', abort: 'engine:document-abort', digestBegin: 'engine:document-digest-begin', digestWrite: 'engine:document-digest-write', digestEnd: 'engine:document-digest-end', digestBatch: 'engine:document-digest-batch'
 } as const;
 
+/** A document stream's largest chunk, and how many main holds unwritten:
+ *  main writes each chunk to its staging file and hashes it before the next,
+ *  so fewer, larger round trips keep it busy (1 MiB two at a time left a
+ *  180 MB stream waiting on replies for half a second). */
+export const DOCUMENT_CHUNK_BYTES = 4 * 1024 * 1024;
+export const DOCUMENT_QUEUED_WRITES = 4;
+
 export interface DocumentKernelReceipt {
   pending: false;
   revision: number;

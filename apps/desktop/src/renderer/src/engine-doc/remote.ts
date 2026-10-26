@@ -1,4 +1,4 @@
-import type { DocumentKernelBridge, DocumentKernelReceipt } from '../../../shared/document-kernel';
+import { DOCUMENT_CHUNK_BYTES, DOCUMENT_QUEUED_WRITES, type DocumentKernelBridge, type DocumentKernelReceipt } from '../../../shared/document-kernel';
 import { serializeInSlices } from '../legacy/core/json-slices';
 import { canonicalChunks } from '../../../shared/canonical-async';
 import { KIND, PmWasm, revive, type PmWasmExports } from './wasm';
@@ -164,13 +164,13 @@ export async function remoteCanonicalHash(bridge: DocumentKernelBridge, value: a
 }
 
 /** The shadow's JSON text (JSON.stringify's member order, serialized in
- * slices), encoded straight into full 1 MiB chunks with two writes in
- * flight; a chunk's buffer is filled again once main has it (180 buffers
- * of garbage for the real project otherwise). The utility parses it into the same tree its canonical JSON would
- * give and answers that tree's canonical hash; main checks the file against
- * its own hash of the stream. About a tenth of the cost of the canonical
- * stream (sorted members, a generator step per token) for the large private
- * project. */
+ * slices), encoded straight into full chunks (DOCUMENT_CHUNK_BYTES) with
+ * main's queue of writes in flight; a chunk's buffer is filled again once
+ * main has it (one buffer per chunk of garbage otherwise). The utility parses
+ * it into the same tree its canonical JSON would give and answers that tree's
+ * canonical hash; main checks the file against its own hash of the stream.
+ * About a tenth of the cost of the canonical stream (sorted members, a
+ * generator step per token) for the large private project. */
 export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
   const token = await bridge.begin();
   let complete = false;
@@ -179,7 +179,7 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
     const inFlight: Promise<void>[] = [], free: Uint8Array<ArrayBuffer>[] = [];
     let chunk = new Uint8Array(CHUNK_BYTES), filled = 0;
     const send = async (bytes: Uint8Array<ArrayBuffer>) => {
-      if (inFlight.length >= 2) await inFlight.shift();
+      if (inFlight.length >= DOCUMENT_QUEUED_WRITES) await inFlight.shift();
       inFlight.push(bridge.write(token, bytes).then(() => { if (bytes.byteLength === CHUNK_BYTES) free.push(bytes); }));
     };
     // The text has no lone surrogates (JSON.stringify escapes them): it
@@ -205,5 +205,5 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
     return receipt;
   } finally { if (!complete) await bridge.abort(token).catch(() => {}); }
 }
-const CHUNK_BYTES = 1024 * 1024;
+const CHUNK_BYTES = DOCUMENT_CHUNK_BYTES;
 

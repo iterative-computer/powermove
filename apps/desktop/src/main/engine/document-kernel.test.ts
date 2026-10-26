@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
 import type { IpcMain } from 'electron';
-import { DOCUMENT_KERNEL_IPC as IPC } from '../../shared/document-kernel';
+import { DOCUMENT_CHUNK_BYTES, DOCUMENT_KERNEL_IPC as IPC, DOCUMENT_QUEUED_WRITES } from '../../shared/document-kernel';
 import { canonicalStringify } from '../../shared/canonical-json';
 import { installDocumentKernelIpc } from './document-kernel';
 
@@ -70,7 +70,7 @@ it('fences owners, bounds chunks, refuses page-supplied file loads, and releases
     await expect(ipc.invoke(IPC.begin, one)).rejects.toThrow('already open');
     const token = await pending;
     await expect(ipc.invoke(IPC.write, two, token, new Uint8Array([1]))).rejects.toThrow('closed');
-    await expect(ipc.invoke(IPC.write, one, token, new Uint8Array(1024 * 1024 + 1))).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, new Uint8Array(DOCUMENT_CHUNK_BYTES + 1))).rejects.toThrow('Invalid document chunk');
     const event = { ...one, returnValue: undefined as unknown };
     ipc.emit(IPC.call, event, '{"op":"load","args":{"path":"/arbitrary"}}');
     await vi.waitFor(() => expect(event.returnValue).toBeDefined());
@@ -146,12 +146,12 @@ it('bounds pending staging writes and releases capacity after awaited streaming'
   const stop = installDocumentKernelIpc({ ipc: ipc as unknown as IpcMain, cache, trusted: () => true, call: async () => '{"ok":true,"value":null}' });
   try {
     const token = await ipc.invoke(IPC.begin, event);
-    const first = ipc.invoke(IPC.write, event, token, new Uint8Array(1024 * 1024));
+    const first = ipc.invoke(IPC.write, event, token, new Uint8Array(DOCUMENT_CHUNK_BYTES));
     await held.pending;
-    const second = ipc.invoke(IPC.write, event, token, new Uint8Array(1024 * 1024));
+    const queued = Array.from({ length: DOCUMENT_QUEUED_WRITES - 1 }, () => ipc.invoke(IPC.write, event, token, new Uint8Array(DOCUMENT_CHUNK_BYTES)));
     await expect(ipc.invoke(IPC.write, event, token, new Uint8Array([1]))).rejects.toThrow(/backpressure/);
     held.release();
-    await Promise.all([first, second]);
+    await Promise.all([first, ...queued]);
     await ipc.invoke(IPC.write, event, token, new Uint8Array([1]));
     await ipc.invoke(IPC.abort, event, token);
     expect(await readdir(cache)).toEqual([]);

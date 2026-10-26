@@ -4,15 +4,15 @@ import { createHash, randomUUID, type Hash } from 'node:crypto';
 import { mkdtemp, mkdir, open, rm, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
-import { DOCUMENT_KERNEL_IPC, type DocumentKernelReceipt } from '../../shared/document-kernel';
+import { DOCUMENT_CHUNK_BYTES, DOCUMENT_KERNEL_IPC, DOCUMENT_QUEUED_WRITES, type DocumentKernelReceipt } from '../../shared/document-kernel';
 
 type Sender = IpcMainEvent | IpcMainInvokeEvent;
 type Stream = { owner: number; generation: number; dir: string; file: FileHandle; hash: Hash; bytes: number; closed: boolean; cancelled: boolean; pendingWrites: number; queuedBytes: number; tail: Promise<void>; idle?: NodeJS.Timeout; cleanup?: Promise<void> };
 type Digest = { owner: number; hash: Hash; bytes: number; idle?: NodeJS.Timeout };
 type Owner = { generation: number; retiring?: Promise<void>; beginning: Set<Promise<string>>; commits: Set<Promise<DocumentKernelReceipt>>; unwatch: () => void };
 const LIMIT = 512 * 1024 * 1024;
-const CHUNK_LIMIT = 1024 * 1024;
-const QUEUED_WRITES = 2;
+const CHUNK_LIMIT = DOCUMENT_CHUNK_BYTES;
+const QUEUED_WRITES = DOCUMENT_QUEUED_WRITES;
 const BATCH_LIMIT = 256 * 1024;
 const IDLE_MS = 120_000;
 const BUSY_RETRY_MS = 250;
