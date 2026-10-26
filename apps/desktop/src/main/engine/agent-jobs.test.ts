@@ -23,7 +23,6 @@ class FakeEngine implements AgentJobsEngine {
   releases: string[] = [];
   holdJobRun(run: string): void { this.holds.push(run); }
   releaseJobRun(run: string): void { this.releases.push(run); }
-  warmExportEncoder = vi.fn();
   private nextSession = 10;
   private listeners: Array<{ jobStatus?(s: JobStatus): void; status?(s: unknown): void }> = [];
   /** How submitJob, agentFrames answer. */
@@ -210,7 +209,7 @@ describe('export settings', () => {
     expect(mp4).toEqual({
       format: { kind: 'h264' }, alpha: 'none', quality: 'high', size: { width: 1280, height: 720 },
       frameRate: { num: 30000, den: 1001 }, range: { start: 705_600_000, end: 3 * 705_600_000 },
-      audio: true, motionBlur: false, color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' }, precision: 'float32', dither: true, draftFromProxies: false,
+      audio: true, motionBlur: false, color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' }, precision: 'float32', dither: false, draftFromProxies: false,
       delivery: { audioCoding: null, timecode: null, hideCaptions: false, preview: false, sequenceName: null }
     });
     const prores = exportSettingsFor(project({ work: null }), { format: 'prores', range: 'work', audio: false, motionBlur: true, alpha: true });
@@ -529,7 +528,7 @@ describe('export sheet jobs through the job engine', () => {
   it('take the sheet\'s rate, scale, range, and tier', () => {
     expect(userExportSettings(project(), options)).toMatchObject({
       format: { kind: 'h264' }, quality: 'max', size: { width: 640, height: 360 }, frameRate: { num: 60, den: 1 },
-      range: { start: 352_800_000, end: 5 * 352_800_000 }, dither: true, precision: 'float32'
+      range: { start: 352_800_000, end: 5 * 352_800_000 }, dither: false, precision: 'float32'
     });
     // The composition's own rate keeps its exact rational.
     expect(userExportSettings(project(), { ...options, fps: 29.97 }).frameRate).toEqual({ num: 30000, den: 1001 });
@@ -623,32 +622,11 @@ describe('Phase 3b delivery through the job engine', () => {
     });
     // Today's ids still work; timecode is MOV only.
     const mp4 = userExportSettings(project(), sheet({ format: 'mp4', delivery: { timecode: '01:00:00:00', audioCoding: 'pcm24' } }));
-    expect(mp4).toMatchObject({ format: { kind: 'h264' }, dither: true, delivery: { timecode: null, audioCoding: null } });
+    expect(mp4).toMatchObject({ format: { kind: 'h264' }, dither: false, delivery: { timecode: null, audioCoding: null } });
+    // 8-bit PNG is the one dithered output.
+    expect(userExportSettings(project(), sheet({ format: 'png', delivery: { highDepth: false } }))).toMatchObject({ dither: true });
     expect(() => userExportSettings(project(), sheet({ format: 'hevc', alpha: true }))).toThrow('transparency');
     expect(() => userExportSettings(project(), sheet({ format: 'json' }))).toThrow(AgentJobError);
-  });
-
-  it('warms only opaque user and queue WebM before opening their snapshots', async () => {
-    const engine = new FakeEngine();
-    const originalRequest = engine.request.bind(engine);
-    engine.request = async (...args) => {
-      if (args[1].type === 'openSession') {
-        const expected = engine.of('openSession').length + 1;
-        expect(engine.warmExportEncoder).toHaveBeenCalledTimes(expected);
-      }
-      return originalRequest(...args);
-    };
-    const jobs = new AgentJobs({ engine });
-    await jobs.exportUser(5, project(), sheet({ format: 'webm-vp9' }), '/Users/x/Web.webm');
-    await jobs.exportQueued(project(), sheet({ format: 'webm-vp8' }), '/Users/x/Queued.webm', 'replace');
-    expect(engine.warmExportEncoder).toHaveBeenCalledTimes(2);
-
-    // Other formats, alpha WebM, and the agent export lane do not warm it.
-    engine.request = originalRequest;
-    await jobs.exportUser(5, project(), sheet({ format: 'mp4' }), '/Users/x/Cut.mp4');
-    await jobs.exportUser(5, project(), sheet({ format: 'webm-vp9', alpha: true }), '/Users/x/Alpha.webm');
-    await jobs.exportVideo(5, 'agent', project(), { format: 'webm-vp9', range: 'all', audio: false, motionBlur: false, alpha: false, mode: 'async' });
-    expect(engine.warmExportEncoder).toHaveBeenCalledTimes(2);
   });
 
   it('streams previews and offline waits to the window, marks draft sessions, and closes them', async () => {

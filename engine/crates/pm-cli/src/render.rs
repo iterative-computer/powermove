@@ -730,19 +730,15 @@ pub(crate) struct Headless {
     pub definitions: String,
 }
 
-/// Sets up a headless renderer as the app's hosts draw (amendments 21-24;
-/// DEFS-4), shared by `render` and `scope` so neither can draw what the
-/// other would refuse:
-/// - the desktop's persisted shader probe store is read, never written
-///   (`crate::angle::configure_probes`), and a user GLSL program it pinned
-///   to the WebGL runner, or has not verified, never draws natively: with a
-///   helper it runs in the on-demand Chromium (the same ANGLE path as the
-///   desktop's runner), else it is reported as not headless-renderable;
+/// Sets up a headless renderer as the app's hosts draw (amendments 21-24),
+/// shared by `render` and `scope` so neither can draw what the other would
+/// refuse:
+/// - user GLSL programs draw natively; a program the engine cannot
+///   translate runs in the helper's on-demand Chromium (the desktop's
+///   runner path), else it is reported as not headless-renderable;
 /// - the definitions are the snapshot's, or the built-ins with a warning.
 pub(crate) fn headless_renderer(setup: &HeadlessSetup<'_>) -> Result<Headless, Failure> {
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
-    crate::angle::configure_probes(&mut renderer).map_err(Failure::Failed)?;
-    renderer.require_shader_reference();
     let angle_host = crate::angle::AngleHost::from_environment()
         .map_err(Failure::Failed)?
         .map(Arc::new);

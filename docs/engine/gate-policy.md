@@ -100,6 +100,35 @@ over its complete affected footprint, including transparent effect input pixels.
 frame, and the paused preview must equal that export. Video selects from source timestamps
 on every surface, holding the last source frame without browser seek padding.
 
+## Effects, shaders and export
+
+- **Built-in effects** are in the frame reference (`support::reference`): the layer's
+  pixels, masks and motion-blur samples, then its chain from `pm_reference::effects` on
+  the frame-sized effect buffer, then the composite (Normal as premultiplied
+  source-over, which keeps the light an effect writes at zero alpha). A value the
+  formula leaves open (a Posterize level at a storage boundary, hash noise in Grain,
+  Displace and Gradient's dither) is judged by the nearest value it allows and classed
+  as resampled. Effects on raster images stay unreferenced with the image. The four
+  built-in transitions (`pm_reference::effects::transition`) run on the frame: the
+  stack below the layer and the stack with it.
+- **Text** (`support::text_group_reference`): a text layer's built-in effects run on
+  its outline reference after its masks, its transition on the frame, and motion
+  blur as the additive sum of its samples, open by what each store into the working
+  format may lose.
+- **The effect proof** (`tests/effect_proof.rs`) proves every corpus chain on every
+  layer type: the f64 chain on the engine's own render without effects equals its
+  render with them within 1 CV at float depth (the GPU's bilinear fractions).
+- **G-E1** (`tests/shader_gate.rs`) judges native translations against WebGL: ≤ 1 CV on
+  8-bit codes and 1.5 binary16 steps per stored pass above 1.0, or within that of WebGL
+  with unrounded intermediates; pixels where WebGL moves against itself under input,
+  parameter, coordinate or storage perturbation are counted, not judged; a program
+  WebGL moves visibly passes when native differs at no more pixels than WebGL does from
+  itself. Compile and refusal verdicts stay exact.
+- **G-X1** (`e2e/export-encoding-parity.spec.ts`) replaces EXPORT-1's byte identity:
+  today's stream properties, and decoded pictures at least as close to the engine's
+  lossless 16-bit render as today's export. Pictures are decoded with zimg's exact
+  BT.709 limited-range inverse; swscale's tables are off by up to a code.
+
 ## Who converts what
 
 Each lane extends `support::reference` for its content, converts its own gates, and
@@ -111,7 +140,7 @@ deletes the today-equality test it replaces.
 | L3 vectors, masks, SVG | G-V1, G-V2, G-V3 | `coverage::fill(_, _, 16, …)` for shapes, paths, SVG; `gaussian::blur` with `Edge::Transparent` at σ = max(0, feather)·\|world x\|/2; `compare`, `same_geometry` |
 | L4 compositing, sampling, viewer, 3D | G-C3, G-C4, G-C5 bars, G-D1, G-D2, G-M1 | `composite::{blend, porter_duff, luma709}`; `Class::Resampled` with a declared-kernel reference (move the one in `tests/sampling.rs` here); `support::reference::preview_and_export`, `identical`; groups, precomps, mattes |
 | L5 stills | G-I1 | `color::{Transfer, Primaries, MatrixTrc, convert, bradford}`; images as `Resampled` |
-| L6 effects, export | G-E1, G-X1 | `compare` with stated f32 bounds; `color::{rgb_to_ycbcr, dequantize_luma, dequantize_chroma}`; `identical` |
+| L6 effects, export | G-E1, G-X1, effects in G-C2 | `effects::run` (the sixteen built-ins in f64; `Open` values judged by the nearest the formula allows); G-E1's f32 bound in `tests/shader_gate.rs`; G-X1 in `e2e/export-encoding-parity.spec.ts` |
 
 Removed with this policy: `tests/half_store.rs` (G-C1), the FONTS-R ratchet (G-T3) and
 `level1_keeps_todays_sampling` (G-C5).

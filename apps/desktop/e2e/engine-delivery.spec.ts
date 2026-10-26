@@ -8,7 +8,8 @@ import { expect, test, type ElectronApplication, type Page } from '@playwright/t
 
 import { launchApp } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
-import { avFoundationImport, expectExportParity, proResFrameHeaderCodes } from './helpers/export-parity';
+import { compareExports } from './helpers/export-encoding-parity';
+import { avFoundationImport, proResFrameHeaderCodes } from './helpers/export-parity';
 import { importFixture } from './helpers/media';
 
 /* Phase 3b delivery with Use New Engine on (plan section 17): the export sheet
@@ -339,8 +340,11 @@ test('offline exports preserve decoded media and delivery properties with the ne
     for (const format of ['prores', 'mp4', 'webm'] as const) for (const setting of ['0', '1']) {
       await testInfo.attach(`offline-${format}-${setting}`, { path: exports[format]![setting]!, contentType: format === 'webm' ? 'video/webm' : format === 'mp4' ? 'video/mp4' : 'video/quicktime' });
     }
+    // G-X1: the engine keeps today's stream properties (pictures against the
+    // reference are export-encoding-parity.spec.ts's).
     for (const format of ['prores', 'mp4', 'webm'] as const) {
-      expectExportParity(exports[format]!['0']!, exports[format]!['1']!, 24, true);
+      const { checks } = compareExports(exports[format]!['0']!, exports[format]!['1']!, null, 24, true);
+      expect(checks.filter(check => !check.equal), `${format} G-X1`).toEqual([]);
     }
     for (const format of ['prores', 'mp4'] as const) {
       const legacyImport = avFoundationImport(exports[format]!['0']!);
@@ -356,12 +360,14 @@ test('offline exports preserve decoded media and delivery properties with the ne
       }
     }
     expect(probe(exports.prores!['1']!).streams.find((stream: any) => stream.tags?.timecode)?.tags?.timecode).toBe('00:00:00:00');
-    // RDD 36: byte 21's aspect-ratio and frame-rate nibbles are unspecified,
-    // as in today's file and the shipped app's (EXPORT-1).
-    for (const setting of ['0', '1'] as const) expect(proResFrameHeaderCodes(exports.prores![setting]!)).toEqual({ aspectRatio: 0, frameRate: 0 });
-    // Chromium's duration of today's WebM, which the engine's matches (EXPORT-1).
-    expect(webmImports['1']).toEqual(webmImports['0']);
+    // RDD 36 byte 21: aspect ratio unspecified in both; today's FFmpeg leaves
+    // the frame-rate code unspecified, VideoToolbox writes 2 (24 fps).
+    expect(proResFrameHeaderCodes(exports.prores!['0']!)).toEqual({ aspectRatio: 0, frameRate: 0 });
+    expect(proResFrameHeaderCodes(exports.prores!['1']!)).toEqual({ aspectRatio: 0, frameRate: 2 });
+    // Chromium reads the engine's WebM at the project's size and length: its
+    // duration is the longest track's end (today's adds a frame, 25/24 s).
     expect(webmImports['1']).toMatchObject({ width: 320, height: 180 });
+    expect(Math.abs(webmImports['1']!.duration - 1), 'WebM duration').toBeLessThan(1 / 24);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

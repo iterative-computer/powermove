@@ -23,10 +23,19 @@
 //!   Chromium) has answered it in `<corpus>/fallback/pixels/`, renders the
 //!   frame with those pixels and compares it like any other.
 //!
-//! Judged by section 25's Standard class on 8-bit values (≤ 1 CV for 99.9%
-//! of pixels, ≤ 4 CV for every pixel), plus the same rule on float values
-//! scaled by max(1, |reference|) for values above 1.0. Without a corpus the
-//! test reports and passes vacuously.
+//! G-E1 (docs/engine/gate-policy.md): the native translation executes the
+//! author's formula at f32 per GLSL ES, so it is judged against WebGL by an
+//! f32-justified bound at every pixel: ≤ 1 CV on 8-bit codes, and for
+//! values above 1.0 at most 1.5 binary16 steps (2⁻¹⁰ relative) per stored
+//! pass: the engine stores the nearest half where Metal's WebGL truncates
+//! (one step), plus a sub-ulp f32 difference (half a step). Pixels where WebGL
+//! itself moves past that bound under a one-step change of its input or
+//! parameters or coordinates (`webgl.ts --perturb-input`, `--perturb`,
+//! `--perturb -1`, `--perturb-geometry`, `--perturb-storage`) are
+//! ill-conditioned in WebGL: neither renderer is right there, so they
+//! are counted, not judged. Compile and refusal verdicts stay exact. This
+//! offline gate replaces the app's first-use native/ANGLE probe (E-R1).
+//! Without a corpus the test reports and passes vacuously.
 
 mod support;
 
@@ -112,72 +121,122 @@ fn js(v: &Value) -> Option<JsValue> {
     }
 }
 
-/// Section 25, Standard class, on 8-bit values (NaN on one side counts as
-/// 255), and the same rule on float values scaled by max(1, |reference|).
+/// One binary16 step relative to the value: the storage bound of the
+/// RGBA16F targets for values above 1.0.
+const HALF_STEP: f64 = 1.0 / 1024.0;
+
+/// Binary16 steps one stored pass may differ by: the nearest half against
+/// WebGL's truncation (one step) and a sub-ulp f32 difference (half a step).
+const STEPS_PER_STORE: f64 = 1.5;
+
+/// G-E1 per pixel: `engine` against `reference`. Pixels in `unstable` are
+/// counted apart, never judged.
 #[derive(Debug, Clone, Copy, Default)]
 struct Metrics {
-    over_one: usize,
+    /// Judged pixels past the bound.
+    over: usize,
+    /// The largest 8-bit difference at a judged pixel.
     max_cv: u32,
-    hdr_over_one: usize,
-    hdr_max_cv: f64,
+    /// The largest relative difference above 1.0 at a judged pixel, in
+    /// binary16 steps.
+    max_half_steps: f64,
+    /// Pixels WebGL itself moves at (not judged).
+    unstable: usize,
     pixels: usize,
+    /// WebGL against its own perturbed runs, the largest over the runs at
+    /// every pixel: (pixels past the bound, largest 8-bit difference).
+    spread: (usize, u32),
 }
 
 impl Metrics {
     fn pass(&self) -> bool {
-        let allowed = self.pixels as f64 * 0.001;
-        self.max_cv <= 4
-            && (self.over_one as f64) <= allowed
-            && self.hdr_max_cv <= 4.0
-            && (self.hdr_over_one as f64) <= allowed
+        self.over == 0
+    }
+
+    /// An ill-conditioned program (E-R2): WebGL itself moves visibly under a
+    /// one-step change of its input, parameters, coordinates or storage, and
+    /// native differs from WebGL at no more pixels than WebGL differs from
+    /// itself. The size of a difference there is not a measure: a chaotic
+    /// program (a bisection on bilinear alpha) jumps by whole steps either way.
+    fn within_webgl_spread(&self) -> bool {
+        self.spread.1 > 1 && self.over <= self.spread.0
     }
 }
 
-/// `engine` top-down f32 against `reference` binary16 rows in GL order.
-fn compare(engine: &[f32], reference: &[u16], width: usize, flip: bool) -> Metrics {
-    let q = |v: f32| -> i32 {
-        if v.is_nan() {
-            -1000
-        } else {
-            (v.clamp(0.0, 1.0) * 255.0).round() as i32
+/// Whether two pixels differ past G-E1's bound for a program of `stores`
+/// stored passes, and by how much (8-bit codes, half steps above 1.0). NaN
+/// on one side is past it.
+fn differs(e: &[f32], r: &[f32], stores: u32) -> (bool, u32, f64) {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as i32;
+    let (mut cv, mut steps) = (0u32, 0.0f64);
+    for c in 0..4 {
+        if e[c].is_nan() || r[c].is_nan() {
+            if e[c].is_nan() != r[c].is_nan() {
+                return (true, 255, f64::INFINITY);
+            }
+            continue;
         }
-    };
-    let height = reference.len() / 4 / width;
+        cv = cv.max((q(e[c]) - q(r[c])).unsigned_abs());
+        if r[c].abs() > 1.0 || e[c].abs() > 1.0 {
+            let rel = f64::from((e[c] - r[c]).abs()) / f64::from(r[c].abs().max(1.0));
+            steps = steps.max(rel / HALF_STEP);
+        }
+    }
+    let bound = STEPS_PER_STORE * f64::from(stores.max(1));
+    (cv > 1 || steps > bound + 1e-9, cv, steps)
+}
+
+fn halves(reference: &[u16]) -> Vec<f32> {
+    reference
+        .iter()
+        .map(|h| pm_gpu::readback::half_to_f32(*h))
+        .collect()
+}
+
+/// WebGL's output for one variant (GL row order) and what its perturbed
+/// runs say about it.
+struct WebGl {
+    reference: Vec<f32>,
+    /// The same program with unrounded RGBA32F intermediates
+    /// (`--perturb-storage`): WebGL at a higher storage precision.
+    precise: Option<Vec<f32>>,
+    /// Pixels WebGL moves at under a perturbation, grown by one pixel.
+    unstable: Option<Vec<bool>>,
+    /// WebGL against its perturbed runs at every pixel, the largest over the
+    /// runs: counted the way `compare` counts the engine.
+    spread: (usize, u32),
+}
+
+/// `engine` top-down f32 against WebGL (`flip`: the engine's rows are
+/// top-down) for a program of `stores` stored passes. A pixel is within
+/// G-E1 when it is within the bound of WebGL at either storage precision.
+fn compare(engine: &[f32], webgl: &WebGl, width: usize, flip: bool, stores: u32) -> Metrics {
+    let height = webgl.reference.len() / 4 / width;
     let mut m = Metrics {
-        pixels: reference.len() / 4,
+        pixels: webgl.reference.len() / 4,
+        spread: webgl.spread,
         ..Default::default()
     };
     for y in 0..height {
         let ry = if flip { height - 1 - y } else { y };
         for x in 0..width {
-            let a = &engine[(y * width + x) * 4..][..4];
-            let b = &reference[(ry * width + x) * 4..][..4];
-            let mut worst = 0u32;
-            let mut worst_hdr = 0.0f64;
-            for c in 0..4 {
-                let r = pm_gpu::readback::half_to_f32(b[c]);
-                let e = a[c];
-                let d = if e.is_nan() != r.is_nan() {
-                    255
-                } else {
-                    (q(e) - q(r)).unsigned_abs()
-                };
-                worst = worst.max(d);
-                let hdr = if e.is_nan() || r.is_nan() {
-                    if e.is_nan() == r.is_nan() { 0.0 } else { 255.0 }
-                } else {
-                    f64::from((e - r).abs()) / f64::from(r.abs().max(1.0)) * 255.0
-                };
-                worst_hdr = worst_hdr.max(hdr);
+            let at = ry * width + x;
+            if webgl.unstable.as_ref().is_some_and(|u| u[at]) {
+                m.unstable += 1;
+                continue;
             }
-            if worst > 1 {
-                m.over_one += 1;
+            let e = &engine[(y * width + x) * 4..][..4];
+            let (past, cv, steps) = differs(e, &webgl.reference[at * 4..][..4], stores);
+            let past = past
+                && webgl
+                    .precise
+                    .as_ref()
+                    .is_none_or(|p| differs(e, &p[at * 4..][..4], stores).0);
+            m.over += usize::from(past);
+            if past {
+                m.max_cv = m.max_cv.max(cv);
+                m.max_half_steps = m.max_half_steps.max(steps);
             }
-            m.max_cv = m.max_cv.max(worst);
-            if worst_hdr > 1.0 + 1e-6 {
-                m.hdr_over_one += 1;
-            }
-            m.hdr_max_cv = m.hdr_max_cv.max(worst_hdr);
         }
     }
     m
@@ -262,10 +321,11 @@ struct Tally {
     /// Matched variants whose WebGL draw raised a GL error (both show the
     /// cleared target); listed for the record, counted as matches.
     draw_error_matched: Vec<String>,
-    /// A real user program's runtime parity verdict once its variants ran
-    /// (`NativeVerified`, `Runner`, the static seed, or refused by both).
-    #[serde(rename = "runtimeVerdict", skip_serializing_if = "Option::is_none")]
-    runtime_verdict: Option<String>,
+    /// Pixels WebGL itself moves at, over all variants (not judged).
+    unstable_pixels: usize,
+    /// Variants of ill-conditioned programs whose native output differs
+    /// from WebGL within WebGL's own spread (E-R2).
+    ill_conditioned: Vec<String>,
 }
 
 /// Probes and cases whose WebGL and engine answers differ for a documented
@@ -310,10 +370,10 @@ fn render_layer(renderer: &mut Renderer, doc: &pm_model::Document, variant: &Val
 }
 
 /// The answers of the app's runner (`tools/shaders/fallback-runner.ts
-/// --fallback <corpus>/fallback-effects`) for effects and transitions WebGL's
-/// runner draws (`pm_render::effects::ANGLE_ONLY`): a request without an
-/// answer is written for the tool and fails by name. No placeholder can
-/// accidentally pass a transparent variant or create a false parity pin.
+/// --fallback <corpus>/fallback-effects`) for effects and transitions the
+/// engine cannot translate (E-K6): a request without an answer is written
+/// for the tool and fails by name. No placeholder can pass a transparent
+/// variant.
 struct EffectRunner {
     dir: PathBuf,
     missing: std::sync::Mutex<usize>,
@@ -351,53 +411,6 @@ impl pm_render::shader_layers::FallbackHost for EffectRunner {
             message: "the gate has not captured this ANGLE request yet".into(),
         })
     }
-}
-
-/// A real user program's verdict after its variants ran through the probe:
-/// it must end decided (`NativeVerified` or pinned to the runner), refused
-/// by both, or on the static ANGLE-only seed; `Unknown` fails the gate.
-fn settle_user_verdict(
-    tally: &mut Tally,
-    case: &Value,
-    def: Option<&DefinitionSnapshot>,
-    via_runner: &mut Renderer,
-    renderer: &mut Renderer,
-) {
-    let shown = if case["private"].as_bool() == Some(true) {
-        "local (private)"
-    } else {
-        case["id"].as_str().unwrap()
-    };
-    let frag = case["frag"].as_str().unwrap();
-    let verdict = if tally.both_refuse == tally.variants {
-        "RefusedByBoth".to_owned()
-    } else if matches!(case["kind"].as_str(), Some("effect" | "transition")) {
-        if def.is_some_and(|d| via_runner.effects().angle_only(d.kind, d.id.as_str())) {
-            "runner (static seed)".to_owned()
-        } else {
-            format!(
-                "{:?}",
-                via_runner
-                    .effects_mut()
-                    .parity
-                    .verdict_at_precision(frag, Precision::Float16)
-            )
-        }
-    } else {
-        format!(
-            "{:?}",
-            renderer
-                .effects_mut()
-                .parity
-                .verdict_at_precision(frag, Precision::Float16)
-        )
-    };
-    if verdict == "Unknown" {
-        tally.failures.push(format!(
-            "{shown}: the runtime parity probe never judged it (Unknown)"
-        ));
-    }
-    tally.runtime_verdict = Some(verdict);
 }
 
 #[test]
@@ -467,7 +480,7 @@ fn every_shader_matches_webgl() {
         definitions.push(Some(def));
     }
     set.generation = Seq::new(1).unwrap();
-    // Effects and transitions WebGL's runner draws (ANGLE-only): a second
+    // Effects and transitions the engine cannot translate (E-K6): a second
     // renderer with the runner's answers as its host, so the layers'
     // fallback path above is unchanged.
     let effect_runner = std::sync::Arc::new(EffectRunner {
@@ -495,20 +508,7 @@ fn every_shader_matches_webgl() {
     let filter = std::env::var("PM_SHADER_FILTER").ok();
     let mut programs: BTreeMap<String, Tally> = BTreeMap::new();
     let mut requests_written = 0;
-    // The last user program run: its verdict is settled before the next
-    // case can reconfigure the probe.
-    let mut last_user: Option<usize> = None;
-    for (n, (case, def)) in cases.iter().zip(&definitions).enumerate() {
-        if let Some(u) = last_user.take() {
-            let tally = programs.get_mut(cases[u]["id"].as_str().unwrap()).unwrap();
-            settle_user_verdict(
-                tally,
-                &cases[u],
-                definitions[u].as_ref(),
-                &mut via_runner,
-                &mut renderer,
-            );
-        }
+    for (case, def) in cases.iter().zip(&definitions) {
         let id = case["id"].as_str().unwrap();
         if filter.as_deref().is_some_and(|f| !id.contains(f)) {
             continue;
@@ -524,24 +524,6 @@ fn every_shader_matches_webgl() {
         let webgl_links = webgl["compiled"].as_bool() == Some(true);
         let webgl_draws = webgl_links && webgl["glError"].is_null();
         let variants = case["variants"].as_array().unwrap();
-        // Keep decisions across the variants of one real user program.
-        let is_user = case["group"].as_str() == Some("user-setups");
-        if is_user {
-            last_user = Some(n);
-        }
-        if !is_user {
-            via_runner.effects_mut().parity.configure(None, None);
-            renderer.effects_mut().parity.configure(None, None);
-        } else if !via_runner.effects().parity.enabled() {
-            via_runner
-                .effects_mut()
-                .parity
-                .configure(Some("shader-gate real user programs".into()), None);
-            renderer
-                .effects_mut()
-                .parity
-                .configure(Some("shader-gate real user programs".into()), None);
-        }
         tally.variants += variants.len();
         let folder = id.replace('/', "__");
         // Effects and transitions: the effects lane's production passes.
@@ -580,18 +562,10 @@ fn every_shader_matches_webgl() {
                 // when the preceding variant's reference is not captured yet.
                 via_runner.effects_mut().fallback = Default::default();
                 via_runner.set_shader_fallback_runner(true);
-                if is_user {
-                    via_runner
-                        .effects_mut()
-                        .parity
-                        .recheck(case["frag"].as_str().unwrap());
-                }
                 let name = variant["name"].as_str().unwrap();
-                let Some(reference) = read_f16(
-                    &dir.join("webgl-metal")
-                        .join(&folder)
-                        .join(format!("{name}.f16")),
-                ) else {
+                let stores = u32::from(def.flags.passes.max(1));
+                let width = variant["width"].as_u64().unwrap() as usize;
+                let Some(output) = webgl_reference(&dir, &folder, name, width, stores) else {
                     tally
                         .failures
                         .push(format!("{shown} {name}: no WebGL output"));
@@ -604,11 +578,7 @@ fn every_shader_matches_webgl() {
                     .map(js)
                     .collect();
                 let time = variant["time"].as_f64().unwrap();
-                let user_setup = case["group"].as_str() == Some("user-setups");
-                let angle_only = user_setup
-                    || needs_runner
-                    || renderer.effects().angle_only(dkind, def.id.as_str());
-                let (renderer, images) = if angle_only {
+                let (renderer, images) = if needs_runner {
                     (&mut via_runner, &runner_images)
                 } else {
                     (&mut renderer, &images)
@@ -649,14 +619,11 @@ fn every_shader_matches_webgl() {
                         )
                         .unwrap();
                         let width = t.width() as usize;
-                        let m = compare(&pixels, &reference, width, false);
-                        let unstable = (!m.pass())
-                            .then(|| webgl_unstable(&dir, &folder, name, width))
-                            .flatten();
-                        if unstable.is_some() {
-                            dump_unstable(shown, name, &pixels, &reference, width, false);
+                        let m = compare(&pixels, &output, width, false, stores);
+                        if m.unstable > 0 || !m.pass() {
+                            dump_unstable(shown, name, &pixels, &output.reference, width, false);
                         }
-                        record(tally, shown, id, name, m, angle_only, unstable);
+                        record(tally, shown, id, name, m, needs_runner);
                     }
                     Err(e) => tally.failures.push(format!("{shown} {name}: {e}")),
                 }
@@ -665,15 +632,9 @@ fn every_shader_matches_webgl() {
         }
         // Shader layers and extension fragment layers: the whole render path.
         for variant in variants {
-            if is_user {
-                renderer
-                    .effects_mut()
-                    .parity
-                    .recheck(case["frag"].as_str().unwrap());
-            }
             let name = variant["name"].as_str().unwrap();
             let doc = layer_document(case, variant, def.as_ref().map(|d| d.id.as_str()));
-            renderer.set_shader_fallback_runner(is_user);
+            renderer.set_shader_fallback_runner(false);
             let mut outcome = render_layer(&mut renderer, &doc, variant);
             let mut via_fallback = false;
             if matches!(&outcome, Outcome::Pending(_))
@@ -729,23 +690,16 @@ fn every_shader_matches_webgl() {
                     // output holds and what today's compositor shows: the
                     // engine must show the same (judged below like any
                     // other output; a visible difference fails).
-                    let Some(reference) = read_f16(
-                        &dir.join("webgl-metal")
-                            .join(&folder)
-                            .join(format!("{name}.f16")),
-                    ) else {
+                    let width = variant["width"].as_u64().unwrap() as usize;
+                    let Some(output) = webgl_reference(&dir, &folder, name, width, 1) else {
                         tally
                             .failures
                             .push(format!("{shown} {name}: no WebGL output"));
                         continue;
                     };
-                    let width = variant["width"].as_u64().unwrap() as usize;
-                    let m = compare(&pixels, &reference, width, true);
-                    let unstable = (!m.pass())
-                        .then(|| webgl_unstable(&dir, &folder, name, width))
-                        .flatten();
-                    if unstable.is_some() {
-                        dump_unstable(shown, name, &pixels, &reference, width, true);
+                    let m = compare(&pixels, &output, width, true, 1);
+                    if m.unstable > 0 || !m.pass() {
+                        dump_unstable(shown, name, &pixels, &output.reference, width, true);
                     }
                     if !webgl_draws && m.pass() {
                         tally.draw_error_matched.push(format!(
@@ -753,7 +707,7 @@ fn every_shader_matches_webgl() {
                             webgl["glError"]
                         ));
                     }
-                    record(tally, shown, id, name, m, via_fallback, unstable);
+                    record(tally, shown, id, name, m, via_fallback);
                 }
                 Outcome::Refused(_) if !webgl_draws => tally.both_refuse += 1,
                 Outcome::Refused(message) => tally.failures.push(format!(
@@ -763,26 +717,6 @@ fn every_shader_matches_webgl() {
                 Outcome::Error(e) => tally.failures.push(format!("{shown} {name}: {e}")),
             }
         }
-    }
-    if let Some(u) = last_user.take() {
-        let tally = programs.get_mut(cases[u]["id"].as_str().unwrap()).unwrap();
-        settle_user_verdict(
-            tally,
-            &cases[u],
-            definitions[u].as_ref(),
-            &mut via_runner,
-            &mut renderer,
-        );
-    }
-    let verdicts: BTreeMap<&str, usize> = programs
-        .values()
-        .filter_map(|t| t.runtime_verdict.as_deref())
-        .fold(BTreeMap::new(), |mut m, v| {
-            *m.entry(v).or_default() += 1;
-            m
-        });
-    if !verdicts.is_empty() {
-        eprintln!("user-setups runtime parity verdicts: {verdicts:?}");
     }
     if let Ok(path) = std::env::var("PM_SHADER_GATE_REPORT") {
         let path = PathBuf::from(path);
@@ -811,6 +745,10 @@ fn every_shader_matches_webgl() {
         total.matched += t.matched;
         total.via_fallback += t.via_fallback;
         total.both_refuse += t.both_refuse;
+        total.unstable_pixels += t.unstable_pixels;
+        total
+            .ill_conditioned
+            .extend(t.ill_conditioned.iter().cloned());
         total
             .awaiting_runner
             .extend(t.awaiting_runner.iter().cloned());
@@ -823,21 +761,25 @@ fn every_shader_matches_webgl() {
     let mut failed = 0;
     eprintln!("shader gate corpus {}", dir.display());
     eprintln!(
-        "| Group | Variants | Match WebGL | via fallback runner | Both refuse | Awaiting runner | Known open | Failures |"
+        "| Group | Variants | Within G-E1 | via fallback runner | Both refuse | WebGL-unstable px | Awaiting runner | Known open | Failures |"
     );
     for (group, t) in &groups {
         eprintln!(
-            "| {group} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {group} | {} | {} | {} | {} | {} | {} | {} | {} |",
             t.variants,
             t.matched,
             t.via_fallback,
             t.both_refuse,
+            t.unstable_pixels,
             t.awaiting_runner.len(),
             t.known.len(),
             t.failures.len()
         );
         for k in &t.known {
             eprintln!("  known: {k}");
+        }
+        for k in &t.ill_conditioned {
+            eprintln!("  ill-conditioned: {k}");
         }
         for d in &t.draw_error_matched {
             eprintln!("  draw error: {d}");
@@ -869,39 +811,65 @@ fn every_shader_matches_webgl() {
     assert_eq!(failed, 0, "{failed} shader gate failures");
 }
 
-/// Whether WebGL's own output for `folder/name` moves past the tolerance
-/// under one of the perturbed runs (`webgl.ts --perturb-input`,
-/// `--perturb`, `--perturb -1`): the WebGL-unstable class of amendment 9.
-fn webgl_unstable(dir: &Path, folder: &str, name: &str, width: usize) -> Option<String> {
-    let base = read_f16(
-        &dir.join("webgl-metal")
-            .join(folder)
-            .join(format!("{name}.f16")),
-    )?;
-    let base: Vec<f32> = base
-        .iter()
-        .map(|h| pm_gpu::readback::half_to_f32(*h))
-        .collect();
-    for run in [
+/// WebGL's output for `folder/name` and its perturbed runs (`webgl.ts
+/// --perturb-input`, `--perturb`, `--perturb -1`, `--perturb-geometry`,
+/// `--perturb-storage`). A pixel whose output moves past G-E1's bound under
+/// one of them is ill-conditioned in WebGL, per program and variant rather
+/// than per name; an edge WebGL cannot place to a pixel also shades its
+/// antialiased neighbours, so the set grows by one pixel.
+fn webgl_reference(
+    dir: &Path,
+    folder: &str,
+    name: &str,
+    width: usize,
+    stores: u32,
+) -> Option<WebGl> {
+    let run = |run: &str| {
+        read_f16(&dir.join(run).join(folder).join(format!("{name}.f16"))).map(|h| halves(&h))
+    };
+    let reference = run("webgl-metal")?;
+    let pixels = reference.len() / 4;
+    let mut moved: Option<Vec<bool>> = None;
+    let mut runs = Vec::new();
+    for name in [
         "webgl-metal-input-perturbed",
         "webgl-metal-perturbed",
         "webgl-metal-perturbed-1",
+        "webgl-metal-geometry-perturbed",
+        "webgl-metal-storage-perturbed",
     ] {
-        let Some(other) = read_f16(&dir.join(run).join(folder).join(format!("{name}.f16"))) else {
+        let Some(other) = run(name).filter(|o| o.len() == reference.len()) else {
             continue;
         };
-        let m = compare(&base, &other, width, false);
-        if !m.pass() {
-            return Some(format!(
-                "{run}: {} px over 1 CV, max {} CV",
-                m.over_one, m.max_cv
-            ));
+        let m = moved.get_or_insert_with(|| vec![false; pixels]);
+        for (i, u) in m.iter_mut().enumerate() {
+            *u |= differs(&reference[i * 4..][..4], &other[i * 4..][..4], stores).0;
         }
+        runs.push(other);
     }
-    None
+    let mut spread = (0, 0);
+    for other in &runs {
+        let (mut over, mut max) = (0, 0);
+        for i in 0..pixels {
+            let (past, cv, _) = differs(&reference[i * 4..][..4], &other[i * 4..][..4], stores);
+            over += usize::from(past);
+            max = max.max(if past { cv } else { 0 });
+        }
+        spread = (spread.0.max(over), spread.1.max(max));
+    }
+    let unstable = moved.filter(|_| width > 0).map(|m| {
+        let height = m.len() / width;
+        pm_reference::compare::dilate(&m, width, height, 1)
+    });
+    Some(WebGl {
+        precise: run("webgl-metal-storage-perturbed").filter(|o| o.len() == reference.len()),
+        reference,
+        unstable,
+        spread,
+    })
 }
 
-/// Side-by-side images of a WebGL-unstable variant for review (amendment
+/// Side-by-side images of a failing or WebGL-unstable variant for review (amendment
 /// 22: escalated with a comparison), written only when
 /// `PM_SHADER_GATE_DIFFS` names a folder outside the repository: the
 /// engine's output, WebGL's, and the differing pixels in red over a dimmed
@@ -910,7 +878,7 @@ fn dump_unstable(
     shown: &str,
     name: &str,
     engine: &[f32],
-    reference: &[u16],
+    reference: &[f32],
     width: usize,
     flip: bool,
 ) {
@@ -935,15 +903,12 @@ fn dump_unstable(
         for x in 0..width {
             let e = &engine[(y * width + x) * 4..][..4];
             let i = (row(y) * width + x) * 4;
-            let w: Vec<f32> = reference[i..i + 4]
-                .iter()
-                .map(|h| pm_gpu::readback::half_to_f32(*h))
-                .collect();
+            let w = &reference[i..i + 4];
             ours.extend(opaque(e[0], e[1], e[2]));
             theirs.extend(opaque(w[0], w[1], w[2]));
             let differs = e
                 .iter()
-                .zip(&w)
+                .zip(w)
                 .any(|(a, b)| ((a.clamp(0.0, 1.0) - b.clamp(0.0, 1.0)) * 255.0).abs() > 1.0);
             diff.extend(if differs {
                 [255, 0, 0, 255]
@@ -959,124 +924,92 @@ fn dump_unstable(
     support::write_png(&dir.join(format!("{stem}-diff.png")), w, h, &diff);
 }
 
-/// Judges one compared variant. A variant that differs from WebGL fails,
-/// whether or not WebGL moves against its own perturbed runs
-/// (`webgl_unstable`, given as `unstable`): amendment 22 and decision DEFS-2
-/// accept no difference on level 1 content, and a program whose native
-/// translation differs draws through the runner (`effects::ANGLE_ONLY`), so
-/// the gate must fail to name it. The perturbation result is kept in the
-/// failure as the explanation (and `PM_SHADER_GATE_DIFFS` gets the
-/// side-by-side). Only the documented undefined-behavior probes
+/// Judges one compared variant by G-E1: every pixel WebGL is stable at is
+/// within the bound. Only the documented undefined-behavior probes
 /// (`known_open`, which are not user content) are listed apart.
-#[allow(clippy::too_many_arguments)]
-fn record(
-    tally: &mut Tally,
-    shown: &str,
-    id: &str,
-    name: &str,
-    m: Metrics,
-    via_fallback: bool,
-    unstable: Option<String>,
-) {
-    if m.pass() {
+fn record(tally: &mut Tally, shown: &str, id: &str, name: &str, m: Metrics, via_fallback: bool) {
+    tally.unstable_pixels += m.unstable;
+    if m.pass() || m.within_webgl_spread() {
         tally.matched += 1;
         if via_fallback {
             tally.via_fallback += 1;
         }
+        if !m.pass() {
+            tally.ill_conditioned.push(format!(
+                "{shown} {name}: {} px past the bound (max {} CV), within WebGL's own spread ({} px, max {} CV)",
+                m.over, m.max_cv, m.spread.0, m.spread.1
+            ));
+        }
     } else if let Some(why) = known_open(id) {
         tally.known.push(format!(
-            "{shown} {name}: {why} ({} px over 1 CV, max {} CV)",
-            m.over_one, m.max_cv
+            "{shown} {name}: {why} ({} px past the bound, max {} CV)",
+            m.over, m.max_cv
         ));
     } else {
         tally.failures.push(format!(
-            "{shown} {name}: {} px over 1 CV (max {} CV); above-1.0 rule {} px, max {:.2} CV{}{}",
-            m.over_one,
+            "{shown} {name}: {} of {} px past the bound (max {} CV, {:.2} half steps above 1.0; {} WebGL-unstable px not judged){}",
+            m.over,
+            m.pixels,
             m.max_cv,
-            m.hdr_over_one,
-            m.hdr_max_cv,
-            if via_fallback {
-                " (fallback runner)"
-            } else {
-                ""
-            },
-            match unstable {
-                Some(why) => format!(
-                    "; WebGL also moves against itself ({why}): ill-conditioned in WebGL, \
-                     so it must draw as WebGL does (add its body fingerprint to \
-                     pm_render::effects::ANGLE_ONLY)"
-                ),
-                None => String::new(),
-            }
+            m.max_half_steps,
+            m.unstable,
+            if via_fallback { " (fallback runner)" } else { "" },
         ));
     }
 }
 
 #[test]
-fn a_difference_webgl_is_unstable_under_fails_the_gate() {
-    // The perturbation class used to be listed apart as "WebGL-unstable"
-    // and passed the gate; it is a failure like any other difference.
-    let differs = Metrics {
-        over_one: 40,
-        max_cv: 9,
-        hdr_over_one: 0,
-        hdr_max_cv: 0.0,
-        pixels: 36_864,
+fn g_e1_bounds_stable_pixels_and_counts_unstable_ones() {
+    let webgl = |reference: Vec<f32>, unstable: Option<Vec<bool>>| WebGl {
+        reference,
+        precise: None,
+        unstable,
+        spread: (0, 0),
     };
-    assert!(!differs.pass());
+    // WebGL: two pixels; the engine is one code off at the first and far off
+    // at the second.
+    let two = vec![0.5, 0.5, 0.5, 1.0, 0.2, 0.2, 0.2, 1.0];
+    let engine = [0.5 + 1.0 / 255.0, 0.5, 0.5, 1.0, 0.6, 0.2, 0.2, 1.0];
+    let m = compare(&engine, &webgl(two.clone(), None), 2, false, 1);
+    assert_eq!((m.over, m.max_cv), (1, 102));
+    assert!(!m.pass());
+    // Where WebGL moves against itself the pixel is counted, not judged.
+    let m = compare(&engine, &webgl(two.clone(), Some(vec![false, true])), 2, false, 1);
+    assert!(m.pass());
+    assert_eq!(m.unstable, 1);
+    // Within the bound of WebGL with unrounded intermediates passes too.
+    let mut precise = webgl(two.clone(), None);
+    precise.precise = Some(vec![0.5, 0.5, 0.5, 1.0, 0.6, 0.2, 0.2, 1.0]);
+    assert!(compare(&engine, &precise, 2, false, 1).pass());
+    // Above 1.0: 1.5 binary16 steps per stored pass (a step at 4.0 is 4/1024).
+    let hdr = webgl(vec![4.0, 4.0, 4.0, 1.0], None);
+    let at = |steps: f32| [4.0 + steps * 4.0 / 1024.0, 4.0, 4.0, 1.0];
+    assert!(compare(&at(1.5), &hdr, 1, false, 1).pass());
+    assert!(!compare(&at(2.0), &hdr, 1, false, 1).pass());
+    assert!(compare(&at(2.0), &hdr, 1, false, 2).pass());
+    assert!(!compare(&at(3.5), &hdr, 1, false, 2).pass());
+    // NaN against a value fails.
+    let first = webgl(two[..4].to_vec(), None);
+    assert!(!compare(&[f32::NAN, 0.5, 0.5, 1.0], &first, 1, false, 1).pass());
+    // A failure names its counts; a known undefined-behavior probe stays
+    // apart; an ill-conditioned program within WebGL's own spread passes.
     let mut tally = Tally::default();
-    record(
-        &mut tally,
-        "store/acme/glass",
-        "store/acme/glass",
-        "viewport",
-        differs,
-        false,
-        Some("webgl-metal-input-perturbed: 52 px over 1 CV, max 11 CV".into()),
-    );
-    assert_eq!(tally.matched, 0);
-    assert_eq!(tally.failures.len(), 1, "{:?}", tally.failures);
-    assert!(
-        tally.failures[0].contains("ANGLE_ONLY"),
-        "{}",
-        tally.failures[0]
-    );
-    // Through the runner too (an ANGLE-only program the runner drew
-    // differently).
-    let mut tally = Tally::default();
-    record(
-        &mut tally,
-        "store/acme/glass",
-        "store/acme/glass",
-        "viewport",
-        differs,
-        true,
-        Some("webgl-metal-perturbed: 3 px over 1 CV, max 2 CV".into()),
-    );
-    assert_eq!(tally.failures.len(), 1);
-    assert_eq!(tally.via_fallback, 0);
-    // A match stays a match, an undefined-behavior probe stays apart.
-    let same = Metrics {
-        over_one: 0,
-        max_cv: 0,
-        hdr_over_one: 0,
-        hdr_max_cv: 0.0,
-        pixels: 36_864,
-    };
-    let mut tally = Tally::default();
-    record(&mut tally, "x", "x", "v", same, false, None);
+    let failing = compare(&engine, &webgl(two.clone(), None), 2, false, 1);
+    record(&mut tally, "x", "x", "v", failing, false);
     record(
         &mut tally,
         "generated-s3/ub-divide-by-zero",
         "generated-s3/ub-divide-by-zero",
         "v",
-        differs,
+        failing,
         false,
-        None,
     );
+    let mut chaotic = webgl(two, None);
+    chaotic.spread = (3, 120);
+    record(&mut tally, "y", "y", "v", compare(&engine, &chaotic, 2, false, 1), false);
     assert_eq!(
-        (tally.matched, tally.known.len(), tally.failures.len()),
-        (1, 1, 0)
+        (tally.matched, tally.known.len(), tally.failures.len(), tally.ill_conditioned.len()),
+        (1, 1, 1, 1)
     );
 }
 
@@ -1170,57 +1103,4 @@ fn user_program_ids_never_receive_the_generated_undefined_behavior_exemption() {
         assert_eq!(known_open(id), None, "{id}");
     }
     assert!(known_open("generated-s3/ub-divide-by-zero").is_some());
-}
-
-/// A real user program the runtime probe never judged (left `Unknown`)
-/// fails the gate; a judged one, or one both refuse, passes.
-#[test]
-fn a_user_program_the_probe_never_judged_fails_the_gate() {
-    let mut via_runner = Renderer::headless().expect("a GPU");
-    let mut renderer = Renderer::headless().expect("a GPU");
-    for r in [&mut via_runner, &mut renderer] {
-        r.effects_mut()
-            .parity
-            .configure(Some("gate verdict test".into()), None);
-    }
-    let effect =
-        json!({"id": "user/fx", "kind": "effect", "frag": "never judged", "private": true});
-    let mut tally = Tally {
-        variants: 2,
-        ..Tally::default()
-    };
-    settle_user_verdict(&mut tally, &effect, None, &mut via_runner, &mut renderer);
-    assert_eq!(tally.runtime_verdict.as_deref(), Some("Unknown"));
-    assert_eq!(tally.failures.len(), 1, "{:?}", tally.failures);
-    assert!(
-        tally.failures[0].starts_with("local (private)"),
-        "private ids stay out of the output"
-    );
-    let px = FallbackPixels {
-        rgba32f: None,
-        width: 1,
-        height: 1,
-        rgba16f: vec![0; 4],
-    };
-    via_runner
-        .effects_mut()
-        .parity
-        .judge("working-depth-v1:float16\0judged", &px, &px);
-    let judged = json!({"id": "user/ok", "kind": "transition", "frag": "judged"});
-    let mut tally = Tally {
-        variants: 1,
-        ..Tally::default()
-    };
-    settle_user_verdict(&mut tally, &judged, None, &mut via_runner, &mut renderer);
-    assert_eq!(tally.runtime_verdict.as_deref(), Some("NativeVerified"));
-    assert!(tally.failures.is_empty());
-    let layer = json!({"id": "user/layer", "kind": "layer", "frag": "refused"});
-    let mut tally = Tally {
-        variants: 3,
-        both_refuse: 3,
-        ..Tally::default()
-    };
-    settle_user_verdict(&mut tally, &layer, None, &mut via_runner, &mut renderer);
-    assert_eq!(tally.runtime_verdict.as_deref(), Some("RefusedByBoth"));
-    assert!(tally.failures.is_empty());
 }

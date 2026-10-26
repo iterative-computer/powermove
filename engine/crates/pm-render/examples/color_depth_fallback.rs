@@ -31,15 +31,9 @@ fn main() {
         serde_json::from_slice(&std::fs::read(dir.join("definition.json")).unwrap()).unwrap(),
     );
     assert!(renderer.set_definitions(&definitions).unwrap().is_empty());
+    // Both programs sample a samplerCube the engine cannot bind (E-K6), so
+    // the shader layer and the effect take the production runner paths.
     renderer.set_shader_fallback_runner(true);
-    // A first-use user program goes through the real ANGLE transport even
-    // when native translation succeeds. This exercises both production
-    // shader/effect runner paths without constructing a program WebGL refuses
-    // (for example incompatible sampler types assigned to the same unit).
-    renderer
-        .effects_mut()
-        .parity
-        .configure(Some("color-depth-fallback-proof".into()), None);
     let request = RenderRequest::sized(Size::new(64, 32), Precision::Float32);
     let mut answered = 0;
     loop {

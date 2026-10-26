@@ -527,13 +527,10 @@ impl Session {
     }
 }
 
-/// Chromium's 16-bit to float conversion (`FixedSampleTypeTraits`).
+/// 16-bit to float with one scale on both sides of zero (X-R5), as
+/// `pm_media::audio` converts.
 fn s16(v: i16) -> f32 {
-    if v < 0 {
-        f32::from(v) * (1.0 / 32768.0)
-    } else {
-        f32::from(v) * (1.0 / 32767.0)
-    }
+    f32::from(v) * (1.0 / 32768.0)
 }
 
 impl Drop for Session {

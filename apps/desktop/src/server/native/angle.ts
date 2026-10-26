@@ -1,6 +1,6 @@
 /** Standalone CLI runner. Its authenticated loopback service is cheap; Chromium
- * starts only when pm-cli encounters a pinned or unverified user program
- * (`POST /`). */
+ * starts only when pm-cli meets a user program its native pipeline cannot
+ * translate (`POST /`). */
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';

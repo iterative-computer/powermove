@@ -20,6 +20,9 @@ pub struct TextReference {
     /// Only opaque WorkingF32 inputs without an authored paint program remain
     /// unreferenced; COLR programs are interpreted independently in f64.
     pub unreferenced: usize,
+    /// Where an effect's formula leaves the value open (`pm_reference::
+    /// effects::Open`): judged by the value it allows nearest the engine's.
+    pub open: Vec<Option<pm_reference::effects::Open>>,
 }
 
 pub fn render(scene: &TextScene) -> TextReference {
@@ -225,11 +228,13 @@ pub fn render_with_samples(
             rgba[i * 4..i * 4 + 4].fill(f64::NAN);
         }
     }
+    let open = vec![None; classes.len()];
     TextReference {
         rgba,
         classes,
         image_pixels,
         unreferenced,
+        open,
     }
 }
 

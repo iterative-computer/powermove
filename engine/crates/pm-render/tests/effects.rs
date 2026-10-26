@@ -148,6 +148,56 @@ fn update(
     }
 }
 
+/// Metal's render-target conversion truncates f32 to half; a legacy program
+/// drawing into an RGBA16F target stores the nearest even half instead
+/// (`pm_render::glsl::half_store`), so a chain of passes is not biased down
+/// by a half step per pass. 0.3 lies at 204.8 half steps of its binade:
+/// truncation stores 0x34CC, the nearest half is 0x34CD.
+#[test]
+fn rgba16f_stores_the_nearest_half_of_a_programs_output() {
+    let _gpu = gpu();
+    const CONSTANT: &str = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nout vec4 o;\nvoid main(){ o = vec4(0.3, -0.3, 1.0 + 3.0 * 0.0003, 1.0); }\n";
+    let mut set = builtin_definitions();
+    set.definitions
+        .push(raw_effect("acme.constant", CONSTANT, json!([]), false));
+    let mut r = Renderer::headless().unwrap();
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let def = r
+        .effects()
+        .get(DefinitionKind::Effect, "acme.constant")
+        .unwrap()
+        .clone();
+    let input = pm_gpu::Target::new(
+        r.device(),
+        "input",
+        4,
+        2,
+        wgpu::TextureFormat::Rgba16Float,
+        pm_gpu::target::working_usage(),
+    );
+    let step = pm_render::effects::plan::effect_step(&def, "fx", &[]);
+    let out = r
+        .run_effects(&input, None, &[step], 0.0, None, (4, 2), Precision::Float16)
+        .unwrap();
+    assert_eq!(out.format(), wgpu::TextureFormat::Rgba16Float);
+    let raw = pm_gpu::readback::read_raw(r.device(), r.queue(), &out.texture).unwrap();
+    let halves: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let nearest = pm_gpu::readback::f32_to_half;
+    let want = [
+        nearest(0.3),
+        nearest(-0.3),
+        nearest(1.0 + 3.0 * 0.0003),
+        0x3c00,
+    ];
+    assert_eq!(want[0], 0x34cd);
+    for px in halves.chunks_exact(4) {
+        assert_eq!(px, want, "{px:04x?}");
+    }
+}
+
 /// GLSL built-ins whose Metal call the engine takes from ANGLE
 /// (`pm_render::glsl`): `round` rounds ties away from zero as WebGL does
 /// today (ANGLE's `metal::round`), `roundEven` to even (`metal::rint`).

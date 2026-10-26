@@ -117,72 +117,6 @@ fn in_functions(msl: &str, prefix: &str, edit: impl Fn(&str) -> String) -> Strin
     out
 }
 
-/// A fingerprint of a legacy program that ignores its numeric literals: the
-/// SHA-256 of the source with every number written as `0` and every run of
-/// whitespace as one space. Programs an extension generates with baked
-/// constants (a composition's resolution) keep one fingerprint; programs
-/// that differ only in constants share it.
-pub fn fingerprint(source: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let starts_number = (c.is_ascii_digit()
-            || (c == '.' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit())))
-            && !(i > 0 && ident(chars[i - 1]));
-        if starts_number {
-            while i < chars.len() {
-                let d = chars[i];
-                let exponent_sign =
-                    (d == '+' || d == '-') && i > 0 && matches!(chars[i - 1], 'e' | 'E');
-                if d.is_ascii_alphanumeric() || d == '.' || exponent_sign {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            out.push('0');
-            continue;
-        }
-        if c.is_whitespace() {
-            while i < chars.len() && chars[i].is_whitespace() {
-                i += 1;
-            }
-            out.push(' ');
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    Sha256::digest(out.trim().as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// The fingerprint ([`fingerprint`]) of a wrapped program's user body (the
-/// `body_utf8_len` bytes from line `body_line_offset`), so a change to the
-/// kernel's wrapper does not change it; the whole source when the range
-/// does not fit.
-pub fn body_fingerprint(glsl: &pm_protocol::definitions::WrappedGlsl) -> String {
-    let source = glsl.source.as_str();
-    let mut start = 0usize;
-    for _ in 0..glsl.body_line_offset {
-        match source[start..].find('\n') {
-            Some(n) => start += n + 1,
-            None => return fingerprint(source),
-        }
-    }
-    let end = start + glsl.body_utf8_len as usize;
-    match source.get(start..end) {
-        Some(body) => fingerprint(body),
-        None => fingerprint(source),
-    }
-}
-
 /// A stage of a legacy program for a pipeline: the module and its entry
 /// point name.
 pub struct Stage {
@@ -270,6 +204,79 @@ pub fn write(
     Ok((angle_calls(&source), entry))
 }
 
+/// The fragment MSL of a program drawing into an RGBA16F target: each float
+/// color output is converted to `half` in the shader, where MSL's
+/// conversion rounds to the nearest even half, so the target's store is
+/// exact. Metal's own render-target conversion truncates f32 toward zero,
+/// which biases every pass of an effect chain down by up to one half step.
+/// naga writes the entry point's outputs as `struct main_Output` and returns
+/// them with one `return main_Output { ... };` per exit; `None` when the
+/// source is not written that way.
+pub fn half_store(msl: &str, entry_point: &str) -> Option<String> {
+    const OUTPUT: &str = "struct main_Output {\n";
+    let start = msl.find(OUTPUT)? + OUTPUT.len();
+    let end = start + msl[start..].find("};\n")?;
+    let mut members = Vec::new();
+    let mut converted = String::new();
+    for line in msl[start..end].lines() {
+        let line = line.trim().strip_suffix(';')?;
+        let (declaration, attribute) = line.split_once(" [[")?;
+        let (ty, name) = declaration.rsplit_once(' ')?;
+        let half = match ty {
+            _ if !attribute.starts_with("color(") => None,
+            "float" => Some("half"),
+            "metal::float2" => Some("metal::half2"),
+            "metal::float3" => Some("metal::half3"),
+            "metal::float4" => Some("metal::half4"),
+            _ => None,
+        };
+        members.push(format!("    {} {name} [[{attribute};", half.unwrap_or(ty)));
+        converted.push_str(&match half {
+            Some(h) => format!("{h}(o.{name}), "),
+            None => format!("o.{name}, "),
+        });
+    }
+    let signature = format!("fragment main_Output {entry_point}(");
+    let at = msl.find(&signature)?;
+    let (head, body) = msl.split_at(at);
+    let returns = body.matches("return main_Output {").count();
+    if returns == 0 || members.is_empty() {
+        return None;
+    }
+    let body = body
+        .replacen(&signature, &format!("fragment pm_half_Output {entry_point}("), 1)
+        .lines()
+        .map(|line| match line.trim_start().strip_prefix("return main_Output {") {
+            Some(rest) => {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                rest.strip_suffix(" };")
+                    .map(|values| format!("{indent}return pm_half(main_Output {{{values} }});"))
+                    .unwrap_or_else(|| line.to_owned())
+            }
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.matches("return pm_half(").count() != returns {
+        return None;
+    }
+    Some(format!(
+        "{head}struct pm_half_Output {{\n{}\n}};\npm_half_Output pm_half(main_Output o) {{ return pm_half_Output {{ {} }}; }}\n{body}\n",
+        members.join("\n"),
+        converted.trim_end_matches(", ")
+    ))
+}
+
+/// A stage compiled from MSL `source` (passthrough).
+pub fn msl_stage(device: &wgpu::Device, label: &str, source: String, entry_point: &str) -> Result<Stage, String> {
+    let compiled = pm_gpu::msl::from_source(device, label, &source, entry_point)?;
+    Ok(Stage {
+        module: compiled.module,
+        entry_point: compiled.entry_point,
+        msl: Some(source),
+    })
+}
+
 /// The module for one stage of a legacy program: ANGLE's calls through
 /// passthrough MSL where the device takes it, else wgpu's translation.
 pub fn stage_module(
@@ -290,12 +297,7 @@ pub fn stage_module(
         });
     }
     let (source, entry_point) = write(&module, stage, entries)?;
-    let compiled = pm_gpu::msl::from_source(device, label, &source, &entry_point)?;
-    Ok(Stage {
-        module: compiled.module,
-        entry_point: compiled.entry_point,
-        msl: Some(source),
-    })
+    msl_stage(device, label, source, &entry_point)
 }
 
 #[cfg(test)]
@@ -361,6 +363,19 @@ mod tests {
     }
 
     #[test]
+    fn half_store_converts_color_outputs_at_every_return() {
+        let msl = "struct main_Output {\n    metal::float4 member [[color(0)]];\n    float gl_FragDepth [[depth(any)]];\n};\nfragment main_Output main_(\n  main_Input varyings [[stage_in]]\n) {\n    if (x) {\n        return main_Output { a, d };\n    }\n    return main_Output { _e7, d };\n}\n";
+        let out = half_store(msl, "main_").expect("naga's form");
+        assert!(out.contains("struct pm_half_Output {\n    metal::half4 member [[color(0)]];\n    float gl_FragDepth [[depth(any)]];\n};"), "{out}");
+        assert!(out.contains("return pm_half_Output { metal::half4(o.member), o.gl_FragDepth };"), "{out}");
+        assert!(out.contains("fragment pm_half_Output main_("), "{out}");
+        assert_eq!(out.matches("return pm_half(main_Output {").count(), 2, "{out}");
+        assert!(!out.contains("        return main_Output {"), "{out}");
+        // Not naga's form: left to the caller.
+        assert!(half_store("fragment float4 main_() { return x; }", "main_").is_none());
+    }
+
+    #[test]
     fn single_call_keeps_what_it_does_not_recognize() {
         let f = "float pm_round_u0028_f1_u0029_(\n    float x\n) {\n    float t = metal::trunc(x);\n    return t;\n}\n";
         assert_eq!(
@@ -372,20 +387,6 @@ mod tests {
         assert_eq!(single_call(two, "metal::round"), two);
         let odd = "float pm_round_u0028_f1_u0029_(float x) { return x; }\n";
         assert_eq!(single_call(odd, "metal::round"), odd);
-    }
-
-    #[test]
-    fn fingerprints_ignore_numbers_and_spacing_only() {
-        let a =
-            fingerprint("const vec2 r = vec2(256.000000, 144.000000);\nfloat x = 1e-3 + u_p0;\n");
-        let b = fingerprint("const vec2 r = vec2(1920.000000, 1080.0);  float x = 2.5E+4 + u_p0;");
-        assert_eq!(a, b);
-        assert_ne!(
-            a,
-            fingerprint("const vec2 r = vec2(256.0, 144.0); float x = 1e-3 - u_p0;")
-        );
-        // Digits inside identifiers are names, not numbers.
-        assert_ne!(fingerprint("float u_p0;"), fingerprint("float u_p1;"));
     }
 
     #[test]

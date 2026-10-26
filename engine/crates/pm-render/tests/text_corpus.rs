@@ -71,10 +71,11 @@ fn outlined_frame(
     size: (u32, u32),
     resolver: &pm_render::MapResolver,
     hidden_pixels: &[u8],
+    engine_pixels: &[u8],
 ) -> Result<(Vec<f64>, Vec<pm_reference::compare::Class>, Vec<bool>), String> {
     use pm_protocol::{color::Precision, common::Size};
     use pm_reference::compare::{Class, dilate};
-    use pm_reference::composite::blend;
+    use pm_reference::composite::{Blend, Operator, blend, porter_duff};
 
     let (w, h) = (size.0 as usize, size.1 as usize);
     if hidden_pixels.len() != w * h * 4 {
@@ -96,8 +97,14 @@ fn outlined_frame(
     let mut seen_text = false;
     let mut nontext_above_text = false;
     let mut text_draws = Vec::with_capacity(plan.draws.len());
+    let facts = support::text_group_reference::LayerFacts {
+        document: doc,
+        composition: comp_id,
+        time: support::ticks(time),
+        effects: renderer.effects(),
+    };
     for draw in &plan.draws {
-        let ideal = support::text_group_reference::render_draw(draw, size.0, size.1)?;
+        let ideal = support::text_group_reference::render_draw(draw, size.0, size.1, &facts)?;
         if ideal.is_some() {
             seen_text = true;
         } else if seen_text {
@@ -120,14 +127,26 @@ fn outlined_frame(
     };
     let full_hidden = (seen_text && !nontext_above_text).then(|| reference(hidden));
     let background = support::text::background_only(hidden);
+    // Why the text is placed over the background alone, for the gap below.
+    let mut underlay = String::new();
     let mut base = match full_hidden {
         Some(full) if full.unmodelled.is_empty() && full.modelled() == 1.0 => full,
-        _ => reference(&background),
+        full => {
+            underlay = match full {
+                None => "; nontext drawn above text".into(),
+                Some(full) if full.unmodelled.is_empty() => "; nontext partly unmodelled".into(),
+                Some(full) => format!("; nontext reference: {}", full.unmodelled.join(", ")),
+            };
+            reference(&background)
+        }
     };
     if !base.unmodelled.is_empty() {
         return Err(base.unmodelled.join("; "));
     }
-    let background_pixels = base.opaque();
+    // Values an effect's formula leaves open below the text take the value
+    // nearest the engine's own frame without text.
+    let hidden_unit: Vec<f64> = hidden_pixels.iter().map(|v| f64::from(*v) / 255.0).collect();
+    let background_pixels = base.opaque_resolved(&hidden_unit).rgba;
     let mut classes = vec![Class::Unreferenced; w * h];
     let mut text_seen = false;
     let mut text_reached = vec![false; w * h];
@@ -138,10 +157,24 @@ fn outlined_frame(
         };
         text_seen = true;
         let mode = support::text_group_reference::blend_mode(draw);
+        // A top-level text layer's transition runs on the stack below it
+        // and the stack with it (`runTransition`).
+        let transition = match &draw.content {
+            pm_render::plan::Content::Composite(node) => match node.as_ref() {
+                pm_render::composite::Node::Layer(layer) if layer.transition.is_some() => {
+                    Some(facts.transition(&layer.layer)?.ok_or("inactive text layer transition")?)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let before = transition.as_ref().map(|_| base.rgba.clone());
         for i in 0..w * h {
             let s = &ideal.rgba[i * 4..][..4];
             let d = &mut base.rgba[i * 4..][..4];
-            if s[3] > 0.0 && ideal.classes[i] != Class::Unreferenced {
+            // Effects write light at zero alpha too (Chroma's fringes).
+            let lit = s.iter().any(|v| *v != 0.0) || ideal.open[i].is_some();
+            if lit && ideal.classes[i] != Class::Unreferenced {
                 let background_delta = (0..4)
                     .map(|c| {
                         (f64::from(hidden_pixels[i * 4 + c]) / 255.0 - background_pixels[i * 4 + c])
@@ -151,7 +184,7 @@ fn outlined_frame(
                     .fold(0.0f64, f64::max);
                 if background_delta > 1.0 + 1e-9 {
                     return Err(format!(
-                        "nontext content intersects text at pixel {i}: background delta {background_delta:.2} CV"
+                        "nontext content intersects text at pixel {i}: background delta {background_delta:.2} CV{underlay}"
                     ));
                 }
             }
@@ -164,14 +197,30 @@ fn outlined_frame(
                 text_reached[i] = true;
                 continue;
             }
-            if s[3] <= 0.0 {
+            if !lit {
                 continue;
             }
-            let result = blend(mode, [s[0], s[1], s[2], s[3]], [d[0], d[1], d[2], d[3]]);
+            // Normal is premultiplied source-over, which keeps light at zero
+            // alpha; the W3C form drops it there and equals it elsewhere.
+            let over = |src: [f64; 4], dst: [f64; 4]| {
+                if mode == Blend::Normal {
+                    porter_duff(Operator::SourceOver, src, dst)
+                } else {
+                    blend(mode, src, dst)
+                }
+            };
+            let dst = [d[0], d[1], d[2], d[3]];
+            let src = [s[0], s[1], s[2], s[3]];
+            base.open[i] = support::reference::composite_open(
+                src,
+                ideal.open[i].as_ref(),
+                dst,
+                base.open[i].as_ref(),
+                over,
+            );
+            let result = over(src, dst);
             d.copy_from_slice(&result);
-            if s[3] > 0.0 {
-                text_reached[i] = true;
-            }
+            text_reached[i] = true;
             classes[i] = if unknown_text[i] {
                 Class::Unreferenced
             } else {
@@ -181,6 +230,30 @@ fn outlined_frame(
                     (_, next) => next,
                 }
             };
+        }
+        if let (Some((id, params, edge_in, progress)), Some(before)) = (transition, before) {
+            let moved = support::reference::apply_transition(
+                &mut base, before, &id, &params, edge_in, progress,
+            );
+            for i in (0..w * h).filter(|&i| moved[i]) {
+                text_reached[i] = true;
+                if unknown_text[i] {
+                    continue;
+                }
+                if base.rgba[i * 4 + 3].is_nan() {
+                    unknown_text[i] = true;
+                    classes[i] = Class::Unreferenced;
+                } else if base.resampled[i] || base.open[i].is_some() {
+                    classes[i] = Class::Resampled;
+                } else if classes[i] == Class::Unreferenced {
+                    classes[i] = Class::Interior;
+                }
+            }
+        }
+    }
+    for (i, open) in base.open.iter().enumerate() {
+        if open.is_some() && classes[i] != Class::Unreferenced {
+            classes[i] = Class::Resampled;
         }
     }
     if !text_seen {
@@ -199,14 +272,15 @@ fn outlined_frame(
             .fold(0.0f64, f64::max);
         if background_delta > 1.0 + 1e-9 {
             return Err(format!(
-                "nontext content intersects text halo at pixel {i}: background delta {background_delta:.2} CV"
+                "nontext content intersects text halo at pixel {i}: background delta {background_delta:.2} CV{underlay}"
             ));
         }
         // The reference has only independently modeled background here;
         // any engine ink in this near-outline halo is a real edge error.
         classes[i] = Class::Edge;
     }
-    Ok((base.opaque(), classes, reach))
+    let engine: Vec<f64> = engine_pixels.iter().map(|v| f64::from(*v) / 255.0).collect();
+    Ok((base.opaque_resolved(&engine).rgba, classes, reach))
 }
 
 /// A text reference gap, judged after the isolation captures are read.
@@ -426,6 +500,7 @@ fn main() {
                     (w, h),
                     &p.resolver,
                     &base,
+                    &ours,
                 );
                 let mut why = Vec::new();
                 let mut gap = None;
@@ -559,10 +634,12 @@ fn main() {
                     renderer.effects(),
                     &p.resolver,
                 );
-                let opaque = support::reference::Reference {
-                    rgba: r.opaque(),
-                    ..r.clone()
-                };
+                let opaque = r.opaque_resolved(
+                    &ours
+                        .iter()
+                        .map(|v| f64::from(*v) / 255.0)
+                        .collect::<Vec<_>>(),
+                );
                 let selected = |values: &[f64]| {
                     values
                         .chunks_exact(4)
@@ -742,6 +819,20 @@ fn main() {
                         }
                     }
                     write_png(&dir.join(format!("{stem}-rest.png")), w, h, &rest_diff);
+                    // The non-text reference; unreferenced pixels in magenta.
+                    let wanted: Vec<u8> = opaque
+                        .rgba
+                        .chunks_exact(4)
+                        .flat_map(|c| {
+                            if c[3].is_nan() {
+                                [255, 0, 255, 255]
+                            } else {
+                                let b = |v: f64| (v * 255.0).round() as u8;
+                                [b(c[0]), b(c[1]), b(c[2]), 255]
+                            }
+                        })
+                        .collect();
+                    write_png(&dir.join(format!("{stem}-reference.png")), w, h, &wanted);
                 }
             }
         }

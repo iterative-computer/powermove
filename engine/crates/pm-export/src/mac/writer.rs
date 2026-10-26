@@ -1,9 +1,7 @@
 //! AVAssetWriter muxing (section 17, "Muxers"): compressed video passed through from
 //! our VTCompressionSession; audio as LPCM (16-bit with deterministic TPDF dither,
 //! 24-bit, or 32-bit float, converted by the engine and passed through) or AAC
-//! encoded by AudioToolbox from f32 (with an edit list for its priming). Today's
-//! formats, ProRes MOV with 24-bit PCM and H.264 MP4 with AAC, are remuxed by
-//! bundled FFmpeg instead (`legacy_audio`, the desktop exporter's mux). A
+//! encoded by AudioToolbox from f32 (with an edit list for its priming). A
 //! `tmcd` track carrying the start timecode with the drop-frame
 //! flag and the reel name, associated with the video track. Movie and media timescales
 //! are always set (section 17; amendment 7).

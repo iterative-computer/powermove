@@ -390,7 +390,6 @@ fn request_name(request: &Request) -> &'static str {
         Request::ShaderFallback(_) => "shaderFallback",
         Request::Snapshot(_) => "snapshot",
         Request::CompatFrame(_) => "compatFrame",
-        Request::HostEncode(_) => "hostEncode",
     }
 }
 

@@ -518,8 +518,9 @@ fn h264_generation_psnr_at_matched_rate() {
     let mut r = Renderer::headless().unwrap();
     let encode = |r: &mut Renderer, bps: u32| -> (PathBuf, f64) {
         let engine = dir.join(format!("engine-{bps}.mp4"));
+        // Undithered, as the desktop sends H.264 (EXPORT-DITHER-1).
         let mut s = settings_sized(ExportFormat::H264, WireAlpha::None, w, h, frames);
-        s.dither = true;
+        s.dither = false;
         let job = full_frame_job_sized(&path, s, engine.clone(), w, h, frames);
         let mut plan = plan_export(&job).unwrap();
         plan.spec.codec = Codec::H264 { bitrate_bps: bps };

@@ -67,26 +67,9 @@ viewport and the complete built-in/user panel registry. They do not return the
 worker's reduced workspace answer. The page's compositor output is replaced by
 CPU snapshots from `pm-node` over authenticated binary HTTP requests.
 
-The desktop writes `desktop-environment.json` beside `Engine Cache/Shader Cache`.
-Hidden engines and CLI renders read this namespace and the same `angle-parity`
-pins. A hidden profile with its own desktop probe copy uses it; otherwise the
-host reads this machine’s desktop store. `POWERMOVE_ENGINE_SHADER_CACHE` selects
-an explicit cache for isolated hosts. A profile without desktop probes uses a fresh namespace: user programs
-must pass through ANGLE before native verification.
-
-Only the desktop writes that namespace. Its decisions compare native output
-with Electron's WebGL runner; the hidden host and both CLI entry points compare
-with Playwright's Chromium, which can be a different ANGLE revision or
-SwiftShader under launchd or ssh. Their engines therefore open it read only
-(`POWERMOVE_ENGINE_PARITY_STORE=read-only`, set by `cliProbeEnvironment` for
-the hidden host and `powermove render`, and forced in code for every `pm-cli`
-renderer). They honour the desktop's runner pins and native verifications, so
-a desktop-verified program draws natively everywhere and a desktop-pinned one
-uses the runner. A program the desktop has not decided is probed against the
-host's own Chromium on first use, decided in memory for that process, and
-leaves no `.native` or `.runner` marker that the desktop would trust. The
-desktop still probes it against Electron. A different `STORE` value also
-fails closed as read only. The browser module uses
+User programs draw natively on every host (no first-use probe, E-R1); the
+hidden host keeps its translated programs in its own profile's
+`Engine Cache/Shader Cache`. The browser module uses
 `ShaderFallbackRunner`, with the desktop's F16 texture, uniform and watchdog
 contract. `powermove render` starts an authenticated loopback service; direct
 bundled `pm-cli` starts the same Node helper and closes it on stdin EOF.
@@ -97,11 +80,10 @@ The desktop and hidden host also atomically persist their winning definitions in
 caller provides `--definitions`; direct `pm-cli` accepts the same snapshot.
 
 `pm-cli render` and `pm-cli scope` share one renderer setup
-(`pm-cli/src/render.rs` `headless_renderer`): the read-only probe store,
-`require_shader_reference`, the helper's Chromium as the fallback host and the
-`--definitions` snapshot (else the built-in set with the same warning). Without a helper,
-both commands report a pinned, unverified or untranslatable user program as not
-headless-renderable (exit 4) and write nothing.
+(`pm-cli/src/render.rs` `headless_renderer`): the helper's Chromium as the
+fallback host and the `--definitions` snapshot (else the built-in set with the
+same warning). Without a helper, both commands report a user program the native
+pipeline cannot translate as not headless-renderable (exit 4) and write nothing.
 
 Missing native addons are `native-runtime-unavailable`; missing Chromium is
 `chromium-unavailable` at the first browser-dependent call. Corrupt persisted
@@ -161,35 +143,10 @@ id normalization. Service tests create temporary user-domain launchd jobs and a
 loopback-only SSH service with temporary keys outside the repository; they do
 not change login or authorized-key settings.
 
-The same parity fixture renders through both CLI entry points. A simultaneous
-native verification must lose to the persisted runner pin; removing only that
-pin must produce different native pixels. With every desktop decision removed,
-first probes by both CLI entry points and by a hidden host on a fresh profile
-copy must match the desktop's pixels and leave `angle-parity` empty. A missing
-browser must fail by name. `pm-cli scope` runs on the same pinned project
-with the forged native verification in place: its channel statistics must match
-`pm-cli scope --frame` of the desktop's frame 0 within one 8-bit step (the PNG
-holds dithered bytes, scope measures the 32-bit render), and every channel mean
-within 0.05 of a step. The 239×137 fixture is measured at the export's 240×138.
-With only the pin removed, the native scope must deviate by more than one step.
-Measured 2026-10-23: largest statistic deviation 0.96 of a step (dither: blue
-181/182 against 181.04), largest mean deviation 0.0002 of a step, native control
-0.97 (247 steps, in red). Without a helper it must exit
-4 naming the effect, and with a missing browser it must fail with
-`chromium-unavailable`; neither writes `scope.json`. The `scope_*` tests in
-`cargo test -p pm-cli --test definitions` cover a shader layer and a runner-only
-definition without a helper, and a shader layer through the production helper.
-`cargo test -p pm-cli --test definitions`
-(`a_cli_first_probe_leaves_no_decision_in_the_desktop_namespace`) covers an
-exactly matching program, which a writable store would have recorded as
-`.native`, and pm-render's `effects_fallback` and `effects::parity` tests cover
-the read-only store directly. Without `POWERMOVE_ANGLE_HELPER` the helper
-gates print a skip reason; gate runs set `POWERMOVE_REQUIRE_ANGLE_HELPER=1`.
-The Rust definitions gate retains its original successful override and blue-pixel
-assertions, with the production ANGLE helper enabled. Child-supervision tests
-kill real pm-node children, check in-flight asset attribution and the two-crash
-ledger, increasing backoff, per-project definition replay and recovery of both
-engine roles. Build all test binaries before acquiring the app lease.
+The same user program renders through the desktop, the hidden host and both CLI
+entry points (`scripts/test-native-hidden-parity.mjs`): the PNG frames must be
+pixel-identical with no browser runner, and `pm-cli scope` of the render must match
+`pm-cli scope --frame` of the desktop's frame 0 within one 8-bit step.
 
 ## Remaining integration gates
 

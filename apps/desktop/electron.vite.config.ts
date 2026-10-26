@@ -24,8 +24,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: path.resolve(__dirname, 'src/preload/index.ts'),
-          onboarding: path.resolve(__dirname, 'src/preload/onboarding.ts'),
-          exportEncoder: path.resolve(__dirname, 'src/preload/export-encoder.ts')
+          onboarding: path.resolve(__dirname, 'src/preload/onboarding.ts')
         },
         output: { format: 'cjs', entryFileNames: '[name].js' }
       }
@@ -63,8 +62,7 @@ export default defineConfig({
         input: {
           index: path.resolve(__dirname, 'src/renderer/index.html'),
           onboardingWelcome: path.resolve(__dirname, 'src/renderer/onboarding/welcome.html'),
-          extSandbox: path.resolve(__dirname, 'src/renderer/sandbox/ext-sandbox.html'),
-          exportEncoder: path.resolve(__dirname, 'src/renderer/export-encoder.html')
+          extSandbox: path.resolve(__dirname, 'src/renderer/sandbox/ext-sandbox.html')
         },
         output: {
           entryFileNames: chunk => chunk.name === 'extSandbox' ? 'host/ext-sandbox.js' : 'assets/[name]-[hash].js',

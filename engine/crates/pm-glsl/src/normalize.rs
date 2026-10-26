@@ -206,8 +206,8 @@ const BUILTINS_450_ONLY: &[&str] = &[
 ///   genType overloads include scalars, naga's built-ins take only vectors
 ///   (`BuiltinArgumentsInvalid("Normalize")`). The vector overloads call the
 ///   built-ins unchanged; the scalar ones use the specification's formulas.
-/// * `round`, `radians`, `degrees`: kept apart from the built-ins naga folds
-///   them into, so the MSL can make ANGLE's calls (`pm_render::glsl`).
+/// * `round`: kept apart from the built-in naga folds it into, so the MSL
+///   can make ANGLE's call (`pm_render::glsl`).
 ///   glslang and naga give `round` and `roundEven` the same IR (`metal::rint`,
 ///   ties to even), while ANGLE writes `round` as `metal::round` (ties away
 ///   from zero: `round(2.5)` is 3 in WebGL). `pm_round` computes ties away
@@ -215,8 +215,7 @@ const BUILTINS_450_ONLY: &[&str] = &[
 ///   point, so `abs(x - t) >= 0.5` finds the halves without the error of
 ///   `floor(x + 0.5)` just below 0.5), so every back end rounds as WebGL; the
 ///   Metal MSL writer recognizes the function by name and gives its body
-///   ANGLE's own call, `metal::round`. naga writes `radians(x)` as `(x) * c`; ANGLE's
-///   `ANGLE_radians` is `c * x` (the constant first), and likewise `degrees`.
+///   ANGLE's own call, `metal::round`.
 const POLYFILLS: &[(&str, &str)] = &[
     (
         // Same expressions and evaluation order as ANGLE's Metal translator
@@ -280,16 +279,6 @@ vec4 pm_modf(vec4 x, out vec4 i){ i = trunc(x); return mix(x - i, vec4(0.0), isi
 vec2 pm_round(vec2 x){ vec2 t = trunc(x); return t + mix(vec2(0.0), sign(x), greaterThanEqual(abs(x - t), vec2(0.5))); } \
 vec3 pm_round(vec3 x){ vec3 t = trunc(x); return t + mix(vec3(0.0), sign(x), greaterThanEqual(abs(x - t), vec3(0.5))); } \
 vec4 pm_round(vec4 x){ vec4 t = trunc(x); return t + mix(vec4(0.0), sign(x), greaterThanEqual(abs(x - t), vec4(0.5))); }",
-    ),
-    (
-        "radians",
-        "float pm_radians(float x){ return 1.7453292519943295e-2 * x; } vec2 pm_radians(vec2 x){ return vec2(1.7453292519943295e-2) * x; } \
-vec3 pm_radians(vec3 x){ return vec3(1.7453292519943295e-2) * x; } vec4 pm_radians(vec4 x){ return vec4(1.7453292519943295e-2) * x; }",
-    ),
-    (
-        "degrees",
-        "float pm_degrees(float x){ return 57.29577951308232 * x; } vec2 pm_degrees(vec2 x){ return vec2(57.29577951308232) * x; } \
-vec3 pm_degrees(vec3 x){ return vec3(57.29577951308232) * x; } vec4 pm_degrees(vec4 x){ return vec4(57.29577951308232) * x; }",
     ),
     (
         "normalize",

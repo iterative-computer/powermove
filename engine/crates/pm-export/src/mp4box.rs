@@ -1,7 +1,7 @@
 //! A QuickTime / ISO BMFF reader for verification: the facts section 17's probe checks
 //! that live in the container (sample entries, `colr`, timescales, sample counts, edit
 //! lists, the `tmcd` track, the H.264 SPS). Bounds-checked; malformed input is an
-//! error, never a panic.
+//! error, never a panic. One writer: [`add_channel_layout`].
 
 use std::path::Path;
 
@@ -263,6 +263,99 @@ impl Movie {
             tracks,
         })
     }
+}
+
+/// Gives a QuickTime movie's sound track a channel layout (`chan`, Mono or
+/// Stereo by tag) when its sample entry has none: AVAssetWriter writes LPCM
+/// without one, and players then read an unknown layout. The movie's `moov`
+/// must be its last box, so no chunk offset moves.
+pub fn add_channel_layout(path: &Path, channels: u16) -> Result<(), Error> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let bad = |m: &str| Error::Verify(format!("container: {m}"));
+    let io = |e: std::io::Error| Error::Io(format!("{}: {e}", path.display()));
+    // kAudioChannelLayoutTag_Mono (100 << 16) | 1, _Stereo (101 << 16) | 2.
+    let tag: u32 = match channels {
+        1 => (100 << 16) | 1,
+        2 => (101 << 16) | 2,
+        _ => return Ok(()),
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
+    let (mut at, mut moov) = (0u64, None);
+    while at + 8 <= len {
+        let mut head = [0u8; 8];
+        file.seek(SeekFrom::Start(at)).map_err(io)?;
+        file.read_exact(&mut head).map_err(io)?;
+        let size = u32::from_be_bytes(head[0..4].try_into().unwrap()) as u64;
+        if size < 8 {
+            break;
+        }
+        if &head[4..8] == b"moov" {
+            moov = Some((at, size));
+        }
+        at += size;
+    }
+    let (at, size) = moov.ok_or_else(|| bad("no moov box"))?;
+    if at + size != len || size > 1 << 30 {
+        return Err(bad("moov is not the movie's last box"));
+    }
+    let mut d = vec![0u8; size as usize];
+    file.seek(SeekFrom::Start(at)).map_err(io)?;
+    file.read_exact(&mut d).map_err(io)?;
+    // The boxes from `moov` down to the sound sample entry, each grown by `chan`.
+    let mut chain = vec![BoxRef {
+        kind: *b"moov",
+        start: 8,
+        end: d.len(),
+    }];
+    let trak = children(&d, 8, d.len())
+        .into_iter()
+        .filter(|b| &b.kind == b"trak")
+        .find(|t| {
+            find(&children(&d, t.start, t.end), b"mdia")
+                .and_then(|m| find(&children(&d, m.start, m.end), b"hdlr"))
+                .and_then(|h| d.get(h.start + 8..h.start + 12))
+                == Some(b"soun".as_slice())
+        })
+        .ok_or_else(|| bad("no sound track"))?;
+    chain.push(trak);
+    for kind in [b"mdia", b"minf", b"stbl", b"stsd"] {
+        let parent = chain[chain.len() - 1];
+        chain.push(
+            find(&children(&d, parent.start, parent.end), kind)
+                .ok_or_else(|| bad("malformed sound track"))?,
+        );
+    }
+    let stsd = chain[chain.len() - 1];
+    let entry = *children(&d, stsd.start + 8, stsd.end)
+        .first()
+        .ok_or_else(|| bad("no sound sample entry"))?;
+    if d[entry.start..entry.end].windows(4).any(|w| w == b"chan") {
+        return Ok(());
+    }
+    chain.push(entry);
+    let mut chan = Vec::with_capacity(24);
+    chan.extend_from_slice(&24u32.to_be_bytes());
+    chan.extend_from_slice(b"chan");
+    chan.extend_from_slice(&0u32.to_be_bytes()); // version and flags
+    chan.extend_from_slice(&tag.to_be_bytes());
+    chan.extend_from_slice(&[0u8; 8]); // bitmap, no channel descriptions
+    for b in &chain {
+        let header = b.start - 8;
+        if be32(&d, header) != Some((b.end - header) as u32) {
+            return Err(bad("unexpected 64-bit box size in the sound track"));
+        }
+        let grown = (b.end - header + chan.len()) as u32;
+        d[header..header + 4].copy_from_slice(&grown.to_be_bytes());
+    }
+    d.splice(entry.end..entry.end, chan);
+    file.seek(SeekFrom::Start(at)).map_err(io)?;
+    file.write_all(&d).map_err(io)?;
+    file.sync_all().map_err(io)
 }
 
 /// (timescale, duration) of an `mvhd` or `mdhd` payload.

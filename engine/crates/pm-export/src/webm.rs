@@ -1,14 +1,14 @@
 //! WebM through FFmpeg (plan section 17, "Muxers" and "Formats at cutover"): VP9
 //! or VP8 from libvpx, alpha as libvpx's second stream (Matroska `AlphaMode` and
-//! `BlockAdditional`), Opus from libopus at 48 kHz. Opaque exports remux the
-//! encoded packets into the current exporter's EBML layout.
+//! `BlockAdditional`), Opus from libopus at 48 kHz.
 //!
 //! Frame-exact: every frame of the range is encoded, frame n at presentation
 //! time n / rate (Matroska stores milliseconds; the stream also declares its
-//! frame duration). The native sink follows today's WebCodecs canvas-byte and
-//! measured REC709 I420 conversion boundary. The current legacy WebM stream
-//! declares unspecified primaries/transfer and BT.709 matrix. Keyframes are
-//! forced every rounded two seconds; rate control follows the quality bitrate.
+//! frame duration). The video is the engine's own conversion of the working
+//! frames (`convert`: BT.709 matrix, limited range, left-sited 4:2:0, blue-noise
+//! dither), tagged with the export's colour description; libvpx runs with
+//! today's realtime settings. Keyframes are forced every rounded two seconds;
+//! rate control follows the quality bitrate.
 //!
 //! Verification demuxes the whole file (frame count, every frame's timestamp,
 //! codec, size, tags, range, alpha mode), decodes the first, middle, and last
@@ -27,15 +27,12 @@ use pm_media::sys::ffmpeg as ff;
 use crate::Delivered;
 use crate::Error;
 use crate::atomic::AtomicOutput;
-use crate::convert::{EncoderInput, Plane, PlaneData, WorkingFrame};
+use crate::convert::{EncoderInput, Plane, PlaneData};
 use crate::pipeline::Sink;
 use crate::settings::{
     AlphaOutput, AudioCodec, Codec, Container, ExportSpec, InputFormat, Overwrite,
 };
 use crate::verify::{self, AudioReport, BlockSample, PixelCheck, VerifyReport};
-
-#[path = "webm_legacy_mux.rs"]
-mod legacy_mux;
 
 /// Matroska's timestamp unit.
 const MS: ff::AVRational = ff::AVRational { num: 1, den: 1000 };
@@ -96,142 +93,9 @@ fn rational(num: i64, den: i64) -> ff::AVRational {
     }
 }
 
-/// Chromium 152's accelerated canvas readback requests limited-range REC709
-/// NV12 before libvpx. Work at its RGBA8 texture boundary and use the REC709
-/// matrix with floating-point UNORM8 writes, including a 2×2 chroma sample.
-/// This matches measured GPU readback codes for paired solid and varied-color
-/// fixtures; gradients and transparency need separate parity measurements.
-pub(crate) fn canvas_rgba_to_i420(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    alpha: bool,
-) -> Result<EncoderInput, Error> {
-    let w = usize::try_from(width).map_err(|_| Error::InvalidFrame("WebM frame width".into()))?;
-    let h = usize::try_from(height).map_err(|_| Error::InvalidFrame("WebM frame height".into()))?;
-    let pixels = w
-        .checked_mul(h)
-        .ok_or_else(|| Error::InvalidFrame("WebM RGBA size".into()))?;
-    if rgba.len()
-        != pixels
-            .checked_mul(4)
-            .ok_or_else(|| Error::InvalidFrame("WebM RGBA size".into()))?
-        || !width.is_multiple_of(2)
-        || !height.is_multiple_of(2)
-    {
-        return Err(Error::InvalidFrame("WebM requires even-sized RGBA8".into()));
-    }
-    let chroma = pixels / 4;
-    let mut y = vec![0; pixels];
-    let mut u = vec![0; chroma];
-    let mut v = vec![0; chroma];
-    const KR: f64 = 0.2126;
-    const KB: f64 = 0.0722;
-    const KG: f64 = 1.0 - KR - KB;
-    let code = |value: f64| value.clamp(0.0, 255.0).round_ties_even() as u8;
-    let color = |r: f64, g: f64, b: f64| {
-        let luma = KR * r + KG * g + KB * b;
-        (
-            code(16.0 + 219.0 * luma / 255.0),
-            code(128.0 + 224.0 * (b - luma) / (2.0 * (1.0 - KB) * 255.0)),
-            code(128.0 + 224.0 * (r - luma) / (2.0 * (1.0 - KR) * 255.0)),
-        )
-    };
-    for row in 0..h {
-        for col in 0..w {
-            let offset = (row * w + col) * 4;
-            y[row * w + col] = color(
-                f64::from(rgba[offset]),
-                f64::from(rgba[offset + 1]),
-                f64::from(rgba[offset + 2]),
-            )
-            .0;
-        }
-    }
-    for row in 0..h / 2 {
-        for col in 0..w / 2 {
-            let mut rgb = [0.0; 3];
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let offset = ((row * 2 + dy) * w + col * 2 + dx) * 4;
-                    for channel in 0..3 {
-                        rgb[channel] += f64::from(rgba[offset + channel]) * 0.25;
-                    }
-                }
-            }
-            let (_, cb, cr) = color(rgb[0], rgb[1], rgb[2]);
-            u[row * (w / 2) + col] = cb;
-            v[row * (w / 2) + col] = cr;
-        }
-    }
-    let mut planes = vec![
-        Plane {
-            data: PlaneData::U8(y),
-            row_samples: width as usize,
-            rows: height as usize,
-        },
-        Plane {
-            data: PlaneData::U8(u),
-            row_samples: (width / 2) as usize,
-            rows: (height / 2) as usize,
-        },
-        Plane {
-            data: PlaneData::U8(v),
-            row_samples: (width / 2) as usize,
-            rows: (height / 2) as usize,
-        },
-    ];
-    if alpha {
-        planes.push(Plane {
-            data: PlaneData::U8(rgba.chunks_exact(4).map(|p| p[3]).collect()),
-            row_samples: width as usize,
-            rows: height as usize,
-        });
-    }
-    Ok(EncoderInput {
-        format: if alpha {
-            InputFormat::I420a
-        } else {
-            InputFormat::I420
-        },
-        width,
-        height,
-        planes,
-    })
-}
-
-/// The WebCodecs path consumes premultiplied canvas bytes for opaque video.
-/// For straight-alpha WebM, divide working RGB by alpha before the REC709
-/// conversion; premultiplied alpha keeps its requested encoding. Carry the
-/// alpha byte separately. There is no legacy alpha-WebM byte boundary.
-fn canvas_bytes(
-    frame: &WorkingFrame,
-    working: crate::settings::WorkingEncoding,
-    alpha: AlphaOutput,
-) -> Vec<u8> {
-    if alpha == AlphaOutput::None {
-        return crate::render::to_rgba8(frame.rgba);
-    }
-    let mut rgba = Vec::with_capacity(frame.rgba.len());
-    for pixel in frame.rgba.chunks_exact(4) {
-        let (rgb, a) =
-            crate::convert::output_rgba([pixel[0], pixel[1], pixel[2], pixel[3]], working, alpha);
-        for value in [rgb[0], rgb[1], rgb[2], a] {
-            let value = if value.is_nan() {
-                0.0
-            } else {
-                value.clamp(0.0, 1.0)
-            };
-            rgba.push((value * 255.0).round_ties_even() as u8);
-        }
-    }
-    rgba
-}
-
 /// Opt-in parity capture of the exact native boundaries fed to the encoders.
 /// The caller owns and removes the directory on either success or failure.
 struct InputCapture {
-    rgba: File,
     i420: File,
     f32_pcm: File,
 }
@@ -252,7 +116,6 @@ impl InputCapture {
                 .map_err(|e| Error::Io(format!("open WebM input capture {name}: {e}")))
         };
         Ok(Some(Self {
-            rgba: open("native.rgba")?,
             i420: open("native.i420")?,
             f32_pcm: open("native.f32")?,
         }))
@@ -440,11 +303,12 @@ impl WebmSink {
             c.qmax = 58;
             c.rc_buffer_size = c.bit_rate as c_int;
             c.rc_initial_buffer_occupancy = (c.bit_rate * 3 / 5) as c_int;
-            // The legacy WebM mux writes no Colour primaries or transfer
-            // elements. VP9 still marks its matrix as BT.709.
-            c.color_primaries = ff::AVCOL_PRI_UNSPECIFIED;
-            c.color_trc = ff::AVCOL_TRC_UNSPECIFIED;
-            c.colorspace = ff::AVCOL_SPC_BT709;
+            // The export's colour description (H.273 code points), limited
+            // range: what `convert` wrote.
+            let (primaries, transfer, matrix) = spec.tags.cicp();
+            c.color_primaries = primaries.into();
+            c.color_trc = transfer.into();
+            c.colorspace = matrix.into();
             c.color_range = ff::AVCOL_RANGE_MPEG;
             c.chroma_sample_location = ff::AVCHROMA_LOC_LEFT;
             c.thread_count = threads(spec.width, spec.height) as c_int;
@@ -737,24 +601,6 @@ impl Drop for WebmSink {
 impl Sink for WebmSink {
     type Output = Delivered;
 
-    fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
-        let rgba = canvas_bytes(frame, self.spec.working, self.spec.alpha);
-        if let Some(capture) = self.capture.as_mut() {
-            capture
-                .rgba
-                .write_all(&rgba)
-                .map_err(|e| Error::Io(format!("write WebM RGBA capture: {e}")))?;
-        }
-        let input = canvas_rgba_to_i420(
-            &rgba,
-            frame.width,
-            frame.height,
-            self.spec.input_format() == InputFormat::I420a,
-        )?;
-        self.video(index, &input)?;
-        Ok(true)
-    }
-
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
         let want = self.spec.input_format();
         if input.format != want {
@@ -796,13 +642,6 @@ impl Sink for WebmSink {
         self.trailer_written = true;
         self.close_file();
         let temp = self.temp_path();
-        // FFmpeg always writes an Opus SeekPreRoll element; today's small
-        // WebM muxer writes SimpleBlocks without it. Rewrite opaque exports
-        // from their encoded packets to keep the same track/cluster contract.
-        // Alpha uses Matroska BlockAdditional and needs its own parity path.
-        if self.spec.alpha == AlphaOutput::None {
-            legacy_mux::remux(&temp, &self.spec)?;
-        }
         let mut report = verify_webm(&temp, &self.spec, &self.blocks, self.audio_pushed)?;
         report.bytes = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
         let path = self
@@ -1100,29 +939,21 @@ pub fn verify_webm(
             vpar.width, vpar.height, spec.width, spec.height
         ));
     }
-    // The current exporter passes a canvas to WebCodecs and its hand-written
-    // WebM muxer does not declare primaries or transfer characteristics. VP8
-    // also has no bitstream color-space/range fields for the demuxer to infer.
-    let (primaries, transfer) = (ff::AVCOL_PRI_UNSPECIFIED, ff::AVCOL_TRC_UNSPECIFIED);
+    // The export's colour description, limited range (Matroska `Colour`).
     let cicp = (
         vpar.color_primaries as u16,
         vpar.color_trc as u16,
         vpar.color_space as u16,
     );
-    let legacy_vp8 = spec.alpha == AlphaOutput::None && matches!(spec.codec, Codec::Vp8 { .. });
-    let expected_cicp = if legacy_vp8 { (2, 2, 2) } else { (2, 2, 1) };
-    if cicp != expected_cicp || (vpar.color_primaries, vpar.color_trc) != (primaries, transfer) {
+    let expected_cicp = spec.tags.cicp();
+    if cicp != expected_cicp {
         problems.push(format!(
             "colour {}-{}-{}, expected {}-{}-{}",
             cicp.0, cicp.1, cicp.2, expected_cicp.0, expected_cicp.1, expected_cicp.2,
         ));
     }
     let full_range = vpar.color_range == ff::AVCOL_RANGE_JPEG;
-    let expected_range = if legacy_vp8 {
-        ff::AVCOL_RANGE_UNSPECIFIED
-    } else {
-        ff::AVCOL_RANGE_MPEG
-    };
+    let expected_range = ff::AVCOL_RANGE_MPEG;
     if vpar.color_range != expected_range {
         problems.push(format!(
             "range {}, expected {expected_range}",
@@ -1439,76 +1270,9 @@ fn decode_sampled_with_gap_map<T>(
 }
 
 #[cfg(test)]
-mod canvas_conversion_tests {
-    use super::*;
-
-    #[test]
-    fn alpha_webm_stores_straight_rgb_with_zero_half_and_full_alpha() {
-        // Working RGB is premultiplied. The translucent red must retain its
-        // full red value when a decoder composites it using the alpha stream.
-        let pixels = [
-            0.1, 0.2, 0.3, 0.0, // transparent, with hidden RGB to test the alpha guard
-            0.5, 0.0, 0.0, 0.5, // translucent red
-            0.0, 1.0, 0.0, 1.0, // opaque green
-            0.5, 0.0, 0.0, 0.5, // translucent red
-        ];
-        let frame = WorkingFrame {
-            width: 2,
-            height: 2,
-            rgba: &pixels,
-        };
-        let rgba = canvas_bytes(
-            &frame,
-            crate::settings::WorkingEncoding::Standard,
-            AlphaOutput::Straight,
-        );
-        assert_eq!(
-            rgba,
-            [0, 0, 0, 0, 255, 0, 0, 128, 0, 255, 0, 255, 255, 0, 0, 128,]
-        );
-        let input = canvas_rgba_to_i420(&rgba, 2, 2, true).unwrap();
-        assert_eq!(input.planes[0].u8().unwrap()[1], 63); // REC709 red, not premultiplied red
-        assert_eq!(input.planes[3].u8().unwrap(), &[0, 128, 255, 128]);
-    }
-
-    #[test]
-    fn opaque_webm_keeps_premultiplied_canvas_bytes() {
-        let pixels = [0.5, 0.0, 0.0, 0.5];
-        let frame = WorkingFrame {
-            width: 1,
-            height: 1,
-            rgba: &pixels,
-        };
-        assert_eq!(
-            canvas_bytes(
-                &frame,
-                crate::settings::WorkingEncoding::Standard,
-                AlphaOutput::None,
-            ),
-            [128, 0, 0, 128]
-        );
-    }
-
-    #[test]
-    fn chromium_canvas_matrix_uses_rgba_bytes_and_bt709_codes() {
-        let rgba = [255, 0, 0, 77].repeat(4);
-        let input = canvas_rgba_to_i420(&rgba, 2, 2, true).unwrap();
-        assert_eq!(input.planes[0].u8().unwrap(), &[63; 4]);
-        assert_eq!(input.planes[1].u8().unwrap(), &[102]);
-        assert_eq!(input.planes[2].u8().unwrap(), &[240]);
-        assert_eq!(input.planes[3].u8().unwrap(), &[77; 4]);
-
-        let fixture = [232, 58, 94, 255].repeat(4);
-        let input = canvas_rgba_to_i420(&fixture, 2, 2, false).unwrap();
-        assert_eq!(input.planes[0].u8().unwrap(), &[100; 4]);
-        assert_eq!(input.planes[1].u8().unwrap(), &[126]);
-        assert_eq!(input.planes[2].u8().unwrap(), &[203]);
-    }
-}
-
-#[cfg(test)]
 mod sampled_decode_tests {
     use super::*;
+    use crate::convert::WorkingFrame;
     use crate::settings::{ColorTags, Dither, WorkingEncoding};
     use pm_time::Rate;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1664,7 +1428,8 @@ mod sampled_decode_tests {
                 overwrite: Overwrite::Fail,
                 mode: None,
             };
-            let mut sink = WebmSink::new(&spec).unwrap();
+            let mut sink =
+                crate::Pipeline::new(spec.clone(), WebmSink::new(&spec).unwrap()).unwrap();
             for n in 0..frames {
                 let mut rgba = Vec::with_capacity((spec.width * spec.height * 4) as usize);
                 for y in 0..spec.height {
@@ -1682,14 +1447,11 @@ mod sampled_decode_tests {
                         ]);
                     }
                 }
-                sink.video_rgba(
-                    n,
-                    &WorkingFrame {
-                        width: spec.width,
-                        height: spec.height,
-                        rgba: &rgba,
-                    },
-                )
+                sink.push_frame(&WorkingFrame {
+                    width: spec.width,
+                    height: spec.height,
+                    rgba: &rgba,
+                })
                 .unwrap();
             }
             let delivered = sink.finish().unwrap();

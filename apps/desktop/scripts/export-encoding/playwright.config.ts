@@ -5,7 +5,7 @@ import { defineConfig } from '@playwright/test';
 
 import base from '../../playwright.config';
 
-/** EXPORT-1 encoding parity (e2e/export-encoding-parity.spec.ts). Build the
+/** G-X1 export encoding parity (e2e/export-encoding-parity.spec.ts). Build the
  * desktop app and the native addon first, then run this config under
  * pm-electron-lock with --workers=1. Results and the attached exports stay
  * outside the repository; each run replaces them. */

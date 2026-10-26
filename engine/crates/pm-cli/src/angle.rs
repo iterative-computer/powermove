@@ -1,6 +1,5 @@
-//! The Node CLI's on-demand Chromium service. The renderer's existing
-//! FallbackHost contract keeps unknown/pinned programs off the unverified
-//! native path.
+//! The Node CLI's on-demand Chromium service: the renderer's FallbackHost
+//! for user programs the native pipeline cannot translate (E-K6).
 use pm_render::shader_layers::{FallbackFailure, FallbackHost, FallbackJob, FallbackPixels};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -296,50 +295,6 @@ fn decode(
         rgba32f: (color_depth == 32)
             .then(|| pm_render::shader_layers::fallback::float_bits(&bytes[at + 4..])),
     })
-}
-
-/// Read the same profile descriptor even when pm-cli is invoked directly.
-///
-/// The desktop's namespace is honoured read only. Its decisions compare
-/// native output with Electron's WebGL runner; this CLI's runner is
-/// Playwright's Chromium (possibly SwiftShader over ssh or launchd), so a
-/// first probe here is decided in memory and never leaves a `.native` or
-/// `.runner` marker the desktop would trust (amendment 22).
-pub fn configure_probes(renderer: &mut pm_render::Renderer) -> Result<(), String> {
-    renderer.read_only_shader_reference();
-    if std::env::var_os("POWERMOVE_ENGINE_PARITY_ENV").is_some() {
-        return Ok(());
-    }
-    let directory = if let Some(cache) = std::env::var_os("POWERMOVE_ENGINE_SHADER_CACHE") {
-        std::path::PathBuf::from(cache)
-    } else {
-        let profile = std::env::var_os("POWERMOVE_USER_DATA")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| {
-                    std::path::PathBuf::from(home).join("Library/Application Support/Powermove")
-                })
-            });
-        let Some(profile) = profile else {
-            return Ok(());
-        };
-        profile.join("Engine Cache/Shader Cache")
-    };
-    let bytes = match std::fs::read(directory.join("desktop-environment.json")) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("shader-probe-store-unreadable: {error}")),
-    };
-    let record: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("shader-probe-store-unreadable: {e}"))?;
-    if record["v"] == 1
-        && let Some(environment) = record["environment"]
-            .as_str()
-            .filter(|s| !s.is_empty() && s.len() <= 16384)
-    {
-        renderer.configure_shader_reference(environment, Some(directory.join("angle-parity")));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

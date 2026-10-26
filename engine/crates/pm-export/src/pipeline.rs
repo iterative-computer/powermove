@@ -16,31 +16,12 @@ use std::sync::atomic::AtomicBool;
 /// Where encoder input goes.
 pub trait Sink {
     type Output;
-    /// A sink may consume the working frame before an engine YCbCr conversion.
-    /// Desktop-compatible encoders have their own pinned RGB conversion, which
-    /// must receive the original byte-quantized framebuffer, not reconstructed YUV.
-    fn video_rgba(&mut self, _index: u64, _frame: &WorkingFrame) -> Result<bool, Error> {
-        Ok(false)
-    }
-    /// Whether this sink accepts GPU-resident working frames.
-    fn gpu_frames(&self) -> bool {
-        false
-    }
-    /// A working texture and optional diagnostic/verification readback.
-    /// Complete all GPU reads of `texture` before returning: the producer
-    /// may reuse its target after a successful return.
-    fn video_gpu(
-        &mut self,
-        _index: u64,
-        _texture: &wgpu::Texture,
-        _frame: Option<&WorkingFrame>,
-    ) -> Result<(), Error> {
-        Err(Error::InvalidFrame(
-            "this encoder does not accept GPU frames".into(),
-        ))
-    }
     /// Frame `index` (0-based, in order).
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error>;
+    /// [`Sink::video`] for a frame the caller no longer needs.
+    fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
+        self.video(index, &input)
+    }
     /// Interleaved f32 PCM at the spec's sample rate.
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error>;
     fn finish(self) -> Result<Self::Output, Error>;
@@ -50,6 +31,97 @@ pub trait Sink {
         Self: Sized,
     {
         self.finish()
+    }
+}
+
+enum Message {
+    Video(u64, EncoderInput),
+    Audio(Vec<f32>),
+}
+
+/// Runs a sink on its own thread, one frame behind: the next frame converts
+/// while this one encodes. Sinks whose encoder already runs asynchronously
+/// (VideoToolbox) gain nothing from it.
+pub struct Overlapped<S: Sink + Send + 'static> {
+    tx: Option<std::sync::mpsc::SyncSender<Message>>,
+    worker: Option<std::thread::JoinHandle<Result<S, Error>>>,
+}
+
+impl<S: Sink + Send + 'static> Overlapped<S> {
+    pub fn new(sink: S) -> Result<Self, Error> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Message>(1);
+        let qos = crate::par::current_qos();
+        let worker = std::thread::Builder::new()
+            .name("pm-export-encode".into())
+            .spawn(move || {
+                crate::par::apply_qos(qos);
+                let mut sink = sink;
+                for message in rx {
+                    match message {
+                        Message::Video(index, input) => sink.video_owned(index, input)?,
+                        Message::Audio(samples) => sink.audio(&samples)?,
+                    }
+                }
+                Ok(sink)
+            })
+            .map_err(|e| Error::Encode(format!("start the encoder thread: {e}")))?;
+        Ok(Self {
+            tx: Some(tx),
+            worker: Some(worker),
+        })
+    }
+
+    fn send(&mut self, message: Message) -> Result<(), Error> {
+        let sent = self.tx.as_ref().map(|tx| tx.send(message).is_ok());
+        if sent == Some(true) {
+            return Ok(());
+        }
+        // The worker stopped at an error; it is the answer.
+        Err(self
+            .join()
+            .err()
+            .unwrap_or_else(|| Error::Encode("the encoder thread stopped".into())))
+    }
+
+    fn join(&mut self) -> Result<S, Error> {
+        self.tx.take();
+        match self.worker.take() {
+            Some(worker) => worker
+                .join()
+                .map_err(|_| Error::Encode("the encoder thread panicked".into()))?,
+            None => Err(Error::Encode("the encoder thread stopped".into())),
+        }
+    }
+}
+
+impl<S: Sink + Send + 'static> Drop for Overlapped<S> {
+    fn drop(&mut self) {
+        // Dropping the sink on its thread cleans up its temporary output.
+        let _ = self.join();
+    }
+}
+
+impl<S: Sink + Send + 'static> Sink for Overlapped<S> {
+    type Output = S::Output;
+
+    fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
+        self.send(Message::Video(index, input.clone()))
+    }
+
+    fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
+        self.send(Message::Video(index, input))
+    }
+
+    fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
+        self.send(Message::Audio(interleaved.to_vec()))
+    }
+
+    fn finish(mut self) -> Result<S::Output, Error> {
+        self.join()?.finish()
+    }
+
+    fn finish_with_cancel(mut self, cancel: &AtomicBool) -> Result<S::Output, Error> {
+        self.join()?.finish_with_cancel(cancel)
     }
 }
 
@@ -106,10 +178,6 @@ impl<S: Sink> Pipeline<S> {
                 frame.width, frame.height, self.spec.width, self.spec.height
             )));
         }
-        if self.sink.video_rgba(index, frame)? {
-            self.next += 1;
-            return Ok(());
-        }
         let params = ConvertParams {
             working: self.spec.working,
             alpha: self.spec.alpha,
@@ -117,24 +185,7 @@ impl<S: Sink> Pipeline<S> {
             frame: index as u32,
         };
         let input = convert(frame, self.spec.input_format(), &params)?;
-        self.sink.video(index, &input)?;
-        self.next += 1;
-        Ok(())
-    }
-
-    /// Delivers a GPU working frame without a CPU pixel conversion.
-    pub fn push_gpu(
-        &mut self,
-        texture: &wgpu::Texture,
-        frame: Option<&WorkingFrame>,
-    ) -> Result<(), Error> {
-        let index = self.admit()?;
-        if texture.width() != self.spec.width || texture.height() != self.spec.height {
-            return Err(Error::InvalidFrame(
-                "GPU frame size does not match the export".into(),
-            ));
-        }
-        self.sink.video_gpu(index, texture, frame)?;
+        self.sink.video_owned(index, input)?;
         self.next += 1;
         Ok(())
     }
@@ -395,16 +446,12 @@ mod tests {
 
     #[test]
     fn frames_reach_the_sink_converted_in_order_with_per_frame_dither() {
-        let mut p = Pipeline::new(
-            spec(
-                Codec::H264 {
-                    bitrate_bps: 4_000_000,
-                },
-                3,
-            ),
-            MemorySink::default(),
-        )
-        .unwrap();
+        let h264 = Codec::H264 {
+            bitrate_bps: 4_000_000,
+        };
+        let mut dithered = spec(h264, 3);
+        dithered.dither = Dither::On;
+        let mut p = Pipeline::new(dithered, MemorySink::default()).unwrap();
         let f = ramp(0);
         for _ in 0..3 {
             p.push_frame(&WorkingFrame {
@@ -428,8 +475,79 @@ mod tests {
         assert_eq!(sink.frames.len(), 3);
         assert_eq!(sink.audio.len(), 3 * 2 * 1920);
         assert!(sink.frames.iter().all(|f| f.format == InputFormat::V420));
-        // Same pixels, different frame index: the 8-bit default dither differs per frame.
+        // Same pixels, different frame index: opt-in dither differs per frame.
         assert_ne!(sink.frames[0], sink.frames[1]);
+        // H.264 is not dithered by default (EXPORT-DITHER-1): same pixels, same input.
+        let mut p = Pipeline::new(spec(h264, 2), MemorySink::default()).unwrap();
+        for _ in 0..2 {
+            p.push_frame(&WorkingFrame {
+                width: 32,
+                height: 16,
+                rgba: &f,
+            })
+            .unwrap();
+            p.push_audio(&[0.0; 2 * 1920]).unwrap();
+        }
+        let sink = p.finish().unwrap();
+        assert_eq!(sink.frames[0], sink.frames[1]);
+    }
+
+    /// Fails at frame 1.
+    struct FailingSink;
+
+    impl Sink for FailingSink {
+        type Output = ();
+        fn video(&mut self, index: u64, _: &EncoderInput) -> Result<(), Error> {
+            if index == 1 {
+                return Err(Error::Encode("frame 1".into()));
+            }
+            Ok(())
+        }
+        fn audio(&mut self, _: &[f32]) -> Result<(), Error> {
+            Ok(())
+        }
+        fn finish(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_overlapped_sink_keeps_order_and_reports_its_error() {
+        let h264 = Codec::H264 {
+            bitrate_bps: 4_000_000,
+        };
+        let frames: Vec<Vec<f32>> = (0..3).map(ramp).collect();
+        fn push<S: Sink>(p: &mut Pipeline<S>, frames: &[Vec<f32>]) -> Result<(), Error> {
+            for f in frames {
+                p.push_frame(&WorkingFrame {
+                    width: 32,
+                    height: 16,
+                    rgba: f,
+                })?;
+                p.push_audio(&[0.25; 2 * 1920])?;
+            }
+            Ok(())
+        }
+        let mut direct = Pipeline::new(spec(h264, 3), MemorySink::default()).unwrap();
+        push(&mut direct, &frames).unwrap();
+        let direct = direct.finish().unwrap();
+        let mut overlapped = Pipeline::new(
+            spec(h264, 3),
+            Overlapped::new(MemorySink::default()).unwrap(),
+        )
+        .unwrap();
+        push(&mut overlapped, &frames).unwrap();
+        let overlapped = overlapped.finish().unwrap();
+        assert_eq!(overlapped.frames, direct.frames);
+        assert_eq!(overlapped.audio, direct.audio);
+
+        let mut failing =
+            Pipeline::new(spec(h264, 3), Overlapped::new(FailingSink).unwrap()).unwrap();
+        let error = push(&mut failing, &frames)
+            .err()
+            .or_else(|| failing.finish().err())
+            .expect("the sink's error");
+        assert!(error.to_string().contains("frame 1"), "{error}");
     }
 
     #[test]

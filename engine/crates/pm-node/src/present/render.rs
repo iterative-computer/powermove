@@ -7735,21 +7735,12 @@ mod tests {
 
         let gpu = pm_gpu::Gpu::new("prepared definitions test").expect("a Metal device");
         let mut composer = composer(&gpu.device, &gpu.queue, &thread.config, thread.frame_cache);
-        composer
-            .renderer()
-            .effects_mut()
-            .parity
-            .configure(Some("prepared-test".into()), None);
         thread.prepared.install(&mut composer);
         assert!(thread.prepared.owners.is_empty());
         assert!(thread.prepared.base.is_none());
         let a = thread.docs[&owner_a].definitions().cloned();
         let b = thread.docs[&owner_b].definitions().cloned();
         assert!(composer.use_definitions(owner_a, a.as_ref(), &[]).is_none());
-        assert_eq!(
-            composer.renderer().effects().parity.environment(),
-            Some("prepared-test")
-        );
         composer
             .renderer()
             .effects_mut()

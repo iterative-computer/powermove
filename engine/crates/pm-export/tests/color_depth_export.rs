@@ -141,9 +141,9 @@ fn settings(format: ExportFormat, alpha: AlphaOutput) -> ExportSettings {
             }
         },
         // The app's wireSettings sends a Float32 hint and enables dither for
-        // delivery formats at 8 bits. The document's depth takes precedence.
+        // 8-bit PNG only (EXPORT-DITHER-1). The document's depth takes precedence.
         precision: Precision::Float32,
-        dither: eight_bit_output,
+        dither: image && eight_bit_output,
         draft_from_proxies: false,
         delivery: DeliveryOptions {
             preview: true,
@@ -481,7 +481,12 @@ fn depth8_project_exports_every_shipped_format() {
             seed: 73,
         };
         assert_eq!(job.settings.precision, Precision::Float32, "{}", case.name);
-        assert_eq!(job.settings.dither, case.depth <= 8, "{}", case.name);
+        assert_eq!(
+            job.settings.dither,
+            case.depth <= 8 && case.format.is_image(),
+            "{}",
+            case.name
+        );
         let plan =
             plan_export_for(&job, &renderer).unwrap_or_else(|e| panic!("{} plan: {e}", case.name));
         assert_eq!(
@@ -653,14 +658,8 @@ fn depth8_project_exports_every_shipped_format() {
                 "{}: {info}",
                 case.name
             );
-            // Opaque WebM is today's WebCodecs file (EXPORT-1): its mux
-            // writes no Colour element, so VP9's bitstream alone marks
-            // BT.709 limited range and opaque VP8 carries no tags at all.
-            let (space, range) = if case.codec == "vp8" && case.alpha == AlphaOutput::None {
-                ("unknown", "unknown")
-            } else {
-                ("bt709", "tv")
-            };
+            // WebM carries the export's colour description, limited range.
+            let (space, range) = ("bt709", "tv");
             assert!(
                 info.contains(&format!("color_space={space}")),
                 "{}: {info}",
