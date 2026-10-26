@@ -90,14 +90,36 @@ where
     for key in keys.clone() {
         key.hash(&mut hash);
     }
+    let hash = hash.finish();
+    // A thread's recent schemas first: threads parsing one document side by
+    // side (json::parse_bytes_parallel) would otherwise queue on the lock
+    // for every keyframe. Its entries are weak hints too.
+    let slot = (hash as usize) % RECENT_SCHEMAS;
+    let recent = RECENT.with(|recent| {
+        let (key, schema) = &recent.borrow()[slot];
+        if *key == hash { schema.upgrade() } else { None }
+    });
+    if let Some(schema) = recent
+        && schema.keys.iter().eq(keys.clone())
+    {
+        return schema;
+    }
     static INTERNER: OnceLock<Mutex<SchemaInterner>> = OnceLock::new();
     // No user code runs while locked. Recovering poison remains safe because
     // entries are only weak hints and the map validates all key bytes.
-    INTERNER
+    let schema = INTERNER
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .intern(keys, hash.finish())
+        .intern(keys, hash);
+    RECENT.with(|recent| recent.borrow_mut()[slot] = (hash, Arc::downgrade(&schema)));
+    schema
+}
+
+const RECENT_SCHEMAS: usize = 64;
+thread_local! {
+    static RECENT: core::cell::RefCell<[(u64, Weak<KeySchema>); RECENT_SCHEMAS]> =
+        core::cell::RefCell::new(core::array::from_fn(|_| (0, Weak::new())));
 }
 
 /// Unique `JsString` keys, sorted, each with a separately stored value.
