@@ -853,9 +853,11 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [need(4 * frame), need(4 * frame, 'intro'), nested(7 * frame)] }, session);
       expect(answered.map(a => [a.layer, a.time / frame])).toEqual([['title', 4], ['intro', 4], ['inner', 7]]);
       prepared.length = 0; answered.length = 0;
-      // A seek to frame 40: the open composition's layers there, before the
-      // engine asks; not `intro` (it ends at frame 10), nor the nested layer
-      // (its time at frame 40 is the engine's to name).
+      // An edit at frame 4, then a seek to frame 40: the open composition's
+      // layers there, before the engine asks; not `intro` (it ends at frame
+      // 10), nor the nested layer (its time at frame 40 is the engine's to
+      // name, and its frame 7 is no longer shown).
+      state.revision++;
       t.prepareShown(40 * frame);
       expect(prepared.map(p => [p.layer, p.time / frame])).toEqual([['title', 40]]);
       expect(answered.map(a => [a.layer, a.time / frame])).toEqual([['title', 40]]);

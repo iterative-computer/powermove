@@ -7717,6 +7717,14 @@ mod tests {
             },
         });
         assert!(thread.settles(&update()));
+        let play = TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        };
+        assert!(thread.views.get_mut(&key).unwrap().clock.apply(play, 0));
+        assert!(!thread.settles(&update()), "playing: no answers follow");
+        let pause = TransportCommand::Pause;
+        assert!(thread.views.get_mut(&key).unwrap().clock.apply(pause, 0));
+        assert!(thread.settles(&update()));
         assert!(!thread.settles(&Command::Compat {
             key,
             message: CompatMessage::Producers {
