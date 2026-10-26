@@ -62,10 +62,9 @@ function timePerturbations<T>(time: unknown, at: (t: number) => T): Array<() => 
   return [() => at(time + 1e-12), () => at(time - 1e-12)];
 }
 
-/** A fast-path miss (the slow path answers). */
 /** A channel's numeric answers at one revision, by exact time (at most
  *  {@link TimeValues.LIMIT}, oldest out first). `-0` and NaN are never kept:
- *  a Map would merge `-0` with `0`, and NaN never equals itself. */
+ *  a Map would merge `-0` with `0`, and NaN is no time to remember. */
 class TimeValues {
   static readonly LIMIT = 128;
   private readonly values = new Map<number, number>();
@@ -81,6 +80,7 @@ class TimeValues {
   clear(): void { this.values.clear(); }
 }
 
+/** A fast-path miss (the slow path answers). */
 const MISS = Symbol('miss');
 
 /**
