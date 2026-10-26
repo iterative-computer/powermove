@@ -256,7 +256,13 @@ impl TextContext {
         // The answers are the current fonts' (as before a layer).
         self.sync_fonts();
         if let Some(fonts) = self.fonts.as_deref_mut() {
+            let earlier = fonts.take_failures();
             fonts.prefetch(&queries);
+            // Asking ahead is advice: a query it could not answer stays
+            // unanswered, and the layer that needs it asks and reports
+            // itself. Never left for the next layer built to be refused for.
+            drop(fonts.take_failures());
+            self.unsupported.extend(earlier);
         }
     }
 
@@ -1118,6 +1124,8 @@ mod tests {
         cx.prefetch_fonts(&first);
         let asked_once = asked.0.lock().unwrap().clone();
         assert_eq!(asked_once.len(), 1, "one round trip");
+        // The registry did not answer: no layer built next is refused for it.
+        assert_eq!(cx.take_unsupported(), Vec::<String>::new());
         let queries = &asked_once[0];
         let avenir = FontDesc {
             weight: 600.0,
