@@ -4523,8 +4523,11 @@ impl Thread {
             if let Some(at) = view.paused_sent
                 && view.armed.is_empty()
                 && !view.clock.is_playing()
+                && at + ARM_IDLE_US > now
             {
-                // The start frames, once the paused frame has stayed.
+                // The start frames, once the paused frame has stayed. Past
+                // that, `arm` runs every turn; one it refused (compatibility
+                // producers, no free slot) waits for a command, never spins.
                 wake = wake.min(at + ARM_IDLE_US);
             }
             if view.awaiting.is_some() || view.clock.following() {
@@ -5005,6 +5008,13 @@ impl Thread {
                     ErrorCode::Unsupported,
                     "The new engine cannot draw this composition yet.",
                 );
+            }
+            // Nothing is drawn on this route: its paused-frame timers would
+            // only wake the thread. A route back to Engine marks it dirty.
+            if let Some(view) = self.views.get_mut(&key) {
+                view.dirty = false;
+                view.compat_paused_wait = None;
+                view.paused_sent = None;
             }
             return;
         }
@@ -7509,6 +7519,48 @@ mod tests {
         );
         thread.apply(producers(vec![]));
         assert!(thread.audio_ingress.transport(key, play).is_some());
+    }
+
+    /// A paused view whose start frames cannot arm (compatibility producers)
+    /// sleeps: its past arm time must not hold the render thread awake.
+    #[test]
+    fn a_paused_view_that_cannot_arm_sleeps() {
+        use pm_protocol::snapshot::{CompatMessage, CompatSource};
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.configure(key, headless_test_state(false), None, None);
+        thread.apply(Command::Compat {
+            key,
+            message: CompatMessage::Producers { sources: vec![CompatSource::RasterOverride] },
+        });
+        let view = thread.views.get_mut(&key).unwrap();
+        view.reported = Some(Route::Engine);
+        view.dirty = false;
+        view.sample_due = false;
+        view.requests.clear();
+        view.armed.clear();
+        view.paused_sent = Some(now() - 2 * ARM_IDLE_US);
+        thread.arm(key);
+        assert!(thread.views[&key].paused_sent.is_some(), "producers refuse the start frames");
+        assert!(thread.next_wake() >= Duration::from_millis(10), "a refused arm must not spin");
+    }
+
+    /// A view on a route the engine does not draw keeps no paused-frame work.
+    #[test]
+    fn a_view_the_engine_does_not_draw_sleeps() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.configure(key, headless_test_state(false), None, None);
+        thread.config.document = true;
+        let view = thread.views.get_mut(&key).unwrap();
+        view.dirty = true;
+        view.sample_due = false;
+        view.paused_sent = Some(now() - 2 * ARM_IDLE_US);
+        thread.work_view(key);
+        let view = &thread.views[&key];
+        assert!(!matches!(view.reported, Some(Route::Engine)), "no document routes nothing to the engine");
+        assert!(!view.dirty && view.paused_sent.is_none());
+        assert!(thread.next_wake() >= Duration::from_millis(10), "an undrawn view must not spin");
     }
 
     #[test]
