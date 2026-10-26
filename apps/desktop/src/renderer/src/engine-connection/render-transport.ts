@@ -245,9 +245,11 @@ const LOOKAHEAD_BUDGET_MS = 6;
  *  Pass-through answers finish in their frame's turn and take none; paused
  *  frames on screen have their own. */
 export const COMPAT_PREPARE_IN_FLIGHT = 24;
-/** The most frames the engine renders ahead (pm-node `schedule::MAX_LEAD`):
- *  a need further ahead along a loop is a late one from before the wrap. */
-const ENGINE_AHEAD_FRAMES = 28;
+/** The most frames ahead of the clock the engine asks for: its render-ahead
+ *  (pm-node `schedule::MAX_LEAD`, 28) plus the frames it names ahead of each
+ *  one it drew (`render::ask_ahead_frames`, at most the furthest horizon). A
+ *  need further ahead along a loop is a late one from before the wrap. */
+const ENGINE_AHEAD_FRAMES = 28 + COMPAT_MAX_LOOKAHEAD;
 
 /** The playable span the clock wraps by while it loops, in ticks, `[start, end)`. */
 export type PlaybackLoop = { start: number; end: number };

@@ -741,6 +741,24 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); }
   });
 
+  it('prepares a frame the engine names a second ahead while playback loops, not taking it for a late one', () => {
+    const { t, session } = rig(true, {
+      span: () => ({ start: 0, end: 300 * frame, loop: true }),
+      layerSpan: (_c: string, layer: string) => layer === 'entering' ? { start: 40 * frame, end: 90 * frame } : null
+    });
+    const { prepared } = passThrough(t);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      prepared.length = 0;
+      // The engine renders up to 28 frames ahead and names the needs a
+      // second (30 frames) after the one it drew: 58 frames ahead at most.
+      const skipped = t.lookaheadStats.skipped;
+      t.receiveCompat({ compat: 'needs', needs: [need(58 * frame, 'entering')] }, session);
+      expect(t.lookaheadStats.skipped).toBe(skipped);
+      expect(prepared.map(p => [p.layer, p.time / frame])).toEqual([['entering', 58]]);
+    } finally { t.dispose(); }
+  });
+
   it('moves on with the clock once a frame while playing, never as a poll, and stops when playback does', async () => {
     vi.useFakeTimers();
     const { t, session, state } = rig(true);
