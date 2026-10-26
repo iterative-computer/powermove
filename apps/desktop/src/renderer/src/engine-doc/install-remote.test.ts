@@ -365,8 +365,8 @@ it('prepares an opened project from its canonical text, streamed while the text 
   const setup = await editor(), { PM, doc, bridge } = setup;
   const raw = project(PM, 'texts-project', 63, true), layer = raw.layers[0];
   const texts = projectTexts('1.0.0', raw)!;
-  const writes: Uint8Array[] = [], write = bridge.write.bind(bridge);
-  bridge.write = async (token, chunk) => { writes.push(chunk.slice()); return write(token, chunk); };
+  const writes: Array<Uint8Array | string> = [], write = bridge.write.bind(bridge);
+  bridge.write = async (token, chunk) => { writes.push(chunk); return write(token, chunk); };
   const serialize = vi.spyOn(jsonSlices, 'serializeInSlices');
   await doc.prepare(raw, texts.canonical); PM.proj = raw;
   // The engine read the open's own text: nothing serialized the shadow again.
