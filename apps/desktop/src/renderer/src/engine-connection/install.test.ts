@@ -102,3 +102,20 @@ describe('engine viewer home eligibility', () => {
     }
   });
 });
+
+describe('engine source media', () => {
+  it('announces a poster arriving as runtime media readiness, not a document write', () => {
+    const f = fixture('project');
+    const announced: unknown[] = [];
+    const emit = f.bus.emit;
+    Object.assign(f.bus, { emit: (name: string, change?: unknown) => { if (name === 'assets') announced.push(change); emit(name); } });
+    const handle = installEngineConnection(f.pm, f.host as never, window);
+    try {
+      // A plain `assets` announcement diffs the whole document and autosaves it.
+      ((f.pm as any).EngineSourceMedia.host as { changed(): void }).changed();
+      expect(announced).toEqual([{ runtimeOnly: true }]);
+    } finally {
+      handle?.dispose();
+    }
+  });
+});
