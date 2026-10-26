@@ -22,6 +22,7 @@ use pm_model::{
     json::{Prebuilt, Unit, UnitScanner},
 };
 use pm_protocol::error::EngineProcess;
+use sha2::{Digest, Sha256};
 
 /// Bytes read from the staging file at once.
 const READ_BYTES: usize = 4 << 20;
@@ -50,6 +51,46 @@ struct State {
     /// Units handed to a worker and not back yet.
     parsing: usize,
     done: Vec<Prebuilt<Node>>,
+    /// Every byte read, as read: the SHA-256 of the whole, and of each read
+    /// (made beside the scan, on a thread of its own).
+    stream: Option<Stream>,
+    hashed: bool,
+}
+
+/// What the scan read of the file, in order: the SHA-256 of all of it and of
+/// each piece read (`(offset, length, digest)`), so a load can tell on several
+/// threads that the file it reads holds these bytes.
+pub(super) struct Stream {
+    pub hash: String,
+    pub pieces: Vec<(usize, usize, [u8; 32])>,
+}
+
+impl Stream {
+    /// Whether `bytes` are the bytes this stream read.
+    pub fn holds(&self, bytes: &[u8]) -> bool {
+        let mut end = 0;
+        for &(offset, length, _) in &self.pieces {
+            if offset != end {
+                return false;
+            }
+            end += length;
+        }
+        end == bytes.len()
+            && pm_model::parallel::map(self.pieces.len(), |i| {
+                let (offset, length, digest) = self.pieces[i];
+                pm_model::hash::sha256(&bytes[offset..offset + length]) == digest
+            })
+            .into_iter()
+            .all(|same| same)
+    }
+}
+
+/// The units a load may use, whether they are every unit of the text, and
+/// the stream the scan read (when it read exactly the loaded length).
+pub(super) struct Preparsed {
+    pub units: Vec<Prebuilt<Node>>,
+    pub complete: bool,
+    pub stream: Option<Stream>,
 }
 
 impl Preparse {
@@ -91,10 +132,27 @@ impl Preparse {
             })
             .map_err(|e| format!("The native document parser could not start ({})", e.kind()))?;
         }
+        let (reads, read) = mpsc::channel::<(usize, Vec<u8>)>();
+        let hashing = shared.clone();
+        pm_engine::qos::spawn_engine_thread(process, "pm-native-kernel-hash", move || {
+            let (mut whole, mut pieces) = (Sha256::new(), Vec::new());
+            for (offset, piece) in read {
+                whole.update(&piece);
+                pieces.push((offset, piece.len(), pm_model::hash::sha256(&piece)));
+            }
+            let mut state = hashing.state.lock().expect("preparse state");
+            state.stream = Some(Stream {
+                hash: pm_model::hash::hex(&whole.finalize().into()),
+                pieces,
+            });
+            state.hashed = true;
+            hashing.changed.notify_all();
+        })
+        .map_err(|e| format!("The native document hasher could not start ({})", e.kind()))?;
         let scanning = shared.clone();
         let file = path.clone();
         pm_engine::qos::spawn_engine_thread(process, "pm-native-kernel-scan", move || {
-            scan(&file, &scanning, &jobs);
+            scan(&file, &scanning, &jobs, &reads);
             let mut state = scanning.state.lock().expect("preparse state");
             state.complete.get_or_insert(false);
             scanning.changed.notify_all();
@@ -114,20 +172,24 @@ impl Preparse {
         self.shared.changed.notify_all();
     }
 
-    /// The units parsed from a file of `length` bytes, in source order, and
-    /// whether they are every unit of its text. Waits for the bytes already
-    /// announced to be scanned and their units parsed.
-    pub fn finish(self, length: u64) -> (Vec<Prebuilt<Node>>, bool) {
+    /// The units parsed from a file of `length` bytes, in source order,
+    /// whether they are every unit of its text, and what was read. Waits for
+    /// the bytes already announced to be scanned and their units parsed.
+    pub fn finish(self, length: u64) -> Preparsed {
         let mut state = self.shared.state.lock().expect("preparse state");
         state.stopped = true;
         self.shared.changed.notify_all();
-        while state.complete.is_none() || state.parsing > 0 {
+        while state.complete.is_none() || state.parsing > 0 || !state.hashed {
             state = self.shared.changed.wait(state).expect("preparse state");
         }
-        let complete = state.complete == Some(true) && state.scanned == length;
-        let mut done = std::mem::take(&mut state.done);
-        done.sort_by_key(|p| p.unit.start);
-        (done, complete)
+        let read = state.scanned == length;
+        let mut units = std::mem::take(&mut state.done);
+        units.sort_by_key(|p| p.unit.start);
+        Preparsed {
+            units,
+            complete: read && state.complete == Some(true),
+            stream: state.stream.take().filter(|_| read),
+        }
     }
 }
 
@@ -141,11 +203,15 @@ impl Drop for Preparse {
 
 /// Reads and scans the file as it grows, until it is stopped and everything
 /// announced was read; hands each final unit's text to the workers.
-fn scan(path: &str, shared: &Shared, jobs: &mpsc::Sender<(Unit, Vec<u8>)>) {
+fn scan(
+    path: &str,
+    shared: &Shared,
+    jobs: &mpsc::Sender<(Unit, Vec<u8>)>,
+    reads: &mpsc::Sender<(usize, Vec<u8>)>,
+) {
     let mut scanner = UnitScanner::default();
     let (mut kept, mut base) = (Vec::new(), 0usize);
     let mut file: Option<File> = None;
-    let mut buffer = vec![0; READ_BYTES];
     let dispatch = |units: Vec<Unit>, kept: &[u8], base: usize| {
         for unit in units {
             let text = kept[unit.start - base..unit.end - base].to_vec();
@@ -178,16 +244,17 @@ fn scan(path: &str, shared: &Shared, jobs: &mpsc::Sender<(Unit, Vec<u8>)>) {
         }
         let mut at = from;
         while at < to {
-            let want = ((to - at) as usize).min(READ_BYTES);
-            match opened.read(&mut buffer[..want]) {
+            let mut piece = vec![0; ((to - at) as usize).min(READ_BYTES)];
+            match opened.read(&mut piece) {
                 Ok(0) | Err(_) => return,
                 Ok(count) => {
-                    let piece = &buffer[..count];
-                    kept.extend_from_slice(piece);
-                    dispatch(scanner.feed(piece), &kept, base);
+                    piece.truncate(count);
+                    kept.extend_from_slice(&piece);
+                    dispatch(scanner.feed(&piece), &kept, base);
                     let needed = scanner.needed_from();
                     kept.drain(..needed - base);
                     base = needed;
+                    let _ = reads.send((at as usize, piece));
                     at += count as u64;
                 }
             }
@@ -243,9 +310,21 @@ mod tests {
             written += chunk.len() as u64;
             preparse.grow(written);
         }
-        let (units, complete) = preparse.finish(written);
+        let Preparsed {
+            units,
+            complete,
+            stream,
+        } = preparse.finish(written);
         std::fs::remove_file(&path).unwrap();
         assert!(complete);
+        // What was read: the whole text, and only it.
+        let stream = stream.unwrap();
+        assert_eq!(stream.hash, pm_model::hash::sha256_hex(text.as_bytes()));
+        assert!(stream.holds(text.as_bytes()));
+        let mut other = text.clone().into_bytes();
+        other[1000] ^= 1;
+        assert!(!stream.holds(&other));
+        assert!(!stream.holds(&text.as_bytes()[..text.len() - 1]));
         assert_eq!(units.iter().map(|p| p.unit).collect::<Vec<_>>(), expected);
         for p in &units {
             let unit = &text.as_bytes()[p.unit.start..p.unit.end];
@@ -266,9 +345,14 @@ mod tests {
         )
         .unwrap();
         preparse.grow(64);
-        let (units, complete) = preparse.finish(64);
+        let Preparsed {
+            units,
+            complete,
+            stream,
+        } = preparse.finish(64);
         std::fs::remove_file(&path).unwrap();
         assert!(!complete);
         assert!(units.is_empty());
+        assert!(stream.is_none());
     }
 }

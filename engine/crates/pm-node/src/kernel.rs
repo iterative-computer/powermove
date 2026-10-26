@@ -661,18 +661,29 @@ fn read(work: &mut Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, St
     metrics.input(bytes.capacity());
     // The stream's checksum and the parse each read every byte: side by side.
     // Units parsed while main wrote the file are used where these bytes
-    // have their digest (preparse.rs).
-    let (prebuilt, complete) = work
+    // have their digest (preparse.rs). When what the preparse read hashes to
+    // main's hash of the stream and the file still holds it (each read's
+    // digest, checked on several threads), the file is the stream.
+    let preparsed = work
         .preparse
         .take()
-        .map_or((Vec::new(), false), |preparse| {
-            preparse.finish(bytes.len() as u64)
-        });
-    let (sha256, document) = pm_model::parallel::join(
-        || work.text.then(|| pm_model::hash::sha256_hex(&bytes)),
+        .map(|preparse| preparse.finish(bytes.len() as u64));
+    let (stream, prebuilt, complete) = match preparsed {
+        Some(p) => (p.stream, p.units, p.complete),
+        None => (None, Vec::new(), false),
+    };
+    let (matches, document) = pm_model::parallel::join(
+        || {
+            work.text.then(|| {
+                stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.hash == work.hash && stream.holds(&bytes))
+                    || pm_model::hash::sha256_hex(&bytes) == work.hash
+            })
+        },
         || PreparedDocument::parse_tree_prebuilt(&bytes, work.revision, prebuilt, complete),
     );
-    if sha256.is_some_and(|sha256| sha256 != work.hash) {
+    if matches == Some(false) {
         return Err("The native document file does not match the hash of its stream".into());
     }
     let document = document?;
@@ -1856,6 +1867,15 @@ mod tests {
             receipt["value"]["hash"],
             pm_model::hash::sha256_hex(expected.as_bytes())
         );
+
+        // A file changed after it was read as written is not the stream main
+        // hashed, though what was read is: refused.
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        stream(&mut k, &mut e, &file, 3, text.as_bytes());
+        std::fs::write(&file.0, &changed).unwrap();
+        let refused = finish(&mut k, &mut e, &file, 3, &source);
+        assert_eq!(refused["ok"], false, "{refused}");
 
         // Units parsed at another revision are not used: the tree is at the load's.
         let mut k = NativeKernels::new(EngineProcess::Interactive);
