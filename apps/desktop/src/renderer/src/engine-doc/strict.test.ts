@@ -334,6 +334,26 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(doc.failures()).toEqual([]);
   });
 
+  it('answers a channel without keyframes or an expression by its stored value, as pm-eval does, without asking it', async () => {
+    const { PM, doc } = await editor('on');
+    const { parent } = content(PM);
+    const prop = parent.p.rotation;
+    const query = vi.spyOn(doc.wasm!, 'query');
+    const exports = doc.wasm!.x;
+    const ev = vi.fn((id: number, t: number) => exports.pm_ev(id, t));
+    (doc.wasm as any).x = new Proxy(Object.create(exports), { get: (_target, key) => key === 'pm_ev' ? ev : (exports as any)[key] });
+    for (const t of [0, 0.37, 5]) expect(doc.api!.evP(parent, prop, t, 'rotation')).toBe(PM.evP(parent, prop, t, 'rotation'));
+    expect(doc.api!.evP(parent, prop, 1, 'rotation')).toBe(30);
+    expect(ev).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+    // A keyframe makes it the evaluator's again.
+    prop.kf = [PM.KF(0, 10), PM.KF(2, 50)];
+    PM.touch();
+    expect(doc.api!.evP(parent, prop, 0.5, 'rotation')).toBe(PM.evP(parent, prop, 0.5, 'rotation'));
+    expect(doc.api!.evP(parent, prop, 0.5, 'rotation')).not.toBe(30);
+    expect(fallbacks(doc)).toEqual({});
+  });
+
   it('answers a keyframed channel again at earlier times of the revision without evaluating it, and anew after an edit', async () => {
     const { PM, doc } = await editor('on');
     const { parent } = content(PM);

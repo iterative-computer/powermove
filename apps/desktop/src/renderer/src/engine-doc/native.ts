@@ -1130,6 +1130,24 @@ export class NativeApi {
     if (!prop || typeof prop !== 'object') return null;
     if (!this.dual && typeof T === 'number') {
       const rawProp = this.unwrap(prop);
+      // pm-eval `ev_p`: a channel without an expression or keyframes is its
+      // stored value, at any time and for any layer. Answered here: a
+      // wrapper reading a static effect setting each frame asked the native
+      // evaluator synchronously every time.
+      const stored = rawProp?.v;
+      if (rawProp && !rawProp.expr && (rawProp.kf == null || (Array.isArray(rawProp.kf) && rawProp.kf.length === 0))
+        && (typeof stored === 'number' || typeof stored === 'string' || typeof stored === 'boolean')) {
+        // A channel that lost its expression leaves the resident runs.
+        const entry = this.props.get(rawProp);
+        if (entry && this.expressionFrames.has(entry.id)) {
+          this.expressionFrames.release(entry.id);
+          entry.frame = undefined;
+        }
+        this.clearError(rawProp);
+        this.stats.fastPath += 1;
+        this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
+        return stored;
+      }
       const entry = this.props.get(rawProp);
       if (entry && entry.key === key && entry.layer === this.unwrap(L) && this.current(entry, rawProp)) {
         if (!rawProp.expr && entry.frame) {
