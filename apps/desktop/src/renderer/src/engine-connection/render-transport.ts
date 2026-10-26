@@ -921,8 +921,8 @@ export class EngineRenderTransport {
     return changed;
   }
 
-  /** An edit while paused: prepares the frames around the playhead at the
-   *  new revision at once, beside the engine's render that will ask for it. */
+  /** An edit while paused: prepares the frame on screen at the new
+   *  revision at once, beside the engine's render that will ask for it. */
   prepareShown(): void {
     if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
     this.pump();

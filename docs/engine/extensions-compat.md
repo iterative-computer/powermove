@@ -144,7 +144,8 @@ them (in the task their base arrived in). A turn takes at most 6 ms, but
 never splits a frame; the rest is the next task. The horizon is eighteen
 frames, and reaches as far as the slowest layer's answers take plus 250 ms,
 up to sixty. A layer whose answers take longer than the clock leaves starts
-where it can still be in time; at most 24 preparations wait for bases, and
+where it can still be in time (with none on its way, at its furthest frame
+when it can make none); at most 24 preparations wait for bases, and
 layers answered at once never wait behind them. Preparation runs on the
 engine's needs, completed preparations and presented frames, and once a
 frame while playing; never as a poll. It stops at the composition's or
