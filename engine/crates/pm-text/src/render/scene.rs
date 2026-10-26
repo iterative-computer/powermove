@@ -743,7 +743,14 @@ impl CoveragePathCache {
     /// geometry outgrows the cache evicts what it would have without this.
     /// A few misses are left to `get`; what an earlier call made and `get`
     /// never asked for is dropped.
-    pub fn prepare<'a>(&mut self, paths: impl IntoIterator<Item = &'a PlacedPath>) {
+    ///
+    /// `map(n, make)` returns `make(0), …, make(n - 1)` in order, on threads
+    /// of the caller's choosing.
+    pub fn prepare<'a>(
+        &mut self,
+        paths: impl IntoIterator<Item = &'a PlacedPath>,
+        map: impl FnOnce(usize, &(dyn Fn(usize) -> Vec<PathEl> + Sync)) -> Vec<Vec<PathEl>>,
+    ) {
         self.prepared.clear();
         let mut missing: Vec<(CoverageKey, &PlacedPath)> = Vec::new();
         for placed in paths {
@@ -759,9 +766,8 @@ impl CoveragePathCache {
         if missing.len() < PREPARE_IN_PARALLEL {
             return;
         }
-        let made = parallel_map(missing.len(), |i| {
-            line_geometry(missing[i].1, &mut NonzeroResolver::default()).0
-        });
+        let make = |i: usize| line_geometry(missing[i].1, &mut NonzeroResolver::default()).0;
+        let made = map(missing.len(), &make);
         for ((key, placed), elements) in missing.into_iter().zip(made) {
             self.prepared
                 .entry(key)
@@ -813,53 +819,6 @@ fn line_geometry(placed: &PlacedPath, resolver: &mut NonzeroResolver) -> (Vec<Pa
     let raw = coverage_path(&linear, Affine::IDENTITY);
     let input_elements = raw.elements().len();
     (resolver.resolve_owned(raw).into_elements(), input_elements)
-}
-
-/// `f(0), …, f(n - 1)`, on up to eight threads (several engine processes
-/// share the machine). The results never depend on the thread count.
-fn parallel_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |t| t.get().min(8))
-            .min(n);
-        if threads > 1 {
-            let next = AtomicUsize::new(0);
-            let work = || {
-                let mut done = Vec::new();
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        return done;
-                    }
-                    done.push((i, f(i)));
-                }
-            };
-            let mut slots: Vec<Option<T>> = (0..n).map(|_| None).collect();
-            std::thread::scope(|scope| {
-                let helpers: Vec<_> = (1..threads).map(|_| scope.spawn(work)).collect();
-                let mut place = |done: Vec<(usize, T)>| {
-                    for (i, value) in done {
-                        slots[i] = Some(value);
-                    }
-                };
-                place(work());
-                for helper in helpers {
-                    place(
-                        helper
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                    );
-                }
-            });
-            return slots
-                .into_iter()
-                .map(|slot| slot.expect("every index made"))
-                .collect();
-        }
-    }
-    (0..n).map(f).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1436,6 +1395,14 @@ mod tests {
         assert!(!Arc::ptr_eq(&old, &limited.get(&first)));
     }
 
+    /// `make(0), …, make(n - 1)` on a thread each.
+    fn threads(n: usize, make: &(dyn Fn(usize) -> Vec<PathEl> + Sync)) -> Vec<Vec<PathEl>> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..n).map(|i| scope.spawn(move || make(i))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    }
+
     /// Geometry made on several threads is the geometry `get` makes alone,
     /// with one resolver going from path to path: overlapping contours
     /// (resolved), simple ones (kept), strokes, and repeated sources.
@@ -1479,7 +1446,7 @@ mod tests {
         let mut alone = CoveragePathCache::new(usize::MAX);
         let want: Vec<BezPath> = paths.iter().map(|p| (*alone.get(p)).clone()).collect();
         let mut prepared = CoveragePathCache::new(usize::MAX);
-        prepared.prepare(paths.iter().rev());
+        prepared.prepare(paths.iter().rev(), threads);
         assert_eq!(
             prepared.prepared.values().map(Vec::len).sum::<usize>(),
             paths.len() - 1
@@ -1505,7 +1472,7 @@ mod tests {
         for placed in &paths {
             small_alone.get(placed);
         }
-        small.prepare(paths.iter());
+        small.prepare(paths.iter(), threads);
         for (placed, want) in paths.iter().zip(&want) {
             assert_eq!(small.get(placed).elements(), want.elements());
         }

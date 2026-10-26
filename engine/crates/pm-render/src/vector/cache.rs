@@ -209,7 +209,7 @@ impl SceneOutlines {
         if missing.len() < PREPARE_IN_PARALLEL {
             return;
         }
-        let made = pm_model::parallel::map(missing.len(), |i| {
+        let made = crate::parallel::map(missing.len(), |i| {
             let (_, item, scale) = missing[i];
             item.device_outline_at_scale(scale, &mut OutlineScratch::default())
         });
