@@ -37,7 +37,7 @@
  * sent again), so the next frame asks afresh.
  */
 import type { CompatNeed } from '../../../shared/engine-protocol';
-import type { CompatAnswerOptions, CompatPrepareOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
+import { MAX_RASTER_EDGE, type CompatAnswerOptions, type CompatPrepareOptions, type CompatAnswerResult, type EngineRenderTransport } from '../engine-connection/render-transport';
 import { compatKey } from '../../../shared/protocol-strings';
 import type { Disposable } from './api';
 import { compositorPixels } from './raster-pixels';
@@ -246,6 +246,24 @@ function lazySurface(mark: Omit<LazyMark, 'touched' | 'loaded'>, load: () => any
       return true;
     }
   });
+}
+
+/**
+ * Whether a lazy base asked for whole (no crop) is, inside a viewer
+ * frame's crop window, the same pixels as the engine's raster of that
+ * window: true unless today's density cap (8,192 pixels a side) lowered
+ * the whole raster's density, which a window does not. A wrapper that
+ * drops the crop argument (a legacy `PM.raster` assignment) returns such a
+ * base for every partly visible layer; today the compositor draws it whole
+ * on the layer's quad, and only the window is ever on screen. Reads the
+ * base's geometry (not its canvas): in a preparation a base not yet
+ * prepared suspends the attempt like any base read.
+ */
+function wholeAtDensity(result: any, mark: LazyMark): boolean {
+  void result.w;
+  const surface = mark.loaded();
+  const width = Number(surface?.cv?.width), height = Number(surface?.cv?.height);
+  return width > 0 && height > 0 && Math.max(width, height) < MAX_RASTER_EDGE;
 }
 
 /** Today's quad sampling of a result (`contentQuad`): `uv` through the
@@ -496,7 +514,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       // The base itself, for this layer, density and window, untouched: the
       // engine draws it. A wrapper that wrote a field or took its canvas
       // (it may have drawn on it) gets its result drawn as returned.
-      if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
+      if (mark && mark.layer === layer && mark.scale === scale && !mark.touched && (mark.crop === crop || (crop && mark.crop == null && wholeAtDensity(result, mark)))) return { kind: 'native' };
       if (result == null) return TRANSPARENT;
       const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
       // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
