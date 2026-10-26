@@ -162,9 +162,21 @@ mod tests {
         // keyframe change with them still keeps the decoders.
         let root = |key: &str| Patch::set(vec![key.into()], pm_model::json::Value::Number(1.0));
         let mut keyframe = layers.clone();
-        keyframe.extend([0usize.into(), "p".into(), "rotation".into(), "kf".into(), 3usize.into(), "v".into()]);
+        keyframe.extend([
+            0usize.into(),
+            "p".into(),
+            "rotation".into(),
+            "kf".into(),
+            3usize.into(),
+            "v".into(),
+        ]);
         assert!(!changes_video_sources(&DocumentUpdate::Patches {
-            patches: vec![root("revision"), root("edits"), Patch::set(keyframe, pm_model::json::Value::Number(0.5))].into(),
+            patches: vec![
+                root("revision"),
+                root("edits"),
+                Patch::set(keyframe, pm_model::json::Value::Number(0.5))
+            ]
+            .into(),
             revision: Revision::ZERO,
         }));
         for key in ["compId", "comps", "params"] {
