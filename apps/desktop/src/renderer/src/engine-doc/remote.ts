@@ -164,33 +164,38 @@ export async function remoteCanonicalHash(bridge: DocumentKernelBridge, value: a
 }
 
 /** The shadow's JSON text (JSON.stringify's member order, serialized in
- * slices), in chunks of up to 1 MiB with two writes in flight. The utility
- * parses it into the same tree its canonical JSON would give and answers that
- * tree's canonical hash; main checks the file against its own hash of the
- * stream. About a tenth of the cost of the canonical stream (sorted members,
- * a generator step per token) for the large private project. */
+ * slices), encoded straight into full 1 MiB chunks with two writes in
+ * flight. The utility parses it into the same tree its canonical JSON would
+ * give and answers that tree's canonical hash; main checks the file against
+ * its own hash of the stream. About a tenth of the cost of the canonical
+ * stream (sorted members, a generator step per token) for the large private
+ * project. */
 export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
   const token = await bridge.begin();
   let complete = false;
   try {
     const encoder = new TextEncoder();
     const inFlight: Promise<void>[] = [];
-    let pending: string[] = [], pendingChars = 0;
-    const send = async (text: string) => {
-      const bytes = encoder.encode(text);
-      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
-        if (inFlight.length >= 2) await inFlight.shift();
-        // A subarray would cross the context bridge with its whole buffer.
-        const chunk = bytes.length <= CHUNK_BYTES ? bytes : bytes.slice(offset, Math.min(bytes.length, offset + CHUNK_BYTES));
-        inFlight.push(bridge.write(token, chunk));
-      }
+    let chunk = new Uint8Array(CHUNK_BYTES), filled = 0;
+    const send = async (bytes: Uint8Array) => {
+      if (inFlight.length >= 2) await inFlight.shift();
+      inFlight.push(bridge.write(token, bytes));
     };
-    // About a third of a chunk of text: UTF-8 takes up to three bytes a unit.
+    // The text has no lone surrogates (JSON.stringify escapes them): it
+    // encodes as it would whole, a chunk ending where the next character
+    // does not fit.
     await serializeInSlices(shadow, async text => {
-      pending.push(text); pendingChars += text.length;
-      if (pendingChars >= CHUNK_BYTES / 3) { const joined = pending.join(''); pending = []; pendingChars = 0; await send(joined); }
+      for (let read = 0; read < text.length;) {
+        const result = encoder.encodeInto(read ? text.slice(read) : text, chunk.subarray(filled));
+        read += result.read; filled += result.written;
+        if (read < text.length || filled === CHUNK_BYTES) {
+          // A subarray would cross the context bridge with its whole buffer.
+          await send(filled === CHUNK_BYTES ? chunk : chunk.slice(0, filled));
+          chunk = new Uint8Array(CHUNK_BYTES); filled = 0;
+        }
+      }
     });
-    if (pending.length) await send(pending.join(''));
+    if (filled) await send(chunk.slice(0, filled));
     await Promise.all(inFlight);
     const receipt = await bridge.commit(token, document, revision);
     complete = true;

@@ -33,6 +33,24 @@ it('constructs a prepared facade without activating or changing the published do
   expect(wasm.ev(wasm.intern(address('b')), 0).value).toBe(2);
 });
 
+it('streams the text in full chunks, cut only between characters', async () => {
+  const bridge = await RealKernelBridge.create();
+  // Three- and four-byte characters across every chunk boundary.
+  const text = Array.from({ length: 900_000 }, (_, i) => (i % 3 ? '€' : '😀') + (i % 7 ? '' : '"\\')).join('');
+  const large = { ...project, name: text, comps: { c: { ...project.comps.c, notes: [text.slice(0, 1000), 'x'] } } };
+  const chunks: Uint8Array[] = [];
+  const write = bridge.write.bind(bridge);
+  bridge.write = async (token, chunk) => { chunks.push(chunk); return write(token, chunk); };
+  await ingestDocumentText(bridge, large, large.id, 1);
+  expect(new TextDecoder().decode(bridge.lastStream!)).toBe(JSON.stringify(large));
+  expect(chunks.length).toBeGreaterThan(2);
+  for (const chunk of chunks.slice(0, -1)) {
+    expect(chunk.byteLength).toBeGreaterThan(1024 * 1024 - 4);
+    expect(chunk.byteLength).toBeLessThanOrEqual(1024 * 1024);
+    expect(chunk.buffer.byteLength).toBe(chunk.byteLength);
+  }
+});
+
 it('keeps prepared batch views scoped to their group and updates only the requested range', async () => {
   const { bridge, wasm } = await remote(); wasm.activate();
   const ids = ['a', 'b', 'c', 'd'].map(key => wasm.intern(address(key)));
