@@ -267,13 +267,31 @@ const NOT_UPLOADED = (_key: string): undefined => undefined;
 
 const TRANSPARENT: CompatAnswerResult = { kind: 'raster', key: 'powermove:empty', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
 
-/** Give frame delivery and input a turn before speculative wrapper work.
+/** A preparation in progress: an urgent ask for the same answer promotes it. */
+type Preparing = { layer: unknown; promise: Promise<void>; urgent: boolean; promote: (() => void) | null };
+
+/** Give frame delivery and input a turn before non-urgent wrapper work.
  *  Native replies often arrive together; chaining their continuations as
- *  microtasks would run several wrappers before a presentation event. */
-async function preparationTurn(urgent = false): Promise<void> {
-  if (urgent) return;
-  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'background' }) => Promise<void> } }).scheduler;
-  if (scheduler?.postTask) await scheduler.postTask(() => {}, { priority: 'background' });
+ *  microtasks would run several wrappers before a presentation event. The
+ *  turn is an ordinary task (`user-visible`), not `background`: background
+ *  tasks run only when no other task is queued, and a long sliced job (a
+ *  project fingerprint posts a task every few milliseconds for tens of
+ *  seconds on a large document) starved them, with the frame on screen
+ *  waiting behind them. An urgent ask for the same answer ends the turn. */
+function promote(entry: Preparing): void {
+  entry.urgent = true;
+  entry.promote?.();
+}
+
+async function preparationTurn(entry: Preparing): Promise<void> {
+  if (entry.urgent) return;
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' }) => Promise<void> } }).scheduler;
+  if (!scheduler?.postTask) return;
+  await new Promise<void>(resolve => {
+    entry.promote = resolve;
+    void scheduler.postTask(() => {}, { priority: 'user-visible' }).then(resolve, resolve);
+  });
+  entry.promote = null;
 }
 
 export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): RasterCompatHandle {
@@ -290,7 +308,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   // real pixels; never hand a wrapper a placeholder it could cache.
   const suspended = Symbol('raster preparation suspended');
   let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
-  const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
+  const preparing = new Map<string, Preparing>();
   const running = new Set<Promise<void>>();
   const bases = new Map<string, { surface: any; bytes: number; persistent: boolean }>();
   let baseBytes = 0;
@@ -509,8 +527,18 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (!prepareOptions?.urgent && ready.get(key)?.retained) ready.delete(key);
       if (ready.get(key)?.layer === layer) return;
       const existing = preparing.get(key);
-      if (existing) { if (existing.layer === layer) await existing.promise; return; }
-      if (pending >= COMPAT_PREPARE_IN_FLIGHT + COMPAT_PREFETCH_IN_FLIGHT) {
+      if (existing) {
+        if (existing.layer !== layer) return;
+        // The frame on screen asks for what a speculative preparation is
+        // already making: it goes on without waiting for its next turn.
+        if (prepareOptions?.urgent) promote(existing);
+        else void prepareOptions?.promoted?.then(() => promote(existing));
+        await existing.promise;
+        return;
+      }
+      // An urgent ask (the paused frame on screen) never waits behind
+      // speculative preparations for a slot.
+      if (!prepareOptions?.urgent && pending >= COMPAT_PREPARE_IN_FLIGHT + COMPAT_PREFETCH_IN_FLIGHT) {
         const waitingGeneration = generation;
         await Promise.race(running);
         if (generation !== waitingGeneration) return;
@@ -521,6 +549,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const beganPreparation = performance.now();
       stats.preparations++;
       const valid = () => generation === epoch && findLayer(PM, String(need.composition), String(need.layer)) === layer && wrapped();
+      const entry: Preparing = { layer, promise: null!, urgent: !!prepareOptions?.urgent, promote: null };
+      void prepareOptions?.promoted?.then(() => promote(entry));
       const promise = Promise.resolve().then(async () => {
         const samples = new Map<string, any>();
         const tainted = new WeakSet<object>();
@@ -531,10 +561,10 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           // later turn. The finite bound also rejects a nonconvergent chain.
           for (let phase = 0; phase < 64 && valid(); phase++) {
             const queued = performance.now();
-            await preparationTurn(prepareOptions?.urgent);
+            await preparationTurn(entry);
             transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
             if (!valid()) return;
-            const attempt = { samples, tainted, urgent: !!prepareOptions?.urgent, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
+            const attempt = { samples, tainted, urgent: entry.urgent, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
             let answer: CompatAnswerResult = null;
             preparation = attempt;
             const beganCpu = performance.now();
@@ -560,7 +590,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
               }
               if (!valid()) return;
               if (answer?.kind === 'native') stats.passThroughSkips++;
-              ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: !!prepareOptions?.urgent });
+              ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: entry.urgent });
               keepReady();
               return;
             }
@@ -589,7 +619,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           pending--; running.delete(promise); if (preparing.get(key)?.promise === promise) preparing.delete(key);
         }
       });
-      preparing.set(key, { layer, promise });
+      entry.promise = promise;
+      preparing.set(key, entry);
       running.add(promise);
       await promise;
     },

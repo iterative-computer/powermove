@@ -272,9 +272,14 @@ export function intoLoop(time: number, loop: PlaybackLoop | null): number {
 /** `loop`: the clock's loop in the entry's own time (a nested composition's
  *  times are the open one's shifted), while playback loops and the shift
  *  is known. */
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null };
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null;
+  /** Ends the waiting turns of a non-urgent preparation in flight, per time. */
+  promote?: Map<number, () => void> };
 
-export type CompatPrepareOptions = { urgent?: boolean };
+/** `urgent`: the paused frame the engine waits for (no yielded turns);
+ *  `promoted`: settles when a preparation that began speculatively became
+ *  that frame's, so it goes on as urgent. */
+export type CompatPrepareOptions = { urgent?: boolean; promoted?: Promise<void> };
 export type CompatPreparer = (need: CompatNeed, revision: number, options?: CompatPrepareOptions) => Promise<void>;
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
@@ -378,6 +383,8 @@ export class EngineRenderTransport {
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
   private readonly preparers = new Map<CompatSource, CompatPreparer>();
   private aheadInFlight = 0;
+  /** Of those, the ones the paused frame on screen waits for. */
+  private aheadUrgentInFlight = 0;
   private prefetchInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
    *  (the engine dropped that raster meanwhile). */
@@ -587,13 +594,21 @@ export class EngineRenderTransport {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           // Past the loop's end, the frames after the wrap.
           const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
-          if (outside(entry, time) || entry.sent.has(time) || entry.pending.has(time)) continue;
+          if (outside(entry, time) || entry.sent.has(time)) continue;
+          if (entry.pending.has(time)) {
+            // The paused frame on screen waits for a preparation that began
+            // speculatively: it goes on without yielding.
+            if (this.urgentAhead(entry, time)) entry.promote?.get(time)?.();
+            continue;
+          }
           if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
           if (offset < lead && this.preparers.has(entry.need.source)) { this.lookaheadStats.latePrepareSkips++; continue; }
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
           const prepare = this.preparers.get(entry.need.source);
-          if (prepare && this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT) continue;
+          // The paused frame on screen is never queued behind speculative
+          // preparations: urgent ones have slots of their own.
+          if (prepare && (this.urgentAhead(entry, time) ? this.aheadUrgentInFlight : this.aheadInFlight) >= COMPAT_PREPARE_IN_FLIGHT) continue;
           done++;
           if (prepare) {
             this.prepareAhead(entry, time, revision ?? 0, prepare, warm, warmUntil);
@@ -648,13 +663,18 @@ export class EngineRenderTransport {
 
   private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: CompatPreparer, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
     const need = { ...entry.need, time };
+    const urgent = this.urgentAhead(entry, time);
+    let promote!: () => void;
+    const promoted = new Promise<void>(resolve => { promote = resolve; });
+    if (!urgent) (entry.promote ??= new Map()).set(time, promote);
     entry.pending.add(time);
     this.aheadInFlight++;
+    if (urgent) this.aheadUrgentInFlight++;
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
     this.trace.record('prepare dispatched', revision, time);
-    void Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
+    void Promise.resolve().then(() => prepare(need, revision, urgent ? { urgent } : { urgent, promoted })).then(() => {
       this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
@@ -683,12 +703,19 @@ export class EngineRenderTransport {
     }).finally(() => {
       entry.pending.delete(time);
       entry.required.delete(time);
+      if (entry.promote?.get(time) === promote) entry.promote.delete(time);
       this.aheadInFlight--;
+      if (urgent) this.aheadUrgentInFlight--;
       this.lookaheadStats.inFlight = this.aheadInFlight;
       // Each completed answer is independent: a slower sibling does not
       // hold its ready pixels behind a Promise.all barrier.
       this.presentedWhilePlaying(warm || [...this.ahead.values()].some(e => e.required.size > 0), warmUntil);
     });
+  }
+
+  /** Whether `time` is the paused frame the engine waits for (its own need, or the cursor's). */
+  private urgentAhead(entry: AheadEntry, time: number): boolean {
+    return !this.options.playing?.() && (time === entry.cursor || entry.required.has(time));
   }
 
   private scheduleAhead(): void {

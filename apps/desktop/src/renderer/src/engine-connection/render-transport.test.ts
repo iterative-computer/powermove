@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest, SnapshotViewer } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, layerRasterScale, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type CompatPrepareOptions, layerRasterScale, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -662,6 +662,58 @@ describe('compatibility answers during playback', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (20 - i) * frame));
       expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('starts the paused frame on screen while speculative preparations hold every slot', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked } = rig(false);
+    const calls: Array<{ time: number; options: CompatPrepareOptions | undefined; resolve: () => void }> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; },
+      (n, _revision, options) => new Promise(resolve => calls.push({ time: n.time, options, resolve })));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      // The frame at the playhead, and the warm-up's next frame.
+      expect(calls.map(c => [c.time, !!c.options?.urgent])).toEqual([[0, true], [frame, false]]);
+      calls[0]!.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([0]);
+      // Speculative work now holds every slot and never finishes (its turns
+      // are starved). A seek's frame starts anyway, and is answered.
+      expect(calls.filter(c => !c.options?.urgent)).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
+      t.receiveCompat({ compat: 'needs', needs: [need(40 * frame)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      const seek = calls.find(c => c.time === 40 * frame);
+      expect(seek?.options).toEqual({ urgent: true });
+      seek!.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([0, 40 * frame]);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('promotes a speculative preparation when the paused frame comes to need it', async () => {
+    vi.useFakeTimers();
+    const { t, session, asked } = rig(false);
+    const calls: Array<{ time: number; options: CompatPrepareOptions | undefined; resolve: () => void }> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; },
+      (n, _revision, options) => new Promise(resolve => calls.push({ time: n.time, options, resolve })));
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      const ahead = calls.find(c => c.time === frame)!;
+      let promoted = false;
+      void ahead.options!.promoted!.then(() => { promoted = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(promoted).toBe(false);
+      // A step to the next frame: the engine waits for exactly that one.
+      t.receiveCompat({ compat: 'needs', needs: [need(frame)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(promoted).toBe(true);
+      expect(calls.filter(c => c.time === frame)).toHaveLength(1);
+      ahead.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toContain(frame);
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
