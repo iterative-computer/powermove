@@ -276,6 +276,9 @@ pub struct FontService {
     /// Main finished replaying to a port (its seeds come last, after the
     /// open and the project fonts).
     opened: bool,
+    /// Project faces whose fallback cascade CoreText has made
+    /// ([`FontService::warm_fallbacks`]), in the order they were added.
+    warmed: usize,
 }
 
 #[cfg(target_os = "macos")]
@@ -289,7 +292,22 @@ impl FontService {
             generation_base: 0,
             seeds: SeedTable::default(),
             opened: false,
+            warmed: 0,
         })
+    }
+
+    /// While nothing waits for fonts: makes CoreText ready to find
+    /// fallbacks for the next project face that is not
+    /// (`CoreTextRegistry::warm_project_fallback`, 15-20 ms each), so the
+    /// frame that first shows a character the face lacks does not wait for
+    /// it. Only once main's replay is done. Returns whether it warmed one.
+    pub fn warm_fallbacks(&mut self) -> bool {
+        if !self.opened || self.warmed >= self.layout.resolver().project_faces() {
+            return false;
+        }
+        self.layout.resolver().warm_project_fallback(self.warmed);
+        self.warmed += 1;
+        true
     }
 
     fn registry(&mut self) -> &mut Registry {
@@ -409,6 +427,7 @@ impl FontService {
             Op::ClearProjectFonts => {
                 let _: NoArgs = parse(json)?;
                 self.registry().clear_project_fonts();
+                self.warmed = 0;
                 Ok(generation_json(self.generation()))
             }
             Op::Generation => {
@@ -549,6 +568,10 @@ impl FontService {
     }
 
     pub fn opened(&self) -> bool {
+        false
+    }
+
+    pub fn warm_fallbacks(&mut self) -> bool {
         false
     }
 }

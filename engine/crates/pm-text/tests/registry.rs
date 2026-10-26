@@ -83,6 +83,23 @@ fn main() {
         r.generation() > generation,
         String::new(),
     );
+    // Warming a project face's fallbacks changes no answer: no face is
+    // added, the generation stays, and its fallbacks resolve as before.
+    let (faces, generation) = (r.faces().count(), r.generation());
+    check("one project face", r.project_faces() == 1, String::new());
+    r.warm_project_fallback(0);
+    r.warm_project_fallback(1);
+    check(
+        "warming leaves the registry as it was",
+        r.faces().count() == faces && r.generation() == generation,
+        String::new(),
+    );
+    let check_mark = r.fallback_for_char(&desc, 0x2713, shadow, false);
+    check(
+        "a warmed face's fallback",
+        check_mark.is_some_and(|f| f != shadow),
+        format!("{check_mark:?}"),
+    );
     let bold = r
         .family(
             "Chalkduster",
