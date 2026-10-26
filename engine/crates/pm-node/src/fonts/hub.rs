@@ -328,7 +328,11 @@ mod tests {
         let h = hub.clone();
         let asked = std::time::Instant::now();
         let t = std::thread::spawn(move || h.serve(&[query()]));
-        // The JavaScript thread's pump, a little later.
+        // The JavaScript thread's pump, a little after the request is queued
+        // (the render thread's wait has begun by then).
+        while !hub.has_requests() {
+            std::thread::yield_now();
+        }
         std::thread::sleep(Duration::from_millis(5));
         let mut served = 0;
         while served == 0 {

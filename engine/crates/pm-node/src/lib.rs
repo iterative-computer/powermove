@@ -378,7 +378,7 @@ impl EngineHost {
     pub fn tick(&mut self) -> Vec<Action> {
         self.sync_runtime_qos();
         self.serve_fonts();
-        // One project face's fallbacks per tick, while no render thread
+        // One face's fallbacks per tick, while no render thread
         // waits for fonts.
         if !self.font_hub.has_requests()
             && let Some(fonts) = self.fonts.as_mut()
