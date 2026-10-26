@@ -237,6 +237,22 @@ pub fn spring_table_len() -> usize {
     (6.0 / SPRING_STEP).ceil() as usize
 }
 
+/// The spring's position table, shared by every track of the process that
+/// uses the same spring (a segment's curve is made on its first use, away
+/// from an evaluator's [`SpringTables`]).
+pub fn shared_spring_table(cfg: SpringConfig) -> Arc<[f32]> {
+    static TABLES: std::sync::OnceLock<std::sync::Mutex<SpringTables>> = std::sync::OnceLock::new();
+    let mut tables = TABLES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Bounded: tables of springs no longer in use go (a track keeps its own).
+    if tables.len() >= 256 {
+        *tables = SpringTables::default();
+    }
+    tables.table(cfg)
+}
+
 /// The spring's position table (`Float32Array`).
 pub fn spring_table(cfg: SpringConfig) -> Vec<f32> {
     let len = spring_table_len();

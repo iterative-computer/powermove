@@ -39,7 +39,7 @@
 
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use pm_model::{Node, NodeKind};
 
@@ -181,104 +181,110 @@ fn is_object(key: &Node) -> bool {
     matches!(key.kind(), NodeKind::Object(_) | NodeKind::Array(_))
 }
 
-/// `adoptTemporalEase(keys)` followed by `refreshAutoBezier`, without
-/// mutating the document. Throws where the legacy code throws: on a key that
-/// is not an object (reading from `null`, or writing to a primitive in strict
+/// Whether `adoptTemporalEase(keys)` throws, and where: on a key that is
+/// not an object (reading from `null`, or writing to a primitive in strict
 /// mode).
-fn adopt(keys: &[Node]) -> JsResult<Vec<SegKey>> {
-    let mut out: Vec<SegKey> = Vec::with_capacity(keys.len());
-    for (index, key) in keys.iter().enumerate() {
-        if !is_object(key) {
-            return Err(JsThrow::type_error(format!(
-                "keyframe {index} is not an object"
-            )));
+fn adoption_error(keys: &[Node]) -> Option<JsThrow> {
+    let index = keys.iter().position(|key| !is_object(key))?;
+    Some(JsThrow::type_error(format!(
+        "keyframe {index} is not an object"
+    )))
+}
+
+/// Key `index` as `adoptTemporalEase(keys)` followed by `refreshAutoBezier`
+/// leaves it, without mutating the document. Every key must be an object
+/// ([`adoption_error`]). It reads only keys `index - 1` to `index + 1`:
+/// adoption measures legacy handles against the segments beside the key,
+/// and an auto-bezier tangent depends only on its neighbours' times and
+/// values, which adoption never changes.
+fn adopt_key(keys: &[Node], index: usize) -> SegKey {
+    let mut seg = adopt_ease(keys, index);
+    if seg.auto_bezier {
+        // refreshAutoBezier
+        let previous = index
+            .checked_sub(1)
+            .map(|i| raw_seg_key(&keys[i]).ease_key());
+        let next = keys.get(index + 1).map(|k| raw_seg_key(k).ease_key());
+        let speed = auto_bezier_speed(previous.as_ref(), &seg.ease_key(), next.as_ref());
+        let ease = make_ease(speed, AUTO_INFLUENCE);
+        if seg.in_interp != Interp::Hold {
+            seg.in_interp = Interp::Bezier;
+            seg.in_ease = ease;
         }
-        let k = Some(key);
-        let mut seg = raw_seg_key(key);
-        let in_i = interp_of(node::member(k, "inInterp"));
-        let out_i = interp_of(node::member(k, "outInterp"));
-        let native = in_i.is_valid()
-            && out_i.is_valid()
-            && is_temporal_ease(node::member(k, "inEase"))
-            && is_temporal_ease(node::member(k, "outEase"));
-        if native {
-            // normalizeKeyEase
-            seg.in_interp = in_i;
-            seg.out_interp = out_i;
-            seg.auto_bezier = matches!(
-                node::member(k, "autoBezier").map(Node::kind),
-                Some(NodeKind::Bool(true))
-            );
-            out.push(seg);
-            continue;
+        if seg.out_interp != Interp::Hold {
+            seg.out_interp = Interp::Bezier;
+            seg.out_ease = ease;
         }
-        let previous = index.checked_sub(1).map(|i| &keys[i]);
-        let next = keys.get(index + 1);
-        let out_handle = legacy_handle(node::member(k, "eo"), [0.0, 0.0]);
-        let in_handle = legacy_handle(node::member(k, "ei"), [1.0, 1.0]);
-        let value = node::to_number(node::member(k, "v"));
-        let hold = matches!(
-            node::member(k, "hold").map(Node::kind),
+    }
+    seg
+}
+
+/// `adoptTemporalEase` (with `normalizeKeyEase`) for key `index`.
+fn adopt_ease(keys: &[Node], index: usize) -> SegKey {
+    let key = &keys[index];
+    let k = Some(key);
+    let mut seg = raw_seg_key(key);
+    let in_i = interp_of(node::member(k, "inInterp"));
+    let out_i = interp_of(node::member(k, "outInterp"));
+    let native = in_i.is_valid()
+        && out_i.is_valid()
+        && is_temporal_ease(node::member(k, "inEase"))
+        && is_temporal_ease(node::member(k, "outEase"));
+    if native {
+        // normalizeKeyEase
+        seg.in_interp = in_i;
+        seg.out_interp = out_i;
+        seg.auto_bezier = matches!(
+            node::member(k, "autoBezier").map(Node::kind),
             Some(NodeKind::Bool(true))
         );
-        if hold {
-            seg.out_interp = Interp::Hold;
-            seg.out_ease = make_ease(0.0, LINEAR_INFLUENCE);
-        } else if !node::truthy(next) || (out_handle[0] == 0.0 && out_handle[1] == 0.0) {
-            seg.out_interp = Interp::Linear;
-            seg.out_ease = make_ease(0.0, LINEAR_INFLUENCE);
-        } else {
-            let next = next.expect("truthy");
-            let next_value = node::to_number(node::get(next, b"v").node());
-            let dt =
-                node::get(next, b"t").to_js().to_number() - node::to_number(node::member(k, "t"));
-            let dv = if next_value.is_finite() && value.is_finite() {
-                next_value - value
-            } else {
-                0.0
-            };
-            seg.out_interp = Interp::Bezier;
-            seg.out_ease = ease_from_unit_handle(out_handle, dt, dv, Side::Out);
-        }
-        if !node::truthy(previous) || (in_handle[0] == 1.0 && in_handle[1] == 1.0) {
-            seg.in_interp = Interp::Linear;
-            seg.in_ease = make_ease(0.0, LINEAR_INFLUENCE);
-        } else {
-            let previous = previous.expect("truthy");
-            let previous_value = node::to_number(node::get(previous, b"v").node());
-            let dt = node::to_number(node::member(k, "t"))
-                - node::get(previous, b"t").to_js().to_number();
-            let dv = if previous_value.is_finite() && value.is_finite() {
-                value - previous_value
-            } else {
-                0.0
-            };
-            seg.in_interp = Interp::Bezier;
-            seg.in_ease = ease_from_unit_handle(in_handle, dt, dv, Side::In);
-        }
-        seg.auto_bezier = false;
-        out.push(seg);
+        return seg;
     }
-    // refreshAutoBezier
-    for index in 0..out.len() {
-        if !out[index].auto_bezier {
-            continue;
-        }
-        let previous = index.checked_sub(1).map(|i| out[i].ease_key());
-        let next = out.get(index + 1).map(SegKey::ease_key);
-        let speed = auto_bezier_speed(previous.as_ref(), &out[index].ease_key(), next.as_ref());
-        let ease = make_ease(speed, AUTO_INFLUENCE);
-        let key = &mut out[index];
-        if key.in_interp != Interp::Hold {
-            key.in_interp = Interp::Bezier;
-            key.in_ease = ease;
-        }
-        if key.out_interp != Interp::Hold {
-            key.out_interp = Interp::Bezier;
-            key.out_ease = ease;
-        }
+    let previous = index.checked_sub(1).map(|i| &keys[i]);
+    let next = keys.get(index + 1);
+    let out_handle = legacy_handle(node::member(k, "eo"), [0.0, 0.0]);
+    let in_handle = legacy_handle(node::member(k, "ei"), [1.0, 1.0]);
+    let value = node::to_number(node::member(k, "v"));
+    let hold = matches!(
+        node::member(k, "hold").map(Node::kind),
+        Some(NodeKind::Bool(true))
+    );
+    if hold {
+        seg.out_interp = Interp::Hold;
+        seg.out_ease = make_ease(0.0, LINEAR_INFLUENCE);
+    } else if !node::truthy(next) || (out_handle[0] == 0.0 && out_handle[1] == 0.0) {
+        seg.out_interp = Interp::Linear;
+        seg.out_ease = make_ease(0.0, LINEAR_INFLUENCE);
+    } else {
+        let next = next.expect("truthy");
+        let next_value = node::to_number(node::get(next, b"v").node());
+        let dt = node::get(next, b"t").to_js().to_number() - node::to_number(node::member(k, "t"));
+        let dv = if next_value.is_finite() && value.is_finite() {
+            next_value - value
+        } else {
+            0.0
+        };
+        seg.out_interp = Interp::Bezier;
+        seg.out_ease = ease_from_unit_handle(out_handle, dt, dv, Side::Out);
     }
-    Ok(out)
+    if !node::truthy(previous) || (in_handle[0] == 1.0 && in_handle[1] == 1.0) {
+        seg.in_interp = Interp::Linear;
+        seg.in_ease = make_ease(0.0, LINEAR_INFLUENCE);
+    } else {
+        let previous = previous.expect("truthy");
+        let previous_value = node::to_number(node::get(previous, b"v").node());
+        let dt =
+            node::to_number(node::member(k, "t")) - node::get(previous, b"t").to_js().to_number();
+        let dv = if previous_value.is_finite() && value.is_finite() {
+            value - previous_value
+        } else {
+            0.0
+        };
+        seg.in_interp = Interp::Bezier;
+        seg.in_ease = ease_from_unit_handle(in_handle, dt, dv, Side::In);
+    }
+    seg.auto_bezier = false;
+    seg
 }
 
 /// `c.v` of a prepared segment: the first key's raw value.
@@ -360,7 +366,8 @@ fn resolved(interp: Interp, ease: TemporalEase, a: &SegKey, b: &SegKey) -> Tempo
 }
 
 impl Curve {
-    fn new(a: &SegKey, b: &SegKey, springs: &mut SpringTables) -> Curve {
+    /// `spring_table`: the table of a spring segment's config.
+    fn new(a: &SegKey, b: &SegKey, spring_table: impl FnOnce(SpringConfig) -> Arc<[f32]>) -> Curve {
         let span = b.tn - a.tn;
         let start = a.tn;
         let mode = if a.out_interp == Interp::Hold || b.in_interp == Interp::Hold {
@@ -368,7 +375,7 @@ impl Curve {
         } else if a.out_interp == Interp::Linear && b.in_interp == Interp::Linear {
             Mode::Linear
         } else if let Some(cfg) = a.spring {
-            Mode::Spring(springs.table(cfg))
+            Mode::Spring(spring_table(cfg))
         } else {
             Mode::Bezier
         };
@@ -436,30 +443,54 @@ impl Curve {
 }
 
 /// A track on the temporal path, prepared once per content revision.
+///
+/// Preparing reads only every key's time and value (the segment search and
+/// the answers outside the keys); a segment's curve (its keys' adopted
+/// easing) is made the first time a time inside it is asked for. A layer
+/// first drawn at a frame reads a few segments of tracks thousands of keys
+/// long, and a frame stays exact: each curve is the one preparing every
+/// segment at once made.
 #[derive(Clone, Debug)]
 pub struct TemporalTrack {
+    keys: Arc<Vec<Node>>,
     times: Vec<f64>,
     values: Vec<f64>,
-    curves: Vec<Curve>,
+    curves: Box<[OnceLock<Curve>]>,
     /// Every segment base is a number, so every answer is a number.
     numeric: bool,
 }
 
 impl TemporalTrack {
-    fn new(keys: &[SegKey], springs: &mut SpringTables) -> TemporalTrack {
-        let times = keys.iter().map(|k| k.tn).collect();
-        let values = keys.iter().map(|k| k.v.to_number()).collect();
-        let curves: Vec<Curve> = keys
-            .windows(2)
-            .map(|w| Curve::new(&w[0], &w[1], springs))
-            .collect();
-        let numeric = curves.iter().all(|c| matches!(c.base, Base::Number(_)));
+    /// `keys` must all be objects ([`adoption_error`]).
+    fn new(keys: Arc<Vec<Node>>) -> TemporalTrack {
+        let mut times = Vec::with_capacity(keys.len());
+        let mut values = Vec::with_capacity(keys.len());
+        let mut numeric = true;
+        for (index, key) in keys.iter().enumerate() {
+            times.push(KeyTime::from_got(&node::get(key, b"t")).1);
+            let v = node::js_value_opt(node::member(Some(key), "v"));
+            values.push(v.to_number());
+            // A segment's base is its first key's value.
+            numeric &= index + 1 == keys.len() || matches!(v, JsValue::Number(_));
+        }
+        let curves = (1..keys.len()).map(|_| OnceLock::new()).collect();
         TemporalTrack {
+            keys,
             times,
             values,
             curves,
             numeric,
         }
+    }
+
+    /// The curve of segment `index` (between keys `index` and `index + 1`).
+    #[inline]
+    fn curve(&self, index: usize) -> &Curve {
+        self.curves[index].get_or_init(|| {
+            let a = adopt_key(&self.keys, index);
+            let b = adopt_key(&self.keys, index + 1);
+            Curve::new(&a, &b, crate::easing::shared_spring_table)
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -502,7 +533,7 @@ impl TemporalTrack {
     pub fn value(&self, time: f64) -> JsValue {
         match self.segment(time) {
             Err(v) => JsValue::Number(v),
-            Ok(lo) => self.curves[lo].value(time),
+            Ok(lo) => self.curve(lo).value(time),
         }
     }
 
@@ -513,7 +544,7 @@ impl TemporalTrack {
         match self.segment(time) {
             Err(v) => v,
             Ok(lo) => {
-                let curve = &self.curves[lo];
+                let curve = self.curve(lo);
                 match curve.base {
                     Base::Number(b) => curve.value_number(time, b),
                     Base::Raw(_) => f64::NAN,
@@ -540,9 +571,9 @@ pub enum PreparedTrack {
 
 impl PreparedTrack {
     /// Prepares a track (the work `temporalEvaluate` caches per version).
-    pub fn prepare(kf: Option<&Node>, springs: &mut SpringTables) -> PreparedTrack {
-        let keys = match node::array(kf) {
-            Some(keys) if !keys.is_empty() => keys,
+    pub fn prepare(kf: Option<&Node>) -> PreparedTrack {
+        let keys = match kf.map(Node::kind) {
+            Some(NodeKind::Array(keys)) if !keys.is_empty() => keys,
             _ => return PreparedTrack::Null,
         };
         let first = &keys[0];
@@ -559,9 +590,9 @@ impl PreparedTrack {
         if node::number(node::get(last, b"v").node()).is_none() {
             return PreparedTrack::Discrete;
         }
-        match adopt(keys) {
-            Ok(seg) => PreparedTrack::Temporal(Arc::new(TemporalTrack::new(&seg, springs))),
-            Err(e) => PreparedTrack::Throws(e),
+        match adoption_error(keys) {
+            None => PreparedTrack::Temporal(Arc::new(TemporalTrack::new(keys.clone()))),
+            Some(e) => PreparedTrack::Throws(e),
         }
     }
 
@@ -615,7 +646,7 @@ pub fn evaluate(
     interpolate_color: bool,
     springs: &mut SpringTables,
 ) -> JsResult<JsValue> {
-    PreparedTrack::prepare(kf, springs).value(kf, t, interpolate_color, springs)
+    PreparedTrack::prepare(kf).value(kf, t, interpolate_color, springs)
 }
 
 /// `/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i`.
@@ -757,7 +788,7 @@ fn discrete(
     }
     if !colors {
         // temporalValue(kf, lo, t) on the stored, unadopted keys.
-        let curve = Curve::new(&raw_seg_key(a), &raw_seg_key(b), springs);
+        let curve = Curve::new(&raw_seg_key(a), &raw_seg_key(b), |cfg| springs.table(cfg));
         return Ok(curve.value(t));
     }
     let (default_eo, default_ei) = handles("power");
@@ -796,6 +827,74 @@ mod tests {
         let track = r##"[{"t":0,"v":"#000000","eo":[0,0],"ei":[1,1]},{"t":1,"v":"#ffffff80","eo":[0,0],"ei":[1,1]}]"##;
         assert_eq!(ev(track, 0.5, true).unwrap(), JsValue::from("#808080c0"));
         assert_eq!(ev(track, 0.5, false).unwrap(), JsValue::from("#000000"));
+    }
+
+    /// A track makes each segment's curve on its first use; the answers do
+    /// not depend on which segments were asked for first, and are the ones
+    /// a track prepared for every single answer gives.
+    #[test]
+    fn segments_made_on_first_use_answer_in_any_order() {
+        let track = kf(r#"[
+            {"t":0,"v":0,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":33},"outEase":{"speed":0,"influence":33},"autoBezier":true},
+            {"t":1,"v":10,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":33},"outEase":{"speed":0,"influence":33},"autoBezier":true},
+            {"t":2,"v":30,"eo":[0.4,0],"ei":[0.6,1]},
+            {"t":"3","v":25,"hold":true},
+            {"t":4,"v":5,"spring":{"stiffness":120,"damping":9,"mass":1}},
+            {"t":5,"v":-5,"inInterp":"bezier","outInterp":"bezier","inEase":{"speed":0,"influence":33},"outEase":{"speed":0,"influence":33},"autoBezier":true},
+            {"t":6,"v":40}
+        ]"#);
+        let times: Vec<f64> = (0..=64).map(|i| -0.5 + i as f64 * 0.109).collect();
+        let fresh: Vec<JsValue> = times
+            .iter()
+            .map(|&t| evaluate(Some(&track), t, false, &mut SpringTables::new()).unwrap())
+            .collect();
+        for order in [false, true] {
+            let prepared = PreparedTrack::prepare(Some(&track));
+            let temporal = prepared.temporal().expect("a temporal track");
+            let indices: Vec<usize> = if order {
+                (0..times.len()).rev().collect()
+            } else {
+                (0..times.len()).collect()
+            };
+            for i in indices {
+                assert_eq!(
+                    temporal.value(times[i]),
+                    fresh[i],
+                    "at {} (reversed: {order})",
+                    times[i]
+                );
+            }
+        }
+        // The answers of the adoption that prepared every key at once
+        // (auto-bezier, legacy handles, hold, spring, a string time), bit
+        // for bit, at every fourth time.
+        const WHOLE: [u64; 17] = [
+            0,
+            0,
+            4613398973615375893,
+            4620147942657401728,
+            4625276642904716806,
+            4628267178381869934,
+            4629110819272958837,
+            4628559021649363989,
+            4627747222013583037,
+            4627730092099895296,
+            4627730092099895296,
+            13843364069718884352,
+            13840338453834760192,
+            13826450269815070064,
+            4626420888944297992,
+            4630826316843712512,
+            4630826316843712512,
+        ];
+        for (n, bits) in WHOLE.iter().enumerate() {
+            assert_eq!(
+                fresh[n * 4],
+                JsValue::Number(f64::from_bits(*bits)),
+                "at {}",
+                times[n * 4]
+            );
+        }
     }
 
     #[test]
