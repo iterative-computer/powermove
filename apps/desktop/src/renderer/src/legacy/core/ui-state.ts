@@ -73,16 +73,20 @@ const keyCompat = (['_ho', '_hi', '_pt'] as const).map(name => {
     function (this: any, value: any) { return setKeyPatch(idOf(this), { [field]: value }); }] as const;
 });
 
+const lookupGetter = (Object.prototype as any).__lookupGetter__ as (this: object, name: string) => unknown;
+
 function installKeyCompat(key: any) {
   const id = idOf(key);
   if (!id) return;
-  const legacy: any = {};
+  let legacy: any = null;
   for (const [name, get, set] of keyCompat) {
+    // Every prune visits every key: one already installed costs no descriptor objects.
+    if (lookupGetter.call(key, name) === get) continue;
     const descriptor = Object.getOwnPropertyDescriptor(key, name);
-    if (descriptor && descriptor.enumerable && descriptor.value != null) legacy[name.slice(1)] = descriptor.value;
+    if (descriptor && descriptor.enumerable && descriptor.value != null) (legacy ??= {})[name.slice(1)] = descriptor.value;
     defineCompat(key, name, get, set);
   }
-  if (Object.keys(legacy).length) setKeyPatch(id, legacy);
+  if (legacy) setKeyPatch(id, legacy);
 }
 
 function installEffectCompat(effect: any) {
@@ -130,13 +134,17 @@ function installLayerCompat(layer: any) {
 }
 
 function collectProject(proj: any) {
-  const ids: any = { keys: new Set(), layers: new Set(), effects: new Set() };
+  // Key ids matter only to prune stored handles: a dense project has a million
+  // keys and usually no stored handles (a key's handles added during this walk
+  // belong to a key that is present).
+  const keys = keyHandles.size ? new Set() : null;
+  const ids: any = { keys, layers: new Set(), effects: new Set() };
   const visitProps = (props: any) => Object.values(props || {}).forEach((prop: any) => {
     if (!prop || !Array.isArray(prop.kf)) return;
     prop.kf.forEach((key: any) => {
       const id = idOf(key);
       if (!id) return;
-      ids.keys.add(id);
+      keys?.add(id);
       installKeyCompat(key);
     });
   });
@@ -169,7 +177,7 @@ function prune(proj: any) {
   if (activeProject && activeProject !== proj) clear();
   activeProject = proj || null;
   const ids = collectProject(proj);
-  for (const id of keyHandles.keys()) if (!ids.keys.has(id)) keyHandles.delete(id);
+  if (ids.keys) for (const id of keyHandles.keys()) if (!ids.keys.has(id)) keyHandles.delete(id);
   for (const id of reveal.keys()) if (!ids.layers.has(id)) reveal.delete(id);
   for (const id of shaderMeta.keys()) if (!ids.layers.has(id)) shaderMeta.delete(id);
   for (const id of fxOpen.keys()) if (!ids.effects.has(id)) fxOpen.delete(id);
