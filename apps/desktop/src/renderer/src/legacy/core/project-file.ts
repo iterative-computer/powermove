@@ -275,6 +275,6 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
 }
 
 /** Embedded media ranges main copies into the media store at once. */
-const PROJECT_RANGE_COPIES = 4;
+const PROJECT_RANGE_COPIES = 8;
 /** Bytes of restored media the page holds before folding them into a Blob. */
 const RESTORE_FOLD_BYTES = 64 * 1024 * 1024;

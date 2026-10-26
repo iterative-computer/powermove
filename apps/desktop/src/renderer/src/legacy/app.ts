@@ -498,7 +498,7 @@ function hydrate(p: any) {
 }
 /** How long hydration's prioritized slices may hold back other tasks (an
  *  open's embedded media is copied in round trips meanwhile). */
-const HYDRATE_TURN_MS = 48;
+const HYDRATE_TURN_MS = 16;
 async function hydrateAsync(p: any, isCurrent = () => true) {
   const steps = hydrateSteps(p);
   let deadline = performance.now() + 4, turn = performance.now() + HYDRATE_TURN_MS, result = steps.next();
