@@ -117,3 +117,36 @@ it('hydrate still drops entries that are not effect objects', () => {
 
   assert.equal(PM.proj.layers[0].fx.length, 1);
 });
+
+it('migrates unversioned saved effects to revision one without replacing their controls or animation', () => {
+  const PM = bootWith([{ id: 'legacy-invert', type: 'invert', on: true,
+    p: { amount: { v: 37, kf: [], expr: 'value + 1' } } }], { registerBefore: true });
+  const effect = PM.proj.layers[0].fx[0];
+  assert.equal(effect.version, 1);
+  assert.equal(effect.missing, undefined);
+  assert.equal(effect.p.amount.v, 37);
+  assert.equal(effect.p.amount.expr, 'value + 1');
+  assert.deepEqual(Object.keys(effect.p), ['amount']);
+  assert.deepEqual(PM.effectDef(effect).params.map(param => param.k), ['amount']);
+});
+
+it('keeps a newer unavailable revision missing with its editable channels intact', () => {
+  const PM = bootWith([{ id: 'future-invert', type: 'invert', version: 99, on: true,
+    p: { futureChannel: { v: 17, kf: [], expr: null } } }], { registerBefore: true });
+  const effect = PM.proj.layers[0].fx[0];
+  assert.equal(effect.version, 99); assert.equal(effect.missing, true);
+  assert.equal(effect.p.futureChannel.v, 17);
+  registerEffects(PM);
+  assert.equal(effect.missing, true); assert.equal(effect.p.futureChannel.v, 17);
+});
+
+
+it('retains future layer-input revisions and initializes known inputs outside channels', () => {
+  const inputs = { map: { layerId: 'deleted-layer', stage: 'future-stage', future: 7 } };
+  const PM = bootWith([{ id: 'future-map', type: 'setMatte', version: 999, on: true, inputs, p: {} },
+    { id: 'known-map', type: 'displacementMap', version: 1, on: true, p: {} }], { registerBefore: true });
+  const [future, known] = PM.proj.layers[0].fx;
+  assert.equal(future.missing, true); assert.deepEqual(future.inputs, inputs);
+  assert.deepEqual(known.inputs, { map: { layerId: null, stage: 'source' } });
+  assert.equal(known.p.map, undefined);
+});

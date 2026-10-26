@@ -50,16 +50,27 @@ describe('legacy workspace library behavior survivors', () => {
     const PM = workspaceModel();
     const compact = PM.WS.normalize(manifest()).chrome;
     expect({ ...compact.timeline }).toEqual({
-      rowHeight: 30,
-      gutterWidth: 224,
-      rulerHeight: 28,
+      rowHeight: 28,
+      gutterWidth: 494,
+      rulerHeight: 32,
       clipRadius: 5,
-      keyframeSize: 8,
-      showLayerNumbers: true,
+      keyframeSize: 10,
+      showLayerNumbers: false,
       showTypeBadges: true,
+      showSwitches: true,
       toolbarDensity: 'compact',
     });
-    expect(compact.timelineChromeSchema).toBe(4);
+    expect(compact.timelineChromeSchema).toBe(6);
+    // Schema 4's stock 224px layer list takes the prototype's measurements.
+    const stock4 = PM.WS.normalize(manifest({ chrome: { timelineChromeSchema: 4, timeline: {
+      rowHeight: 30, gutterWidth: 224, rulerHeight: 28, clipRadius: 5, keyframeSize: 8,
+      showLayerNumbers: true, showTypeBadges: true, showSwitches: true, toolbarDensity: 'compact' } } })).chrome.timeline;
+    expect(stock4.gutterWidth).toBe(494);
+    // Schema 5 with a dragged layer list keeps the width; stock values move.
+    const dragged5 = PM.WS.normalize(manifest({ chrome: { timelineChromeSchema: 5, timeline: {
+      rowHeight: 30, gutterWidth: 352, rulerHeight: 28, clipRadius: 5, keyframeSize: 8,
+      showLayerNumbers: true, showTypeBadges: true, showSwitches: true, toolbarDensity: 'compact' } } })).chrome.timeline;
+    expect(dragged5).toMatchObject({ gutterWidth: 352, rowHeight: 28, rulerHeight: 32, showLayerNumbers: false });
 
     const customized = PM.WS.normalize(manifest({
       chrome: { timeline: { rowHeight: 34, gutterWidth: 240 } },

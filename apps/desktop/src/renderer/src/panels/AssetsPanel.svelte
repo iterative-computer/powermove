@@ -132,7 +132,7 @@
     if (asset.format === 'svg' || /\.svg$/i.test(asset.name)) parts.push('SVG');
     // An animated image becomes a clip, so name the container it came from.
     else if (asset.format && asset.kind !== 'model') parts.push(asset.format.toUpperCase());
-    if (asset.kind !== 'audio' && asset.w && asset.h) parts.push(`${asset.w}×${asset.h}`);
+    if (asset.kind !== 'audio' && asset.kind!=='lut' && asset.w && asset.h) parts.push(`${asset.w}×${asset.h}`);
     if (asset.dur) parts.push(mediaDuration(asset.dur));
     if (asset.kind === 'model' && asset.triangles) parts.push(`${asset.triangles.toLocaleString()} tris`);
     if (asset.size) parts.push(mediaSize(asset.size));
@@ -194,7 +194,7 @@
     PM.menu(event.currentTarget, [
       { header: asset.name },
       ...(offline && PM.assets.cloud?.get(asset.id) ? [{ label: 'Download from cloud', run: () => PM.assets.cloud.download(asset.id) }] : []),
-      ...(offline ? [] : [
+      ...(offline||asset.kind==='lut' ? [] : [
         { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
         ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
@@ -355,9 +355,7 @@
     status = `Confirm deletion of ${name}`;
     void PM.confirm({
       message: items.length === 1 ? `Delete “${name}”?` : `Delete ${name}?`,
-      detail: items.length === 1
-        ? `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`
-        : 'This also removes layers that use the selected media. You can undo this.',
+      detail: 'Layers using this media are removed. Effects using it keep a missing source until it is restored. You can undo this.',
       confirmLabel: 'Delete'
     }).then((ok: boolean) => {
       if (ok) deleteAssets(items, project);
@@ -565,6 +563,7 @@
   }
 
   function previewToggle(asset: Asset): void {
+    if(asset.kind==='lut'){status=`${asset.name} is a color lookup table`;return;}
     if (asset.kind === 'model') { status = `${asset.name} is a 3D model`; return; }
     const preview = PM.Kernel?.services.get('viewer')?.preview;
     if (!preview) { status = 'Source preview is unavailable'; return; }
@@ -890,18 +889,14 @@
 >
   {#if currentFolder}
     <nav class="asset-path" aria-label="Folder path">
-      <button class="asset-path-up" type="button" title="Up one level" aria-label="Up one level"
-        onclick={() => openFolder(crumbs.at(-2)?.id ?? null)}
-        ondragover={(event) => handleFolderDragOver(event, crumbs.at(-2)?.id ?? null)}
-        ondragleave={handleFolderDragLeave}
-        ondrop={(event) => handleFolderDrop(event, crumbs.at(-2)?.id ?? null)}>
-        <Icon {PM} name="chev" />
-      </button>
-      <button class="asset-path-crumb" type="button" class:is-drop-target={folderDropTarget === ''}
+      <button class="asset-path-crumb asset-path-root" type="button" class:is-drop-target={folderDropTarget === ''}
         onclick={() => openFolder(null)}
         ondragover={(event) => handleFolderDragOver(event, null)}
         ondragleave={handleFolderDragLeave}
-        ondrop={(event) => handleFolderDrop(event, null)}>Media</button>
+        ondrop={(event) => handleFolderDrop(event, null)}>
+        <Icon {PM} name="chev" />
+        Media
+      </button>
       {#each crumbs as crumb, index (crumb.id)}
         <span class="asset-path-sep" aria-hidden="true">/</span>
         <button class="asset-path-crumb" type="button" class:is-drop-target={folderDropTarget === crumb.id}

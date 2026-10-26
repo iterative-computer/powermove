@@ -12,6 +12,23 @@ describe('legacy editing install', () => {
     expect(PM.L('early')).toMatchObject({ from: -3, dur: 5 });
   });
 
+  it('continuously rasterizes pre-comps only, with undo', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject({ fps: 30, dur: 10 });
+    const precomp = PM.mkLayer('precomp', { d: { comp: 'C1', w: 100, h: 100 } });
+    const solid = PM.mkLayer('solid');
+    PM.addLayer(precomp, 0); PM.addLayer(solid, 0);
+    PM.hist.clear();
+
+    expect(PM.Edit.apply({ type: 'set_layer', target: precomp.id, patch: { continuousRaster: true } }).ok).toBe(true);
+    expect(PM.L(precomp.id).continuousRaster).toBe(true);
+    const refused = PM.Edit.apply({ type: 'set_layer', target: solid.id, patch: { continuousRaster: true } });
+    expect(refused.ok).toBe(false);
+    expect(PM.L(solid.id).continuousRaster).toBeUndefined();
+    PM.hist.undo();
+    expect(PM.L(precomp.id).continuousRaster).toBeFalsy();
+  });
+
   it('moves a layer before zero without changing its duration or local keys, with undo and redo', () => {
     const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
     PM.proj = PM.mkProject({ fps: 30, dur: 10 });
@@ -43,6 +60,6 @@ describe('legacy editing install', () => {
     expect(PM.Edit.operations.set_transition).toEqual({
       target: 'layer', fields: ['layer', 'edge', 'transition'],
     });
-    expect(Object.keys(PM.Edit.operations)).toHaveLength(24);
+    expect(Object.keys(PM.Edit.operations)).toHaveLength(26);
   });
 });

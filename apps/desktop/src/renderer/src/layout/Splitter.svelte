@@ -3,7 +3,7 @@
   import type { PMRegistry } from '../legacy/registry';
   import { clampPanelHeight, growPanelPair, resolvePairResize, transferPanelHeights } from './geometry';
   import { scrollSideDock, SIDE_DOCKS } from './side-scroll';
-  import { applyPanelSize, defaultDockSize, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
+  import { applyPanelSize, defaultDockSize, fitsContent as fitsPanelContent, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
 
   let {
     PM,
@@ -29,6 +29,9 @@
   let value = $state(0);
   let minimum = $state<number | undefined>(undefined);
   let maximum = $state<number | undefined>(undefined);
+  /* Under a content-height panel in a side column there is nothing to resize:
+     the panel already shows every row and the column scrolls. */
+  let fixed = $state(false);
 
   /* A horizontal splitter with a dock (rather than two panels) sits above the
      bottom dock and resizes that dock's height. */
@@ -95,6 +98,7 @@
     value = readValue();
     minimum = mode === 'vertical' ? 200 : undefined;
     maximum = mode === 'vertical' ? 760 : undefined;
+    fixed = !dockSplit && fitsContent(beforeSpec);
     if (dockSplit) exposeBounds();
   });
 
@@ -132,6 +136,7 @@
     const dock = splitter?.closest<HTMLElement>('.dock');
     return dock && SIDE_DOCKS.has(dock.dataset.dock ?? '') ? dock : null;
   };
+  const fitsContent = (spec?: PanelSpec): boolean => !!spec && fitsPanelContent(PM.PANELS[spec.id] || {}, panelDockId(), spec);
   // Floors follow the state a drag leaves the panel in, not the one it starts in.
   const panelMin = (spec: PanelSpec, fluid: boolean): number => panelMinHeight(spec, PM.PANELS[spec.id] || {}, panelDockId(), fluid);
   /* A side column scrolls, so its dividers resize the pair directly (see
@@ -189,7 +194,8 @@
       const { dock, fluid, otherFluid } = geometry.side;
       const next = growPanelPair(geometry.start, geometry.otherStart, delta, geometry.min, geometry.otherMin);
       pin(geometry.element, geometry.spec, Math.round(next.before), fluid);
-      pin(geometry.otherElement, geometry.other, Math.round(next.after), otherFluid);
+      // A content-height neighbour below keeps its own length.
+      if (!fitsContent(geometry.other)) pin(geometry.otherElement, geometry.other, Math.round(next.after), otherFluid);
       revealSplitter(dock);
       height = next.before;
     } else if (geometry.resize.mode === 'transfer') {
@@ -262,7 +268,7 @@
   }
 
   function onPointerDown(event: PointerEvent): void {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || fixed) return;
     event.stopPropagation();
     exposeBounds();
     trackPointer(event);
@@ -357,7 +363,7 @@
     const delta = mode === 'vertical'
       ? event.key === 'ArrowRight' ? 10 : event.key === 'ArrowLeft' ? -10 : null
       : event.key === 'ArrowDown' ? 10 : event.key === 'ArrowUp' ? -10 : null;
-    if (delta == null) return;
+    if (delta == null || fixed) return;
     event.preventDefault();
     if (dockSplit) {
       const { sign } = verticalTarget();
@@ -379,6 +385,7 @@
   bind:this={splitter}
   class:splitter={true}
   class:h={mode === 'horizontal'}
+  class:fixed
   role="separator"
   aria-orientation={mode}
   aria-label={dockSplit ? 'Resize dock' : 'Resize panels'}

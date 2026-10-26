@@ -228,6 +228,43 @@ describe('project settings control', () => {
 });
 
 describe('new project form', () => {
+  it('keeps a dimension field focused when deferred initial focus runs after navigation', () => {
+    const form = createNewProjectForm();
+    document.body.append(form.element);
+    const height = field(form, 'Height in pixels');
+    height.focus();
+    form.focus();
+    expect(document.activeElement).toBe(height);
+    form.element.remove();
+  });
+
+  it('preserves the caret after the user has started editing the name', () => {
+    const form = createNewProjectForm();
+    document.body.append(form.element);
+    const name = field(form, 'Project name') as HTMLInputElement;
+    name.focus();
+    name.value = 'Kinetic';
+    name.setSelectionRange(7, 7);
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    form.focus();
+    expect([name.selectionStart, name.selectionEnd]).toEqual([7, 7]);
+    form.element.remove();
+  });
+
+  it('selects the default name only before the user interacts', () => {
+    const form = createNewProjectForm();
+    document.body.append(form.element);
+    const name = field(form, 'Project name') as HTMLInputElement;
+    form.focus();
+    expect(document.activeElement).toBe(name);
+    expect([name.selectionStart, name.selectionEnd]).toEqual([0, name.value.length]);
+    name.setSelectionRange(2, 2);
+    name.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    form.focus();
+    expect([name.selectionStart, name.selectionEnd]).toEqual([2, 2]);
+    form.element.remove();
+  });
+
   it('uses an in-window background picker without a native colour input', () => {
     let read!: () => string;
     let write!: (value: string) => void;

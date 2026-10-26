@@ -96,7 +96,7 @@ test('timeline motion retains subpixel updates independently of composition fram
     PM.bus.on('project', onProject); PM.bus.on('transport', onTransport);
     let stem: number | null = null;
     context.moveTo = function (x: number, y: number) {
-      stem = y === 7 ? x : null;
+      stem = y === timeline.ruler - (timeline.header || 0) - 2 ? x : null; // the playhead line starts under its head
       return move.call(this, x, y);
     };
     context.lineTo = function (x: number, y: number) {
@@ -210,7 +210,7 @@ test('scrub indicator follows subframe pointer motion while selected frames stay
     const positions: number[] = [];
     let stem: number | null = null;
     context.moveTo = function (x: number, y: number) {
-      stem = y === 7 ? x : null;
+      stem = y === timeline.ruler - (timeline.header || 0) - 2 ? x : null; // the playhead line starts under its head
       return move.call(this, x, y);
     };
     context.lineTo = function (x: number, y: number) {

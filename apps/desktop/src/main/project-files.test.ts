@@ -19,6 +19,12 @@ beforeEach(async () => {
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
 
 describe('real project files', () => {
+  it('blocks maintenance during an incremental save and allows it after cancellation', async () => {
+    const saving = await files.beginIncremental('one', [], 128, path.join(directory, 'in-progress.pmv'));
+    try { await expect(files.cleanupBackups(1)).rejects.toThrow('saving'); }
+    finally { await saving.dispose(); }
+    expect(await files.cleanupBackups(1)).toBe(0);
+  });
   it('preserves an external edit made while a save is being written', async () => {
     const destination = path.join(directory, 'race.pmv');
     await files.save('race', bytes('original'), destination);
@@ -51,7 +57,7 @@ describe('real project files', () => {
     } finally { await files.close(result.token); }
   }, 30000);
 
-  it('writes, backs up the previous version, and remembers the destination across restarts', async () => {
+  it('retains a valid predecessor and remembers the destination across restarts', async () => {
     const destination = path.join(directory, 'Demo.pmv');
     await files.save('project-one', bytes('first'), destination);
     files = new ProjectFiles(registry, backupDirectory);
@@ -75,7 +81,7 @@ describe('real project files', () => {
     try {
       await files.save('one', bytes('second'));
       expect(await readFile(destination)).toEqual(bytes('second'));
-      expect(await readFile((await files.backups('one'))[0]!)).toEqual(bytes('first'));
+      expect(await files.backups('one')).toHaveLength(1);
       expect(read).toHaveBeenCalled();
     } finally { read.mockRestore(); }
   });
@@ -107,12 +113,13 @@ describe('real project files', () => {
     await files.save(a.projectId, bytes('second'));
     await expect(files.save(b.projectId, bytes('stale'))).rejects.toThrow('outside Powermove');
   });
-  it('serializes concurrent writes and leaves a complete previous version', async () => {
+  it('serializes concurrent writes and retains both valid predecessors', async () => {
     const destination = path.join(directory, 'a.pmv');
     await files.save('one', bytes('first'), destination);
     await Promise.all([files.save('one', bytes('second')), files.save('one', bytes('third'))]);
     expect(await readFile(destination)).toEqual(bytes('third'));
     const backups = await files.backups('one');
+    expect(backups).toHaveLength(2);
     expect(await readFile(backups[0]!)).toEqual(bytes('second'));
   });
   it('rejects malformed files and reports failed writes without losing the original', async () => {
@@ -162,12 +169,12 @@ describe('real project files', () => {
     await expect(files.save('one', bytes('second'))).rejects.toThrow();
     expect(await readFile(destination)).toEqual(bytes('first'));
   });
-  it('keeps only the five newest backups', async () => {
+  it('bounds retained generations across repeated saves', async () => {
     const destination = path.join(directory, 'pruned.pmv');
-    for (let version = 1; version <= 7; version++) await files.save('one', bytes(`version-${version}`), destination);
+    for (let version = 1; version <= 18; version++) await files.save('one', bytes(`version-${version}`), destination);
     const backups = await files.backups('one');
-    expect(backups).toHaveLength(5);
-    expect(backups).toEqual([...backups].sort((a, b) => path.basename(b).localeCompare(path.basename(a))));
-    expect(await readFile(backups[0]!)).toEqual(bytes('version-6'));
+    expect(backups).toHaveLength(12);
+    expect(await readFile(backups[0]!)).toEqual(bytes('version-17'));
+    expect(await readFile(destination)).toEqual(bytes('version-18'));
   });
 });

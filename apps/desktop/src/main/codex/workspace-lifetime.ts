@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { renameSync } from 'node:fs';
 
 import { agentStateRoot, agentWorkspaceRoot, safeAgentComponent } from './workspace';
 
@@ -65,7 +66,7 @@ export async function sweepOrphanWorkspaces(
   busy: ReadonlySet<string> = new Set(),
   now = Date.now()
 ): Promise<string[]> {
-  const workspacesRoot = path.join(userData, 'Agent Workspaces');
+  const workspacesRoot = path.dirname(agentWorkspaceRoot(userData, 'project'));
   const live = new Set([...liveProjectIds].map((id) => safeAgentComponent(id)));
   const keep = new Set([APP_AGENT_WORKSPACE, ...[...busy].map((id) => safeAgentComponent(id))]);
   const removed: string[] = [];
@@ -86,4 +87,44 @@ export async function sweepOrphanWorkspaces(
     }
   }
   return removed;
+}
+
+/** Generated dependency and API caches can be recreated. Never remove user
+ * artifacts, source, attachments, session state or unfinished extension edits. */
+export async function cleanWorkspaceCaches(userData: string, anyBusy: () => boolean, manual = false, now = Date.now(), dryRun = false): Promise<number> {
+  const root = path.dirname(agentWorkspaceRoot(userData, 'project'));
+  if (anyBusy()) return 0;
+  try { if (!(await lstat(root)).isDirectory()) return 0; } catch (error) { if (missing(error)) return 0; throw error; }
+  let bytes = 0;
+  const size = async (file: string): Promise<number> => {
+    const entry = await lstat(file);
+    if (entry.isSymbolicLink()) return 0;
+    if (entry.isFile()) return entry.size;
+    let total = 0;
+    if (entry.isDirectory()) for (const name of await list(file)) total += await size(path.join(file, name));
+    return total;
+  };
+  for (const name of await list(root)) {
+    if (name.startsWith('.') || name === APP_AGENT_WORKSPACE || anyBusy()) continue;
+    const workspace = path.join(root, name);
+    if (!(await lstat(workspace)).isDirectory()) continue;
+    if (now - await lastTouched(workspace) < (manual ? 60 * 60 * 1000 : ORPHAN_IDLE_MS)) continue;
+    for (const cache of ['powermove-api', 'node_modules', '__pycache__', '.pytest_cache']) {
+      const file = path.join(workspace, cache);
+      try {
+        const entry = await lstat(file);
+        if (!entry.isDirectory()) continue;
+        const count = await size(file);
+        // Busy is checked immediately before a synchronous detach. New runs
+        // see an empty cache, never a directory being removed beneath them.
+        if (anyBusy()) return bytes;
+        if (dryRun) { bytes += count; continue; }
+        const holding = path.join(root, `${REMOVING_PREFIX}${randomUUID()}`);
+        renameSync(file, holding);
+        await rm(holding, { recursive: true, force: true });
+        bytes += count;
+      } catch (error) { if (!missing(error)) throw error; }
+    }
+  }
+  return bytes;
 }

@@ -77,10 +77,10 @@ Check API pack/get_workspace_state before claiming unavailable. Panel targets: s
 ANIMATION-FIRST VALUES
 Treat every user-editable project value as keyframeable by default: each effect, layer type, generated control, or extension. Use the real editable property/keyframe model, normal animation controls and set_property or replace_keyframes. Never flatten adjustable values or duplicate state. Only structural metadata may be non-keyframeable.
 
-Supported commands: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
+Commands: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
 
 GROUPS AND PARENTING
-Groups: group_layers {targets,name}, ungroup_layers {targets}, move_to_group {targets,group:ID|null}; animate with set_property. move_to_group preserves world pose at the playhead, rebasing local transforms; animated rigs affect other times. Join before animating the rig, or set local transforms afterward. reorder_layer uses composition-wide indices and may change groups; siblings: edit_layer_strips {operation:"reorder",layerIds,anchorId,placement:"before"|"after"}. Parent: set_layer {target,patch:{parent:ID|null}} preserves pose/rejects cycles. Never group with precomps.
+group_layers {targets,name}, ungroup_layers {targets}, move_to_group {targets,group:ID|null}; animate with set_property. move_to_group preserves world pose at the playhead, rebasing local transforms; rigs affect other times. Join before animating the rig, or set local transforms afterward. reorder_layer uses composition-wide indices and may change groups; siblings: edit_layer_strips {operation:"reorder",layerIds,anchorId,placement:"before"|"after"}. Parent: set_layer {target,patch:{parent:ID|null}} preserves pose/rejects cycles. Never group precomps.
 
 ${extensionGuidance}
 

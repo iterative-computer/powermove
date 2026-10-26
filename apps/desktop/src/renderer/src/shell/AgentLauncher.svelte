@@ -14,6 +14,8 @@
   let hovering = $state(false);
   // A pinned (docked) agent panel carries the conversation; the launcher steps aside.
   let docked = $state(false);
+  // The home screen has no agent.
+  let home = $state(false);
   let now = $state(Date.now());
   let wasRunning = false;
   let lastThread: string | undefined;
@@ -75,7 +77,7 @@
 
   onMount(() => {
     open = !!PM.AgentShell?.isOpen?.();
-    const syncDocked = () => { docked = !!PM.AgentShell?.isDocked?.(); };
+    const syncDocked = () => { docked = !!PM.AgentShell?.isDocked?.(); home = !!PM.ProjectsScreen?.isOpen; };
     syncDocked();
     const offLayout = PM.bus?.on?.('layout:applied', syncDocked);
     const offProjects = PM.bus?.on?.('projects:screen', syncDocked);
@@ -88,7 +90,7 @@
   });
 </script>
 
-{#if !docked}
+{#if !docked && !home}
 <div class="agent-launcher-wrap" role="presentation" onpointerenter={enter} onpointerleave={leave}>
   <button
     id="agent-launcher"

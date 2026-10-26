@@ -50,6 +50,37 @@ describe('timeline extension', () => {
     vi.restoreAllMocks();
   });
 
+  it.each(['layers', 'tracks'])('adds and removes ruler markers in %s mode', async mode => {
+    const value = activate();
+    const canvas = build(value).querySelector<HTMLCanvasElement>('#tl-canvas')!;
+    const timeline = value.state.timeline as any;
+    timeline.mode = mode; timeline.w = 900; timeline.pps = 90; timeline.scrollT = 0;
+    const context = (time: number, y: number) => {
+      const event = new MouseEvent('contextmenu', { clientX: 400, clientY: 100, cancelable: true });
+      Object.defineProperties(event, { offsetX: { value: timeline.gut + time * timeline.pps }, offsetY: { value: y } });
+      canvas.dispatchEvent(event);
+    };
+    context(2, 15);
+    const pending = vi.mocked(value.api.ui.menu).mock.calls.at(-1)![1];
+    const items = await pending as any[];
+    const add = items.find(item => item.label === 'Add marker here');
+    expect(add).toBeTruthy();
+    add.run();
+    expect(value.api.edit.apply).toHaveBeenLastCalledWith({ type: 'add_marker', time: 2 }, { label: 'Add marker', origin: 'timeline' });
+    value.state.project.markers = [{ id: 'beat', t: 2, name: 'Beat' }];
+    context(2, timeline.ruler - 6);
+    const remove = (vi.mocked(value.api.ui.menu).mock.calls.at(-1)![1] as any[])[0];
+    expect(remove.label).toBe('Remove marker');
+    remove.run();
+    expect(value.api.edit.apply).toHaveBeenLastCalledWith({ type: 'remove_marker', index: 0 }, { label: 'Remove marker', origin: 'timeline' });
+    expect(value.state.time).toBe(0);
+    const commands = vi.mocked(value.api.commands.register).mock.calls.map(([command]) => command);
+    expect(commands.find(command => command.id === 'timeline.addMarker')).toBeTruthy();
+    expect(commands.find(command => command.id === 'timeline.removeMarker')!.when!()).toBe(false);
+    value.state.time = 2;
+    expect(commands.find(command => command.id === 'timeline.removeMarker')!.when!()).toBe(true);
+  });
+
   it('registers the live timeline service and panel with automatic disposal', () => {
     const value = activate();
     expect(value.state.panel).toMatchObject({
@@ -239,7 +270,8 @@ describe('timeline extension', () => {
     const canvas = build(value).querySelector<HTMLCanvasElement>('#tl-canvas')!;
     const timeline = value.state.timeline as any;
     value.emit('selection', value.state.selection);
-    const click = () => pointer(canvas, 64, timeline.ruler + timeline.row / 2);
+    // The disclosure triangle sits at x 87, before the type swatch.
+    const click = () => pointer(canvas, 87, timeline.ruler + timeline.row / 2);
     click();
     expect(group.groupCollapsed).toBe(true);
     value.state.selection.keys = keys;
@@ -268,14 +300,16 @@ describe('timeline extension', () => {
     vi.mocked(value.api.transport.invalidate).mockClear();
     value.state.time = 2;
     value.emit('time', 2);
-    expect(body.querySelector('#tl-time')?.textContent).toBe('2:30');
+    expect(body.querySelector('#tl-time')?.textContent).toBe('0:00:02:00');
     expect(value.api.transport.invalidate).toHaveBeenCalledWith('timeline');
     value.state.time = 0;
     value.state.project.fps = 24;
     if (!value.state.timeline) throw new Error('timeline service not registered');
     value.state.timeline.graph = true;
     value.emit('project:changed', { kind: 'project' });
-    expect(body.querySelector('#tl-time')?.textContent).toBe('0:24');
+    value.state.time = 1.5;
+    value.emit('project:changed', { kind: 'project' });
+    expect(body.querySelector('#tl-time')?.textContent).toBe('0:00:01:12');
     expect(body.querySelector('button[title="Graph editor (Shift+F3)"]')?.classList.contains('on')).toBe(true);
   });
 
@@ -308,7 +342,7 @@ describe('timeline extension', () => {
     expect(slot.firstElementChild).toBe(body.querySelector('button[title="Graph options"]'));
     expect(slot.previousElementSibling?.classList.contains('tl-transport')).toBe(true);
     expect(graph.closest('.tl-transport')).toBeNull();
-    expect(graph.querySelector('[data-icon="bezier"]')).not.toBeNull();
+    expect(graph.querySelector('[data-icon="dopeGraph"]')).not.toBeNull();
     expect(body.querySelector('button[title="Snapping (S)"]')).toBeNull();
     expect(body.querySelector('button[title="Play / Pause (Space)"]')).not.toBeNull();
     expect(body.querySelector('input[aria-label="Timeline zoom"]')).toBeNull();

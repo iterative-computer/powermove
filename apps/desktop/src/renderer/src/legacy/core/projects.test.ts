@@ -180,3 +180,18 @@ describe('legacy project registry install', () => {
     expect(PM.Projects.pickBoot({ open: ['older', 'current'], metas: [], get, getState, taken: ['current', 'older'] })).toBeNull();
   });
 });
+
+it('replays completed edits and Undo with unchanged or decreasing edit revisions', async () => {
+  const { PM, memory } = projectsRegistry();
+  let publish!: (value: any) => void;
+  PM.bus = { on: (_name: string, handler: any) => { publish = handler; } };
+  install(PM);
+  memory.set('project.P1', { recoverySequence: 0, proj: { id: 'P1', revision: 5, name: 'Initial', layers: [] } });
+  PM.store.getAsync = async (key: string, fallback: any) => structuredClone(memory.has(key) ? memory.get(key) : fallback);
+  publish({ projectId: 'P1', revision: 5, patches: [{path:['name'],exists:true,value:'Direct edit'}] });
+  expect((await PM.Projects.getAsync('P1')).name).toBe('Direct edit');
+  publish({ projectId: 'P1', revision: 4, patches: [{path:['name'],exists:true,value:'Undone'}] });
+  expect((await PM.Projects.getAsync('P1')).name).toBe('Undone');
+  expect(PM.Projects.get('P1').name).toBe('Undone');
+  expect(memory.get('projectJournal.P1').map((entry: any) => entry.sequence)).toEqual([1,2]);
+});

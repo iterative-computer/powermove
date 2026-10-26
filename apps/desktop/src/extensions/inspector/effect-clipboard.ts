@@ -3,6 +3,8 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 type JsonObject = { [key: string]: JsonValue };
 type EffectLike = {
   type: string;
+  version?: number;
+  inputs?: Record<string, any>;
   on?: boolean | { v: boolean; kf: unknown[]; expr?: string | null };
   open?: boolean;
   p?: Record<string, unknown>;
@@ -12,6 +14,8 @@ export type PasteEffectCommand = {
   type: 'add_effect';
   target: string;
   effect: string;
+  version?: number;
+  inputs?: Record<string, any>;
   parameters: JsonObject;
   open: boolean;
   enabled: boolean;
@@ -30,7 +34,9 @@ const clone = <T>(value: T): T => {
 export function copyEffects(effects: EffectLike[]): number {
   clipboard = effects.map((effect) => ({
     effect: effect.type,
+    version: effect.version ?? 1,
     parameters: clone(effect.p ?? {}) as JsonObject,
+    ...(effect.inputs ? { inputs: clone(effect.inputs) } : {}),
     open: effect.open !== false,
     enabled: isProperty(effect.on) ? (effect.on as any).v !== false : effect.on !== false,
     ...(isProperty(effect.on) ? { enabledAnimation: clone(effect.on as unknown as JsonObject) } : {}),

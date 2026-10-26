@@ -90,8 +90,10 @@
     border-top-color: var(--section-line);
   }
 
+  /* As in the prototype, a rule separates Content from the align strip. */
   .inspector-layer > :global(.sec:first-child) {
     margin-top: 0;
+    border-top: 1px solid var(--section-line);
   }
 
   .inspector-layer > :global(.inspector-section-heading.is-empty + .sec) {

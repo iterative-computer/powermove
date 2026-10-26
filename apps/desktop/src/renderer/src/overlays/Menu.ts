@@ -101,6 +101,16 @@ export class MenuController {
         cursorOrigin,
         label: this.menuLabel(items),
         onrun: (item: MenuAction) => {
+          /* Without the native bridge a submenu opens in place, with a way back. */
+          if (item.submenu) {
+            const parent = items;
+            this.open(anchor, [
+              { label: '‹ Back', run: () => this.open(anchor, parent, options) },
+              { header: item.label },
+              ...item.submenu
+            ], options);
+            return;
+          }
           this.close(true);
           item.run?.();
         },

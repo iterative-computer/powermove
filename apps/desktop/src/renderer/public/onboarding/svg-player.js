@@ -214,8 +214,7 @@ export async function createOnboardingSvgPlayer(options) {
       node.output.setAttribute('display', active ? 'inline' : 'none');
       if (!active) continue;
       const path = node.layer.d.paths[0];
-      // Every path shares the first path's transform; together they draw the mark.
-      const data = node.layer.d.paths.map(each => pathData(engine, node.layer, each, nextTime)).join(' ');
+      const data = pathData(engine, node.layer, path, nextTime);
       let presentationScale = 1;
       let matrix = combinedPathMatrix(engine, node.layer, path, nextTime);
       node.glowPath.setAttribute('d', data);

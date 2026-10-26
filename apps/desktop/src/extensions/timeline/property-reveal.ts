@@ -40,7 +40,7 @@ function keysFor(api: Pick<PowermoveAPI, 'anim' | 'effects' | 'model' | 'selecti
       case 'ss': return k === api.selection.chan() || (api.selection.chan() === 'scale' && k.startsWith('scale.')) || p.prop.kf.some((kf: any) => selected.has(kf.i));
       case 'aa': return p.group === 'Material Options';
       case 'pp': return /^(Paint|Puppet|Roto Brush)/.test(p.group || '');
-      case 'ff': return (layer.fx || []).some((fx: any) => fx.id === k.split('.')[0] && !api.effects.get(fx.type));
+      case 'ff': return (layer.fx || []).some((fx: any) => fx.id === k.split('.')[0] && !api.effects.get(fx.type, fx.version ?? 1));
       default: return false;
     }
   }).map((p: any) => p.key);

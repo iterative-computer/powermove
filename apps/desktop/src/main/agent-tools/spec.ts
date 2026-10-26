@@ -26,6 +26,7 @@ const closedObject = (properties: Record<string, unknown>, required: string[] = 
 
 export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   ...ORCHESTRATION_TOOLS,
+  { name: 'publish_visual_reply', description: 'Publish a self-contained interactive HTML visual attachment in this run’s thread before your final text. Keep the explanation in your normal prose reply; the page supplements it. The inline preview is 280×180 CSS pixels, with deliberate expansion for full interaction. Use for storyboards, timing/easing charts and palettes. Inline CSS/scripts/SVG work; network, file paths, forms, nested pages, host tools and external links are unavailable. Embed only small raster data:image/png|jpeg|webp|gif;base64 images (192 KiB each); complete HTML max 384 KiB, up to four pages per run. Use CSS variables --background, --foreground, --muted, --accent for live theme support. Give each interactive control an accessible label. This saves a reply, never edits the composition. Verify with capture_panel and report any validation limits.', inputSchema: closedObject({ title: { type: 'string', minLength: 1, maxLength: 120 }, html: { type: 'string', minLength: 1, maxLength: 393216 }, height: { type: 'integer', minimum: 160, maximum: 900 } }, ['title', 'html']) },
   {
     name: 'get_timeline',
     description: 'Read compact layer strips in visual stack order, with selection, frame positions, timing, source ranges, group/parent links, visibility, solo and locks. Page with offset/limit. Refreshes the revision baseline before editing. Every layer owns its own strip; vertical order controls compositing, not chronological order.',
@@ -186,7 +187,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'apply_commands',
-    description: 'Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly. move_to_group preserves world pose at the playhead by rebasing local transforms, including scale; it does not preserve the whole animation. Join before animating the rig, or set intended local transforms afterward. reorder_layer index is composition-wide and may change group membership; use edit_layer_strips operation reorder with sibling anchorId and placement before/after to stay in the group. Captions: add_captions {name?, cues:[{start,end,text}] | text (SRT/WebVTT) + format?, style?:{preset:classic|boxed|whisper|spotlight|pop|paper, ...overrides}, language?, from?} adds a captions layer on top (it moves to a free position, e.g. top, when another captions layer shows at the same time, unless style sets placement); edit_captions {target, op} with op replace|insert {cues}, update {cues:[{id,start?,end?,text?}]}, delete|merge {ids}, split {id, at}, move {ids?, by}, import {text, format?, replace?}, style {style}. Caption times are composition seconds; get_project_state lists cue ids (page with cueOffset/cueLimit).',
+    description: 'simplify_keyframes {scope:project|layers|properties, targets?:layerIds, properties?:[{layerId,path}]} removes only verified redundant keys, returns before/after counts, and keeps locked layers and expressions. Large keyframe edits apply as written and offer the user a separate optional Simplify undo step; prefer sparse keys or expressions. Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly. move_to_group preserves world pose at the playhead by rebasing local transforms, including scale; it does not preserve the whole animation. Join before animating the rig, or set intended local transforms afterward. reorder_layer index is composition-wide and may change group membership; use edit_layer_strips operation reorder with sibling anchorId and placement before/after to stay in the group. Captions: add_captions {name?, cues:[{start,end,text}] | text (SRT/WebVTT) + format?, style?:{preset:classic|boxed|whisper|spotlight|pop|paper, ...overrides}, language?, from?} adds a captions layer on top (it moves to a free position, e.g. top, when another captions layer shows at the same time, unless style sets placement); edit_captions {target, op} with op replace|insert {cues}, update {cues:[{id,start?,end?,text?}]}, delete|merge {ids}, split {id, at}, move {ids?, by}, import {text, format?, replace?}, style {style}. Caption times are composition seconds; get_project_state lists cue ids (page with cueOffset/cueLimit).',
     inputSchema: closedObject({
       label: { type: 'string', minLength: 1, maxLength: 80 },
       commands: {
@@ -410,13 +411,14 @@ export const POWERMOVE_STORE_READONLY_TOOL_NAMES = [
 /** App runs may manage the library, inspect and stage extensions, and use the
  * Store. Composition edits require a project thread. */
 export const POWERMOVE_APP_AGENT_TOOLS = POWERMOVE_AGENT_TOOLS.filter((tool) =>
-  ['manage_project', 'fork_builtin_extension', 'stage_fork_rebase', 'validate_effect', 'inspect_creative_workspace', 'inspect_creative_extension', 'get_panel_layout', 'set_panel_layout', ...POWERMOVE_STORE_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES].includes(tool.name));
+  ['publish_visual_reply', 'manage_project', 'fork_builtin_extension', 'stage_fork_rebase', 'validate_effect', 'inspect_creative_workspace', 'inspect_creative_extension', 'get_panel_layout', 'set_panel_layout', ...POWERMOVE_STORE_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES].includes(tool.name));
 
 /** Read-only project inspection plus the minimum layout action required to
  * make a hidden panel observable. Editor/planning runs must never receive the
  * project- or control-mutating tools from the complete agent tool set. */
 export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   ...ORCHESTRATION_TOOL_NAMES,
+  'publish_visual_reply',
   'get_project_state',
   'get_timeline',
   'list_media',

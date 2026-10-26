@@ -21,6 +21,7 @@
     edit,
     label,
     weight,
+    styleName,
     onChange,
     mixed
   }: {
@@ -29,6 +30,8 @@
     edit: EditBinding;
     label?: string;
     weight?: () => number;
+    /** The face's style ("Bold"), shown after the family in the closed field. */
+    styleName?: () => string;
     onChange?: (value: string) => void;
     mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
@@ -229,12 +232,12 @@
   aria-expanded={open}
   aria-labelledby={labelledBy}
   aria-label={labelledBy ? undefined : (label ?? edit.label)}
-  style:font-family={cssFontStack(value)}
-  style:font-weight={weight ? String(Math.min(700, Math.max(400, weight()))) : undefined}
+  style:font-family={styleName ? undefined : cssFontStack(value)}
+  style:font-weight={styleName ? undefined : weight ? String(Math.min(700, Math.max(400, weight()))) : undefined}
   onpointerdown={(event) => { event.stopPropagation(); dismissByPress = open; }}
   onpointercancel={() => { dismissByPress = false; }}
   onclick={toggle}
->{isMixed ? 'Mixed' : value}</button>
+>{isMixed ? 'Mixed' : styleName && styleName() ? `${value} ${styleName()}` : value}</button>
 
 {#if shown}
   <div

@@ -1,4 +1,4 @@
-import { expect, test, chooseNativeMenu } from './helpers/app';
+import { expect, test } from './helpers/app';
 
 test('Pen edits protect nested locked groups and work after unlocking with one Undo', async ({ session }) => {
   await session.openEditor();
@@ -24,7 +24,7 @@ test('Pen edits protect nested locked groups and work after unlocking with one U
     viewer.fit = true; viewer.activePath = path.id; viewer.layout();
     return { group: outer.id, paths: JSON.stringify(PM.L('pen-shape').d.paths) };
   });
-  await chooseNativeMenu(session, 'Pen Tool (G)', () => page.getByRole('button', { name: 'Drawing tools', exact: true }).click());
+  await page.locator('#toolbar button[data-tool="pen"]').click();
   const point = async (x: number, y: number) => {
     const bounds = (await page.locator('#stage-inner').boundingBox())!;
     const scale = await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').shown);

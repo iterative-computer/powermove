@@ -155,9 +155,30 @@ export function appMenuTemplate(
       label: 'Composition',
       submenu: [
         commandItem('New Composition…', 'CommandOrControl+N', 'newComposition', send),
-        commandItem('Composition Settings…', 'CommandOrControl+Alt+K', 'compositionSettings', send),
+        commandItem('Composition Settings…', 'CommandOrControl+Alt+K', 'compositionSettings', send)
+      ]
+    },
+    {
+      /* After Effects' Layer menu: making layers lives here, not in the toolbar.
+         The renderer owns these shortcuts, so New shows none to pre-empt them. */
+      label: 'Layer',
+      submenu: [
+        {
+          label: 'New',
+          submenu: [
+            { id: 'newText', label: 'Text', click: () => send('newText') },
+            { id: 'newSolid', label: 'Solid', click: () => send('newSolid') },
+            { id: 'newShape', label: 'Shape Layer', click: () => send('newShape') },
+            { id: 'newNull', label: 'Null Object', click: () => send('newNull') },
+            { id: 'newAdjustment', label: 'Adjustment Layer', click: () => send('newAdjustment') },
+            { type: 'separator' },
+            { id: '3d.add-camera', label: 'Camera', click: () => send('3d.add-camera') },
+            { id: '3d.add-light', label: 'Light', click: () => send('3d.add-light') }
+          ]
+        },
         { type: 'separator' },
-        commandItem('Pre-compose…', 'CommandOrControl+Shift+C', 'precompose', send, false)
+        commandItem('Pre-compose…', 'CommandOrControl+Shift+C', 'precompose', send, false),
+        { id: 'releasePrecomp', label: 'Release Pre-comp', click: () => send('releasePrecomp') }
       ]
     },
     { label: 'View', submenu: viewItems },

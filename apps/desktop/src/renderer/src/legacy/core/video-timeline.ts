@@ -1,3 +1,5 @@
+import { layerInputPlan, hasLayerInputs } from '../../core/effect-inputs';
+import { evaluatedValue } from './content-properties';
 import { sequenceStreamTime } from '../../../../shared/image-sequence';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
 import { sourceTime } from './retiming';
@@ -13,11 +15,12 @@ export function videoClipsAt(PM: any, time: number): VideoClip[] {
     if (depth > 8) return;
     PM.scope?.push(comp);
     try {
+      const required = hasLayerInputs(comp, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type)) ? layerInputPlan(comp, { assets:PM.assets, definition: (fx: any) => PM.effectDef?.(fx), enabled: (l: any, fx: any) => !!evaluatedValue(PM,l,fx.on,at,`${fx.id}.$enabled`), active: (l: any) => !!PM.active(l,at), contentActive: (l: any) => !!PM.active({...l,group:null},at) }).layerIds : new Set();
       const layers = PM.ProjectIndex?.layersOfType
         ? [...PM.ProjectIndex.layersOfType('video', comp), ...PM.ProjectIndex.layersOfType('precomp', comp)]
         : comp.layers;
       for (const layer of layers) {
-        if (!PM.active(layer, at)) continue;
+        if (!PM.active(layer, at) && !(required.has(layer.id) && at >= layer.from-1e-6 && (at < layer.from+layer.dur-1e-6 || Math.abs(at-comp.dur)<=1e-6 && Math.abs(at-layer.from-layer.dur)<=1e-6))) continue;
         if (layer.type !== 'video' && layer.type !== 'precomp') continue;
         const d = resolveContent(PM, layer, at);
         const variable = d.timeRemap || layer.d.speed?.kf?.length || layer.d.speed?.expr;

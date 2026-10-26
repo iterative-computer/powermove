@@ -198,6 +198,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     PM.WS.mutate((workspace: Workspace) => {
       removePanel(workspace, spec.id);
       insertPanel(workspace, spec, dropTarget!.dockId, index);
+      PM.Layout.rememberPanelOpen?.(spec.id);
     });
     animatePanelLayout(previous);
     PM.toast(`Moved ${PM.PANELS[spec.id]?.title || spec.id} → ${dockLabel(dropTarget.dockId)}`);

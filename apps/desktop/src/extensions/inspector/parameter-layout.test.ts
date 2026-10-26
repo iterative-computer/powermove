@@ -6,7 +6,7 @@ const number=(k:string,extra={}):EffectParamDefinition=>({k,label:k,def:0,min:-1
 
 describe('visual parameter layout',()=>{
   it('keeps old gradient data editable while combining colors, mode, midpoint and center',()=>{
-    const params=EFFECTS.find(effect=>effect.id==='gradient')!.params.map(({advanced,...p})=>p);
+    const params=EFFECTS.find(effect=>effect.id==='gradient')!.legacy![0]!.params.map(({advanced,...p})=>p);
     const layout=parameterLayout(params);
     expect(layout.widgets).toContainEqual({kind:'ramp',start:'startColor',end:'endColor',midpoint:'midpoint',mode:'radial'});
     expect(layout.widgets.some(w=>w.kind==='point'&&w.x==='centerX'&&w.y==='centerY')).toBe(true);
@@ -30,4 +30,9 @@ describe('visual parameter layout',()=>{
     const layout=parameterLayout([number('centerX',{label:undefined}),number('centerY')]);
     expect(layout.widgets).toEqual([{kind:'point',x:'centerX',y:'centerY',label:'center',advanced:undefined}]);
   });
+});
+
+it('keeps explicitly authored spatial controls in their documented order',()=>{
+  expect(parameterLayout(EFFECTS.find(effect=>effect.id==='blur')!.params).primary.map(p=>p.k)).toEqual(['amount','dimensions','repeatEdgePixels']);
+  expect(parameterLayout(EFFECTS.find(effect=>effect.id==='unsharpMask')!.params).primary.map(p=>p.k)).toEqual(['amount','radius','threshold']);
 });

@@ -19,7 +19,7 @@ export function promptSegments<T extends { name: string }>(text: string, attachm
   let cursor = 0;
   const push = (value: string) => { if (value) segments.push({ text: value }); };
   for (const match of text.matchAll(/\[Attachment: ([^\]\n]*)\]/g)) {
-    const index = remaining.findIndex(item => item.name === match[1]);
+    const index = remaining.findIndex(item => item.name === match[1] || match[1]!.startsWith(`${item.name} | `));
     if (index < 0) continue;
     push(text.slice(cursor, match.index));
     segments.push({ attachment: remaining.splice(index, 1)[0]! });
@@ -67,7 +67,8 @@ export class InlinePrompt {
     let result = '', cursor = 0;
     for (const item of draft.attachments) {
       const offset = item.promptOffset ?? draft.text.length;
-      result += draft.text.slice(cursor, offset) + `[Attachment: ${item.name}]`;
+      const note = item.promptNote ? ` | ${item.promptNote.replace(/[\]\n]/g, ' ')}` : '';
+      result += draft.text.slice(cursor, offset) + `[Attachment: ${item.name}${note}]`;
       cursor = offset;
     }
     return result + draft.text.slice(cursor);

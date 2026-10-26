@@ -46,10 +46,7 @@ const MASK_DEFAULTS = { x: 0, y: 0, w: 0, h: 0, rotation: 0, feather: 24 } as co
 const MASK_SHAPES = ['rect', 'ellipse'] as const;
 const FONT_AXIS_PREFIX = 'fontAxis.';
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-const EFFECT_TYPES = new Set([
-  'blur', 'motionblurDir', 'sharpen', 'glow', 'color', 'levels', 'duotone', 'grain',
-  'vignette', 'chroma', 'pixelate', 'posterize', 'displace', 'shadow', 'invert', 'gradient'
-]);
+const EFFECT_ID = /^[a-zA-Z][a-zA-Z0-9._-]{0,63}$/;
 
 let nextId = 0;
 const uid = (prefix: string): string => `${prefix}-${Date.now().toString(36)}-${(++nextId).toString(36)}`;
@@ -175,7 +172,7 @@ function sanitizeTransformChannels(raw: unknown, type: LayerType, comp: Pick<Com
 }
 
 function sanitizeEffect(raw: unknown): Effect | null {
-  if (!isRecord(raw) || typeof raw.type !== 'string' || !EFFECT_TYPES.has(raw.type)) return null;
+  if (!isRecord(raw) || typeof raw.type !== 'string' || !EFFECT_ID.test(raw.type) || FORBIDDEN_KEYS.has(raw.type)) return null;
   const parameters: Record<string, Channel> = {};
   if (isRecord(raw.p)) {
     for (const [name, value] of Object.entries(raw.p)) {
@@ -187,8 +184,11 @@ function sanitizeEffect(raw: unknown): Effect | null {
     id: typeof raw.id === 'string' && raw.id ? raw.id : uid('fx'),
     type: raw.type,
     on: (isProperty(raw.on) ? sanitizeLooseChannel(raw.on, true) : raw.on !== false) as any,
-    p: parameters
+    p: parameters,
+    ...(isRecord(raw.inputs) ? { inputs: JSON.parse(JSON.stringify(raw.inputs)) } : {})
   };
+  effect.version = typeof raw.version === 'number' && Number.isSafeInteger(raw.version) && raw.version > 0 ? raw.version : 1;
+  if (raw.missing === true) effect.missing = true;
   if ('open' in raw) effect.open = !!raw.open;
   return effect;
 }
@@ -233,7 +233,8 @@ function sanitizeTransition(raw: unknown): Transition | null {
   const transition: Transition = {
     type: raw.type,
     dur: clamp(finite(raw.dur, 0.5), 0.02, 600),
-    p: parameters
+    p: parameters,
+    ...(isRecord(raw.inputs) ? { inputs: JSON.parse(JSON.stringify(raw.inputs)) } : {})
   };
   if (raw.missing === true) transition.missing = true;
   return transition;
@@ -507,7 +508,9 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     lock: !!source.lock,
     shy: !!source.shy,
     threeD: type !== 'audio' && type !== 'adjustment' && !!source.threeD,
+    ...(type === 'precomp' && source.continuousRaster === true ? { continuousRaster: true } : {}),
     solo: !!source.solo,
+    ...(source.effectSpace === undefined ? {} : {effectSpace:source.effectSpace as any}),
     matteSource: typeof source.matteSource === 'string' ? source.matteSource : null,
     matteMode: sanitizeLooseChannel(source.matteMode, 'alpha') as any,
     group: typeof source.group === 'string' && source.group !== id ? source.group : null,

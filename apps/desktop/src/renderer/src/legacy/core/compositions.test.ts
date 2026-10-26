@@ -112,6 +112,55 @@ describe('compositions', () => {
     expect(PM.Comps.exists(id)).toBe(false);
   });
 
+  it('releases a pre-comp into a group that keeps its transform, timing and links', () => {
+    const PM = composer();
+    const a = PM.mkLayer('shape', { name: 'A' }, PM.proj); a.from = 2; a.dur = 3;
+    const b = PM.mkLayer('text', { name: 'B' }, PM.proj); b.from = 3; b.dur = 4;
+    b.parent = a.id;
+    PM.proj.layers.push(a, b);
+    const id = PM.Comps.precompose([a.id, b.id], { name: 'Cards', adjustDuration: true });
+    const precomp = PM.proj.layers[0];
+    precomp.p['scale.x'].v = 150;
+    // Trim the pre-comp: its source starts 1s in, and it ends at 4.5s.
+    precomp.d.trim = 1; precomp.dur = 2.5;
+
+    const groupId = PM.Comps.release(precomp.id);
+    expect(groupId).toBe(precomp.id);
+    expect(PM.proj.layers.map((layer: any) => [layer.type, layer.name])).toEqual([['group', 'Cards'], ['shape', 'A'], ['text', 'B']]);
+    const [group, A, B] = PM.proj.layers;
+    expect(group).toMatchObject({ from: 2, dur: 2.5 });
+    expect(group.p['scale.x'].v).toBe(150);
+    expect(A.group).toBe(group.id);
+    expect(B.parent).toBe(A.id);
+    expect(A.id).not.toBe(a.id);
+    // Pre-comp time 1 shows at host time 2: A's 0–3 lands at 1–4 and B's 1–5 at 2–6,
+    // each clipped to the pre-comp's 2–4.5 span, which a group would not enforce.
+    expect([A.from, A.dur]).toEqual([2, 2]);
+    expect([B.from, B.dur]).toEqual([2, 2.5]);
+    // The composition stays for other uses; undo brings the pre-comp back.
+    expect(PM.Comps.exists(id)).toBe(true);
+    PM.hist.undo();
+    expect(PM.proj.layers.map((layer: any) => layer.type)).toEqual(['precomp']);
+  });
+
+  it('refuses to release a pre-comp whose timing or 3D it could not keep', () => {
+    const PM = composer();
+    const a = PM.mkLayer('shape', { name: 'A' }, PM.proj);
+    PM.proj.layers.push(a);
+    PM.Comps.precompose([a.id], { name: 'Cards' });
+    const precomp = PM.proj.layers[0];
+    expect(PM.Comps.releaseIssue(precomp)).toBeNull();
+    precomp.threeD = true;
+    expect(PM.Comps.releaseIssue(precomp)).toMatch(/3D/);
+    precomp.threeD = false;
+    precomp.d.speed = 2;
+    expect(PM.Comps.releaseIssue(precomp)).toMatch(/speed/);
+    precomp.d.speed = 1;
+    precomp.lock = true;
+    expect(() => PM.Comps.release(precomp.id)).toThrow(/Unlock/);
+    expect(PM.Comps.releaseIssue(a)).toMatch(/pre-comp/);
+  });
+
   it('pre-composes one layer leaving its attributes in place', () => {
     const PM = composer();
     const solid = PM.mkLayer('solid', { name: 'Plate', d: { w: 800, h: 600 } }, PM.proj);

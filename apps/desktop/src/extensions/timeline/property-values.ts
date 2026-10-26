@@ -20,7 +20,7 @@ export function propertyMetadata(api: Pick<PowermoveAPI, 'effects' | 'model'>, l
   if (path.startsWith('x.')) return api.model.layerDefinition?.(layer.d?.definition)?.params?.find((p: any) => p.k === path.slice(2)) ?? {};
   if (path.startsWith('u.')) return shaderUniforms(layer.d?.code).find((property) => property.name === path.slice(2)) ?? {};
   const effect = layer.fx?.find((fx: any) => path.startsWith(`${fx.id}.`));
-  if (effect) return api.effects.get(effect.type)?.params.find((property) => property.k === path.slice(effect.id.length + 1)) ?? {};
+  if (effect) return api.effects.get(effect.type, effect.version ?? 1)?.params.find((property) => property.k === path.slice(effect.id.length + 1)) ?? {};
   const key = path.replace(/^c\./, '');
   const metadata: Record<string, { step?: number; min?: number; max?: number }> = {
     w: { step: 1, min: 1 }, h: { step: 1, min: 1 }, size: { step: 1, min: 4 },

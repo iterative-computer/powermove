@@ -437,11 +437,58 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **commands** — `register({ id, label, category, run, when? })`, `run(id, …args)`, `has`, `list`. Commands appear in the palette (⌘K) unless `when()` returns false. `when` may return a Promise (a Store extension's always does, over the port): the palette asks it on every open, and every other reader, `list()` included, gets a synchronous `when()` that returns its last answer (`true` before the first), so `!c.when || c.when()` filters.
 - **keybindings** — `bind({ key, command, args?, inFields?, looseModifiers?, repeat?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through. Repeated browser keydowns are ignored by default; set `repeat: true` only for continuous, repeat-safe actions such as frame stepping or nudging. Suppressed repeats do not prevent the browser's default behavior.
 - **effects** — `register({ id, label, group, params, frag, passes?, keepOrig?, backdrop? })`.
-  `group` is the category in the FX browser. Reuse an existing family: Blur & Sharpen, Light & Shadow, Color, Stylize, Distort or Generate. Add a new group only when none plausibly fits; never one per effect or a near-duplicate of an existing name.
+  `group` is the category in the FX browser. Reuse an existing family: Blur & Sharpen, Light & Shadow, Color, Channel, Stylize, Distort or Generate. Add a new group only when none plausibly fits; never one per effect or a near-duplicate of an existing name.
   Write only the body of `main()`. Available: `v_st` (uv), `u_tex`, `u_res`, `u_texel`, `u_time`, `u_pass`, helpers `src() luma() noise() fbm() hash() rgb2hsv() hsv2rgb()`. Each param `k` is a uniform `u_<k>` (float, or vec3 for `type:'color'`). Output `o` (vec4).
   Set `backdrop: true` when the shader needs the already-composited pixels below
   the layer; the host binds those pixels as `u_backdrop` on every effect pass.
-  Params are keyframable automatically and appear in the Effects browser + inspector.
+  Numeric/color/toggle params are keyframable automatically and appear in the Effects browser + inspector.
+  Definitions may provide `version` and a `legacy` array of complete older
+  definitions with the same ID. Saved instances retain their revision;
+  unversioned source means revision 1. `effects.get(id, version)` reads that
+  revision; omit `version` to read the newest catalog entry. Check
+  `effects.supportsVersions === true` before registering an extension that relies
+  on this contract, so older hosts cannot silently reinterpret old artwork.
+  Static layer parameters require `effects.supportsLayerInputs === true`.
+  Declare `{ k: 'map', label: 'Map Layer', type: 'layer', def: '' }` and set
+  references through `add_effect.inputs` or `set_effect.patch.inputs`, e.g.
+  `{ map: { layerId: 'stable-layer-id', stage: 'source' } }`. Valid stages are
+  `source`, `masks`, and `effects`; null layerId means None. Optional
+  `space: 'source'` selects source-sized rasters before transforms/opacity;
+  absent space or `'composition'` retains the transformed composition path.
+  Require `effects.supportsSourceRasters === true` to use source space. These records live
+  in `Effect.inputs`, have native layer/stage pickers and are not channels.
+  Generated shaders receive `u_map`, `u_has_map`, `u_mapUV`, `u_mapFromUV`,
+  `u_mapRes`, `u_mapMidpoint`, `sample_map(uv)` and owner `u_layerUV`/`u_ownerFromUV`/`u_layerRes`.
+  Use premultiplied composition buffers; mappings use normalized layer bounds.
+  Four inputs per effect are supported. `effects.supportsInputSubframes === true`
+  identifies hosts that prepare exact shutter-time input video/precomp frames;
+  sample count, shutter width and instance paths remain aligned with rendering. Cycles and unresolved/unsupported
+  references are diagnosed. See `effect-layer-inputs.md` for stage, bounds,
+  lifetime and export limits; direct 3D/adjustment sources and external-backdrop
+  Effects references are not supported by the initial implementation.
+  Spatial definitions require `effects.supportsSpatialSampling === true`.
+  `sampling: { radius, support, maxRadius }` names a numeric radius channel and
+  requests filtered mip levels to bound wide kernels. Raw shaders receive
+  `u_sampleLod`, `u_pixelScale`, and `u_sourceRes`. `grid: { columns, rows,
+  pointSample? }` names two numeric block counts and an optional toggle; it
+  requires two passes, rendering a cell atlas first and the full image second.
+  `u_gridRes` is the actual bounded atlas size; `u_res` is the current target size.
+  `sampling.space: 'layer'` projects radii through the layer transform;
+  `sampling.firstPass` skips mip preparation before the first neighborhood pass.
+  All textures retain working precision and their mip storage is budgeted.
+  Crop-safe definitions can declare `viewportPadding` keys, a
+  `viewportPaddingFactor`, and fixed `viewportPaddingPixels` in composition
+  pixels. Enabled stack and containing-group support is accumulated.
+  Numeric params can declare `defaultFrom: { dimension: 'width'|'height', factor }`.
+  Creation/repair resolves these from the target source dimensions, then saves
+  ordinary numeric channels. Use `effects.parameterDefault(param, {width,height})`
+  for the same contextual reset value; extensions requiring this contract must
+  check that helper exists before registering.
+  Numeric/color/toggle params accept an optional `group` for native disclosure
+  layout. `actions: [{ kind: 'swap', label: 'Swap Colors', keys: ['dark', 'light'] }]`
+  exposes an undoable playhead-value swap between two existing color params.
+  The action changes channel values through ordinary source commands; it does
+  not replace animation tracks or alter their paths.
 - **transitions** — `register({ id, label, params, frag })`. Inputs `u_from` (frame so far), `u_to` (incoming layer), `u_prog` 0→1. Output `o`. Applied on a layer via its `transition` property (inspector or `set_layer` command with `{ transition: { type, dur, p } }`).
 - **layers** — `register({ id, label, version, params, defaults?, renderer })` adds a programmable renderer with structured project instances. Fragment renderers use `{ kind:'fragment', fragment }`; mesh renderers use `{ kind:'mesh', assetField:'assetId' }` and resolve a durable OBJ model id from layer data. Projects store only the definition id, version, JSON data, and keyframe channels—not renderer code or expanded vertex arrays. Missing definitions/assets keep their data and show a placeholder.
 - **assets** — `pick({ accept, multiple? })`, `import(file, { layerDefinition? })`, `importUrl(url)` (see [Opening links and importing from a URL](#opening-links-and-importing-from-a-url)), `get(id)`, and `readText(id)`. Imported files live in Powermove's durable media store and are embedded when the `.pmv` is saved. Use an asset id in structured layer data instead of storing binary or large text in the project JSON.
@@ -450,7 +497,7 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **menus** — `contribute(location, ctx => items[])`, `collect(location, ctx?)` (in a Store sandbox, only your own contributions); locations: `panel:context`, `layer:context`, `timeline:context`, `viewer:context`. The function runs on every open with that open's `ctx`; it may return a Promise, which the menu waits for at most 100 ms. `gather(location, ctx)` resolves every contribution for one open, for `ui.menu`; `collect` returns only the ones that answer synchronously and never asks a Store extension's. Titlebar extension shortcuts are retired; registered panels appear in the panel Library automatically.
 - **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
 - **project** — `get()`, `latest()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`. `latest()`, `revision()`, `selection()`, `time()` and `playing()` are reactive in components.
-  `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
+  `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `simplify_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
 - **anim** — channel evaluation, property/keyframe edits, easing, expression errors, animation versioning, and 2D transform matrices.
 - **model** — property/keyframe/layer/project factories, model schema tables, current composition, layer lookups, `cloneLayer(layer)`, and `normalizeFill(value, fallback?)`.
 - **selection** — live selection reads, mutation with legacy events/invalidation, selected-key resolution, and key-selection mode.
@@ -846,3 +893,64 @@ Project agents can manage media directly, without generating a recovery extensio
 Paths must be absolute local paths. Imports read native file chunks, accept files up to 512 MiB and do not silently download cloud placeholders. Both import tools verify durable storage and live availability before returning success. Failed replacements leave the original intact. Retry only failed assets; media bytes never belong in extension source.
 
 Replacement and management use normal editor Undo. They are preserved if the agent run stops and cannot be restored with `rollback_changes`, because snapshot rollback cannot restore retained media runtime versions. Importing media follows normal import behavior: media survives timeline Undo. Planning runs can list media but cannot mutate it; app runs without an attached project receive none of these tools.
+
+### Simplifying animation
+
+`apply([{type: 'simplify_keyframes', scope: 'project'}])` simplifies the whole project in one undo step. Use `scope: 'layers', targets: ['layer-id']` (omit targets for selected layers), or `scope: 'properties', properties: [{layerId: 'layer-id', path: 'opacity'}]`. The result includes `keysBefore`, `keysAfter`, `propertiesChanged`, and `propertiesSkipped`. Agent `apply_commands` accepts the same command and returns its results.
+
+Only numeric constant runs and safe transform keys outside a layer's visible span are candidates. The real evaluator verifies frame and sub-frame samples. Tangent-dependent, spatial/structured, expression-dependent, and unknown tracks retain their keys. Nested/time-mapped compositions and parent rigs retain out-of-range keys. Locked layers are skipped. This command does not approximate curves.
+
+Agent/generated edits or imports writing more than 200 keys on one property apply as supplied and show a persistent native notice with **Simplify** and **Keep as is**. Only Simplify runs the command, in its own undo step; stale notices never edit another project or revised animation. Agents receive a note recommending sparse keys or expressions.
+
+
+### Source owner processing and typed geometry/assets
+
+Use `set_layer.patch.effectSpace: 'source'` to opt a 2D owner into native-source
+processing; absent/`composition` preserves historical rendering. Definitions must
+declare `sourceProcessing: {padding?: string[], factor?: number, pixels?: number,
+when?: string, geometry?: string[]}`. Padding is in source pixels, additive in effect order and gated
+by the optional toggle. Unsupported revisions/backdrops/owner types diagnose;
+there is no silent fallback. Require `effects.supportsSourceOwners === true`.
+
+For static geometry/image references require `effects.supportsTypedReferences`.
+Path params use `type:'path',def:''` with optional numeric `pathWidth` key; instances
+store `{kind:'path',layerId,pathId}` in `Effect.inputs`. Both IDs null select None.
+Asset params use `type:'asset',def:''` and `{kind:'asset',assetId}` (null for None).
+Image is the default; `assetKind:'lut'` selects bounded standalone `.cube` assets. These params get input samplers
+and normalized helper functions, not animated scalar channels. All reference
+kinds share the four-sampler limit. See `effect-layer-inputs.md` for geometry,
+working bounds, memory, deletion/copy and packaging semantics.
+
+Require `effects.supportsBrushGeometry` for `pathBrush` metadata and geometry-grown
+bounds. `pathBrush` names numeric hardness/spacing/start/end and toggle
+allMasks/sequential keys. `sourceProcessing.geometry` names path inputs using that
+brush contract. Require `effects.supportsLutAssets` for LUT inputs: generated
+`u_<key>Size`, `u_<key>DomainMin/Max` and the packed float sampler are provided.
+Use `coordinates:'layer'` to request generated owner-local coordinate uniforms
+without an input. Reference samplers share validated limits and durable media
+lifecycle; see `effect-layer-inputs.md` for supported formats and semantics.
+
+`effects.supportsOwnerValidity` advertises `u_ownerValid` for source-coordinate
+shaders: zero means an ordinary owner's source transform/bounds are singular or
+invalid, one means valid (including adjustment composition fallback). New alpha-
+creating shaders should preserve the incoming image when invalid instead of
+painting a layer reference through fallback coordinates. Older shaders remain
+unchanged. Effect registration stores metadata/text and must not allocate GPU
+programs or effect textures; these are lazy rendering resources.
+
+### Temporal effects
+
+Require `effects.supportsTemporalInputs === true` for
+`temporal:{step:string,count:string,maxSamples:number}`. Step/count name numeric
+parameters; maxSamples is an integer 1–32. This contract requires a raw,
+single-pass shader with scalar/color controls and no backdrop, keepOrig, sampling,
+grid, layer coordinate contract, direct reference params or extra source padding.
+Earlier prefix effects retain their own references and ordinary contracts.
+The host supplies exact owner-prefix
+samples at consumer time plus i*step; sampling ends before the consuming effect,
+so a zero offset is finite. The shader receives an immutable `u_temporal` sample,
+accumulator `u_tex`, sample index/count and current/provider coordinate metadata.
+Use native scalar controls and ordinary effect serialization. The graph is
+invocation-owned, bounded and cancellation-aware; it is never persisted or used
+as a cross-frame history cache. See `effect-layer-inputs.md` for supported 2D
+spaces, alpha/operator conventions, hard request limits and export behavior.

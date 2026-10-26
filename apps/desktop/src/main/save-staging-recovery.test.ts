@@ -18,6 +18,7 @@ import { registerSaveIpc } from './save';
 import { FileUpload } from './file-upload';
 import { IPC } from '../shared/ipc';
 import { decodeProjectContainer } from '../shared/project-container';
+import * as durableFile from './durable-file';
 
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); });
 const document = (name: string) => Buffer.from(JSON.stringify({ proj: { id: 'one', name, w: 100, h: 100, layers: [] } }));
@@ -161,6 +162,37 @@ it.each(['incremental', 'upload'])('allows an active %s finish to durably commit
   } finally {
     resume(); await pending;
     if (token) await f.call(kind === 'upload' ? IPC.fileSaveAbort : IPC.projectSaveAbort, token);
+    f.sender.emit('destroyed');
+    await rm(f.folder, { recursive: true, force: true });
+  }
+});
+
+it('finishes publishing a non-project upload before renderer-loss cleanup removes its source', async () => {
+  const f = await fixture();
+  let resume!: () => void;
+  const pause = new Promise<void>(resolve => { resume = resolve; });
+  let copying = false;
+  const originalCopy = durableFile.copySnapshot;
+  vi.spyOn(durableFile, 'copySnapshot').mockImplementationOnce(async (...args) => { copying = true; await pause; return originalCopy(...args); });
+  let token: string | undefined, publishing: Promise<any> | undefined;
+  try {
+    token = await f.call(IPC.fileSaveUpload, f.incoming.length);
+    await f.call(IPC.fileSaveChunk, { uploadId: token, data: f.incoming });
+    const staged = await f.staged('upload');
+    publishing = f.call(IPC.fileSave, { name: 'Export.bin', uploadId: token });
+    await vi.waitFor(() => expect(copying).toBe(true));
+    f.sender.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    f.sender.emit('did-finish-load');
+    expect(staged.handle.fd).not.toBe(-1);
+    expect(await readFile(f.destination)).toEqual(f.before);
+    resume();
+    expect(await publishing).toEqual({ ok: true, path: f.destination });
+    await vi.waitFor(() => expect(staged.handle.fd).toBe(-1));
+    expect(await stat(staged.file).catch(() => null)).toBeNull();
+    expect(await readFile(f.destination)).toEqual(f.incoming);
+  } finally {
+    resume(); await publishing;
+    if (token) await f.call(IPC.fileSaveAbort, token);
     f.sender.emit('destroyed');
     await rm(f.folder, { recursive: true, force: true });
   }

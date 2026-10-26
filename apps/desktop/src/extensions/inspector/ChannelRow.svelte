@@ -9,6 +9,7 @@
   import { expressionDiagnostic, EXPRESSION_NAMES } from 'powermove';
   import type { ChannelDefinition, EditCommand, MenuContribution } from 'powermove';
   import { inspectorContext, type EditBinding } from './context';
+  import { inEffectControls } from './effect-controls';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector, timeline } = inspectorContext();
   const { NumField, SliderField, Row } = api.ui.controls;
@@ -29,6 +30,7 @@
     allowContextMenu = true,
     compact = false,
     prefix,
+    pairWith,
     visual = !!property
   }: {
     layer: any;
@@ -47,9 +49,12 @@
     compact?: boolean;
     /** Single-letter gutter label inside the well (X, Y, W, H). */
     prefix?: string;
+    /** A second channel shown in the same row, as one value pair (Position). */
+    pairWith?: string;
     visual?: boolean;
   } = $props();
 
+  const effectControls = inEffectControls();
   const instance = `channel-${++instanceSequence}`;
   const prop = $derived((doc.tick.structure, doc.proj, property ?? layer.p?.[channel]));
   const value = $derived((
@@ -65,7 +70,8 @@
   const runtimeError=$derived((void value,transport.time,doc.tick.values,prop?.expr ? api.anim.expressionErrors?.get(prop) : null));
   const scaleLinked = $derived((doc.tick.history, doc.tick.values, doc.proj, !!layer.scaleLinked));
   const isScale = $derived(!property && !compact && channel === 'scale.x');
-  const channels = $derived(isScale ? ['scale.x', 'scale.y'] : [channel]);
+  const pairChannel = $derived(isScale ? 'scale.y' : !property && !compact ? pairWith : undefined);
+  const channels = $derived(pairChannel ? [channel, pairChannel] : [channel]);
   const properties = $derived((doc.tick.structure, doc.proj, channels.map((key) => property ?? layer.p?.[key])));
   const animated = $derived((doc.tick.history, doc.tick.values, doc.proj, properties.some((p) => (p?.kf?.length ?? 0) > 0)));
   const expression = $derived((doc.tick.history, doc.tick.values, doc.proj, properties.find((p) => p?.expr)?.expr));
@@ -102,6 +108,7 @@
     origin: 'inspector',
     time: () => transport.time
   }));
+  const pairEdit = $derived(pairWith ? channelBinding(layer.id, pairWith, { label: `${label} Y`, origin: 'inspector', time: () => transport.time }) : scaleYEdit);
 
   function refreshValues(): void {
     inspector()?.refresh();
@@ -350,18 +357,19 @@
     oncontextmenu={allowContextMenu ? contextMenu : undefined}
     onpointerdown={selectChannel}
   >
-    <Row {api} {label} pair={isScale}>
+    <Row {api} {label} pair={!!pairChannel}>
       {#snippet left()}
         <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={keyAtPlayhead}
           aria-label={`${keyAtPlayhead ? 'Remove keyframe for' : 'Add keyframe for'} ${label}`}
           aria-pressed={keyAtPlayhead} title={keyAtPlayhead ? 'Remove keyframe' : 'Add keyframe'}
           onclick={diamondClick}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg>
+          {@html api.ui.icon(effectControls ? 'timer' : keyAtPlayhead ? 'diamondFill' : 'diamond')}
         </button>
       {/snippet}
-      {@render well(isScale ? 'Scale X' : label, edit, () => value, !!prop?.expr, isScale ? 'X' : prefix)}
-      {#if isScale}
-        {@render well('Scale Y', scaleYEdit, () => api.anim.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
+      <!-- One value per axis, X then Y, in one well. -->
+      {@render well(isScale ? 'Scale X' : pairChannel ? `${label} X` : label, edit, () => value, !!prop?.expr, pairChannel ? undefined : prefix)}
+      {#if pairChannel}
+        {@render well(isScale ? 'Scale Y' : `${label} Y`, pairEdit, () => api.anim.ev(layer, pairChannel, transport.time), !!layer.p?.[pairChannel]?.expr)}
       {/if}
       {#snippet action()}
         {#if isScale}
@@ -391,6 +399,9 @@
   }
   .link-axes:hover { color: var(--tx-2); background: var(--ink-1); }
   .link-axes.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  /* Out of the way until the row is pointed at, as in the prototype. */
+  .link-axes { opacity: 0; transition: opacity var(--dur-1); }
+  :global(.row.split:hover) .link-axes, .link-axes:focus-visible { opacity: 1; }
   .link-axes:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .link-axes :global(svg) { width: 16px; height: 16px; }
 </style>

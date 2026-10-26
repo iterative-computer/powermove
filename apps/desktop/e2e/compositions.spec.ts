@@ -41,6 +41,8 @@ test.describe('@compositions After Effects compositions', () => {
 
     // The media browser lists every composition; the timeline shows one tab.
     await page.evaluate(() => (window as any).PM.WS?.activate?.('design', true));
+    // Project shares its slot with Effect Controls, which is the tab shown by default.
+    await page.evaluate(() => (window as any).PM.Layout.activateTab?.('assets'));
     const cards = page.locator('.asset-card.is-comp');
     await expect(cards).toHaveCount(3);
     await expect(page.locator('.asset-card.is-comp[aria-current="true"] b')).toHaveText('Main');

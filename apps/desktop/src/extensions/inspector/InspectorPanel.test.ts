@@ -495,7 +495,7 @@ describe('InspectorPanel', () => {
     api.events.emit('project:changed', { kind: 'structure' });
     flushSync();
     expect(cycles).toHaveBeenCalled();
-    expect([...labelledSelect('Parent').options].some(option => option.textContent === 'Renamed parent')).toBe(true);
+    expect([...labelledSelect('Link Layers').options].some(option => option.textContent === 'Renamed parent')).toBe(true);
     cycles.mockClear();
     runtime.sel.layers = ['L1'];
     api.events.emit('selection', runtime.sel);
@@ -520,7 +520,7 @@ describe('InspectorPanel', () => {
     const rig = layer('R'); rig.type = 'solid'; rig.name = 'Rig';
     setup([group, rig], ['G']);
 
-    expect([...labelledSelect('Parent').options].map(option => option.textContent)).toEqual(['None', 'Rig']);
+    expect([...labelledSelect('Link Layers').options].map(option => option.textContent)).toEqual(['None', 'Rig']);
     expect(target.querySelector('[aria-label="Pick parent layer"]')).not.toBeNull();
   });
 
@@ -532,13 +532,15 @@ describe('InspectorPanel', () => {
 
     const headings = [...target.querySelectorAll('.sec')].map((item) => item.textContent?.trim());
     expect(headings).toContain('Masks');
-    expect(target.querySelector('[aria-label="Add effect"]')).not.toBeNull();
+    // Effects are added from Effects & Presets; the header has no Add button.
+    expect(target.querySelector('[aria-label="Add effect"]')).toBeNull();
     expect(target.querySelector('[data-effects-layer="G"] [data-effects-section]')).not.toBeNull();
-    expect(labelledSelect('Blend mode')).not.toBeNull();
+    expect(labelledSelect('Blend Mode')).not.toBeNull();
     expect([...target.querySelectorAll('button[aria-labelledby], [role="radiogroup"][aria-labelledby]')].some((control) =>
       document.getElementById(control.getAttribute('aria-labelledby')!)?.textContent?.trim() === 'Motion blur'
     )).toBe(true);
-    expect(labelledSelect('Track matte')).not.toBeNull();
+    // Track Matte moved to Effect Controls, applied from Effects & Presets.
+    expect(() => labelledSelect('Track matte')).toThrow();
 
     target.querySelector<HTMLButtonElement>('[aria-label="Add mask"]')!.click();
     expect(runtime.mkMask).toHaveBeenCalledWith('rect', runtime.proj);
@@ -553,9 +555,9 @@ describe('InspectorPanel', () => {
     const group = layer('G'); group.type = 'group'; group.name = 'Rig Group'; group.d = {};
     const { apply } = setup([child, group], ['C']);
 
-    expect([...labelledSelect('Parent').options].map(option => option.textContent)).toEqual(['None', 'Rig Group']);
-    labelledSelect('Parent').value = '1';
-    labelledSelect('Parent').dispatchEvent(new Event('change', { bubbles: true }));
+    expect([...labelledSelect('Link Layers').options].map(option => option.textContent)).toEqual(['None', 'Rig Group']);
+    labelledSelect('Link Layers').value = '1';
+    labelledSelect('Link Layers').dispatchEvent(new Event('change', { bubbles: true }));
 
     expect(apply).toHaveBeenCalledWith(
       [{ type: 'set_layer', target: child.id, patch: { parent: group.id } }],
@@ -576,7 +578,7 @@ describe('InspectorPanel', () => {
     }));
     expect(register).toHaveBeenNthCalledWith(2, expect.objectContaining({
       id: 'layer-effects',
-      title: 'Layer Effects',
+      title: 'Effect Controls',
       component: EffectsPanel
     }));
   });
@@ -821,7 +823,9 @@ describe('InspectorPanel', () => {
     const candidate = layer('A');
     candidate.p[path]!.v = value;
     const { apply, menu } = setup([candidate]);
-    channelRow('A', path).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    // Position and Anchor Point show X and Y in one row; its Reset covers both.
+    const rowChannel = /^(position|anchor)\.y$/.test(path) ? path.replace('.y', '.x') : path;
+    channelRow('A', rowChannel).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
     const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: () => void }>;
     items.find((item) => item.label === 'Reset')!.run!();
     expect(apply).toHaveBeenCalledWith(expect.arrayContaining([
@@ -900,21 +904,11 @@ describe('InspectorPanel', () => {
     expect(row.querySelector('.well .kf')).toBeNull();
   });
 
-  it('sends the exact legacy add-effect and remove-effect commands', () => {
+  it('sends the exact legacy remove-effect command', () => {
     const candidate = layer('A');
-    const { apply, menu } = setup([candidate], ['A'], { effects: true });
-    const add = target.querySelector<HTMLButtonElement>('header [aria-label="Add effect"]')!;
-    expect(add).not.toBeNull();
-    expect(target.querySelector('[data-effects-section] [aria-label="Add effect"]')).toBeNull();
-    add.click();
-    const items = menu.mock.calls[0]![1] as Array<{ label?: string; run?: () => void }>;
-    items.find((item) => item.label === 'Gaussian Blur')?.run?.();
-    expect(apply).toHaveBeenCalledWith(
-      { type: 'add_effect', target: 'A', effect: 'blur' },
-      { label: 'Add Gaussian Blur', origin: 'inspector' }
-    );
-
-    apply.mockClear();
+    const { apply } = setup([candidate], ['A'], { effects: true });
+    // Effects are added from Effects & Presets, not from a Properties button.
+    expect(target.querySelector('[aria-label="Add effect"]')).toBeNull();
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: {} });
     bump('structure');
     flushSync();
@@ -996,11 +990,11 @@ describe('InspectorPanel', () => {
     expect(paste.defaultPrevented).toBe(true);
     expect(apply).toHaveBeenCalledExactlyOnceWith([
       {
-        type: 'add_effect', target: 'A', effect: 'blur', parameters: candidate.fx[0].p,
+        type: 'add_effect', target: 'A', effect: 'blur', version: 1, parameters: candidate.fx[0].p,
         open: false, enabled: false
       },
       {
-        type: 'add_effect', target: 'A', effect: 'blur', parameters: candidate.fx[1].p,
+        type: 'add_effect', target: 'A', effect: 'blur', version: 1, parameters: candidate.fx[1].p,
         open: true, enabled: true
       }
     ], { label: 'Paste effects', origin: 'inspector' });
@@ -1032,7 +1026,7 @@ describe('InspectorPanel', () => {
 
     expect(api.services.get<InspectorService>('inspector')?.pasteCopiedEffects()).toBe(true);
     expect(apply).toHaveBeenCalledExactlyOnceWith({
-      type: 'add_effect', target: 'B', effect: 'blur', parameters: source.fx[0].p,
+      type: 'add_effect', target: 'B', effect: 'blur', version: 1, parameters: source.fx[0].p,
       open: true, enabled: true
     }, { label: 'Paste effect', origin: 'inspector' });
   });
@@ -1085,8 +1079,8 @@ describe('InspectorPanel', () => {
     );
 
     apply.mockClear();
-    labelledSelect('Blend mode').value = '1';
-    labelledSelect('Blend mode').dispatchEvent(new Event('change', { bubbles: true }));
+    labelledSelect('Blend Mode').value = '1';
+    labelledSelect('Blend Mode').dispatchEvent(new Event('change', { bubbles: true }));
     expect(apply).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'set_property', target: 'A', path: 'l.blend', value: 'screen', mode: 'auto' }),
       { label: 'Blend', origin: 'inspector' }
@@ -1125,13 +1119,13 @@ describe('InspectorPanel', () => {
     expect(apply).toHaveBeenCalledWith([expect.objectContaining({type:'set_property',path:'fx-blur.amount',value:5,mode:'keyframe',time:2})],expect.objectContaining({origin:'inspector'}));
     expect(apply).toHaveBeenCalledWith([expect.objectContaining({ type: 'set_property', path: 'fx-duotone.shadow', value: '#1B2A4A', mode: 'keyframe', time: 2 })], expect.objectContaining({ origin: 'inspector' }));
 
-    /* Toggle params get a switch rather than a numeric scrubber. */
+    /* Toggle params get a checkbox rather than a numeric scrubber, as in Effect Controls. */
     const radial = target.querySelector<HTMLButtonElement>('[aria-label="Add keyframe for Radial"]');
     expect(radial).not.toBeNull();
     const radialRow = [...target.querySelectorAll<HTMLElement>('.row')]
       .find((row) => row.querySelector('.k')?.textContent === 'Radial');
     apply.mockClear();
-    [...radialRow!.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find(button => button.textContent === 'On')!.click();
+    radialRow!.querySelector<HTMLButtonElement>('button[role="checkbox"]')!.click();
     expect(apply).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'set_property', path: 'fx-gradient.radial', value: true }),
       expect.objectContaining({ origin: 'inspector' })

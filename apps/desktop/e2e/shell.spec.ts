@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 
-import { expect, test } from './helpers/app';
+import { chooseNativeMenu, expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 
 /** Registers named projects without opening them, the way a library does. */
@@ -17,9 +17,9 @@ async function makeProjects(page: Page, names: string[]): Promise<string[]> {
   }, names);
 }
 
-const tabOrder = (page: Page) => page.locator('#tabs .project-doc').evaluateAll(
-  (tabs) => tabs.map((tab) => (tab as HTMLElement).dataset.tabId)
-);
+/** The window's open projects, in order. The titlebar lists them in its title menu. */
+const tabOrder = (page: Page) => page.evaluate(() => [...(window as any).PM.Tabs.list()] as string[]);
+const title = (page: Page) => page.locator('#doc-title .tb-title-btn');
 
 test.describe('@shell Svelte shell', () => {
   test('boots the Svelte chrome while the dock panels stay live', async ({ session }) => {
@@ -27,25 +27,24 @@ test.describe('@shell Svelte shell', () => {
     await session.openEditor();
     const titlebar = page.locator('#titlebar[data-svelte-shell="true"]');
     await expect(titlebar).toHaveCount(1);
-    await expect(titlebar.locator('#tabs [role="tablist"]')).toHaveCount(1);
-    await expect(titlebar.locator('#toolbar-strip[data-svelte-toolbar]')).toHaveCount(1);
+    await expect(titlebar.locator('[role="tab"], #tabs')).toHaveCount(0);
+    await expect(titlebar.locator('.tb-left #toolbar-strip[data-svelte-toolbar]')).toHaveCount(1);
     await expect(page.locator('#body .panel')).not.toHaveCount(0);
 
     const activeId = await page.evaluate(() => (window as any).PM.proj.id as string);
-    const tab = titlebar.locator(`.project-doc[data-project-id="${activeId}"]`);
-    await expect(tab).toHaveCount(1);
-    await expect(tab).toHaveAttribute('aria-selected', 'true');
+    await expect(title(page)).toHaveAttribute('data-project-id', activeId);
+    await expect(title(page)).toHaveAttribute('aria-haspopup', 'menu');
 
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('opens projects from the library as tabs and switches between them', async ({ session }) => {
+  test('opens projects from the library and switches between them from the title menu', async ({ session }) => {
     const { page, diagnostics } = session;
     await session.openEditor();
     const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
     const [secondId] = await makeProjects(page, ['Second composition']);
 
-    await page.locator('#tabs .project-home').click();
+    await page.locator('.tb-left .project-home').click();
     await expect(page.locator('#projects-screen')).toHaveClass(/\bon\b/);
     await page.locator('#projects-screen .ps-card').filter({ hasText: 'Second composition' }).first().click();
 
@@ -53,9 +52,11 @@ test.describe('@shell Svelte shell', () => {
     await expect(page.locator('#projects-screen')).not.toHaveClass(/\bon\b/);
     // The first document stays open beside it, and the new one is added after it.
     expect(await tabOrder(page)).toEqual([firstId, secondId]);
-    await expect(page.locator(`#tabs .project-doc[data-project-id="${secondId}"]`)).toHaveClass(/\bon\b/);
+    await expect(title(page)).toHaveAttribute('data-project-id', secondId);
 
-    await page.locator(`#tabs .project-doc[data-project-id="${firstId}"]`).click();
+    const firstName = await page.evaluate((id) => (window as any).PM.Projects.get(id).name, firstId);
+    const labels = await chooseNativeMenu(session, firstName, () => title(page).click());
+    expect(labels.slice(0, 2)).toEqual([firstName, 'Second composition']);
     await page.waitForFunction((id) => (window as any).PM.proj.id === id, firstId);
     expect(await tabOrder(page)).toEqual([firstId, secondId]);
 
@@ -66,7 +67,7 @@ test.describe('@shell Svelte shell', () => {
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('closing a tab shows its neighbour, and closing the last shows Projects', async ({ session }) => {
+  test('closing a project shows its neighbour, and closing the last shows Projects', async ({ session }) => {
     const { page, diagnostics } = session;
     await session.openEditor();
     const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
@@ -78,13 +79,13 @@ test.describe('@shell Svelte shell', () => {
     }, [secondId, thirdId]);
     expect(await tabOrder(page)).toEqual([firstId, secondId, thirdId]);
 
-    // Closing the middle tab shows the one that slides into its place.
-    await page.locator(`#tabs .project-doc[data-project-id="${secondId}"] .project-doc-close`).click();
+    // Closing the middle project shows the one that slides into its place.
+    await chooseNativeMenu(session, 'Close Project', () => title(page).click());
     await page.waitForFunction((id) => (window as any).PM.proj.id === id, thirdId);
     expect(await tabOrder(page)).toEqual([firstId, thirdId]);
 
-    // Middle-click closes an inactive tab without changing what is on screen.
-    await page.locator(`#tabs .project-doc[data-project-id="${firstId}"]`).click({ button: 'middle' });
+    // Close Other Projects keeps only what is on screen.
+    await chooseNativeMenu(session, 'Close Other Projects', () => title(page).click({ button: 'right' }));
     await expect.poll(() => tabOrder(page)).toEqual([thirdId]);
     expect(await page.evaluate(() => (window as any).PM.proj.id)).toBe(thirdId);
 
@@ -99,7 +100,7 @@ test.describe('@shell Svelte shell', () => {
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('tabs reorder by dragging and relaunch opens the active document while retaining the others in Recents', async ({ session }) => {
+  test('relaunch opens the active document while retaining the others in Recents', async ({ session }) => {
     const { page, diagnostics } = session;
     await session.openEditor();
     const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
@@ -112,18 +113,7 @@ test.describe('@shell Svelte shell', () => {
       expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
     }
 
-    const dragged = page.locator(`#tabs .project-doc[data-project-id="${thirdId}"]`);
-    const target = page.locator(`#tabs .project-doc[data-project-id="${firstId}"]`);
-    const from = (await dragged.boundingBox())!;
-    const to = (await target.boundingBox())!;
-    await page.mouse.move(from.x + 20, from.y + from.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(from.x + 10, from.y + from.height / 2, { steps: 2 });
-    await page.mouse.move(to.x + 4, to.y + to.height / 2, { steps: 12 });
-    await page.mouse.up();
-    await expect.poll(() => tabOrder(page)).toEqual([thirdId, firstId, secondId]);
-    // A drag is not a click: the tab on screen is still the one that was.
-    expect(await page.evaluate(() => (window as any).PM.proj.id)).toBe(thirdId);
+    expect(await tabOrder(page)).toEqual([firstId, secondId, thirdId]);
 
     await page.evaluate(async (id) => {
       const PM = (window as any).PM;
@@ -164,34 +154,7 @@ test.describe('@shell Svelte shell', () => {
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('a tab pulled out of the strip and let go becomes a window of its own', async ({ session }) => {
-    const { page, app, diagnostics } = session;
-    await session.openEditor();
-    const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
-    const [secondId] = await makeProjects(page, ['Torn off']);
-    await page.evaluate((id) => (window as any).PM.Tabs.activate(id), secondId);
-
-    const tab = page.locator(`#tabs .project-doc[data-project-id="${secondId}"]`);
-    const box = (await tab.boundingBox())!;
-    const opened = app.waitForEvent('window');
-    await page.mouse.move(box.x + 30, box.y + box.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(box.x + 40, box.y + 60, { steps: 4 });
-    await page.mouse.move(box.x + 120, box.y + 320, { steps: 8 });
-    // Out of the strip the tab leaves a ghost under the pointer.
-    await expect(page.locator('#tabs .tab-ghost')).toHaveCount(1);
-    await expect(tab).toHaveClass(/\btorn\b/);
-    await page.mouse.up();
-
-    const other = await opened;
-    await other.waitForFunction((id) => (window as any).PM?.proj?.id === id, secondId);
-    await expect.poll(() => tabOrder(other)).toEqual([secondId]);
-    await expect.poll(() => tabOrder(page)).toEqual([firstId]);
-    await expect(page.locator('#tabs .tab-ghost')).toHaveCount(0);
-    expect(diagnostics.pageErrors).toEqual([]);
-  });
-
-  test('a tab dropped on another window\'s strip joins it where it lands', async ({ session }) => {
+  test('a project handed to another window joins the end of its open projects', async ({ session }) => {
     const { page, app, diagnostics } = session;
     await session.openEditor();
     const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
@@ -224,45 +187,47 @@ test.describe('@shell Svelte shell', () => {
     // A lone tab has nowhere to go but another window; let go elsewhere, it stays.
     expect(await page.evaluate((id) => (window as any).PM.Tabs.detach(id, { x: -9999, y: -9999 }), secondId)).toBeNull();
     expect(await tabOrder(page)).toEqual([secondId]);
-    // Dropped on a strip, it moves and its emptied window closes.
+    // Handed over, it joins the end of the other window's projects and its emptied window closes.
     bounds = await stripOf();
     const closed = page.waitForEvent('close');
     // The window closes under its own call, so the call is not awaited.
     void page.evaluate(({ id, point }) => (window as any).PM.Tabs.detach(id, point), { id: secondId, point: { x: bounds.x + 100, y: bounds.y + 20 } }).catch(() => undefined);
     await closed;
-    await expect.poll(() => tabOrder(other)).toEqual([secondId, firstId, thirdId]);
+    await expect.poll(() => tabOrder(other)).toEqual([firstId, thirdId, secondId]);
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('the tools stay on the right whatever the tabs, which scroll rather than crowd them', async ({ session }) => {
+  test('tools lead on the left and the project is titled in the middle, however many are open', async ({ session }) => {
     const { page } = session;
     await session.openEditor();
-    await page.setViewportSize({ width: 1440, height: 860 });
     const geometry = () => page.evaluate(() => {
       const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
-      const strip = document.querySelector('.project-tab-scroll')!;
+      const title = box('#doc-title .tb-title-btn');
       return {
-        tabsRight: box('#tabs').right, tools: box('#toolbar-strip'),
-        settings: box('#tb-right [aria-label="Open settings"]').left,
-        overflowing: strip.scrollWidth > strip.clientWidth,
+        home: box('.tb-left .project-home'), tools: box('#toolbar-strip'), titleCentre: title.left + title.width / 2,
+        titleLeft: title.left, titleRight: title.right, settings: box('#tb-right [aria-label="Open settings"]').left,
+        width: window.innerWidth,
       };
     });
     const few = await geometry();
+    expect(few.home.right).toBeLessThanOrEqual(few.tools.left);
+    expect(few.tools.right).toBeLessThanOrEqual(few.titleLeft);
+    expect(Math.abs(few.titleCentre - few.width / 2)).toBeLessThanOrEqual(2);
+    expect(few.titleRight).toBeLessThanOrEqual(few.settings);
 
-    const ids = await makeProjects(page, Array.from({ length: 10 }, (_, index) => `Tab ${index + 2}`));
+    const ids = await makeProjects(page, Array.from({ length: 10 }, (_, index) => `Project ${index + 2}`));
     await page.evaluate(async (list) => {
       const PM = (window as any).PM;
       for (const id of list) await PM.Tabs.activate(id);
     }, ids);
     const many = await geometry();
-    // The tools do not move for the tabs; the tabs scroll short of them.
+    // Nothing moves for more open projects: they are in the title's menu.
     expect(Math.round(many.tools.left)).toBe(Math.round(few.tools.left));
-    expect(many.tools.right).toBeLessThanOrEqual(many.settings);
-    expect(many.tabsRight).toBeLessThanOrEqual(many.tools.left);
-    expect(many.overflowing).toBe(true);
+    expect(Math.abs(many.titleCentre - many.width / 2)).toBeLessThanOrEqual(2);
+    await expect(page.locator('#titlebar [role="tab"]')).toHaveCount(0);
   });
 
-  test('keeps a usable window drag area with crowded tabs and overlays', async ({ session }) => {
+  test('keeps a usable window drag area with many projects and overlays', async ({ session }) => {
     const { page } = session;
     await session.openEditor();
     await page.setViewportSize({ width: 980, height: 640 });
@@ -271,11 +236,21 @@ test.describe('@shell Svelte shell', () => {
       for (const id of list) await (window as any).PM.Tabs.activate(id);
     }, ids);
 
+    /* The widest stretch of a drag spacer that nothing covers, either side of the title. */
     const dragArea = () => page.evaluate(() => {
-      const drag = document.querySelector<HTMLElement>('#titlebar > .titlebar-drag:not(.titlebar-drag-traffic)')!;
-      const box = drag.getBoundingClientRect();
-      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
-      return { width: box.width, hit: hit === drag || hit?.classList.contains('titlebar-overlay-drag'), region: hit ? getComputedStyle(hit).getPropertyValue('-webkit-app-region') : '' };
+      let best = { width: 0, hit: false, region: '' };
+      for (const drag of document.querySelectorAll<HTMLElement>('#titlebar > .titlebar-drag:not(.titlebar-drag-traffic)')) {
+        const box = drag.getBoundingClientRect();
+        let run = 0, middle: Element | null = null;
+        for (let x = Math.ceil(box.left); x < box.right; x++) {
+          const hit = document.elementFromPoint(x, box.top + box.height / 2);
+          const ok = hit === drag || !!hit?.classList.contains('titlebar-overlay-drag');
+          run = ok ? run + 1 : 0;
+          if (run > best.width) { best = { width: run, hit: true, region: '' }; middle = hit; }
+        }
+        if (middle && best.width) best.region = getComputedStyle(middle).getPropertyValue('-webkit-app-region');
+      }
+      return best;
     });
     expect(await dragArea()).toMatchObject({ hit: true, region: 'drag' });
     expect((await dragArea()).width).toBeGreaterThanOrEqual(72);
@@ -302,7 +277,7 @@ test.describe('@shell Svelte shell', () => {
     await page.locator('.fill-picker-layer').evaluate(element => element.remove());
   });
 
-  test('switching back to a tab resumes it from memory instead of reloading it', async ({ session }) => {
+  test('switching back to a project resumes it from memory instead of reloading it', async ({ session }) => {
     const { page, diagnostics } = session;
     await session.openEditor();
     const firstId = await page.evaluate(() => (window as any).PM.proj.id as string);
@@ -361,18 +336,17 @@ test.describe('@shell Svelte shell', () => {
     expect(diagnostics.pageErrors).toEqual([]);
   });
 
-  test('renames a tab\'s project in place from the titlebar', async ({ session }) => {
+  test('renames the project in place from the titlebar', async ({ session }) => {
     const { page, diagnostics } = session;
     await session.openEditor();
 
-    const tab = page.locator('#tabs .project-doc');
-    await tab.dblclick();
-    const input = tab.locator('.project-doc-input');
+    await chooseNativeMenu(session, 'Rename Project…', () => title(page).click());
+    const input = page.locator('#doc-title .tb-title-input');
     await expect(input).toHaveCount(1);
     await input.fill('Renamed from the titlebar');
     await input.press('Enter');
 
-    await expect(tab.locator('.project-doc-label')).toHaveText('Renamed from the titlebar');
+    await expect(title(page).locator('.tb-title-name')).toHaveText('Renamed from the titlebar');
     await page.waitForFunction(() => (window as any).PM.proj.name === 'Renamed from the titlebar');
 
     expect(diagnostics.pageErrors).toEqual([]);

@@ -91,7 +91,7 @@ import * as history from '../codex/change-history';
 
 afterEach(() => { native.beforeRename = null; native.beforeReadDirectory = null; vi.restoreAllMocks(); });
 
-it.each(['first-change', 'second-change'])('rejects a stale %s publication from a second real MCP connection and keeps history restorable', async secondId => {
+it.each(['first-change', 'second-change'])('serializes concurrent %s publication, rejecting only overlapping edits and keeping history restorable', async secondId => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-concurrent-publish-'));
   const live = path.join(root, 'extensions');
   for (const id of ['first-change', 'second-change']) {
@@ -152,11 +152,22 @@ it.each(['first-change', 'second-change'])('rejects a stale %s publication from 
     expect(await readFile(path.join(live, secondId, 'index.ts'), 'utf8')).toBe('export default "before";');
     resume();
     const last = unwrap(await firstResult);
-    expect(await secondResult).toMatchObject({ failure: expect.objectContaining({ message: expect.stringContaining('Extensions changed while the agent was working') }) });
+    const secondOutcome = await secondResult;
+    const historyRoot = path.join(root, 'Agent Change History', 'project-one');
+    if (secondId === 'second-change') {
+      const secondPublished = unwrap(secondOutcome);
+      expect(await readFile(path.join(live, secondId, 'index.ts'), 'utf8')).toBe('export default "second after";');
+      await expect(history.restoreExtensionChangeSet({ liveDirectory: live, historyRoot, changeSetId: last.changeSetId }))
+        .rejects.toThrow('Newer extension changes exist');
+      await history.restoreExtensionChangeSet({ liveDirectory: live, historyRoot, changeSetId: secondPublished.changeSetId });
+      await history.restoreExtensionChangeSet({ liveDirectory: live, historyRoot, changeSetId: last.changeSetId });
+      for (const id of ['first-change', 'second-change']) expect(await readFile(path.join(live, id, 'index.ts'), 'utf8')).toBe('export default "before";');
+      return;
+    }
+    expect(secondOutcome).toMatchObject({ failure: expect.objectContaining({ message: expect.stringContaining('Newer changes exist in these extensions: first-change') }) });
     expect(await readFile(path.join(live, 'first-change', 'index.ts'), 'utf8')).toBe('export default "first after";');
     expect(await readFile(path.join(live, 'second-change', 'index.ts'), 'utf8')).toBe('export default "before";');
     expect(await readFile(path.join(two.stagingDirectory, secondId, 'index.ts'), 'utf8')).toBe('export default "second after";');
-    const historyRoot = path.join(root, 'Agent Change History', 'project-one');
     await expect(history.restoreExtensionChangeSet({ liveDirectory: live, historyRoot, changeSetId: last.changeSetId }))
       .resolves.toMatchObject({ id: last.changeSetId });
     // Rejection must release the queue and preserve the staged repair. Once

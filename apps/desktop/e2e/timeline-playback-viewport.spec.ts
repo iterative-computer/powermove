@@ -10,7 +10,8 @@ test('playback and scrubbing draw only the active timeline viewport, including a
     const original = CanvasRenderingContext2D.prototype.fillText;
     (window as any).__timelineRulerPaints = [];
     CanvasRenderingContext2D.prototype.fillText = function(text, x, y, maxWidth?) {
-      if (this.canvas.id === 'tl-canvas' && y === 13 && this.textAlign === 'center') {
+      // Ruler labels: the mono "15s" / "1m00s" names in the time scale's band.
+      if (this.canvas.id === 'tl-canvas' && y < 30 && /^-?\d+(s|f|m\d\ds)$/.test(String(text))) {
         (window as any).__timelineRulerPaints.push(String(text));
       }
       if (maxWidth === undefined) original.call(this, text, x, y);
@@ -63,8 +64,8 @@ test('playback and scrubbing draw only the active timeline viewport, including a
     await expect.poll(() => page.evaluate(() => (window as any).PM.time)).toBeCloseTo(7, 1);
 
     const painted = await page.evaluate(() => [...new Set((window as any).__timelineRulerPaints)] as string[]);
-    expect(painted).toContain('0:15');
-    expect(painted.filter(label => !/^\d+:(?:00|15|30|45)$/.test(label))).toEqual([]);
+    expect(painted).toContain('15s');
+    expect(painted.filter(label => !/^(?:(?:0|15|30|45)s|\d+m(?:00|15|30|45)s)$/.test(label))).toEqual([]);
     expect(await page.evaluate(() => {
       const timeline = (window as any).PM.Kernel.services.get('timeline');
       return { pps: timeline.pps, scrollT: timeline.scrollT };

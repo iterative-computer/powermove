@@ -280,7 +280,17 @@ export function installAgentShell(PM: PM) {
   window.addEventListener('resize', onResize, { signal: listeners.signal });
   window.visualViewport?.addEventListener('resize', onResize, { signal: listeners.signal });
   const offLayout = PM.bus?.on?.('layout:applied', attach);
-  const offProjects = PM.bus?.on?.('projects:screen', () => { if (open) position(); });
+  /* The agent belongs to the editor, not the home screen. Hiding (rather than
+     refusing to open) lets a flow that opens it from home and then opens a
+     project, like the workspace import, show it once the editor is up. */
+  const syncHome = () => {
+    const home = !!PM.ProjectsScreen?.isOpen;
+    root.toggleAttribute('data-home', home);
+    if (home && open && !floatingPosition) close({ restoreFocus: false });
+    else if (open) position();
+  };
+  const offProjects = PM.bus?.on?.('projects:screen', syncHome);
+  syncHome();
   sync();
   queueMicrotask(attach);
 

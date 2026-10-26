@@ -17,6 +17,9 @@ function harness() {
     selectLayers: vi.fn((id: string) => { PM.sel.layers = [id]; }),
     selLayers: () => layers.filter(layer => PM.sel.layers.includes(layer.id)),
     expandGroups: (ids: string[]) => ids,
+    // Submenus (Parent, Timing) are built when the menu opens.
+    L: (id: string) => layers.find(layer => layer.id === id) ?? null,
+    wouldCycle: () => false,
     menu: vi.fn()
   };
   installLayerMenu(PM);

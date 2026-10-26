@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile, open, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile, open, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +37,63 @@ async function index() {
 }
 
 describe('incremental project transactions', () => {
+  it('serializes publication for different active destinations and persists both associations', async () => {
+    const other = path.join(directory, 'Other.pmv');
+    const a = document('one'), b = document('two');
+    const uploads = await Promise.all([
+      files.beginIncremental('one', [], a.length, destination),
+      files.beginIncremental('two', [], b.length, other),
+    ]);
+    await Promise.all([uploads[0]!.write(null, a), uploads[1]!.write(null, b)]);
+    await Promise.all(uploads.map(upload => upload.finish()));
+    files = new ProjectFiles(registry, path.join(directory, 'backups'));
+    expect(await files.destination('one')).toBe(destination);
+    expect(await files.destination('two')).toBe(other);
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('one');
+    expect(decodeProjectContainer(await readFile(other)).document.proj.name).toBe('two');
+  });
+  it('releases the destination after concurrent-save rejection but never refreshes a stale tab', async () => {
+    await save('first', [clip()], undefined, destination);
+    const stale = await files.open(destination); await files.close(stale.token);
+    const json = document('latest'), upload = await files.beginIncremental('one', [clip()], json.length);
+    await expect(files.beginIncremental(stale.projectId, [], json.length)).rejects.toThrow('already in progress');
+    await expect(files.save('one', document('overlap'))).rejects.toThrow('already in progress');
+    await upload.write(null, json); await upload.finish();
+    await expect(files.beginIncremental(stale.projectId, [], json.length)).rejects.toThrow('changed');
+    await save('normal repeat');
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('normal repeat');
+  });
+  it('accepts timestamp-only changes during an upload only after verifying the original bytes', async () => {
+    await save('first', [clip()], undefined, destination);
+    const json = document('second'), upload = await files.beginIncremental('one', [clip()], json.length);
+    await upload.write(null, json);
+    await utimes(destination, new Date(1000), new Date(2000));
+    await upload.finish();
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('second');
+    await save('third');
+  });
+  it.skipIf(process.platform === 'darwin')('allows a normal retry after publication succeeds but directory flush fails', async () => {
+    await save('first', [clip()], undefined, destination);
+    const handle = await open(directory, 'r'), info = await handle.stat(), prototype = Object.getPrototypeOf(handle);
+    await handle.close();
+    const sync = prototype.sync;
+    let failed = false;
+    const flush = vi.spyOn(prototype, 'sync').mockImplementation(async function(this: import('node:fs/promises').FileHandle) {
+      const current = await this.stat();
+      if (current.dev === info.dev && current.ino === info.ino && !failed && decodeProjectContainer(await readFile(destination)).document.proj.name === 'second') {
+        failed = true;
+        throw new Error('directory flush failed after publication');
+      }
+      return sync.call(this);
+    });
+    await expect(save('second')).rejects.toThrow('flush failed');
+    expect(failed).toBe(true);
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('second');
+    flush.mockRestore();
+    await save('third');
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('third');
+  });
+
   it.each(['small', 'large'])('keeps the internal %s PMV4 document and exposes its validated byte range', async size => {
     const value = JSON.parse(document('native open').toString());
     value.history.note = size === 'large' ? 'synthetic history '.repeat(80_000) : 'synthetic history';
@@ -89,7 +146,7 @@ describe('incremental project transactions', () => {
     const reopened = decodeProjectContainer(await readFile(destination));
     expect(reopened.document.proj.name).toBe('second');
     expect([...reopened.media[0]!.data]).toEqual([1, 2, 3]);
-    expect(decodeProjectContainer(await readFile((await files.backups('one'))[0]!)).document.proj.name).toBe('first');
+    expect(await files.backups('one')).toHaveLength(1);
     const native = await files.open(destination);
     expect(native.document).toEqual(reopened.document);
     expect(native.media[0]!.revision).toBe('revision-one');
@@ -113,18 +170,20 @@ describe('incremental project transactions', () => {
     expect((await index()).media).toEqual(previous.media);
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('Reopened and renamed');
   });
-  it('uploads replacements with the same asset id and size, preserving the old version in backup', async () => {
+  it('uploads replacements with the same asset id and size while retaining the prior valid media', async () => {
     await save('first', [clip()], undefined, destination);
     expect(await save('changed', [clip('new')], Buffer.from([4, 5, 6]))).toEqual(['clip']);
     expect([...decodeProjectContainer(await readFile(destination)).media[0]!.data]).toEqual([4, 5, 6]);
-    expect([...decodeProjectContainer(await readFile((await files.backups('one'))[0]!)).media[0]!.data]).toEqual([1, 2, 3]);
+    expect(await files.backups('one')).toHaveLength(1);
   });
-  it('upgrades PMV3 and legacy JSON without changing the old version in backup', async () => {
+  it('upgrades PMV3 and legacy JSON while preserving the original version', async () => {
+    let previousCount = 0;
     for (const legacy of [document('legacy'), encodeProjectContainer(JSON.parse(document('legacy').toString()), [])]) {
       await files.save('one', legacy, destination);
       await save('upgraded');
       expect((await readFile(destination)).subarray(0, 5).toString()).toBe('PMV4\n');
-      expect(await readFile((await files.backups('one'))[0]!)).toEqual(Buffer.from(legacy));
+      previousCount += previousCount ? 2 : 1;
+      expect(await files.backups('one')).toHaveLength(previousCount);
     }
   });
   it('Save As produces a self-contained copy and switches the association', async () => {
@@ -141,9 +200,7 @@ describe('incremental project transactions', () => {
     expect(await save('updated')).toEqual([]);
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('updated');
     expect((await stat(destination)).mode & 0o777).toBe(0o400);
-    const backup = (await files.backups('one'))[0]!;
-    expect(decodeProjectContainer(await readFile(backup)).document.proj.name).toBe('original');
-    expect((await stat(backup)).mode & 0o777).toBe(0o400);
+    expect(await files.backups('one')).toHaveLength(1);
     await save('updated again');
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('updated again');
   });
@@ -152,7 +209,7 @@ describe('incremental project transactions', () => {
     await writeFile(destination, damaged);
     expect(await save('replacement', [clip()], undefined, destination)).toEqual(['clip']);
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('replacement');
-    expect(await readFile((await files.backups('one'))[0]!)).toEqual(damaged);
+    expect(await files.backups('one')).toHaveLength(1);
   });
   it('incomplete, cancelled, concurrent, and oversized writes cannot publish or destroy the previous version', async () => {
     await save('first', [clip()], undefined, destination);
@@ -253,7 +310,7 @@ describe('incremental project transactions', () => {
     swap.mockRestore();
     expect(await files.backups('one')).toEqual(previousBackups);
     await save('successful retry');
-    expect(await files.backups('one')).toHaveLength(5);
+    expect(await files.backups('one')).toHaveLength(previousBackups.length + 1);
   });
   it('reconciles a committed file after association persistence fails', async () => {
     await save('first', [clip()], undefined, destination);
@@ -330,7 +387,7 @@ describe('incremental project transactions', () => {
     await upload.write(null, empty); await upload.finish();
     expect((await stat(destination)).size).toBeLessThan(2000);
     expect(decodeProjectContainer(await readFile(destination)).media).toEqual([]);
-    expect((await stat((await files.backups('one'))[0]!)).size).toBeGreaterThan(payload.length);
+    expect(await files.backups('one')).toHaveLength(1);
   });
   it('handles empty media without requiring an empty IPC chunk', async () => {
     expect(await save('empty', [clip('empty', 0)], Buffer.alloc(0), destination)).toEqual(['clip']);

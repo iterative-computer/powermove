@@ -23,8 +23,9 @@ test('right-click menus create a composition and preserve the current project on
   expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   const dialog = page.getByRole('dialog', { name: 'New Composition', exact: true });
 
-  for (const selector of ['.project-doc.on', '.tl-comp-tab[aria-selected="true"]', '#stage-inner', '#tl-canvas', '.asset-card.is-comp']) {
-    await chooseNativeMenu(session, 'New Composition…', () =>
+  for (const selector of ['.tl-comp-tab[aria-selected="true"]', '#stage-inner', '#tl-canvas', '.asset-card.is-comp']) {
+    // The canvas and timeline offer it under New ▸.
+    await chooseNativeMenu(session, ['#stage-inner', '#tl-canvas'].includes(selector) ? ['New', 'Composition…'] : 'New Composition…', () =>
       page.locator(selector).click({ button: 'right', position: { x: 20, y: selector === '#tl-canvas' ? 60 : 20 } }));
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -33,7 +34,7 @@ test('right-click menus create a composition and preserve the current project on
       .toEqual({ projectId: original.projectId, compId: original.compId });
   }
 
-  await chooseNativeMenu(session, 'New Composition…', () =>
+  await chooseNativeMenu(session, ['New', 'Composition…'], () =>
     page.locator('#tl-canvas').click({ button: 'right', position: { x: 20, y: 60 } }));
   await dialog.getByLabel('Composition Name', { exact: true }).fill('Composition from context menu');
   await dialog.locator('select[aria-label="Resolution preset"]').selectOption('1080x1080');
@@ -43,7 +44,7 @@ test('right-click menus create a composition and preserve the current project on
     .toBe('Composition from context menu');
   expect(await page.evaluate(() => ({ id: (window as any).PM.proj.id, name: (window as any).PM.proj.name })))
     .toEqual({ id: original.projectId, name: original.projectName });
-  await expect(page.locator('.project-doc')).toHaveCount(1);
+  expect(await page.evaluate(() => (window as any).PM.Tabs.list().length)).toBe(1);
   await expect(page.locator('.tl-comp-tab')).toHaveCount(2);
   expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   expect(await session.app.evaluate(() => (globalThis as any).__compositionSaveDialogs)).toBe(1);

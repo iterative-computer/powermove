@@ -686,18 +686,16 @@ export function createTrackView(host: TrackViewHost) {
   /* Each clip's parent pickwhip follows its name, as the layer timeline's
      ends the name column. Positions come from the last draw, for hit tests. */
   let whips = new Map<string, { x: number; cy: number }>();
-  /* The disclosure arrow is drawn as a path: the text glyph was too small to
-     read or hit. The label is padded with spaces to leave room for it. */
+  /* Match the layer timeline's disclosure chevron. The label padding and
+     larger pointer target leave room for the compact icon. */
   function drawDisclosure(c: CanvasRenderingContext2D, layer: any, from: number, dur: number, open: boolean, y: number, h: number) {
     const x0 = Math.max(host.t2x(from), T.gut), x1 = host.t2x(from + dur);
     if (x1 - x0 < 22) return;
     const cx = x0 + 6 + 6, cy = h >= 32 ? y + 11 : y + h / 2 + .5;
     c.save();
-    c.fillStyle = host.clipPalette(layer).foreground; c.globalAlpha = .85;
-    c.beginPath();
-    if (open) { c.moveTo(cx - 5, cy - 3); c.lineTo(cx + 5, cy - 3); c.lineTo(cx, cy + 4); }
-    else { c.moveTo(cx - 3, cy - 5); c.lineTo(cx + 4, cy); c.lineTo(cx - 3, cy + 5); }
-    c.closePath(); c.fill();
+    c.translate(cx, cy); c.rotate(open ? Math.PI / 2 : 0);
+    c.strokeStyle = host.clipPalette(layer).foreground; c.globalAlpha = .85; c.lineWidth = 1.4;
+    c.beginPath(); c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
     c.restore();
   }
   function placeWhip(c: CanvasRenderingContext2D, layer: any, from: number, dur: number, name: string, y: number, h: number) {
@@ -1017,8 +1015,8 @@ export function createTrackView(host: TrackViewHost) {
     const whip = whipAt(x, y);
     if (whip) {
       const parent = whip.layer.parent ? layerOf(whip.layer.parent)?.name || 'Missing layer' : 'None';
-      return whip.menu ? { cursor: 'pointer', title: `Parent: ${parent} · Choose parent` }
-        : { cursor: 'crosshair', title: `Parent: ${parent} · Drag to a layer` };
+      return whip.menu ? { cursor: 'pointer', title: `Link Layers: ${parent} · Choose a layer` }
+        : { cursor: 'crosshair', title: `Link Layers: ${parent} · Drag to a layer` };
     }
     const hit = hitItem(x, y);
     if (!hit) return { cursor: 'default', title: '' };

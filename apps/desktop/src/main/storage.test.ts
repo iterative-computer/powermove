@@ -31,6 +31,48 @@ afterEach(async () => {
 });
 
 describe('file store', () => {
+  it('upgrade compresses unopened recovery records and does not overwrite a newer edit made during the scan', async () => {
+    const directory = await temporaryDirectory();
+    const original = { layers: [], notes: 'recoverable'.repeat(20_000) }, current = { ...original, notes: 'new edit'.repeat(20_000) };
+    await fs.writeFile(path.join(directory, 'project.unopened.json'), JSON.stringify(original));
+    const store = createStore(directory); await store.load();
+    let inspected = false;
+    await store.optimizeStorage!(async value => {
+      expect(value).toEqual(original); inspected = true;
+      store.set('project.unopened', current);
+    });
+    expect(inspected).toBe(true);
+    expect((await fs.stat(path.join(directory, 'project.unopened.json'))).size).toBeLessThan(5000);
+    const reopened = createStore(directory); await reopened.load();
+    expect(reopened.get!('project.unopened')).toEqual(current);
+  });
+
+  it('upgrade retries a failed recovery compression without completing prematurely', async () => {
+    const directory = await temporaryDirectory(), original = { notes: 'recoverable'.repeat(20_000) };
+    const file = path.join(directory, 'project.retry.json'); await fs.writeFile(file, JSON.stringify(original));
+    const writeFile = vi.fn(fs.writeFile).mockRejectedValueOnce(new Error('disk full'));
+    const store = createStore(directory, { fs: fileSystemWith({ writeFile: writeFile as typeof fs.writeFile }) }); await store.load();
+    await expect(store.optimizeStorage!()).rejects.toThrow('resume');
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual(original);
+    await store.optimizeStorage!();
+    expect((await fs.stat(file)).size).toBeLessThan(5000);
+    const reopened = createStore(directory); await reopened.load(); expect(reopened.get!('project.retry')).toEqual(original);
+  });
+  it('migrates large legacy recovery records atomically on read and reopens every API losslessly', async () => {
+    const directory = await temporaryDirectory(), file = path.join(directory, 'project.migrating.json');
+    const project = { layers: [], text: 'Café 🟢'.repeat(20_000) }, original = JSON.stringify(project);
+    await fs.writeFile(file, original);
+    const store = createStore(directory); await store.load();
+    expect(await fs.readFile(file, 'utf8')).toBe(original);
+    await store.preload!('project.migrating'); await store.flushAll();
+    expect((await fs.stat(file)).size).toBeLessThan(Buffer.byteLength(original) / 10);
+    const reopened = createStore(directory); await reopened.load();
+    expect(reopened.get!('project.migrating')).toEqual(project);
+    expect(reopened.getSerialized!('project.migrating')).toBe(original);
+    expect(reopened.getEncodedSerialized!('project.migrating')).toBe(original);
+    expect(await reopened.getEncodedSerializedAsync!('project.migrating')).toBe(original);
+    expect((await fs.readdir(directory)).filter(name => name.includes('.tmp-'))).toEqual([]);
+  });
   it('indexes heavy filenames without reading them, and reads through every synchronous API', async () => {
     const directory = await temporaryDirectory();
     const prefixes = ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads', 'agentAttachment'];
@@ -507,7 +549,7 @@ describe('file store', () => {
     store.set('theme', 'dark');
     await store.flushAll();
 
-    expect(calls).toEqual(['write', 'open', 'fsync', 'close', 'rename']);
+    expect(calls).toEqual(['write', 'open', 'fsync', 'close', 'rename', 'open', 'fsync', 'close']);
   });
 
   it('quarantines corrupt JSON and reports it without failing startup', async () => {
@@ -568,7 +610,7 @@ describe('file store', () => {
     project.editableSource = 'x'.repeat(59351487 - Buffer.byteLength(JSON.stringify(project)));
     store.set('project.large-project', project);
     await store.flushAll();
-    expect((await fs.stat(path.join(directory, 'project.large-project.json'))).size).toBe(59351487);
+    expect((await fs.stat(path.join(directory, 'project.large-project.json'))).size).toBeLessThan(59351487 / 10);
     const reopened = createStore(directory);
     await reopened.load();
     expect(reopened.get!('project.large-project')).toEqual(project);
@@ -601,7 +643,7 @@ describe('file store', () => {
 
     store.set('projectState.Pyckwzri', state);
     await store.flushAll();
-    expect((await fs.stat(path.join(directory, 'projectState.Pyckwzri.json'))).size).toBe(33792768);
+    expect((await fs.stat(path.join(directory, 'projectState.Pyckwzri.json'))).size).toBeLessThan(33792768 / 10);
     const reopened = createStore(directory);
     await reopened.load();
     expect(reopened.get!('projectState.Pyckwzri')).toEqual(state);
@@ -615,7 +657,7 @@ describe('file store', () => {
     takes[0]!.json = 'x'.repeat(168720601 - Buffer.byteLength(JSON.stringify(takes)));
     store.set('takes', takes);
     await store.flushAll();
-    expect((await fs.stat(path.join(directory, 'takes.json'))).size).toBe(168720601);
+    expect((await fs.stat(path.join(directory, 'takes.json'))).size).toBeLessThan(168720601 / 10);
     const reopened = createStore(directory);
     await reopened.load();
     expect(reopened.snapshot().takes).toEqual(takes);
@@ -799,6 +841,64 @@ describe('store IPC and quit integration', () => {
     release();
     await vi.waitFor(() => expect(quit).toHaveBeenCalledTimes(1));
   });
+  it('rejects a strict durability flush after an actual filesystem write failure', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory, { fs: fileSystemWith({ writeFile: async () => { throw new Error('Disk full'); } }) });
+    await store.load();
+    store.set('openWindows', ['P1']);
+    await expect(store.flushAll({ strict: true })).rejects.toThrow('still open');
+    // Ordinary background flushes keep their error-event contract.
+    await expect(store.flushAll()).resolves.toBeUndefined();
+  });
+
+  it('retries retained failed writes on an explicit strict flush without requiring a new edit', async () => {
+    const directory = await temporaryDirectory();
+    let full = true;
+    const store = createStore(directory, { fs: fileSystemWith({ writeFile: async (...args) => {
+      if (full) throw new Error('Disk full');
+      return fs.writeFile(...args);
+    } }) });
+    await store.load();
+    store.set('openWindows', ['P1']);
+    await expect(store.flushAll({ strict: true })).rejects.toThrow('still open');
+    full = false;
+    await store.flushAll({ strict: true });
+    const recovered = createStore(directory); await recovered.load();
+    expect(recovered.get?.('openWindows')).toEqual(['P1']);
+  });
+
+  it('keeps Quit reversible across cancellation, write failure and a late timed-out flush', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const app = Object.assign(new EventEmitter(), { quit: vi.fn() });
+      const prepare = vi.fn().mockRejectedValueOnce(new Error('Close cancelled')).mockResolvedValue(undefined);
+      let finish!: () => void;
+      const flushAll = vi.fn().mockRejectedValueOnce(new Error('Disk full'))
+        .mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; })).mockResolvedValue(undefined);
+      const commit = vi.fn(async () => {}), cancel = vi.fn();
+      const barrier = installQuitFlush(app as unknown as Pick<App, 'on' | 'quit'>, storeStub({ flushAll }), prepare, { commit, cancel });
+      const request = () => app.emit('before-quit', { preventDefault: vi.fn() });
+      request(); await vi.advanceTimersByTimeAsync(0);
+      expect(flushAll).not.toHaveBeenCalled();
+      request(); await vi.advanceTimersByTimeAsync(0);
+      expect(app.quit).not.toHaveBeenCalled();
+      expect(barrier.isPrepared()).toBe(false);
+      request(); request(); await vi.advanceTimersByTimeAsync(5_000);
+      expect(app.quit).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledTimes(3);
+      expect(commit).not.toHaveBeenCalled();
+      finish(); await vi.advanceTimersByTimeAsync(0);
+      expect(app.quit).not.toHaveBeenCalled();
+      request(); await vi.advanceTimersByTimeAsync(0);
+      expect(app.quit).toHaveBeenCalledOnce();
+      expect(commit).toHaveBeenCalledOnce();
+      expect(barrier.isPrepared()).toBe(true);
+      barrier.reset(); expect(barrier.isPrepared()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('captures the live editor before flushing the main store',async()=>{
     const app=Object.assign(new EventEmitter(),{quit:vi.fn()});
     let prepared!:()=>void;

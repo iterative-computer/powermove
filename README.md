@@ -32,7 +32,7 @@ packages/
   macos-haptics/      @powermove/macos-haptics   native macOS alignment-haptics addon
   cli/                powermove            `npx powermove serve`: the editor host for any Linux or macOS box, used from a browser
 assets/
-  brand/              powermove-mark.svg, powermove-mark.png (the orange playhead mark)
+  brand/              powermove-light.svg, powermove-dark.svg, powermove-light.png
 docs/
   design.md           Powermove design language
 ```

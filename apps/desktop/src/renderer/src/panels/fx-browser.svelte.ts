@@ -4,7 +4,9 @@ export const fxBrowser = $state({
   query: '',
   searchOpen: false,
   /** 'all', 'recent', or an effect group name. */
-  category: 'all' as string
+  category: 'all' as string,
+  /** Effect families folded shut in the tree. */
+  folded: [] as string[]
 });
 
 const RECENT_KEY = 'pm.fx.recent';

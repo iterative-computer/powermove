@@ -77,16 +77,28 @@ describe('application menu', () => {
       'File',
       'Edit',
       'Composition',
+      'Layer',
       'View',
       'Window'
     ]);
     // After Effects: ⌘N makes a composition, ⌥⌘N a project.
     expect(submenu(topLevel(template, 'Composition')).map((item) => [item.label ?? item.type, item.accelerator, item.id])).toEqual([
       ['New Composition…', 'CommandOrControl+N', 'newComposition'],
-      ['Composition Settings…', 'CommandOrControl+Alt+K', 'compositionSettings'],
-      ['separator', undefined, undefined],
-      ['Pre-compose…', 'CommandOrControl+Shift+C', 'precompose']
+      ['Composition Settings…', 'CommandOrControl+Alt+K', 'compositionSettings']
     ]);
+    // After Effects: making layers and pre-composing live in the Layer menu.
+    const layerItems = submenu(topLevel(template, 'Layer'));
+    expect(layerItems.map((item) => [item.label ?? item.type, item.accelerator, item.id])).toEqual([
+      ['New', undefined, undefined],
+      ['separator', undefined, undefined],
+      ['Pre-compose…', 'CommandOrControl+Shift+C', 'precompose'],
+      ['Release Pre-comp', undefined, 'releasePrecomp']
+    ]);
+    expect(submenu(layerItems[0]!).map((item) => item.label ?? item.type)).toEqual([
+      'Text', 'Solid', 'Shape Layer', 'Null Object', 'Adjustment Layer', 'separator', 'Camera', 'Light'
+    ]);
+    for (const item of submenu(layerItems[0]!)) (item.click as (() => void) | undefined)?.();
+    expect(sent.splice(0)).toEqual(['newText', 'newSolid', 'newShape', 'newNull', 'newAdjustment', '3d.add-camera', '3d.add-light']);
 
     const appItems = submenu(topLevel(template, 'Powermove'));
     const fileItems = submenu(topLevel(template, 'File'));

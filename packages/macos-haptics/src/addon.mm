@@ -277,7 +277,71 @@ static napi_value SandboxDeniesLookup(napi_env env, napi_callback_info info) {
   return result;
 }
 
+
+// NSFileVersion is usable without NSDocument. The AppKit Versions browser is
+// deliberately not exposed: it requires document/window-controller ownership.
+struct VersionWork {
+  napi_async_work work; napi_deferred deferred;
+  std::string operation, path, contents, result, error;
+};
+static void PerformVersionWork(napi_env env, void *data) {
+  VersionWork *job = static_cast<VersionWork *>(data);
+  @autoreleasepool {
+    @try {
+      NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:job->path.c_str()]];
+      if (job->operation == "snapshot") {
+        NSError *error = nil;
+        NSURL *contents = [NSURL fileURLWithPath:[NSString stringWithUTF8String:job->contents.c_str()]];
+        NSFileVersion *version = [NSFileVersion addVersionOfItemAtURL:url withContentsOfURL:contents options:0 error:&error];
+        if (!version) job->error = [[error localizedDescription] UTF8String] ?: "macOS could not save a version";
+        else job->result = "true";
+      } else {
+        NSMutableArray *versions = [NSMutableArray array];
+        for (NSFileVersion *version in [NSFileVersion otherVersionsOfItemAtURL:url]) {
+          if (version.URL.path && version.modificationDate) [versions addObject:@{ @"path": version.URL.path, @"at": @([version.modificationDate timeIntervalSince1970] * 1000) }];
+        }
+        NSData *json = [NSJSONSerialization dataWithJSONObject:versions options:0 error:nil];
+        job->result = std::string(static_cast<const char *>(json.bytes), json.length);
+      }
+    } @catch (NSException *exception) { job->error = [[exception reason] UTF8String] ?: "macOS version operation failed"; }
+  }
+}
+static void CompleteVersionWork(napi_env env, napi_status status, void *data) {
+  VersionWork *job = static_cast<VersionWork *>(data); napi_value value;
+  if (status != napi_ok || !job->error.empty()) {
+    napi_value message; napi_create_string_utf8(env, job->error.empty() ? "Version operation cancelled" : job->error.c_str(), NAPI_AUTO_LENGTH, &message);
+    napi_create_error(env, nullptr, message, &value); napi_reject_deferred(env, job->deferred, value);
+  } else {
+    napi_create_string_utf8(env, job->result.c_str(), job->result.size(), &value); napi_resolve_deferred(env, job->deferred, value);
+  }
+  napi_delete_async_work(env, job->work); delete job;
+}
+static napi_value FileVersions(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value args[3]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  std::string strings[3];
+  for (size_t i = 0; i < argc; i++) {
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, args[i], nullptr, 0, &length) != napi_ok || length > 16384) {
+      napi_throw_type_error(env, nullptr, "Expected version operation and file paths"); return nullptr;
+    }
+    std::vector<char> buffer(length + 1); napi_get_value_string_utf8(env, args[i], buffer.data(), buffer.size(), &length);
+    strings[i] = std::string(buffer.data(), length);
+  }
+  if (argc < 2 || (strings[0] != "list" && strings[0] != "snapshot") || strings[1].empty()
+      || (strings[0] == "snapshot" && (argc < 3 || strings[2].empty()))) {
+    napi_throw_type_error(env, nullptr, "Invalid version operation"); return nullptr;
+  }
+  VersionWork *job = new VersionWork{}; job->operation = strings[0]; job->path = strings[1]; job->contents = strings[2];
+  napi_value promise, name; napi_create_promise(env, &job->deferred, &promise);
+  napi_create_string_utf8(env, "fileVersions", NAPI_AUTO_LENGTH, &name);
+  napi_create_async_work(env, nullptr, name, PerformVersionWork, CompleteVersionWork, job, &job->work);
+  napi_queue_async_work(env, job->work); return promise;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
+  napi_value versions;
+  napi_create_function(env, "fileVersions", NAPI_AUTO_LENGTH, FileVersions, nullptr, &versions);
+  napi_set_named_property(env, exports, "fileVersions", versions);
   FontObserverEnvironment *fontEnvironment = new FontObserverEnvironment();
   napi_add_env_cleanup_hook(env, RemoveFontObservers, fontEnvironment);
   napi_value trigger;

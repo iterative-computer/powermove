@@ -1,28 +1,22 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { flip } from 'svelte/animate';
   import Icon from '../panels/Icon.svelte';
   import { readProjectLoading } from '../overlays/project-ghost';
   import AgentLauncher from './AgentLauncher.svelte';
+  import TaskPill from './TaskPill.svelte';
   import ToolbarMount from './ToolbarMount.svelte';
 
+  /* After Effects' layout: Home and the tools on the left, the document's
+     name centred the way a macOS window titles itself, and what you do with
+     the project on the right. Other open projects are one click away in the
+     title's menu instead of a strip of tabs. */
   let { PM }: { PM: Record<string, any> } = $props();
   let refreshToken = $state(0);
   let metadataToken = $state(0);
-  let strip = $state<HTMLDivElement>();
-  let overflow = $state({ start: false, end: false });
-  let rovingId = $state('');
-  let renamingId = $state<string | null>(null);
+  let renaming = $state(false);
   let renameValue = $state('');
-  /* The tab under the pointer while it is being dragged along the strip, and
-     how far it sits from its slot so it stays under the cursor. */
-  let dragId = $state<string | null>(null);
-  let dragOffset = $state(0);
-  /* Pulled out of the strip, the tab leaves its slot and follows the pointer
-     as a ghost; let go there, it moves to another window or one of its own. */
-  let tear = $state<{ x: number; y: number } | null>(null);
+  let titleButton = $state<HTMLButtonElement>();
 
-  const tabIds = $derived.by(() => {
+  const openIds = $derived.by(() => {
     metadataToken;
     return [...(PM.Tabs?.list?.() ?? (PM.proj?.id && !PM.isHomeProject?.() ? [PM.proj.id] : []))] as string[];
   });
@@ -30,9 +24,8 @@
     metadataToken;
     return new Map<string, string>((PM.Projects?.list?.() ?? []).map((meta: { id: string; name?: string }) => [meta.id, meta.name || 'Untitled']));
   });
-  /* A project that is still opening is the active tab at once; the loaded
-     document (name, dirty state) stays with its own tab until it lands. The
-     opening tab skips its saved file state: that is what the load is reading. */
+  /* A project that is still opening is titled at once; the loaded document
+     (name, dirty state) stays with its own title until it lands. */
   const pending = $derived.by(() => {
     refreshToken;
     return readProjectLoading(PM);
@@ -42,8 +35,6 @@
     return PM.proj?.id as string | undefined;
   });
   const activeProjectId = $derived(pending ? (pending.id ?? undefined) : documentId);
-  /* Nothing to select yet on a cold boot: one placeholder tab names what is opening. */
-  const pendingChip = $derived(pending && !(pending.id && tabIds.includes(pending.id)) ? pending : null);
   const activeName = $derived.by(() => {
     metadataToken;
     refreshToken;
@@ -62,9 +53,7 @@
     return !!PM.app?.dirty;
   });
   // File metadata is read lazily, so the lookup — not its result — is what
-  // re-derives when a save, rename or dirty change bumps the token. The state
-  // is one mutable object per project, so each read is copied: an unchanged
-  // reference would otherwise hide a changed flag from the tab.
+  // re-derives when a save, rename or dirty change bumps the token.
   const fileStateFor = $derived.by(() => {
     refreshToken;
     return (id: string): { path?: string; dirty?: boolean } | null => {
@@ -73,60 +62,52 @@
     };
   });
   const multiWindow = $derived(!!PM.windows?.supported);
-  const selectedId = $derived(homeOpen || !activeProjectId || !tabIds.includes(activeProjectId) ? 'home' : activeProjectId);
+  /* The project on screen, or the one Projects will return to. Nothing on a
+     cold boot until the first document lands. */
+  const titleId = $derived(activeProjectId && (openIds.includes(activeProjectId) || pending?.id === activeProjectId) ? activeProjectId : null);
+  const opening = $derived(!!pending && (!pending.id || pending.id === titleId));
+  const titleName = $derived(titleId ? nameFor(titleId) : pending ? (pending.name || 'Untitled') : '');
+  const titleFile = $derived(titleId && !opening ? fileStateFor(titleId) : null);
+  const titleDirty = $derived(!!titleId && !opening && (titleId === documentId ? (titleFile?.dirty ?? appDirty) : !!titleFile?.dirty));
 
   function nameFor(id: string): string {
     if (pending?.id === id && pending.name) return pending.name;
     return id === documentId ? activeName : names.get(id) || 'Untitled';
   }
 
-  function tabIndex(id: string): 0 | -1 {
-    return (rovingId || selectedId) === id ? 0 : -1;
-  }
-
   function showProjects(): void {
-    rovingId = 'home';
     PM.ProjectsScreen?.show?.();
   }
 
   function activate(id: string): void {
-    rovingId = id;
     if (id === activeProjectId) {
-      // The tab is the way back out of Projects to the composition.
+      // The title is also the way back out of Projects to the composition.
       if (PM.ProjectsScreen?.isOpen) PM.ProjectsScreen.hide?.();
       return;
     }
     void PM.Tabs?.activate?.(id);
   }
 
-  async function close(id: string): Promise<void> {
-    const focused = document.activeElement?.closest('[data-tab-id]')?.getAttribute('data-tab-id') === id;
-    const closed = await PM.Tabs?.close?.(id);
-    if (!closed) return;
-    if (rovingId === id) rovingId = '';
-    if (focused) {
-      await tick();
-      [...document.querySelectorAll<HTMLElement>('#tabs [role="tab"]')]
-        .find((node) => node.dataset.tabId === selectedId)?.focus();
-    }
+  function close(id: string): void {
+    void PM.Tabs?.close?.(id);
   }
 
-  function beginRename(id: string): void {
-    if (renamingId) return;
-    renamingId = id;
-    renameValue = nameFor(id);
+  function beginRename(): void {
+    if (renaming || !titleId || opening) return;
+    renaming = true;
+    renameValue = nameFor(titleId);
   }
 
   function finishRename(commit: boolean): void {
-    if (!renamingId) return;
-    const id = renamingId;
+    if (!renaming || !titleId) return;
     if (commit) {
-      try { PM.Projects?.rename?.(id, renameValue); }
+      try { PM.Projects?.rename?.(titleId, renameValue); }
       catch (error) { PM.toast?.(`Could not rename project: ${error instanceof Error ? error.message : String(error)}`); return; }
     }
-    renamingId = null;
+    renaming = false;
     PM.bus?.emit?.('projects:open');
     if (commit) PM.bus?.emit?.('project');
+    titleButton?.focus();
   }
 
   function renameKeydown(event: KeyboardEvent): void {
@@ -148,198 +129,44 @@
     return { destroy: () => window.cancelAnimationFrame(frame) };
   }
 
-  function tabMenu(event: MouseEvent, id: string): void {
-    event.preventDefault();
-    event.stopPropagation();
+  /* Open projects, then what you can do with the one on screen. */
+  function projectMenu(event?: MouseEvent): void {
+    event?.preventDefault();
+    event?.stopPropagation();
+    if (!titleButton || !titleId) return;
     const items: Array<Record<string, unknown> | string> = [
-      { label: 'New Composition…', kb: '⌘N', run: () => PM.cmd('newComposition') },
+      ...openIds.map((id) => ({ label: nameFor(id), on: id === titleId && !homeOpen, run: () => activate(id) })),
       '-',
-      { label: 'Close Tab', kb: '⌘W', run: () => void close(id) },
-      { label: 'Close Other Tabs', disabled: tabIds.length < 2, run: () => void PM.Tabs?.closeOthers?.(id) },
-      '-',
-      { label: 'Rename Project…', kb: 'F2', run: () => beginRename(id) }
+      { label: 'Rename Project…', kb: 'F2', disabled: opening, run: beginRename },
+      { label: 'Close Project', kb: '⌘W', run: () => close(titleId) },
+      { label: 'Close Other Projects', disabled: openIds.length < 2, run: () => void PM.Tabs?.closeOthers?.(titleId) }
     ];
-    if (multiWindow) {
-      items.push(
-        { label: 'Move to New Window', disabled: tabIds.length < 2, run: () => void PM.Tabs?.moveToNewWindow?.(id) },
-        '-',
-        { label: 'New Window', kb: '⇧⌘N', run: () => void PM.newWindow?.() }
-      );
-    }
-    PM.menu(event.currentTarget, items, { x: event.clientX, y: event.clientY });
+    if (multiWindow) items.push({ label: 'Move to New Window', disabled: openIds.length < 2, run: () => void PM.Tabs?.moveToNewWindow?.(titleId) });
+    items.push(
+      '-',
+      { label: 'New Project', kb: '⌥⌘N', run: () => PM.newProject?.() },
+      { label: 'All Projects…', kb: '⌘P', run: showProjects }
+    );
+    if (event?.type === 'contextmenu') PM.menu(titleButton, items, { x: event.clientX, y: event.clientY });
+    else PM.menu(titleButton, items);
   }
 
-  function focusTab(event: KeyboardEvent): void {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-    const tabs = [...document.querySelectorAll<HTMLElement>('#tabs [role="tab"]:not([aria-disabled="true"])')];
-    if (!tabs.length) return;
-    const current = Math.max(0, tabs.indexOf(event.currentTarget as HTMLElement));
-    let next = current;
-    if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = tabs.length - 1;
-    else if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
-    else next = (current + 1) % tabs.length;
-    event.preventDefault();
-    const target = tabs[next];
-    if (!target) return;
-    rovingId = target.dataset.tabId ?? '';
-    target.focus();
-  }
-
-  function tabKeydown(event: KeyboardEvent, id: string): void {
+  function titleKeydown(event: KeyboardEvent): void {
     if (event.key === 'F2') {
       event.preventDefault();
       event.stopPropagation();
-      beginRename(id);
-      return;
-    }
-    if (event.key === 'Backspace' || event.key === 'Delete') {
+      beginRename();
+    } else if (event.key === 'ArrowDown') {
       event.preventDefault();
-      void close(id);
-      return;
-    }
-    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-      focusTab(event);
-      return;
-    }
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      activate(id);
+      projectMenu();
     }
   }
-
-  /* ── dragging a tab along the strip, or out of it ──────────── */
-  let press: { id: string; pointer: number; x: number; y: number; grab: number; grabY: number; node: HTMLElement } | null = null;
-  let suppressClick = false;
-
-  function tabPointerDown(event: PointerEvent, id: string): void {
-    if (event.button !== 0 || renamingId === id || !strip) return;
-    if ((event.target as Element)?.closest?.('.project-doc-close')) return;
-    const node = event.currentTarget as HTMLElement;
-    const left = strip.getBoundingClientRect().left;
-    press = {
-      id, pointer: event.pointerId, x: event.clientX, y: event.clientY, node,
-      grab: event.clientX - (left + node.offsetLeft - strip.scrollLeft),
-      grabY: event.clientY - node.getBoundingClientRect().top
-    };
-    window.addEventListener('pointermove', tabPointerMove, true);
-    window.addEventListener('pointerup', tabPointerUp, true);
-    window.addEventListener('pointercancel', tabPointerUp, true);
-  }
-
-  /** Far enough from the titlebar that the pointer means "somewhere else":
-   *  well below it, above it, or out of the window altogether. */
-  function pulledOut(event: PointerEvent): boolean {
-    if (!multiWindow) return false;
-    const bar = document.getElementById('titlebar')?.getBoundingClientRect();
-    if (!bar) return false;
-    return event.clientY < bar.top - 8 || event.clientY > bar.bottom + 28
-      || event.clientX < 0 || event.clientX > window.innerWidth;
-  }
-
-  function tabPointerMove(event: PointerEvent): void {
-    if (!press || event.pointerId !== press.pointer || !strip) return;
-    if (!dragId) {
-      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 5) return;
-      dragId = press.id;
-      press.node.setPointerCapture?.(press.pointer);
-    }
-    const { node, id, grab, grabY } = press;
-    if (pulledOut(event)) {
-      tear = { x: event.clientX - grab, y: event.clientY - grabY };
-      dragOffset = 0;
-      return;
-    }
-    tear = null;
-    // Where the tab's leading edge wants to be, in the strip's content space.
-    const want = event.clientX - strip.getBoundingClientRect().left + strip.scrollLeft - grab;
-    const centre = want + node.offsetWidth / 2;
-    const others = [...strip.querySelectorAll<HTMLElement>('[data-tab-id]')].filter((tab) => tab.dataset.tabId !== id);
-    const index = others.filter((tab) => tab.offsetLeft + tab.offsetWidth / 2 < centre).length;
-    if (tabIds.indexOf(id) !== index) PM.Tabs?.move?.(id, index);
-    dragOffset = want - node.offsetLeft;
-    void tick().then(() => { if (dragId === id && press && !tear) dragOffset = want - node.offsetLeft; });
-  }
-
-  function tabPointerUp(event: PointerEvent): void {
-    if (!press || event.pointerId !== press.pointer) return;
-    window.removeEventListener('pointermove', tabPointerMove, true);
-    window.removeEventListener('pointerup', tabPointerUp, true);
-    window.removeEventListener('pointercancel', tabPointerUp, true);
-    const torn = event.type === 'pointerup' && tear && dragId;
-    if (dragId) suppressClick = true;
-    press = null;
-    dragId = null;
-    dragOffset = 0;
-    tear = null;
-    // Screen coordinates, so main can tell which window, if any, it landed on.
-    if (torn) void PM.Tabs?.detach?.(torn, { x: event.screenX, y: event.screenY });
-  }
-
-  function tabClick(event: MouseEvent, id: string): void {
-    if (suppressClick) {
-      suppressClick = false;
-      return;
-    }
-    if (renamingId === id || event.target instanceof HTMLInputElement) return;
-    if (event.detail > 1) {
-      event.preventDefault();
-      beginRename(id);
-      return;
-    }
-    activate(id);
-  }
-
-  /* ── overflow ───────────────────────────────────────────── */
-  function measureOverflow(): void {
-    if (!strip) return;
-    const start = strip.scrollLeft > 1;
-    const end = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1;
-    if (start !== overflow.start || end !== overflow.end) overflow = { start, end };
-  }
-
-  function scrollTabs(event: WheelEvent): void {
-    if (!strip || event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
-    if (strip.scrollWidth <= strip.clientWidth) return;
-    const scale = event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? strip.clientWidth : 1;
-    strip.scrollLeft += event.deltaY * scale;
-    event.preventDefault();
-  }
-
-  $effect(() => {
-    const node = strip;
-    if (!node) return;
-    node.addEventListener('wheel', scrollTabs, { passive: false });
-    node.addEventListener('scroll', measureOverflow, { passive: true });
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureOverflow);
-    observer?.observe(node);
-    return () => {
-      observer?.disconnect();
-      node.removeEventListener('wheel', scrollTabs);
-      node.removeEventListener('scroll', measureOverflow);
-    };
-  });
-
-  $effect(() => {
-    tabIds;
-    const frame = window.requestAnimationFrame(measureOverflow);
-    return () => window.cancelAnimationFrame(frame);
-  });
-
-  $effect(() => {
-    selectedId;
-    if (dragId) return;
-    const frame = window.requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>('#tabs .project-doc.on')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  });
 
   /* ── native window behaviour ────────────────────────────── */
   function startWindowDrag(event: PointerEvent): void {
     if (event.button !== 0) return;
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
+    if (target?.closest('button, #toolbar-strip, input, a, .tb-right')) return;
     const bridge = (window as any).webkit?.messageHandlers?.windowDrag;
     if (!bridge) return;
     event.preventDefault();
@@ -361,16 +188,35 @@
     bridge.postMessage({ x: event.clientX, y: event.clientY });
   }
 
+  /* After Effects' workspace bar: the main workspaces one click away, the
+     rest (and the panel library) in the overflow menu. */
+  const BAR_WORKSPACES = ['design', 'animate', 'effects'];
+  const workspaces = $derived.by(() => {
+    refreshToken;
+    const all = (PM.WS?.list?.() ?? []) as Array<{ id: string; name: string }>;
+    return { bar: BAR_WORKSPACES.map((id) => all.find((item) => item.id === id)).filter((item) => !!item), all, current: PM.WS?.current?.id as string | undefined };
+  });
+  function moreWorkspaces(event: MouseEvent): void {
+    const anchor = event.currentTarget as HTMLElement;
+    PM.menu(anchor, [
+      { header: 'Workspaces' },
+      ...workspaces.all.map((item) => ({ label: item.name, on: item.id === workspaces.current, run: () => PM.WS.activate(item.id) })),
+      '-',
+      { label: 'Reset “' + (workspaces.all.find((item) => item.id === workspaces.current)?.name ?? 'Workspace') + '” to Saved Layout', disabled: !PM.WS?.get?.(workspaces.current)?.builtin, run: () => PM.WS.resetBuiltin(workspaces.current) },
+      '-',
+      { label: 'Panel Library…', icon: 'grid', run: () => PM.LibraryUI?.open?.() },
+    ]);
+  }
+
   function zoomWindow(event: MouseEvent): void {
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
+    if (target?.closest('button, #toolbar-strip, input, a, .tb-right')) return;
     (window as any).webkit?.messageHandlers?.windowZoom?.postMessage({});
   }
 
   $effect(() => {
-    const events = ['projects:open', 'projects:screen', 'settings:screen', 'project', 'project:loading', 'history'];
+    const events = ['projects:open', 'projects:screen', 'settings:screen', 'project', 'project:loading', 'history', 'workspaces'];
     const offs = events.map((event) => PM.bus?.on?.(event, () => {
-      if (!document.getElementById('tabs')?.contains(document.activeElement)) rovingId = '';
       if (event === 'projects:open' || event === 'project' || event === 'project:loading') metadataToken++;
       refreshToken++;
     }));
@@ -391,145 +237,77 @@
 </script>
 
 <div class="titlebar-drag titlebar-drag-traffic" aria-hidden="true"></div>
-<div id="tabs" data-svelte-shell="tabs">
-  <div role="tablist" aria-label="Open projects" class="project-tablist">
-    <button
-      class="project-strip-btn project-home"
-      class:on={homeOpen}
-      type="button"
-      role="tab"
-      data-tab-id="home"
-      title="Projects (⌘P)"
-      aria-label="Projects"
-      aria-selected={homeOpen}
-      tabindex={tabIndex('home')}
-      onclick={showProjects}
-      onfocus={() => (rovingId = 'home')}
-      onkeydown={focusTab}
-    ><Icon {PM} name="home" /></button>
-
-    <div
-      class="project-tab-scroll"
-      class:fade-start={overflow.start}
-      class:fade-end={overflow.end}
-      class:dragging={!!dragId}
-      bind:this={strip}
-    >
-      {#each tabIds as id (id)}
-        {@const active = id === activeProjectId && !homeOpen}
-        {@const opening = pending?.id === id}
-        {@const file = opening ? null : fileStateFor(id)}
-        {@const dirty = !opening && (id === documentId ? (file?.dirty ?? appDirty) : !!file?.dirty)}
-        {@const tabName = nameFor(id)}
-        <div
-          class="project-doc"
-          class:on={active}
-          class:current={id === activeProjectId}
-          class:pending={opening}
-          class:dirty
-          class:renaming={renamingId === id}
-          class:lifted={dragId === id && !tear}
-          class:torn={dragId === id && !!tear}
-          style:transform={dragId === id && !tear ? `translateX(${dragOffset}px)` : null}
-          title={opening ? `Opening ${tabName}` : file?.path ? `${tabName} — ${file.path}` : `${tabName} — Not saved to a file`}
-          role="tab"
-          data-tab-id={id}
-          data-project-id={id}
-          aria-selected={active}
-          aria-busy={opening || undefined}
-          aria-label={renamingId === id ? `Rename ${tabName}` : `${tabName}${dirty ? ', unsaved' : ''}${opening ? ', opening' : ''}`}
-          tabindex={tabIndex(id)}
-          animate:flip={{ duration: dragId === id ? 0 : 180 }}
-          onpointerdown={(event) => tabPointerDown(event, id)}
-          onclick={(event) => tabClick(event, id)}
-          oncontextmenu={(event) => tabMenu(event, id)}
-          ondblclick={(event) => {
-            if ((event.target as Element)?.closest?.('.project-doc-close')) return;
-            event.preventDefault();
-            event.stopPropagation();
-            beginRename(id);
-          }}
-          onfocus={() => (rovingId = id)}
-          onkeydown={(event) => tabKeydown(event, id)}
-          onauxclick={(event) => {
-            if (event.button !== 1) return;
-            event.preventDefault();
-            void close(id);
-          }}
-        >
-          {#if renamingId === id}
-            <input
-              class="project-doc-input"
-              bind:value={renameValue}
-              maxlength="120"
-              aria-label="Rename project"
-              spellcheck="false"
-              use:focusAndSelect
-              onclick={(event) => event.stopPropagation()}
-              onpointerdown={(event) => event.stopPropagation()}
-              onkeydown={renameKeydown}
-              onblur={() => finishRename(true)}
-            />
-          {:else}
-            <span class="project-doc-label">{tabName}</span>
-            {#if dirty}<span class="project-doc-state">Edited</span>{/if}
-            <button
-              class="project-doc-close"
-              type="button"
-              title="Close tab (⌘W)"
-              aria-label={`Close ${tabName}`}
-              tabindex="-1"
-              onclick={(event) => {
-                event.stopPropagation();
-                void close(id);
-              }}
-            ><Icon {PM} name="x" /></button>
-          {/if}
-        </div>
-      {/each}
-      {#if pendingChip}
-        {@const chipName = pendingChip.name || 'Untitled'}
-        <div
-          class="project-doc pending"
-          class:on={!homeOpen}
-          role="tab"
-          aria-selected={!homeOpen}
-          aria-busy="true"
-          aria-disabled="true"
-          aria-label={`${chipName}, opening`}
-          tabindex="-1"
-        ><span class="project-doc-label">{chipName}</span></div>
-      {/if}
-    </div>
-  </div>
-
-  {#if tear && dragId}
-    <div class="project-doc tab-ghost" style:left="{tear.x}px" style:top="{tear.y}px" aria-hidden="true">
-      <span class="project-doc-label">{nameFor(dragId)}</span>
-    </div>
-  {/if}
-
+<div class="tb-left" id="tb-left">
   <button
-    class="project-strip-btn project-new"
+    class="project-strip-btn project-home"
+    class:on={homeOpen}
     type="button"
-    title="New project (⌥⌘N)"
-    aria-label="New project"
-    onclick={() => PM.newProject?.()}
-  ><Icon {PM} name="plus" /></button>
+    title="Projects (⌘P)"
+    aria-label="Projects"
+    aria-pressed={homeOpen}
+    onclick={showProjects}
+  ><Icon {PM} name="home" /></button>
+  <div class="tb-tools" inert={!!pending}>
+    <ToolbarMount {PM} />
+  </div>
+</div>
+
+<div class="titlebar-drag" aria-hidden="true"></div>
+
+<div id="doc-title" class="tb-title" data-svelte-shell="title">
+  {#if renaming}
+    <input
+      class="tb-title-input"
+      bind:value={renameValue}
+      maxlength="120"
+      aria-label="Rename project"
+      spellcheck="false"
+      use:focusAndSelect
+      onkeydown={renameKeydown}
+      onblur={() => finishRename(true)}
+    />
+  {:else if titleName}
+    <button
+      bind:this={titleButton}
+      class="tb-title-btn"
+      class:pending={opening}
+      class:dirty={titleDirty}
+      class:away={homeOpen}
+      type="button"
+      data-project-id={titleId}
+      aria-haspopup="menu"
+      aria-busy={opening || undefined}
+      aria-label={`${titleName}${titleDirty ? ', unsaved' : ''}${opening ? ', opening' : ''}`}
+      title={opening ? `Opening ${titleName}` : titleFile?.path ? `${titleName} — ${titleFile.path}` : `${titleName} — Not saved to a file`}
+      onclick={(event) => (homeOpen && titleId ? activate(titleId) : projectMenu(event))}
+      oncontextmenu={projectMenu}
+      onkeydown={titleKeydown}
+    >
+      <span class="tb-title-name">{titleName}</span>
+      {#if titleDirty}<span class="tb-title-state">Edited</span>{/if}
+      <svg class="tb-title-chev" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="m2 3 2 2 2-2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  {/if}
 </div>
 
 <div class="titlebar-drag" aria-hidden="true"></div>
 
 <div class="tb-right" id="tb-right">
-  <div class="tb-project-controls" inert={!!pending}>
-    <AgentLauncher {PM} />
-    <ToolbarMount {PM} />
-  </div>
   {#if !homeOpen}
-    <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
-      <Icon {PM} name="grid" />
-    </button>
+    <div class="tb-workspaces" role="radiogroup" aria-label="Workspace">
+      {#each workspaces.bar as item (item.id)}
+        <button type="button" role="radio" class:on={item.id === workspaces.current} aria-checked={item.id === workspaces.current}
+          title={`${item.name} workspace`} onclick={() => { if (item.id !== workspaces.current) PM.WS.activate(item.id); }}>{item.name}</button>
+      {/each}
+      <button type="button" class="tb-workspaces-more" title="More workspaces" aria-label="More workspaces" onclick={moreWorkspaces}>
+        <Icon {PM} name="more" />
+      </button>
+    </div>
   {/if}
+  <div class="tb-project-controls" inert={!!pending}>
+    <TaskPill {PM} />
+    <AgentLauncher {PM} />
+  </div>
   <button
     class="iconbtn"
     class:on={settingsOpen}

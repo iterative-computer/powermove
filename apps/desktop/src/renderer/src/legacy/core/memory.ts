@@ -92,10 +92,10 @@ export function install(PM: PMRegistry): void {
   // Automatic frames and explicitly prepared previews share the user's cap.
   PM.Memory.register('preview', {
     bytes: () => (PM.GL?.previewFrames?.bytes || 0) + (PM.Preview?.bytes || 0)
-      + (PM.GL?.previewPreparationBytes || 0) + (PM.AutomaticPreview?.stagingBytes || 0),
+      + (PM.GL?.previewPreparationBytes || 0) + (PM.AutomaticPreview?.stagingBytes || 0) + (PM.GL?.inputPreviewBytes || 0),
     entries: () => (PM.GL?.previewFrames?.count || 0) + (PM.Preview?.count || 0),
     trim: (target: number) => {
-      PM.AutomaticPreview?.cancel?.();
+      PM.AutomaticPreview?.cancel?.(); PM.GL?.cancelInputPreview?.();
       if ((PM.Preview?.bytes || 0) > target) PM.Preview.clear();
       PM.GL?.previewFrames?.trim(Math.max(0, target - (PM.Preview?.bytes || 0)));
     },

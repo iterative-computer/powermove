@@ -12,6 +12,7 @@ import type { Scene3D, SceneObject, SceneLight, SceneSource } from '../core/scen
 import type { Scene3DEdit } from '../core/scene3d/operations';
 export type { Scene3D, SceneObject, SceneLight, SceneSource, SceneChannel } from '../core/scene3d/schema';
 export type { Scene3DEdit } from '../core/scene3d/operations';
+export type { EffectLayerInput, EffectInputStage, EffectInputSpace, EffectInput, EffectPathInput, EffectAssetInput } from '../core/types/project';
 import type {
   BlendMode,
   Channel,
@@ -86,6 +87,9 @@ export interface PanelDefinition {
   min?: number;
   flush?: boolean;
   noscroll?: boolean;
+  /** In a side column, show every row: the panel grows to its content and the
+   * column scrolls as one page instead of nesting a short scroller. */
+  fitContent?: boolean;
   headless?: boolean;
   hideMoveHandle?: boolean;
   /** CSS selector inside the body that hosts the move handle. */
@@ -176,6 +180,8 @@ export interface KeybindingsAPI {
 /* ── effects & transitions ───────────────────────────────── */
 
 export interface ParameterPresentation {
+  /** Optional native disclosure group; does not alter the saved channel path. */
+  group?: string;
   /** Secondary controls live under More. Explicit false keeps a control visible. */
   advanced?: boolean;
   /** Numeric choices, or boolean choices for an existing toggle. */
@@ -186,27 +192,45 @@ export type ParameterWidget =
   | { kind: 'ramp'; start: string; end: string; midpoint?: string; mode?: string }
   | { kind: 'point'; x: string; y: string; label?: string; advanced?: boolean };
 
-export type EffectParamDefinition = ParameterPresentation & (
+export type EffectParamDefinition = ParameterPresentation & {
+  /** Numeric creation/reset default derived from source dimensions. */
+  defaultFrom?: { dimension: 'width' | 'height'; factor: number };
+} & (
   | { k: string; label: string; def: number; min: number; max: number; step?: number; unit?: string; type?: 'number' }
   | { k: string; label: string; def: string; type: 'color' }
-  | { k: string; label: string; def: boolean; type: 'toggle' });
+  | { k: string; label: string; def: boolean; type: 'toggle' }
+  /** Static composition-local reference in Effect.inputs; def is an unused empty sentinel, never a Channel. */
+  | { k: string; label: string; def: string; type: 'layer'|'path'|'asset'; pathWidth?:string; assetKind?:'image'|'lut'; pathBrush?:{hardness:string;spacing:string;start:string;end:string;allMasks:string;sequential:string}; min?: number; max?: number; step?: number; unit?: string });
 
 /**
  * Fragment shader body contract (GLSL ES 3.00). The kernel prepends the common
  * preamble (`v_uv`, `v_st`, `u_tex`, `u_res`, `u_texel`, `u_time`, helpers) and
  * a `uniform` declaration for every param named `u_<k>` (float for numbers and
- * toggles, vec3 for colors), plus `u_pass` (int), `u_orig` when `keepOrig`, and
+ * toggles, vec3 for colors). Layer parameters bind sampler2D `u_<k>`, float
+ * `u_has_<k>`, mat3 `u_<k>UV`/`u_<k>FromUV` (composition pixels ↔ local
+ * normalized bounds), vec2 `u_<k>Res` (layer pixels), float `u_<k>Midpoint`,
+ * and `sample_<k>(uv)`. Source-space references keep native content bounds
+ * before transforms/opacity; matrix pixels are consumer-raster virtual pixels.
+ * Layer-input shaders also receive `u_layerUV`, `u_ownerFromUV`, `u_layerRes`.
+ * Additional uniforms include `u_pass` (int), `u_orig` when `keepOrig`, and
  * `u_backdrop` when `backdrop` is enabled. `u_backdrop` contains the pixels
  * accumulated beneath the layer before the effect is applied.
  * `v_uv` is composition-normalized and `v_px` is in composition pixels even
  * when the editor is rendering a cropped high-zoom viewport; `u_coordRes` is
- * the full composition size in those pixels.
+ * the full composition size in those pixels. Within source-space Effects
+ * processing these coordinates describe the selected native source raster.
  * Output is `o` (vec4). Provide only the body of `main()` in `frag`, or a full
  * shader with `void main` when `rawShader` is true (legacy positional u_p<i>
  * uniforms remain supported for raw shaders).
  */
 export interface EffectDefinition {
   id: string;
+  /** Positive implementation revision. Unversioned definitions/instances mean 1. */
+  version?: number;
+  /** Full historical definitions, with the same id and explicit older versions. */
+  legacy?: EffectDefinition[];
+  /** Native, undoable parameter actions. Values are swapped at the playhead. */
+  actions?: { kind: 'swap'; label: string; keys: [string, string] }[];
   label: string;
   group: string;
   /** Parameter keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
@@ -215,6 +239,10 @@ export interface EffectDefinition {
   ui?: ParameterWidget[];
   /** Non-empty shader body, at most 65,536 characters. */
   frag: string;
+  /** Prepare filtered mip levels for a wide pixel kernel. Radius is in composition pixels. */
+  sampling?: { radius: string; support: number; maxRadius: number; space?: 'layer'; firstPass?: number };
+  /** First pass renders a layer-local cell atlas; second pass maps it onto the layer. */
+  grid?: { columns: string; rows: string; pointSample?: string };
   passes?: number; // 1..8
   keepOrig?: boolean;
   /** Expose the already-composited pixels beneath this layer as `u_backdrop`. */
@@ -226,7 +254,18 @@ export interface EffectDefinition {
    */
   viewportSafe?: boolean;
   /** Numeric parameter keys whose values are sampled outside the viewport. */
+  /** Explicit native-source processing support; padding sums in source pixels. */
+  /** Request the owner-local source coordinate uniforms without a reference input. */
+  coordinates?:'layer';
+  /** Bounded owner-prefix requests at time + i*step, before this effect.
+   * Raw single-pass scalar/color controls only; no backdrop/original/sampling/
+   * grid/coordinates/references or extra source padding in this first contract. */
+  temporal?: {step:string;count:string;maxSamples:number};
+  sourceProcessing?: {geometry?:string[];padding?:string[];factor?:number;pixels?:number;when?:string};
   viewportPadding?: string[];
+  viewportPaddingFactor?: number;
+  /** Fixed neighborhood support, in composition pixels, added to parameter padding. */
+  viewportPaddingPixels?: number;
 }
 
 /**
@@ -246,9 +285,26 @@ export interface TransitionDefinition {
 }
 
 export interface EffectsAPI {
+  /** Feature detection for extensions that require saved implementation revisions. */
+  readonly supportsTemporalInputs?:boolean;
+  readonly supportsVersions?: boolean;
+  readonly supportsSpatialSampling?: boolean;
+  readonly supportsLayerInputs?: boolean;
+  readonly supportsInputSubframes?: boolean;
+  readonly supportsSourceRasters?: boolean;
+  readonly supportsSourceOwners?: boolean;
+  readonly supportsTypedReferences?: boolean;
+  /** Bounded path brushes with geometry-dependent source bounds. */
+  readonly supportsBrushGeometry?:boolean;
+  /** Durable .cube assets and float table samplers. */
+  readonly supportsLutAssets?:boolean;
+  /** u_ownerValid distinguishes singular owner coordinates from adjustment fallback. */
+  readonly supportsOwnerValidity?:boolean;
+  /** Resolve numeric defaults from the source size at creation, repair, or reset. */
+  parameterDefault?(param: EffectParamDefinition, size: { width: number; height: number }): number | string | boolean;
   register(def: EffectDefinition): Disposable;
   list(): EffectDefinition[];
-  get(id: string): EffectDefinition | undefined;
+  get(id: string, version?: number): EffectDefinition | undefined;
 }
 
 export interface TransitionsAPI {
@@ -429,7 +485,7 @@ export type MenuLocation = 'titlebar:right' | 'panel:context' | 'layer:context' 
 export type MenuContribution =
   | '-'
   | { header: string }
-  | { label: string; icon?: string; kb?: string | null; on?: boolean; disabled?: boolean; run?: () => unknown };
+  | { label: string; icon?: string; kb?: string | null; on?: boolean; disabled?: boolean; run?: () => unknown; submenu?: MenuContribution[] };
 
 export interface MenusAPI {
   /** Called on every open with that open's `ctx`. A Promise is waited for at

@@ -9,7 +9,7 @@ async function point(page:any,x:number,y:number){const b=await page.locator('#st
 test('editable Pen, canvas text, graph and preview controls render coherently',async({session})=>{
  await session.openEditor();
  const {page}=session;await clean(page);await mkdir(evidence,{recursive:true});
- await chooseNativeMenu(session,'Pen Tool (G)',()=>page.getByRole('button',{name:'Drawing tools',exact:true}).click());
+ await page.locator('#toolbar button[data-tool="pen"]').click();
  for(const [x,y] of [[100,100],[260,80],[300,230]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
  const first=await point(page,100,100);await page.mouse.dblclick(first.x,first.y);
  expect(await page.evaluate(()=>{const PM=(window as any).PM,l=PM.proj.layers[0];return {count:l.d.paths[0].vertices.length,closed:l.d.paths[0].p.closed.v};})).toEqual({count:3,closed:true});
@@ -25,7 +25,7 @@ test('editable Pen, canvas text, graph and preview controls render coherently',a
  await expect(page.getByRole('combobox',{name:'Preview resolution',exact:true})).toBeVisible();
  await page.waitForFunction(()=>(window as any).PM.quality===1);
  const full=await page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height]);
- await page.locator('#preview-controls select').selectOption('0.25');
+ await page.locator('#viewer-foot select[aria-label="Preview resolution"]').selectOption('0.25');
  await expect.poll(()=>page.evaluate(()=>[(window as any).PM.GL.canvas.width,(window as any).PM.GL.canvas.height])).toEqual(full.map(n=>Math.round(n*.25)));
  const geometry=await page.locator('#tl-head').evaluate(el=>{const r=el.getBoundingClientRect();return [...el.querySelectorAll('button,input,select')].filter((e:any)=>getComputedStyle(e).display!=='none').map(e=>({name:e.getAttribute('aria-label')||e.getAttribute('title'),right:e.getBoundingClientRect().right,bound:r.right}));});
  expect(geometry.every((r:any)=>r.right<=r.bound+1)).toBe(true);
@@ -62,7 +62,7 @@ test('multiple graph curves, velocity editing and a cached preview retain editab
  await page.screenshot({path:path.join(evidence,'multi-graph.png')});
  await page.evaluate(()=>(window as any).PM.theme.apply('dark'));await session.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1100,800));await page.screenshot({path:path.join(evidence,'multi-graph-dark-narrow.png')});
  const overflow=await page.locator('#tl-head').evaluate(el=>{const bounds=el.getBoundingClientRect();return [...el.querySelectorAll('button,select,input')].some(e=>{const b=e.getBoundingClientRect();return b.width>0&&b.right>bounds.right+1;});});expect(overflow).toBe(false);
- await page.locator('#preview-controls select').selectOption('0.25');
+ await page.locator('#viewer-foot select[aria-label="Preview resolution"]').selectOption('0.25');
  await page.evaluate(()=>(window as any).PM.Preview.cache());await page.waitForFunction(()=>(window as any).PM.Preview.active);
  expect(await page.evaluate(()=>(window as any).PM.Preview.count)).toBe(60);
  await page.evaluate(()=>(window as any).PM.Preview.stop());
@@ -85,7 +85,7 @@ test('a drawn mask, luma matte and live text selector change pixels and undo',as
  await session.openEditor();
  const {page}=session;await clean(page);
  await page.evaluate(()=>{const PM=(window as any).PM,l=PM.mkLayer('solid',{d:{w:640,h:360,color:'#ffffff'}});PM.proj.layers=[l];PM.ProjectIndex.invalidate();PM.selectLayers(l.id);PM.touch();PM.invalidate();});
- await chooseNativeMenu(session,'Pen Tool (G)',()=>page.getByRole('button',{name:'Drawing tools',exact:true}).click());for(const [x,y] of [[100,100],[300,100],[300,240],[100,240],[100,100]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
+ await page.locator('#toolbar button[data-tool="pen"]').click();for(const [x,y] of [[100,100],[300,100],[300,240],[100,240],[100,100]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
  const mask=await page.evaluate(()=>{const PM=(window as any).PM,l=PM.proj.layers[0],px=PM.GL.renderToPixels(0,640,360,{transparent:true,mblur:false});return {count:l.masks[0].path.vertices.length,center:px[(180*640+200)*4+3],corner:px[3],saved:PM.serialize()};});expect(mask.count).toBe(4);expect(mask.center).toBeGreaterThan(245);expect(mask.corner).toBe(0);expect(JSON.stringify(mask.saved)).toContain('vertices');
  await clean(page);
  const output=await page.evaluate(()=>{const PM=(window as any).PM,l=PM.mkLayer('text',{p:{'position.x':70,'position.y':100},d:{text:'Live type',size:48,color:'#ffffff'}});PM.proj.layers=[l];PM.ProjectIndex.invalidate();PM.touch();PM.selectLayers(l.id);const render=()=>PM.GL.renderToPixels(0,640,360,{transparent:true,mblur:false});const before=render();PM.Edit.mutate('Add selector',()=>{l.d.animators=[{id:'a',p:Object.fromEntries(Object.entries({unit:'characters',start:0,end:100,offset:0,smoothness:0,x:0,y:0,rotation:0,scale:100,opacity:0,tracking:0}).map(([k,v])=>[k,PM.P(v)]))}];PM.touch();});const after=render();PM.hist.undo();const restored=render();return {before:before.reduce((a:number,v:number)=>a+v,0),after:after.reduce((a:number,v:number)=>a+v,0),restored:restored.reduce((a:number,v:number)=>a+v,0)};});expect(output.before).toBeGreaterThan(10000);expect(output.after).toBe(0);expect(output.restored).toBe(output.before);

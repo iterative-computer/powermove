@@ -25,6 +25,8 @@ test('agent controls, independent hover states, media icons, and titlebar spacin
     await effort.hover();
     expect(await effort.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
     expect(await model.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+    // Project shares its slot with Effect Controls, which is the tab shown by default.
+    await page.evaluate(() => (window as any).PM.Layout.activateTab?.('assets'));
     for (const preview of await page.locator('.asset-preview').all()) {
       expect(await preview.evaluate(el => getComputedStyle(el).backgroundImage)).toBe('none');
     }
@@ -36,7 +38,7 @@ test('agent controls, independent hover states, media icons, and titlebar spacin
     await expect(page.locator('.asset-preview.video [data-icon="film"]').first()).toBeVisible();
     const titlebar = await page.locator('#titlebar').evaluate(el => ({ left: parseFloat(getComputedStyle(el).paddingLeft), height: el.getBoundingClientRect().height }));
     expect(titlebar).toEqual({ left: 88, height: 44 });
-    await page.getByRole('button', { name: 'Open panel library' }).click();
+    await page.evaluate(() => (window as any).PM.LibraryUI.open()); // The library opens from the workspace ⋯ menu.
     await page.screenshot({ path: info.outputPath(`panel-icons-${theme}.png`) });
     await page.keyboard.press('Escape');
   }

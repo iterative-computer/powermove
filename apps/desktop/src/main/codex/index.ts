@@ -44,7 +44,7 @@ import {
 import { EXTENSION_ID } from '../../shared/extensions';
 import { IpcValidationError, isRecord, isString } from '../../shared/guards';
 import { readArtifact, revealArtifact } from './artifacts';
-import { forgetProjectWorkspace, sweepOrphanWorkspaces } from './workspace-lifetime';
+import { cleanWorkspaceCaches, forgetProjectWorkspace, sweepOrphanWorkspaces } from './workspace-lifetime';
 import { requestComputerConsent, revokeStandingConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
@@ -76,6 +76,9 @@ export interface CodexIpcContext {
   /** Account state is app-wide, so it reaches every open window, not just one. */
   broadcast?(send: (webContents: BrowserWindow['webContents']) => void): void;
   userData: string;
+  registerStorageCleanup?(cleanup: (manual: boolean, dryRun?: boolean) => Promise<number>, busy?: () => boolean): void;
+  archivedArtifact?(reference: { projectId: string; path: string }): Promise<{ path: string; mime: string } | null>;
+  forgetArchivedArtifacts?(projectId: string): Promise<void>;
   extensionsDir: string;
   apiPackFiles(): Promise<AgentApiPackFile[]>;
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
@@ -513,12 +516,16 @@ export function registerCodexIpc(
      running agent: removal waits for that project's last run to finish. */
   const runningProjects = new Map<string, number>();
   const forgetWhenIdle = new Set<string>();
+  const storageBusy = () => runningProjects.size > 0 || activeChildWorkspaces.size > 0 || forgetWhenIdle.size > 0;
+  ctx.registerStorageCleanup?.((manual, dryRun) => cleanWorkspaceCaches(ctx.userData,
+    storageBusy, manual, Date.now(), dryRun), storageBusy);
   const forget = async (projectId: string): Promise<void> => {
     if (runningProjects.has(projectId)) { forgetWhenIdle.add(projectId); return; }
     forgetWhenIdle.delete(projectId);
     const childWorkspaces = await orchestrator.forgetProject(projectId);
     await Promise.all(childWorkspaces.map(id => forgetProjectWorkspace(ctx.userData, id)));
     await forgetProjectWorkspace(ctx.userData, projectId);
+    await ctx.forgetArchivedArtifacts?.(projectId);
   };
 
   ipcMain.handle(IPC.chatgptStatus, async (event) => {
@@ -665,7 +672,7 @@ export function registerCodexIpc(
         });
       if (toolSession) {
         const changedBeforeFinish = toolSession.changed;
-        const finish = await toolSession.finish(result.ok || preserveRunEdits.has(req.id));
+        const finish = await toolSession.finish(result.ok || result.preserveLiveEdits === true || preserveRunEdits.has(req.id));
         toolSession = null;
         if (result.ok && req.mode === 'autonomous') {
           result = {
@@ -801,14 +808,27 @@ export function registerCodexIpc(
     requireTrusted(event, ctx);
     const reference = requireArtifactRef(IPC.artifactRead, rawReference);
     const root = path.join(agentWorkspaceRoot(ctx.userData, reference.projectId), 'artifacts');
-    return await readArtifact(root, reference.path);
+    try { return await readArtifact(root, reference.path); }
+    catch (error: any) {
+      if (error.code !== 'ENOENT') throw error;
+      const archived = await ctx.archivedArtifact?.(reference);
+      if (!archived) throw error;
+      return { name: path.basename(reference.path), mime: archived.mime, data: new Uint8Array(await readFile(archived.path)) };
+    }
   });
 
   ipcMain.handle(IPC.artifactReveal, async (event, rawReference: unknown) => {
     requireTrusted(event, ctx);
     const reference = requireArtifactRef(IPC.artifactReveal, rawReference);
     const root = path.join(agentWorkspaceRoot(ctx.userData, reference.projectId), 'artifacts');
-    await revealArtifact(root, reference.path);
+    try { await revealArtifact(root, reference.path); }
+    catch (error: any) {
+      if (error.code !== 'ENOENT') throw error;
+      const archived = await ctx.archivedArtifact?.(reference);
+      if (!archived) throw error;
+      const { shell } = await import('electron');
+      shell.showItemInFolder(archived.path);
+    }
   });
 
   ipcMain.handle(IPC.artifactForget, async (event, projectId: unknown) => {

@@ -1,0 +1,5 @@
+import {expect,it} from 'vitest';
+import {brushBounds,trimPoints,brushGeometry} from './effect-path';
+it('trims unequal segments by distance and handles reversed or empty spans',()=>{expect(trimPoints([[0,0],[10,0],[10,30]],.125,.5)).toEqual([[5,0],[10,0],[10,10]]);expect(trimPoints([[0,0],[10,0]],.8,.2)).toEqual([]);});
+it('uses control hulls and brush radius for conservative source bounds',()=>{expect(brushBounds([{points:[[0,0],[10,0]],hull:[[0,0],[10,0],[100,40]]}],8)).toEqual({x0:-5,y0:-5,w:110,h:50});expect(brushBounds([],8)).toBeNull();expect(()=>brushBounds([{points:[],hull:[[Infinity,0]]}],8)).toThrow('Non-finite');});
+it('evaluates hidden masks and all-mask transforms without reading their visibility',()=>{const P=(v:any)=>({v}),mask=(id:string,x:number)=>({id,on:false,shape:P('rect'),p:Object.fromEntries(Object.entries({x,y:0,rotation:0,w:10,h:10}).map(([k,v])=>[k,P(v)]))}),provider={masks:[mask('one',0),mask('two',30)]},PM={evP:(_:any,p:any)=>p.v};const curves=brushGeometry(PM,provider,{pathId:'one'},0,true);expect(curves).toHaveLength(2);expect(brushBounds(curves,2)).toEqual({x0:-7,y0:-7,w:44,h:14});});

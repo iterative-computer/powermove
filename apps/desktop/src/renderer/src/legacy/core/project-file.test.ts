@@ -3,6 +3,17 @@ import { packProjectFile, readProjectFileDocument, restoreProjectFileMedia, unpa
 import { sha256Hex } from '../../../../shared/sha256';
 
 describe('portable project media', () => {
+  it('keeps linked originals out of ordinary saves while portable exports include their full media', async () => {
+    const snapshot = { proj: { assets: { clip: { id: 'clip', sourcePath: '/media/clip.mp4' }, paste: { id: 'paste' } } } };
+    const store = { get: async (asset: any) => new Blob([asset.id]), put: vi.fn(),
+      getForSave: async (asset: any) => asset.id === 'clip' ? { linked: true, revision: 'linked' } : { blob: new Blob(['paste']), revision: 'paste' } };
+    const bridge = { begin: vi.fn(async () => ({ ok: true as const, token: 'token', required: ['paste'] })),
+      chunk: vi.fn(async () => {}), finish: vi.fn(async () => ({ ok: true as const, path: 'file.pmv' })), abort: vi.fn(async () => {}) };
+    await saveIncrementalProject(snapshot, JSON.stringify(snapshot), store, bridge, { name: 'file.pmv', projectId: 'one', saveAs: false }, () => {});
+    expect(bridge.begin).toHaveBeenCalledWith(expect.objectContaining({ media: [expect.objectContaining({ id: 'paste' })] }));
+    const portable = unpackProjectFile(await packProjectFile(snapshot, store));
+    expect(portable.containerMedia.map((source: any) => source.id)).toEqual(['clip', 'paste']);
+  });
   it('assembles a large document in bounded reads without splitting Unicode or losing Undo records', async () => {
     const prefix = '{"proj":{"w":1920,"h":1080,"layers":[],"assets":{},"note":"';
     const note = 'x'.repeat(1024 * 1024 - prefix.length - 1) + '🟢 Café';
@@ -51,6 +62,158 @@ describe('portable project media', () => {
     expect(new TextDecoder().decode(chunks[1]![2])).toBe('deleted');
     expect(store.get).not.toHaveBeenCalled();
     expect(bridge.abort).toHaveBeenCalledWith('token');
+  });
+
+  it('keeps document reads serial and overlaps only one media read while preserving acknowledged progress and bytes', async () => {
+    const limit = 1024 * 1024;
+    const bytes = new Uint8Array(2 * limit + 3);
+    for (let index = 0; index < bytes.length; index++) bytes[index] = index * 13;
+    const media = new Blob([bytes]), empty = new Blob(), skipped = new Blob(['unchanged']);
+    const emptySlice = vi.spyOn(empty, 'slice'), skippedSlice = vi.spyOn(skipped, 'slice');
+    const assets = { clip: { id: 'clip' }, empty: { id: 'empty' }, skipped: { id: 'skipped' } };
+    const document = { proj: { assets }, note: 'x'.repeat(limit) }, serialized = JSON.stringify(document);
+    const records = new Map([['clip', media], ['empty', empty], ['skipped', skipped]]);
+    const store = { get: vi.fn(), put: vi.fn(), getForSave: async (asset: any) => ({ blob: records.get(asset.id)!, revision: asset.id }) };
+    const reads = new Map<number, () => void>();
+    let activeReads = 0, maxReads = 0, documentReads = 0;
+    const originalSlice = Blob.prototype.slice;
+    const documentSlice = vi.spyOn(Blob.prototype, 'slice').mockImplementation(function (this: Blob, start, end, type) {
+      documentReads++; return originalSlice.call(this, start, end, type);
+    });
+    Object.defineProperty(media, 'slice', { value: (start = 0, end?: number) => ({ arrayBuffer: () => {
+      activeReads++; maxReads = Math.max(maxReads, activeReads);
+      return new Promise<ArrayBuffer>(resolve => reads.set(start, () => {
+        activeReads--; resolve(bytes.slice(start, end).buffer);
+      }));
+    } }) });
+    const acknowledgements: Array<() => void> = [];
+    let activeWrites = 0, maxWrites = 0;
+    const bridge = { begin: vi.fn(async () => ({ ok: true as const, token: 'token', required: ['empty', 'clip'] })),
+      chunk: vi.fn((_token: string, _id: string | null, _data: Uint8Array) => {
+        activeWrites++; maxWrites = Math.max(maxWrites, activeWrites);
+        return new Promise<void>(resolve => acknowledgements.push(() => { activeWrites--; resolve(); }));
+      }), finish: vi.fn(async () => ({ ok: true as const, path: 'file.pmv' })), abort: vi.fn(async () => undefined) };
+    const progress = vi.fn();
+    const saving = saveIncrementalProject(document, serialized, store, bridge, { name: 'file.pmv', projectId: 'one', saveAs: false }, progress);
+    try {
+      await vi.waitFor(() => expect(bridge.chunk).toHaveBeenCalledTimes(1));
+      expect(documentReads).toBe(1); expect(reads.size).toBe(0); expect(progress.mock.calls).toEqual([[.3]]);
+      acknowledgements[0]!();
+      await vi.waitFor(() => expect(bridge.chunk).toHaveBeenCalledTimes(2));
+      expect(documentReads).toBe(2); expect(reads.size).toBe(0);
+      acknowledgements[1]!();
+      await vi.waitFor(() => expect(reads.has(0)).toBe(true));
+      reads.get(0)!();
+      await vi.waitFor(() => expect(bridge.chunk).toHaveBeenCalledTimes(3));
+      expect([...reads.keys()]).toEqual([0, limit]);
+      const beforeMediaACK = progress.mock.calls.length;
+      reads.get(limit)!();
+      await Promise.resolve(); await Promise.resolve();
+      expect(progress.mock.calls.length).toBe(beforeMediaACK);
+      expect(bridge.chunk).toHaveBeenCalledTimes(3);
+      expect(reads.has(2 * limit)).toBe(false);
+      acknowledgements[2]!();
+      await vi.waitFor(() => expect(bridge.chunk).toHaveBeenCalledTimes(4));
+      expect(reads.has(2 * limit)).toBe(true);
+      reads.get(2 * limit)!(); acknowledgements[3]!();
+      await vi.waitFor(() => expect(bridge.chunk).toHaveBeenCalledTimes(5));
+      acknowledgements[4]!();
+      expect(await saving).toMatchObject({ ok: true });
+      expect(maxReads).toBe(1); expect(maxWrites).toBe(1);
+      expect(emptySlice).not.toHaveBeenCalled(); expect(skippedSlice).not.toHaveBeenCalled();
+      expect(bridge.chunk.mock.calls.map(call => call[1])).toEqual([null, null, 'clip', 'clip', 'clip']);
+      const uploaded = bridge.chunk.mock.calls.filter(call => call[1] === 'clip').map(call => call[2]);
+      expect(new Uint8Array(await new Blob(uploaded as BlobPart[]).arrayBuffer())).toEqual(bytes);
+      const documentBytes = new TextEncoder().encode(serialized).length, total = documentBytes + bytes.length;
+      const acknowledged = [limit, documentBytes, documentBytes + limit, documentBytes + 2 * limit, total];
+      expect(progress.mock.calls.map(call => call[0])).toEqual([.3, ...acknowledged.map(value => .3 + .6 * value / total)]);
+      expect(bridge.abort).toHaveBeenCalledWith('token');
+    } finally { documentSlice.mockRestore(); }
+  }, 30000);
+
+  it.each(['read', 'write', 'progress'] as const)('drains a speculative media read before aborting after a %s failure', async failure => {
+    const limit = 1024 * 1024, media = new Blob([new Uint8Array(2 * limit + 1)]);
+    const document = { proj: { assets: { clip: { id: 'clip' } } } };
+    let rejectRead!: (error: Error) => void, resolveWrite!: () => void, rejectWrite!: (error: Error) => void;
+    const slice = vi.spyOn(media, 'slice').mockImplementation((start = 0) => ({ arrayBuffer: () => start === 0
+      ? Promise.resolve(new ArrayBuffer(limit))
+      : new Promise<ArrayBuffer>((_resolve, reject) => { rejectRead = reject; }) }) as Blob);
+    const readError = new Error('speculative read failed'), primaryError = new Error(`${failure} failed`);
+    const bridge = { begin: async () => ({ ok: true as const, token: 'token', required: ['clip'] }),
+      chunk: vi.fn(async (_token: string, id: string | null, _data: Uint8Array) => {
+        if (id !== null) await new Promise<void>((resolve, reject) => { resolveWrite = resolve; rejectWrite = reject; });
+      }), finish: vi.fn(async () => ({ ok: true as const, path: 'file.pmv' })), abort: vi.fn(async () => undefined) };
+    const progress = vi.fn((value: number) => { if (failure === 'progress' && value > .5) throw primaryError; });
+    let settled = false;
+    const saving = saveIncrementalProject(document, JSON.stringify(document),
+      { get: vi.fn(), put: vi.fn(), getForSave: async () => ({ blob: media, revision: 'revision' }) }, bridge,
+      { name: 'file.pmv', projectId: 'one', saveAs: false }, progress);
+    saving.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = expect(saving).rejects.toMatchObject({ cause: failure === 'read' ? readError : primaryError });
+    await vi.waitFor(() => expect(bridge.chunk).toHaveBeenCalledTimes(2));
+    expect(slice).toHaveBeenCalledTimes(2);
+    if (failure === 'read') rejectRead(readError);
+    else if (failure === 'write') rejectWrite(primaryError);
+    else resolveWrite();
+    if (failure === 'progress') await vi.waitFor(() => expect(progress.mock.calls.some(([value]) => value > .5)).toBe(true));
+    await Promise.resolve(); await Promise.resolve();
+    expect(settled).toBe(false); expect(bridge.abort).not.toHaveBeenCalled();
+    if (failure === 'read') resolveWrite(); else rejectRead(readError);
+    await rejected;
+    expect(bridge.abort).toHaveBeenCalledWith('token'); expect(bridge.finish).not.toHaveBeenCalled();
+    expect(bridge.chunk).toHaveBeenCalledTimes(2); expect(slice).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['portable', 'incremental'])('prepares %s project media sequentially without changing file order or missing-media handling', async mode => {
+    const document = { proj: { assets: Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`asset-${index}`, { id: `asset-${index}` }])) } };
+    const before = JSON.stringify(document);
+    const pending = new Map<string, (blob: Blob | null) => void>();
+    const read = (asset: any) => new Promise<Blob | null>(resolve => pending.set(asset.id, resolve));
+    const store = { get: vi.fn(read), put: vi.fn(), getForSave: vi.fn(async (asset: any) => {
+      const blob = await read(asset);
+      return blob ? { blob, revision: `revision-${asset.id}` } : null;
+    }) };
+    const bridge = { begin: vi.fn(async () => ({ ok: true as const, token: 'token', required: [] as string[] })),
+      chunk: vi.fn(async () => undefined), finish: vi.fn(async () => ({ ok: true as const, path: 'file.pmv' })), abort: vi.fn(async () => undefined) };
+    const progress = vi.fn();
+    const packaging = mode === 'portable'
+      ? packProjectFileBlob(document, store, before, progress)
+      : saveIncrementalProject(document, before, store, bridge, { name: 'file.pmv', projectId: 'one', saveAs: false }, progress);
+    for (let index = 0; index < 6; index++) {
+      await vi.waitFor(() => expect(pending.size).toBe(index + 1));
+      expect(bridge.begin).not.toHaveBeenCalled();
+      pending.get(`asset-${index}`)!(index === 2 ? null : new Blob([`bytes-${index}`], { type: 'image/png' }));
+    }
+    const result = await packaging;
+    const ids = [0, 1, 3, 4, 5].map(index => `asset-${index}`);
+    if (mode === 'portable') {
+      const unpacked = unpackProjectFile(await (result as Blob).arrayBuffer());
+      expect(unpacked.proj).toEqual(document.proj);
+      expect(unpacked.containerMedia.map((item: any) => item.id)).toEqual(ids);
+      for (const item of unpacked.containerMedia) expect(new TextDecoder().decode(item.data)).toBe(`bytes-${item.id.slice(-1)}`);
+      expect(progress.mock.calls.map(call => call[0])).toEqual([1, 2, 3, 4, 5, 6].map(value => value / 6));
+      expect(store.getForSave).not.toHaveBeenCalled();
+    } else {
+      expect(result).toMatchObject({ ok: true });
+      expect(bridge.begin).toHaveBeenCalledWith(expect.objectContaining({ media: ids.map(id => ({ id, revision: `revision-${id}`, type: 'image/png', length: 7 })) }));
+      expect(store.get).not.toHaveBeenCalled();
+      expect(bridge.chunk).toHaveBeenCalledTimes(1);
+    }
+    expect(JSON.stringify(document)).toBe(before);
+  });
+
+  it('settles failed source preparation before rejecting and never begins a native save', async () => {
+    const document = { proj: { assets: Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`asset-${index}`, { id: `asset-${index}` }])) } };
+    const pending = new Map<string, { resolve: (value: null) => void; reject: (error: Error) => void }>();
+    const store = { get: vi.fn(), put: vi.fn(), getForSave: (asset: any) => new Promise<null>((resolve, reject) => pending.set(asset.id, { resolve, reject })) };
+    const bridge = { begin: vi.fn(), chunk: vi.fn(), finish: vi.fn(), abort: vi.fn() };
+    const saving = saveIncrementalProject(document, JSON.stringify(document), store, bridge, { name: 'file.pmv', projectId: 'one', saveAs: false }, () => {});
+    const rejected = expect(saving).rejects.toThrow('source preparation failed');
+    await vi.waitFor(() => expect(pending.size).toBe(1));
+    pending.get('asset-0')!.reject(new Error('source preparation failed'));
+    await rejected;
+    expect(pending.has('asset-4')).toBe(false);
+    expect(bridge.begin).not.toHaveBeenCalled();
   });
 
   it.each(['memory', 'OPFS'])('keeps restored media revisions available for range reuse through %s staging', async staging => {

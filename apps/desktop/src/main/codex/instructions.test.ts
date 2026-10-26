@@ -35,8 +35,8 @@ describe('autonomous agent contract', () => {
   });
 
   it('keeps every distinct edit command reachable by the agent', () => {
-    expect(EDIT_COMMAND_TYPES).toHaveLength(24);
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(24);
+    expect(EDIT_COMMAND_TYPES).toHaveLength(26);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(26);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
   });
 

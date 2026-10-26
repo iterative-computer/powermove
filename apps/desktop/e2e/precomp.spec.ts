@@ -30,7 +30,7 @@ test.describe('@groups editable timeline groups', () => {
     expect(result).toEqual({ok:true,type:'group',comps:0,equal:true,saved:2,undo:true,undone:2,times:[1,2]});
     await expect(page.locator('[data-inspector-layer]')).toBeVisible();
     await page.waitForFunction(() => { const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'); return timeline.rows.length === 3; });
-    const twirl = await page.evaluate(() => { const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect(); return {x:r.left+64,y:r.top+timeline.ruler+timeline.row/2-timeline.scrollY}; });
+    const twirl = await page.evaluate(() => { const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect(); return {x:r.left+87,y:r.top+timeline.ruler+timeline.row/2-timeline.scrollY}; });
     await page.mouse.click(twirl.x,twirl.y);
     await page.waitForFunction(() => { const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'); return timeline.rows.length === 1; });
     await page.mouse.click(twirl.x,twirl.y);

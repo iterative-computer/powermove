@@ -252,11 +252,19 @@ export async function chooseNativeMenu(session: LaunchedApp, label: string | rea
     const state = { original: Menu.prototype.popup, result: 'waiting', labels: [] as string[], choices: Array.isArray(label) ? [...label] : [label] };
     (globalThis as any).__testNativeMenu = state;
     Menu.prototype.popup = function (options) {
-      const choice = state.choices.shift();
+      // A chosen row with a submenu consumes the next label from that submenu.
+      let menu = this;
+      let choice = state.choices.shift();
+      let item = menu.items.find(item => item.label === choice && item.enabled);
+      state.labels = menu.items.map(item => item.label);
+      while (item?.submenu && state.choices.length) {
+        menu = item.submenu!;
+        choice = state.choices.shift();
+        state.labels = menu.items.map(item => item.label);
+        item = menu.items.find(item => item.label === choice && item.enabled);
+      }
       if (!state.choices.length) Menu.prototype.popup = state.original;
-      state.labels = this.items.map(item => item.label);
-      const item = this.items.find(item => item.label === choice && item.enabled);
-      state.result = item ? (state.choices.length ? 'waiting' : 'selected') : `Missing enabled native menu item: ${choice}; got ${this.items.map(item => item.label).join(', ')}`;
+      state.result = item ? (state.choices.length ? 'waiting' : 'selected') : `Missing enabled native menu item: ${choice}; got ${menu.items.map(item => item.label).join(', ')}`;
       item?.click(item, options?.window, {} as any);
       options?.callback?.();
     };

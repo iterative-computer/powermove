@@ -75,10 +75,27 @@ export function iconRasterizer(icons: Record<string, string> | undefined): IconR
 
 export async function planNativeMenu(items: MenuItem[], icon?: IconRasterizer): Promise<NativeMenuPlan> {
   const actions = new Map<string, MenuAction>();
-  const out = await Promise.all(items.map(async (item, index): Promise<NativeMenuItem> => {
+  const out = await planLevel(items, 'm', actions, icon);
+  return { items: out, actions };
+}
+
+/* Submenu rows nest their own ids under the parent's ("m3.1"), so one flat
+   action map serves every level. */
+async function planLevel(items: MenuItem[], prefix: string, actions: Map<string, MenuAction>, icon?: IconRasterizer): Promise<NativeMenuItem[]> {
+  return Promise.all(items.map(async (item, index): Promise<NativeMenuItem> => {
     if (item === '-') return { type: 'separator' };
-    const id = `m${index}`;
+    const id = `${prefix}${index}`;
     if ('header' in item) return { type: 'header', id, label: item.header };
+    if (item.submenu) {
+      return {
+        type: 'submenu',
+        id,
+        label: item.label,
+        enabled: !item.disabled && item.submenu.some((child) => child !== '-' && !('header' in child)),
+        icon: item.icon && icon ? await icon(item.icon).catch(() => undefined) : undefined,
+        items: await planLevel(item.submenu, `${id}.`, actions, icon)
+      };
+    }
     actions.set(id, item);
     return {
       type: item.on != null ? 'checkbox' : 'normal',
@@ -90,5 +107,4 @@ export async function planNativeMenu(items: MenuItem[], icon?: IconRasterizer): 
       icon: item.icon && icon ? await icon(item.icon).catch(() => undefined) : undefined
     };
   }));
-  return { items: out, actions };
 }

@@ -2,6 +2,7 @@ import type { PowermoveAPI } from 'powermove';
 
 import { createViewerRuntime, viewerPanelOptions } from './viewer';
 import { installSourcePreview } from './source-preview';
+import { mountViewerChrome, VIEWER_CHROME_STYLES } from './viewer-chrome';
 
 const VIEWER_STYLES = `
   .canvas-text-input::selection{background:transparent;color:transparent}
@@ -27,7 +28,7 @@ const VIEWER_STYLES = `
   #composition-recovery:hover{color:var(--tx);background:var(--bg-row-hi)}
   #composition-recovery:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   #stage.fx-drop-over > #stage-inner{outline:2px solid var(--accent);outline-offset:-2px;box-shadow:0 0 0 4px color-mix(in oklab, var(--accent) 28%, transparent);transition:box-shadow 120ms ease}
-`;
+${VIEWER_CHROME_STYLES}`;
 
 export default function activate(api: PowermoveAPI): void {
   // Install at activation time so engine and panels can consume the viewer
@@ -36,6 +37,24 @@ export default function activate(api: PowermoveAPI): void {
   const disposeRuntime = runtime.dispose as () => void;
   api.onDispose(() => disposeRuntime());
   api.services.register('viewer', runtime);
+  let disposeChrome: (() => void) | null = null;
+  const chrome = (body: HTMLElement) => { disposeChrome?.(); disposeChrome = mountViewerChrome(api, body, runtime); };
+  api.onDispose(() => disposeChrome?.());
+
+  // Tab opens the composition mini-flowchart, as in After Effects.
+  api.commands.register({
+    id: 'composition.flowchart', label: 'Composition Mini-Flowchart', category: 'Composition',
+    run: () => {
+      // Tab keeps moving keyboard focus between controls; it opens the
+      // flowchart only from the canvas surfaces, as in After Effects.
+      const target = document.activeElement;
+      const surface = !target || target === document.body || target instanceof HTMLCanvasElement || target.id === 'stage';
+      if (!surface && !document.getElementById('viewer-flowchart')) return false;
+      return !!runtime.toggleFlowchart?.();
+    },
+  });
+  // inFields: Tab is cancelled only when the flowchart actually handles it.
+  api.keybindings.bind({ key: 'tab', command: 'composition.flowchart', inFields: true });
 
   // Enter on a single selected text layer starts editing it (Figma).
   api.commands.register({
@@ -63,6 +82,7 @@ export default function activate(api: PowermoveAPI): void {
         const overlay = stage.querySelector('#overlay');
         if (overlay && overlay.parentElement !== stage) stage.appendChild(overlay);
         body.replaceChildren(stage);
+        chrome(body);
         runtime.layout();
         installSourcePreview(api, runtime, stage);
         return;
@@ -85,6 +105,7 @@ export default function activate(api: PowermoveAPI): void {
       body.replaceChildren(stage);
 
       runtime.attach(stage);
+      chrome(body);
       installSourcePreview(api, runtime, stage);
     }
   });

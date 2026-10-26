@@ -184,7 +184,7 @@ test.describe('@import-mp4 H.264 import smoke', () => {
       PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { from: 0 } }, { label: 'e2e: pin clip to 0' });
       PM.selectLayers(layer.id);
       const index = timeline.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === layer.id);
-      return { x: timeline.gut - 58, y: timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
+      return { x: timeline.gut - 154, y: timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
     });
 
     await page.locator('#tl-canvas').click({ position: toggle });

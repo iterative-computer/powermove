@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 function editor(type = 'shape') {
-  const PM = makePM('core/util', 'core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'ui/shortcuts');
+  const PM = makePM('core/util', 'core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'ui/controls', 'ui/shortcuts');
   PM.proj = PM.mkProject({ w: 640, h: 360, dur: 3 });
   const outer = PM.mkLayer('group'), group = PM.mkLayer('group'), first = PM.mkLayer(type), second = PM.mkLayer('shape');
   group.group = outer.id; first.group = group.id;
@@ -93,8 +93,8 @@ describe('precompose dialog respects effective layer locks', () => {
 
   it('rechecks a stale lock when Leave all attributes is selected', () => {
     const { first, open, confirm, state } = editor('solid'); open();
-    const leave = document.querySelector<HTMLInputElement>('input[name="precompose-mode"][value="leave"]')!;
-    expect(leave.disabled).toBe(false); leave.checked = true; leave.dispatchEvent(new Event('change'));
+    const leave = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] [role="radio"]')].find(item => item.textContent === 'Keep on layer')!;
+    expect(leave.disabled).toBe(false); leave.click(); flushSync();
     first.lock = true; const before = state(); confirm();
     expect(state()).toBe(before);
     expect(document.querySelector('.modal-action-error')?.textContent?.toLowerCase()).toContain('locked');
@@ -102,8 +102,8 @@ describe('precompose dialog respects effective layer locks', () => {
 
   it('keeps editable Leave all attributes available with one Undo', () => {
     const { PM, first, open, confirm } = editor('solid'); open();
-    const leave = document.querySelector<HTMLInputElement>('input[name="precompose-mode"][value="leave"]')!;
-    leave.checked = true; leave.dispatchEvent(new Event('change')); confirm();
+    const leave = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] [role="radio"]')].find(item => item.textContent === 'Keep on layer')!;
+    leave.click(); flushSync(); confirm();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(PM.L(first.id).type).toBe('precomp'); expect(PM.hist.list()).toEqual(['Pre-compose']);
     expect(PM.hist.undo()).toBe(true); expect(PM.L(first.id).type).toBe('solid');

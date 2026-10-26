@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import { InlinePrompt } from './inline-prompt';
-  import { ATTACHMENT_HINT } from './attachments';
+  import { ATTACHMENT_HINT, notePromptFile } from './attachments';
+  import { capturePick, pickScreenRegion } from './frame-region';
   import { agentState, composerMode } from './agent-state.svelte';
   import AgentOptions from './AgentOptions.svelte';
   import SlashMenu from './SlashMenu.svelte';
@@ -24,6 +25,7 @@
   let focused = $state(false);
   let dismissedDraft = $state<string | null>(null);
   let selectedCommand = $state(0);
+  let pickingFrame = $state(false);
   const mode = $derived(composerMode(agentState.legacyPhase));
   const textareaId = $derived(`agent-composer-${panelId}`);
   const menuId = $derived(`${textareaId}-commands`);
@@ -84,6 +86,24 @@
       });
     }
   });
+
+  /* Drag a box anywhere over Powermove; the agent gets what was under it, and
+     the attachment mark carries its time, area and the layers or panels there. */
+  async function selectFrameRegion(): Promise<void> {
+    if (pickingFrame) return;
+    pickingFrame = true;
+    try {
+      const pick = await pickScreenRegion(PM);
+      if (!pick) return;
+      const capture = await capturePick(PM, pick);
+      notePromptFile(capture.file, capture.note);
+      await PM.AgentUI?.addAttachments([capture.file]);
+    } catch (error) {
+      PM.toast?.(error instanceof Error ? error.message : String(error), 6000);
+    } finally {
+      pickingFrame = false;
+    }
+  }
 
   function autosize(): void {
     if (!textarea) return;
@@ -247,6 +267,7 @@
   </div>
   <div class="agent-composer-actions">
     <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onpointerdown={() => editor?.remember()} onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <button class="agent-round agent-attach agent-frame-region" type="button" title="Select part of the screen" aria-label="Select part of the screen for the agent" onpointerdown={() => editor?.remember()} onclick={() => void selectFrameRegion()} disabled={mode.disabled || pickingFrame}><Icon {PM} name="marquee" /></button>
     <span class="sp"></span>
     {#if mode.working}
       <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>

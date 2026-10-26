@@ -29,7 +29,7 @@ export function parentMenuItems(PM: PMRegistry, ids: string[], origin = 'timelin
 }
 
 export function installLayerMenu(PM: PMRegistry): void {
-  PM.showParentMenu = (ids: string[], event: {clientX: number; clientY: number}) => PM.menu(document.body, [{header:'Parent'}, ...parentMenuItems(PM, ids)], {x:event.clientX,y:event.clientY});
+  PM.showParentMenu = (ids: string[], event: {clientX: number; clientY: number}) => PM.menu(document.body, [{header:'Link Layers'}, ...parentMenuItems(PM, ids)], {x:event.clientX,y:event.clientY});
   PM.showLayerMenu = (layer: any, event: { clientX: number; clientY: number }, origin = 'timeline') => {
     if (!PM.sel.layers.includes(layer.id)) PM.selectLayers(layer.id);
     const selected = PM.selLayers();
@@ -39,13 +39,20 @@ export function installLayerMenu(PM: PMRegistry): void {
     const apply = (commands: any, label: string) => PM.Edit.apply(commands, { label, origin: editOrigin });
     const patch = (value: any, label: string) => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: value })), label);
     const open = (items: any[] | Promise<any[]>) => PM.menu(document.body, items, { x: event.clientX, y: event.clientY });
-    const more = (title: string, items: any[]) => open([{ label: '‹ Back', run: () => PM.showLayerMenu(layer, event, origin) }, { header: title }, ...items]);
     const items: any[] = [
       { header: selected.length > 1 ? `${selected.length} layers` : layer.name },
       { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
       { label: 'Group layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
+      { label: 'Simplify Keyframes', disabled: !editable, run: () => {
+        const result = apply({ type: 'simplify_keyframes', scope: 'layers', targets: selected.map((item: any) => item.id) }, 'Simplify Keyframes');
+        const data = result.data?.results?.[0]?.data;
+        PM.toast(result.ok ? `${data.keysBefore.toLocaleString()} → ${data.keysAfter.toLocaleString()} keyframes` : result.message, 4000, { error: !result.ok });
+      } },
       { label: 'Pre-compose…', icon: 'layers', kb: '⇧⌘C', disabled: !editable, run: () => PM.cmd('precompose') },
     ];
+    /* Un-precompose: the pre-comp becomes a group of its layers. A refusal
+       says why instead of greying the row out without a reason. */
+    if (selected.length === 1 && layer.type === 'precomp') items.push({ label: 'Release Pre-comp', icon: 'stack', disabled: !editable, run: () => PM.cmd('releasePrecomp', layer.id) });
     if (selected.length === 2) {
       const matteLayers = selected.slice().sort((a: any, b: any) => PM.proj.layers.indexOf(a) - PM.proj.layers.indexOf(b));
       const canMatte = matteLayers[0] && matteLayers[1]
@@ -54,19 +61,22 @@ export function installLayerMenu(PM: PMRegistry): void {
       items.push({ label: 'Use bottom layer as mask', icon: 'mask', disabled: !editable || !canMatte,
         run: () => applySelectedLayerMatte(PM, selected, editOrigin) });
     }
-    if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split text into layers…', icon: 'type', disabled: !editable, run: () => more('Split text into layers',
-      ([['By word', 'words'], ['By character', 'characters'], ['By line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) }))) });
+    if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split text into layers', icon: 'type', disabled: !editable, submenu:
+      ([['By word', 'words'], ['By character', 'characters'], ['By line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) })) });
+    items.push('-');
     if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D layer', icon: 'cube', on: selected.every((item: any) => item.threeD), disabled: !editable, run: () => patch({threeD: !selected.every((item: any) => item.threeD)}, '3D layer') });
+    if (selected.every((item: any) => item.type === 'precomp')) items.push({ label: 'Continuously rasterize', icon: 'sun', on: selected.every((item: any) => item.continuousRaster), disabled: !editable,
+      run: () => patch({ continuousRaster: !selected.every((item: any) => item.continuousRaster) }, 'Continuously rasterize') });
     if (selected.some((item: any) => item.type === 'group')) items.push({ label: 'Ungroup layers', icon: 'layers', kb: '⌘⇧G', disabled: !editable, run: () => PM.cmd('ungroupLayers') });
     const groups = PM.proj.layers.filter((item: any) => item.type === 'group' && !item.lock && !PM.expandGroups(PM.sel.layers).includes(item.id));
-    if (groups.length || selected.some((item: any) => item.group)) items.push({ label: 'Move to group…', icon: 'stack', disabled: !editable, run: () => more('Move to group', [
+    if (groups.length || selected.some((item: any) => item.group)) items.push({ label: 'Move to group', icon: 'stack', disabled: !editable, submenu: [
       { label: 'Outside groups', run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: null }, 'Move out of group') },
       ...groups.map((group: any) => ({ label: group.name, run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: group.id }, 'Move to group') }))
-    ]) });
-    if (selected.every((item: any) => PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Parent…', icon: 'link', disabled: !editable, run: () => more('Parent', parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin)) });
+    ] });
+    if (selected.every((item: any) => PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Link Layers', icon: 'link', disabled: !editable, submenu: parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin) });
     if (selected.every((item: any) => item.type !== 'group')) {
       const inside = selected.every((item: any) => PM.time > item.from && PM.time < item.from + item.dur);
-      items.push({ label: 'Timing…', icon: 'clock', disabled: !editable, run: () => more('Timing', [
+      items.push({ label: 'Timing', icon: 'clock', disabled: !editable, submenu: [
         { label: 'Split at playhead', icon: 'scissors', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
         { label: 'Trim in to playhead', disabled: !inside, run: () => apply(selected.flatMap((item: any) => [
           { type: 'set_layer', target: item.id, patch: { from: PM.time, duration: item.dur - (PM.time - item.from) } },
@@ -74,7 +84,7 @@ export function installLayerMenu(PM: PMRegistry): void {
         ]), 'Trim in') },
         { label: 'Trim out to playhead', disabled: !inside, run: () => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: { duration: PM.time - item.from } })), 'Trim out') },
         { label: 'Fit to composition', run: () => patch({ from: 0, duration: PM.proj.dur }, 'Fit duration') },
-      ]) });
+      ] });
     }
     if (selected.length === 1 && layer.type === 'video' && layer.d?.embeddedAudio === true) {
       const muted = layer.d.audioMuted === true;

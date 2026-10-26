@@ -33,7 +33,8 @@ describe('toolbar service', () => {
     const harness = serviceHarness();
     activate({
       services: harness.services,
-      panels: { register: vi.fn() }
+      panels: { register: vi.fn() },
+      transport: { invalidate: vi.fn() }
     } as unknown as PowermoveAPI);
 
     const toolService = harness.services.get<ToolService>('tool');

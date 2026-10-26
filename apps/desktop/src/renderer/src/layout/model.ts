@@ -8,6 +8,10 @@ export type PanelSpec = {
   min?: number;
   flex?: boolean;
   collapsed?: boolean;
+  /** Consecutive panels in a dock that share a group stack as tabs. */
+  group?: string;
+  /** The group's shown tab; the first member when none is marked. */
+  active?: boolean;
 };
 
 export type DockSpec = {
@@ -57,6 +61,39 @@ export function ensureDockFill(dock: DockSpec | undefined): DockSpec | undefined
     fill.flex = true;
   }
   return dock;
+}
+
+/** A dock's visual slots: a lone panel, or a run of panels stacked as tabs. */
+export type DockSlot = { specs: PanelSpec[]; active: PanelSpec };
+
+export function dockSlots(specs: PanelSpec[]): DockSlot[] {
+  const slots: DockSlot[] = [];
+  for (const spec of specs) {
+    const last = slots.at(-1);
+    if (spec.group && last && last.specs[0]!.group === spec.group) last.specs.push(spec);
+    else slots.push({ specs: [spec], active: spec });
+  }
+  for (const slot of slots) slot.active = slot.specs.find((spec) => spec.active) ?? slot.specs[0]!;
+  return slots;
+}
+
+/** Show one tab of a stack. The stack keeps its place and size in the column,
+ * so the newly shown panel takes over the previous tab's size. */
+export function activateTab(ws: Workspace, id: string): boolean {
+  const found = findPanel(ws, id);
+  if (!found?.spec.group) return false;
+  const slot = dockSlots(found.dock.panels).find((item) => item.specs.includes(found.spec));
+  if (!slot || slot.specs.length < 2 || slot.active === found.spec) return false;
+  const previous = slot.active;
+  for (const spec of slot.specs) delete spec.active;
+  found.spec.active = true;
+  if (previous.flex) found.spec.flex = true;
+  else delete found.spec.flex;
+  if (previous.size) found.spec.size = previous.size;
+  else delete found.spec.size;
+  if (previous.collapsed) found.spec.collapsed = true;
+  else delete found.spec.collapsed;
+  return true;
 }
 
 export function removePanel(ws: Workspace, id: string): void {
@@ -193,19 +230,50 @@ export function panelMinHeight(
   return SIDE_DOCKS.has(dockId ?? '') && fluid ? Math.max(floor, SIDE_FLUID_MIN_HEIGHT) : floor;
 }
 
+/* Properties and Layer Effects read top to bottom. In a side column they
+   show every row and the column scrolls as one page, as After Effects'
+   Effect Controls does. Over a panel of a set height (Effects & Presets,
+   Takes) they scroll inside themselves instead, so that panel stays in view,
+   as in the prototype. */
+const STACKED = new WeakSet<PanelSpec>();
+
+/** Record which panels sit above a panel that keeps its own height. */
+export function markStackedPanels(slots: DockSlot[], fitsOwnContent: (spec: PanelSpec) => boolean): DockSlot[] {
+  slots.forEach((slot, index) => {
+    const below = slots.slice(index + 1).some((other) => !fitsOwnContent(other.active));
+    for (const spec of slot.specs) {
+      if (below) STACKED.add(spec);
+      else STACKED.delete(spec);
+    }
+  });
+  return slots;
+}
+
+export const fitsContent = (def: Record<string, any>, dockId?: string, spec?: PanelSpec): boolean =>
+  !!def.fitContent && SIDE_DOCKS.has(dockId ?? '') && !(spec && STACKED.has(spec));
+
 /* A side column scrolls, so its fluid panel fills spare height but never
    shrinks below its set height (or the floor): when the column overflows it
    keeps the length it was dragged to and the column scrolls instead. */
 export function panelFlex(spec: PanelSpec, def: Record<string, any>, dockId?: string): string {
+  if (fitsContent(def, dockId, spec)) return isFluid(spec, def) ? '1 0 auto' : '0 0 auto';
   if (!isFluid(spec, def)) return `0 0 ${spec.size || def.size || 180}px`;
   if (!SIDE_DOCKS.has(dockId ?? '')) return '1 1 auto';
   return `1 0 ${Math.max(spec.size || 0, panelMinHeight(spec, def, dockId, true))}px`;
 }
 
+/** The expanded panel's CSS floor. A content-height panel treats a dragged
+ * height as extra room below its rows, never as a cap above them. */
+export function panelFloor(spec: PanelSpec, def: Record<string, any>, dockId?: string): number {
+  // Its rows are its height, so the usable-height floor for fluid panels does not apply.
+  if (fitsContent(def, dockId, spec)) return Math.max(panelMinHeight(spec, def, dockId, false), spec.size || 0);
+  return panelMinHeight(spec, def, dockId);
+}
+
 export function applyPanelSize(el: HTMLElement, spec: PanelSpec, def: Record<string, any>, dockId?: string): void {
   el.style.flex = panelFlex(spec, def, dockId);
   // A panel turning fluid or fixed changes its floor in a side column.
-  if (dockId && el.dataset.collapsed !== '1') el.style.minHeight = `${panelMinHeight(spec, def, dockId)}px`;
+  if (dockId && el.dataset.collapsed !== '1') el.style.minHeight = `${panelFloor(spec, def, dockId)}px`;
 }
 
 export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean, emit = true): boolean {
@@ -218,7 +286,7 @@ export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean
   if ((PM.PANELS[id] ?? inst.def)?.headless) collapsed = false;
   current.spec.collapsed = !!collapsed;
   inst.el.dataset.collapsed = collapsed ? '1' : '0';
-  inst.el.style.minHeight = collapsed ? 'var(--hdr-h)' : `${panelMinHeight(current.spec, inst.def, current.dock.id)}px`;
+  inst.el.style.minHeight = collapsed ? 'var(--hdr-h)' : `${panelFloor(current.spec, inst.def, current.dock.id)}px`;
   inst.body.style.display = collapsed ? 'none' : '';
   inst.el.style.flex = collapsed
     ? '0 0 var(--hdr-h)'

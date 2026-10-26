@@ -1,3 +1,4 @@
+import { remapLayerInputs } from '../../core/effect-inputs';
 import type { PMRegistry } from '../registry';
 import { finite } from './project-tools';
 import { isProperty, resolveContent } from '../core/content-properties';
@@ -84,6 +85,7 @@ export function editLayerStrips(PM: PMRegistry, args: Record<string, any>, meta:
         for (const copy of copies) {
           copy.from += delta;
           for (const key of ['parent', 'group', 'matteSource']) if (ids.has(copy[key])) copy[key] = ids.get(copy[key]);
+      remapLayerInputs(copy, ids as Map<string, string>);
         }
         const roots = selected.filter(layer => !(PM.groupAncestors?.(layer) || []).some((group: any) => selected.some(item => item.id === group.id)));
         const bySource = new Map(layers.map((layer: any, i: number) => [layer.id, copies[i]]));

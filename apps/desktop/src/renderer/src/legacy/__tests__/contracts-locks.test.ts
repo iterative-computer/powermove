@@ -50,6 +50,7 @@ const lockedCases = {
     type: 'replace_keyframes', target: layer.id, path: 'opacity',
     keyframes: [{ time: 0, value: 10 }, { time: 1, value: 90 }], preserveHandEdits: false,
   }),
+  simplify_keyframes: ({ layer }) => ({ type: 'simplify_keyframes', scope: 'layers', targets: [layer.id] }),
   set_easing: ({ layer }) => ({
     type: 'set_easing', keyframes: layer.p.opacity.kf.map(key => key.i), curve: [.2, .1, .8, .9],
   }),
@@ -90,11 +91,12 @@ const lockedCases = {
   edit_captions: ({ layer }) => ({ type: 'edit_captions', target: layer.id, op: 'delete', ids: [] }),
 };
 
-it('the locked-layer operation matrix is frozen for all 24 operations', () => {
+it('the locked-layer operation matrix is frozen for all 25 operations', () => {
   const outcomes = {
     group_layers: 'blocked', ungroup_layers: 'blocked', move_to_group: 'blocked',
     set_property: 'blocked',
     replace_keyframes: 'blocked',
+    simplify_keyframes: 'allowed', // The command succeeds while retaining locked tracks.
     set_easing: 'blocked',
     set_expression: 'blocked',
     set_content: 'blocked',
@@ -126,6 +128,7 @@ it('the locked-layer operation matrix is frozen for all 24 operations', () => {
       assert.match(result.message, /Locked title/, operation);
     } else {
       assert.equal(result.ok, true, `${operation}: ${result.message}`);
+      if (operation === 'simplify_keyframes') assert.equal(result.data.results[0].data.propertiesChanged, 0);
     }
   }
 });

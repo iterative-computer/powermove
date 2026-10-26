@@ -2,8 +2,6 @@ import type { InspectorService, Layer, PowermoveAPI } from 'powermove';
 
 import EffectsPanel from './EffectsPanel.svelte';
 import InspectorPanel from './InspectorPanel.svelte';
-import { showFxMenu } from './actions';
-import { inspectorSelection } from './multi-edit';
 import {
   clearEffectClipboard,
   copyEffects,
@@ -105,6 +103,7 @@ export default function activate(api: PowermoveAPI): void {
     icon: 'sliders',
     title: 'Properties',
     component: InspectorPanel as any,
+    fitContent: true,
     header: () => {}
   });
   /* The applied-effects stack lives in its own dockable panel; the Effects
@@ -112,28 +111,11 @@ export default function activate(api: PowermoveAPI): void {
   api.panels.register({
     id: 'layer-effects',
     icon: 'diamond',
-    title: 'Layer Effects',
+    title: 'Effect Controls',
     component: EffectsPanel as any,
-    header: (header) => {
-      const add = document.createElement('button');
-      add.type = 'button';
-      add.className = 'iconbtn panel-action';
-      add.title = 'Add effect';
-      add.setAttribute('aria-label', 'Add effect');
-      add.innerHTML = api.ui.icon('plus');
-      const showEffects = () => {
-        const layers = api.selection.layers()
-          .map((id) => api.model.layer(id))
-          .filter((layer): layer is Layer => layer !== null);
-        showFxMenu(api, add, inspectorSelection(api, layers)[0]);
-      };
-      add.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0) return;
-        event.preventDefault();
-        showEffects();
-      });
-      add.addEventListener('click', (event) => { if (event.detail === 0) showEffects(); });
-      header.insertBefore(add, header.querySelector('.panel-options'));
-    }
+    fitContent: true,
+    /* Effects are added from Effects & Presets (or a layer's menu); the
+       header carries only the tab, as in the prototype. */
+    header: () => {}
   });
 }

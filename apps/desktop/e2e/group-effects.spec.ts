@@ -60,11 +60,12 @@ test('groups composite their contents through visual layer features', async ({ s
   const inspector = page.locator('#panel-inspector');
   await expect(inspector.locator(`[data-inspector-layer="${proof.group}"]`)).toBeVisible();
   const effects = page.locator('#panel-layer-effects');
-  await expect(effects.locator('header').getByRole('button', { name: 'Add effect', exact: true })).toBeVisible();
+  // Effects come from Effects & Presets; Effect Controls' header is only its tab.
+  await expect(effects.locator('header').getByRole('button', { name: 'Add effect', exact: true })).toHaveCount(0);
   await expect(effects.getByText('Gaussian Blur', { exact: true })).toBeVisible();
   await expect(inspector.getByText('Masks', { exact: true })).toBeVisible();
-  await expect(inspector.getByRole('combobox', { name: 'Blend mode', exact: true })).toBeVisible();
+  await expect(inspector.getByRole('combobox', { name: 'Blend Mode', exact: true })).toBeVisible();
   await expect(inspector.getByRole('radiogroup', { name: 'Motion blur', exact: true })).toBeVisible();
-  await expect(inspector.getByRole('combobox', { name: 'Track matte', exact: true })).toBeVisible();
+  // Track Matte is applied from Effects & Presets and shows in Effect Controls.
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

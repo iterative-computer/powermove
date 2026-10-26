@@ -25,8 +25,19 @@ export type ToastOptions = {
   /** Save progress from 0 to 1; null shows indeterminate activity. */
   progress?: number | null;
   completed?: boolean;
+  /** Show this long-running job in the titlebar's task pill instead of a toast.
+      Needs a `key`. A failure (`error: true`) with the same key still toasts. */
+  task?: boolean;
+  /** What a task is working on right now, such as a file name or a stage. */
+  detail?: string;
+  /** Items finished out of the total, for a task that works through a list. */
+  count?: { done: number; total: number };
+  /** Stage position, for a task that runs in fixed steps. */
+  step?: { index: number; total: number };
   sticky?: boolean;
   dismissible?: boolean;
+  /** Optional explicit label for the existing dismiss action. */
+  dismissLabel?: string;
   /** Prefer a Powermove icon name. When omitted, the toast message selects one. */
   icon?: string;
   /** A stable key replaces an earlier toast with the same key instead of stacking. */
@@ -34,7 +45,7 @@ export type ToastOptions = {
   /** Persistent notices sit top-right; routine status sits top-center. bottom-right is a legacy alias. */
   corner?: 'top-right' | 'bottom-right';
   /** One primary action rendered as a quiet button inside the toast. */
-  action?: { label: string; run: () => void };
+  action?: { label: string; run: () => void; dismiss?: boolean };
   /** Called when the user dismisses the toast explicitly (not on replace or timeout). */
   onDismiss?: () => void;
   /** Called once when the notice leaves, however it goes: action, dismissal,
@@ -50,6 +61,8 @@ export type MenuAction = {
   disabled?: boolean;
   curve?: readonly number[];
   run?: () => unknown;
+  /** Opens a nested menu instead of running; `run` is ignored. */
+  submenu?: MenuItem[];
 };
 
 export type MenuHeader = { header: string };

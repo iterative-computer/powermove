@@ -1,3 +1,4 @@
+import { validateEffectInputs } from '../effect-inputs';
 import type { BlendMode, Layer, LayerType } from '../types/project';
 import type {
   Transform,
@@ -20,6 +21,7 @@ import {
   type AddEffectCommand,
   type AddLayerCommand,
   type AddMarkerCommand,
+  type RemoveMarkerCommand,
   type CommandKeyframe,
   type CompositionPatch,
   type CreateSectionCommand,
@@ -31,6 +33,7 @@ import {
   type LayerPatch,
   type LayerTarget,
   type ReplaceKeyframesCommand,
+  type SimplifyKeyframesCommand,
   type SectionManifest,
   type SectionVersion,
   type SetCompositionCommand,
@@ -62,13 +65,13 @@ const BLEND_MODES = new Set([
 ]);
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'solo'
+  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'solo', 'effectSpace', 'continuousRaster'
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
   'shutter', 'workArea', 'audioGain', 'colorDepth'
 ]);
-const EFFECT_FIELDS = new Set(['enabled', 'open', 'index']);
+const EFFECT_FIELDS = new Set(['enabled', 'open', 'index', 'inputs']);
 const EASING_PRESETS = new Set([
   'linear', 'ease', 'easeIn', 'easeOut', 'easeInOut', 'quadIn', 'quadOut', 'quadInOut',
   'cubicIn', 'cubicOut', 'cubicInOut', 'quartIn', 'quartOut', 'quartInOut', 'expoIn',
@@ -85,6 +88,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
     'type', 'target', 'path', 'keyframes', 'replace', 'expression',
     'overrideLock', 'preserveHandEdits'
   ],
+  simplify_keyframes: ['type', 'scope', 'targets', 'properties'],
   set_easing: ['type', 'keyframes', 'curve'],
   set_expression: ['type', 'target', 'path', 'expression'],
   set_content: ['type', 'target', 'patch', 'overrideLock'],
@@ -100,12 +104,13 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
   ungroup_layers: ['type', 'targets'],
   move_to_group: ['type', 'targets', 'group'],
   reorder_layer: ['type', 'target', 'index'],
-  add_effect: ['type', 'target', 'effect', 'parameters', 'open', 'enabled'],
+  add_effect: ['type', 'target', 'effect', 'version', 'parameters', 'inputs', 'open', 'enabled'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],
   set_transition: ['type', 'layer', 'edge', 'transition'],
   set_scene_parameter: ['type', 'name', 'label', 'control', 'value', 'min', 'max', 'options'],
   add_marker: ['type', 'id', 'time', 'name'],
+  remove_marker: ['type', 'index'],
   create_section: ['type', 'section'],
   update_section: ['type', 'sectionId', 'layers', 'thumb', 'at', 'version'],
   transform_layers: ['type', 'transform', 'state'],
@@ -116,6 +121,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
 const AGENT_COMMAND_FIELDS = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
   replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression', 'preserveHandEdits'],
+  simplify_keyframes: COMMAND_FIELDS.simplify_keyframes,
   set_expression: COMMAND_FIELDS.set_expression,
   set_content: ['type', 'target', 'patch'],
   set_layer: COMMAND_FIELDS.set_layer,
@@ -132,6 +138,7 @@ const AGENT_COMMAND_FIELDS = {
   set_transition: COMMAND_FIELDS.set_transition,
   set_scene_parameter: COMMAND_FIELDS.set_scene_parameter,
   add_marker: COMMAND_FIELDS.add_marker,
+  remove_marker: COMMAND_FIELDS.remove_marker,
   transform_layers: COMMAND_FIELDS.transform_layers,
   add_captions: COMMAND_FIELDS.add_captions,
   edit_captions: ['type', 'target', 'op', 'cues', 'ids', 'id', 'at', 'by', 'text', 'format', 'replace', 'offset', 'style', 'language']
@@ -311,6 +318,42 @@ function parseReplaceKeyframes(source: Record<string, unknown>): ReplaceKeyframe
     const keyframe: CommandKeyframe = { time: Math.max(0, time), value };
     if (owns(item, 'ease') && item.ease != null) keyframe.ease = stringified(item.ease);
     if (owns(item, 'hold')) keyframe.hold = Boolean(item.hold);
+    if (owns(item, 'handles')) {
+      const h = item.handles;
+      if (!Array.isArray(h) || h.length !== 4 || !h.every(isFiniteNumber)
+        || h[0]! < 0 || h[0]! > 1 || h[2]! < 0 || h[2]! > 1 || Math.abs(h[1]!) > 100 || Math.abs(h[3]!) > 100) {
+        return invalid('must contain four finite Bezier coordinates', `keyframes[${index}].handles`);
+      }
+      keyframe.handles = [...h] as [number, number, number, number];
+    }
+    if (owns(item, 'spring')) {
+      if (item.spring !== null && !isRecord(item.spring)) return invalid('must be an object or null', `keyframes[${index}].spring`);
+      const spring = cloneJson(item.spring, `keyframes[${index}].spring`);
+      if (spring instanceof ValidationError) return spring;
+      keyframe.spring = spring as JsonObject | null;
+    }
+    if (owns(item, 'id')) {
+      if (typeof item.id !== 'string' || !item.id || item.id.length > 200) return invalid('must be a keyframe ID', `keyframes[${index}].id`);
+      keyframe.id = item.id;
+    }
+    if (owns(item, 'temporal')) {
+      const ease = item.temporal;
+      if (!isRecord(ease) || typeof value !== 'number'
+        || !['linear', 'bezier', 'hold'].includes(String(ease.inInterp))
+        || !['linear', 'bezier', 'hold'].includes(String(ease.outInterp))
+        || typeof ease.autoBezier !== 'boolean' || typeof ease.continuous !== 'boolean'
+        || ![ease.inEase, ease.outEase].every(side => isRecord(side)
+          && isFiniteNumber(side.speed) && isFiniteNumber(side.influence)
+          && side.influence >= 0.1 && side.influence <= 100)) {
+        return invalid('must contain valid numeric temporal interpolation', `keyframes[${index}].temporal`);
+      }
+      keyframe.temporal = {
+        inInterp: ease.inInterp as 'linear' | 'bezier' | 'hold', outInterp: ease.outInterp as 'linear' | 'bezier' | 'hold',
+        inEase: { speed: (ease.inEase as any).speed, influence: (ease.inEase as any).influence },
+        outEase: { speed: (ease.outEase as any).speed, influence: (ease.outEase as any).influence },
+        autoBezier: ease.autoBezier, continuous: ease.continuous,
+      };
+    }
     keyframes.push(keyframe);
   }
   const out: ReplaceKeyframesCommand = { type: 'replace_keyframes', path, keyframes };
@@ -396,10 +439,11 @@ function parseLayerPatch(value: unknown): LayerPatch | ValidationError {
     if (number instanceof ValidationError) return number;
     out[key] = number;
   }
-  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'threeD', 'scaleLinked', 'solo'] as const) {
+  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'threeD', 'scaleLinked', 'solo', 'continuousRaster'] as const) {
     if (patch[key] != null) out[key] = Boolean(patch[key]);
   }
   for (const key of ['name', 'color'] as const) if (patch[key] != null) out[key] = stringified(patch[key]);
+  if (patch.effectSpace != null) {if(!['composition','source'].includes(String(patch.effectSpace)))return invalid('must be composition or source','patch.effectSpace');out.effectSpace=patch.effectSpace as 'composition'|'source';}
   if (patch.blend != null) {
     const blend = stringified(patch.blend);
     if (!BLEND_MODES.has(blend)) return invalid('is not a known blend mode', 'patch.blend');
@@ -528,6 +572,10 @@ function parseAddEffect(source: Record<string, unknown>): AddEffectCommand | Val
   const effect = effectName(source.effect);
   if (effect instanceof ValidationError) return effect;
   const out: AddEffectCommand = { type: 'add_effect', effect };
+  if (source.version !== undefined) {
+    if (typeof source.version !== 'number' || !Number.isSafeInteger(source.version) || source.version < 1) return new ValidationError('Effect version must be a positive integer');
+    out.version = source.version;
+  }
   const targetError = optionalTarget(source, out);
   if (targetError) return targetError;
   if (source.parameters !== undefined) {
@@ -535,6 +583,7 @@ function parseAddEffect(source: Record<string, unknown>): AddEffectCommand | Val
     if (parameters instanceof ValidationError) return parameters;
     out.parameters = parameters;
   }
+  if (source.inputs !== undefined) { try { out.inputs = validateEffectInputs(source.inputs); } catch (e: any) { return new ValidationError(e.message); } }
   if (source.open != null) out.open = Boolean(source.open);
   if (source.enabled != null) out.enabled = Boolean(source.enabled);
   return out;
@@ -556,6 +605,7 @@ function parseSetEffect(source: Record<string, unknown>): SetEffectCommand | Val
   const out: SetEffectCommand = { type: 'set_effect', effect, patch: {} };
   const targetError = optionalTarget(source, out);
   if (targetError) return targetError;
+  if (patch.inputs !== undefined) { try { out.patch.inputs = validateEffectInputs(patch.inputs); } catch (e: any) { return new ValidationError(e.message); } }
   if (patch.enabled != null) out.patch.enabled = Boolean(patch.enabled);
   if (patch.open != null) out.patch.open = Boolean(patch.open);
   if (patch.index != null) {
@@ -634,6 +684,14 @@ function parseAddMarker(source: Record<string, unknown>): AddMarkerCommand | Val
     out.time = time;
   }
   return out;
+}
+
+function parseRemoveMarker(source: Record<string, unknown>): RemoveMarkerCommand | ValidationError {
+  if (source.index == null || typeof source.index === 'boolean' || source.index === '') return invalid('marker index is required', 'index');
+  const index = finite(source.index, 'index');
+  if (index instanceof ValidationError) return index;
+  if (!Number.isSafeInteger(index) || index < 0) return invalid('must be a non-negative integer', 'index');
+  return { type: 'remove_marker', index };
 }
 
 function jsonRecord(value: unknown, path: string): JsonObject | ValidationError {
@@ -1087,6 +1145,19 @@ function parseEditCaptions(source: Record<string, unknown>): EditCaptionsCommand
   return out as unknown as EditCaptionsCommand;
 }
 
+function parseSimplifyKeyframes(source: Record<string, unknown>): SimplifyKeyframesCommand | ValidationError {
+  const scope = source.scope ?? 'project';
+  if (!['project', 'layers', 'properties'].includes(String(scope))) return invalid('must be project, layers or properties', 'scope');
+  if (source.targets !== undefined && (!Array.isArray(source.targets) || !source.targets.length || source.targets.some(id => typeof id !== 'string' || !id))) return invalid('must contain layer IDs', 'targets');
+  if (scope !== 'layers' && source.targets !== undefined) return invalid('targets require layers scope', 'targets');
+  if (scope === 'properties') {
+    if (!Array.isArray(source.properties) || !source.properties.length || source.properties.some(ref => !isRecord(ref) || typeof ref.layerId !== 'string' || !ref.layerId || typeof ref.path !== 'string' || !ref.path || ref.path.split('.').some(part => FORBIDDEN_KEYS.has(part)))) return invalid('must contain layerId and path', 'properties');
+  } else if (source.properties !== undefined) return invalid('properties require properties scope', 'properties');
+  return { type: 'simplify_keyframes', scope: scope as SimplifyKeyframesCommand['scope'],
+    ...(source.targets !== undefined ? { targets: [...source.targets as string[]] } : {}),
+    ...(scope === 'properties' ? { properties: (source.properties as any[]).map(ref => ({ layerId: ref.layerId, path: ref.path })) } : {}) };
+}
+
 function parseObject(source: Record<string, unknown>): EditCommand | ValidationError {
   if (typeof source.type !== 'string' || !COMMAND_TYPE_SET.has(source.type)) {
     return invalid('unknown edit command type', 'type');
@@ -1094,6 +1165,7 @@ function parseObject(source: Record<string, unknown>): EditCommand | ValidationE
   switch (source.type) {
     case 'set_property': return parseSetProperty(source);
     case 'replace_keyframes': return parseReplaceKeyframes(source);
+    case 'simplify_keyframes': return parseSimplifyKeyframes(source);
     case 'set_easing': return parseSetEasing(source);
     case 'set_expression': return parseSetExpression(source);
     case 'set_content': return parseSetContent(source);
@@ -1116,6 +1188,7 @@ function parseObject(source: Record<string, unknown>): EditCommand | ValidationE
     case 'set_transition': return parseSetTransition(source);
     case 'set_scene_parameter': return parseSetSceneParameter(source);
     case 'add_marker': return parseAddMarker(source);
+    case 'remove_marker': return parseRemoveMarker(source);
     case 'create_section': return parseCreateSection(source);
     case 'update_section': return parseUpdateSection(source);
     case 'transform_layers': return parseTransformLayers(source);

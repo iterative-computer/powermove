@@ -33,6 +33,13 @@ describe('memory budget manager', () => {
     expect(PM.Memory.stats().preview.bytes).toBe(0);
     expect(PM.Memory.setBudget('raster', 0)).toBe(false);
   });
+  it('counts and cancels invocation-owned video input previews when the shared cap is lowered or pressured', () => {
+    (globalThis as any).window = {addEventListener:vi.fn()};const PM={} as PMRegistry;install(PM);
+    let bytes=8192;const cancel=vi.fn(()=>{bytes=0;});PM.GL={get inputPreviewBytes(){return bytes;},cancelInputPreview:cancel};
+    expect(PM.Memory.stats().preview.bytes).toBe(8192);PM.Memory.pressure('critical');expect(cancel).toHaveBeenCalledOnce();
+    bytes=8192;PM.Memory.setBudget('preview',0);expect(cancel).toHaveBeenCalledTimes(2);expect(PM.Memory.stats().preview.bytes).toBe(0);
+  });
+
   it('measures providers and requests deterministic trimming under pressure', () => {
     (globalThis as any).window = { addEventListener: vi.fn() };
     const PM = {} as PMRegistry;

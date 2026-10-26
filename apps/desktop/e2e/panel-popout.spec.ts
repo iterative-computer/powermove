@@ -3,7 +3,7 @@ import { chooseNativeMenu, expect, test } from './helpers/app';
 test('a panel opens in a native window, keeps edits, and returns to the layout', async ({ session }) => {
   await session.openEditor();
   const { page, app } = session;
-  await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+  await page.evaluate(() => (window as any).PM.LibraryUI.open()); // The library opens from the workspace ⋯ menu.
   const library = page.getByRole('dialog', { name: 'Panel library', exact: true });
   await library.getByRole('searchbox', { name: 'Search panels' }).fill('Notes');
   await library.getByRole('button', { name: 'Add Notes to workspace', exact: true }).click();

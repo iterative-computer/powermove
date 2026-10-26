@@ -24,7 +24,7 @@
       {
         "id": "Lczhapmm",
         "type": "shape",
-        "name": "Powermove playhead 2",
+        "name": "Powermove light 2",
         "from": 3.848800000143237,
         "dur": 4.918199999856762,
         "on": true,
@@ -426,29 +426,29 @@
           "paths": [
             {
               "id": "path6jt0gwa",
-              "name": "Playhead head",
+              "name": "Path 1",
               "parent": null,
               "vertices": [
                 {
-                  "id": "vh00",
+                  "id": "vem76rn5",
                   "p": {
                     "x": {
-                      "v": -26.366,
+                      "v": -37.1115,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -107.0152,
+                      "v": 48.544,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": -10.3187,
+                      "v": 21.9931,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": 0.9368,
+                      "v": -6.767299999999992,
                       "kf": [],
                       "expr": null
                     },
@@ -465,15 +465,15 @@
                   }
                 },
                 {
-                  "id": "vh01",
+                  "id": "v68lek8u",
                   "p": {
                     "x": {
-                      "v": 27.1363,
+                      "v": -65.30264,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -107.0875,
+                      "v": 57.218,
                       "kf": [],
                       "expr": null
                     },
@@ -488,72 +488,37 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": 4.462,
+                      "v": -3.9276200000000046,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": -0.0041,
+                      "v": 1.2079999999999984,
                       "kf": [],
                       "expr": null
                     }
                   }
                 },
                 {
-                  "id": "vh02",
+                  "id": "vsqg4ivw",
                   "p": {
                     "x": {
-                      "v": 37.5573,
+                      "v": -69.38743,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -100.4393,
+                      "v": 50.647999999999996,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": -1.8882,
+                      "v": -2.8211000000000013,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": -4.0656,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": 1.8741,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 4.0537,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh03",
-                  "p": {
-                    "x": {
-                      "v": 35.8925,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -88.2014,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 2.8917,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": -3.4054,
+                      "v": 2.9879999999999995,
                       "kf": [],
                       "expr": null
                     },
@@ -570,15 +535,15 @@
                   }
                 },
                 {
-                  "id": "vh04",
+                  "id": "vy98mwxd",
                   "p": {
                     "x": {
-                      "v": 23.6626,
+                      "v": -42.2946,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -73.7921,
+                      "v": 21.953100000000006,
                       "kf": [],
                       "expr": null
                     },
@@ -593,142 +558,37 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": -1.7604,
+                      "v": 14.700700000000005,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": 1.9906,
+                      "v": -15.570300000000003,
                       "kf": [],
                       "expr": null
                     }
                   }
                 },
                 {
-                  "id": "vh05",
+                  "id": "vbig2f16",
                   "p": {
                     "x": {
-                      "v": 20.7262,
+                      "v": -12.430100000000003,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -66.9513,
+                      "v": -33.665099999999995,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": 0.2346,
+                      "v": -4.8581999999999965,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": -2.5905,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh06",
-                  "p": {
-                    "x": {
-                      "v": 17.7152,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -48.8048,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": -0.7471,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 4.5264,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh07",
-                  "p": {
-                    "x": {
-                      "v": 9.1286,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -39.5355,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 4.4605,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": -1.087,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": -4.4593,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 1.0999,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh08",
-                  "p": {
-                    "x": {
-                      "v": -2.77,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -43.7866,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 2.7552,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": 3.6781,
+                      "v": 20.855299999999993,
                       "kf": [],
                       "expr": null
                     },
@@ -745,15 +605,15 @@
                   }
                 },
                 {
-                  "id": "vh09",
+                  "id": "vlrwh0zs",
                   "p": {
                     "x": {
-                      "v": -36.0287,
+                      "v": -7.4816999999999965,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -88.0767,
+                      "v": -54.90751,
                       "kf": [],
                       "expr": null
                     },
@@ -768,141 +628,37 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": -6.1748,
+                      "v": 0.9692999999999969,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": -8.865,
+                      "v": -4.160619999999994,
                       "kf": [],
                       "expr": null
                     }
                   }
-                }
-              ],
-              "p": {
-                "x": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
                 },
-                "y": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "rotation": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "scaleX": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "scaleY": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "closed": {
-                  "v": true,
-                  "kf": [],
-                  "expr": null
-                },
-                "fill": {
-                  "v": "#F2F2F7",
-                  "kf": [],
-                  "expr": null
-                },
-                "fillEnabled": {
-                  "v": true,
-                  "kf": [],
-                  "expr": null
-                },
-                "fillOpacity": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "stroke": {
-                  "v": "#000000",
-                  "kf": [],
-                  "expr": null
-                },
-                "strokeWidth": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "strokeOpacity": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "trimStart": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "trimEnd": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "trimOffset": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "copies": {
-                  "v": 1,
-                  "kf": [],
-                  "expr": null
-                },
-                "repeatX": {
-                  "v": 30,
-                  "kf": [],
-                  "expr": null
-                },
-                "repeatY": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "repeatRotation": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                }
-              }
-            },
-            {
-              "id": "path6jt0gwas",
-              "name": "Playhead stem",
-              "parent": null,
-              "vertices": [
                 {
-                  "id": "vs0",
+                  "id": "vzgj2hlr",
                   "p": {
                     "x": {
-                      "v": 2.5285,
+                      "v": 0.32510000000000616,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -33.7545,
+                      "v": -54.83898,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": 0,
+                      "v": -0.8961000000000041,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": 0,
+                      "v": -4.1769900000000035,
                       "kf": [],
                       "expr": null
                     },
@@ -919,15 +675,15 @@
                   }
                 },
                 {
-                  "id": "vs1",
+                  "id": "vibi99cg",
                   "p": {
                     "x": {
-                      "v": 9.0285,
+                      "v": 3.6448000000000036,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -33.7545,
+                      "v": -39.363299999999995,
                       "kf": [],
                       "expr": null
                     },
@@ -938,6 +694,41 @@
                     },
                     "inY": {
                       "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 5.2402000000000015,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 24.427899999999994,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtzglujq",
+                  "p": {
+                    "x": {
+                      "v": 39.92400000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 24.209199999999996,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -18.366,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -16.9375,
                       "kf": [],
                       "expr": null
                     },
@@ -954,15 +745,15 @@
                   }
                 },
                 {
-                  "id": "vs2",
+                  "id": "vi0gaor9",
                   "p": {
                     "x": {
-                      "v": 9.0285,
+                      "v": 68.32900000000001,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": 107.0875,
+                      "v": 50.405,
                       "kf": [],
                       "expr": null
                     },
@@ -973,6 +764,41 @@
                     },
                     "inY": {
                       "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 3.0889999999999986,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 2.8490000000000038,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtjpzryc",
+                  "p": {
+                    "x": {
+                      "v": 64.53899999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 57.19799999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 4.0470000000000255,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 1.132000000000005,
                       "kf": [],
                       "expr": null
                     },
@@ -989,15 +815,15 @@
                   }
                 },
                 {
-                  "id": "vs3",
+                  "id": "vpf5j6oz",
                   "p": {
                     "x": {
-                      "v": 2.5285,
+                      "v": 30.516000000000005,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": 107.0875,
+                      "v": 47.67700000000001,
                       "kf": [],
                       "expr": null
                     },
@@ -1012,12 +838,12 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": 0,
+                      "v": -22.15950000000001,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": 0,
+                      "v": -6.201300000000003,
                       "kf": [],
                       "expr": null
                     }
@@ -1124,8 +950,8 @@
             }
           ],
           "svgSourceAsset": "azcgdicc",
-          "svgWidth": 59.41,
-          "svgHeight": 164.75,
+          "svgWidth": 141,
+          "svgHeight": 116,
           "svgWarnings": []
         },
         "scaleLinked": true,
@@ -1134,7 +960,7 @@
       {
         "id": "Le8s0um9",
         "type": "shape",
-        "name": "Powermove playhead",
+        "name": "Powermove light",
         "from": 0,
         "dur": 3.848800000143237,
         "on": true,
@@ -1605,29 +1431,29 @@
           "paths": [
             {
               "id": "path6jt0gwa",
-              "name": "Playhead head",
+              "name": "Path 1",
               "parent": null,
               "vertices": [
                 {
-                  "id": "vh00",
+                  "id": "vem76rn5",
                   "p": {
                     "x": {
-                      "v": -26.366,
+                      "v": -37.1115,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -107.0152,
+                      "v": 48.544,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": -10.3187,
+                      "v": 21.9931,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": 0.9368,
+                      "v": -6.767299999999992,
                       "kf": [],
                       "expr": null
                     },
@@ -1644,15 +1470,15 @@
                   }
                 },
                 {
-                  "id": "vh01",
+                  "id": "v68lek8u",
                   "p": {
                     "x": {
-                      "v": 27.1363,
+                      "v": -65.30264,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -107.0875,
+                      "v": 57.218,
                       "kf": [],
                       "expr": null
                     },
@@ -1667,72 +1493,37 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": 4.462,
+                      "v": -3.9276200000000046,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": -0.0041,
+                      "v": 1.2079999999999984,
                       "kf": [],
                       "expr": null
                     }
                   }
                 },
                 {
-                  "id": "vh02",
+                  "id": "vsqg4ivw",
                   "p": {
                     "x": {
-                      "v": 37.5573,
+                      "v": -69.38743,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -100.4393,
+                      "v": 50.647999999999996,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": -1.8882,
+                      "v": -2.8211000000000013,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": -4.0656,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": 1.8741,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 4.0537,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh03",
-                  "p": {
-                    "x": {
-                      "v": 35.8925,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -88.2014,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 2.8917,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": -3.4054,
+                      "v": 2.9879999999999995,
                       "kf": [],
                       "expr": null
                     },
@@ -1749,15 +1540,15 @@
                   }
                 },
                 {
-                  "id": "vh04",
+                  "id": "vy98mwxd",
                   "p": {
                     "x": {
-                      "v": 23.6626,
+                      "v": -42.2946,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -73.7921,
+                      "v": 21.953100000000006,
                       "kf": [],
                       "expr": null
                     },
@@ -1772,142 +1563,37 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": -1.7604,
+                      "v": 14.700700000000005,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": 1.9906,
+                      "v": -15.570300000000003,
                       "kf": [],
                       "expr": null
                     }
                   }
                 },
                 {
-                  "id": "vh05",
+                  "id": "vbig2f16",
                   "p": {
                     "x": {
-                      "v": 20.7262,
+                      "v": -12.430100000000003,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -66.9513,
+                      "v": -33.665099999999995,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": 0.2346,
+                      "v": -4.8581999999999965,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": -2.5905,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh06",
-                  "p": {
-                    "x": {
-                      "v": 17.7152,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -48.8048,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": 0,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": -0.7471,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 4.5264,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh07",
-                  "p": {
-                    "x": {
-                      "v": 9.1286,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -39.5355,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 4.4605,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": -1.087,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outX": {
-                      "v": -4.4593,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "outY": {
-                      "v": 1.0999,
-                      "kf": [],
-                      "expr": null
-                    }
-                  }
-                },
-                {
-                  "id": "vh08",
-                  "p": {
-                    "x": {
-                      "v": -2.77,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "y": {
-                      "v": -43.7866,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inX": {
-                      "v": 2.7552,
-                      "kf": [],
-                      "expr": null
-                    },
-                    "inY": {
-                      "v": 3.6781,
+                      "v": 20.855299999999993,
                       "kf": [],
                       "expr": null
                     },
@@ -1924,15 +1610,15 @@
                   }
                 },
                 {
-                  "id": "vh09",
+                  "id": "vlrwh0zs",
                   "p": {
                     "x": {
-                      "v": -36.0287,
+                      "v": -7.4816999999999965,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -88.0767,
+                      "v": -54.90751,
                       "kf": [],
                       "expr": null
                     },
@@ -1947,141 +1633,37 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": -6.1748,
+                      "v": 0.9692999999999969,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": -8.865,
+                      "v": -4.160619999999994,
                       "kf": [],
                       "expr": null
                     }
                   }
-                }
-              ],
-              "p": {
-                "x": {
-                  "v": 0.4311063534973272,
-                  "kf": [],
-                  "expr": null
                 },
-                "y": {
-                  "v": 0.29533754974378823,
-                  "kf": [],
-                  "expr": null
-                },
-                "rotation": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "scaleX": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "scaleY": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "closed": {
-                  "v": true,
-                  "kf": [],
-                  "expr": null
-                },
-                "fill": {
-                  "v": "#F2F2F7",
-                  "kf": [],
-                  "expr": null
-                },
-                "fillEnabled": {
-                  "v": true,
-                  "kf": [],
-                  "expr": null
-                },
-                "fillOpacity": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "stroke": {
-                  "v": "#000000",
-                  "kf": [],
-                  "expr": null
-                },
-                "strokeWidth": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "strokeOpacity": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "trimStart": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "trimEnd": {
-                  "v": 100,
-                  "kf": [],
-                  "expr": null
-                },
-                "trimOffset": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "copies": {
-                  "v": 1,
-                  "kf": [],
-                  "expr": null
-                },
-                "repeatX": {
-                  "v": 30,
-                  "kf": [],
-                  "expr": null
-                },
-                "repeatY": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                },
-                "repeatRotation": {
-                  "v": 0,
-                  "kf": [],
-                  "expr": null
-                }
-              }
-            },
-            {
-              "id": "path6jt0gwas",
-              "name": "Playhead stem",
-              "parent": null,
-              "vertices": [
                 {
-                  "id": "vs0",
+                  "id": "vzgj2hlr",
                   "p": {
                     "x": {
-                      "v": 2.5285,
+                      "v": 0.32510000000000616,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -33.7545,
+                      "v": -54.83898,
                       "kf": [],
                       "expr": null
                     },
                     "inX": {
-                      "v": 0,
+                      "v": -0.8961000000000041,
                       "kf": [],
                       "expr": null
                     },
                     "inY": {
-                      "v": 0,
+                      "v": -4.1769900000000035,
                       "kf": [],
                       "expr": null
                     },
@@ -2098,15 +1680,15 @@
                   }
                 },
                 {
-                  "id": "vs1",
+                  "id": "vibi99cg",
                   "p": {
                     "x": {
-                      "v": 9.0285,
+                      "v": 3.6448000000000036,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": -33.7545,
+                      "v": -39.363299999999995,
                       "kf": [],
                       "expr": null
                     },
@@ -2117,6 +1699,41 @@
                     },
                     "inY": {
                       "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 5.2402000000000015,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 24.427899999999994,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtzglujq",
+                  "p": {
+                    "x": {
+                      "v": 39.92400000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 24.209199999999996,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -18.366,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -16.9375,
                       "kf": [],
                       "expr": null
                     },
@@ -2133,15 +1750,15 @@
                   }
                 },
                 {
-                  "id": "vs2",
+                  "id": "vi0gaor9",
                   "p": {
                     "x": {
-                      "v": 9.0285,
+                      "v": 68.32900000000001,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": 107.0875,
+                      "v": 50.405,
                       "kf": [],
                       "expr": null
                     },
@@ -2152,6 +1769,41 @@
                     },
                     "inY": {
                       "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 3.0889999999999986,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 2.8490000000000038,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtjpzryc",
+                  "p": {
+                    "x": {
+                      "v": 64.53899999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 57.19799999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 4.0470000000000255,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 1.132000000000005,
                       "kf": [],
                       "expr": null
                     },
@@ -2168,15 +1820,15 @@
                   }
                 },
                 {
-                  "id": "vs3",
+                  "id": "vpf5j6oz",
                   "p": {
                     "x": {
-                      "v": 2.5285,
+                      "v": 30.516000000000005,
                       "kf": [],
                       "expr": null
                     },
                     "y": {
-                      "v": 107.0875,
+                      "v": 47.67700000000001,
                       "kf": [],
                       "expr": null
                     },
@@ -2191,12 +1843,12 @@
                       "expr": null
                     },
                     "outX": {
-                      "v": 0,
+                      "v": -22.15950000000001,
                       "kf": [],
                       "expr": null
                     },
                     "outY": {
-                      "v": 0,
+                      "v": -6.201300000000003,
                       "kf": [],
                       "expr": null
                     }
@@ -2303,8 +1955,8 @@
             }
           ],
           "svgSourceAsset": "azcgdicc",
-          "svgWidth": 59.41,
-          "svgHeight": 164.75,
+          "svgWidth": 141,
+          "svgHeight": 116,
           "svgWarnings": []
         },
         "scaleLinked": true,

@@ -105,7 +105,18 @@ export interface Mask {
   };
 }
 
+export type EffectInputStage = 'source' | 'masks' | 'effects';
+export type EffectInputSpace = 'composition' | 'source';
+export interface EffectLayerInput { kind?:never; assetId?:never;pathId?:never; layerId: string | null; stage: EffectInputStage; space?: EffectInputSpace }
+
+export interface EffectPathInput {kind:'path';layerId:string|null;pathId:string|null;assetId?:never;stage?:never;space?:never}
+export interface EffectAssetInput {kind:'asset';assetId:string|null;layerId?:never;pathId?:never;stage?:never;space?:never}
+export type EffectInput = EffectLayerInput|EffectPathInput|EffectAssetInput;
 export interface Effect {
+  inputs?: Record<string, EffectInput>;
+  /** Implementation revision; absent in legacy source means 1. */
+  version?: number;
+  missing?: boolean;
   id: string;
   type: string;
   on: boolean;
@@ -290,12 +301,16 @@ interface LayerBase<T extends LayerType, D extends object> {
   on: boolean;
   lock: boolean;
   shy: boolean;
+  effectSpace?: EffectInputSpace;
   matteSource?: string | null;
   matteMode?: Channel<'alpha'|'alpha-inverted'|'luma'|'luma-inverted'>;
   solo?: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;
   threeD?: boolean;
+  /** Pre-comps only: render the nested composition at the size it is shown,
+   * so scaling it up stays sharp (After Effects' Continuously Rasterize). */
+  continuousRaster?: boolean;
   color: string;
   blend: BlendMode;
   mblur: boolean;

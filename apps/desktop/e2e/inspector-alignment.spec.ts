@@ -23,10 +23,20 @@ for (const theme of ['light', 'dark']) {
       text.selectNodeContents(label);
       return [{ label: label.textContent, textX: text.getBoundingClientRect().left,
         fieldX: field.getBoundingClientRect().left,
-        keyed: !!row.querySelector(':scope > .stopwatch') }];
+        keyed: !!row.querySelector(':scope > .stopwatch'),
+        content: !!row.closest('.content-rows') }];
     }));
+    // As in the prototype, Content's rows are plain label and value (their
+    // diamond sits in the margin); every other section shares one lane.
+    const content = positions.filter((row) => row.content);
+    expect(content.length).toBeGreaterThan(0);
+    for (const row of content) {
+      expect(row.textX, row.label ?? '').toBe(content[0]!.textX);
+      expect(row.fieldX, row.label ?? '').toBe(content[0]!.fieldX);
+    }
+    positions.splice(0, positions.length, ...positions.filter((row) => !row.content));
     const solo = positions.find((row) => row.label === 'Solo')!;
-    const blend = positions.find((row) => row.label === 'Blend mode')!;
+    const blend = positions.find((row) => row.label === 'Blend Mode')!;
     expect(solo.keyed).toBe(false);
     expect(blend.keyed).toBe(true);
     expect(solo.textX).toBe(blend.textX);
@@ -35,8 +45,8 @@ for (const theme of ['light', 'dark']) {
       expect(row.textX, row.label ?? '').toBe(solo.textX);
       expect(row.fieldX, row.label ?? '').toBe(solo.fieldX);
     }
-    await page.getByRole('button', { name: 'Add keyframe for Blend mode', exact: true }).click();
-    await expect(page.getByRole('button', { name: 'Remove keyframe for Blend mode', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Add keyframe for Blend Mode', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Remove keyframe for Blend Mode', exact: true })).toBeVisible();
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 }

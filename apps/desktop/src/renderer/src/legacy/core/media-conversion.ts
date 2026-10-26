@@ -1,3 +1,4 @@
+import { yieldMediaWork } from './media-work';
 import { cloudSourcePaths } from './cloud-media';
 import { MAX_SEQUENCE_FRAMES, animationTiming } from '../../../../shared/animated-image';
 import { imageMimeType, isAnimatedImageExtension, mediaExtension } from '../../../../shared/media-formats';
@@ -10,17 +11,21 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 const UPLOAD_CHUNK = 4 * 1024 * 1024;
 
 /** Stream a finished conversion out of the main process and back into a File. */
-export async function readProxyFile(result: any, name: string, lastModified: number): Promise<File> {
+export async function readProxyFile(result: any, name: string, lastModified: number, { assertCurrent, onStage }: any = {}): Promise<File> {
   const media = (hostBridge() as any)?.media;
   const parts: ArrayBuffer[] = [];
   try {
-    for (let offset = 0; offset < result.size; offset += UPLOAD_CHUNK) {
+    for (let offset = 0; offset < result.size;) {
+      assertCurrent?.();
       const chunk = await media.readPlaybackProxy(result.token, offset, Math.min(UPLOAD_CHUNK, result.size - offset));
       if (!chunk.byteLength) throw new Error('The converted file ended unexpectedly');
       const owned = new Uint8Array(chunk.byteLength);
       owned.set(chunk);
       parts.push(owned.buffer);
+      offset += chunk.byteLength;
+      onStage?.('Loading converted media', { completed: offset, total: result.size });
     }
+    assertCurrent?.();
     return new (window as any).File(parts, name, { type: result.type, lastModified: Number(lastModified) || Date.now() });
   } finally {
     await media.releasePlaybackProxy(result.token).catch(() => undefined);
@@ -92,7 +97,7 @@ export interface AnimationConversion { file: File; fps: number; frames: number; 
 /** Decode every frame with Chromium, then encode them through the same proxy
     converter numbered image sequences use. Each frame repeats for as long as
     its own delay lasts, so variable-delay animations keep their timing. */
-export async function convertAnimatedImage(file: any, { onStage, onProgress }: any = {}): Promise<AnimationConversion> {
+export async function convertAnimatedImage(file: any, { onStage, onProgress, assertCurrent }: any = {}): Promise<AnimationConversion> {
   const media = (hostBridge() as any)?.media;
   if (!media?.beginAnimation) throw new Error('Animated image import is unavailable');
   const opened = await openDecoder(file);
@@ -109,6 +114,8 @@ export async function convertAnimatedImage(file: any, { onStage, onProgress }: a
   let w = 0, h = 0, canvas: any = null, context: any = null;
   try {
     for (let index = 0; index < count; index++) {
+      await yieldMediaWork();
+      assertCurrent?.();
       const { image } = await decoder.decode({ frameIndex: index });
       try {
         if (!canvas) {
@@ -124,24 +131,28 @@ export async function convertAnimatedImage(file: any, { onStage, onProgress }: a
         context.drawImage(image, 0, 0, w, h);
       } finally { image.close(); }
       encoded.push(await canvas.convertToBlob({ type: 'image/png' }));
+      onStage?.('Reading animation frames', { completed: index + 1, total: count });
     }
   } finally {
     try { decoder.close(); } catch (error) { }
   }
+  assertCurrent?.();
   const timing = animationTiming(durations);
   onStage?.('Converting animation');
   const token = await media.beginAnimation(timing.fps, timing.repeats);
   let result: any;
   try {
     for (let index = 0; index < encoded.length; index++) {
+      assertCurrent?.();
       const bytes = new Uint8Array(await encoded[index]!.arrayBuffer());
       for (let offset = 0; offset < bytes.length; offset += UPLOAD_CHUNK) {
+        assertCurrent?.();
         await media.writeAnimationFrame(token, index, offset,
           bytes.subarray(offset, Math.min(offset + UPLOAD_CHUNK, bytes.length)));
       }
     }
     result = await media.finishAnimation(token, (completed: number) => {
-      onStage?.(`Converting animation · ${Math.min(99, Math.round((completed / timing.frames) * 100))}%`);
+      onStage?.('Converting animation', { completed, total: timing.frames });
       onProgress?.(completed, timing.frames);
     });
   } catch (error) {
@@ -151,17 +162,17 @@ export async function convertAnimatedImage(file: any, { onStage, onProgress }: a
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading animation');
   return {
-    file: await readProxyFile(result, `${String(file.name || 'animation')}.webm`, file.lastModified),
+    file: await readProxyFile(result, `${String(file.name || 'animation')}.webm`, file.lastModified, { assertCurrent, onStage }),
     fps: timing.fps, frames: timing.frames, w, h,
   };
 }
 
 /** TIFF and HEIF stills become a PNG before the renderer ever sees them. */
-export async function convertStillImage(file: any, { onStage }: any = {}): Promise<File> {
+export async function convertStillImage(file: any, { onStage, assertCurrent }: any = {}): Promise<File> {
   const media = (hostBridge() as any)?.media;
   if (!media?.createStillImage) throw new Error('Image conversion is unavailable');
   onStage?.('Converting image');
   const result = await media.createStillImage(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
-  return readProxyFile(result, `${String(file.name || 'image')}.png`, file.lastModified);
+  return readProxyFile(result, `${String(file.name || 'image')}.png`, file.lastModified, { assertCurrent, onStage });
 }

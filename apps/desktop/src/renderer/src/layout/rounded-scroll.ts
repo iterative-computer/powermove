@@ -19,18 +19,24 @@ export function panelClipPath(width: number, top: number, bottom: number, radius
   return `path('${points.join(' ')} Z')`;
 }
 
+/* A panel clipped by a column carries this attribute, so whichever column
+   holds it next clears the clip. A panel can move between columns (a
+   workspace switch, a drag) between two frames; a clip kept from its old
+   column would cut its bottom off and read as a gap in the new one. */
+const CLIPPED = 'scrollClipped';
+
+function unclip(panel: HTMLElement): void {
+  if (panel.dataset[CLIPPED] === undefined) return;
+  panel.style.clipPath = '';
+  panel.style.borderRadius = '';
+  delete panel.dataset[CLIPPED];
+}
+
 /** Round the visible part of a panel, including while it crosses a dock edge. */
 export function roundedScroll(node: HTMLElement) {
   if (node.id === 'dock-center') return;
-  const originals = new Map<HTMLElement, { clipPath: string; borderRadius: string }>();
   let frame = 0;
-  const restore = (panel: HTMLElement) => {
-    const original = originals.get(panel);
-    if (!original) return;
-    panel.style.clipPath = original.clipPath;
-    panel.style.borderRadius = original.borderRadius;
-    originals.delete(panel);
-  };
+  const clipped = new Set<HTMLElement>();
   /* Tell the column whether content is hidden above or below, so CSS can fade
      that edge. Without it a full column looks identical to a scrollable one. */
   const markScrollEdges = () => {
@@ -48,22 +54,23 @@ export function roundedScroll(node: HTMLElement) {
     const radius = parseFloat(chrome.borderTopLeftRadius);
     const smoothing = Number(chrome.getPropertyValue('--ui-corner-smoothing').match(/superellipse\(([-\d.]+)\)/)?.[1] ?? 1);
     const panels = node.querySelectorAll<HTMLElement>(':scope > .panel-slot > .panel');
-    for (const panel of originals.keys()) if (!node.contains(panel)) restore(panel);
+    // Panels that left this column take their clip off with them.
+    for (const panel of clipped) if (!node.contains(panel)) { unclip(panel); clipped.delete(panel); }
     for (const panel of panels) {
       const rect = panel.getBoundingClientRect();
       const top = Math.min(rect.height, Math.max(0, bounds.top - rect.top));
       const bottom = Math.min(rect.height - top, Math.max(0, rect.bottom - bounds.bottom));
       if (!top && !bottom) {
-        restore(panel);
+        unclip(panel);
+        clipped.delete(panel);
         continue;
       }
-      if (!originals.has(panel)) originals.set(panel, {
-        clipPath: panel.style.clipPath, borderRadius: panel.style.borderRadius
-      });
       // Avoid intersecting the panel's original corners with the viewport's
       // corners: that intersection makes a lens out of a thin visible slice.
       panel.style.borderRadius = '0px';
       panel.style.clipPath = panelClipPath(rect.width, top, rect.height - bottom, radius, smoothing);
+      panel.dataset[CLIPPED] = '';
+      clipped.add(panel);
     }
   };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
@@ -83,7 +90,7 @@ export function roundedScroll(node: HTMLElement) {
     node.removeEventListener('scroll', schedule);
     resize.disconnect();
     mutations.disconnect();
-    for (const panel of originals.keys()) restore(panel);
+    for (const panel of clipped) unclip(panel);
     delete node.dataset.overflowTop;
     delete node.dataset.overflowBottom;
   } };

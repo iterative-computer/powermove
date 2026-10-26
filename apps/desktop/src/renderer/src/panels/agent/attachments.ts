@@ -13,6 +13,15 @@ export interface PromptAttachment {
   content?: string;
   /** Native path captured from the File at picker/drop time. */
   sourcePath?: string;
+  /** Context the model reads beside the file, e.g. where a viewer frame came from. */
+  promptNote?: string;
+}
+
+const promptNotes = new WeakMap<File, string>();
+
+/** Attach model-facing context to a File before it is added to the composer. */
+export function notePromptFile(file: File, note: string): void {
+  promptNotes.set(file, note);
 }
 
 export async function readPromptAttachment(file: File, id: string): Promise<PromptAttachment> {
@@ -31,6 +40,8 @@ export async function readPromptAttachment(file: File, id: string): Promise<Prom
   let sourcePath: string | null = null;
   try { sourcePath = bridge()?.media?.sourcePath?.(file) || null; } catch { /* Clipboard-backed Files have no native path. */ }
   if (sourcePath) item.sourcePath = sourcePath;
+  const note = promptNotes.get(file);
+  if (note) item.promptNote = note;
   if (image) item.dataUrl = dataUrl.replace(/^data:[^;]*;/, `data:${type};`);
   if (!isAgentImageType(type)) {
     // Preserve binary bytes, including zero-byte files. Never attach just a filename.

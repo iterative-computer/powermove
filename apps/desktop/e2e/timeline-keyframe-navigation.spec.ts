@@ -35,7 +35,8 @@ test('timeline shortcuts navigate real keyframes with a compact transport', asyn
     const timeline = PM.Kernel.services.get('timeline');
     const box = timeline.cv.getBoundingClientRect();
     const i = timeline.rows.findIndex((r: any) => r.key === 'position.y');
-    return { x: box.x + 28, y: box.y + timeline.ruler + i * timeline.row - timeline.scrollY + timeline.row / 2 };
+    // The previous-keyframe arrow, left of the stopwatch.
+    return { x: box.x + 116, y: box.y + timeline.ruler + i * timeline.row - timeline.scrollY + timeline.row / 2 };
   });
   await page.mouse.click(point.x, point.y);
   await expect.poll(time).toBe(2);
@@ -77,11 +78,11 @@ test('clicking away clears row selection and deleting final keys preserves value
     const i = timeline.rows.findIndex((r: any) => r.key === 'position.y');
     return { x: box.x, y: box.y + timeline.ruler + i * timeline.row - timeline.scrollY + timeline.row / 2, emptyY: box.y + timeline.hgt - 8, gut: timeline.gut };
   });
-  await page.mouse.click(coords.x + 115, coords.y);
+  await page.mouse.click(coords.x + 175, coords.y);
   await expect.poll(() => page.evaluate(() => (window as any).PM.sel.chan)).toBe('position.y');
-  await page.mouse.click(coords.x + 115, coords.emptyY);
+  await page.mouse.click(coords.x + 175, coords.emptyY);
   await expect.poll(() => page.evaluate(() => (window as any).PM.sel.chan)).toBeNull();
-  await page.mouse.click(coords.x + 115, coords.y);
+  await page.mouse.click(coords.x + 175, coords.y);
   await page.mouse.click(coords.x + coords.gut + 400, coords.y);
   await expect.poll(() => page.evaluate(() => (window as any).PM.sel.chan)).toBeNull();
   await expect.poll(() => page.evaluate(() => (window as any).PM.time)).toBe(2);

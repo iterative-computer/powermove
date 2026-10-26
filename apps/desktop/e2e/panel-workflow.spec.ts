@@ -43,7 +43,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   });
   expect(timelineStyle.width).toBeLessThan(200);
   expect(timelineStyle.height).toBeGreaterThan(600);
-  await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+  await page.evaluate(() => (window as any).PM.LibraryUI.open()); // The library opens from the workspace ⋯ menu.
   const library = page.getByRole('dialog', { name: 'Panel library', exact: true });
   await expect(library).toBeVisible();
   const toolbarGeometry = await library.evaluate((screen) => {
@@ -152,7 +152,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   await library.getByRole('button', { name: 'Add Notes to workspace', exact: true }).click();
   await expect(library).toBeHidden();
   await expect(page.locator('#panel-notes')).toBeVisible();
-  await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+  await page.evaluate(() => (window as any).PM.LibraryUI.open()); // The library opens from the workspace ⋯ menu.
   await library.getByRole('searchbox', { name: 'Search panels' }).fill('Notes');
   await expect(library.locator('.library-card .library-live-frame .panel.library-clone')).toBeVisible();
   await library.getByRole('button', { name: 'Edit Notes', exact: true }).click();
@@ -190,7 +190,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   }, dragId);
   await expect(library).toBeHidden();
   await expect(page.locator(`#dock-right #panel-${dragId}`)).toBeVisible();
-  await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+  await page.evaluate(() => (window as any).PM.LibraryUI.open()); // The library opens from the workspace ⋯ menu.
   const workspaceCount = await page.evaluate(() => (window as any).PM.WS.all.length);
   await library.getByRole('button', { name: 'All workspaces', exact: true }).click();
   await expect(library.locator('.library-card')).toHaveCount(workspaceCount);

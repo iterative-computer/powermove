@@ -14,13 +14,10 @@
   const HORIZONTAL: AlignMode[] = ['left', 'hcenter', 'right'];
   const VERTICAL: AlignMode[] = ['top', 'vcenter', 'bottom'];
 
+  /* Phosphor's align glyphs, from the app's icon registry. */
   const GLYPHS: Record<AlignMode, string> = {
-    left: 'M3 2.5v11M5.5 5h7M5.5 9h4.5',
-    hcenter: 'M8 2.5v11M4.5 5h7M5.75 9h4.5',
-    right: 'M13 2.5v11M3.5 5h7M6 9h4.5',
-    top: 'M2.5 3h11M5 5.5v7M9 5.5v4.5',
-    vcenter: 'M2.5 8h11M5 4.5v7M9 5.75v4.5',
-    bottom: 'M2.5 13h11M5 3.5v7M9 6v4.5',
+    left: 'alignLeft', hcenter: 'alignCenterH', right: 'alignRight',
+    top: 'alignTop', vcenter: 'alignCenterV', bottom: 'alignBottom',
   };
 
   function worldBox(layer: any, time: number): Box | null {
@@ -63,7 +60,7 @@
     <div class="align-group">
       {#each group as mode}
         <button type="button" aria-label={ALIGN_LABELS[mode]} title={ALIGN_LABELS[mode]} onclick={() => align(mode)} onpointerdown={(event) => event.stopPropagation()}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d={GLYPHS[mode]} /></svg>
+          <span class="align-glyph" aria-hidden="true">{@html api.ui.icon(GLYPHS[mode])}</span>
         </button>
       {/each}
     </div>
@@ -71,17 +68,11 @@
 </div>
 
 <style>
-  /* Each button is its own well; a 1px seam of panel shows between them and
-     only the outer corners of a group are rounded. Hover and press are per
-     button. A wider gap separates the horizontal and vertical groups. */
+  /* Two wells, horizontal and vertical, each holding its three buttons. */
   .align-strip { display: flex; gap: 6px; margin: 2px 4px 10px; }
-  .align-group { display: flex; flex: 1; gap: 1px; }
-  /* Same material as every value well: tinted rest, a touch more on hover,
-     pressed a step darker. */
-  button { display: flex; align-items: center; justify-content: center; flex: 1; height: 28px; padding: 0; border: 0; border-radius: 0; background: rgb(var(--ink-rgb) / .06); color: var(--tx-3); cursor: default; transition: background var(--dur-1), color var(--dur-1); }
-  button:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
-  button:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
-  button:hover { background: rgb(var(--ink-rgb) / .085); color: var(--tx); }
-  button:active { background: rgb(var(--ink-rgb) / .12); color: var(--tx); transform: scale(.94); transition: none; }
+  .align-group { display: flex; flex: 1; height: 28px; border-radius: 7px; background: var(--bg-field); }
+  button { display: flex; align-items: center; justify-content: center; flex: 1; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: color-mix(in srgb, var(--tx-label) 50%, var(--tx-2)); cursor: default; transition: background var(--dur-1), color var(--dur-1); }
+  button:hover { background: rgb(var(--ink-rgb) / .06); color: var(--tx); }
+  button:active { background: rgb(var(--ink-rgb) / .1); color: var(--tx); transform: scale(.94); transition: none; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>

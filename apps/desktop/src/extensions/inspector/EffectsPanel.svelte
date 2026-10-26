@@ -19,6 +19,17 @@
       inspectorSelection(api, sel.layers.map((id) => api.model.layer(id)).filter((layer): layer is NonNullable<typeof layer> => layer !== null)))
   );
   const firstLayer = $derived(selectedLayers[0]);
+  const layerName = $derived((doc.tick.structure, firstLayer?.name ?? ''));
+
+  /* The layer's name sits beside the panel's title, as in After Effects'
+     "Effect Controls: Layer" tab. */
+  $effect(() => {
+    const panel = document.getElementById(`panel-${panelId}`);
+    if (!panel) return;
+    if (layerName) panel.style.setProperty('--panel-subtitle', JSON.stringify(layerName));
+    else panel.style.removeProperty('--panel-subtitle');
+    return () => panel.style.removeProperty('--panel-subtitle');
+  });
 </script>
 
 <InspectorSurface {panelId}>
@@ -27,9 +38,6 @@
   {:else if meta[firstLayer.type]?.effects === false}
     <div class="empty">{meta[firstLayer.type]?.label ?? 'This'} layers don’t take effects.</div>
   {:else}
-    <div class="row inspector-header" data-effects-header>
-      <div class="k"><span>{(doc.tick.structure, firstLayer.name)}</span></div>
-    </div>
     {#if selectedLayers.length > 1}
       <div class="effects-selection-note" role="status">
         {selectedLayers.length} layers selected · showing {firstLayer.name || 'the first layer'}

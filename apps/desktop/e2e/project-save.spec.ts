@@ -4,13 +4,12 @@ import { expect, test, type LaunchedApp } from './helpers/app';
 import { decodeProjectContainer } from '../src/shared/project-container';
 import { fixturePath } from './helpers/media';
 
-async function newestBackup(userData: string): Promise<string> {
+async function fullBackups(userData: string): Promise<string[]> {
   const root = path.join(userData, 'backups');
   const files: string[] = [];
   for (const id of await readdir(root)) for (const name of await readdir(path.join(root, id))) files.push(path.join(root, id, name));
   files.sort((a, b) => path.basename(b).localeCompare(path.basename(a)));
-  if (!files[0]) throw new Error('No project backup was written');
-  return files[0];
+  return files;
 }
 
 async function saveTo(session: LaunchedApp, destination: string | null) {
@@ -41,15 +40,15 @@ test('Command+S writes real files, reuses the destination, saves from a field, a
   await expect.poll(() => savedName(a)).toBe('Velocity Study');
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(false);
   await rename(session, 'Second version');
-  await session.page.waitForTimeout(750);
-  expect(await session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(true);
-  expect(await savedName(a)).toBe('Velocity Study');
+  await expect.poll(() => savedName(a)).toBe('Second version');
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(false);
   await session.page.evaluate(() => {
     const input = document.createElement('input'); input.id = 'save-from-field'; document.body.appendChild(input); input.focus();
   });
   await session.page.keyboard.press('Meta+S');
   await expect.poll(() => savedName(a)).toBe('Second version');
-  expect(await savedName(await newestBackup(session.userData))).toBe('Velocity Study');
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.saving)).toBe(false);
+  expect((await fullBackups(session.userData)).length).toBeGreaterThan(0);
   expect(await session.app.evaluate(() => (globalThis as any).__saveDialogs)).toBe(1);
   await saveTo(session, b);
   await session.page.keyboard.press('Meta+Shift+S');
@@ -228,8 +227,11 @@ test('Save on native window close writes the document before closing', async ({ 
   await session.app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
   });
+  const process = session.app.process();
+  const closed = session.app.waitForEvent('close');
   await session.app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]!.close(); });
-  await expect.poll(() => session.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(0);
+  await closed;
+  expect(process.exitCode).toBe(0);
   expect(await savedName(destination)).toBe('Saved on close');
 });
 

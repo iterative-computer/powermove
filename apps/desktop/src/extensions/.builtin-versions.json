@@ -1,11 +1,11 @@
 {
   "effects-basic": {
-    "version": "1.0.3",
-    "treeSha": "4555c4eacdc99494dff4a0358294a2ed2e011fed"
+    "version": "1.13.0",
+    "treeSha": "9e28780905d3c390b03db03ba41546d15a1cd284"
   },
   "inspector": {
-    "version": "1.2.8",
-    "treeSha": "ea0c62b6f4ebdc86673f74ccd67f4b3392eae15f"
+    "version": "1.7.0",
+    "treeSha": "9130fc3c84369b69e47da568fcc4954e3e62cdc1"
   },
   "keymap-default": {
     "version": "1.0.3",
@@ -24,8 +24,8 @@
     "treeSha": "b69ac96e7ade6661dde9b596b903a48bf1592ff0"
   },
   "timeline": {
-    "version": "1.1.5",
-    "treeSha": "f7fc9863051ff3e6c8dc3fb7baa74da3a030c836"
+    "version": "1.1.8",
+    "treeSha": "4a41a480701e12124b533916b8a0fcddbacb40bd"
   },
   "toolbar": {
     "version": "1.0.1",
@@ -36,7 +36,7 @@
     "treeSha": "5c9bb6ea0faddf0d8c66006789c120adebb18802"
   },
   "viewer": {
-    "version": "1.0.14",
-    "treeSha": "75209b17d142f0c0dc6d4247ed597c39f47b2dd3"
+    "version": "1.0.18",
+    "treeSha": "45b7cf1c0cc13cfa0a7e8a611b2829c9619ff2d0"
   }
 }

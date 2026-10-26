@@ -1,3 +1,6 @@
+import { remapLayerInputs } from '../../core/effect-inputs';
+import { evaluatedValue, isProperty } from './content-properties';
+import { sourceTime } from './retiming';
 /* After Effects compositions.
  *
  * A project holds any number of compositions. Exactly one of them — the one
@@ -374,6 +377,7 @@ export function install(PM: PMRegistry): void {
       if (copy.parent) copy.parent = ids.get(copy.parent) ?? null;
       if (copy.group) copy.group = ids.get(copy.group) ?? null;
       if (copy.matteSource) copy.matteSource = ids.get(copy.matteSource) ?? null;
+      remapLayerInputs(copy, ids);
     }
     return copies;
   };
@@ -613,10 +617,78 @@ export function install(PM: PMRegistry): void {
     return comp.id;
   };
 
+  /* Release Pre-comp: Pre-compose in reverse. The pre-comp layer becomes a
+     group holding copies of its composition's layers. The group keeps the
+     layer's id, transform, keyframes, effects, masks, parent and timing, so
+     nothing moves; the copies are clipped to the pre-comp's In and Out
+     points, which a group does not enforce. The composition stays in the
+     project for other uses. */
+  const ALWAYS_3D = /^powermove\.3d\.(camera|light)$/;
+  const releaseIssue = (layer: any): string | null => {
+    if (!layer || layer.type !== 'precomp') return 'Select a pre-comp layer to release';
+    const sub = PM.compOf(layer);
+    if (!sub) return 'This pre-comp’s composition is missing';
+    if (layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock)) return 'Unlock the pre-comp before releasing it';
+    if (layer.threeD) return 'Turn off 3D on the pre-comp before releasing it';
+    if (layer.effectSpace === 'source') return 'Set Effect Space to Composition before releasing this pre-comp';
+    const speed = layer.d?.speed;
+    if (evaluatedValue(PM, layer, layer.d?.timeRemap, layer.from, 'c.timeRemap')
+        || (isProperty(speed) ? speed.kf?.length || speed.expr || Number(speed.v ?? 1) !== 1 : Number(speed ?? 1) !== 1)) {
+      return 'Remove time remapping and speed changes before releasing this pre-comp';
+    }
+    if (sub.layers.some((inner: any) => ALWAYS_3D.test(String(inner.d?.definition ?? '')))) {
+      return 'This pre-comp has its own camera or lights. Open it to work on its 3D scene.';
+    }
+    return null;
+  };
+
+  const release = (layerId: string) => {
+    const host = PM.proj;
+    const layer = host.layers.find((item: any) => item.id === layerId);
+    const issue = releaseIssue(layer);
+    if (issue) throw new Error(issue);
+    const sub = PM.compOf(layer);
+    const start = layer.from, end = layer.from + layer.dur;
+    const offset = start - sourceTime(PM, layer, start);
+    const group: any = PM.mkLayer('group', { name: layer.name }, host);
+    for (const key of ['id', 'from', 'dur', 'on', 'shy', 'solo', 'color', 'blend', 'mblur', 'parent', 'group', 'p', 'fx',
+      'masks', 'matteSource', 'matteMode', 'transitionIn', 'transitionOut', 'track']) {
+      if (layer[key] !== undefined) group[key] = layer[key];
+    }
+    group.collapsed = false;
+    const copies = cloneLayers(sub.layers || []);
+    for (const copy of copies) {
+      if (!copy.group) copy.group = group.id;
+      copy.from += offset;
+      if (copy.type === 'group') continue;
+      const from = Math.max(copy.from, start), to = Math.min(copy.from + copy.dur, end);
+      // Never visible inside the pre-comp's span: keep it, hidden, so links hold.
+      if (to <= from) { copy.on = false; continue; }
+      if (from > copy.from) {
+        const content = PM.MediaTiming?.startPatch?.(copy, from);
+        if (content) Object.assign(copy.d, content);
+        // Keyframe times are layer-local; keep their composition times.
+        for (const { prop } of PM.allProps(copy)) for (const key of prop.kf ?? []) key.t -= from - copy.from;
+        copy.from = from;
+      }
+      copy.dur = to - copy.from;
+    }
+    transact('Release Pre-comp', () => {
+      const index = host.layers.indexOf(layer);
+      host.layers.splice(index, 1, group, ...copies);
+      PM.normalizeGroupStack?.();
+      PM.ProjectIndex?.invalidate();
+      PM.selectLayers(group.id);
+    });
+    PM.bus.emit('layers'); PM.bus.emit('project'); PM.bus.emit('comps');
+    PM.invalidate('all');
+    return group.id;
+  };
+
   /** Project panel ▸ New Comp from Selection: a comp matching the footage. */
   const fromAsset = (assetId: string) => {
     const meta: any = PM.proj?.assets?.[assetId];
-    if (!meta) return null;
+    if (!meta||meta.kind==='lut') return null;
     const live = PM.assets?.get?.(assetId);
     const w = Math.round(meta.w || live?.w || PM.proj.w), h = Math.round(meta.h || live?.h || PM.proj.h);
     const dur = Number(meta.dur) > 0 ? Number(meta.dur) : PM.proj.dur;
@@ -627,8 +699,9 @@ export function install(PM: PMRegistry): void {
   };
 
   PM.Comps = {
-    list, get, open, close, openTabs, create, setSettings, rename, duplicate, remove,
+    list, get, open, close, openTabs, create, setSettings, rename, duplicate, remove, children,
     addToTimeline, precompose, canLeave, canNest, contains, users, exists, fromAsset,
+    release, releaseIssue,
     isOpen: isRoot,
     active: () => PM.proj?.compId,
     normalize: (project: any) => normalizeCompositions(project, PM.uid),

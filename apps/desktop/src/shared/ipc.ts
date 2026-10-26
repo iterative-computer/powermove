@@ -35,6 +35,8 @@ export const IPC = {
   projectSaveChunk: 'project:save-chunk',
   projectSaveFinish: 'project:save-finish',
   projectSaveAbort: 'project:save-abort',
+  projectVersions: 'project:versions',
+  projectVersionOpen: 'project:version-open',
   projectOpen: 'project:open',
   projectOpenPath: 'project:open-path',
   projectOpenExternal: 'project:open-external', // main → renderer
@@ -274,23 +276,24 @@ export interface FileSaveRequest {
   saveAs?: boolean;
   destinationToken?: string;
 }
-export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
+export type FileSaveResult = { ok: true; path: string; recovery?: boolean } | { ok: false; cancelled: boolean; error?: string };
 /** Captions sidecar: `path` is the exported video; `suffix` adds ".en" etc. */
 export interface ExportSidecarRequest { path: string; extension: 'srt' | 'vtt'; suffix?: string; text: string }
 /** The only suffixes a sidecar may carry ("en", "pt-BR", "Notes-2"). */
 export const SIDECAR_SUFFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export interface ProjectSaveRequest {
-  name: string; projectId: string; saveAs?: boolean; documentBytes: number;
+  name: string; projectId: string; saveAs?: boolean; background?: boolean; documentBytes: number;
   media: import('./project-incremental').SaveMedia[];
 }
 export type ProjectSaveBeginResult = { ok: true; token: string; required: string[] } | { ok: false; cancelled: boolean; error?: string };
 export type ProjectOpenResult = ({
-  ok: true; path: string; projectId: string; token: string; size: number;
+  ok: true; path: string; projectId: string; token: string; size: number; copy?: boolean;
   media: import('./project-container').ProjectMediaRange[];
 } & ({ document: any; documentRange?: import('./project-incremental').ProjectRecord }
   | { document?: never; documentRange: import('./project-incremental').ProjectRecord }))
   | { ok: true; path: string; projectId: string; data: Uint8Array }
   | { ok: false; cancelled: boolean; error?: string };
+export type ProjectVersion = { id: string; at: number; source: 'recovery' | 'file' | 'macos' };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
 /** The longest text `clipboard:write-text` takes: 1 MB of UTF-16. */
 export const CLIPBOARD_TEXT_MAX_CHARS = 500_000;
@@ -391,7 +394,13 @@ export type CodexRunResult =
       /** One history entry containing every live edit made during this run. */
       liveEditHistoryId?: string;
     }
-  | { ok: false; error: string; cancelled: boolean };
+  | {
+      ok: false;
+      error: string;
+      cancelled: boolean;
+      /** An extension publication conflict must not roll back completed project tools. */
+      preserveLiveEdits?: boolean;
+    };
 
 export interface CodexCancelRequest {
   id: string;
@@ -607,6 +616,14 @@ export type MenuCommand =
   | 'newComposition'
   | 'compositionSettings'
   | 'precompose'
+  | 'releasePrecomp'
+  | 'newText'
+  | 'newSolid'
+  | 'newShape'
+  | 'newNull'
+  | 'newAdjustment'
+  | '3d.add-camera'
+  | '3d.add-light'
   | 'save'
   | 'saveAs'
   | 'open'
@@ -672,6 +689,14 @@ export interface PowermoveExtensionsBridge extends ExtensionsBridge {
 export type NativeMenuItem =
   | { type: 'separator' }
   | {
+      type: 'submenu';
+      id: string;
+      label: string;
+      enabled?: boolean;
+      icon?: string;
+      items: NativeMenuItem[];
+    }
+  | {
       type: 'normal' | 'checkbox' | 'header';
       id: string;
       label: string;
@@ -724,6 +749,10 @@ export interface PowermoveBridge {
     finish(uploadId: string, metadata: Omit<FileSaveRequest, 'data'>): Promise<FileSaveResult>;
     abort(uploadId: string): Promise<void>;
   };
+  projectVersions?: {
+    list(projectId: string): Promise<ProjectVersion[]>;
+    open(projectId: string, versionId: string): Promise<ProjectOpenResult>;
+  };
   projectSave?: {
     begin(request: ProjectSaveRequest): Promise<ProjectSaveBeginResult>;
     chunk(token: string, assetId: string | null, data: Uint8Array): Promise<void>;
@@ -755,7 +784,7 @@ export interface PowermoveBridge {
   pasteMedia?(): Promise<boolean>;
 
   render: {
-    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
+    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number;expectsAudio?:boolean}):Promise<string | null>;
     write(token:string,data:Uint8Array,audio?:boolean,retain?:boolean):Promise<void>;
     repeat?(token:string,count:number):Promise<void>;
     finish(token:string):Promise<{path?:string;cancelled?:boolean}>;
@@ -942,6 +971,9 @@ export interface PowermoveBridge {
   /* ── transcription lane ── */
   /** On-device transcription: models, downloads, transcribe (absent on hosts without the engine). */
   transcription?: import('./transcription').TranscriptionBridge;
+  /** Local profile storage and safe retention; absent on remote/older hosts. */
+  storage?: import('./storage-management').StorageBridge;
+  libraryMedia?: import('./library-media').LibraryMediaBridge;
 }
 
 export interface SandboxInputKey {

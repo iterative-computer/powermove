@@ -4,6 +4,7 @@ import type { TransformInput } from './transform';
 export const COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
+  'simplify_keyframes',
   'set_easing',
   'set_expression',
   'set_content',
@@ -21,6 +22,7 @@ export const COMMAND_TYPES = [
   'set_transition',
   'set_scene_parameter',
   'add_marker',
+  'remove_marker',
   'create_section',
   'update_section',
   'transform_layers',
@@ -45,6 +47,12 @@ export interface CommandKeyframe {
   value: JsonValue;
   ease?: string;
   hold?: boolean;
+  /** Native editor round trips preserve identity and independent temporal sides. */
+  id?: string;
+  temporal?: import('../anim/temporal-ease').TemporalEaseFields;
+  spring?: JsonObject | null;
+  /** Unit handles for color channels, whose values are strings. */
+  handles?: EasingCurve;
 }
 
 interface LayerTargetedCommand {
@@ -78,6 +86,15 @@ export interface ReplaceKeyframesCommand extends LayerTargetedCommand, LockableC
   expression?: string | null;
 }
 
+export interface SimplifyKeyframesCommand {
+  type: 'simplify_keyframes';
+  scope?: 'project' | 'layers' | 'properties';
+  /** Explicit IDs; omitted layers use the current layer selection. */
+  targets?: string[];
+  /** Explicit property paths from get_project_state. */
+  properties?: { layerId: string; path: string }[];
+}
+
 export interface SetEasingCommand {
   type: 'set_easing';
   keyframes: string[];
@@ -96,6 +113,7 @@ export interface SetContentCommand extends LayerTargetedCommand, LockableCommand
 }
 
 export interface LayerPatch {
+  effectSpace?: 'composition' | 'source';
   name?: string;
   from?: number;
   duration?: number;
@@ -111,6 +129,8 @@ export interface LayerPatch {
   collapsed?: boolean;
   scaleLinked?: boolean;
   threeD?: boolean;
+  /** Pre-comps only: render the nested composition at its displayed size. */
+  continuousRaster?: boolean;
 }
 
 export interface SetLayerCommand extends LayerTargetedCommand {
@@ -174,7 +194,9 @@ export interface ReorderLayerCommand extends LayerTargetedCommand {
 
 export interface AddEffectCommand extends LayerTargetedCommand {
   type: 'add_effect';
+  inputs?: Record<string, import('./project').EffectInput>;
   effect: string;
+  version?: number;
   parameters?: JsonObject;
   open?: boolean;
   enabled?: boolean;
@@ -190,6 +212,7 @@ export interface SetEffectCommand extends LayerTargetedCommand {
   type: 'set_effect';
   effect: string;
   patch: {
+    inputs?: Record<string, import('./project').EffectInput>;
     enabled?: boolean;
     open?: boolean;
     /** New position in the layer's effect stack (0 = applied first). */
@@ -224,6 +247,12 @@ export interface AddMarkerCommand {
   id?: string;
   time?: number;
   name?: string;
+}
+
+export interface RemoveMarkerCommand {
+  type: 'remove_marker';
+  /** Position in the current composition's marker list, including legacy markers without IDs. */
+  index: number;
 }
 
 export interface SectionVersion {
@@ -334,6 +363,7 @@ export type EditCommand =
   | GroupLayersCommand
   | SetPropertyCommand
   | ReplaceKeyframesCommand
+  | SimplifyKeyframesCommand
   | SetEasingCommand
   | SetExpressionCommand
   | SetContentCommand
@@ -348,6 +378,7 @@ export type EditCommand =
   | SetTransitionCommand
   | SetSceneParameterCommand
   | AddMarkerCommand
+  | RemoveMarkerCommand
   | CreateSectionCommand
   | UpdateSectionCommand
   | TransformLayersCommand

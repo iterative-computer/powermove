@@ -79,6 +79,73 @@ describe('legacy audio system behavior', () => {
     expect(PM.Audio.plan(audioLayer({ from: 2, d: { trim: 5 } }), asset, 3, 6)).toBeNull();
   });
 
+  it('predicts an offline track only inside its actual source and export windows without decoding', async () => {
+    const buffer = new FakeAudioBuffer([new Float32Array(20)], 4);
+    const h = audioHarness();
+    h.assets.set('asset-1', {...audioAsset(buffer), dur: 99});
+    h.PM.proj.layers = [audioLayer({ from: 2, dur: 8, d: { trim: 1 } })];
+    const before = JSON.stringify(h.PM.proj);
+
+    // A nominal eight-second layer ends after four seconds of remaining media.
+    for (const [from, to, expected] of [[0, 2, false], [2, 4, true], [5, 7, true], [6, 10, false], [2, 2, false]] as const) {
+      expect(h.PM.Audio.expectsOfflineMix(from, to)).toBe(expected);
+      expect(h.contexts).toHaveLength(0);
+      expect(h.decodeCalls).toHaveLength(0);
+      expect(!!await h.PM.Audio.renderOffline(from, to)).toBe(expected);
+    }
+    expect(JSON.stringify(h.PM.proj)).toBe(before);
+  });
+
+  it('predicts nested and embedded audio with the same trim and visible windows as offline mixing', async () => {
+    const buffer = new FakeAudioBuffer([new Float32Array(40)], 4);
+    const h = audioHarness();
+    h.assets.set('asset-1', audioAsset(buffer));
+    h.PM.proj.layers = [{ id: 'precomp', type: 'precomp', on: true, from: 2, dur: 3, d: { comp: 'inner', trim: 1 } }];
+    h.PM.proj.comps.inner = { layers: [{
+      id: 'video', type: 'video', on: true, from: 2, dur: 5,
+      d: { asset: 'asset-1', trim: 1, embeddedAudio: true },
+    }] };
+    const before = JSON.stringify(h.PM.proj);
+    for (const [from, to, expected] of [[0, 3, false], [3, 4, true], [5, 8, false]] as const) {
+      expect(h.PM.Audio.expectsOfflineMix(from, to)).toBe(expected);
+      expect(h.decodeCalls).toHaveLength(0);
+      expect(!!await h.PM.Audio.renderOffline(from, to)).toBe(expected);
+    }
+    expect(h.contexts).toHaveLength(0);
+    expect(JSON.stringify(h.PM.proj)).toBe(before);
+  });
+
+  it('keeps unknown media and durations on the normal encoder path without opening a context', () => {
+    const h = audioHarness();
+    h.PM.proj.layers = [audioLayer()];
+    for (const asset of [null, {}, {dur: 0}, {dur: Infinity}, {dur: NaN}, {audioBuffer: {}}]) {
+      if (asset) h.assets.set('asset-1', asset);
+      else h.assets.delete('asset-1');
+      expect(h.PM.Audio.expectsOfflineMix(0, 4)).toBe(false);
+    }
+    h.assets.set('asset-1', {dur: 10});
+    expect(h.PM.Audio.expectsOfflineMix(0, 4)).toBe(true);
+    h.PM.assets.get = () => { throw new Error('Metadata is unavailable'); };
+    expect(h.PM.Audio.expectsOfflineMix(0, 4)).toBe(false);
+    expect(h.decodeCalls).toHaveLength(0);
+    expect(h.contexts).toHaveLength(0);
+    expect(h.offlineContexts).toHaveLength(0);
+  });
+
+  it('does not predict disabled, fully trimmed or muted embedded audio tracks', () => {
+    const h = audioHarness();
+    h.assets.set('asset-1', {dur: 4});
+    for (const layer of [audioLayer({on: false}), audioLayer({d: {trim: 4}}), {
+      id: 'video', type: 'video', on: true, from: 0, dur: 4,
+      d: {asset: 'asset-1', trim: 0, embeddedAudio: true, audioMuted: true},
+    }]) {
+      h.PM.proj = {...h.PM.proj, layers: [layer]};
+      expect(h.PM.Audio.expectsOfflineMix(0, 4)).toBe(false);
+    }
+    expect(h.decodeCalls).toHaveLength(0);
+    expect(h.contexts).toHaveLength(0);
+  });
+
   it('starts once, restarts at exact seeks, pauses, and starts again', () => {
     const buffer = new FakeAudioBuffer([new Float32Array(40)], 4);
     const h = audioHarness();
@@ -202,7 +269,8 @@ describe('legacy audio system behavior', () => {
     await flush();
 
     expect(h.decodeCalls).toHaveLength(1);
-    expect(h.toasts).toHaveLength(1);
+    // One loading notice while decoding, then one failure, not one per tick.
+    expect(h.toasts).toEqual(['Loading audio…', 'decoder failed']);
     expect(asset.audioRetryAt).toBeGreaterThan(Date.now());
   });
 

@@ -17,11 +17,11 @@ test('restart opens only the previously active project tab', async ({ session })
     await PM.flushProject();
     return ids;
   });
-  await expect(session.page.locator('#tabs .project-doc')).toHaveCount(4);
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.Tabs.list().length)).toBe(4);
   await session.relaunch();
   await session.page.waitForFunction(id => (window as any).PM.proj.id === id, ids[0]);
-  await expect(session.page.locator('#tabs .project-doc')).toHaveCount(1);
-  await expect(session.page.locator('#tabs .project-doc.on')).toContainText('First project');
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.Tabs.list().length)).toBe(1);
+  await expect(session.page.locator('.tb-title-name')).toHaveText('First project');
   expect(await session.page.evaluate(ids => ids.every(id => !!(window as any).PM.Projects.get(id)), ids)).toBe(true);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
@@ -44,7 +44,7 @@ test('restart restores one project from the last focused window', async ({ sessi
   await session.relaunch();
   expect(session.app.windows()).toHaveLength(1);
   expect(await session.page.evaluate(() => (window as any).PM.proj.id)).toBe(active);
-  await expect(session.page.locator('#tabs .project-doc')).toHaveCount(1);
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.Tabs.list().length)).toBe(1);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -56,7 +56,8 @@ test('turning off project restoration starts on Projects without opening another
     await PM.flushProject();
   });
   await session.relaunch();
-  await expect(session.page.locator('#tabs .project-doc')).toHaveCount(0);
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.Tabs.list().length)).toBe(0);
+  await expect(session.page.locator('.tb-title-btn')).toHaveCount(0);
   expect(await session.page.evaluate(() => (window as any).PM.ProjectsScreen.isOpen)).toBe(true);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
@@ -70,8 +71,8 @@ test('an old single-autosave profile restores its only project', async () => {
   const session = await launchApp({ userData: directory });
   try {
     expect(await session.page.evaluate(() => (window as any).PM.proj.id)).toBe('legacy-project');
-    await expect(session.page.locator('#tabs .project-doc')).toHaveCount(1);
-    await expect(session.page.locator('#tabs .project-doc.on')).toContainText('Legacy recovery');
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.Tabs.list().length)).toBe(1);
+    await expect(session.page.locator('.tb-title-name')).toHaveText('Legacy recovery');
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally { await session.close(); await rm(directory, { recursive: true, force: true }); }
 });

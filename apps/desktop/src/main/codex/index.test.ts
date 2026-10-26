@@ -432,6 +432,21 @@ describe('registerCodexIpc', () => {
     expect(decoded.notes.join(' ')).toContain('duplicated edits');
   });
 
+  it('keeps completed project edits when extension publication reports a conflict', async () => {
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null, userData: '/tmp/powermove-index-test', extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles, isTrustedSender: () => true, codexBinaryPref: () => null, openExternal: async () => undefined,
+      agentToolServerPath: '/test/mcp-server.mjs', agentToolCommand: '/test/electron'
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    const pending = handlers.get(IPC.codexRun)!({ sender: new Sender() }, {
+      ...runRequest(), mode: 'autonomous', access: 'project', projectJSON: '{"revision":1}'
+    });
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
+    mocks.resolve({ ok: false, cancelled: false, preserveLiveEdits: true, error: 'Extension publication conflict' });
+    await expect(pending).resolves.toMatchObject({ ok: false, preserveLiveEdits: true });
+    expect(mocks.toolFinish).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
   it('steers only an active run owned by the requesting renderer', async () => {
     const owner = new Sender();
     const stranger = new Sender();

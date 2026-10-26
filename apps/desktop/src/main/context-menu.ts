@@ -13,22 +13,34 @@ export interface ContextMenuIpcContext {
 }
 
 const MAX_ITEMS = 200;
+/** Nested menus deeper than this are dropped; NSMenu cascades get unusable. */
+const MAX_DEPTH = 3;
 const ICON_PREFIX = 'data:image/png;base64,';
 const MAX_ICON_BYTES = 64 * 1024;
 /** Menu glyph slot on macOS. Renderer PNGs arrive at 2× of this. */
 export const MENU_ICON_POINTS = 16;
 
-/** Renderer payloads are untrusted: keep only well-formed rows. */
-export function sanitizeNativeMenu(items: unknown): NativeMenuItem[] {
+/** Renderer payloads are untrusted: keep only well-formed rows. The row
+ * budget is shared across every level of nesting. */
+export function sanitizeNativeMenu(items: unknown, depth = 0, budget = { rows: MAX_ITEMS }): NativeMenuItem[] {
   if (!Array.isArray(items)) return [];
   const out: NativeMenuItem[] = [];
-  for (const raw of items.slice(0, MAX_ITEMS)) {
+  for (const raw of items) {
+    if (budget.rows <= 0) break;
+    budget.rows -= 1;
     if (!raw || typeof raw !== 'object') continue;
     const item = raw as Record<string, unknown>;
     if (item.type === 'separator') { out.push({ type: 'separator' }); continue; }
-    if (item.type !== 'normal' && item.type !== 'checkbox' && item.type !== 'header') continue;
+    if (item.type !== 'normal' && item.type !== 'checkbox' && item.type !== 'header' && item.type !== 'submenu') continue;
     if (typeof item.id !== 'string' || typeof item.label !== 'string') continue;
     const icon = typeof item.icon === 'string' && item.icon.startsWith(ICON_PREFIX) && item.icon.length <= MAX_ICON_BYTES ? item.icon : undefined;
+    if (item.type === 'submenu') {
+      if (depth + 1 >= MAX_DEPTH) continue;
+      const children = sanitizeNativeMenu(item.items, depth + 1, budget);
+      if (!children.length) continue;
+      out.push({ type: 'submenu', id: item.id, label: item.label.slice(0, 200), enabled: item.enabled !== false, icon, items: children });
+      continue;
+    }
     out.push({
       type: item.type,
       id: item.id,
@@ -62,6 +74,14 @@ export function nativeMenuTemplate(
     if (item.type === 'separator') return { type: 'separator' };
     /* NSMenu has no section titles; a disabled row reads the same way. */
     if (item.type === 'header') return { label: item.label, enabled: false };
+    if (item.type === 'submenu') {
+      return {
+        label: item.label,
+        enabled: item.enabled !== false,
+        icon: item.icon ? image(item.icon) : undefined,
+        submenu: nativeMenuTemplate(item.items, onClick, image)
+      };
+    }
     return {
       type: item.type,
       label: item.label,
@@ -94,7 +114,7 @@ export function registerContextMenuIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: Co
   ipcMain.handle(IPC.menuPopup, async (event: IpcMainInvokeEvent, request: NativeMenuRequest): Promise<string | null> => {
     if (!ctx.isTrustedSenderContents(event.sender)) throw new Error('Unauthorized IPC sender');
     const items = sanitizeNativeMenu(request?.items);
-    if (!items.some((item) => item.type === 'normal' || item.type === 'checkbox')) return null;
+    if (!items.some((item) => item.type === 'normal' || item.type === 'checkbox' || item.type === 'submenu')) return null;
     const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const finite = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
     let chosen: string | null = null;

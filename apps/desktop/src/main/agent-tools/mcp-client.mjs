@@ -2,7 +2,7 @@ import net from 'node:net';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-async function openConnection(userData) {
+async function openConnection(userData, onClose = () => {}) {
   let descriptor;
   try { descriptor = JSON.parse(await readFile(path.join(userData, 'mcp', 'connection.json'), 'utf8')); }
   catch { throw new Error('No Powermove MCP host is running in this profile. Open Powermove, or use powermove mcp to start a hidden host.'); }
@@ -12,6 +12,7 @@ async function openConnection(userData) {
   let nextId = 0, buffer = '', disconnected = false;
   const pending = new Map();
   const fail = () => {
+    if (!disconnected) onClose();
     disconnected = true;
     for (const call of pending.values()) call.reject(new Error('Powermove MCP host disconnected. Its session ended and the action outcome is unknown. Reconnect with start_session and inspect the project before repeating edits.'));
     pending.clear();
@@ -43,13 +44,17 @@ async function openConnection(userData) {
   return { call, isClosed: () => disconnected || socket.destroyed, close: () => socket.destroy() };
 }
 
-/** Re-discover a restarted app on the next request; never replay a sent call. */
-export async function connectMcpHost(userData) {
-  let connection = await openConnection(userData), connecting = null, closed = false;
+/** Re-discover a restarted app on the next request; never replay a sent call.
+    `onHostClosed` runs when the app ends the connection (not when the client
+    closes it), for relays that should not outlive the app. */
+export async function connectMcpHost(userData, { onHostClosed } = {}) {
+  let closed = false, connecting = null;
+  const hostClosed = () => { if (!closed) onHostClosed?.(); };
+  let connection = await openConnection(userData, hostClosed);
   const ensureConnection = async () => {
     if (closed) throw new Error('This Powermove MCP connection is closed.');
     if (!connection.isClosed()) return connection;
-    connecting ??= openConnection(userData).finally(() => { connecting = null; });
+    connecting ??= openConnection(userData, hostClosed).finally(() => { connecting = null; });
     connection = await connecting;
     if (closed) { connection.close(); throw new Error('This Powermove MCP connection is closed.'); }
     return connection;

@@ -1,5 +1,6 @@
 import {afterEach,describe,it,expect,vi} from 'vitest';
-import {mkdtemp,readFile,rm,stat,writeFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,stat,writeFile,symlink,readlink,chmod,copyFile} from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
 import {EventEmitter} from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,11 +9,121 @@ import {promisify} from 'node:util';
 const native = vi.hoisted(() => ({ on: vi.fn(), showSaveDialog: vi.fn(), window: { isDestroyed: () => false } }));
 vi.mock('electron',()=>({app:{ getAppPath: () => '.', getPath: () => '/tmp', on: native.on },
   BrowserWindow: { fromWebContents: () => native.window }, dialog:{ showSaveDialog: native.showSaveDialog }}));
+vi.mock('node:fs/promises', async importOriginal => {
+ const actual = await importOriginal<typeof import('node:fs/promises')>();
+ return {...actual, link: vi.fn(actual.link)};
+});
 afterEach(() => vi.restoreAllMocks());
-import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs} from './render-encoder';
+import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs,deliverEncodedVideo} from './render-encoder';
 const binary=path.resolve('node_modules/ffmpeg-static/ffmpeg');
 const renderSender = () => Object.assign(new EventEmitter(), { id: 1, isDestroyed: () => false, isCrashed: () => false });
+function videoAtoms(bytes: Buffer): string[] {
+ const atoms: string[] = [];
+ for (let offset = 0; offset + 8 <= bytes.length;) {
+  let length = bytes.readUInt32BE(offset);
+  atoms.push(bytes.toString('ascii', offset + 4, offset + 8));
+  if (length === 0) break;
+  if (length === 1) length = Number(bytes.readBigUInt64BE(offset + 8));
+  if (length < 8) throw new Error('Invalid video atom');
+  offset += length;
+ }
+ return atoms;
+}
+describe('finished video delivery', () => {
+ it('keeps a new output intact after temporary source cleanup without copying its data', async () => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-video-delivery-'));
+  try {
+   const source = path.join(folder, 'encoded.mov'), destination = path.join(folder, 'chosen.mov');
+   const bytes = Uint8Array.from({length: 1024 * 1024}, (_, i) => i % 251);
+   await writeFile(source, bytes);
+   await deliverEncodedVideo(source, destination);
+   expect((await stat(destination)).ino).toBe((await stat(source)).ino);
+   await rm(source);
+   expect(await readFile(destination)).toEqual(Buffer.from(bytes));
+   expect((await stat(destination)).nlink).toBe(1);
+  } finally { await rm(folder, {recursive: true, force: true}); }
+ });
+ it.each([false, true])('preserves overwrite behavior and permissions for an existing destination, symlink=%s', async symbolic => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-video-overwrite-'));
+  try {
+   const source = path.join(folder, 'encoded.mp4'), target = path.join(folder, 'existing.mp4'), reference = path.join(folder, 'reference.mp4');
+   const destination = symbolic ? path.join(folder, 'chosen.mp4') : target;
+   await writeFile(source, 'finished video');
+   await writeFile(target, 'old video');
+   await writeFile(reference, 'old video');
+   await chmod(target, 0o640);
+   await chmod(reference, 0o640);
+   await copyFile(source, reference);
+   if (symbolic) await symlink(target, destination);
+   await deliverEncodedVideo(source, destination);
+   await rm(source);
+   expect(await readFile(target, 'utf8')).toBe('finished video');
+   expect((await stat(target)).mode & 0o777).toBe((await stat(reference)).mode & 0o777);
+   if (symbolic) expect(await readlink(destination)).toBe(target);
+  } finally { await rm(folder, {recursive: true, force: true}); }
+ });
+ it.each(['EXDEV', 'ENOTSUP', 'EPERM'])('copies safely when hard links are unavailable (%s)', async code => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-video-copy-'));
+  try {
+   const source = path.join(folder, 'encoded.mp4'), destination = path.join(folder, 'chosen.mp4');
+   await writeFile(source, 'finished video');
+   vi.mocked(fs.link).mockRejectedValueOnce(Object.assign(new Error('Cannot link'), {code}));
+   await deliverEncodedVideo(source, destination);
+   await rm(source);
+   expect(await readFile(destination, 'utf8')).toBe('finished video');
+  } finally { await rm(folder, {recursive: true, force: true}); }
+ });
+ it('surfaces delivery errors without deleting the temporary video', async () => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-video-delivery-failure-'));
+  try {
+   const source = path.join(folder, 'encoded.mp4');
+   await writeFile(source, 'finished video');
+   await expect(deliverEncodedVideo(source, path.join(folder, 'missing', 'chosen.mp4'))).rejects.toThrow();
+   expect(await readFile(source, 'utf8')).toBe('finished video');
+  } finally { await rm(folder, {recursive: true, force: true}); }
+ });
+});
 describe('native frame encoder',()=>{
+ it.each([
+  {format: 'mp4' as const, audio: false}, {format: 'mp4' as const, audio: true},
+  {format: 'prores' as const, audio: false}, {format: 'prores' as const, audio: true},
+ ])('preserves decoded $format frames, timing, audio and container layout with an audio hint, actual audio=$audio', async ({format, audio}) => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-audio-hint-parity-'));
+  const service = new RenderEncoder(binary, folder);
+  const exec = promisify(execFile);
+  try {
+   const wav = path.join(folder, 'tone.wav');
+   if (audio) await exec(binary, ['-v','error','-f','lavfi','-i','sine=frequency=600:sample_rate=48000:duration=0.6','-ac','2','-c:a','pcm_s16le',wav]);
+   const outputs: Array<{video: string; audio?: Buffer; faststart: boolean}> = [];
+   for (const expectsAudio of [undefined, true]) {
+    const token = await service.start({width: 32, height: 16, fps: 24000/1001, format, alpha: format === 'prores', name: 'Parity', expectsAudio}, 1);
+    try {
+     const intermediate = service.job(token, 1).file;
+     for (let frame = 0; frame < 12; frame++) {
+      const bytes = Uint8Array.from({length: 32 * 16 * 4}, (_, index) => index % 4 === 3 ? (index % 32 < 16 ? 128 : 255) : (frame * 19 + index * 7) % 256);
+      await service.write(token, 1, bytes);
+     }
+     if (audio) await service.write(token, 1, await readFile(wav), true);
+     const file = await service.finish(token, 1);
+     const initialAtoms = videoAtoms(await readFile(intermediate));
+     expect(initialAtoms.indexOf('moov') < initialAtoms.indexOf('mdat')).toBe(!expectsAudio);
+     // framemd5 includes decoded pixels, timebase, frame order and timestamps.
+     const video = await exec(binary, ['-v','error','-i',file,'-map','0:v','-pix_fmt','rgba','-f','framemd5','pipe:1']);
+     expect(video.stdout.split('\n').filter(line => line && !line.startsWith('#'))).toHaveLength(12);
+     const samples = audio ? (await exec(binary, ['-v','error','-i',file,'-map','0:a','-c:a','pcm_f32le','-f','f32le','pipe:1'], {encoding: 'buffer', maxBuffer: 1024 * 1024})).stdout : undefined;
+     if (samples) expect(samples.length).toBeGreaterThan(48000 * .45 * 2 * 4);
+     const atoms = videoAtoms(await readFile(file));
+     expect(atoms).toContain('moov'); expect(atoms).toContain('mdat');
+     outputs.push({video: video.stdout, audio: samples, faststart: atoms.indexOf('moov') < atoms.indexOf('mdat')});
+    } finally { await service.release(token, 1); }
+   }
+   expect(outputs[1]).toEqual(outputs[0]);
+   expect(outputs[1]!.faststart).toBe(!audio);
+  } finally {
+   for (const token of service.jobs.keys()) await service.release(token, 1);
+   await rm(folder, {recursive: true, force: true});
+  }
+ }, 30000);
  it.each(['mp4', 'prores'] as const)('repeats complete %s frames in order at a fractional frame rate',async format=>{
   const temp=await mkdtemp(path.join(os.tmpdir(),'pm-repeat-test-')),service=new RenderEncoder(binary,temp);
   const token=await service.start({width:16,height:16,fps:24000/1001,format,alpha:format==='prores',name:'Repeated'},1);
@@ -48,6 +159,7 @@ it('applies the selected MP4 bitrate and rejects invalid bitrates', () => {
  expect(encoderArgs(options,'out.mp4')).toContain('4M');
  expect(encoderArgs({...options,bitrateMbps:40},'out.mp4')).toContain('40M');
  expect(()=>validateEncoderOptions({...options,bitrateMbps:Infinity})).toThrow('Invalid video bitrate');
+ expect(()=>validateEncoderOptions({...options,expectsAudio:'true'})).toThrow('Invalid render audio expectation');
 });
 
 import { IPC } from '../shared/ipc';
@@ -216,7 +328,10 @@ it.each([false, true])('surfaces cleanup errors only when export has no primary 
   }
 });
 
-it('terminates a crashed renderer’s audio mux and preserves the interruption error', async () => {
+it.each([
+  { audio: false, interruption: 'crash' }, { audio: true, interruption: 'crash' },
+  { audio: false, interruption: 'cancel' }, { audio: true, interruption: 'cancel' },
+])('terminates the final mux after $interruption and preserves the interruption error, actual audio=$audio', async ({ audio, interruption }) => {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'powermove-render-mux-'));
   const wrapper = path.join(folder, 'ffmpeg-wrapper');
   const marker = path.join(folder, 'mux-pid');
@@ -244,17 +359,18 @@ if (process.argv.includes('rawvideo')) {
     Object.defineProperty(this, 'binary', { value: wrapper });
     return originalStart.call(this, options, owner);
   });
-  const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Audio' });
+  const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Audio', expectsAudio: true });
   let pending: Promise<unknown> | undefined;
   let muxPid: number | undefined;
   let result: { file?: string; error?: Error } | undefined;
   try {
     await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
-    await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array([1]), audio: true });
+    if (audio) await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array([1]), audio: true });
     const job = service.job(token, 1);
     pending = handlers.get(IPC.renderFinish)(event, { token }).then((file: string) => { result = { file }; }, (error: Error) => { result = { error }; });
     await vi.waitFor(async () => { muxPid = Number(await readFile(marker, 'utf8')); expect(muxPid).toBeGreaterThan(0); });
-    event.sender.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    if (interruption === 'cancel') await handlers.get(IPC.renderCancel)(event, { token });
+    else event.sender.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
     await vi.waitFor(() => expect(result).toEqual({ error: expect.objectContaining({ message: 'Video muxer stopped' }) }));
     expect(() => process.kill(muxPid!, 0)).toThrow();
     await vi.waitFor(async () => expect(await stat(job.dir).catch(() => null)).toBeNull());
@@ -263,5 +379,44 @@ if (process.argv.includes('rawvideo')) {
     if (service.jobs.has(token)) await service.release(token, 1);
     await pending;
     await rm(folder, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  {stage: 'encoder', audio: false}, {stage: 'mux', audio: false}, {stage: 'mux', audio: true},
+])('cleans up a hinted export after a real $stage failure, actual audio=$audio', async ({stage, audio}) => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-audio-hint-failure-'));
+  const wrapper = path.join(folder, 'ffmpeg-wrapper'), destination = path.join(folder, 'output.mp4');
+  await writeFile(wrapper, `#!/usr/bin/env node
+const {spawn} = require('node:child_process');
+if (process.argv.includes('rawvideo') && ${JSON.stringify(stage)} === 'mux') {
+  spawn(${JSON.stringify(binary)}, process.argv.slice(2), {stdio: 'inherit'}).once('close', code => process.exit(code ?? 1));
+} else {
+  process.stderr.write('Deliberate ${stage} failure', () => process.exit(9));
+}
+`, {mode: 0o755});
+  const handlers = new Map<string, any>();
+  registerRenderEncoder({handle: (channel: string, handler: any) => handlers.set(channel, handler)} as any, {isTrustedSender: () => true});
+  const event = {sender: renderSender()};
+  native.showSaveDialog.mockReset().mockResolvedValue({canceled: false, filePath: destination});
+  const originalStart = RenderEncoder.prototype.start;
+  let service!: RenderEncoder;
+  vi.spyOn(RenderEncoder.prototype, 'start').mockImplementation(function (this: RenderEncoder, options, owner) {
+    service = this;
+    Object.defineProperty(this, 'binary', {value: wrapper});
+    return originalStart.call(this, options, owner);
+  });
+  const token = await handlers.get(IPC.renderStart)(event, {width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Failure', expectsAudio: true});
+  const job = service.job(token, 1);
+  try {
+    await handlers.get(IPC.renderWrite)(event, {token, data: new Uint8Array(16 * 16 * 4)});
+    if (audio) await handlers.get(IPC.renderWrite)(event, {token, data: new Uint8Array([1]), audio: true});
+    await expect(handlers.get(IPC.renderFinish)(event, {token})).rejects.toThrow(`Deliberate ${stage} failure`);
+    expect(service.jobs.size).toBe(0);
+    expect(await stat(job.dir).catch(() => null)).toBeNull();
+    expect(await stat(destination).catch(() => null)).toBeNull();
+  } finally {
+    if (service.jobs.has(token)) await service.release(token, 1);
+    await rm(folder, {recursive: true, force: true});
   }
 });

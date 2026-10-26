@@ -63,7 +63,7 @@ test('timeline diamond toggles playhead keys without clearing other times', asyn
   await expect.poll(async () => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r: any) => r.key === 'opacity'); })).toBe(true);
   const point = await page.evaluate(() => {
     const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); const box = timeline.cv.getBoundingClientRect();
-    return { x: box.x + 85, y: box.y + timeline.ruler + timeline.rows.findIndex((r: any) => r.key === 'opacity') * timeline.row - timeline.scrollY + timeline.row / 2 };
+    return { x: box.x + 148.5, y: box.y + timeline.ruler + timeline.rows.findIndex((r: any) => r.key === 'opacity') * timeline.row - timeline.scrollY + timeline.row / 2 };
   });
   await page.mouse.click(point.x, point.y);
   await expect.poll(keys).toEqual([0, 1, 2]);

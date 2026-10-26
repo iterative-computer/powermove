@@ -39,6 +39,8 @@ import { MEDIA_PATH_IPC } from '../shared/media-tools';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
+import { STORAGE_IPC, type StorageStatus, type StorageCleanupResult } from '../shared/storage-management';
+import { LIBRARY_MEDIA_IPC, type LibraryMediaRecord } from '../shared/library-media';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
@@ -92,6 +94,10 @@ const bridge: PowermoveBridge = {
     chunk: (uploadId, data) => ipcRenderer.invoke(IPC.fileSaveChunk, { uploadId, data }),
     finish: (uploadId, metadata) => ipcRenderer.invoke(IPC.fileSave, { ...metadata, uploadId }),
     abort: uploadId => ipcRenderer.invoke(IPC.fileSaveAbort, uploadId),
+  },
+  projectVersions: {
+    list: projectId => ipcRenderer.invoke(IPC.projectVersions, projectId),
+    open: (projectId, versionId) => ipcRenderer.invoke(IPC.projectVersionOpen, { projectId, versionId }),
   },
   projectSave: {
     begin: request => ipcRenderer.invoke(IPC.projectSaveBegin, request),
@@ -472,6 +478,33 @@ const bridge: PowermoveBridge = {
     onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged),
     onPublishProgress: cloudEvent(STORE_IPC.publishProgress),
     onLibraryChanged: cloudEvent<void>(STORE_IPC.libraryChanged)
+  },
+
+  storage: {
+    status: () => ipcRenderer.invoke(STORAGE_IPC.status) as Promise<StorageStatus>,
+    upgrade: request => ipcRenderer.invoke(STORAGE_IPC.upgrade, { action: request.action, token: request.token }),
+    onUpgradeProgress: listener => {
+      const receive = (_event: IpcRendererEvent, value: import('../shared/storage-management').StorageUpgradeProgress) => listener(value);
+      ipcRenderer.on(STORAGE_IPC.upgradeProgress, receive);
+      return () => ipcRenderer.removeListener(STORAGE_IPC.upgradeProgress, receive);
+    },
+    cleanup: () => ipcRenderer.invoke(STORAGE_IPC.cleanup) as Promise<StorageCleanupResult>,
+    configure: (settings) => ipcRenderer.invoke(STORAGE_IPC.configure, {
+      automatic: settings.automatic, backupBudgetGiB: settings.backupBudgetGiB
+    }) as Promise<StorageStatus>,
+    reveal: () => ipcRenderer.invoke(STORAGE_IPC.reveal) as Promise<void>
+  },
+  libraryMedia: {
+    link: input => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.link, { key: input.key, sourcePath: input.sourcePath,
+      size: input.size, type: input.type, revision: input.revision, matchExisting: input.matchExisting }),
+    begin: input => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.begin, { key: input.key, size: input.size, type: input.type,
+      revision: input.revision, onlyIfMissing: input.onlyIfMissing,
+      ...(input.artifact ? { artifact: { projectId: input.artifact.projectId, path: input.artifact.path } } : {}) }) as Promise<string>,
+    chunk: (token, offset, data) => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.chunk, token, offset, data),
+    finish: token => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.finish, token) as Promise<LibraryMediaRecord>,
+    abort: token => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.abort, token),
+    get: (key, metadataOnly) => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.get, key, metadataOnly) as Promise<LibraryMediaRecord | null>,
+    remove: key => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.remove, key) as Promise<boolean>
   },
 
   /* ── transcription lane: on-device speech models and transcribe ── */

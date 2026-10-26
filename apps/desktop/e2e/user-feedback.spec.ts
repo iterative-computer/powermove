@@ -94,13 +94,14 @@ test('titlebar layout and explicit effect actions keep legacy hidden layers acce
     await session.app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
     await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width);
     const toolbar = (await page.locator('#toolbar-strip').boundingBox())!;
-    const documents = (await page.locator('#tabs').boundingBox())!;
+    const title = (await page.locator('.tb-title-btn').boundingBox())!;
     const settings = (await page.locator('#tb-right [aria-label="Open settings"]').boundingBox())!;
-    // The tools lead the right side: after the tabs, before the settings and
-    // Export buttons, and hard against the window's right edge with them.
-    expect(documents.x + documents.width).toBeLessThanOrEqual(toolbar.x);
-    expect(toolbar.x + toolbar.width).toBeLessThanOrEqual(settings.x);
-    expect(toolbar.x).toBeGreaterThan(width / 2);
+    // After Effects' arrangement: tools on the left, the document centred,
+    // settings and Export on the right, none overlapping.
+    expect(toolbar.x).toBeLessThan(width / 3);
+    expect(toolbar.x + toolbar.width).toBeLessThanOrEqual(title.x);
+    expect(Math.abs(title.x + title.width / 2 - width / 2)).toBeLessThanOrEqual(2);
+    expect(title.x + title.width).toBeLessThanOrEqual(settings.x);
   }
   await expect(page.locator('.project-strip-divider')).toHaveCount(0);
   const effect = page.locator('.fxb-row[data-id="blur"]');

@@ -306,6 +306,7 @@ describe('viewer extension', () => {
     const removeListener = vi.spyOn(stage, 'removeEventListener');
     first.dispose();
 
+    // The runtime's eight; the chrome under the viewer subscribes to nothing.
     expect(first.eventDisposers).toHaveLength(8);
     expect(first.eventDisposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true);
     expect(removeListener.mock.calls.some(([event]) => event === 'pointerdown')).toBe(true);

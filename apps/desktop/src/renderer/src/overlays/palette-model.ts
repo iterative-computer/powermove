@@ -18,6 +18,24 @@ export function scorePaletteMatch(value: unknown, query: unknown): number | null
   return index < 0 ? null : index;
 }
 
+/* After Effects names for Powermove commands, so a search in the words an
+   After Effects user already knows still finds the command. */
+export const AFTER_EFFECTS_TERMS: Readonly<Record<string, readonly string[]>> = {
+  toggleContinuousRaster: ['Collapse Transformations'],
+  toggle3DLayer: ['3D Layer Switch'],
+  precompose: ['Nest Layers', 'Precompose'],
+  releasePrecomp: ['Unprecompose'],
+  newNull: ['Null Object'],
+  newAdjustment: ['Adjustment Layer'],
+  newShape: ['Shape Layer'],
+  graph: ['Speed Graph', 'Value Graph'],
+  easyEase: ['Keyframe Assistant'],
+  split: ['Split Layer'],
+  groupLayers: ['Nest'],
+  compositionSettings: ['Composition Settings'],
+  palette: ['Search'],
+};
+
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   !!value && typeof (value as { then?: unknown }).then === 'function';
 
@@ -44,10 +62,13 @@ export function paletteEntries(PM: OverlayPM, query: string, onLate?: (entries: 
     parts.push(entries);
   };
   for (const command of Object.values(PM.commands ?? {}) as Array<Record<string, any>>) {
-    if (hasQuery && !matches(command.label)) continue;
+    const term = hasQuery && !matches(command.label)
+      ? (AFTER_EFFECTS_TERMS[command.id] ?? []).find((name) => matches(name))
+      : undefined;
+    if (hasQuery && !matches(command.label) && !term) continue;
     const entry: PaletteEntry = {
       id: `command:${command.id}`,
-      label: String(command.label),
+      label: term ? `${command.label} — ${term} in After Effects` : String(command.label),
       cat: String(command.cat ?? 'General'),
       kb: command.kb,
       run: () => PM.cmd(command.id)

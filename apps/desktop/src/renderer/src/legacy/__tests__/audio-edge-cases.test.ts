@@ -36,6 +36,49 @@ describe('legacy audio edge cases', () => {
     expect(h.contexts[0].sources[0].starts[0].offset).toBeCloseTo(0.2);
   });
 
+  it('starts a lazy clip from its samples without waiting for the waveform', async () => {
+    const pending = deferred<FakeAudioBuffer>();
+    const buffer = new FakeAudioBuffer([new Float32Array(40)], 10);
+    const h = audioHarness({ decode: () => pending.promise, currentTime: 10 });
+    const dismissed: string[] = [];
+    h.PM.dismissToast = (key: string) => dismissed.push(key);
+    const lazy = { ...audioAsset(buffer), audioBuffer: null };
+    h.assets.set(lazy.id, lazy);
+    h.PM.proj.layers = [audioLayer({ dur: 4 })];
+    h.PM.playing = true;
+
+    h.PM.Audio.start(0);
+    expect(h.toasts).toEqual(['Loading audio…']);
+    pending.resolve(buffer);
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+
+    expect(lazy.peaks).toBeNull();
+    expect(h.PM.Audio.inspect().voices).toHaveLength(1);
+    expect(dismissed).toEqual(['audio-loading']);
+    await flush(4);
+    expect(lazy.peaks).not.toBeNull();
+    expect(h.contexts[0].sources).toHaveLength(1);
+  });
+
+  it('decodes restored audio in the background before the first Play', async () => {
+    const buffer = new FakeAudioBuffer([new Float32Array(40)], 10);
+    const h = audioHarness({ decode: () => buffer });
+    const lazy = { ...audioAsset(buffer), audioBuffer: null };
+    const huge = { ...audioAsset(buffer, 'asset-2'), audioBuffer: null, dur: 1e6 };
+    h.assets.set(lazy.id, lazy);
+    h.assets.set(huge.id, huge);
+    h.PM.proj.layers = [audioLayer({ dur: 4 }), audioLayer({ id: 'audio-2', d: { asset: 'asset-2' } })];
+
+    h.PM.Audio.prefetch();
+    await flush(8);
+
+    expect(lazy.audioBuffer).toBe(buffer);
+    // Over the memory budget: left for playback to decode on demand.
+    expect(huge.audioBuffer).toBeNull();
+    expect(h.decodeCalls).toHaveLength(1);
+    expect(h.toasts).toEqual([]);
+  });
+
   it('keeps a voice on a normal tick but restarts it for meaningful clock drift', () => {
     const buffer = new FakeAudioBuffer([new Float32Array(100)], 10);
     const h = audioHarness({ decode: () => buffer, currentTime: 10 });

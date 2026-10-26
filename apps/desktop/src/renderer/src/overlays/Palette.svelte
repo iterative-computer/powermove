@@ -96,7 +96,7 @@
 
   onMount(() => input.focus({ preventScroll: true }));
 
-  // One highlight surface glides to the selected row; hover and keyboard both
+  // One highlight surface follows the selected row immediately; hover and keyboard both
   // write `selection`, so a single fill is ever visible.
   $effect(() => {
     const index = selected;

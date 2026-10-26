@@ -37,7 +37,7 @@ test('flat controls remain consistent across home, editor, settings, library, an
       await inspect(`settings-${tab.toLowerCase()}-${theme}`);
     }
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
-    await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+    await page.evaluate(() => (window as any).PM.LibraryUI.open()); // The library opens from the workspace ⋯ menu.
     await expect(page.getByRole('dialog', { name: 'Panel library', exact: true })).toBeVisible();
     await inspect(`library-${theme}`);
     await page.keyboard.press('Escape');

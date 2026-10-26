@@ -1,4 +1,5 @@
 import type { PowermoveAPI } from 'powermove';
+import { addTimelineMarker, markerAtTime, removeTimelineMarker } from './markers';
 
 import { createTimelineRuntime, timelinePanelOptions } from './timeline';
 import { adjacentKeyframe } from './keyframe-navigation';
@@ -25,38 +26,40 @@ if (import.meta.hot) {
 const TIMELINE_STYLES = `
 #panel-timeline{flex:0 0 340px}
 #panel-timeline>.body{position:relative;display:flex;flex-direction:column;overflow:hidden}
-#tl-head{position:absolute;z-index:3;left:0;top:0;width:var(--tl-gutter,266px);height:var(--tl-ruler,28px);display:flex;align-items:center;justify-content:flex-start;gap:4px;padding:0 7px;background:var(--bg-panel);border-right:1px solid var(--line);border-bottom:1px solid var(--line);overflow:hidden}
-#tl-head .iconbtn{width:22px;height:22px;flex:none;background:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));border:0;border-radius:var(--r-sm);box-shadow:none}
-#tl-head .iconbtn:hover{background:var(--bg-hover)}
-#tl-head .iconbtn svg{width:13px;height:13px}
-#tl-head[data-density="compact"]{gap:3px;padding-inline:6px}
-#tl-head[data-density="compact"] .iconbtn{width:22px;height:22px}
-#tl-head[data-density="compact"] .iconbtn svg{width:13px;height:13px}
-#tl-head[data-density="compact"] #tl-time{font-size:var(--fs-sm);min-width:0}
-#tl-head .tl-group{min-width:0;display:flex;align-items:center;gap:4px}
-#tl-head .tl-graph-slot{margin-left:auto}
-#tl-head .tl-graph-slot .iconbtn.on{color:var(--on-accent);background:var(--accent)}
-#tl-head .tl-graph-slot .iconbtn.on:hover{background:var(--accent-hover)}
-#tl-head .tl-graph-slot{gap:1px}
-#tl-head .tl-graph-slot>.iconbtn:not(.tl-view-button){margin-right:5px}
-#tl-head .tl-view-button,#tl-head[data-density] .tl-view-button{width:26px;border-radius:0;color:var(--tx-2)}
-#tl-head .tl-view-button svg,#tl-head[data-density] .tl-view-button svg{width:15px;height:15px}
-#tl-head .tl-view-button.first{border-radius:var(--r-sm) 0 0 var(--r-sm)}
-#tl-head .tl-view-button.last{border-radius:0 var(--r-sm) var(--r-sm) 0}
-#tl-head .tl-view-button:not(.on):hover{color:var(--tx)}
-#tl-head .tl-graph-slot .tl-view-button.on{color:var(--on-accent);background:var(--accent)}
-#tl-time{font-family:var(--f-mono);font-size:var(--fs-md);letter-spacing:0;color:var(--tx-2);font-variant-numeric:tabular-nums;margin-left:4px;padding:0 2px;white-space:nowrap;cursor:ew-resize}
+#tl-head{position:absolute;z-index:3;left:0;top:0;width:var(--tl-gutter,494px);height:var(--tl-ruler,32px);display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:0 10px;background:var(--bg-panel);border-right:1px solid var(--line);overflow:hidden}
+/* The move handle shows only under the pointer; at rest the row is play, time and the graph switch. */
+#tl-head>.panel-move-handle{opacity:0;margin-right:-4px}
+#tl-head:hover>.panel-move-handle,#tl-head>.panel-move-handle:focus-visible{opacity:.58}
+#tl-head .iconbtn{width:24px;height:24px;flex:none;background:none;border:0;border-radius:var(--r-sm);box-shadow:none;color:var(--tx-2)}
+#tl-head .iconbtn:hover{background:var(--bg-hover);color:var(--tx)}
+#tl-head .iconbtn svg{width:14px;height:14px}
+#tl-head .tl-transport .iconbtn{color:var(--tx-label)}
+#tl-head .tl-transport .iconbtn svg{width:12px;height:12px}
+#tl-head .tl-group{min-width:0;display:flex;align-items:center;gap:8px}
+#tl-head .tl-graph-slot{margin-left:auto;gap:2px}
+#tl-head .tl-graph-slot .iconbtn.on{color:var(--accent-tx);background:var(--accent-dim)}
+#tl-time{font:13px/16px var(--f-mono);letter-spacing:0;color:var(--accent-tx);font-variant-numeric:tabular-nums;white-space:nowrap;cursor:ew-resize}
 #tl-time.edit{color:var(--accent)}
 #tl-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
+.tl-empty{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;pointer-events:none}
+.tl-empty[hidden]{display:none}
+.tl-empty-title{color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium)}
+.tl-empty-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;pointer-events:auto}
+.tl-empty-button{display:flex;align-items:center;gap:7px;height:30px;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--ink-1);color:var(--tx-2);font:var(--fs-sm) var(--f-ui);cursor:pointer}
+.tl-empty-button:hover{background:var(--ink-2);color:var(--tx)}
+.tl-empty-button svg{width:14px;height:14px}
+.tl-empty-button kbd{color:var(--tx-4);font:var(--fs-xs) var(--f-mono)}
+.tl-empty-hint{color:var(--tx-4);font-size:var(--fs-xs)}
 #tl-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 #tl-canvas-wrap .tl-caption-editor{position:absolute;z-index:9;margin:0;padding:3px 7px;border:0;border-radius:var(--r-sm);background:var(--bg-float);color:var(--tx);font-family:inherit;font-size:11.5px;line-height:16px;resize:none;overflow:hidden;outline:0;box-shadow:var(--shadow-float,0 4px 14px rgb(0 0 0 / .18)),inset 0 0 0 1px var(--line);cursor:text}
 ${COMP_TABS_STYLES}
 #tl-comp-tabs{padding-right:168px}
-#tl-mode{position:absolute;z-index:4;top:4px;right:8px;height:20px;display:flex;align-items:stretch;padding:1px;gap:1px;border-radius:var(--r-sm);background:color-mix(in srgb,var(--tx) 6%,var(--bg-panel))}
-#tl-mode .tl-mode-button{display:flex;align-items:center;gap:5px;padding:0 9px;border:0;border-radius:calc(var(--r-sm) - 1px);background:none;color:var(--tx-3);font:inherit;font-size:var(--fs-xs);line-height:1;cursor:default}
-#tl-mode .tl-mode-button svg{width:12px;height:12px;flex:none}
+/* Centred in the tab row; inset 4px with its radius 4px smaller than the panel's, so the curves run parallel. */
+#tl-mode{position:absolute;z-index:4;top:4px;right:4px;height:28px;display:flex;align-items:stretch;padding:2px;gap:2px;border-radius:var(--r-md);background:rgb(0 0 0 / .19)}
+#tl-mode .tl-mode-button{display:flex;align-items:center;padding:0 10px;border:0;border-radius:calc(var(--r-md) - 2px);background:none;color:var(--tx-2);font:12px/16px var(--f-ui);cursor:default}
+#tl-mode .tl-mode-button svg{display:none}
 #tl-mode .tl-mode-button:hover{color:var(--tx)}
-#tl-mode .tl-mode-button.on{color:var(--tx);background:var(--bg-panel);box-shadow:0 0 0 1px var(--line)}`;
+#tl-mode .tl-mode-button.on{color:var(--tx);font-weight:var(--fw-medium);background:var(--bg-float)}`;
 
 export function toggleLayerStrips(api: PowermoveAPI): void {
   const layers = selectedLayers(api);
@@ -109,6 +112,12 @@ export default function activate(api: PowermoveAPI): void {
   activeApi = api;
   const timeline = createTimelineRuntime(api);
   const revealProperty = createPropertyReveal(api);
+  api.commands.register({ id: 'timeline.addMarker', label: 'Add marker', category: 'Timeline', run: () => addTimelineMarker(api) });
+  api.commands.register({
+    id: 'timeline.removeMarker', label: 'Remove marker at playhead', category: 'Timeline',
+    when: () => !!markerAtTime(api, api.transport.time()),
+    run: () => { const marker = markerAtTime(api, api.transport.time()); if (marker) removeTimelineMarker(api, marker); },
+  });
   for (const [key, , label] of propertyShortcuts) {
     api.commands?.register({
       id: `timeline.revealProperty:${key}`,

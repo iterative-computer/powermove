@@ -47,34 +47,47 @@ export function effectViewportSafe(api: PowermoveAPI, layer: any, time: number):
         ? (api.anim.evP?.(layer, effect.on, time, `${effect.id}.$enabled`) ?? effect.on.v) !== false
         : true;
     if (!enabled) continue;
-    if (api.effects?.get?.(effect.type)?.viewportSafe !== true) return false;
+    if (api.effects?.get?.(effect.type, effect.version ?? 1)?.viewportSafe !== true) return false;
   }
   return true;
 }
 
-/** Return the largest source radius required by viewport-safe effects, in
- * effect parameter pixels. The viewer converts it to CSS pixels before
+/** Return the largest accumulated stack/group support for viewport-safe effects,
+ * in composition pixels. The viewer converts it to CSS pixels before
  * adding it to the overscan. */
 export function effectViewportPadding(api: PowermoveAPI, project: any, time: number): number {
   let padding = 0;
-  for (const layer of project?.layers || []) {
+  const layers = project?.layers || [], radii = new Map<any, number>();
+  const byId = new Map<string, any>(layers.filter((layer: any) => typeof layer.id === 'string').map((layer: any) => [layer.id, layer]));
+  for (const layer of layers) {
+    let radius = 0;
     for (const effect of layer?.fx || []) {
       const enabled = effect?.on === false ? false
         : effect?.on && typeof effect.on === 'object'
           ? (api.anim.evP?.(layer, effect.on, time, `${effect.id}.$enabled`) ?? effect.on.v) !== false
           : true;
       if (!enabled) continue;
-      const definition = api.effects?.get?.(effect.type);
+      const definition = api.effects?.get?.(effect.type, effect.version ?? 1);
       if (!definition || definition.viewportSafe !== true) continue;
+      const world = definition.sampling?.space === 'layer' ? api.anim.worldMatrix?.(layer, time) : undefined;
+      const spaceScale = world ? Math.hypot(world[0], world[1], world[2], world[3]) : 1;
+      radius += (definition.viewportPaddingPixels ?? 0) * spaceScale;
       for (const key of definition.viewportPadding || []) {
         const prop = effect.p?.[key];
         const value = prop && typeof prop === 'object'
           ? (api.anim.evP?.(layer, prop, time, `${effect.id}.${key}`) ?? prop.v)
-          : prop;
+          : prop ?? definition.params?.find((param: any) => param.k === key)?.def;
         const numeric = Number(value);
-        if (Number.isFinite(numeric)) padding = Math.max(padding, Math.abs(numeric));
+        if (Number.isFinite(numeric)) radius += Math.abs(numeric) * (definition.viewportPaddingFactor ?? 1) * spaceScale;
       }
     }
+    radii.set(layer, radius);
+  }
+  for (const layer of layers) {
+    let radius = radii.get(layer) || 0, group = byId.get(layer.group);
+    const seen = new Set([layer]);
+    while (group && !seen.has(group)) { seen.add(group); radius += radii.get(group) || 0; group = byId.get(group.group); }
+    padding = Math.max(padding, radius);
   }
   return padding;
 }
@@ -319,6 +332,8 @@ type ViewerRuntime = ViewerService & {
   textSession?: TextEditSession | null;
   editText?(layer: any, options?: Omit<TextEditOptions, 'drag' | 'onFinish'>): TextEditSession | null;
   requestOverlay?(): void;
+  /** Opens or closes the composition mini-flowchart (viewer-chrome.ts). */
+  toggleFlowchart?(): boolean;
   inner: HTMLElement;
   _runtimeToken?: symbol | null;
   _disposeRuntime?: () => void;
@@ -774,6 +789,7 @@ const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / v
   gl.style.width = viewport.width * zoom + 'px'; gl.style.height = viewport.height * zoom + 'px';
 };
 const eventOffs: Array<() => void> = [];
+let layoutFrame = 0;
 
 let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
 let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
@@ -782,6 +798,7 @@ const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powerm
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
+  window.cancelAnimationFrame(layoutFrame); layoutFrame = 0;
   sceneGizmo?.dispose();sceneGizmo=null;if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();
   sceneNavigation?.dispose();sceneNavigation=null;
   activeDrag?.cancel(); activeDrag = null;
@@ -864,7 +881,7 @@ V.attach = (stage: HTMLElement) => {
     V.zoomControl = zoomControl;
     if(api.scene3d){
       gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';
-      gizmoToolbarHost.style.cssText='position:absolute;right:212px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
+      gizmoToolbarHost.style.cssText='position:absolute;right:8px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
       zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
     }
 
@@ -872,7 +889,7 @@ V.attach = (stage: HTMLElement) => {
     if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
     preview.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';
     preview.replaceChildren();
-    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
+    const quality=document.createElement('select');quality.id='preview-resolution';quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
     quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);
     quality.onchange=()=>{
@@ -917,6 +934,8 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   if (V.zoomControl) {
     const control = V.zoomControl as HTMLSelectElement;
     control.options[0]!.textContent = `Fit (${Math.round(z * 1000) / 10}%)`;
+    // Closed, the menu reads as the bare percentage.
+    control.options[0]!.dataset.short = `${Math.round(z * 1000) / 10}%`;
     const preset = [...control.options].find(option => Number(option.value) === z);
     const custom = control.querySelector<HTMLOptionElement>('option[value="custom"]')!;
     custom.textContent = `${Math.round(z * 1000) / 10}%`; custom.hidden = V.fit || !!preset;
@@ -1022,9 +1041,19 @@ const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K,
   const disposable = api.events.on(event, handler);
   eventOffs.push(() => disposable.dispose());
 };
-listen('project:changed', () => { viewportPlan = null; V.layout(); });
+// Tab activation publishes history, project, layers and media in one burst.
+// Measuring and rewriting the stage for every notification forces layout
+// repeatedly across the entire editor. Keep direct gesture layouts immediate.
+const scheduleLayout = () => {
+  if (layoutFrame || disposed) return;
+  layoutFrame = window.requestAnimationFrame(() => {
+    layoutFrame = 0;
+    if (!disposed && !V.stage?.closest?.('#pm-panel-pool')) V.layout();
+  });
+};
+listen('project:changed', () => { viewportPlan = null; scheduleLayout(); });
 listen('extensions:changed', () => { viewportPlan = null; V.layout(); });
-listen('layout', () => V.layout());
+listen('layout', scheduleLayout);
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
 listen('time', () => {
@@ -1198,16 +1227,19 @@ function drawOverlay() {
   // Evaluate the local anchor through the full parent chain.
   c.save();
   const anchorUnit = 1 / Math.max(.02, V.shown);
+  // With the Anchor Point tool the marker is the thing to grab: draw it larger.
+  const anchorTool = (V.temporaryTool || toolService()?.tool) === 'anchor';
+  const ring = (anchorTool ? 7 : 5) * anchorUnit, arm = (anchorTool ? 11 : 8) * anchorUnit;
   for (const layer of sels) {
     if (!layerBounds(api, layer, api.transport.time())) continue;
     const pivot = layerWorldPivot(api, layer, api.transport.time(), space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
     c.beginPath();
-    c.arc(pivot.x, pivot.y, 5 * anchorUnit, 0, Math.PI * 2);
-    c.moveTo(pivot.x - 8 * anchorUnit, pivot.y);
-    c.lineTo(pivot.x + 8 * anchorUnit, pivot.y);
-    c.moveTo(pivot.x, pivot.y - 8 * anchorUnit);
-    c.lineTo(pivot.x, pivot.y + 8 * anchorUnit);
+    c.arc(pivot.x, pivot.y, ring, 0, Math.PI * 2);
+    c.moveTo(pivot.x - arm, pivot.y);
+    c.lineTo(pivot.x + arm, pivot.y);
+    c.moveTo(pivot.x, pivot.y - arm);
+    c.lineTo(pivot.x, pivot.y + arm);
     c.strokeStyle = 'rgba(0,0,0,.8)';
     c.lineWidth = 3 * anchorUnit;
     c.stroke();
@@ -1481,6 +1513,9 @@ function snapshotSnapCandidates(T: any, selectionLayers: any[]): SnapCandidates 
   return snapCandidatesFromPoints(points);
 }
 
+/** Screen pixels around the anchor marker that grab it. */
+const ANCHOR_REACH = 14;
+
 function passedMoveDragThreshold(dx: any, dy: any) {
   return Math.hypot(dx, dy) >= MOVE_DRAG_THRESHOLD_PX;
 }
@@ -1733,7 +1768,7 @@ function updateStageCursor(e: any) {
   if (tool === 'hand') { setStageCursor('grab'); return; }
   if (tool === 'zoom') { setStageCursor(e.altKey ? 'zoom-out' : 'zoom-in'); return; }
   if (tool === 'rotate') { setStageCursor(ROTATE_CURSOR); return; }
-  if (tool === 'anchor') { setStageCursor('crosshair'); return; }
+  if (tool === 'anchor') { setStageCursor(anchorUnderPointer(pointerComp(e)) ? 'move' : 'crosshair'); return; }
   if (tool === 'pen') { setStageCursor('crosshair'); return; }
   if (tool === 'shape') { setStageCursor('crosshair'); return; }
   if (tool === 'text') { setStageCursor('text'); return; }
@@ -2098,12 +2133,28 @@ function startRotationTool(e: any): void {
   if (selection?.transformable) startTransform(e, selection, { rotate: true }, api.transport.time());
 }
 
+/** The selected layer whose anchor marker is under the pointer. The marker
+    often sits on a corner of the box, where most of its hit area lies outside
+    the box, so it is found before anything is picked. */
+function anchorUnderPointer(point: Point): SelectionGeometry | null {
+  const selection = resolveSelectionGeometry(api, visualSelection(api), api.transport.time(), space3d);
+  if (!selection?.transformable || selection.layers.length !== 1 || space3d.is3DLayer(selection.layers[0])) return null;
+  const reach = ANCHOR_REACH / Math.max(.02, V.shown);
+  return Math.hypot(point.x - selection.pivotWorld.x, point.y - selection.pivotWorld.y) <= reach ? selection : null;
+}
+
+/* Anchor Point tool: drag the anchor marker, or press anywhere on the
+   selected layer to bring the anchor there and keep dragging. Pressing
+   another layer only selects it. Position compensates so nothing moves;
+   Option moves the layer with its anchor, Command snaps to the box. */
 function startAnchorTool(e: any): void {
-  const selection = selectionForTransformTool(e);
+  const pointer = pointerComp(e);
+  const grabbed = anchorUnderPointer(pointer);
+  const previous = api.selection.layers().join('\n');
+  const selection = grabbed || selectionForTransformTool(e);
   if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Use Anchor X, Y and Z in Transform for 3D layers'); return; }
   if (!selection?.transformable || selection.layers.length !== 1) return;
-  const pointer = pointerComp(e);
-  if (Math.hypot(pointer.x - selection.pivotWorld.x, pointer.y - selection.pivotWorld.y) > 12 / Math.max(.02, V.shown)) return;
+  if (!grabbed && api.selection.layers().join('\n') !== previous) return;
   const layer = selection.layers[0];
   const T = api.transport.time();
   const local = api.anim.localMatrix(layer, T) as AffineMatrix;
@@ -2112,38 +2163,44 @@ function startAnchorTool(e: any): void {
   const position = { x: ev(api, layer, 'position.x', T), y: ev(api, layer, 'position.y', T) };
   const parent = parentWorldMatrix(layer, T);
   const bounds = layerBounds(api, layer, T);
+  const grabOffset = grabbed ? { x: grabbed.pivotWorld.x - pointer.x, y: grabbed.pivotWorld.y - pointer.y } : { x: 0, y: 0 };
   let moved = false;
   api.edit.begin('Move anchor point', { origin: 'canvas' });
-  beginDrag(e, {
-    cursor: 'crosshair',
-    move: (dx: number, dy: number, ev: any) => {
-      if (!passedMoveDragThreshold(dx, dy)) return;
-      moved = true;
-      const world = pointerComp(ev);
-      const pointerInParent = parent ? invertPoint(parent, world) : world;
-      if (!pointerInParent) return;
-      let next = anchorMoveValues(linear, anchor, position, pointerInParent, { moveLayer: !ev.altKey });
-      if (!next) return;
-      if ((ev.metaKey || ev.ctrlKey) && bounds) {
-        const xs = [bounds.x0, (bounds.x0 + bounds.x1) / 2, bounds.x1];
-        const ys = [bounds.y0, (bounds.y0 + bounds.y1) / 2, bounds.y1];
-        next.anchor.x = xs.reduce((best, value) => Math.abs(value - next!.anchor.x) < Math.abs(best - next!.anchor.x) ? value : best);
-        next.anchor.y = ys.reduce((best, value) => Math.abs(value - next!.anchor.y) < Math.abs(best - next!.anchor.y) ? value : best);
-        if (!ev.altKey) {
-          const dax = next.anchor.x - anchor.x, day = next.anchor.y - anchor.y;
-          next.position = {
-            x: position.x + linear[0] * dax + linear[2] * day,
-            y: position.y + linear[1] * dax + linear[3] * day,
-          };
-        }
-      }
-      setOrKey(layer, 'anchor.x', api.util.round(next.anchor.x, 3), T);
-      setOrKey(layer, 'anchor.y', api.util.round(next.anchor.y, 3), T);
+  const follow = (ev: any) => {
+    moved = true;
+    // Keep the grab offset, so taking the marker off-centre does not jump it.
+    const at = pointerComp(ev), world = { x: at.x + grabOffset.x, y: at.y + grabOffset.y };
+    const pointerInParent = parent ? invertPoint(parent, world) : world;
+    if (!pointerInParent) return;
+    let next = anchorMoveValues(linear, anchor, position, pointerInParent, { moveLayer: !ev.altKey });
+    if (!next) return;
+    if ((ev.metaKey || ev.ctrlKey) && bounds) {
+      const xs = [bounds.x0, (bounds.x0 + bounds.x1) / 2, bounds.x1];
+      const ys = [bounds.y0, (bounds.y0 + bounds.y1) / 2, bounds.y1];
+      next.anchor.x = xs.reduce((best, value) => Math.abs(value - next!.anchor.x) < Math.abs(best - next!.anchor.x) ? value : best);
+      next.anchor.y = ys.reduce((best, value) => Math.abs(value - next!.anchor.y) < Math.abs(best - next!.anchor.y) ? value : best);
       if (!ev.altKey) {
-        setOrKey(layer, 'position.x', api.util.round(next.position.x, 3), T);
-        setOrKey(layer, 'position.y', api.util.round(next.position.y, 3), T);
+        const dax = next.anchor.x - anchor.x, day = next.anchor.y - anchor.y;
+        next.position = {
+          x: position.x + linear[0] * dax + linear[2] * day,
+          y: position.y + linear[1] * dax + linear[3] * day,
+        };
       }
-      invalidate();
+    }
+    setOrKey(layer, 'anchor.x', api.util.round(next.anchor.x, 3), T);
+    setOrKey(layer, 'anchor.y', api.util.round(next.anchor.y, 3), T);
+    if (!ev.altKey) {
+      setOrKey(layer, 'position.x', api.util.round(next.position.x, 3), T);
+      setOrKey(layer, 'position.y', api.util.round(next.position.y, 3), T);
+    }
+    invalidate();
+  };
+  if (!grabbed) follow(e);
+  beginDrag(e, {
+    cursor: 'move',
+    move: (dx: number, dy: number, ev: any) => {
+      if (!moved && !passedMoveDragThreshold(dx, dy)) return;
+      follow(ev);
     },
     up: () => { moved ? api.edit.commit('Move anchor point') : api.edit.cancel(); refreshInspector(); },
     cancel: () => { api.edit.cancel(); refreshInspector(); },

@@ -1,3 +1,4 @@
+import { effectParameterDefault } from './effect-defaults';
 /*
  * The per-extension `PowermoveAPI` factory.
  *
@@ -13,6 +14,7 @@
  * Host capabilities arrive through `HostDeps` rather than imports: this module
  * has zero legacy dependencies, so it can be unit-tested with a fake PM.
  */
+import { resolveEffectDefinition } from './effect-versions';
 import type {
   AssetsAPI,
   AnimAPI,
@@ -418,9 +420,15 @@ export function createExtensionAPI(
   /* ── effects & transitions ─────────────────────────────── */
 
   const effects: EffectsAPI = {
+    supportsVersions: true,
+    supportsSpatialSampling: true,
+    supportsLayerInputs: true,
+    supportsInputSubframes: true,
+    supportsTemporalInputs: true, supportsSourceRasters: true, supportsSourceOwners: true, supportsBrushGeometry: true, supportsOwnerValidity: true, supportsLutAssets: true, supportsTypedReferences: true,
+    parameterDefault: effectParameterDefault,
     register: (def: EffectDefinition) => contribute(() => kernel.registerEffect(id, def)),
     list: () => kernel.effects.list(),
-    get: (effectId) => kernel.effects.get(effectId)
+    get: (effectId, version) => resolveEffectDefinition(kernel.effects.get(effectId), version)
   };
 
   const transitions: TransitionsAPI = {

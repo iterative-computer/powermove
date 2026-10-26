@@ -960,11 +960,31 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     open: (id: string) => PM.Comps?.open(id) ?? false,
     close: (id: string) => PM.Comps?.close(id) ?? false,
     onChange: (listener: () => void) => PM.bus.on('comps', listener),
+    active: () => PM.Comps?.active?.() ?? null,
+    /** Compositions that nest `id`, and the ones nested directly inside it. */
+    parents: (id: string) => [...new Set<string>((PM.Comps?.users?.(id) ?? []).map((use: { comp: string }) => use.comp))],
+    children: (id: string) => PM.Comps?.children?.(id) ?? [],
   });
+  /* New ▸, as in After Effects: every kind of layer, the camera and lights
+     included, and a composition. It closes the empty-canvas, empty-timeline
+     and layer context menus. Camera and Light come from the 3D extension. */
+  const newItems = (): MenuContribution[] => {
+    const has = (id: string): boolean => !!kernel.commands.get(id);
+    return [
+      { label: 'Text', icon: 'type', kb: '⌘T', run: () => PM.cmd('newText') },
+      { label: 'Solid', icon: 'solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
+      { label: 'Shape', icon: 'shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
+      { label: 'Null Object', kb: '⌘⌥⇧Y', run: () => PM.cmd('newNull') },
+      { label: 'Adjustment Layer', kb: '⌘⌥Y', run: () => PM.cmd('newAdjustment') },
+      ...(has('3d.add-camera') ? ['-' as const,
+        { label: 'Camera', icon: 'cam', run: () => PM.cmd('3d.add-camera') },
+        ...(has('3d.add-light') ? [{ label: 'Light', icon: 'sun', run: () => PM.cmd('3d.add-light') }] : [])] : []),
+      '-',
+      { label: 'Composition…', icon: 'layers', kb: '⌘N', run: () => PM.cmd('newComposition') }
+    ];
+  };
   for (const location of ['viewer:context', 'timeline:context'] as const) {
-    kernel.contributeMenu('core', location, () => [
-      { label: 'New Composition…', icon: 'plus', kb: '⌘N', run: () => PM.cmd('newComposition') }
-    ]);
+    kernel.contributeMenu('core', location, () => [{ label: 'New', icon: 'plus', submenu: newItems() }]);
   }
   return installed;
 }

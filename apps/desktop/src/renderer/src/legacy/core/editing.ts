@@ -1,3 +1,6 @@
+import { layerInputPlan, hasLayerInputs, validateEffectInputs } from '../../core/effect-inputs';
+import { allPropertyRefs, simplificationLayer, simplifyProperties, snapshotKeyframes, noticeDenseKeyframes, keyframeWrites } from './keyframe-simplification';
+import { parseEditCommand, ValidationError } from '../../core/validate/commands';
 import { captureFontAnchor } from './font-anchor';
 import { captureSizeAnchor, sizeAnchorOffset, sizeBounds } from './size-anchor';
 import { temporalKeys } from './temporal-bridge';
@@ -39,10 +42,24 @@ const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = 
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'solo', 'blend',
-  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'threeD', 'scaleLinked',
+  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'threeD', 'scaleLinked', 'effectSpace',
+  'continuousRaster',
 ]);
 let live: any = null;
 
+const validateInputGraphs = (commands?: any[]) => {
+  // Scalar drags cannot change texture dependencies. Keep graph validation off
+  // their critical path, and allow ordinary edits to imported invalid data.
+  if (commands && !commands.some(command => ['add_effect','group_layers','ungroup_layers','move_to_group','reorder_layer'].includes(command.type)
+    || command.type === 'set_effect' && (command.patch?.inputs !== undefined || command.patch?.enabled !== undefined)
+    || command.type === 'set_layer' && command.patch?.matteSource !== undefined
+    || ['set_property','set_expression'].includes(command.type) && String(command.path || command.channel).endsWith('.$enabled'))) return;
+  const pending = [PM.proj], seen = new Set<any>();
+  while (pending.length) { const comp: any = pending.pop(); if (!comp || seen.has(comp)) continue; seen.add(comp);
+    if (hasLayerInputs(comp, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) layerInputPlan(comp, { definition: (fx: any) => PM.effectDef?.(fx), allowMissing: true, topologyOnly: true });
+    pending.push(...Object.values(comp.comps || {}));
+  }
+};
 const projectLayers: any = () => {
   if (PM.ProjectIndex) return PM.ProjectIndex.allLayers();
   const out: any[] = [], queue: any[] = [PM.proj], seen = new Set<any>();
@@ -102,8 +119,9 @@ function commandScopes(command: any): any[][] {
     return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
-  if (type === 'add_marker') return [['markers']];
+  if (type === 'add_marker' || type === 'remove_marker') return [['markers']];
   if (type === 'create_section' || type === 'update_section') return [['library']];
+  if (type === 'simplify_keyframes') return [...new Set(simplificationRefs(command).map(ref => ref.layerId))].map(id => layerPath(simplificationLayer(PM, id))).filter((path): path is any[] => !!path);
   if (type === 'set_easing') return keyframeLayers(command).map((layer: any) => layerPath(layer)).filter(Boolean);
   const layer = findLayer(command?.target || command?.layer || command?.targetId);
   const path = layerPath(layer);
@@ -308,18 +326,44 @@ function replaceKeyframes(command: any) {
     if (!key || typeof key !== 'object') throw new Error(`Keyframe ${index + 1} is invalid`);
     const time: any = Math.max(0, finite(key.time, `keyframe ${index + 1} time`));
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
-    return { time, value, ease: key.ease || 'linear', hold: !!key.hold };
+    return { time, value, ease: key.ease || 'linear', hold: !!key.hold, id: key.id, temporal: key.temporal, spring: key.spring, handles: key.handles };
   });
   if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
     const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
     if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
     validate3DChannel(layer,channel,candidate);
   }
-  if (command.replace !== false) {
-    if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
-    prop.kf = [];
+  // Native edits preserve exact subframe times, identities and independent
+  // temporal sides. Existing named-easing callers retain frame snapping.
+  if (next.some((key: any) => key.temporal || key.id)) {
+    const existing = new Map(prop.kf.map((key: any) => [key.i, key]));
+    const native = next.map((key: any) => {
+      const old = key.id ? existing.get(key.id) as any : null;
+      const value: any = { ...(old || {}), ...(key.temporal || {}), t: key.time, v: key.value, i: key.id || PM.uid('k') };
+      if (key.spring === null) delete value.spring;
+      else if (key.spring !== undefined) value.spring = clone(key.spring);
+      if (!key.temporal) {
+        delete value.inInterp; delete value.outInterp;
+        delete value.inEase; delete value.outEase;
+        const handles = key.handles ? { eo: key.handles.slice(0, 2), ei: key.handles.slice(2) } : PM.Ease.handles(key.ease);
+        value.eo = handles.eo; value.ei = handles.ei; value.hold = key.hold;
+      }
+      return value;
+    });
+    const ids = new Set(native.map((key: any) => key.i));
+    if (ids.size !== native.length) throw new Error('Keyframe IDs must be unique within a track');
+    for (const candidate of projectLayers()) for (const item of PM.allProps(candidate)) {
+      if (item.prop !== prop && item.prop.kf.some((key: any) => ids.has(key.i))) throw new Error('Keyframe ID belongs to another property');
+    }
+    prop.kf = PM.normalizeKeyframes([...(command.replace === false ? prop.kf.filter((key: any) => !ids.has(key.i) && !native.some((n: any) => n.t === key.t)) : []), ...native], prop.v, PM.proj.fps);
+    temporalKeys(prop.kf);
+  } else {
+    if (command.replace !== false) {
+      if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
+      prop.kf = [];
+    }
+    PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   }
-  PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
   if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,prop);
   PM.touch();
@@ -543,6 +587,15 @@ function setLayer(command: any) {
     if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
     layer.threeD = !!patch.threeD;
   }
+  if (patch.continuousRaster != null) {
+    if (layer.type !== 'precomp') throw new Error('Only pre-comp layers can be continuously rasterized');
+    layer.continuousRaster = !!patch.continuousRaster;
+  }
+  if(patch.effectSpace!==undefined){if(!['composition','source'].includes(patch.effectSpace))throw new Error('Invalid effect processing space');layer.effectSpace=patch.effectSpace;}
+  if(layer.effectSpace==='source'){
+    if(layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new Error('Source effects require a 2D content layer');
+    for(const fx of layer.fx??[]){const def=PM.effectDef(fx);if(def&&!fx.missing&&fx.on!==false&&(!def.sourceProcessing||def.backdrop))throw new Error(`${def.label} does not support source owner processing`);}
+  }
   if (patch.scaleLinked != null) layer.scaleLinked = !!patch.scaleLinked;
   PM.touch();
   return { id: layer.id, keys: Object.keys(patch) };
@@ -700,7 +753,7 @@ function addEffect(command: any) {
   const layer: any = findLayer(command.target || command.layer);
   if (!layer) throw new Error('Layer not found');
   if (PM.TYPE_META[layer.type] && PM.TYPE_META[layer.type].effects === false) throw new Error(`${PM.TYPE_META[layer.type].label} layers do not support visual effects`);
-  const effect: any = PM.mkEffect(command.effect);
+  const effect: any = PM.mkEffect(command.effect, command.version, layer);
   if (!effect) throw new Error(`Unknown effect: ${command.effect}`);
   effect.open = command.open !== false;
   effect.on = command.enabled !== false;
@@ -728,6 +781,11 @@ function addEffect(command: any) {
       };
     } else effect.p[key].v = value;
   }
+  if (command.inputs !== undefined) {
+    const inputs = validateEffectInputs(command.inputs);
+    for (const key of Object.keys(inputs)) if (!PM.effectDef(effect)?.params.some((p: any) => p.k === key && (p.type==='layer'&&!inputs[key]!.kind||p.type===inputs[key]!.kind))) throw new Error(`Unknown layer input: ${key}`);
+    effect.inputs = { ...effect.inputs, ...inputs };
+  }
   layer.fx.push(effect); PM.touch();
   return { id: layer.id, effectId: effect.id };
 }
@@ -750,8 +808,13 @@ function setEffect(command: any) {
   const effect: any = layer.fx.find((item: any) => item.id === command.effect || item.type === command.effect);
   if (!effect) throw new Error(`Effect not found: ${command.effect}`);
   const patch: any = safePatch(command.patch, 'effect patch');
-  const allowed: any = new Set(['enabled', 'open', 'index']);
+  const allowed: any = new Set(['enabled', 'open', 'index', 'inputs']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Effect field “${key}” is not editable`);
+  if (patch.inputs !== undefined) {
+    const inputs = validateEffectInputs(patch.inputs);
+    for (const key of Object.keys(inputs)) if (!PM.effectDef(effect)?.params.some((p: any) => p.k === key && (p.type==='layer'&&!inputs[key]!.kind||p.type===inputs[key]!.kind))) throw new Error(`Unknown layer input: ${key}`);
+    effect.inputs = { ...effect.inputs, ...inputs };
+  }
   if (patch.enabled != null) {
     if (isProperty(effect.on)) setProperty({ target: layer.id, path: `${effect.id}.$enabled`, value: !!patch.enabled, preserveHandEdits: false });
     else effect.on = !!patch.enabled;
@@ -851,6 +914,15 @@ function addMarker(command: any) {
   return marker;
 }
 
+function removeMarker(command: any) {
+  if (!Number.isSafeInteger(command.index) || command.index < 0 || command.index >= PM.proj.markers.length) {
+    throw new Error('Marker not found');
+  }
+  const [marker] = PM.proj.markers.splice(command.index, 1);
+  PM.touch();
+  return marker;
+}
+
 function createSection(command: any) {
   if (!command.section || typeof command.section !== 'object') throw new Error('Section manifest is required');
   PM.proj.library = PM.proj.library && typeof PM.proj.library === 'object' ? PM.proj.library : { sections: [], looks: [] };
@@ -876,6 +948,21 @@ function updateSection(command: any) {
   if (section.versions.length > 12) section.versions.splice(0, section.versions.length - 12);
   PM.bus.emit('library');
   return { id: section.id, versions: section.versions.length };
+}
+
+function simplificationRefs(source: any) {
+  const command = parseEditCommand(source);
+  if (command instanceof ValidationError) throw new Error(command.message);
+  if (command.type !== 'simplify_keyframes') throw new Error('Expected simplify_keyframes');
+  const refs = command.scope === 'properties' ? command.properties! : allPropertyRefs(PM).filter(ref =>
+    command.scope !== 'layers' || (command.targets || PM.sel.layers).includes(ref.layerId));
+  const unique = new Map(refs.map(ref => [JSON.stringify([ref.layerId, ref.path]), ref]));
+  for (const ref of unique.values()) {
+    const layer = simplificationLayer(PM, ref.layerId);
+    if (!layer || !PM.findProp(layer, ref.path)) throw new Error('Simplification property not found');
+  }
+  if (command.scope === 'layers' && command.targets?.some(id => !simplificationLayer(PM, id))) throw new Error('Simplification layer not found');
+  return [...unique.values()];
 }
 
 function keyframeLayers(command: any) {
@@ -976,6 +1063,7 @@ function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
   switch (command.type) {
     case 'set_property': data = setProperty(command, presets); break;
     case 'replace_keyframes': data = replaceKeyframes(command); break;
+    case 'simplify_keyframes': data = simplifyProperties(PM, simplificationRefs(command)); break;
     case 'set_easing': data = setEasing(command); break;
     case 'set_expression': data = setExpression(command,meta); break;
     case 'set_content': data = setContent(command, meta); break;
@@ -993,6 +1081,7 @@ function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
     case 'set_transition': data = setTransition(command); break;
     case 'set_scene_parameter': data = setSceneParameter(command); break;
     case 'add_marker': data = addMarker(command); break;
+    case 'remove_marker': data = removeMarker(command); break;
     case 'create_section': data = createSection(command); break;
     case 'update_section': data = updateSection(command); break;
     case 'add_captions': data = addCaptions({ PM, findLayer }, command); break;
@@ -1142,7 +1231,7 @@ function sourceCatalog() {
       const control: any = primitiveControl(value); if (!control) return null;
       const fxId: any = item.key.split('.')[0];
       const fx: any = (layer.fx || []).find((effect: any) => effect.id === fxId);
-      const fxParam: any = fx && PM.FX?.[fx.type]?.params?.find((param: any) => param.k === item.key.slice(fxId.length + 1));
+      const fxParam: any = fx && (PM.effectDef?.(fx) ?? (!PM.effectDef ? PM.FX?.[fx.type] : undefined))?.params?.find((param: any) => param.k === item.key.slice(fxId.length + 1));
       const shaderDef: any = layer.type === 'shader' && item.key.startsWith('u.')
         ? (layer._udefs || PM.parseUniforms?.(layer.d.code) || []).find((def: any) => `u.${def.name}` === item.key) : null;
       const extensionDef: any = layer.type === 'extension' && item.key.startsWith('x.')
@@ -1196,6 +1285,7 @@ const Edit: any = {
   operations: Object.freeze({
     set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
     replace_keyframes: { target: 'layer', fields: ['path', 'keyframes', 'replace', 'expression'] },
+    simplify_keyframes: { target: 'project', fields: ['scope', 'targets', 'properties'] },
     set_easing: { target: 'keyframes', fields: ['keyframes', 'curve'] },
     set_expression: { target: 'layer', fields: ['path', 'expression'] },
     set_content: { target: 'layer', fields: ['patch'] },
@@ -1207,12 +1297,13 @@ const Edit: any = {
     group_layers: { target: 'project', fields: ['targets', 'name'] },
     ungroup_layers: { target: 'project', fields: ['targets'] },
     move_to_group: { target: 'project', fields: ['targets', 'group'] },
-    add_effect: { target: 'layer', fields: ['effect', 'parameters'] },
+    add_effect: { target: 'layer', fields: ['effect', 'parameters', 'inputs'] },
     remove_effect: { target: 'layer', fields: ['effect'] },
     set_effect: { target: 'layer', fields: ['effect', 'patch'] },
     set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },
     set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
     add_marker: { target: 'project', fields: ['time', 'name'] },
+    remove_marker: { target: 'project', fields: ['index'] },
     create_section: { target: 'project', fields: ['section'] },
     update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
     transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
@@ -1228,6 +1319,9 @@ const Edit: any = {
     if (meta.baseRevision != null && Number(meta.baseRevision) !== Number(PM.proj.revision || 0)) {
       return fail(`Project changed: expected revision ${meta.baseRevision}, found ${PM.proj.revision || 0}`);
     }
+    const guarded = ['agent', 'import', 'generated-ui', 'generated-tool', 'generated-script'].includes(meta.origin)
+      && !list.every((command: any) => command.type === 'simplify_keyframes');
+    const keysBefore = guarded ? snapshotKeyframes(PM) : null;
     if (live) {
       const transaction = live, pendingCommands = [...live.commands], selection = clone(PM.sel);
       let checkpoint: Patch[] | null = null;
@@ -1235,10 +1329,12 @@ const Edit: any = {
         checkpoint = liveCheckpoint(list);
         trackCommands(list);
         const executed: any = runCommands(list, meta);
+        validateInputGraphs(list);
         const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
         executed.forEach(({ command }: any) => rememberLive(command));
         changed(false);
-        const notices: any = executed.map((item: any) => item.message).filter(Boolean);
+        const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore, keyframeWrites(executed)) : null;
+        const notices: any = [...executed.map((item: any) => item.message), denseNote].filter(Boolean);
         return pass(['Source updated', ...notices].join('. '), { results, revision: PM.proj.revision || 0 });
       } catch (error: any) {
         transaction.commands = pendingCommands;
@@ -1251,12 +1347,14 @@ const Edit: any = {
     try {
       trackCommands(list);
       const executed: any = runCommands(list, meta);
+        validateInputGraphs(list);
       const applied: any = executed.map((item: any, index: any) => recordedCommand(item.command, list[index]));
       const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
       record(meta.label, meta.origin, applied);
       changed();
       PM.hist.commit(meta.label || 'Edit source');
-      const notices: any = executed.map((item: any) => item.message).filter(Boolean);
+      const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore, keyframeWrites(executed)) : null;
+      const notices: any = [...executed.map((item: any) => item.message), denseNote].filter(Boolean);
       return pass([meta.label || 'Source updated', ...notices].join('. '), { results, revision: PM.proj.revision });
     } catch (error: any) {
       PM.hist.rollback(selection);
@@ -1274,9 +1372,12 @@ const Edit: any = {
     if (live) return fail('Finish the active source edit before changing structure');
     if (typeof action !== 'function') return fail('A structural edit action is required');
     const selection: any = clone(PM.sel);
+    const guarded = ['agent', 'import'].includes(meta.origin);
+    const keysBefore = guarded ? snapshotKeyframes(PM) : null;
     const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
       const result: any = action();
+      validateInputGraphs();
       PM.ProjectIndex?.invalidate();
       if (JSON.stringify(PM.proj) === before) {
         PM.hist.cancel();
@@ -1304,7 +1405,8 @@ const Edit: any = {
       });
       changed();
       PM.hist.commit(label || 'Edit source');
-      return pass(label || 'Source updated', { result, revision: PM.proj.revision });
+      const denseNote = keysBefore ? noticeDenseKeyframes(PM, keysBefore) : null;
+      return pass([label || 'Source updated', denseNote].filter(Boolean).join('. '), { result, revision: PM.proj.revision });
     } catch (error: any) {
       PM.hist.rollback(selection);
       return fail(String(error.message || error));
@@ -1382,6 +1484,7 @@ const Edit: any = {
     };
   },
 
+  isLive: () => !!live,
   sourceCatalog,
 };
 

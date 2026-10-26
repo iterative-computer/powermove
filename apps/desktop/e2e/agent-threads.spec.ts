@@ -1,4 +1,4 @@
-import { test, expect } from './helpers/app';
+import { chooseNativeMenu, test, expect } from './helpers/app';
 
 test('background run badge stays compact when creating and switching threads', async ({ session }) => {
   await session.openEditor(); await session.openAgent();
@@ -274,13 +274,14 @@ test('agent run survives clicking another project tab and resumes on return', as
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Keep working while I switch projects');
   await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => Boolean((window as any).__tabRun))).toBe(true);
-  await page.locator(`#tabs .project-doc[data-tab-id="${second}"]`).click();
+  // Switch from the title's project menu, the way the titlebar now offers it.
+  await chooseNativeMenu(session, await page.evaluate((id) => (window as any).PM.Projects.get(id).name, second), () => page.locator('.tb-title-btn').click());
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).toBe(second);
   expect(await page.evaluate(() => (window as any).__tabRun.signal.aborted)).toBe(false);
   await page.evaluate(() => (window as any).__tabRun.finish());
   await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.backgroundRuns)).toBe(1);
   expect(await page.evaluate(() => (window as any).PM.AgentUI.state.conversation)).toEqual([]);
-  await page.locator(`#tabs .project-doc[data-tab-id="${first}"]`).click();
+  await chooseNativeMenu(session, await page.evaluate((id) => (window as any).PM.Projects.get(id).name, first), () => page.locator('.tb-title-btn').click());
   await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.phase)).toBe('result');
   expect(await page.evaluate(() => (window as any).PM.AgentUI.state.run.projectId)).toBe(first);
   await session.openAgent();

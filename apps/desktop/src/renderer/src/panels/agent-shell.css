@@ -6,6 +6,10 @@
   pointer-events: none;
 }
 
+#agent-popover-root[data-home] {
+  display: none;
+}
+
 .agent-popover {
   position: fixed;
   display: flex;

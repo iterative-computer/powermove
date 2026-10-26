@@ -198,6 +198,12 @@ describe('automatic preview editor integration', () => {
     expect(h.options.state().blocked).toBe(false);
   });
 
+  it('leaves layer-input video preparation to the live invocation instead of warming unusable retained frames', () => {
+    const h=editor();h.PM.proj.layers=[{type:'shape',fx:[{inputs:{map:{layerId:'hidden',stage:'source'}}}]},{id:'hidden',type:'video',on:false}];
+    h.setVersion(2);expect(h.options.state().blocked).toBe(true);
+    h.service.request();expect(h.videos.prepare).not.toHaveBeenCalled();
+  });
+
   it('cancels ongoing work immediately when an edit makes temporal video preparation unsafe', () => {
     const h = editor();
     h.service.request();

@@ -1,3 +1,4 @@
+import { createPathTiming, type PathTiming } from '../../core/anim/motion-path';
 import { structuredProperties } from './vector-paths';
 import { sceneProperties } from '../../core/scene3d/schema';
 /* Ported from js/core/anim.js — behavior-preserving. */
@@ -125,6 +126,30 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
 PM.exprCache = new Map();
 PM.expressionErrors = new WeakMap();
 const EXPR_CACHE_MAX = 256;
+// Layer identity and source revision invalidate this non-serializable timing
+// cache on edits, undo, and project reload; playback reuses it across axes.
+const pathTimings = new WeakMap<object, Map<string, { version: number; timing: PathTiming }>>();
+function motionPathValue(comp: any, layerId: string, channel: string, progress: number, start: number, end: number): number {
+  if (!/^position\.[xyz]$/.test(channel) || ![progress, start, end].every(Number.isFinite) || !(end > start)) throw new Error('Invalid motion path request');
+  const layer = comp.layers?.find((item: any) => item.id === layerId);
+  if (!layer) throw new Error('Motion path layer is unavailable');
+  const axes = ['position.x', 'position.y', 'position.z'].filter(axis => layer.p?.[axis]);
+  const index = axes.indexOf(channel);
+  if (index < 0) throw new Error('Motion path axis is unavailable');
+  let cache = pathTimings.get(layer);
+  if (!cache) { cache = new Map(); pathTimings.set(layer, cache); }
+  const key = `${start}:${end}`;
+  let entry = cache.get(key);
+  if (!entry || entry.version !== version) {
+    const channels = axes.map(axis => layer.p[axis]);
+    const sample = (time: number) => channels.map(prop => prop.kf?.length ? Number(evalKfs(prop.kf, time)) : Number(prop.v));
+    const timing = createPathTiming(sample, channels.flatMap(prop => prop.kf.map((k: any) => k.t)), start, end);
+    if (cache.size >= 16) cache.delete(cache.keys().next().value!);
+    entry = { version, timing }; cache.set(key, entry);
+  }
+  return entry.timing.position(progress)[index]!;
+}
+
 function compile(src: any) {
   let c = PM.exprCache.get(src);
   if (c !== undefined) return c;
@@ -134,6 +159,14 @@ function compile(src: any) {
     f: (t: number, T: number, fps: number, value: unknown, layer: any, comp: any,
       param: (name: string) => unknown, ch: string, idx: number) => parsed.evaluate({
         t, T, fps, value, layer, comp, param, ch, idx,
+        motionPath: (layerId, channel, progress, start, end) => motionPathValue(comp, layerId, channel, progress, start, end),
+        sample: (layerId, channel, localTime) => {
+          if (!Number.isFinite(localTime)) throw new Error('Sample time must be finite');
+          const sourceLayer = (comp.layers as any[])?.find(item => item.id === layerId);
+          const source = sourceLayer && PM.findProp(sourceLayer, channel);
+          if (!source) throw new Error('Sampled channel is unavailable');
+          return source.kf?.length ? evalKfs(source.kf, localTime) : source.v;
+        },
       }),
   } : null;
   if (PM.exprCache.size >= EXPR_CACHE_MAX) PM.exprCache.delete(PM.exprCache.keys().next().value);

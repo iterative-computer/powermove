@@ -2,7 +2,7 @@ import { videoClipsAt } from './video-timeline';
 import { previewVideoElement } from './video-preview';
 
 type Decoder = { source: HTMLVideoElement; url: string; video: HTMLVideoElement; at: number | null };
-type PreviewVideoRequest = { key: string; asset: any; at: number };
+type PreviewVideoRequest = { key: string; asset: any; at: number; exact?: boolean };
 const MAX_DECODERS = 4;
 const WAIT_MS = 2000;
 const TIME_EPSILON = .0005;
@@ -10,15 +10,17 @@ const TIME_EPSILON = .0005;
 /** Idle preparation has its own decoders. Seeking the editing decoder here
  * would disturb the visible canvas, playback and the next press of Play. */
 export function createAutomaticPreviewVideos(PM: any): {
-  prepare(time: number, valid: () => boolean): Promise<Map<string, ImageBitmap> | null>;
+  prepare(time: number, valid: () => boolean, options?: {mblur?: boolean; mbSamples?: number; shutter?: number}): Promise<Map<string, ImageBitmap> | null>;
   release(frames: Map<string, ImageBitmap>): void;
   readonly bytes: number;
+  readonly error: string | null;
   cancel(): void;
   dispose(): void;
 } {
   const decoders = new Map<HTMLVideoElement, Decoder>();
   const owned = new Map<Map<string, ImageBitmap>, { bytes: number }>();
   let capturedBytes = 0;
+  let lastError: string | null = null;
   let active: AbortController | null = null;
   let disposed = false;
   let inactivity: ReturnType<typeof setTimeout> | null = null;
@@ -51,9 +53,10 @@ export function createAutomaticPreviewVideos(PM: any): {
     for (const frames of owned.keys()) releaseFrames(frames);
   };
 
-  async function prepare(time: number, valid: () => boolean): Promise<Map<string, ImageBitmap> | null> {
+  async function prepare(time: number, valid: () => boolean, options?: {mblur?: boolean; mbSamples?: number; shutter?: number}): Promise<Map<string, ImageBitmap> | null> {
     if (disposed || !Number.isFinite(time)) return null;
     clearInactivity();
+    lastError = null;
     // Concurrent requests cannot seek the same private decoder. A new request
     // supersedes unfinished work; already returned bitmaps belong to the caller.
     if (active) cancel();
@@ -71,7 +74,9 @@ export function createAutomaticPreviewVideos(PM: any): {
         // The compositor also renders forced-on track mattes, group passes and
         // solo precomps. The ordinary playback clip list does not include all
         // of those sources and cannot safely plan a finished preview for them.
-        planned = typeof PM.GL?.thumbnailVideoRequests === 'function'
+        planned = options && typeof PM.GL?.frameVideoRequests === 'function'
+          ? PM.GL.frameVideoRequests(PM.proj,time,options).map((request:any)=>({...request,exact:true}))
+          : typeof PM.GL?.thumbnailVideoRequests === 'function'
           ? PM.GL.thumbnailVideoRequests(PM.proj, time)
           : videoClipsAt(PM, time).map(clip => ({ key: `${clip.id}@${clip.time}`, asset: clip.asset, at: clip.at }));
       } finally {
@@ -133,8 +138,12 @@ export function createAutomaticPreviewVideos(PM: any): {
         const width = Number(PM.GL?.canvas?.width ?? Math.ceil(Number(PM.proj.w || 1) * Number(PM.quality || 1)));
         const height = Number(PM.GL?.canvas?.height ?? Math.ceil(Number(PM.proj.h || 1) * Number(PM.quality || 1)));
         const available = Math.max(0, (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024)
-          - (PM.GL?.previewFrames?.bytes || 0) - (PM.Preview?.bytes || 0) - width * height * 4);
-        const limit = Math.min(64 * 1024 * 1024, available);
+          - (PM.GL?.previewFrames?.bytes || 0) - (PM.Preview?.bytes || 0)
+          - (options ? PM.AutomaticPreview?.stagingBytes || 0 : PM.GL?.inputPreviewBytes || 0) - width * height * 4);
+        // Exact shutter invocations can need more than one ordinary idle
+        // snapshot (for example twelve full-HD samples). Bound them by both
+        // the texture allowance and the shared preview cap, not the idle ceiling.
+        const limit = Math.min(options ? PM.Memory?.budget?.('textures') ?? 128 * 1024 * 1024 : 64 * 1024 * 1024, available);
         if (!Number.isSafeInteger(size) || size <= 0 || !Number.isFinite(limit) || capturedBytes + size > limit) {
           throw new Error('Video preview exceeds available memory');
         }
@@ -161,7 +170,8 @@ export function createAutomaticPreviewVideos(PM: any): {
       if (!current()) throw new Error('Preview preparation cancelled');
       completed = true;
       return frames;
-    } catch {
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
       releaseFrames(frames);
       if (active === controller) releaseAll();
       return null;
@@ -178,7 +188,7 @@ export function createAutomaticPreviewVideos(PM: any): {
     }
   }
 
-  return { prepare, cancel, release: releaseFrames, get bytes() { return capturedBytes; }, dispose() { disposed = true; cancel(); } };
+  return { prepare, cancel, release: releaseFrames, get bytes() { return capturedBytes; }, get error() { return lastError; }, dispose() { disposed = true; cancel(); } };
 }
 
 function loaded(video: HTMLVideoElement, url: string, signal: AbortSignal): Promise<void> {
@@ -204,7 +214,8 @@ function loaded(video: HTMLVideoElement, url: string, signal: AbortSignal): Prom
  * Require presentation and keep the actual decoded timestamp with its pixels. */
 function decodedFrame(decoder: Decoder, request: PreviewVideoRequest, signal: AbortSignal): Promise<VideoFrame> {
   const video = decoder.video;
-  const at = request.at;
+  const at = request.at, epsilon = request.exact ? .0000011 : TIME_EPSILON;
+  let observed = 'no presentation';
   const capture = (presentedTime?: number): VideoFrame | null => {
     if (video.seeking || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
     let frame: VideoFrame;
@@ -213,9 +224,10 @@ function decodedFrame(decoder: Decoder, request: PreviewVideoRequest, signal: Ab
     const fps = Number(request.asset.imageSequence?.fps || request.asset.fps);
     const duration = Number(frame.duration) > 0 ? Number(frame.duration) / 1e6
       : Number.isFinite(fps) && fps > 0 ? 1 / fps : 0;
+    observed = `frame ${start}, duration ${duration}, presentation ${presentedTime}, seek ${video.currentTime}`;
     const presented = presentedTime === undefined || Math.abs(start - presentedTime) < TIME_EPSILON;
-    const coversTarget = Math.abs(start - at) < TIME_EPSILON
-      || start <= at + TIME_EPSILON && duration > 0 && at < start + duration - TIME_EPSILON;
+    const coversTarget = Math.abs(start - at) < epsilon
+      || start <= at + epsilon && duration > 0 && at < start + duration - epsilon;
     if (presented && coversTarget) return frame;
     frame.close(); return null;
   };
@@ -239,13 +251,16 @@ function decodedFrame(decoder: Decoder, request: PreviewVideoRequest, signal: Ab
       if (finished) { frame?.close(); return; }
       finished = true; cleanup();
       if (frame) { decoder.at = at; resolve(frame); }
-      else reject(new Error('Video preview did not decode the requested frame'));
+      else reject(new Error(`Video preview did not decode ${at}: ${observed}`));
     };
     const failed = () => finish(null);
     const aborted = () => finish(null);
     const ready = () => {
-      if (finished || video.seeking || video.readyState < 2 || Math.abs(video.currentTime - at) >= TIME_EPSILON) return;
+      if (finished || video.seeking || video.readyState < 2 || Math.abs(video.currentTime - at) >= epsilon) return;
       seekCompleted = true;
+      // A seeked private decoder may already expose a timestamp-validated
+      // frame. Freeze it before playback can skip a high-frame-rate target.
+      if (request.exact) { const frame = capture(); if (frame) { finish(frame); return; } }
       // Detached decoders may not present a paused frame. Play only this muted
       // private element until its first matching presentation, then pause it.
       if (!playing) {

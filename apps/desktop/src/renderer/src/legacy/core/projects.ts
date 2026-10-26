@@ -17,6 +17,8 @@ const R: any = {
   trashKey: 'projectTrash', // metadata for recoverable deletion; slots stay intact
   JOURNAL: 'projectJournal.',
 };
+const sequences = new Map<string, number>();
+const sequence = (id: string) => journal(id).reduce((latest: number, entry: any) => Math.max(latest, Number(entry.sequence) || 0), sequences.get(id) || 0);
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
 const CHECKPOINT_REVISIONS = 50;
 const journalBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -69,8 +71,8 @@ R.put = (proj: any, thumb: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
-  if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }) === false) throw new Error('Project storage is unavailable or full');
-  PM.store.del(R.JOURNAL + proj.id);
+  if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', recoverySequence: sequence(proj.id), proj }) === false) throw new Error('Project storage is unavailable or full');
+  // Keep the journal until a durable asynchronous checkpoint retires its prefix.
   return meta;
 };
 
@@ -102,7 +104,7 @@ R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
   const entries = journal(proj.id);
   if (PM.store.has(R.SLOT + proj.id) && entries.length && journalBytes(entries) <= MAX_JOURNAL_BYTES
       && Number(proj.revision || 0) % CHECKPOINT_REVISIONS !== 0) return true;
-  const saved = await PM.store.setSnapshotAsync(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }, isCurrent);
+  const saved = await PM.store.setSnapshotAsync(R.SLOT + proj.id, { v: PM.version || '1.0.0', recoverySequence: sequence(proj.id), proj }, isCurrent);
   if (!saved) return false;
   // Edits can arrive while native storage commits. Retain patches newer than
   // the captured prefix instead of deleting their recovery journal.
@@ -164,10 +166,20 @@ R.get = (id: any) => {
     if (auto && auto.proj && auto.proj.id === id) return auto.proj;
     return null;
   }
-  let project = R.unwrap(raw);
+  const envelope = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  let project = R.unwrap(envelope);
   if (!project) return null;
+  const checkpointSequence = Number(envelope.recoverySequence) || 0;
+  sequences.set(id, Math.max(checkpointSequence, sequence(id)));
   project = clone(project);
-  for (const entry of journal(id)) project = applyPatches(project, entry.patches);
+  for (const entry of journal(id)) {
+    if (Number.isFinite(entry.sequence) && entry.sequence <= checkpointSequence) continue;
+    // Only old envelopes used edit revisions. New checkpoints use an independent
+    // sequence because Undo, Redo and legacy transactions can rewind revisions.
+    if (envelope?.recoverySequence === undefined && entry.sequence === undefined
+      && Number.isFinite(entry.revision) && Number.isFinite(project.revision) && entry.revision <= project.revision) continue;
+    project = applyPatches(project, entry.patches);
+  }
   return project;
 };
 
@@ -177,16 +189,23 @@ R.getAsync = async (id: string) => {
   if (!PM.store.getAsync) return R.get(id);
   const entries = await PM.store.getAsync(R.JOURNAL + id, []);
   const raw = await PM.store.getAsync(R.SLOT + id, null);
-  let project = R.unwrap(typeof raw === 'string' ? await parseAsync(raw) : raw);
+  const envelope = typeof raw === 'string' ? await parseAsync(raw) : raw;
+  let project = R.unwrap(envelope);
   if (!project) {
     const autosave = await PM.store.getAsync('autosave', null);
     const old = R.unwrap(typeof autosave === 'string' ? await parseAsync(autosave) : autosave);
     project = old?.id === id ? old : null;
   }
   if (!project) return null;
+  const checkpointSequence = Number(envelope?.recoverySequence) || 0;
+  sequences.set(id, (Array.isArray(entries) ? entries : []).reduce((latest: number, entry: any) => Math.max(latest, Number(entry.sequence) || 0), checkpointSequence));
   let deadline = performance.now() + 4;
   for (const entry of Array.isArray(entries) ? entries : []) {
-    if (Number.isFinite(entry.revision) && Number.isFinite(project.revision) && entry.revision <= project.revision) continue;
+    if (Number.isFinite(entry.sequence) && entry.sequence <= checkpointSequence) continue;
+    // Only old envelopes used edit revisions. New checkpoints use an independent
+    // sequence because Undo, Redo and legacy transactions can rewind revisions.
+    if (envelope?.recoverySequence === undefined && entry.sequence === undefined
+      && Number.isFinite(entry.revision) && Number.isFinite(project.revision) && entry.revision <= project.revision) continue;
     project = applyPatches(project, entry.patches);
     if (performance.now() >= deadline) { await yieldTask(); deadline = performance.now() + 4; }
   }
@@ -312,7 +331,9 @@ PM.Projects = R;
 PM.bus?.on?.('history:project-patch', (entry: any) => {
   if (!entry?.projectId || !Array.isArray(entry.patches) || !entry.patches.length) return;
   const entries = journal(entry.projectId);
-  entries.push({ revision: Number(entry.revision) || 0, patches: entry.patches });
+  const next = sequence(entry.projectId) + 1;
+  sequences.set(entry.projectId, next);
+  entries.push({ sequence: next, revision: Number(entry.revision) || 0, patches: entry.patches });
   /* Keep the journal bounded even before the next debounced checkpoint. */
   if (journalBytes(entries) > MAX_JOURNAL_BYTES) {
     if (PM.proj?.id === entry.projectId) R.put(PM.proj);

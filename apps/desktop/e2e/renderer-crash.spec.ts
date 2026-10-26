@@ -29,7 +29,7 @@ test('offers recovery after an editor process crashes and restores its latest sa
   // reload. Inspect the recovered document through the surviving native host.
   const recovered = await window.evaluate(window => window.webContents.executeJavaScript(`
     window.PM.projectReady.then(() => ({ id: window.PM.proj.id, name: window.PM.proj.name,
-      tabs: document.querySelectorAll('#tabs .project-doc').length }))
+      tabs: window.PM.Tabs.list().length }))
   `));
   expect(recovered).toEqual({ id: projectId, name: 'Renderer recovery', tabs: 1 });
   expect(session.app.windows()).toHaveLength(1);

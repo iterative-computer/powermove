@@ -1,7 +1,8 @@
 import { readWithRetry } from './read-retry';
-import { mkdtemp, open, rm, type FileHandle } from 'node:fs/promises';
+import { mkdtemp, open, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { copySnapshot, syncDirectory, syncFile, temporarySibling } from './durable-file';
 
 export const FILE_CHUNK_BYTES = 1024 * 1024;
 
@@ -12,6 +13,7 @@ export class FileUpload {
   private disposed = false;
   private claimed = false;
   private failure?: unknown;
+  private publishing?: Promise<void>;
   private constructor(readonly size: number, private directory: string, private handle: FileHandle) {}
 
   static async create(size: number, root = tmpdir()): Promise<FileUpload> {
@@ -42,11 +44,46 @@ export class FileUpload {
 
   /** Claim only complete uploads. An incomplete finish cannot consume the upload. */
   claim(): AsyncIterable<Uint8Array> {
+    this.claimComplete();
+    return this.read();
+  }
+
+  /** Export publication can clone the immutable spool instead of reading and
+   * rewriting every byte through JavaScript. Project saves keep their stream
+   * so their validated document, hashing, and backup path stay authoritative. */
+  claimForExport(): (destination: string) => Promise<void> {
+    this.claimComplete();
+    let used = false;
+    return destination => {
+      if (this.disposed || used) throw new Error('The save upload is unavailable.');
+      used = true;
+      return this.publishing = this.publish(destination);
+    };
+  }
+
+  private claimComplete(): void {
     if (this.disposed || this.claimed || this.writing || this.failure || this.received !== this.size) {
       throw new Error('The save upload is incomplete.');
     }
     this.claimed = true;
-    return this.read();
+  }
+
+  private async publish(destination: string): Promise<void> {
+    const temporary = temporarySibling(destination);
+    try {
+      // copySnapshot falls back to an ordinary exclusive copy across volumes
+      // and on filesystems without cloning. Never write through the target.
+      await copySnapshot(path.join(this.directory, 'data'), temporary);
+      const handle = await open(temporary, 'r+');
+      try { await syncFile(handle); } finally { await handle.close(); }
+      await rename(temporary, destination);
+      await syncDirectory(path.dirname(destination));
+    } catch (error) {
+      // An exclusive-copy collision belongs to another writer, so it must not
+      // become ours to remove during cleanup.
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async *read(): AsyncGenerator<Uint8Array> {
@@ -64,6 +101,9 @@ export class FileUpload {
     if (this.disposed) return;
     this.disposed = true;
     await this.writing?.catch(() => undefined);
+    // Once publication starts, finish its durable outcome before removing its
+    // source, even if the renderer disappears while the copy is in progress.
+    await this.publishing?.catch(() => undefined);
     try { await this.handle.close(); }
     finally { await rm(this.directory, { recursive: true, force: true }); }
   }

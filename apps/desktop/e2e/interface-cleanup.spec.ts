@@ -34,11 +34,12 @@ test('panel reload keeps the project and canvas while simplifying editor control
     const PM = (window as any).PM, before = (window as any).__beforeCleanup;
     const head = document.querySelector('#tl-head')!.getBoundingClientRect();
     const canvas = document.querySelector('#tl-canvas')!.getBoundingClientRect();
-    const quality = document.querySelector('#preview-controls [role=combobox]')!.getBoundingClientRect();
-    const zoom = document.querySelector('[role=combobox][aria-label="Composition zoom"]')!.getBoundingClientRect();
+    // Zoom, then preview quality, along the bottom of the viewer.
+    const quality = document.querySelector('#viewer-foot [role=combobox][aria-label="Preview resolution"]')!.getBoundingClientRect();
+    const zoom = document.querySelector('#viewer-foot [role=combobox][aria-label="Composition zoom"]')!.getBoundingClientRect();
     return { sameProject: PM.serialize() === before.project, sameCanvas: PM.GL.canvas === before.canvas,
       inlineRuler: Math.abs(head.top - canvas.top) < 1, compact: head.width < canvas.width,
-      adjacentMenus: zoom.left - quality.right >= 0 && zoom.left - quality.right < 20,
+      adjacentMenus: quality.left - zoom.right >= 0 && quality.left - zoom.right < 20,
       alignedMenus: quality.top === zoom.top && quality.height === zoom.height };
   })).toEqual({ sameProject: true, sameCanvas: true, inlineRuler: true, compact: true, adjacentMenus: true, alignedMenus: true });
   await page.getByRole('radiogroup', { name: 'Visible', exact: true }).getByRole('radio', { name: 'Off', exact: true }).click();

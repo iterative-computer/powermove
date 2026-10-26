@@ -70,6 +70,7 @@ export interface MediaPathCacheOptions {
   isLocal?(file: string): Promise<boolean>;
   /** `powermove serve`: the host's content-addressed copies, by store key. */
   mediaStoreDir?: string;
+  libraryFile?(key: string): Promise<string | null>;
 }
 
 export class MediaPathCache {
@@ -115,6 +116,7 @@ export class MediaPathCache {
   }
 
   private async hostCopy(storageKey?: string): Promise<string | null> {
+    if (storageKey && this.options.libraryFile) return this.options.libraryFile(storageKey);
     if (!this.options.mediaStoreDir || !storageKey || !MEDIA_KEY.test(storageKey)) return null;
     const file = path.join(this.options.mediaStoreDir, storageKey.replace(/[^A-Za-z0-9._-]/g, '_'));
     return await exists(file) ? file : null;

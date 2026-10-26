@@ -1,6 +1,9 @@
+import {referenceParam,emptyReference} from '../core/effect-inputs';
+import { noticeDenseKeyframes } from './core/keyframe-simplification';
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
 import { MEDIA_ACCEPT } from '../../../shared/media-formats';
 import { chooseSequence, convertImageSequence } from './core/image-sequence';
+import { prepareCloudImport, cloudWait, downloadCloudImportSource } from './core/cloud-media';
 import { createImportProgress } from './core/import-progress';
 import { createFolder, validFolder } from './core/asset-folders';
 import { droppedFolders, pickedFolders, readDroppedFolder, type ImportFolderNode } from './core/folder-import';
@@ -15,20 +18,28 @@ import { sanitizeMemory } from '../core/memory';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
+import { AutosaveQueue, type SaveOutcome } from './core/autosave-queue';
+import { parseAsync } from './core/parse-async';
+import { ClosePreparation } from './core/close-preparation';
 import { stringifyAsync } from './core/serialize-async';
 import { yieldTask } from './core/yield-task';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
+import { installStorageUpgradeNotice } from '../host/storage-upgrade';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
 const document = window.document;
-type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any };
+type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any; phase?: string; recoverySaved?: boolean };
 const fileStates = new Map<string, FileState>();
 const comparisonVersions = new Map<string, number>();
 const pendingDiscards = new Set<string>();
+const closeFileDiscards = new Set<string>();
+function resumeDiscardedAutosaves(ids: string[]) {
+  for (const id of ids) if (closeFileDiscards.delete(id) && fileStates.get(id)?.dirty && !discardedProjects.has(id)) backgroundSaves.edit(id);
+}
 const discardedProjects = new Set<string>();
 let loadGeneration = 0;
 let loadingSourceProject: any = null;
@@ -65,6 +76,7 @@ function finishProjectLoading(generation: number) {
 function discardUnsavedProject(id: string) {
   if (!pendingDiscards.delete(id)) return;
   discardedProjects.add(id);
+  backgroundSaves.forget(id);
   if (PM.proj.id === id) {
     window.clearTimeout(APP.saveTimer);
     window.clearTimeout(thumbRetry);
@@ -99,21 +111,26 @@ function fileState(id = PM.proj.id): FileState {
 }
 function fileUI() {
   APP.dirty = fileState().dirty;
+  APP.saveStatus = fileState().phase === 'failure' ? 'SAVE FAILED' : fileState().phase === 'saving' ? 'SAVING…'
+    : fileState().phase === 'pending' ? 'UNSAVED' : !fileState().path ? (fileState().recoverySaved ? 'SAVED LOCALLY' : 'UNSAVED') : APP.dirty ? 'UNSAVED' : 'SAVED';
   PM.invalidate('status'); PM.bus.emit('projects:open');
   document.title = `${APP.dirty ? '• ' : ''}${PM.proj.name} — Powermove`;
 }
-async function refreshFileDirty(project = PM.proj, isCurrent?: () => boolean): Promise<boolean> {
+async function refreshFileDirty(project = PM.proj, isCurrent?: () => boolean, preparation?: ClosePreparation): Promise<boolean> {
   const state = fileState(project.id);
-  const json = await stringifyAsync(project);
+  const serialize = () => stringifyAsync(project, async () => { await yieldTask(); preparation?.check(); });
+  preparation?.check();
+  const json = await serialize();
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
   await state.baselineReady;
   const hash = await projectFingerprint(json);
+  preparation?.check();
   // A newer edit wins over an in-flight comparison.
   // Autosave already owns an edit-generation guard. Use it to avoid walking
   // the whole document twice. Close and explicit comparisons retain the full
   // equality check, including callers that changed data without an edit event.
-  if (isCurrent ? !isCurrent() : await stringifyAsync(project) !== json) return true;
+  if (isCurrent ? !isCurrent() : await serialize() !== json) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the
@@ -351,14 +368,17 @@ function* hydrateSteps(p: any): Generator<void, any> {
          lose the user's keyframes on save. The compositor skips `missing`. */
       L.fx = L.fx
         .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
-        .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
+        .map((f: any) => (PM.effectDef?.(f) ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
       L.fx.forEach((f: any) => {
         f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, minKeyTime); f.on = isProperty(f.on) ? f.on : f.on !== false;
         if (isProperty(f.on)) sanitizeProp(f.on, { v: true }, minKeyTime);
-        const definition = PM.FX?.[f.type];
+        f.version ??= 1;
+        const definition = PM.effectDef?.(f);
         for (const param of definition?.params || []) {
-          if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
-          sanitizeProp(f.p[param.k], { v: param.def }, minKeyTime);
+          if (referenceParam(param)) { (f.inputs ??= {})[param.k] ??= emptyReference(param.type!); continue; }
+          const fallback = PM.effectParamDefault?.(param, L, container) ?? param.def;
+          if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(fallback);
+          sanitizeProp(f.p[param.k], { v: fallback }, minKeyTime);
         }
       });
       L.transitionIn = sanitizeTransition(L.transitionIn, minKeyTime);
@@ -486,12 +506,12 @@ async function restoreProjectAssets(project: any, warn: any = true) {
      panel shows loading, not offline: only a finished restore can say a
      file is missing. */
   PM.assetsRestoring = (PM.assetsRestoring || 0) + 1;
-  PM.bus.emit('assets');
+  PM.bus.emit('assets', { runtimeOnly: true });
   let result: any;
   try { result = await PM.assets.restoreProject(project); }
-  finally { PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets'); }
+  finally { PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets', { runtimeOnly: true }); }
   if (result.stale || PM.proj !== project) return result;
-  PM.bus.emit('assets');
+  PM.bus.emit('assets', { runtimeOnly: true });
   inspectorService(PM)?.refresh();
   PM.invalidate('all');
   if (warn && result.missing.length) {
@@ -502,6 +522,15 @@ async function restoreProjectAssets(project: any, warn: any = true) {
       : count === 1
       ? 'One media file is missing · import it again to relink it'
       : `${count} media files are missing · import them again to relink them`, 5000);
+  }
+  // Restoration notifications are runtime-only; persisted metadata repairs
+  // still count as edits against the existing saved baseline.
+  if (await refreshFileDirty(project) && PM.proj === project) {
+    const queued = backgroundSaves.state(project.id);
+    if (!queued || queued.revision === queued.persisted) {
+      comparisonVersions.set(project.id, (comparisonVersions.get(project.id) || 0) + 1);
+      backgroundSaves.edit(project.id);
+    }
   }
   return result;
 }
@@ -524,21 +553,25 @@ function revalidateContributionPlaceholders() {
     for (const layer of container?.layers || []) {
       for (const effect of layer.fx || []) {
         if (!effect || typeof effect.type !== 'string') continue;
-        const missing = !PM.FX?.[effect.type];
+        effect.version ??= 1;
+        const definition = PM.effectDef?.(effect);
+        const missing = !definition;
         if (missing && !effect.missing) { effect.missing = true; changed = true; }
         else if (!missing && effect.missing) { delete effect.missing; changed = true; }
         if (!missing) {
           effect.p = effect.p && typeof effect.p === 'object' ? effect.p : {};
-          for (const param of PM.FX[effect.type].params || []) {
+          for (const param of definition.params || []) {
+            if (referenceParam(param)) { (effect.inputs ??= {})[param.k] ??= emptyReference(param.type!); continue; }
+            const fallback = PM.effectParamDefault?.(param, layer, container) ?? param.def;
             const prop = effect.p[param.k];
             if (!prop || typeof prop !== 'object') {
-              effect.p[param.k] = PM.P(param.def);
+              effect.p[param.k] = PM.P(fallback);
               changed = true;
             } else {
-              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps, -layer.from);
+              prop.kf = PM.normalizeKeyframes(prop.kf, fallback, PM.proj.fps, -layer.from);
               if (typeof prop.expr !== 'string') prop.expr = null;
-              const sameType = typeof prop.v === typeof param.def;
-              if (!sameType || (typeof prop.v === 'number' && !Number.isFinite(prop.v))) prop.v = param.def;
+              const sameType = typeof prop.v === typeof fallback;
+              if (!sameType || (typeof prop.v === 'number' && !Number.isFinite(prop.v))) prop.v = fallback;
             }
           }
         }
@@ -688,25 +721,41 @@ function captureProjectSession(persist = true) {
 }
 
 async function captureProjectSessionAsync(isCurrent: () => boolean) {
+  if (!isCurrent()) return false;
   if (!PM.store.setSnapshotAsync) return captureProjectSession();
   const project = PM.proj;
   if (!project?.id || project.id === homeProjectId || discardedProjects.has(project.id)) return true;
   PM.bus.emit('project:flush-edits');
-  if (!await PM.store.setSnapshotAsync(`project.${project.id}`, { v: PM.version, proj: project }, isCurrent)) return false;
+  if (PM.Projects.recoverAsync) {
+    if (!await PM.Projects.recoverAsync(project, undefined, isCurrent)) return false;
+  } else if (!await PM.store.setSnapshotAsync(`project.${project.id}`, { v: PM.version, proj: project }, isCurrent)) return false;
   if (!isCurrent() || PM.proj !== project) return false;
-  PM.store.del(`projectJournal.${project.id}`);
+  // recoverAsync retires only its durably checkpointed journal prefix.
   PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), w: project.w, h: project.h });
   return captureProjectSession(false);
 }
 
 // Native close/quit calls this while the document and its IPC channel are
 // still alive. beforeunload alone runs after the main process's quit flush.
-PM.flushProject = async () => {
-  await APP.importQueue;
+PM.flushProject = async (preparation?: ClosePreparation, isCurrent = () => true) => {
+  const run = <T>(detail: string, operation: () => T | PromiseLike<T>) => preparation
+    ? preparation.wait(detail, operation) : Promise.resolve().then(operation);
+  await run('Waiting for imports', () => APP.importQueue);
+  preparation?.check();
   if (!discardedProjects.has(PM.proj.id)) PM.AgentUI?.flushThreads?.();
   window.clearTimeout(APP.saveTimer);
-  if (!captureProjectSession()) throw new Error('Project storage is unavailable or full');
-  await PM.store.flush?.();
+  // Explicit close uses the same yielding, generation-guarded checkpoint as
+  // background recovery, instead of cloning/stringifying the live document
+  // synchronously (and doing it all again in beforeunload).
+  const current = () => !preparation?.controller.signal.aborted && isCurrent();
+  if (!await run('Saving your work', () => captureProjectSessionAsync(current)) || !current()) {
+    throw new Error('The project changed while closing. Your edits are still open; try Close again.');
+  }
+  if (hostBridge()?.projectSave && !closeFileDiscards.has(PM.proj.id)) await run('Finishing project save', async () => {
+    if (!await backgroundSaves.flush(PM.proj.id, () => performSave({ projectId: PM.proj.id, background: true }))) throw new Error('Project save failed. Your edits are still open.');
+  });
+  await run('Finishing up', () => PM.store.flush?.());
+  if (!current()) throw new Error('The project changed while closing. Your edits are still open; try Close again.');
 };
 
 function closeProjectTransients() {
@@ -715,8 +764,14 @@ function closeProjectTransients() {
   PM.closeMenus?.();
   if (PM.WS.editing) PM.WS.cancelEdit();
 }
+const backgroundSaves = new AutosaveQueue((projectId, explicit) => performSave({ projectId, background: !explicit }),
+  (id, status) => { const state = fileState(id); state.phase = status.phase; if (PM.proj.id === id) fileUI(); },
+  id => id !== PM.proj.id || !PM.hist.busy?.(), 750, 5000, {
+    setTimeout: window.setTimeout.bind(window), clearTimeout: window.clearTimeout.bind(window) } as any);
+let switchingProject = false;
 PM.autosave = () => {
-  if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
+  if (switchingProject || PM.projectLoading || PM.hist.busy?.() || PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
+  backgroundSaves.edit(PM.proj.id);
   APP.dirty = true;
   fileState().dirty = true;
   comparisonVersions.set(PM.proj.id, (comparisonVersions.get(PM.proj.id) || 0) + 1);
@@ -724,7 +779,9 @@ PM.autosave = () => {
   const generation = ++saveGeneration, project = PM.proj, projectId = project.id;
   window.clearTimeout(APP.saveTimer);
   APP.saveTimer = window.setTimeout(async () => {
-    const isCurrent = () => generation === saveGeneration && PM.proj === project && !discardedProjects.has(projectId);
+    const editVersion = PM.animVersion?.();
+    const isCurrent = () => generation === saveGeneration && PM.proj === project && !discardedProjects.has(projectId)
+      && editVersion === PM.animVersion?.() && !PM.hist.busy?.();
     if (!isCurrent()) return;
     try {
       if (PM.Projects.recoverAsync) {
@@ -733,11 +790,8 @@ PM.autosave = () => {
       PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
       await PM.store.flush?.();
       if (!isCurrent()) return;
-      // Local recovery is not the user's .pmv file and must never mark it saved.
-      const editVersion = PM.animVersion?.();
-      const comparisonCurrent = () => isCurrent() && editVersion === PM.animVersion?.() && !PM.hist.busy?.();
-      await refreshFileDirty(project, comparisonCurrent);
-      if (!comparisonCurrent()) return;
+      // The completed transaction already marked its revision dirty. Hashing a
+      // whole project here would repeat the background file serializer's work.
       PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
@@ -752,7 +806,7 @@ PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); })
 // Disposable decoder previews change runtime readiness, not saved project data.
 PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly) PM.autosave(); });
 
-async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
+async function saveProject({ saveAs = false, projectId = PM.proj.id, signal, background = false, cancelled = () => {} }: any = {}): Promise<boolean> {
   // A live background tab may be ahead of its recovery checkpoint.
   const currentProject = () => {
     if (projectId === PM.proj.id) return PM.proj;
@@ -765,89 +819,122 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
   APP.saving = true; PM.invalidate('status');
   const toastKey = 'project-save';
   const name = safeName(currentProject()?.name || 'Project') + '.pmv';
-  const progress = (value: number | null) => PM.toast('Saving ' + name, 2200, {
+  const progress = (value: number | null) => !background && PM.toast('Saving ' + name, 2200, {
     key: toastKey, icon: 'export', error: false, sticky: true, dismissible: false, progress: value,
+    task: true,
+    ...(value == null || value < 0.25 ? { detail: 'Preparing project', step: { index: 1, total: 3 } }
+      : value < 0.95 ? { detail: 'Writing project', step: { index: 2, total: 3 } }
+      : { detail: 'Finishing up', step: { index: 3, total: 3 } }),
   });
   progress(null);
   try {
-    (window.document.activeElement as HTMLElement | null)?.blur?.();
-    PM.bus.emit('project:flush-edits');
+    signal?.throwIfAborted();
+    if (!background) (window.document.activeElement as HTMLElement | null)?.blur?.();
+    if (!background) PM.bus.emit('project:flush-edits');
     await APP.importQueue;
     progress(0.05);
     const project = currentProject();
     if (!project) throw new Error('This project is no longer available.');
     let projectJSON: string, snapshot: any, serialized: string;
     let capturedGeneration = 0, capturedEditVersion: unknown;
+    let snapshotAttempts = 0;
     // Edits can arrive between serialization slices. Retry a changed snapshot
     // instead of writing a mixture of two document revisions to disk.
     for (;;) {
+      signal?.throwIfAborted();
       const generation = comparisonVersions.get(projectId) || 0;
-      const editVersion = PM.animVersion?.();
+      const editVersion = projectId === PM.proj.id ? PM.animVersion?.() : undefined;
       const current = currentProject() || project;
       snapshot = { v: PM.version, proj: current,
         history: projectId === PM.proj.id ? PM.hist.export?.({ copy: false }) : PM.Projects.getState(projectId)?.history,
         ws: projectId === PM.proj.id ? PM.WS.snapshot() : PM.Projects.getState(projectId)?.workspace };
-      projectJSON = await stringifyAsync(current);
+      // Continuous edits must not starve a yielding serializer indefinitely.
+      // Only after two superseded attempts, pin the plain project once at this
+      // save boundary. Media stays in its immutable native ranges, outside it.
+      const pinned = ++snapshotAttempts > 2;
+      if (pinned) snapshot.proj = structuredClone(current);
+      projectJSON = await stringifyAsync(snapshot.proj);
       const historyJSON = await stringifyAsync(snapshot.history ?? null);
       serialized = `{"v":${JSON.stringify(PM.version ?? null)},"proj":${projectJSON},"history":${historyJSON},"ws":${JSON.stringify(snapshot.ws ?? null)}}`;
-      if (editVersion === PM.animVersion?.() && generation === (comparisonVersions.get(projectId) || 0) && (projectId !== PM.proj.id || current === PM.proj)) {
+      if (pinned || (projectId !== PM.proj.id || editVersion === PM.animVersion?.()) && generation === (comparisonVersions.get(projectId) || 0) && (projectId !== PM.proj.id || current === PM.proj)) {
         capturedGeneration = generation; capturedEditVersion = editVersion; break;
       }
     }
+    snapshot.proj = await parseAsync(projectJSON);
     const state = fileState(projectId);
     const suggestedName = safeName(project.name) + '.pmv';
     progress(0.25);
-    const finish = async (path?: string) => {
+    const finish = async (path?: string, recovery = false) => {
+      if (recovery) {
+        state.recoverySaved = capturedGeneration === (comparisonVersions.get(projectId) || 0);
+        if (projectId === PM.proj.id) fileUI();
+        return true;
+      }
       progress(0.95);
       state.path = path || state.path;
       state.savedHash = await projectFingerprint(projectJSON);
-      if (projectId === PM.proj.id && snapshot.proj === PM.proj && capturedEditVersion === PM.animVersion?.()
+      if (projectId === PM.proj.id && capturedEditVersion === PM.animVersion?.()
         && capturedGeneration === (comparisonVersions.get(projectId) || 0)) {
         state.dirty = false; fileUI();
       } else await refreshFileDirty(currentProject() || project);
       let recoveryFailed = false;
       try {
         rememberFile(projectId, state);
-        if (projectId === PM.proj.id && !captureProjectSession()) throw new Error('Local recovery is unavailable');
+        if (projectId === PM.proj.id) {
+          const recoveryProject = PM.proj, recoveryGeneration = saveGeneration;
+          if (!await captureProjectSessionAsync(() => PM.proj === recoveryProject && saveGeneration === recoveryGeneration)) {
+            throw new Error('Local recovery changed while saving');
+          }
+        }
         await PM.store.flush?.();
       } catch (error) {
         recoveryFailed = true;
         console.warn('Project file saved, but local recovery could not be updated.', error);
       }
       PM.bus.emit('project:saved');
-      PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName), 2200, { key: toastKey, icon: 'export', error: false, progress: 1, completed: true });
+      if (!background) PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName), 2200, { key: toastKey, icon: 'export', error: false, progress: 1, completed: true, task: true });
       if (recoveryFailed) PM.toast('Your project file is saved, but local recovery could not be updated. Check available disk space.', 6000, { key: 'project-recovery', error: true });
       return true;
     };
     const incremental = hostBridge()?.projectSave;
     if (incremental) {
       const result = await saveIncrementalProject(snapshot, serialized, PM.MediaStore, incremental,
-        { name: suggestedName, projectId, saveAs }, progress);
-      if (result.ok) return await finish(result.path);
+        { name: suggestedName, projectId, saveAs, background }, progress, signal);
+      if (result.ok) return await finish(result.path, result.recovery);
       if (!result.cancelled) throw new Error(result.error || 'Save failed');
-      PM.dismissToast?.(toastKey); return false;
+      cancelled(); PM.dismissToast?.(toastKey); return false;
     }
-    const data = await packProjectFileBlob(snapshot, PM.MediaStore, serialized, value => progress(0.25 + value * 0.4));
+    if (background) return true; // Non-native hosts use their existing journal/checkpoint store.
+    const data = await packProjectFileBlob(snapshot, PM.MediaStore, serialized, value => progress(0.25 + value * 0.4), signal);
     progress(0.65);
     if (typeof hostBridge()?.saveFile === 'function') {
       const metadata = { name: suggestedName, projectId, saveAs };
       const upload = hostBridge()!.fileUpload;
       const result = await (async () => {
-        if (!upload || data.size <= 4 * 1024 * 1024) return hostBridge()!.saveFile({ ...metadata, data: new Uint8Array(await data.arrayBuffer()) });
+        signal?.throwIfAborted();
+        if (!upload || data.size <= 4 * 1024 * 1024) {
+          const bytes = new Uint8Array(await data.arrayBuffer());
+          signal?.throwIfAborted();
+          return hostBridge()!.saveFile({ ...metadata, data: bytes });
+        }
         const token = await upload.begin(data.size);
         try {
           for (let offset = 0; offset < data.size; offset += 1024 * 1024) {
             // A subarray still owns the complete backing buffer. Electron's
             // context bridge would clone the entire project for every slice.
-            await upload.chunk(token, new Uint8Array(await data.slice(offset, offset + 1024 * 1024).arrayBuffer()));
+            signal?.throwIfAborted();
+            const bytes = new Uint8Array(await data.slice(offset, offset + 1024 * 1024).arrayBuffer());
+            signal?.throwIfAborted();
+            await upload.chunk(token, bytes);
             progress(0.65 + Math.min(1, (offset + 1024 * 1024) / data.size) * 0.25);
           }
+          signal?.throwIfAborted();
           return await upload.finish(token, metadata);
         } finally { await upload.abort(token).catch(() => undefined); }
       })();
-      if (result.ok) return await finish(result.path);
+      if (result.ok) return await finish(result.path, result.recovery);
       if (!result.cancelled) throw new Error(result.error || 'Save failed');
-      PM.dismissToast?.(toastKey);
+      cancelled(); PM.dismissToast?.(toastKey);
       return false;
     }
     let handle = saveAs ? null : state.handle;
@@ -855,21 +942,24 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       handle = await (window as any).showSaveFilePicker({ suggestedName, types: [{ description: 'Powermove Project', accept: { 'application/json': ['.pmv'] } }] });
     }
     if (handle?.createWritable) {
-      const w = await handle.createWritable(); await w.write(data); await w.close();
+      const w = await handle.createWritable();
+      try { signal?.throwIfAborted(); await w.write(data); signal?.throwIfAborted(); await w.close(); }
+      catch (error) { await w.abort().catch(() => undefined); throw error; }
       state.handle = handle;
       return await finish(handle.name);
     }
+    signal?.throwIfAborted();
     PM.download(data, safeName(PM.proj.name) + '.pmv');
     PM.toast('Download started', 2200, { key: toastKey, error: false }); return false;
   } catch (error: any) {
-    if (error.name === 'AbortError') { PM.dismissToast?.(toastKey); return false; }
-    PM.toast('Could not save project: ' + (error.message || 'Save failed'), 6000, { key: toastKey, error: true }); return false;
+    if (signal?.aborted || error?.name === 'AbortError' && !signal) { cancelled(); PM.dismissToast?.(toastKey); return false; }
+    console.error('[project-save] Save failed.', error);
+    PM.toast('Could not save project: ' + (error?.message || 'Save failed'), 6000, { key: toastKey, error: true }); return false;
   }
 }
-PM.saveProject = (options: any = {}) => {
-  if (PM.proj.id === homeProjectId) return Promise.resolve(false);
-  if (activeSave) return Promise.resolve(false);
-  const save = saveProject(options);
+function performSave(options: any = {}): Promise<SaveOutcome> {
+  let wasCancelled = false;
+  const save = saveProject({ ...options, cancelled: () => { wasCancelled = true; } });
   activeSave = save;
   void save.finally(() => {
     if (activeSave === save) {
@@ -877,7 +967,34 @@ PM.saveProject = (options: any = {}) => {
       APP.saving = false;
     }
   });
-  return save;
+  return save.then(ok => wasCancelled ? 'cancelled' : ok);
+}
+PM.saveProject = (options: any = {}) => {
+  const projectId = options.projectId || PM.proj.id;
+  if (projectId === homeProjectId) return Promise.resolve(false);
+  return backgroundSaves.flush(projectId, () => performSave({ ...options, projectId }));
+};
+PM.projectVersionHistory = async () => {
+  const bridge = hostBridge()?.projectVersions;
+  if (!bridge) return;
+  const projectId = PM.proj.id;
+  try {
+    const versions = await bridge.list(projectId);
+    const body = h('div');
+    if (!versions.length) body.append(h('p', 'No earlier saved versions yet.'));
+    for (const version of versions) {
+      const source = version.source === 'macos' ? 'macOS snapshot' : version.source === 'recovery' ? 'Local recovery' : 'Saved file';
+      const button = h('button.btn', { onclick: async () => {
+        try {
+          const result = await bridge.open(projectId, version.id);
+          if (!result.ok) throw new Error(result.error || 'Could not open version');
+          await openProjectFile({ name: 'Recovered copy', native: result }, { ...result, copy: true });
+        } catch (error: any) { PM.toast('Could not restore version: ' + error.message, 6000); }
+      } }, `${new Date(version.at).toLocaleString()} · ${source} · Open Copy`);
+      body.append(h('div.settings-row', button));
+    }
+    PM.modal({ title: 'Version History', body, width: 560, actions: [{ label: 'Done' }] });
+  } catch (error: any) { PM.toast('Could not load versions: ' + error.message, 6000); }
 };
 PM.openProject = async () => {
   if (hostBridge()?.openProjectFile) {
@@ -897,7 +1014,7 @@ hostBridge()?.onProjectOpenExternal?.(async result => {
     PM.toast('Could not open project: ' + result.error, 6000);
   }
 });
-async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
+async function openProjectFile(file: any, association?: { path: string; projectId: string; copy?: boolean }) {
   const opening = createImportProgress('Opening project', PM);
   opening.update({ label: file.name });
   const generation = beginProjectLoading(association?.projectId || null, file.name || 'project');
@@ -922,6 +1039,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
     const source = o.proj || o;
+    if (association?.copy) source.name = (source.name || 'Untitled') + ' recovered copy';
     if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) throw new Error('This is not a Powermove project.');
     source.id = association?.projectId || PM.uid('project');
     const project = await hydrateAsync(source, current);
@@ -930,7 +1048,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.
-    const filePath = association?.path;
+    const filePath = association?.copy ? undefined : association?.path;
     const rememberedWorkspace = filePath && fileState().path === filePath
       ? PM.WS.snapshot()
       : filePath ? PM.Projects.list()
@@ -961,8 +1079,8 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (!current()) { opening.close(); return false; }
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
     const state = fileState(project.id);
-    state.path = association?.path;
-    state.savedHash = association ? await projectFingerprint(await stringifyAsync(project)) : undefined;
+    state.path = association?.copy ? undefined : association?.path;
+    state.savedHash = association && !association.copy ? await projectFingerprint(await stringifyAsync(project)) : undefined;
     if (!current()) { opening.close(); return false; }
     rememberFile(project.id, state);
     await refreshFileDirty(project, current);
@@ -974,6 +1092,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (!current()) { opening.close(); return false; }
     opening.finish('Opened ' + file.name, 2200);
     PM.ProjectsScreen?.hide?.();
+    noticeDenseKeyframes(PM);
     return true;
   } catch (e: any) {
     opening.close();
@@ -987,7 +1106,8 @@ const PROJECT_FILE = /\.(pmv|json)$/i;
 /* Home's Open takes a project or media. A project opens as itself, with any
    media alongside imported into it; media alone starts a project matching the
    first successfully decoded source, named after the first file. */
-PM.openFiles = () => {
+PM.openFiles = (files?: File[]) => {
+  if (files) return openFiles(files);
   const inp = h('input', {
     type: 'file', multiple: true, accept: MEDIA_ACCEPT + ',.json',
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
@@ -1004,7 +1124,13 @@ PM.openFiles = () => {
 };
 async function openFiles(files: File[]) {
   const projectFile = files.find(f => PROJECT_FILE.test(f.name));
-  const media = files.filter(f => !PROJECT_FILE.test(f.name));
+  const media = files.filter(f => {
+    if (PROJECT_FILE.test(f.name)) return false;
+    if (PM.assetKind(f) || PM.Captions?.isCaptionFile?.(f)) return true;
+    PM.toast('Unsupported file · ' + f.name, 2200, { error: true });
+    return false;
+  });
+  if (!projectFile && !media.length) return;
   if (projectFile) {
     if (!await openPickedProject(projectFile)) return;
   } else {
@@ -1172,10 +1298,11 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
   else if (!parkable) PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = fileState().dirty;
-  PM.bus.emit('project');
-  PM.bus.emit('layers');
-  PM.bus.emit('sel');
-  PM.bus.emit('assets');
+  APP.saveStatus = fileState().phase === 'failure' ? 'SAVE FAILED' : fileState().phase === 'saving' ? 'SAVING…'
+    : fileState().phase === 'pending' ? 'UNSAVED' : !fileState().path ? (fileState().recoverySaved ? 'SAVED LOCALLY' : 'UNSAVED') : APP.dirty ? 'UNSAVED' : 'SAVED';
+  switchingProject = true;
+  try { PM.bus.emit('project'); PM.bus.emit('layers'); PM.bus.emit('sel'); PM.bus.emit('assets'); }
+  finally { switchingProject = false; }
   inspectorService(PM)?.refresh();
   viewerService(PM)?.layout();
   PM.invalidate('all');
@@ -1203,44 +1330,115 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
   }
 }
 
-PM.confirmCloseProject = async (id: string) => {
+PM.confirmCloseProject = async (id: string, preparation?: ClosePreparation) => {
+  const run = <T>(detail: string, operation: () => T | PromiseLike<T>, timeout?: number) => preparation
+    ? preparation.wait(detail, operation, timeout) : Promise.resolve().then(operation);
   pendingDiscards.delete(id);
+  closeFileDiscards.delete(id);
   if (id === homeProjectId) return true;
   PM.bus.emit('project:flush-edits');
-  await APP.importQueue;
-  // Closing is a continuation of the user's current action. If a save is
-  // already running, join it and then re-check the document instead of making
-  // them retry Close after the file dialog or write completes.
-  if (activeSave) await activeSave;
+  await run('Waiting for imports', () => APP.importQueue);
+  // Join an existing save, but cancelling Close never cancels that file write.
+  if (activeSave) await run('Waiting for the current save', () => activeSave);
+  preparation?.check();
   const project = id === PM.proj.id ? PM.proj : parkedTabs.get(id)?.project
-    || await (PM.Projects.getAsync?.(id) ?? PM.Projects.get(id));
-  if (!project || !await refreshFileDirty(project)) return true;
-  const decision = hostBridge()?.confirmProjectClose
-    ? await hostBridge()!.confirmProjectClose(project.name || 'Untitled')
-    : window.confirm?.('Close without saving a project file?') ? 'discard' : 'cancel';
+    || await run('Reading project', () => PM.Projects.getAsync?.(id) ?? PM.Projects.get(id));
+  if (!project || !await run('Checking ' + project.name, () => refreshFileDirty(project, undefined, preparation))) return true;
+  const decision = await run('Waiting for your save decision', () => hostBridge()?.confirmProjectClose
+    ? hostBridge()!.confirmProjectClose(project.name || 'Untitled')
+    : window.confirm?.('Close without saving a project file?') ? 'discard' : 'cancel', 0);
+  preparation?.check();
   if (decision === 'cancel') return false;
   if (decision === 'save') {
-    if (!await PM.saveProject({ projectId: id })) return false;
-    return !await refreshFileDirty(id === PM.proj.id ? PM.proj : PM.Projects.get(id) || project);
+    if (!await run('Saving ' + project.name, () => PM.saveProject({ projectId: id }), 0)) return false;
+    return !await run('Checking saved project', () => refreshFileDirty(id === PM.proj.id ? PM.proj : PM.Projects.get(id) || project, undefined, preparation));
   }
   const state = fileState(id);
+  closeFileDiscards.add(id);
+  backgroundSaves.forget(id);
   if (!state.path && !state.handle && !state.savedHash) pendingDiscards.add(id);
   return true;
 };
-/* Closing the window closes every tab, so each one with unsaved file changes
-   gets its own chance to be saved. */
-PM.prepareToClose = async () => {
-  if (PM.projectLoading) { finishProjectLoading(loadGeneration); loadGeneration++; }
-  const ids = [...new Set([PM.proj.id, ...tabIds])];
-  for (const id of ids) {
-    if (!await PM.confirmCloseProject(id)) {
-      // A cancelled window close leaves all of its projects intact.
-      for (const pending of ids) pendingDiscards.delete(pending);
-      return false;
-    }
-  }
-  for (const id of ids) discardUnsavedProject(id);
+
+// Preparation is reversible. In particular, a later tab/window cancelling Quit
+// must not delete a previously approved unsaved project or its agent workspace.
+let nativeCloseCancelled = false;
+let closeAttempt: {
+  preparation: ClosePreparation; promise: Promise<boolean>; current: () => boolean;
+  ready: boolean; committed: boolean; ids: string[]; native: boolean;
+} | null = null;
+PM.cancelClosePreparation = (id?: string) => {
+  const attempt = closeAttempt;
+  if (!attempt || (id && attempt.preparation.id !== id)) return;
+  attempt.preparation.cancel();
+  if (attempt.native) nativeCloseCancelled = true;
+  resumeDiscardedAutosaves(attempt.ids);
+  for (const projectId of attempt.ids) pendingDiscards.delete(projectId);
+  closeAttempt = null;
+  PM.dismissToast?.('project-close');
+  if (attempt.native && APP.dirty) PM.autosave();
+};
+PM.commitClosePreparation = () => {
+  if (!closeAttempt?.ready || !closeAttempt.current()) return false;
+  closeAttempt.preparation.check();
+  closeAttempt.committed = true;
   return true;
+};
+PM.prepareToClose = (options: { id?: string; flush?: boolean } = {}): Promise<boolean> => {
+  if (closeAttempt) return closeAttempt.promise;
+  nativeCloseCancelled = false;
+  if (options.flush) { window.clearTimeout(APP.saveTimer); ++saveGeneration; }
+  const ids = [...new Set<string>([PM.proj.id, ...tabIds])];
+  const preparation = new ClosePreparation(options.id || 'close', detail => PM.toast('Closing project: ' + detail, 2200, {
+    key: 'project-close', sticky: true, dismissible: false, progress: null, detail,
+    action: { label: 'Cancel Close', run: () => PM.cancelClosePreparation(preparation.id) },
+  }));
+  const versions = new Map<string, number>();
+  const project = PM.proj;
+  let editVersion: unknown;
+  const current = () => closeAttempt?.preparation === preparation && !preparation.controller.signal.aborted
+    && PM.proj === project && editVersion === PM.animVersion?.()
+    && ids.length === new Set([PM.proj.id, ...tabIds]).size
+    && ids.every(id => (id === PM.proj.id || tabIds.includes(id)) && versions.get(id) === (comparisonVersions.get(id) || 0));
+  const attempt = { preparation, current, ids, native: !!options.flush, ready: false, committed: false, promise: null as unknown as Promise<boolean> };
+  closeAttempt = attempt;
+  attempt.promise = Promise.resolve().then(async () => {
+    if (PM.projectLoading) { finishProjectLoading(loadGeneration); loadGeneration++; }
+    for (const id of ids) {
+      if (!await PM.confirmCloseProject(id, preparation)) return false;
+      preparation.check();
+      versions.set(id, comparisonVersions.get(id) || 0);
+    }
+    editVersion = PM.animVersion?.();
+    if (!current()) throw new Error('The project changed while closing. Your edits are still open; try Close again.');
+    if (options.flush) {
+      await PM.flushProject(preparation, current);
+      if (!current()) throw new Error('The project changed while closing. Your edits are still open; try Close again.');
+      attempt.ready = true;
+      // Keep cancellation available through the main-process durability barrier.
+      return true;
+    }
+    // Legacy/tab callers commit immediately; native Close/ Quit defer destructive
+    // disposal until beforeunload, after every editor has agreed to close.
+    for (const id of ids) discardUnsavedProject(id);
+    attempt.committed = true;
+    return true;
+  }).catch(error => {
+    if (error instanceof Error && error.message === 'Close cancelled') return false;
+    throw error;
+  }).finally(() => {
+    if (!attempt.ready) {
+      if (!attempt.committed) resumeDiscardedAutosaves(ids);
+      if (attempt.native) nativeCloseCancelled = true;
+      for (const id of ids) pendingDiscards.delete(id);
+      if (closeAttempt === attempt) {
+        closeAttempt = null;
+        PM.dismissToast?.('project-close');
+        if (attempt.native && APP.dirty) PM.autosave();
+      }
+    }
+  });
+  return attempt.promise;
 };
 
 /* ── project tabs ──────────────────────────────────────── */
@@ -1379,12 +1577,10 @@ PM.Tabs = {
   /** A trashed project leaves the strip; Trash is its only close. */
   forget: dropTab,
 };
-/* A tab another window let go of over this window's strip. It opens here and
-   takes the place along the strip where it was dropped. */
-PM.windows?.onAdoptTab?.(async ({ projectId, x }: { projectId: string; x: number }) => {
-  const before = [...window.document.querySelectorAll<HTMLElement>('#tabs [data-tab-id]:not([data-tab-id="home"])')]
-    .filter(tab => tab.dataset.tabId !== projectId);
-  const index = before.filter(tab => { const box = tab.getBoundingClientRect(); return box.left + box.width / 2 < x; }).length;
+/* A project another window handed over. It opens here and joins the end of
+   this window's open projects, listed in the title's menu. */
+PM.windows?.onAdoptTab?.(async ({ projectId }: { projectId: string; x: number }) => {
+  const index = PM.Tabs.list().filter((id: string) => id !== projectId).length;
   if (!await PM.openProjectHere(projectId)) return;
   PM.ProjectsScreen?.hide?.();
   PM.Tabs.move(projectId, index);
@@ -1416,12 +1612,15 @@ PM.pickFiles = (sequence = false, { replaceAssetId }: { replaceAssetId?: string 
 async function importFiles(files: any, placement?: { at: number; index?: number } | null, sequence?: boolean, replaceAssetId?: string,
   { folder, sequenceNote, matchSource }: { folder?: string | null; sequenceNote?: string; matchSource?: boolean } = {}) {
   let progress: ReturnType<typeof createImportProgress> | undefined;
+  const controller = new AbortController();
+  const startProgress = (title: string) => createImportProgress(title, PM, () => controller.abort());
   try {
     const targetProject = PM.proj;
     const replacement = replaceAssetId != null ? targetProject.assets?.[replaceAssetId] : null;
     if (replaceAssetId != null && !replacement) throw new Error('This media item is no longer in the project');
     const importAt = placement ? placement.at : PM.time;
     const assertCurrent = () => {
+      controller.signal.throwIfAborted();
       if (PM.proj !== targetProject) throw new Error('Import stopped because you switched projects · import again in the intended project');
       if (replacement && targetProject.assets?.[replaceAssetId!] !== replacement) throw new Error('The media item changed · choose the replacement again');
     };
@@ -1432,15 +1631,23 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
         assertCurrent();
         files = choice.files;
         if (choice.fps !== null) {
-          progress = createImportProgress('Importing image sequence', PM);
+          progress = startProgress('Importing image sequence');
           files = [await convertImageSequence(files, choice.fps, assertCurrent, update => progress!.update(update))];
           assertCurrent();
         }
-      } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000, { error: true }); return; }
+      } catch (error: any) {
+        if (controller.signal.aborted) progress?.finish('Import cancelled');
+        else PM.toast(error.message || 'Could not import image sequence', 6000, { error: true });
+        return;
+      }
     }
     if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const mediaFiles: any = [];
-    for (const f of files) {
+    for (let f of files) {
+      if (PM.Captions?.isCaptionFile?.(f) || /\.pmv$/i.test(f.name)) {
+        progress ??= startProgress('Importing file');
+        f = await prepareCloudImport(f, assertCurrent, (label, update) => progress!.update({ label: `${label} · ${f.name}`, ...update }));
+      }
       // Subtitles become a captions layer, placed where the file was dropped.
       if (PM.Captions?.isCaptionFile?.(f) && replaceAssetId == null) {
         await PM.Captions.importFile(f, { at: placement ? placement.at : 0 });
@@ -1455,13 +1662,14 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       mediaFiles.push(f);
     }
     if (!mediaFiles.length) return;
-    progress ??= createImportProgress(mediaFiles.length === 1 ? 'Importing file' : `Importing ${mediaFiles.length} files`, PM);
+    progress ??= startProgress(mediaFiles.length === 1 ? 'Importing file' : `Importing ${mediaFiles.length} files`);
     progress.update({ label: mediaFiles.length === 1 ? mediaFiles[0].name : `Preparing files · 0 of ${mediaFiles.length}` });
     const results = await PM.assets.importBatch(mediaFiles, {
-      replaceAssetId,
-      onStage: ({ file, label, completed, total }: any) => progress!.update({
+      replaceAssetId, signal: controller.signal,
+      onStage: ({ file, label, progress: stageProgress, completed, total }: any) => progress!.update({
         label: mediaFiles.length === 1 ? `${label} · ${file.name}` : `${completed} of ${total} files · ${label} · ${file.name}`,
-        ...(mediaFiles.length > 1 ? { completed, total } : {}),
+        file: file.name,
+        ...(mediaFiles.length > 1 ? { completed, total } : stageProgress || {}),
       }),
       onProgress: (update: any) => {
         progress!.update({ label: `Processed ${update.completed} of ${update.total} ${update.total === 1 ? 'file' : 'files'}`, completed: update.completed, total: update.total });
@@ -1470,14 +1678,14 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     });
     const target = validFolder(targetProject, folder);
     if (target) for (const result of results) {
-      const meta = result.status !== 'failed' ? targetProject.assets?.[result.asset?.id] : null;
+      const meta = result.status !== 'failed' && result.status !== 'cancelled' ? targetProject.assets?.[result.asset?.id] : null;
       // Media already in the project stays where the user filed it.
       if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) meta.folder = target;
     }
     const failures = results.filter((result: any) => result.status === 'failed');
-    failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000, { error: true }));
+    failures.forEach((result: any) => PM.toast(`${result.file?.name || 'Media file'} · ${result.error?.message || 'Could not import this file'}`, 5000, { error: true }));
     const layerResults = results.filter((result: any) => result.status === 'created' || result.status === 'reused');
-    assertCurrent();
+    if (PM.proj !== targetProject) { assertCurrent(); return; }
     if (matchSource) {
       const source = layerResults[0]?.asset;
       if (source) {
@@ -1509,7 +1717,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     }
     const relinked = results.filter((result: any) => result.status === 'relinked');
     const replaced = results.filter((result: any) => result.status === 'replaced');
-    const volatile = results.filter((result: any) => result.status !== 'failed' && !result.persisted);
+    const volatile = results.filter((result: any) => result.status !== 'failed' && result.status !== 'cancelled' && !result.persisted);
     if (layerResults.length || relinked.length || replaced.length) {
       PM.autosave();
       if (placement === null || target) PM.bus.emit('assets');
@@ -1525,9 +1733,11 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       const svgWarnings = [...layerResults, ...replaced].flatMap((result: any) => result.asset.svg?.warnings || []);
       if (svgWarnings.length) parts.push(`${svgWarnings.length} SVG ${svgWarnings.length === 1 ? 'feature needs' : 'features need'} review`);
       if (volatile.length) parts.push('durable storage unavailable');
+      if (controller.signal.aborted) parts.push('remaining files cancelled');
       progress.finish(parts.join(' · '), volatile.length ? 6000 : 3400);
-    }
+    } else if (controller.signal.aborted) progress.finish('Import cancelled');
   } catch (error: any) {
+    if (controller.signal.aborted) { progress?.finish('Import cancelled'); return; }
     PM.toast(error.message || 'Could not import files', 6000, { error: true });
   } finally { progress?.close(); }
 }
@@ -1548,11 +1758,39 @@ PM.importFiles = (files: any, { project = PM.proj, placement, sequence, replaceA
       return [];
     }
     if (dropped) {
+      let downloadProgress: ReturnType<typeof createImportProgress> | undefined;
       try {
-        const trees = await Promise.all(dropped.folders.map(({ entry, path }) => readDroppedFolder(entry, path)));
+        const beforeFile = async (sourcePath: string, name: string) => {
+          if (PM.proj !== project) throw new Error('Import stopped because you switched projects');
+          if (!PM.assetKind({ name, type: '' })) return;
+          const media = hostBridge()?.media;
+          if (!media?.cloudStatus || !media.downloadCloudSource) return;
+          const status = (await cloudWait(media.cloudStatus([sourcePath])))[sourcePath];
+          if (status !== 'icloud' && status !== 'cloud') return;
+          // Dropping media explicitly asks to import its bytes, including any
+          // originals that File Provider still needs to download.
+          downloadProgress ??= createImportProgress('Downloading folder media from cloud…', PM);
+          downloadProgress.update({ file: name });
+          try {
+            const source = await downloadCloudImportSource(media, sourcePath);
+            await cloudWait(media.releaseCloudSource(source.token), 10_000).catch(() => undefined);
+          } catch (error: any) { throw new Error(`Could not download “${name}” · ${error?.message || 'Try downloading it in Finder.'}`); }
+        };
+        // Keep downloads sequential across roots as well as within each tree.
+        const trees: ImportFolderNode[] = [];
+        const unreadable: string[] = [];
+        for (const { entry, path } of dropped.folders) trees.push(await readDroppedFolder(entry, path, beforeFile,
+          (name, error) => {
+            if (PM.proj !== project) throw error;
+            unreadable.push(name);
+            console.warn('Folder media could not be read.', name, error);
+          }));
+        downloadProgress?.close();
         if (loose.length) await importFiles(loose, placement, sequence, undefined, { folder });
         await importFolders(project, trees, { asFolder: !!asFolder, parent: folder ?? null, placement });
+        if (unreadable.length) PM.toast(`Could not import ${unreadable.length === 1 ? '“' + unreadable[0] + '”' : unreadable.length + ' files'} · Download or open ${unreadable.length === 1 ? 'it' : 'them'} in Finder, then try again.`, 6000, { error: true });
       } catch (error: any) { PM.toast(error?.message || 'Could not read the dropped folder', 6000, { error: true }); }
+      finally { downloadProgress?.close(); }
       return [];
     }
     return importFiles(loose, placement, sequence, replaceAssetId, { folder, matchSource });
@@ -1619,8 +1857,24 @@ window.addEventListener('drop', (e: any) => {
 });
 
 function safeName(s: any) { return String(s || 'powermove').replace(/[\\/:*?"<>|]+/g, '-').trim() || 'powermove'; }
-window.addEventListener('beforeunload', () => {
+window.addEventListener('beforeunload', (event: BeforeUnloadEvent) => {
   window.clearTimeout(APP.saveTimer);
+  if (nativeCloseCancelled) {
+    event.preventDefault(); event.returnValue = '';
+    return;
+  }
+  if (closeAttempt) {
+    if (!closeAttempt.ready || !closeAttempt.committed || !closeAttempt.current()) {
+      event.preventDefault();
+      event.returnValue = '';
+      PM.cancelClosePreparation();
+      return;
+    }
+    // The recovery checkpoint and session metadata are already durable. Never
+    // make a second synchronous clone of a huge project while tearing it down.
+    for (const id of closeAttempt.ids) discardUnsavedProject(id);
+    return;
+  }
   captureProjectSession();
 });
 
@@ -1770,6 +2024,7 @@ if (pendingBootId) {
   });
 }
 PM.bus.on('project:saved', () => PM.bus.emit('projects:open'));
+installStorageUpgradeNotice(PM);
 /* Another window renaming, trashing or saving a project changes what this one
    should be showing. Repaint on the keys that describe the shared library. */
 PM.bus.on('store:external', (keys: string[]) => {

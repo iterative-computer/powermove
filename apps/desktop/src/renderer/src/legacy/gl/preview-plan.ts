@@ -1,3 +1,4 @@
+import {effectMightRender} from '../../core/effect-inputs';
 /** Conservative temporal analysis for editable, built-in artwork. Unknown
  * renderers, expressions and media always retain the normal per-frame path. */
 export function previewPlan(project: any, effectStationary?: (effect: any) => boolean) {
@@ -11,13 +12,14 @@ export function previewPlan(project: any, effectStationary?: (effect: any) => bo
   for (const layer of project.layers || []) {
     // Sound keeps advancing independently of the retained picture.
     if (layer.type === 'audio') continue;
+    const activeEffects=(layer.fx??[]).filter(effectMightRender);
     let constant = true;
     const ranges: Array<[number, number]> = [];
     layerMotion.set(layer, ranges);
     const from = Number(layer.from) || 0, end = from + (Number(layer.dur) || 0);
     edges.add(from); edges.add(end);
     if (!['shape', 'text', 'solid', 'group', 'null'].includes(layer.type)
-        || layer.fx?.length || layer.transitionIn || layer.transitionOut
+        || activeEffects.length || layer.transitionIn || layer.transitionOut
         || layer.d?.animators?.length || layer.threeD) {
       continuous = true;
     }
@@ -42,7 +44,10 @@ export function previewPlan(project: any, effectStationary?: (effect: any) => bo
           if (!held && !flat) { moving.push([start, finish]); ranges.push([start, finish]); }
         }
       }
-      for (const [key, child] of Object.entries(value)) if (key !== 'kf') visit(child);
+      for (const [key,child] of Object.entries(value)) {
+        if(key==='kf')continue;
+        if(value===layer&&key==='fx'){for(const effect of activeEffects)visit(effect);}else visit(child);
+      }
     };
     if (['shape', 'text', 'solid', 'image', 'group', 'null'].includes(layer.type)) visit(layer);
     else {
@@ -52,7 +57,7 @@ export function previewPlan(project: any, effectStationary?: (effect: any) => bo
       visit(layer.on); visit(layer.p?.opacity);
     }
     if (constant && ['shape', 'text', 'solid', 'group', 'null'].includes(layer.type)
-        && !layer.fx?.length && !layer.transitionIn && !layer.transitionOut && !layer.d?.animators?.length
+        && !activeEffects.length && !layer.transitionIn && !layer.transitionOut && !layer.d?.animators?.length
         && !layer.threeD && !layer.matteSource && !layer.masks?.length && !layer.solo) independent.add(layer);
   }
   const byId = new Map<any, any>((project.layers || []).map((layer: any) => [layer.id, layer]));
@@ -139,7 +144,7 @@ export function previewPlan(project: any, effectStationary?: (effect: any) => bo
           && !layer.transitionIn && !layer.transitionOut && !layer.d?.animators?.length
           && !layer.threeD && !layer.matteSource && !layer.masks?.length && !layer.solo
           && (!range || time - radius > range[1])
-          && (layer.fx || []).every((effect: any) => effect.missing || effect.on === false || effectStationary?.(effect))
+          && (layer.fx || []).every((effect: any) => !effectMightRender(effect) || effectStationary?.(effect))
           && (!layer.parent || settled(byId.get(layer.parent)))
           && (!layer.group || settled(byId.get(layer.group)));
         path.delete(layer); memo.set(layer, value); return value;

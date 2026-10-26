@@ -320,3 +320,35 @@ it('extends decoder reuse across nearby preparation jobs and cancels the inactiv
   await vi.advanceTimersByTimeAsync(3000); expect(privateVideos[0]?.load).toHaveBeenCalledOnce();
   cache.dispose();
 });
+
+it('uses the exact shutter planner and freezes timestamp-validated paused seeks before playback skips them', async () => {
+ const {PM,cache,asset,source,privateVideos,bitmaps}=fixture();
+ const options={mblur:true,mbSamples:4,shutter:1};
+ PM.GL={frameVideoRequests:vi.fn(()=>[.5-.0001,.5,.625].map(at=>({key:`group/clip@${at}`,asset,at})))};
+ const frames=await cache.prepare(.5,()=>true,options);
+ expect(PM.GL.frameVideoRequests).toHaveBeenCalledWith(PM.proj,.5,options);
+ expect([...frames!.keys()]).toEqual(['group/clip@0.4999','group/clip@0.5','group/clip@0.625']);
+ expect(bitmaps.map(bitmap=>bitmap.pixelTime)).toEqual([11/24,.5,.625]);
+ expect(privateVideos[0]!.play).not.toHaveBeenCalled();
+ expect(source.seek).not.toHaveBeenCalled();expect(cache.error).toBeNull();
+ cache.release(frames!);expect(cache.bytes).toBe(0);cache.dispose();
+});
+
+it('diagnoses and releases an exact private frame that never covers the requested timestamp', async () => {
+ vi.useFakeTimers();const {PM,cache,asset,privateVideos}=fixture();
+ PM.GL={frameVideoRequests:()=>[{key:'clip@2',asset,at:2}]};
+ // A seek can finish while the decoded frame is still stale.
+ const create=document.createElement as any;create.mockImplementationOnce(()=>{const video=new PrivateVideo({stale:true});privateVideos.push(video);return video;});
+ const pending=cache.prepare(2,()=>true,{mblur:true});await microtasks();await vi.advanceTimersByTimeAsync(2000);
+ expect(await pending).toBeNull();expect(cache.error).toContain('did not decode 2');expect(cache.bytes).toBe(0);
+ expect(privateVideos[0]!.load).toHaveBeenCalledOnce();cache.dispose();
+});
+
+
+it('allows full-HD-sized exact shutter sets above the idle ceiling within shared and texture budgets', async () => {
+ const {PM,cache,asset,nextOptions}=fixture();nextOptions.push({width:1500,height:1000});
+ PM.Memory={budget:(name:string)=>name==='textures'?128*1024*1024:256*1024*1024};
+ PM.GL={frameVideoRequests:()=>Array.from({length:17},(_,i)=>({key:`clip@${i/24}`,asset,at:i/24}))};
+ const frames=await cache.prepare(.5,()=>true,{mblur:true,mbSamples:16});
+ expect(frames?.size).toBe(17);expect(cache.bytes).toBe(102000000);cache.release(frames!);expect(cache.bytes).toBe(0);cache.dispose();
+});

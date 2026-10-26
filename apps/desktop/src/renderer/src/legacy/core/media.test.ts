@@ -62,3 +62,8 @@ describe('legacy media install', () => {
     expect(PM.MediaImport.removeAsset(project, 'current')).toEqual({ removedLayers: 1, removedLayerIds: ['mesh'] });
   });
 });
+
+it('coalesces typed effect image/LUT asset IDs while deletion preserves recoverable references',()=>{
+ const PM=mediaRegistry(),project:any={assets:{old:{id:'old',kind:'lut'},current:{id:'current',kind:'lut'}},layers:[{id:'owner',fx:[{inputs:{lut:{kind:'asset',assetId:'old'}}}]}],comps:{child:{layers:[{id:'child-owner',fx:[{inputs:{texture:{kind:'asset',assetId:'old'}}}]}]}}};
+ expect(PM.MediaImport.referenceCount(project,'old')).toBe(2);expect(PM.MediaImport.coalesce(project,'current',['old'])).toBe(2);expect(project.layers[0].fx[0].inputs.lut.assetId).toBe('current');expect(project.comps.child.layers[0].fx[0].inputs.texture.assetId).toBe('current');expect(PM.MediaImport.removeAsset(project,'current').removedLayerIds).toEqual([]);expect(project.layers[0].fx[0].inputs.lut.assetId).toBe('current');
+});

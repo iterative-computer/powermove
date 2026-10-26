@@ -9,7 +9,7 @@
   import { axisContentKey, type FontStyle } from 'powermove';
 
   const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
-  const { ColorField, FontField, NumField, Section, SelectField, ToggleField } = api.ui.controls;
+  const { ColorField, Disclosure, FontField, NumField, Section, SelectField, ToggleField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
   const weightLabels: Record<number, string> = {
     100: 'Thin',
@@ -39,6 +39,9 @@
   let fontStyles = $state<FontStyle[]>([]);
   const IMPORT_SOURCE = '__powermove_import_source__';
 
+  /* More reads as changed while tracking, leading or alignment is set or animated. */
+  const typeMoreChanged = $derived((doc.tick.values, doc.tick.history, doc.proj, ['tracking', 'leading', 'align', 'weight']
+    .some((key) => !!(layer.d?.[key]?.kf?.length || layer.d?.[key]?.expr))));
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
   const edit = (key: string, label: string): EditBinding =>
     contentBinding(layer.id, key, { label, origin: 'inspector' });
@@ -196,13 +199,15 @@
 
 {#if !modelLayer && !(layer.type === 'shape' && layer.d.paths?.length)}<Section {api} title="Content" />{/if}
 
+<div class="content-rows">
 {#if layer.type === 'text'}
   <AnimatedRow {layer} label="Text" path="c.text">
   <textarea
     data-inspector-text-layer={layer.id}
     aria-label="Text"
     value={String(content.text ?? '')}
-    style="width:100%;min-height:54px;background:var(--bg-row);border-radius:var(--r-sm);padding:8px 10px;font-size:var(--fs-md);line-height:1.5;resize:vertical;color:var(--tx)"
+    class="text-content"
+    rows="1"
     onfocus={beginText}
     oninput={inputText}
     onblur={commitText}
@@ -219,45 +224,50 @@
         edit={edit('font', 'Font')}
         label="Font"
         weight={() => Number(content.weight) || 400}
+        styleName={() => currentStyle?.name ?? weightLabels[Number(content.weight) || 400] ?? ''}
       />
     {/key}
   </AnimatedRow>
-  {#if !hasVariableWeight && content[axisContentKey('wght')] == null && fontStyles.length}
-    <AnimatedRow {layer} label="Style" path="c.weight">
-      <SelectField
-        {api}
-        {mixed}
-
-        get={() => currentStyle ? styleKey(currentStyle) : null}
-        edit={styleEdit}
-        options={fontStyles.map((style) => ({ v: styleKey(style), label: style.name }))}
-        label="Style"
-        onChange={(value: unknown) => {
-          const style = fontStyles.find((candidate) => styleKey(candidate) === value);
-          if (style) api.media.fonts?.ensure?.(content.font, style.weight);
-        }}
-      />
-    </AnimatedRow>
-  {:else if !hasVariableWeight && content[axisContentKey('wght')] == null}
-    {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
-    <AnimatedRow {layer} label="Weight" path="c.weight">
-      <SelectField
-        {api}
-        {mixed}
-
-        get={get('weight', 400)}
-        edit={edit('weight', 'Weight')}
-        options={weights.map((value) => ({ v: value, label: weightLabels[value] ?? String(value) }))}
-        label="Weight"
-        onChange={(value: unknown) => api.media.fonts?.ensure?.(content.font, Number(value) || 400)}
-      />
-    </AnimatedRow>
-  {/if}
   <AnimatedRow {layer} label="Size" path="c.size"><NumField {api} {mixed} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {api} {mixed} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {api} {mixed} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
-  <AnimatedRow {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
   <AnimatedRow {layer} label="Color" path="c.color"><ColorField {api} {mixed} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
+  <!-- After the prototype: Text, Font, Size and Color; the rest of the
+       type settings fold under More. -->
+  <Disclosure count={3 + (!hasVariableWeight && content[axisContentKey('wght')] == null ? 1 : 0)} changed={typeMoreChanged} remember={`${doc.proj.id}:${layer.id}:type-more`}>
+    {#if !hasVariableWeight && content[axisContentKey('wght')] == null && fontStyles.length}
+      <AnimatedRow {layer} label="Style" path="c.weight">
+        <SelectField
+          {api}
+          {mixed}
+
+          get={() => currentStyle ? styleKey(currentStyle) : null}
+          edit={styleEdit}
+          options={fontStyles.map((style) => ({ v: styleKey(style), label: style.name }))}
+          label="Style"
+          onChange={(value: unknown) => {
+            const style = fontStyles.find((candidate) => styleKey(candidate) === value);
+            if (style) api.media.fonts?.ensure?.(content.font, style.weight);
+          }}
+        />
+      </AnimatedRow>
+    {:else if !hasVariableWeight && content[axisContentKey('wght')] == null}
+      {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
+      <AnimatedRow {layer} label="Weight" path="c.weight">
+        <SelectField
+          {api}
+          {mixed}
+
+          get={get('weight', 400)}
+          edit={edit('weight', 'Weight')}
+          options={weights.map((value) => ({ v: value, label: weightLabels[value] ?? String(value) }))}
+          label="Weight"
+          onChange={(value: unknown) => api.media.fonts?.ensure?.(content.font, Number(value) || 400)}
+        />
+      </AnimatedRow>
+    {/if}
+    <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {api} {mixed} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
+    <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {api} {mixed} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
+    <AnimatedRow {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
+  </Disclosure>
   <TypeSettings {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} onStyles={(styles) => { fontStyles = styles; }} />
 {:else if (layer.type === 'solid' || layer.type === 'shape' || layer.type === 'null') && !layer.d.paths?.length}
   <AnimatedRow {layer} label="Fill" path="c.color"><ColorField {api} {mixed} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
@@ -381,8 +391,26 @@
   <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
 {/if}
+</div>
 
 <style>
+  /* The text itself: one line tall, growing with its lines. */
+  .text-content {
+    width: 100%; min-height: 26px; field-sizing: content; padding: 5px 8px; border: 0; border-radius: 6px;
+    background: var(--bg-field); color: var(--tx-value); font: 12px/16px var(--f-ui); resize: none;
+  }
+  .text-content:focus-visible { outline: 0; box-shadow: inset 0 0 0 1px var(--accent); }
+  /* Content rows read as plain label and value, as in the prototype; the
+     keyframe diamond sits in the margin, shown under the pointer or while
+     the property is animated. */
+  .content-rows.content-rows :global(.row.split) { position: relative; }
+  .content-rows.content-rows :global(.row.split > .stopwatch) { position: absolute; left: 1px; width: 14px; opacity: 0; }
+  .content-rows.content-rows :global(.row.split > .stopwatch.on),
+  .content-rows.content-rows :global(.row.split:hover > .stopwatch),
+  .content-rows.content-rows :global(.row.split > .stopwatch:focus-visible) { opacity: 1; }
+  .content-rows.content-rows :global(.row.split > .k),
+  .content-rows.content-rows :global(.row.split:not(:has(> .stopwatch)) > .k) { width: 96px; padding-left: 0; }
+
   /* Figma-style corner controls: glyphs sit inside the wells, toggles tint
      with the accent when on, and independent corners form a 2x2 grid with
      the toggles in a trailing column. */

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServicesRegistry } from '../../kernel/services';
 import type { PMRegistry } from '../registry';
 import { install } from './engine';
+import * as frameCapture from './frame-capture';
 import * as videoInstances from './video-instances';
 
 function delayedVideo(): any {
@@ -93,6 +94,73 @@ function engine({ layer = null, media = null, work = [0, 10], audioStartupDelay 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('offscreen frame surfaces', () => {
+  function surface(width = 300, height = 150) {
+    let pixels: Uint8ClampedArray | undefined;
+    const resized: number[] = [];
+    const putImageData = vi.fn((image: ImageData) => { pixels = image.data.slice(); });
+    const canvas = {
+      get width() { return width; }, set width(value: number) { resized.push(value); width = value; pixels = undefined; },
+      get height() { return height; }, set height(value: number) { resized.push(value); height = value; pixels = undefined; },
+      getContext: () => ({ putImageData }),
+    } as unknown as HTMLCanvasElement;
+    return { canvas, resized, putImageData, pixels: () => pixels };
+  }
+  function capture() {
+    const { PM } = engine();
+    const created: ReturnType<typeof surface>[] = [];
+    const create = vi.fn(() => { const next = surface(); created.push(next); return next.canvas; });
+    window.document.createElement = create as any;
+    const render = vi.spyOn(frameCapture, 'renderOpaqueFrame').mockImplementation((_PM, time, width, height) => ({
+      width, height, data: new Uint8ClampedArray(width * height * 4).fill(time),
+    }) as ImageData);
+    return { PM, create, created, render };
+  }
+
+  it('keeps independent frame canvases by default', () => {
+    const { PM, created, render } = capture();
+    const first = PM.renderFrameTo(10, 2, 1, { mblur: false });
+    const second = PM.renderFrameTo(20, 2, 1);
+    expect(first).not.toBe(second);
+    expect([...created[0]!.pixels()!]).toEqual(Array(8).fill(10));
+    expect([...created[1]!.pixels()!]).toEqual(Array(8).fill(20));
+    expect(render).toHaveBeenCalledWith(PM, 10, 2, 1, { mblur: false });
+  });
+
+  it('replaces every pixel of a supplied surface without allocating another canvas or resizing it', () => {
+    const { PM, create } = capture();
+    const target = surface(2, 1);
+    expect(PM.renderFrameTo(255, 2, 1, {}, target.canvas)).toBe(target.canvas);
+    expect([...target.pixels()!]).toEqual(Array(8).fill(255));
+    expect(PM.renderFrameTo(0, 2, 1, {}, target.canvas)).toBe(target.canvas);
+    expect([...target.pixels()!]).toEqual(Array(8).fill(0));
+    expect(target.putImageData).toHaveBeenCalledTimes(2);
+    expect(target.resized).toEqual([]);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('resizes a supplied surface to the current capture dimensions and replaces its prior pixels', () => {
+    const { PM } = capture();
+    const target = surface(2, 1);
+    PM.renderFrameTo(100, 2, 1, {}, target.canvas);
+    PM.renderFrameTo(25, 3, 2, {}, target.canvas);
+    expect(target.canvas.width).toBe(3);
+    expect(target.canvas.height).toBe(2);
+    expect(target.resized).toEqual([3, 2]);
+    expect([...target.pixels()!]).toEqual(Array(24).fill(25));
+  });
+
+  it('preserves a supplied surface when capture fails', () => {
+    const { PM, render } = capture();
+    const target = surface(2, 1);
+    PM.renderFrameTo(100, 2, 1, {}, target.canvas);
+    render.mockImplementationOnce(() => { throw new Error('Capture failed'); });
+    expect(() => PM.renderFrameTo(0, 3, 2, {}, target.canvas)).toThrow('Capture failed');
+    expect(target.resized).toEqual([]);
+    expect([...target.pixels()!]).toEqual(Array(8).fill(100));
+  });
 });
 
 describe('legacy engine install', () => {
@@ -740,4 +808,10 @@ it('keeps transport and audio stopped until project media finishes restoring', (
   PM.assets.loading.clear(); PM.play();
   expect(PM.playing).toBe(true);
   expect(audioCalls[0][0]).toBe('start');
+});
+
+
+it('pauses on the actual completed input-shutter frame when private decoding finishes behind transport', () => {
+ const {PM,runFrame}=engine();PM.GL.gl={};PM.GL.render=()=>{PM.GL.inputPreviewPresentedTime=1/30;};
+ PM.play();runFrame(100);expect(PM.time).toBeCloseTo(.1);PM.pause();expect(PM.time).toBe(1/30);
 });

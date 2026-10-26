@@ -1,6 +1,7 @@
 import { AUDIO_EXTENSIONS as ACCEPTED_EXTENSIONS } from '../../../../shared/media-formats';
 import { evaluatedValue, isProperty, resolveContent } from './content-properties';
 import { measureBlock } from '../../mixer/levels';
+import { buildWaveform } from './media-work';
 /* Ported from js/core/audio.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -327,31 +328,6 @@ function decodeArrayBuffer(ctx: any, bytes: any) {
   });
 }
 
-/* Waveform peaks at a fixed source rate, never a fixed count: a bucket must
-   span a few milliseconds so the envelope keeps its dynamics. Squashing a
-   whole file into a few hundred max-abs buckets flattens every bucket to the
-   file's loudest sample and draws a solid wall. */
-const PEAKS_PER_SECOND: any = 100;
-function peakEnvelope(buffer: any, rate: any = PEAKS_PER_SECOND) {
-  const frames: any = Math.max(1, buffer.length || 1);
-  const duration: any = Math.max(.001, finite(buffer.duration, frames / Math.max(1, finite(buffer.sampleRate, 1))));
-  const length: any = Math.max(1, Math.min(frames, Math.ceil(duration * rate)));
-  const peaks: any = new Float32Array(length);
-  const channels: any = Math.max(1, buffer.numberOfChannels || 1);
-  const data: any = [];
-  for (let channel: any = 0; channel < channels; channel++) data.push(buffer.getChannelData(channel));
-  for (let bucket: any = 0; bucket < length; bucket++) {
-    const start: any = Math.floor(bucket * frames / length);
-    const end: any = bucket === length - 1 ? frames : Math.max(start + 1, Math.floor((bucket + 1) * frames / length));
-    let peak: any = 0;
-    for (const samples of data) {
-      for (let index: any = start; index < end; index++) peak = Math.max(peak, Math.abs(samples[index] || 0));
-    }
-    peaks[bucket] = peak;
-  }
-  return peaks;
-}
-
 function decodedBytes(buffer: any) {
   return Math.max(0, finite(buffer && buffer.length) * Math.max(1, finite(buffer && buffer.numberOfChannels, 1)) * 4);
 }
@@ -387,42 +363,73 @@ function trimDecodedCache(targetBytes: any = MAX_DECODED_BYTES) {
   }
 }
 
-async function decodeAsset(asset: any) {
+async function decodeAsset(asset: any, { assertCurrent, onStage }: any = {}) {
   if (!asset || !asset.audioBlob) throw new Error('Audio asset is unavailable');
-  if (asset.audioBuffer) {
+  if (asset.audioBuffer && asset.peaks) {
     asset.audioUsedAt = Date.now();
     return asset.audioBuffer;
   }
   if (asset.audioDecoding) return asset.audioDecoding;
   if (!asset.audioBlob) throw new Error('Audio media is missing · import it again to relink it');
-  if (asset.audioRetryAt > Date.now() && asset.audioDecodeError) throw asset.audioDecodeError;
+  if (!asset.audioBuffer && asset.audioRetryAt > Date.now() && asset.audioDecodeError) throw asset.audioDecodeError;
   const token: any = asset.audioToken;
   asset.audioDecoding = (async () => {
     try {
-      const bytes: any = await asset.audioBlob.arrayBuffer();
-      const buffer: any = await decodeArrayBuffer(context(), bytes);
-      if (!buffer || !(buffer.duration > 0)) throw new Error('The decoder returned an empty audio file');
-      if (decodedBytes(buffer) > MAX_DECODED_BYTES) {
-        const error: any = new Error('This audio file is too long to decode safely · use a shorter edit or split it first');
-        error.audioUserFacing = true;
-        throw error;
+      assertCurrent?.();
+      let buffer: any = asset.audioBuffer;
+      if (!buffer) {
+        onStage?.('Decoding audio');
+        const bytes: any = await asset.audioBlob.arrayBuffer();
+        assertCurrent?.();
+        buffer = await decodeArrayBuffer(context(), bytes);
+        if (!buffer || !(buffer.duration > 0)) throw new Error('The decoder returned an empty audio file');
+        if (decodedBytes(buffer) > MAX_DECODED_BYTES) {
+          const error: any = new Error('This audio file is too long to decode safely · use a shorter edit or split it first');
+          error.audioUserFacing = true;
+          throw error;
+        }
+        if (asset.audioDisposed || asset.audioToken !== token) return null;
+        /* Playback needs only the samples. Publish them before the waveform:
+           that pass yields at background priority and can take many seconds
+           while the transport draws frames, which left first Play silent. */
+        asset.audioBuffer = buffer;
+        if (asset.kind === 'video') asset.audioDur = buffer.duration;
+        else asset.dur = buffer.duration;
+        asset.channels = buffer.numberOfChannels || 1;
+        asset.sampleRate = buffer.sampleRate || 0;
+        asset.audioUsedAt = Date.now();
+        asset.audioDecodeError = null;
+        asset.audioRetryAt = 0;
+        bufferReady();
       }
-      if (asset.audioDisposed || asset.audioToken !== token) return null;
-      asset.audioBuffer = buffer;
-      if (asset.kind === 'video') asset.audioDur = buffer.duration;
-      else asset.dur = buffer.duration;
-      asset.channels = buffer.numberOfChannels || 1;
-      asset.sampleRate = buffer.sampleRate || 0;
-      asset.peaks = peakEnvelope(buffer);
-      asset.audioUsedAt = Date.now();
-      asset.audioDecodeError = null;
-      asset.audioRetryAt = 0;
+      /* Peaks survive cache eviction, so a re-decode skips the waveform. */
+      if (!asset.peaks) {
+        let lastProgress = -1;
+        const cancelled = () => {
+          assertCurrent?.();
+          if (asset.audioDisposed || asset.audioToken !== token) throw new Error('Audio preparation cancelled');
+        };
+        try {
+          asset.peaks = await buildWaveform(buffer, {
+            assertCurrent: cancelled,
+            onProgress: (completed, total) => {
+              const percent = Math.floor(completed / total * 100);
+              if (percent !== lastProgress) { onStage?.(`Building waveform · ${percent}%`, { completed, total }); lastProgress = percent; }
+            },
+          });
+        } catch (error: any) {
+          cancelled();
+          /* A failed waveform must not take the playable samples with it. */
+          asset.audioRetryAt = Date.now() + DECODE_RETRY_MS;
+        }
+      }
       if (PM.Memory?.maintain) PM.Memory.maintain('audio');
       else trimDecodedCache();
       PM.bus && PM.bus.emit('audio:decoded', asset.id);
       PM.invalidate && PM.invalidate('timeline');
       return buffer;
     } catch (error: any) {
+      assertCurrent?.();
       const failure: any = error && (error.audioUserFacing || /missing|decoder|supported/i.test(error.message || ''))
         ? error
         : new Error('Could not decode this audio file · try WAV, MP3, M4A, AAC, OGG, FLAC, or AIFF');
@@ -436,7 +443,7 @@ async function decodeAsset(asset: any) {
   return asset.audioDecoding;
 }
 
-async function prepareAsset({ id, name, blob, meta = {} }: any) {
+async function prepareAsset({ id, name, blob, meta = {}, assertCurrent, onStage }: any) {
   const asset: any = {
     id,
     name,
@@ -460,7 +467,7 @@ async function prepareAsset({ id, name, blob, meta = {} }: any) {
   };
   /* Imports are decoded before they can mutate project source. Restores already
      have trusted duration metadata and stay lazy until playback/waveform demand. */
-  if (!(asset.dur > 0)) await decodeAsset(asset);
+  if (!(asset.dur > 0)) await decodeAsset(asset, { assertCurrent, onStage });
   return asset;
 }
 
@@ -695,17 +702,100 @@ function requestDecode(layer: any, asset: any, generation: any) {
   if (existing && existing.asset === asset && existing.generation === generation) return;
   const request: any = { asset, generation };
   state.decodeRequests.set(layer.id, request);
-  decodeAsset(asset).then((buffer: any) => {
-    if (!buffer || !state.running || generation !== state.generation) return;
-    audioLayers();
-    const current: any = audioById?.get(layer.id);
-    if (!current || current.d.asset !== asset.id || !PM.assets || PM.assets.get(asset.id) !== asset) return;
-    sync(PM.time, true);
-  }).catch((error: any) => {
+  // bufferReady() starts the voice as soon as samples exist.
+  decodeAsset(asset).catch((error: any) => {
     if (generation === state.generation && PM.toast) PM.toast(error.message || 'Could not decode audio', 5000);
   }).finally(() => {
     if (state.decodeRequests.get(layer.id) === request) state.decodeRequests.delete(layer.id);
+    // A failed decode no longer counts as loading.
+    if (state.running) sync(PM.time, false);
   });
+}
+
+/* Join newly decoded samples into a running transport. Unforced, so voices
+   already playing other clips keep going without a click. */
+function bufferReady() {
+  if (state.running && PM.playing && !PM.audioDisabled) sync(PM.time, false);
+}
+
+/* Play keeps its clock while a clip's samples are still decoding, so say why
+   that clip is silent instead of leaving the user to guess. */
+const LOADING_TOAST = 'audio-loading';
+let loadingShown = false;
+function showLoading(loading: boolean) {
+  if (loading === loadingShown || PM.headlessPlayer) return;
+  loadingShown = loading;
+  if (loading) PM.toast?.('Loading audio…', 0, { key: LOADING_TOAST, sticky: true, progress: null });
+  else PM.dismissToast?.(LOADING_TOAST);
+}
+
+/* Restored projects open without decoding audio, so they open quickly. Decode
+   what the composition will play in the background afterwards, one file at a
+   time, nearest the playhead first, and only within the memory budget, so the
+   first Play is not spent waiting on the decoder. */
+const PREFETCH_MAX_SOURCE_BYTES = 512 * 1024 * 1024;
+let prefetchEpoch = 0;
+let prefetching = false;
+let prefetchAgain = false;
+
+function idle() {
+  return new Promise<void>(resolve => {
+    const host: any = (globalThis as any).window;
+    if (typeof host?.requestIdleCallback === 'function') host.requestIdleCallback(() => resolve(), { timeout: 1000 });
+    else setTimeout(resolve, 0);
+  });
+}
+
+function nextPrefetch(tried: Set<any>) {
+  const rate: any = finite(state.context?.sampleRate, 48000) || 48000;
+  const room: any = MAX_DECODED_BYTES - decodedUsage().bytes;
+  const time: any = finite(PM.time);
+  const clips: any[] = audioLayers().filter((layer: any) => layer.d?.asset).map((layer: any) => ({
+    layer,
+    start: Math.max(finite(layer.from), finite(layer._audioWindowStart, finite(layer.from))),
+    end: Math.min(finite(layer.from) + finite(layer.dur), finite(layer._audioWindowEnd, Infinity)),
+  }));
+  // Clips still ahead of (or under) the playhead first, in timeline order.
+  clips.sort((a, b) => Number(a.end <= time) - Number(b.end <= time) || a.start - b.start);
+  for (const { layer } of clips) {
+    const asset: any = PM.assets?.get?.(layer.d.asset);
+    if (!asset || !asset.audioBlob || asset.audioBuffer || asset.audioDecoding || tried.has(asset)) continue;
+    if (asset.audioRetryAt > Date.now() || finite(asset.audioBlob.size) > PREFETCH_MAX_SOURCE_BYTES) continue;
+    const seconds: any = finite(asset.kind === 'video' ? asset.audioDur || asset.dur : asset.dur);
+    if (seconds * rate * Math.max(1, finite(asset.channels, 2) || 2) * 4 > room) continue;
+    return asset;
+  }
+  return null;
+}
+
+async function prefetchPass(epoch: number) {
+  const tried = new Set<any>();
+  for (;;) {
+    await idle();
+    if (epoch !== prefetchEpoch || PM.audioDisabled || !PM.proj || PM.assets?.loading?.size) return;
+    // Background warming must never surface its own errors: playback reports
+    // decode failures when it actually needs the file.
+    try {
+      const asset: any = nextPrefetch(tried);
+      if (!asset) return;
+      tried.add(asset);
+      await decodeAsset(asset);
+    } catch { /* Try the next file. */ }
+  }
+}
+
+function requestPrefetch() {
+  if (PM.headlessPlayer || PM.audioDisabled) return;
+  if (prefetching) { prefetchAgain = true; return; }
+  prefetching = true;
+  const epoch = prefetchEpoch;
+  void (async () => {
+    try {
+      do { prefetchAgain = false; await prefetchPass(epoch); } while (prefetchAgain && epoch === prefetchEpoch);
+    } finally {
+      if (epoch === prefetchEpoch) prefetching = false;
+    }
+  })();
 }
 
 /* Re-schedule a playing voice's gain envelope from now, without restarting it. */
@@ -733,10 +823,11 @@ function voiceDrift(voice: any, layer: any, time: any, ctx: any) {
 }
 
 function sync(time: any, force: any = false) {
-  if (!state.running || !PM.proj) { stopAll(); return; }
+  if (!state.running || !PM.proj) { stopAll(); showLoading(false); return; }
   const generation: any = state.generation;
   const desired: any = new Set();
   const strips: any = new Set<string>();
+  let loading = false;
   applyMasterLevel();
   for (const layer of audioLayers()) {
     strips.add(layer._audioStrip || layer.id);
@@ -749,6 +840,7 @@ function sync(time: any, force: any = false) {
     if (!asset.audioBuffer) {
       stopVoice(layer.id);
       requestDecode(layer, asset, generation);
+      if (asset.audioDecoding) loading = true;
       continue;
     }
     const voice: any = state.voices.get(layer.id);
@@ -764,6 +856,7 @@ function sync(time: any, force: any = false) {
   }
   for (const id of [...state.voices.keys()]) if (!desired.has(id)) stopVoice(id);
   pruneStrips(strips);
+  showLoading(loading);
   publishState();
 }
 
@@ -787,6 +880,7 @@ function pause() {
   state.running = false;
   state.generation++;
   stopAll();
+  showLoading(false);
 }
 
 function seek(time: any) {
@@ -811,6 +905,7 @@ function reconcile(force: boolean = true) {
 function reconcileLayers() {
   invalidateAudioIndex();
   reconcile(false);
+  requestPrefetch();
 }
 
 /* A live edit (a dragged fader) does not announce itself on the bus until it
@@ -893,7 +988,8 @@ async function collectDecodedClips(t0: any, t1: any) {
       if (asset.dur > 0 && !plan(layer, asset, from, to)) continue;
       state.pinnedAssets.add(asset.id);
       pinned.add(asset.id);
-      try { await decodeAsset(asset); }
+      // Mixing needs samples only; a waveform still being drawn can finish later.
+      try { if (!asset.audioBuffer) await decodeAsset(asset); }
       catch (error: any) {
         throw new Error(`Could not include “${layer.name || asset.name || 'Audio'}” in the export · ${error.message || 'decode failed'}`);
       }
@@ -1038,6 +1134,7 @@ async function encodeOpus(buffer: any) {
   const chunks: any = [];
   let privateData: any = null;
   let encodeError: any = null;
+  const capacity: { wake?: () => void; stop?: () => void } = {};
   const encoder: any = new Encoder({
     output(chunk: any, metadata: any) {
       const description: any = metadata && metadata.decoderConfig && metadata.decoderConfig.description;
@@ -1046,40 +1143,82 @@ async function encodeOpus(buffer: any) {
       chunk.copyTo(bytes);
       chunks.push({ ts: Number(chunk.timestamp), data: bytes });
     },
-    error(error: any) { encodeError = error; },
+    error(error: any) { encodeError = error; capacity.wake?.(); },
   });
-  encoder.configure(config);
-  const source: any = Array.from({ length: channels }, (_: any, channel: any) => buffer.getChannelData(channel));
-  const frameLength: any = Math.max(1, Math.floor(buffer.sampleRate * .02));
-  for (let offset: any = 0; offset < buffer.length; offset += frameLength) {
-    const frames: any = Math.min(frameLength, buffer.length - offset);
-    const planar: any = new Float32Array(frames * channels);
-    for (let channel: any = 0; channel < channels; channel++) planar.set(source[channel].subarray(offset, offset + frames), channel * frames);
-    const data: any = new Data({
-      format: 'f32-planar',
-      sampleRate: buffer.sampleRate,
-      numberOfFrames: frames,
-      numberOfChannels: channels,
-      timestamp: Math.round(offset / buffer.sampleRate * 1e6),
-      data: planar,
-    });
-    encoder.encode(data);
-    data.close();
-    if (encoder.encodeQueueSize > 16) await new Promise((resolve: any) => setTimeout(resolve, 4));
+  try {
+    encoder.configure(config);
+    const source: any = Array.from({ length: channels }, (_: any, channel: any) => buffer.getChannelData(channel));
+    const frameLength: any = Math.max(1, Math.floor(buffer.sampleRate * .02));
+    for (let offset: any = 0; offset < buffer.length; offset += frameLength) {
+      if (encodeError) break;
+      const frames: any = Math.min(frameLength, buffer.length - offset);
+      const planar: any = new Float32Array(frames * channels);
+      for (let channel: any = 0; channel < channels; channel++) planar.set(source[channel].subarray(offset, offset + frames), channel * frames);
+      const data: any = new Data({
+        format: 'f32-planar',
+        sampleRate: buffer.sampleRate,
+        numberOfFrames: frames,
+        numberOfChannels: channels,
+        timestamp: Math.round(offset / buffer.sampleRate * 1e6),
+        data: planar,
+      });
+      try { encoder.encode(data); } finally { data.close(); }
+      // Wait for actual capacity instead of polling once after four milliseconds.
+      // This also bounds a slow encoder to at most 17 queued audio packets.
+      while (encoder.encodeQueueSize > 16 && !encodeError && encoder.state !== 'closed') {
+        await new Promise<void>(resolve => {
+          const stop = () => {
+            encoder.removeEventListener('dequeue', check);
+            if (capacity.wake === check) capacity.wake = undefined;
+            if (capacity.stop === stop) capacity.stop = undefined;
+            resolve();
+          };
+          const check = () => {
+            if (encoder.encodeQueueSize <= 16 || encodeError || encoder.state === 'closed') stop();
+          };
+          capacity.wake = check; capacity.stop = stop;
+          encoder.addEventListener('dequeue', check);
+          // Capacity may have changed immediately before listener registration.
+          check();
+        });
+      }
+    }
+    await encoder.flush();
+    if (encodeError || !chunks.length) return null;
+    return { chunks, priv: privateData || opusHead(channels, buffer.sampleRate), rate: buffer.sampleRate, channels };
+  } finally {
+    capacity.stop?.();
+    if (encoder.state !== 'closed') encoder.close();
   }
-  await encoder.flush();
-  encoder.close();
-  if (encodeError || !chunks.length) return null;
-  return { chunks, priv: privateData || opusHead(channels, buffer.sampleRate), rate: buffer.sampleRate, channels };
 }
 
 function hasAudibleLayers(project: any = PM.proj) {
   return audioLayers(project).some((layer: any) => layer.on !== false && layer.d && layer.d.asset);
 }
 
+/** A conservative encoder hint, using the same clip windows and source bounds
+ * as offline mixing. Never decode media or create audio contexts just to
+ * predict a track; unknown sources keep the ordinary encoder path. */
+function expectsOfflineMix(t0: number, t1: number): boolean {
+  const from = Math.max(0, finite(t0)), to = Math.max(from, finite(t1, from));
+  if (to - from <= 1e-4 || !PM.proj) return false;
+  try {
+    return audioLayers().some((layer: any) => {
+      const asset = layer.d?.asset && PM.assets?.get?.(layer.d.asset);
+      const duration = asset?.audioBuffer ? asset.audioBuffer.duration : asset?.dur;
+      return Number.isFinite(duration) && duration > 0 && !!plan(layer, asset, from, to);
+    });
+  } catch {
+    // A hint must not replace the export's normal validation or errors.
+    return false;
+  }
+}
+
 const Audio: any = PM.Audio = {
   destroy() {
     contextWarmupGeneration++;
+    prefetchEpoch++;
+    prefetching = false;
     if (contextWarmup !== undefined) window.cancelIdleCallback?.(contextWarmup);
     contextWarmup = undefined;
     pause();
@@ -1106,12 +1245,14 @@ const Audio: any = PM.Audio = {
   seek,
   tick,
   reconcile,
+  prefetch: requestPrefetch,
   drawWaveform,
   renderOffline,
   createRealtimeMix,
   supportsOpus,
   encodeOpus,
   hasAudibleLayers,
+  expectsOfflineMix,
   retune,
   setMonitorSolo,
   monitorSolo: () => [...state.monitorSolo],
@@ -1149,8 +1290,9 @@ PM.Memory?.register?.('audio', {
 });
 
 PM.bus.on('layers', reconcileLayers);
-PM.bus.on('assets', reconcile);
-PM.bus.on('project', () => { invalidateAudioIndex(); reconcileProject(); requestContextWarmup(); });
+PM.bus.on('assets', () => { reconcile(); requestPrefetch(); });
+PM.bus.on('project', () => { invalidateAudioIndex(); reconcileProject(); requestContextWarmup(); requestPrefetch(); });
 requestContextWarmup();
+requestPrefetch();
 publishState();
 }

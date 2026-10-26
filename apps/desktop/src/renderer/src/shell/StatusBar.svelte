@@ -37,7 +37,7 @@
 
   const saveStatus = $derived.by(() => {
     refreshToken;
-    return PM.app?.saving ? 'SAVING…' : PM.app?.dirty ? 'UNSAVED' : 'SAVED';
+    return PM.app?.saveStatus || (PM.app?.saving ? 'SAVING…' : PM.app?.dirty ? 'UNSAVED' : 'SAVED');
   });
   const layerCount = $derived.by(() => {
     doc.tick.structure;
@@ -123,7 +123,7 @@
   });
 </script>
 
-<span class="status-field">{saveStatus}</span>
+<button type="button" class="status-field status-contribution" aria-label="Save status and version history" aria-live="polite" title="Version History" onclick={() => PM.projectVersionHistory?.()}>{saveStatus}</button>
 <span class="status-field">{layerCount} layers</span>
 <span class="status-field">{keyframeCount} keys</span>
 {#if performanceIssues.length}
@@ -133,11 +133,10 @@
   {@render statusItem(entry)}
 {/each}
 <span class="sp" aria-hidden="true"></span>
-<span class="status-field">
-  {#if webglLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
-</span>
-<span class="status-field" title="Measured preview redraws per second during playback">{playbackStatus}</span>
-<span class="status-field" title="Preview render time">{frameMs} ms</span>
+<!-- As in the prototype, the right side reads playback and the frame; the
+     renderer only speaks up when something is wrong with it. -->
+{#if !webglLive}<span class="status-field">WebGL unavailable</span>{/if}
+<span class="status-field" title={`Measured preview redraws per second during playback · ${frameMs} ms per preview frame`}>{playbackStatus}</span>
 <span class="status-field">{dimensions}</span>
 {#each rightItems as entry (entry.item.id)}
   {@render statusItem(entry)}

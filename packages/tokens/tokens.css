@@ -36,6 +36,8 @@
   --tx-2:rgb(var(--ink-rgb) / .66);
   --tx-3:rgb(var(--ink-rgb) / .48);
   --tx-4:rgb(var(--ink-rgb) / .32);
+  --tx-label:rgb(var(--ink-rgb) / .8);  /* row labels: between primary and secondary */
+  --tx-value:var(--tx);                /* text inside a field */
 
   --accent:#F0580A;
   --accent-hover:#FF6A24;
@@ -79,8 +81,8 @@
   --hit:28px;     /* minimum interactive target */
   --val-w:128px;  /* inspector value column: wells share one right-aligned track */
 
-  --f-ui:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;
-  --f-mono:"SF Mono",ui-monospace,Menlo,monospace;
+  --f-ui:"Powermove Inter","Inter","SF Pro Text",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;
+  --f-mono:"Powermove Mono","Geist Mono","SF Mono",ui-monospace,Menlo,monospace;
 
   --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:18px;
   --lh:1.45;
@@ -120,40 +122,42 @@
 
 /* ── dark theme (alternate) ────────────────────────────── */
 :root[data-theme="dark"]{
-  --ink-rgb:245 245 244;
+  --ink-rgb:242 242 242;
   --paper-rgb:255 255 255;
 
-  /* Tailwind Stone, kept close to 950 so the dark theme stays truly dark. */
-  --bg-window:#0C0A09;
-  --bg-rail:#100E0D;
-  --bg-panel:#1C1917;
-  --bg-panel-2:#151311;
-  --bg-sunken:#090807;
-  --bg-row:#211E1C;
-  --bg-row-hi:#292524;
-  --bg-field:#171412;
-  --bg-float:#292524;
+  /* Warm charcoal: the prototype's ground, panels and wells. */
+  --bg-window:#0F0D0D;
+  --bg-rail:#121010;
+  --bg-panel:#1A1817;
+  --bg-panel-2:#151312;
+  --bg-sunken:#121010;
+  --bg-row:#232120;
+  --bg-row-hi:#252321;
+  --bg-field:#272524;
+  --bg-float:#2A2725;
 
   --ink-1:rgb(var(--ink-rgb) / .05);
   --ink-2:rgb(var(--ink-rgb) / .09);
   --ink-3:rgb(var(--ink-rgb) / .18);
 
-  --line:rgb(var(--ink-rgb) / .07);
-  --line-2:rgb(var(--ink-rgb) / .11);
-  --line-strong:rgb(var(--ink-rgb) / .2);
-  --section-line:rgb(var(--ink-rgb) / .08);
+  --line:rgb(255 255 255 / .06);
+  --line-2:rgb(255 255 255 / .06);
+  --line-strong:rgb(255 255 255 / .2);
+  --section-line:rgb(255 255 255 / .06);
 
-  --tx:#F5F5F4;
-  --tx-2:rgb(var(--ink-rgb) / .62);
-  --tx-3:rgb(var(--ink-rgb) / .44);
-  --tx-4:rgb(var(--ink-rgb) / .28);
+  --tx:#F2F2F2;
+  --tx-2:#A8A39F;
+  --tx-3:#8F8A86;
+  --tx-4:#6B6764;
+  --tx-label:#C9C4C0;
+  --tx-value:#E4E0DC;
 
-  --accent:#FF6B1A;
-  --accent-hover:#FF7B33;
-  --accent-dim:rgba(255,107,26,.15);
-  --accent-tx:#FF8B4D;
+  --accent:#FF6019;
+  --accent-hover:#FF7333;
+  --accent-dim:rgba(255,96,25,.15);
+  --accent-tx:#FF8A55;
 
-  --danger:#F36357;
+--danger:#F36357;
   --warning:#F59E0B;
   --success:#3FCF8E;
 
@@ -173,11 +177,7 @@
   --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 65%,transparent);
 
   --shadow-raise:none;
-  --shadow-panel:
-    0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
-    0 1px 1px rgb(0 0 0 / .3),
-    0 6px 14px -4px rgb(0 0 0 / .45),
-    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .07);
+  --shadow-panel:none; /* flat cards on the ground, as in the prototype */
   --shadow-lift:0 4px 14px -2px rgb(0 0 0 / .5),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09);
   --shadow-float:0 20px 48px -8px rgb(0 0 0 / .65),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .12),inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .1);
 }

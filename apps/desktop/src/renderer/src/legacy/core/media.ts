@@ -4,6 +4,7 @@ import { clipCuesToEnd, rebaseCuesForStart } from '../../captions/model';
 /* Ported from js/core/media.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { attachLibraryMedia } from '../../host/library-media';
 
 export function install(PM: PMRegistry): void {
 const DB_NAME: any = 'powermove-media';
@@ -137,6 +138,29 @@ PM.MediaStore = {
     return key ? ((await request('readwrite', (store: any) => store.delete(key))) as any).ok : false;
   },
 };
+const fileMedia = hostBridge()?.libraryMedia;
+if (fileMedia) PM.MediaStore = attachLibraryMedia(fileMedia, {
+  record: readMediaRecord,
+  keys: async () => {
+    const result = await request('readonly', (store: any) => store.getAllKeys());
+    if (!result.ok) throw new Error('The old media library could not be read. Its files have been preserved.');
+    return (result.value || []).map(String);
+  },
+  removeIfUnchanged: async (record) => {
+    let removed = false;
+    const result = await request('readwrite', (store: any) => {
+      const get = store.get(record.id);
+      get.addEventListener('success', () => {
+        const current = get.result;
+        if (current && current.revision === record.revision && current.at === record.at && current.size === record.size) {
+          store.delete(record.id); removed = true;
+        }
+      });
+      return get;
+    });
+    return result.ok && removed;
+  }
+});
 /* On a remote host this browser's IndexedDB is one device's cache: the host
    keeps the bytes for every device. Wrapped here, before the first project
    restore, so a miss is filled from the host. */
@@ -206,6 +230,7 @@ function referenceCount(project: any, assetId: any) {
   let count: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
     if (layerAssetId(layer) === assetId) count++;
+    for(const fx of layer.fx??[])for(const ref of Object.values<any>(fx.inputs??{}))if(ref?.kind==='asset'&&ref.assetId===assetId)count++;
     for(const texture of Object.values(layer?.d?.data?.object?.material?.maps || {}))if(texture===assetId)count++;
     for(const object of layer?.d?.data?.scene?.objects || []) {
       if(object.source?.assetId===assetId)count++;
@@ -273,6 +298,7 @@ function coalesce(project: any, canonicalId: any, aliases: any) {
   const retired: any = new Set(aliases.filter((id: any) => id && id !== canonicalId));
   let changed: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
+    for(const fx of layer.fx??[])for(const ref of Object.values<any>(fx.inputs??{}))if(ref?.kind==='asset'&&retired.has(ref.assetId)){ref.assetId=canonicalId;changed++;}
     if (retired.has(layerAssetId(layer))) { replaceLayerAssetId(layer, canonicalId); changed++; }
   }));
   retired.forEach((id: any) => {

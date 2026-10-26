@@ -1,5 +1,8 @@
+import {referenceParam,emptyReference} from '../../core/effect-inputs';
+import { effectDefaultDimensions, effectParameterDefault } from '../../kernel/effect-defaults';
 /* Ported from js/gl/shaders.js — behavior-preserving. */
 import type { EffectDefinition } from '../../kernel/api';
+import { effectProgramKey, effectVersion, resolveEffectDefinition } from '../../kernel/effect-versions';
 import { toLegacyFx, type LegacyFx } from '../../kernel/glsl';
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
@@ -177,28 +180,56 @@ void main(){
    registered by extensions, translated back into the legacy shape so the
    compositor, inspector, palette and FX browser remain unchanged. */
 const kernel = ensureKernel(PM);
-const legacyFx = new WeakMap<EffectDefinition, LegacyFx>();
+const legacyFx = new WeakMap<EffectDefinition, { value: LegacyFx; source: string; raw: boolean; version: number; samplingRadius?: string; support?: number; maxRadius?: number; samplingSpace?: string; firstPass?: number; columns?: string; rows?: string; pointSample?: string }>();
 const toLegacy = (definition: EffectDefinition): LegacyFx => {
   let cached = legacyFx.get(definition);
-  if (!cached) {
-    cached = toLegacyFx(definition, PRE);
+  if (!cached || cached.source !== definition.frag || cached.raw !== !!definition.rawShader
+      || cached.version !== (definition.version ?? 1) || cached.value.params !== definition.params
+      || cached.value.passes !== (definition.passes ?? 1) || cached.value.keepOrig !== !!definition.keepOrig
+      || cached.value.backdrop !== !!definition.backdrop
+      || cached.samplingRadius !== definition.sampling?.radius || cached.support !== definition.sampling?.support || cached.maxRadius !== definition.sampling?.maxRadius
+      || cached.samplingSpace !== definition.sampling?.space || cached.firstPass !== definition.sampling?.firstPass
+      || cached.columns !== definition.grid?.columns || cached.rows !== definition.grid?.rows || cached.pointSample !== definition.grid?.pointSample
+      || cached.value.label !== definition.label || cached.value.group !== definition.group) {
+    const value = toLegacyFx(definition, PRE);
+    if (cached) PM.GL?.dropProgram?.(effectProgramKey(definition.id, definition.version ?? 1, kernel.effects.get(definition.id)));
+    cached = { value, source: definition.frag, raw: !!definition.rawShader, version: definition.version ?? 1,
+      samplingRadius: definition.sampling?.radius, support: definition.sampling?.support, maxRadius: definition.sampling?.maxRadius,
+      samplingSpace: definition.sampling?.space, firstPass: definition.sampling?.firstPass,
+      columns: definition.grid?.columns, rows: definition.grid?.rows, pointSample: definition.grid?.pointSample };
     legacyFx.set(definition, cached);
   }
-  return cached;
+  return cached.value;
 };
 
 /* Every effect registry change retires its program and completed pictures.
    Re-enabling a provider must also discard frames drawn while it was missing. */
 kernel.effects.onChange((change) => {
   PM.GL?.dropProgram?.('fx:' + change.id);
+  for (const key of PM.GL?.progs?.keys?.() || []) if (key.startsWith('fx:' + change.id + '@')) PM.GL.dropProgram(key);
 });
 
 PM.FX = registryView<EffectDefinition, LegacyFx>(kernel.effects, { read: (item) => toLegacy(item) });
 
-PM.mkEffect = (type: any) => {
-  const def = PM.FX[type]; if (!def) return null;
-  const fx: any = { id: PM.uid('f'), type, on: true, p: {} };
-  def.params.forEach((pd: any) => { fx.p[pd.k] = PM.P(pd.def); });
+PM.effectDef = (effect: any) => {
+  const version = effectVersion(effect?.version);
+  const definition = version === undefined ? undefined : resolveEffectDefinition(kernel.effects.get(effect?.type), version);
+  return definition ? toLegacy(definition) : undefined;
+};
+PM.effectParamDefault = (param: any, layer?: any, project = PM.curComp?.() || PM.proj, time = PM.time || 0) => {
+  if (!param.defaultFrom) return param.def;
+  const bounds = layer && project?.layers?.includes(layer) ? PM.GL?.bounds?.(layer, time) : undefined;
+  return effectParameterDefault(param, effectDefaultDimensions(layer, project, bounds));
+};
+PM.mkEffect = (type: any, version?: number, layer?: any) => {
+  const definition = resolveEffectDefinition(kernel.effects.get(type), version);
+  if (!definition) return null;
+  const def = toLegacy(definition);
+  const fx: any = { id: PM.uid('f'), type, version: definition.version ?? 1, on: true, p: {} };
+  def.params.forEach((pd: any) => {
+    if (referenceParam(pd)) (fx.inputs ??= {})[pd.k] = emptyReference(pd.type);
+    else fx.p[pd.k] = PM.P(PM.effectParamDefault(pd, layer));
+  });
   return fx;
 };
 

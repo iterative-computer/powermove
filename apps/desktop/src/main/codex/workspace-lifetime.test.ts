@@ -1,9 +1,10 @@
-import { lutimes, mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { lstat, lutimes, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { forgetProjectWorkspace, sweepOrphanWorkspaces } from './workspace-lifetime';
+import { cleanWorkspaceCaches, forgetProjectWorkspace, sweepOrphanWorkspaces } from './workspace-lifetime';
+import { agentStateRoot, agentWorkspaceRoot } from './workspace';
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.UTC(2026, 9, 4);
@@ -28,6 +29,29 @@ async function workspace(id: string, ageDays: number): Promise<void> {
 
 beforeEach(async () => { userData = await mkdtemp(path.join(tmpdir(), 'pm-workspace-lifetime-')); });
 afterEach(async () => { await rm(userData, { recursive: true, force: true }); });
+
+it('cleans only idle generated caches in the app workspace location, preserving artifacts and session state', async () => {
+  const workspace = agentWorkspaceRoot(userData, 'one');
+  for (const name of ['node_modules/dependency/index.js', 'powermove-api/api.ts', 'artifacts/run/output.png', '.powermove/extension-runs/pending/edit.ts', 'inputs/attachments/file.txt']) {
+    await mkdir(path.dirname(path.join(workspace, name)), { recursive: true });
+    await writeFile(path.join(workspace, name), name);
+  }
+  const old = (NOW - 20 * DAY) / 1000;
+  async function age(file: string): Promise<void> {
+    if ((await lstat(file)).isDirectory()) for (const name of await readdir(file)) await age(path.join(file, name));
+    await utimes(file, old, old);
+  }
+  await age(workspace);
+  expect(agentStateRoot(workspace)).toBe(path.join(userData, 'Agent State', 'one'));
+  expect(await cleanWorkspaceCaches(userData, () => true, false, NOW)).toBe(0);
+  const estimated = await cleanWorkspaceCaches(userData, () => false, false, NOW, true);
+  expect(estimated).toBeGreaterThan(0);
+  expect(await readFile(path.join(workspace, 'powermove-api/api.ts'), 'utf8')).toBe('powermove-api/api.ts');
+  expect(await cleanWorkspaceCaches(userData, () => false, false, NOW)).toBe(estimated);
+  expect(await readdir(workspace)).toEqual(['.powermove', 'artifacts', 'inputs']);
+  expect(await readFile(path.join(workspace, 'artifacts/run/output.png'), 'utf8')).toBe('artifacts/run/output.png');
+  expect(await readFile(path.join(workspace, '.powermove/extension-runs/pending/edit.ts'), 'utf8')).toContain('pending');
+});
 
 describe('forgetProjectWorkspace', () => {
   it('removes the project workspace and its agent sessions only', async () => {

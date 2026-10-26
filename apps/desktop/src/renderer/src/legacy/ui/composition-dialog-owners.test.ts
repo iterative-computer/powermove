@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 function editor() {
-  const PM = makePM('core/util', 'core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history');
+  const PM = makePM('core/util', 'core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'ui/controls');
   PM.proj = PM.mkProject({ name: 'Original project', w: 640, h: 360, dur: 3 });
   const target = PM.Comps.create({ name: 'Original nested composition' }, { open: false });
   const use = PM.Comps.addToTimeline(target); PM.hist.clear();

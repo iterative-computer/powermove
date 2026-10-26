@@ -21,8 +21,11 @@ test('large undo history survives autosave, native Save, and relaunch', async ({
     return PM.proj.id as string;
   });
   const statePath = path.join(session.userData, 'store', `projectHistory.${projectId}.json`);
-  await expect.poll(async () => (await stat(statePath).catch(() => null))?.size || 0)
-    .toBeGreaterThan(32 * 1024 * 1024);
+  await expect.poll(async () => {
+    const bytes = await readFile(statePath, 'utf8').catch(() => 'null');
+    return JSON.parse(bytes)?.__powermoveDiskValue ?? null;
+  }).toBe(1);
+  expect((await stat(statePath)).size).toBeLessThan(1024 * 1024);
   expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   const saved = decodeProjectContainer(new Uint8Array(await readFile(destination))).document as any;
   expect(saved.history.entries[0].label).toBe('Delete large source');

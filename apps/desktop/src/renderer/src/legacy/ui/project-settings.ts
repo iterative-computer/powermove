@@ -509,6 +509,13 @@ export function createNewProjectForm(
   let backgroundValue = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(seed.bg) ? seed.bg.toUpperCase() : NEW_PROJECT_DEFAULTS.bg;
   const element = document.createElement('div');
   element.className = 'new-project-form';
+  // Initial focus is deferred until the modal mounts. Rapid entry may already
+  // have moved to another field or positioned a caret before that callback runs.
+  let interacted = false;
+  const markInteraction = (): void => { interacted = true; };
+  for (const event of ['pointerdown', 'keydown', 'input']) {
+    element.addEventListener(event, markInteraction, { capture: true });
+  }
 
   const field = (label: string, control: HTMLElement | HTMLElement[]): HTMLElement => {
     const wrap = document.createElement('label');
@@ -600,6 +607,11 @@ export function createNewProjectForm(
       dur: clampDuration(duration.value, seed.dur),
       bg: backgroundValue
     }),
-    focus: () => { name.focus(); name.select(); }
+    focus: () => {
+      if (!element.isConnected || interacted
+        || (element.contains(document.activeElement) && document.activeElement !== name)) return;
+      name.focus();
+      name.select();
+    }
   };
 }

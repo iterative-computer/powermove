@@ -83,3 +83,41 @@ describe('nativeMenuTemplate', () => {
     expect(clicked).toEqual(['shy']);
   });
 });
+
+describe('native submenus', () => {
+  it('keeps nested rows, drops empty or too-deep submenus, and shares one row budget', () => {
+    const leaf = (id: string) => ({ type: 'normal', id, label: id });
+    expect(sanitizeNativeMenu([
+      { type: 'submenu', id: 'new', label: 'New', items: [leaf('new.text'), { type: 'separator' }, leaf('new.camera')] },
+      { type: 'submenu', id: 'empty', label: 'Empty', items: [] },
+      { type: 'submenu', id: 'a', label: 'A', items: [{ type: 'submenu', id: 'b', label: 'B', items: [{ type: 'submenu', id: 'c', label: 'C', items: [leaf('deep')] }, leaf('b.1')] }] }
+    ])).toEqual([
+      { type: 'submenu', id: 'new', label: 'New', enabled: true, icon: undefined, items: [
+        { type: 'normal', id: 'new.text', label: 'new.text', enabled: true, checked: false, accelerator: undefined, icon: undefined },
+        { type: 'separator' },
+        { type: 'normal', id: 'new.camera', label: 'new.camera', enabled: true, checked: false, accelerator: undefined, icon: undefined }
+      ] },
+      { type: 'submenu', id: 'a', label: 'A', enabled: true, icon: undefined, items: [
+        { type: 'submenu', id: 'b', label: 'B', enabled: true, icon: undefined, items: [
+          { type: 'normal', id: 'b.1', label: 'b.1', enabled: true, checked: false, accelerator: undefined, icon: undefined }
+        ] }
+      ] }
+    ]);
+    const flood = Array.from({ length: 150 }, (_, index) => leaf(`r${index}`));
+    const rows = sanitizeNativeMenu([{ type: 'submenu', id: 's', label: 'S', items: flood }, ...flood]);
+    const count = (items: any[]): number => items.reduce((sum, item) => sum + 1 + (item.items ? count(item.items) : 0), 0);
+    expect(count(rows)).toBeLessThanOrEqual(200);
+  });
+
+  it('builds an Electron submenu whose rows report their own ids', () => {
+    const clicked: string[] = [];
+    const template = nativeMenuTemplate([
+      { type: 'submenu', id: 'm0', label: 'New', items: [{ type: 'normal', id: 'm0.1', label: 'Camera' }] }
+    ], (id) => clicked.push(id), () => undefined);
+    const submenu = (template[0] as any).submenu;
+    expect(template[0]).toMatchObject({ label: 'New', enabled: true });
+    expect(submenu).toHaveLength(1);
+    submenu[0].click();
+    expect(clicked).toEqual(['m0.1']);
+  });
+});

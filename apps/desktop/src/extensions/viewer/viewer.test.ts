@@ -128,6 +128,27 @@ describe('viewer runtime', () => {
     return { api, runtime, rect, handlers, frames, context, stageRead, frameRead, flush };
   }
 
+  it('coalesces project-tab notification bursts into one stage measurement', () => {
+    const h = overlayHarness();
+    for (let n = 0; n < 8; n++) {
+      h.handlers.get('project:changed')?.({ kind: 'structure' });
+      h.handlers.get('layout')?.();
+    }
+    expect(h.stageRead).not.toHaveBeenCalled();
+    h.flush();
+    expect(h.stageRead).toHaveBeenCalledOnce();
+    h.runtime.dispose();
+  });
+
+  it('does not measure a parked viewer or run deferred layout after disposal', () => {
+    const h = overlayHarness();
+    h.runtime.stage.closest = () => ({});
+    h.handlers.get('project:changed')?.({ kind: 'structure' }); h.flush();
+    expect(h.stageRead).not.toHaveBeenCalled();
+    h.handlers.get('layout')?.(); h.runtime.dispose(); h.flush();
+    expect(h.stageRead).not.toHaveBeenCalled();
+  });
+
   it('paints playback overlays once per frame without forcing DOM layout', () => {
     const h = overlayHarness();
     h.api.transport.playing = () => true;
@@ -791,4 +812,15 @@ describe('group-aware pick targets', () => {
     expect(drillTarget(apiWith(['loose']), leaf)).toBeNull();
     expect(drillTarget(apiWith([]), leaf)).toBeNull();
   });
+});
+
+it('adds chained spatial support, fixed edge support and containing group padding', () => {
+  const api = viewerApi() as any;
+  api.effects = {get:(id:string)=>id==='blur' ? {viewportSafe:true,viewportPadding:['amount'],viewportPaddingFactor:2,params:[{k:'amount',def:3}]} : {viewportSafe:true,viewportPaddingPixels:1}};
+  const fx = (amount:number) => ({type:'blur',on:true,p:{amount:{v:amount}}});
+  const group = {id:'g',fx:[fx(5)]};
+  const layer = {id:'l',group:'g',fx:[fx(2),{type:'blur',on:true,p:{}},{type:'findEdges',on:true,p:{}},{...fx(90),on:false}]};
+  expect(effectViewportPadding(api,{layers:[group,layer]},0)).toBe(21);
+  group['group' as keyof typeof group] = 'l' as never;
+  expect(effectViewportPadding(api,{layers:[group,layer]},0)).toBe(21);
 });

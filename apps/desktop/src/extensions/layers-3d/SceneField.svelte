@@ -55,7 +55,7 @@
       <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={atKey}
         aria-label={`${atKey ? 'Remove keyframe for' : 'Add keyframe for'} ${field.label}`} aria-pressed={atKey}
         title={atKey ? 'Remove keyframe' : 'Add keyframe'} disabled={!prop} onclick={toggleKey}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg>
+        {@html api.ui.icon(atKey ? 'diamondFill' : 'diamond')}
       </button>
     {/snippet}
     {#if field.kind === 'color'}

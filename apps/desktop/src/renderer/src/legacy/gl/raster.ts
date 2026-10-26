@@ -1,6 +1,8 @@
+import {parseCube,MAX_CUBE_BYTES} from '../../core/cube-lut';
+import { yieldMediaWork } from '../core/media-work';
 import { webmTimestampScale } from '../../../../shared/video-timing';
 import { mp4FrameRate } from '../../../../shared/mp4-frame-rate';
-import { createCloudMedia, cloudSourcePaths, readLocalMediaSource } from '../core/cloud-media';
+import { createCloudMedia, cloudSourcePaths, readLocalMediaSource, prepareCloudImport } from '../core/cloud-media';
 import { prepareVideoPreview } from '../core/video-preview';
 import { disposeVideoInstances } from '../core/video-instances';
 import { cancelPreviewVideoSeek } from '../core/video-seek';
@@ -591,6 +593,7 @@ function assetKind(file: any) {
   if (mime.startsWith('video/')) return 'video';
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = mediaExtension(file.name);
+  if(ext==='cube')return 'lut';
   if (['obj','glb','gltf'].includes(ext) || ['model/obj','text/plain+obj','model/gltf-binary','model/gltf+json'].includes(mime)) return 'model';
   if (isImageExtension(ext)) return 'image';
   if (isVideoExtension(ext)) return 'video';
@@ -670,7 +673,7 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
     loaded();
   });
 }
-async function playbackProxy(file: any, name: string, onStage?: (label: string) => void): Promise<any> {
+async function playbackProxy(file: any, name: string, onStage?: (label: string, progress?: { completed: number; total: number }) => void, assertCurrent?: () => void): Promise<any> {
   const media = hostBridge()?.media;
   if (!media?.createPlaybackProxy) {
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
@@ -680,11 +683,12 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string) 
   const result = await media.createPlaybackProxy(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading optimized video');
-  return readProxyFile(result, name, file.lastModified);
+  return readProxyFile(result, name, file.lastModified, { assertCurrent, onStage });
 }
-async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
+async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCurrent }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
-  if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
+  if(kind==='lut'){if(blob.size>MAX_CUBE_BYTES)throw new Error('LUT exceeds the 16 MiB file limit');const sourceText=await blob.text(),lut=parseCube(sourceText);return{id,name,kind,format:'cube',blob,lut,size:blob.size,w:lut.width,h:lut.height,dur:0};}
+  if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta, onStage, assertCurrent });
   if (kind === 'model') {
     if(blob.size>128*1024*1024)throw new Error('3D models must be smaller than 128 MB');
     if(/\.(glb|gltf)$/i.test(name) || /^model\/gltf/.test(blob.type)) {
@@ -715,6 +719,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
   let playbackProxyVersion = Number(meta.playbackProxyVersion) || 0;
   try {
     if (kind === 'image') {
+      onStage?.('Decoding image');
       /* Keep an SVG as a live vector image. createImageBitmap bakes it at its
          intrinsic dimensions, which makes an otherwise vector layer soften as
          soon as the user scales it in the composition. */
@@ -730,6 +735,8 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
       if (!(w > 0 && hh > 0)) throw new Error('Could not read this image file');
     } else if (kind === 'video') {
       const openVideo = async () => {
+        onStage?.('Reading video metadata');
+        assertCurrent?.();
         el = window.document.createElement('video');
         el.preload = 'metadata'; el.muted = true; el.playsInline = true;
         const ready = waitForVideoMetadata(el, name);
@@ -761,7 +768,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
           el.load();
         }
         window.URL.revokeObjectURL(url);
-        sourceBlob = await playbackProxy(blob, name, onStage);
+        sourceBlob = await playbackProxy(blob, name, onStage, assertCurrent);
         playbackProxyUsed = true;
         playbackProxyVersion = 3;
         url = window.URL.createObjectURL(sourceBlob);
@@ -791,7 +798,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
     if (kind === 'video' && (meta.hasAudio === true || meta.hasAudio == null)) {
       try {
         const audio: any = await PM.Audio.prepareAsset({
-          id, name, blob: sourceBlob,
+          id, name, blob: sourceBlob, onStage, assertCurrent,
           meta: meta.hasAudio === true ? { dur: meta.audioDur || meta.dur || dur } : {},
         });
         Object.assign(asset, {
@@ -810,6 +817,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
           sampleRate: audio.sampleRate,
         });
       } catch (error) {
+        assertCurrent?.();
         asset.hasAudio = false;
       }
     } else if (kind === 'video') asset.hasAudio = false;
@@ -819,6 +827,10 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
     }
     return asset;
   } catch (error) {
+    if (kind === 'video' && el) {
+      cancelPreviewVideoSeek(el);
+      try { el.pause(); el.removeAttribute('src'); el.load(); } catch { }
+    }
     try { if (el && el.close) el.close(); } catch (e) { }
     window.URL.revokeObjectURL(url);
     throw error;
@@ -860,6 +872,9 @@ function checkpointAssetMetadata(project: any) {
 }
 /** Import and replacement share all reading, decoding, conversion, and storage. */
 async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage }: any) {
+  assertCurrentProject();
+  await yieldMediaWork();
+  assertCurrentProject();
   const resolved = settled || await resolveAssetKind(file);
   const kind = resolved.kind;
   if (!kind) throw new Error('Unsupported media file');
@@ -876,27 +891,24 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   let source = file;
   let meta: any = {};
   if (resolved.animated) {
-    const animation = await convertAnimatedImage(file, { onStage });
+    const animation = await convertAnimatedImage(file, { onStage, assertCurrent: assertCurrentProject });
     assertCurrentProject();
     source = animation.file;
     meta = { format: extension, imageSequence: { fps: animation.fps, frames: animation.frames } };
   } else if (kind === 'image' && needsImageConversion(extension)) {
-    source = await convertStillImage(file, { onStage });
+    source = await convertStillImage(file, { onStage, assertCurrent: assertCurrentProject });
     assertCurrentProject();
     meta = { format: extension };
   }
   onStage?.('Preparing media');
-  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey }, onStage });
-  /* Images/audio can persist while they decode. Video preparation may replace
-     an unsupported source with a much smaller playback proxy, so wait for that
-     decision before writing any video bytes to durable storage. */
-  const mayNeedPlaybackProxy = kind === 'video' && !resolved.animated && mayNeedVideoProxy(extension);
-  // Observe storage failures immediately, even while decoding is still pending.
+  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey }, onStage, assertCurrent: assertCurrentProject });
+  // Decode before storing so failed or cancelled imports do not copy payloads.
   const persist = (blob: any) => Promise.resolve().then(() => {
     assertCurrentProject();
-    return PM.MediaStore.put(storageKey, blob, { storageKey, fingerprint, type: blob.type || file.type });
+    return PM.MediaStore.put(storageKey, blob, { storageKey, fingerprint, type: blob.type || file.type,
+      // Preserve links only for unchanged user-selected source files.
+      ...(blob === file && sourcePath && !file.__powermoveArtifact ? { sourcePath } : {}) });
   }).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
-  const eagerPersist = mayNeedPlaybackProxy ? null : persist(source);
   const preparedResult: any = await Promise.resolve(preparation).then(
     value => ({ status: 'fulfilled', value }),
     reason => ({ status: 'rejected', reason })
@@ -905,8 +917,8 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const persistBlob = prepared?.persistBlob || source;
   if (prepared) delete prepared.persistBlob;
   if (prepared) onStage?.('Saving media');
-  const persistedResult: any = await (eagerPersist || (prepared
-    ? persist(persistBlob) : { status: 'fulfilled', value: false }));
+  const persistedResult: any = await (prepared
+    ? persist(persistBlob) : { status: 'fulfilled', value: false });
   if (preparedResult.status === 'rejected' || persistedResult.status === 'rejected') {
     if (prepared) disposeAsset(prepared);
     throw preparedResult.status === 'rejected' ? preparedResult.reason : persistedResult.reason;
@@ -927,6 +939,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
       throw error;
     }
   };
+  file = await prepareCloudImport(file, assertCurrentProject, onStage);
   const provisionalId = PM.uid('a');
   const { prepared, kind, fingerprint, storageKey, sourcePath, persisted } = await prepareImportedAsset(file, {
     id: provisionalId, assertCurrentProject, onStage,
@@ -937,6 +950,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   }
   let posterBlob: Blob | null = null;
   try {
+    onStage?.('Creating thumbnail');
     posterBlob = await capturePoster(prepared);
     if (posterBlob) {
       const posterKey = PM.MediaImport.posterKeyFor(storageKey);
@@ -1021,32 +1035,40 @@ PM.assets = {
   map: new Map<any, any>(),
   loading: new Set<string>(),
   errors: new Map<string, string>(),
+  has(id:string){const pending=[PM.proj],seen=new Set<any>();while(pending.length){const comp=pending.pop();if(!comp||seen.has(comp))continue;seen.add(comp);if(comp.assets?.[id])return true;pending.push(...Object.values<any>(comp.comps??{}));}return false;},
   async add(file: any, options: any) {
     const result = await ingestAsset(file, options);
     result.asset.importResult = result;
     return result.asset;
   },
-  async importBatch(files: any, { concurrency, onProgress, onStage, replaceAssetId }: any = {}) {
+  async importBatch(files: any, { concurrency, onProgress, onStage, replaceAssetId, signal }: any = {}) {
     const list = Array.from(files || []);
     if (replaceAssetId != null && list.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
+    const targetProject = PM.proj, targetEpoch = assetEpoch;
+    const assertCurrent = () => {
+      signal?.throwIfAborted();
+      if (PM.proj !== targetProject || assetEpoch !== targetEpoch) throw new Error('Import stopped because you switched projects · import again in the intended project');
+    };
     const cores = Math.max(1, Number(window.navigator && window.navigator.hardwareConcurrency) || 4);
     const limit = concurrency == null ? Math.max(1, Math.min(3, Math.floor(cores / 2))) : concurrency;
     let completed = 0;
     const results = await PM.MediaImport.mapBounded(list, limit, async (file: any, index: any) => {
       let result: any;
-      const options = { silent: true, onStage: onStage
-        ? (label: string) => onStage({ file, index, label, completed, total: list.length }) : undefined };
+      const options = { silent: true, assertCurrent, onStage: onStage
+        ? (label: string, progress?: { completed: number; total: number }) => onStage({ file, index, label, progress, completed, total: list.length }) : undefined };
       try {
+        await yieldMediaWork();
+        assertCurrent();
         result = replaceAssetId != null
           ? { ...await PM.assets.replace(replaceAssetId, file, options), status: 'replaced' }
           : await ingestAsset(file, options);
       }
-      catch (error) { result = { file, status: 'failed', error }; }
+      catch (error) { result = { file, status: signal?.aborted ? 'cancelled' : 'failed', error }; }
       completed++;
       if (onProgress) onProgress({ completed, total: list.length, index, file, result });
       return result;
     });
-    if (results.some((result: any) => result.status !== 'failed' && result.status !== 'replaced')) {
+    if (PM.proj === targetProject && results.some((result: any) => ['created', 'reused', 'relinked'].includes(result.status))) {
       PM.touch();
       checkpointAssetMetadata(PM.proj);
       PM.bus.emit('assets');
@@ -1060,6 +1082,10 @@ PM.assets = {
     const targetEpoch = assetEpoch;
     const currentMeta: any = targetProject?.assets?.[id];
     if (!currentMeta) throw new Error('This media item is no longer in the project');
+    file = await prepareCloudImport(file, () => {
+      assertCurrent?.();
+      if (PM.proj !== targetProject || assetEpoch !== targetEpoch) throw new Error('Replacement stopped because you switched projects');
+    }, onStage);
     const resolved = await resolveAssetKind(file);
     const kind = resolved.kind;
     if (!kind) throw new Error('Unsupported media file');
@@ -1176,6 +1202,7 @@ PM.assets = {
     PM.assets.loading.clear();
     PM.assets.errors.clear();
     PM.GL?.dropTextures?.('a:');
+    PM.GL?.dropTextures?.('effect-asset:');PM.GL?.dropTextures?.('effect-lut:');PM.GL?.dropTextures?.('effect-path:');
     PM.GL?.dropTextures?.('video:');
     for (const id of [...posterUrls.keys()]) revokePoster(id);
   },
@@ -1195,6 +1222,7 @@ PM.assets = {
     PM.assets.errors = new Map();
     posterUrls.clear();
     PM.GL?.dropTextures?.('a:');
+    PM.GL?.dropTextures?.('effect-asset:');PM.GL?.dropTextures?.('effect-lut:');PM.GL?.dropTextures?.('effect-path:');
     PM.GL?.dropTextures?.('video:');
     for (const id of parked.map.keys()) PM.GL?.dropMesh?.(id);
     PM.preparedVideoFrames?.clear?.();
@@ -1226,7 +1254,7 @@ PM.assets = {
     // goes stale must take back only what it added, and only from here.
     const cache = PM.assets.map;
     const metas: any[] = Object.values(project && project.assets || {})
-      .filter((meta: any) => meta && meta.id && ['image', 'video', 'audio', 'model'].includes(meta.kind));
+      .filter((meta: any) => meta && meta.id && ['image', 'video', 'audio', 'model','lut'].includes(meta.kind));
     const restored: any[] = [], missing: any[] = [];
     const loading = new Set(metas.map(meta => String(meta.id)));
     PM.assets.loading = loading;

@@ -41,16 +41,30 @@ const V4_TIMELINE_DEFAULTS: any = Object.freeze({
   keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true,
   toolbarDensity: 'compact',
 });
-const TIMELINE_DEFAULTS: any = Object.freeze({
+/* Schema 4's stock chrome; schema 5 widens the layer list for its column
+   headings, switches and Link Layers pickwhip. Untouched saves migrate. */
+const V5_TIMELINE_DEFAULTS: any = Object.freeze({
   rowHeight: 30, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
   keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true,
   toolbarDensity: 'compact',
 });
-const TIMELINE_CHROME_SCHEMA: any = 4;
+/* Schema 5's stock chrome; schema 6 takes the prototype's measurements:
+   28px rows, a 32px control row, a 494px layer list and no layer numbers. */
+const V6_TIMELINE_DEFAULTS: any = Object.freeze({
+  rowHeight: 30, gutterWidth: 300, rulerHeight: 28, clipRadius: 5,
+  keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true,
+  toolbarDensity: 'compact',
+});
+const TIMELINE_DEFAULTS: any = Object.freeze({
+  rowHeight: 28, gutterWidth: 494, rulerHeight: 32, clipRadius: 5,
+  keyframeSize: 10, showLayerNumbers: false, showTypeBadges: true,
+  toolbarDensity: 'compact',
+});
+const TIMELINE_CHROME_SCHEMA: any = 6;
 
 function isLegacyTimelineChrome(value: any) {
   if (!value || typeof value !== 'object') return true;
-  return [LEGACY_TIMELINE_DEFAULTS, V2_TIMELINE_DEFAULTS, V3_TIMELINE_DEFAULTS, V4_TIMELINE_DEFAULTS].some((defaults: any) =>
+  return [LEGACY_TIMELINE_DEFAULTS, V2_TIMELINE_DEFAULTS, V3_TIMELINE_DEFAULTS, V4_TIMELINE_DEFAULTS, V5_TIMELINE_DEFAULTS, V6_TIMELINE_DEFAULTS].some((defaults: any) =>
     Object.entries(defaults).every(([key, expected]: any) => value[key] === undefined || value[key] === expected));
 }
 
@@ -58,12 +72,13 @@ function normalizeTimelineChrome(value: any) {
   const raw: any = value && typeof value === 'object' ? value : {};
   return {
     rowHeight: PM.clamp(Math.round(finite(raw.rowHeight) ? raw.rowHeight : TIMELINE_DEFAULTS.rowHeight), 22, 48),
-    gutterWidth: PM.clamp(Math.round(finite(raw.gutterWidth) ? raw.gutterWidth : TIMELINE_DEFAULTS.gutterWidth), 160, 360),
+    gutterWidth: PM.clamp(Math.round(finite(raw.gutterWidth) ? raw.gutterWidth : TIMELINE_DEFAULTS.gutterWidth), 160, 640),
     rulerHeight: PM.clamp(Math.round(finite(raw.rulerHeight) ? raw.rulerHeight : TIMELINE_DEFAULTS.rulerHeight), 20, 42),
     clipRadius: PM.clamp(finite(raw.clipRadius) ? raw.clipRadius : TIMELINE_DEFAULTS.clipRadius, 0, 12),
     keyframeSize: PM.clamp(finite(raw.keyframeSize) ? raw.keyframeSize : TIMELINE_DEFAULTS.keyframeSize, 4, 12),
-    showLayerNumbers: raw.showLayerNumbers !== false,
+    showLayerNumbers: typeof raw.showLayerNumbers === 'boolean' ? raw.showLayerNumbers : TIMELINE_DEFAULTS.showLayerNumbers,
     showTypeBadges: raw.showTypeBadges !== false,
+    showSwitches: raw.showSwitches !== false,
     toolbarDensity: ['compact', 'normal'].includes(raw.toolbarDensity) ? raw.toolbarDensity : TIMELINE_DEFAULTS.toolbarDensity,
   };
 }
@@ -142,7 +157,7 @@ function normalizeControl(control: any, index: any) {
   }
   out.param = text(authoredParam, text(raw.name, label));
   if (type === 'text') out.def = rawDefault == null ? '' : String(rawDefault);
-  else if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6B1A';
+  else if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6019';
   else if (type === 'fill') out.def = rawDefault && typeof rawDefault === 'object' ? copy(rawDefault) : null;
   else if (type === 'toggle') out.def = rawDefault === undefined ? false : !!rawDefault;
   else if (type === 'select') {
@@ -182,8 +197,12 @@ function isLegacyBrokenTextSplitter(panel: any) {
       already has it, docked or hidden.
    4. A sized Timeline at the foot of the center column moves into a bottom
       dock that also spans the left column. (Version 3 briefly stamped
-      project workspaces without moving it, so this step runs below 4.) */
-const AGENT_DOCK_MIGRATION = 4;
+      project workspaces without moving it, so this step runs below 4.)
+   5. The After Effects layout: Project and Effect Controls share one tabbed
+      slot, Effect Controls shown. Default (Design) workspaces, and the edited
+      copies projects open with, also get Effects & Presets back under
+      Properties, and the built-ins take their workspace-bar names. */
+const AGENT_DOCK_MIGRATION = 5;
 const panelId = (spec: any) => typeof spec === 'string' ? spec : spec?.id;
 function migrateDockedAgent(workspace: any) {
   if (!workspace || typeof workspace !== 'object') return workspace;
@@ -219,11 +238,73 @@ function migrateDockedAgent(workspace: any) {
       docks.splice(index < 0 ? docks.length : index, 0, bottom);
     }
   }
+  let renamed: string | null = null;
+  if (version < 5 && docks) {
+    const migrated = migratePrototypeLayout(workspace, docks, hiddenPanels ?? []);
+    docks = migrated.docks; hiddenPanels = migrated.hiddenPanels;
+    if (workspace.builtin && BUILTIN_NAMES[workspace.id]?.from === workspace.name) renamed = BUILTIN_NAMES[workspace.id]!.to;
+  }
   return {
     ...workspace,
+    ...(renamed ? { name: renamed } : {}),
     ...(docks ? { layout: { ...workspace.layout, docks } } : {}),
     ...(hiddenPanels ? { hiddenPanels } : {}),
   };
+}
+
+/* The prototype's workspace bar names the main built-ins after what they are for. */
+const BUILTIN_NAMES: Record<string, { from: string; to: string }> = {
+  design: { from: 'Design', to: 'Default' },
+  animate: { from: 'Animate', to: 'Animation' },
+};
+const asSpec = (spec: any) => typeof spec === 'string' ? { id: spec } : { ...spec };
+function migratePrototypeLayout(workspace: any, docks: any[], hiddenPanels: any[]) {
+  docks = docks.map((dock: any) => dock?.panels ? { ...dock, panels: dock.panels.map(asSpec) } : dock);
+  const defaultFamily = workspace.id === 'design' || /^Design\b/.test(String(workspace.name || ''));
+  const docked = (id: string) => docks.find((dock: any) => dock?.panels?.some((spec: any) => spec.id === id));
+  const take = (id: string) => {
+    const dock = docked(id);
+    if (dock) {
+      const spec = dock.panels.splice(dock.panels.findIndex((item: any) => item.id === id), 1)[0];
+      if (dock.panels.length) ensureDockFill(dock);
+      return spec;
+    }
+    const hidden = hiddenPanels.find((item: any) => item?.id === id);
+    if (!hidden) return null;
+    hiddenPanels = hiddenPanels.filter((item: any) => item?.id !== id);
+    return { ...(hidden.spec || {}), id };
+  };
+  const media = docked('assets');
+  if (media) {
+    const effectsDock = docked('layer-effects');
+    const index = media.panels.findIndex((spec: any) => spec.id === 'assets');
+    const adjacent = effectsDock === media && Math.abs(media.panels.findIndex((spec: any) => spec.id === 'layer-effects') - index) === 1;
+    if (defaultFamily || adjacent) {
+      const project = media.panels[index];
+      const effects: any = take('layer-effects') || { id: 'layer-effects' };
+      const at = media.panels.indexOf(project);
+      // The stack keeps Project's place and size; Effect Controls is the shown tab.
+      project.group = effects.group = 'project';
+      delete project.active;
+      effects.active = true;
+      delete effects.collapsed;
+      if (project.flex) effects.flex = true; else delete effects.flex;
+      if (project.size) effects.size = project.size; else delete effects.size;
+      media.panels.splice(at + 1, 0, effects);
+    }
+  }
+  if (defaultFamily && !docked('fxbrowser')) {
+    const properties = docked('inspector') || docks.find((dock: any) => dock?.id === 'right');
+    const browser: any = take('fxbrowser') || { id: 'fxbrowser' };
+    delete browser.collapsed;
+    if (properties) {
+      const at = properties.panels.findIndex((spec: any) => spec.id === 'inspector');
+      if (!browser.flex && !browser.size) browser.size = 300;
+      properties.panels.splice(at < 0 ? properties.panels.length : at + 1, 0, browser);
+      ensureDockFill(properties);
+    }
+  }
+  return { docks: docks.filter((dock: any) => !dock?.panels || dock.panels.length), hiddenPanels };
 }
 
 function normalizeWorkspace(workspace: any, fallback?: any) {
@@ -247,8 +328,18 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
   raw.chrome.timelineSurfaceSchema = 3;
   /* Compact the old stock Timeline once, while preserving any authored or
      agent-authored Timeline configuration that differs from the old default. */
+  /* Schema 6 also brings the prototype's accent; a workspace still on the
+     old stock orange moves with it, a chosen colour stays. */
+  if (raw.chrome.timelineChromeSchema !== TIMELINE_CHROME_SCHEMA && raw.theme && typeof raw.theme === 'object'
+    && String(raw.theme.accent || '').toUpperCase() === '#FF6B1A') raw.theme.accent = '#FF6019';
   if (raw.chrome.timelineChromeSchema !== TIMELINE_CHROME_SCHEMA && isLegacyTimelineChrome(raw.chrome.timeline)) {
     raw.chrome.timeline = copy(TIMELINE_DEFAULTS);
+  } else if (raw.chrome.timelineChromeSchema === 5 && raw.chrome.timeline && typeof raw.chrome.timeline === 'object') {
+    /* A partly customised schema 5 Timeline (usually a dragged layer list)
+       keeps its custom values; settings still at the old stock value move. */
+    for (const [key, previous] of Object.entries(V6_TIMELINE_DEFAULTS)) {
+      if (raw.chrome.timeline[key] === previous) raw.chrome.timeline[key] = TIMELINE_DEFAULTS[key];
+    }
   }
   raw.chrome.timelineChromeSchema = TIMELINE_CHROME_SCHEMA;
   raw.chrome.timeline = normalizeTimelineChrome(raw.chrome.timeline);
@@ -320,6 +411,8 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
       if (finite(q.size)) clean.size = PM.clamp(q.size, 56, 1600);
       if (finite(q.min)) clean.min = PM.clamp(q.min, 32, 800);
       if (text(q.title)) clean.title = text(q.title);
+      if (text(q.group)) clean.group = text(q.group);
+      if (clean.group && q.active) clean.active = true;
       keepPanelAtSetHeight(clean);
       return clean;
     }).filter(Boolean);
@@ -357,25 +450,25 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
 
 const PRESETS: any = () => ([
   {
-    id: 'design', name: 'Design', builtin: true, density: 'normal',
-    theme: { accent: '#FF6B1A' },
+    id: 'design', name: 'Default', builtin: true, density: 'normal',
+    theme: { accent: '#FF6019' },
     features: { autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
-        /* Default shape: project media above the selected layer's applied
-           effects on the left, the composition + timeline in the middle, and
-           properties over the effects browser on the right. The agent opens
-           from the titlebar and can be dragged into any dock. */
-        dock('left', [p('assets', { flex: true }), p('layer-effects', { size: 350 })], 300),
+        /* After Effects' shape: Project and Effect Controls tabbed on the
+           left, the composition + timeline in the middle, and Properties over
+           Effects & Presets on the right. The agent opens from the titlebar
+           and can be dragged into any dock. */
+        dock('left', [p('assets', { flex: true, group: 'project' }), p('layer-effects', { flex: true, group: 'project', active: true })], 300),
         dock('center', [p('viewer', { flex: true })]),
-        dock('bottom', [p('timeline', { flex: true })], 340),
-        dock('right', [p('inspector', { flex: true }), p('fxbrowser', { size: 380 })], 320),
+        dock('bottom', [p('timeline', { flex: true })], 344),
+        dock('right', [p('inspector', { flex: true }), p('fxbrowser', { size: 268 })], 300),
       ],
     },
   },
   {
     id: 'gradient', name: 'Gradient', builtin: true, density: 'compact',
-    theme: { accent: '#FF6B1A', radius: 10 },
+    theme: { accent: '#FF6019', radius: 10 },
     features: { autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
@@ -389,7 +482,7 @@ const PRESETS: any = () => ([
       id: 'gradient-controls', title: 'Gradient Editor', size: 220,
       controls: [
         { type: 'select', label: 'Type', target: '$composition', path: 'composition.background.type', options: ['linear', 'radial'], def: 'linear' },
-        { type: 'color', label: 'Start color', target: '$composition', path: 'composition.background.startColor', def: '#FF6B1A' },
+        { type: 'color', label: 'Start color', target: '$composition', path: 'composition.background.startColor', def: '#FF6019' },
         { type: 'color', label: 'End color', target: '$composition', path: 'composition.background.endColor', def: '#34144F' },
         { type: 'slider', label: 'Angle', target: '$composition', path: 'composition.background.angle', min: -180, max: 180, def: 0, step: 1 },
         { type: 'slider', label: 'Midpoint', target: '$composition', path: 'composition.background.midpoint', min: 1, max: 100, def: 100, step: 1 },
@@ -397,14 +490,29 @@ const PRESETS: any = () => ([
     }],
   },
   {
-    id: 'animate', name: 'Animate', builtin: true, density: 'compact',
-    theme: { accent: '#FF6B1A' },
+    id: 'animate', name: 'Animation', builtin: true, density: 'compact',
+    theme: { accent: '#FF6019' },
     features: { autosave: true, graphOnOpen: true },
     layout: {
       docks: [
         dock('left', [p('takes', { flex: true }), p('assets', { size: 170 })], 230),
         dock('center', [p('viewer', { size: 300 }), p('timeline', { flex: true })]),
         dock('right', [p('inspector', { flex: true })], 320),
+      ],
+    },
+  },
+  {
+    /* Effects work: Effect Controls large on the left, the browser large on
+       the right, Properties tucked beneath it. */
+    id: 'effects', name: 'Effects', builtin: true, density: 'normal',
+    theme: { accent: '#FF6019' },
+    features: { autosave: true, adaptiveQuality: true },
+    layout: {
+      docks: [
+        dock('left', [p('assets', { flex: true, group: 'project' }), p('layer-effects', { flex: true, group: 'project', active: true })], 340),
+        dock('center', [p('viewer', { flex: true })]),
+        dock('bottom', [p('timeline', { flex: true })], 300),
+        dock('right', [p('fxbrowser', { flex: true }), p('inspector', { size: 320 })], 320),
       ],
     },
   },
@@ -436,7 +544,7 @@ const PRESETS: any = () => ([
   },
   {
     id: 'review', name: 'Review', builtin: true, density: 'comfy',
-    theme: { accent: '#FF6B1A' },
+    theme: { accent: '#FF6019' },
     features: { autosave: true },
     layout: {
       docks: [
@@ -447,7 +555,7 @@ const PRESETS: any = () => ([
   },
   {
     id: 'focus', name: 'Focus', builtin: true, density: 'normal',
-    theme: { accent: '#FF6B1A' },
+    theme: { accent: '#FF6019' },
     features: { autosave: true },
     layout: { docks: [dock('center', [p('viewer', { flex: true })])] },
   },

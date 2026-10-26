@@ -21,10 +21,7 @@
 <div class="text-alignment" role="group" aria-label="Text alignment">
   {#each options as option}
     <button type="button" aria-label={`Align ${option}`} title={`Align ${option}`} aria-pressed={!mixed && value === option} onclick={() => align(option)} onpointerdown={(event) => event.stopPropagation()}>
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
-        <path d="M2 3h12M2 9h12" />
-        <path d={option === 'left' ? 'M2 6h7M2 12h7' : option === 'right' ? 'M7 6h7M7 12h7' : 'M4.5 6h7M4.5 12h7'} />
-      </svg>
+      <span class="align-glyph" aria-hidden="true">{@html api.ui.icon(option === 'left' ? 'textLeft' : option === 'right' ? 'textRight' : 'textCenter')}</span>
     </button>
   {/each}
 </div>

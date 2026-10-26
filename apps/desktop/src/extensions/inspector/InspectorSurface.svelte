@@ -14,11 +14,20 @@
   let previousKey: string | undefined;
   let restoring = false;
 
+  /* In a side column Properties shows every row and the column scrolls, so
+     the remembered position belongs to whichever of the two scrolls. */
+  const scrollerOf = (body: HTMLElement): HTMLElement => {
+    if (body.scrollHeight > body.clientHeight + 1) return body;
+    const dock = body.closest<HTMLElement>('.dock');
+    return dock && dock.scrollHeight > dock.clientHeight + 1 ? dock : body;
+  };
+
   $effect.pre(() => {
     const key = scrollKey;
     const project = scrollProject;
-    const body = surface?.closest<HTMLElement>('.body');
-    if (key === undefined || !body) return;
+    const panelBody = surface?.closest<HTMLElement>('.body');
+    if (key === undefined || !panelBody) return;
+    const body = scrollerOf(panelBody);
     if (project === previousProject && key === previousKey) return;
 
     // Save before shorter incoming content can clamp the outgoing scroll.
@@ -30,7 +39,8 @@
     let cancelled = false;
     void tick().then(() => {
       if (cancelled) return;
-      body.scrollTop = positions.get(key) ?? 0;
+      // The incoming rows decide which one scrolls now.
+      scrollerOf(panelBody).scrollTop = positions.get(key) ?? 0;
       restoring = false;
     });
     return () => { cancelled = true; };
@@ -50,22 +60,47 @@
     padding: 0 var(--pad) 24px;
   }
 
-  .insp :global(.row.split .k) {
-    width: 90px;
-    font-size: 11px;
-    line-height: 1.2;
+  /* Rows after the prototype: 30px, 4px apart, an 11px diamond, a 78px
+     label (96px where a row has no diamond), then a 26px well. */
+  .insp :global(.sec) {
+    height: 34px;
+    padding-top: 6px;
+    color: var(--tx-value);
+    font-size: 12px;
+    font-weight: var(--fw-semibold);
   }
-  .insp :global(.row.split) { gap: 6px; }
+  .insp :global(.row.split) { height: 30px; margin: 2px calc(-1 * var(--pad)); padding: 0 16px; gap: 8px; }
+  .insp :global(.row.split .k) {
+    width: 78px;
+    color: var(--tx-2);
+    font-size: 12px;
+    line-height: 16px;
+  }
+  .insp :global(.row.split :is(.num, .sel, .color-field, .pm-select, .onoff)) {
+    height: 26px;
+    border-radius: 6px;
+    background: var(--bg-field);
+    color: var(--tx-value);
+    font-size: 12px;
+    line-height: 26px;
+  }
+  .insp :global(.row.split :is(.sel, .pm-select):not(.font-select)) { font-family: var(--f-ui); }
+  .insp :global(.row.split .font-select) { font-family: var(--f-ui); font-weight: var(--fw-semibold); }
+  .insp :global(.row.split .pm-select .pm-select-chevron) { width: 8px; height: 8px; margin-top: -4px; }
+  .insp :global(.row.split .pair-group) { height: 26px; border-radius: 6px; background: var(--bg-field); }
+  .insp :global(.row.split .pair-group .num) { background: transparent; }
+  .insp :global(.row.split:has(> .stopwatch.on) .num) { color: var(--accent-tx); }
+  .insp :global(.row.split .color-field .sw) { width: 14px; height: 14px; border-radius: 4px; }
   /* Tall rows (the text field) keep their label and stopwatch on the same
      28px band as every single-line row, so the diamond and the title stay
      centered on each other while the field grows below. */
-  .insp :global(.row.split:has(textarea)) { height: auto; min-height: 54px; align-items: start; }
-  .insp :global(.row.split:has(textarea) > .k) { height: 28px; }
-  .insp :global(.row.split:has(textarea) > .stopwatch) { margin-top: 5px; }
+  .insp :global(.row.split:has(textarea)) { height: auto; min-height: 30px; padding-block: 2px; align-items: start; }
+  .insp :global(.row.split:has(textarea) > .k) { height: 26px; }
+  .insp :global(.row.split:has(textarea) > .stopwatch) { margin-top: 0; }
   /* Reserve the diamond's 18px + 6px gap even on non-animated rows.
      Border-box padding keeps both the text and control columns aligned. */
-  .insp :global(.row.split:not(:has(> .stopwatch)) > .k) { width: 114px; padding-left: 24px; }
-  .insp :global(.property-stopwatch) { width: 18px; height: 24px; }
+  .insp :global(.row.split:not(:has(> .stopwatch)) > .k) { width: 97px; padding-left: 19px; }
+  .insp :global(.stopwatch.property-stopwatch) { width: 11px; height: 26px; }
 
   /* Panel actions use the same flat material as property fields. */
   .insp :global(.chip) {
@@ -121,7 +156,8 @@
 
   .insp :global(.property-stopwatch.at-key svg) { fill: currentColor; }
 
-  .insp :global(.stopwatch.property-stopwatch svg) { width: 14px; height: 14px; stroke-width: 1.5; }
+  .insp :global(.stopwatch.property-stopwatch svg) { width: 11px; height: 11px; stroke-width: 1.5; }
+  .insp :global(.stopwatch.property-stopwatch:hover) { background: none; }
 
   .insp :global(.kf i) { width: 5px; height: 5px; }
 
@@ -157,14 +193,14 @@
   }
 
   .insp :global(.inspector-header) {
-    height: 48px;
-    margin: 0 calc(-1 * var(--pad)) 8px;
-    padding: 0 12px 0 16px;
+    height: 36px;
+    margin: 0 calc(-1 * var(--pad));
+    padding: 0 16px;
     border-bottom: 0;
     border-radius: 0;
     background: transparent;
   }
-  .insp :global(.inspector-header .k) { font-size: 12px; }
+  .insp :global(.inspector-header .k) { font-size: 13px; line-height: 16px; }
 
   .insp :global(.inspector-header[data-effects-header]) {
     height: 32px;
@@ -182,6 +218,7 @@
 
   .insp :global(.inspector-header .k .sub) {
     color: var(--tx-3);
+    font-size: 13px;
     font-weight: var(--fw-regular);
   }
 

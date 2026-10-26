@@ -215,7 +215,77 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   return { PM, memory, listeners, timers, clearedTimers, toasts };
 }
 
+async function reopenWithPendingMedia() {
+  const { PM } = appRegistry();
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  await Promise.resolve();
+  PM.bus.emit = (name: string, ...args: any[]) => {
+    for (const handler of PM.__busHandlers.get(name) || []) handler(...args);
+  };
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
+  installBridgeForTests({ saveFile } as any);
+  expect(await PM.saveProject()).toBe(true);
+  const data = saveFile.mock.calls[0]![0].data;
+  let release!: () => void;
+  PM.assets.restoreProject = () => new Promise(resolve => { release = () => resolve({ stale: false, missing: [] }); });
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data }) } as any);
+  await PM.openProject();
+  expect(PM.app.dirty).toBe(false);
+  return { PM, release };
+}
+
 describe('legacy app install', () => {
+  it('keeps a reopened saved document clean after runtime-only media restoration notifications', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const before = JSON.stringify(PM.proj), savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    release(); await PM.projectAssetsReady;
+    expect(JSON.stringify(PM.proj)).toBe(before);
+    expect(PM.app.dirty).toBe(false);
+    expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+  });
+  it.each(['user edit', 'persisted media metadata repair'])('keeps a %s dirty when restoration finishes', async kind => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    if (kind === 'user edit') PM.proj.name = 'Edited during loading';
+    else PM.proj.assets.repaired = { id: 'repaired', kind: 'image', format: 'svg', poster: true };
+    PM.autosave();
+    release(); await PM.projectAssetsReady;
+    expect(PM.app.dirty).toBe(true);
+    expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+    if (kind === 'user edit') expect(PM.proj.name).toBe('Edited during loading');
+    else expect(PM.proj.assets.repaired.format).toBe('svg');
+  });
+  it('keeps a newer edit dirty when it arrives during the restoration content comparison', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let finishHash!: () => void;
+    const hashing = vi.spyOn(crypto.subtle, 'digest').mockImplementationOnce(async (...args) => {
+      await new Promise<void>(resolve => { finishHash = resolve; });
+      return digest(...args);
+    });
+    try {
+      release();
+      await vi.waitFor(() => expect(hashing).toHaveBeenCalled());
+      PM.proj.name = 'Newer edit during comparison'; PM.autosave();
+      finishHash(); await PM.projectAssetsReady;
+      expect(PM.app.dirty).toBe(true);
+      expect(PM.proj.name).toBe('Newer edit during comparison');
+      expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+    } finally { hashing.mockRestore(); }
+  });
+  it('does not clear another tab’s edits when an old restoration finishes', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const ready = PM.projectAssetsReady;
+    PM.proj = PM.mkProject({ id: 'other', name: 'Other unsaved project' });
+    PM.projectFileState('other');
+    PM.proj.name = 'Other edits'; PM.autosave();
+    release(); await ready;
+    expect(PM.proj.name).toBe('Other edits');
+    expect(PM.app.dirty).toBe(true);
+  });
+
   it('ignores runtime preview readiness while still autosaving asset metadata changes', () => {
     const { PM } = appRegistry();
     const previous = { timer: PM.app.saveTimer, dirty: PM.app.dirty };
@@ -229,32 +299,33 @@ describe('legacy app install', () => {
     expect(PM.app.dirty).toBe(true);
   });
 
-  it('checks autosave file status once while retaining exact Close comparisons', async () => {
+  it('does not serialize the document for journal recovery and retains exact Close comparisons', async () => {
     const { PM, timers } = appRegistry();
     await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
     PM.Projects.recoverAsync = vi.fn(async () => true);
     const stringify = vi.spyOn(serialization, 'stringifyAsync');
     PM.autosave(); await timers.get(PM.app.saveTimer)();
-    expect(stringify).toHaveBeenCalledTimes(1);
+    expect(stringify).not.toHaveBeenCalled();
     stringify.mockClear();
     expect(await PM.confirmCloseProject(PM.proj.id)).toBe(true);
     expect(stringify).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['name', 'assets', 'composition', 'animation', 'history', 'project'])('abandons an autosave comparison when %s changes during hashing', async change => {
+  it.each(['name', 'assets', 'composition', 'animation', 'history', 'project'])('keeps newer edits dirty when %s changes during recovery', async change => {
     const { PM, timers } = appRegistry();
     await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
     let editVersion = 1, editing = false;
     PM.animVersion = () => editVersion;
     PM.hist.busy = () => editing;
-    PM.Projects.recoverAsync = vi.fn(async () => true);
-    let finish!: (hash: string) => void;
-    const fingerprint = vi.spyOn(fingerprints, 'projectFingerprint').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    let finish!: (saved: boolean) => void;
+    PM.Projects.recoverAsync = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));
+    const fingerprint = vi.spyOn(fingerprints, 'projectFingerprint');
     const emit = vi.spyOn(PM.bus, 'emit');
     const project = PM.proj, baseline = PM.projectFileState().baselineHash;
     PM.autosave();
     const saving = timers.get(PM.app.saveTimer)();
-    await vi.waitFor(() => expect(fingerprint).toHaveBeenCalledOnce());
+    expect(PM.Projects.recoverAsync).toHaveBeenCalledOnce();
+    expect(fingerprint).not.toHaveBeenCalled();
     if (change === 'name') { project.name = 'Newer edit'; PM.autosave(); }
     else if (change === 'assets') {
       project.assets.source = { id: 'source', name: 'Newer metadata' };
@@ -265,7 +336,7 @@ describe('legacy app install', () => {
     } else if (change === 'animation') { project.name = 'Newer edit'; editVersion++; }
     else if (change === 'history') { project.name = 'Newer edit'; editing = true; }
     else PM.proj = { ...project, name: 'Replacement project' };
-    emit.mockClear(); finish(baseline); await saving;
+    emit.mockClear(); finish(true); await saving;
     expect(PM.projectFileState().dirty).toBe(true);
     expect(emit.mock.calls.some(([event]: any[]) => event === 'project:recovered')).toBe(false);
   });
@@ -454,7 +525,7 @@ describe('legacy app install', () => {
     (window as any).powermove = { saveFile };
   installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
-    expect(toast).toHaveBeenCalledWith('Saving Test.pmv', 2200, expect.objectContaining({ key: 'project-save', sticky: true, progress: null }));
+    await vi.waitFor(() => expect(toast).toHaveBeenCalledWith('Saving Test.pmv', 2200, expect.objectContaining({ key: 'project-save', sticky: true, progress: null })));
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
     expect(toast.mock.calls.some(call => call[2]?.completed)).toBe(false);
     release({ ok: true, path: '/tmp/Test.pmv' });
@@ -472,12 +543,13 @@ describe('legacy app install', () => {
     PM.autosave();
     expect(await PM.saveProject()).toBe(false);
     expect(PM.app.dirty).toBe(true);
+    expect(PM.app.saveStatus).toBe('UNSAVED');
     (window as any).powermove.saveFile = async () => ({ ok: false, cancelled: false, error: 'Disk full' });
     expect(await PM.saveProject()).toBe(false);
     expect(PM.app.dirty).toBe(true);
   });
 
-  it('keeps edits made during a save dirty and suppresses duplicate save dialogs', async () => {
+  it('keeps in-flight edits dirty and queues Cmd+S to flush the newer revision', async () => {
     const { PM } = appRegistry();
     let finish!: (result: any) => void;
     const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
@@ -485,11 +557,61 @@ describe('legacy app install', () => {
   installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
-    expect(await PM.saveProject()).toBe(false);
     PM.proj.name = 'New edit'; PM.autosave();
+    const nextSave = PM.saveProject();
+    expect(saveFile).toHaveBeenCalledOnce();
     finish({ ok: true, path: '/tmp/Test.pmv' });
     expect(await saving).toBe(true);
     expect(PM.app.dirty).toBe(true);
+    await vi.waitFor(() => expect(saveFile).toHaveBeenCalledTimes(2));
+    finish({ ok: true, path: '/tmp/Test.pmv' });
+    expect(await nextSave).toBe(true);
+    expect(PM.app.dirty).toBe(false);
+  });
+
+  it('can still save an external file when the separate local recovery disk is unavailable', async () => {
+    const { PM, toasts } = appRegistry();
+    PM.store.flush = vi.fn(async () => { throw new Error('Local recovery disk full'); });
+    const saveFile = vi.fn(async () => ({ ok: true, path: '/tmp/External.pmv' }));
+    installBridgeForTests({ saveFile } as any);
+    PM.proj.name = 'Rescued externally'; PM.autosave();
+    expect(await PM.saveProject()).toBe(true);
+    expect(saveFile).toHaveBeenCalledOnce();
+    expect(PM.app.dirty).toBe(false);
+    expect(toasts.some(message => message.includes('local recovery could not be updated'))).toBe(true);
+  });
+
+  it('keeps pointer-move notifications inside a drag out of autosave and commits one edit', () => {
+    const { PM } = appRegistry(); installHistory(PM); PM.touch = vi.fn();
+    const before = PM.app.saveTimer;
+    PM.hist.begin('Drag');
+    for (let move = 0; move < 100; move++) {
+      PM.proj.name = 'Drag ' + move;
+      PM.__busHandlers.get('layers').forEach((run: any) => run());
+      expect(PM.app.saveTimer).toBe(before);
+    }
+    expect(PM.hist.commit()).toBe(true);
+    expect(PM.hist.export().entries).toHaveLength(1);
+    expect(PM.app.saveTimer).not.toBe(before);
+  });
+
+  it('pins one coherent save snapshot after repeated edits supersede yielding serialization', async () => {
+    const { PM } = appRegistry();
+    await PM.projectAssetsReady;
+    const saveFile = vi.fn(async () => ({ ok: true, path: '/tmp/Test.pmv' }));
+    installBridgeForTests({ saveFile } as any);
+    const stringify = serialization.stringifyAsync;
+    let superseded = 0;
+    vi.spyOn(serialization, 'stringifyAsync').mockImplementation(async (value, breathe) => {
+      const json = await stringify(value, breathe);
+      if (value === PM.proj) { PM.proj.name = 'Continuous edit ' + ++superseded; PM.autosave(); }
+      return json;
+    });
+    expect(await PM.saveProject()).toBe(true);
+    expect(superseded).toBe(2);
+    expect(saveFile).toHaveBeenCalledOnce();
+    const data = (saveFile.mock.calls[0] as any)[0].data;
+    expect(unpackProjectFile(data).proj.name).toBe('Continuous edit 2');
   });
 
   it('waits for an in-flight save before closing instead of rejecting the close', async () => {
@@ -551,6 +673,101 @@ describe('legacy app install', () => {
     expect(await PM.prepareToClose()).toBe(false);
     (window as any).powermove.confirmProjectClose = async () => 'discard';
     expect(await PM.prepareToClose()).toBe(true);
+  });
+
+  it('cancels a stalled native close without cancelling its save or disposing agent/project state', async () => {
+    const { PM } = appRegistry();
+    PM.toast = vi.fn(); PM.dismissToast = vi.fn();
+    let release!: () => void;
+    PM.app.importQueue = new Promise<void>(resolve => { release = resolve; });
+    const dispose = PM.Projects.destroy = vi.fn();
+    const stop = PM.AgentUI = { cancel: vi.fn(), flushThreads: vi.fn() };
+    const closing = PM.prepareToClose({ id: 'first', flush: true });
+    expect(PM.prepareToClose({ id: 'repeated', flush: true })).toBe(closing);
+    await vi.waitFor(() => expect(PM.toast).toHaveBeenCalledWith('Closing project: Waiting for imports', 2200, expect.objectContaining({
+      detail: 'Waiting for imports', action: expect.objectContaining({ label: 'Cancel Close' }),
+    })));
+    PM.toast.mock.calls.at(-1)[2].action.run();
+    expect(await closing).toBe(false);
+    release(); await Promise.resolve();
+    expect(dispose).not.toHaveBeenCalled();
+    expect(stop.cancel).not.toHaveBeenCalled();
+    expect(PM.proj.id).toBe('P1');
+    expect(PM.commitClosePreparation()).toBe(false);
+    expect(await PM.prepareToClose({ id: 'retry', flush: true })).toBe(true);
+    PM.cancelClosePreparation('first'); // A late old cancellation cannot touch the retry.
+    expect(PM.commitClosePreparation()).toBe(true);
+  });
+
+  it('uses an interruptible native recovery checkpoint and skips repeated persistence at unload', async () => {
+    const { PM, listeners } = appRegistry();
+    const setSnapshotAsync = PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => current());
+    PM.Projects.upsertMeta = vi.fn();
+    const put = vi.spyOn(PM.Projects, 'put');
+    const flush = PM.store.flush = vi.fn(async () => {});
+    expect(await PM.prepareToClose({ id: 'close', flush: true })).toBe(true);
+    expect(setSnapshotAsync).toHaveBeenCalledOnce();
+    expect(put).not.toHaveBeenCalled();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(PM.commitClosePreparation()).toBe(true);
+    const event = { preventDefault: vi.fn(), returnValue: undefined };
+    listeners.get('beforeunload')![0](event);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(setSnapshotAsync).toHaveBeenCalledOnce();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('keeps deferred discards and the editor intact after a failed native recovery flush', async () => {
+    const { PM } = appRegistry();
+    PM.proj.name = 'Unwritten edits'; PM.autosave();
+    const dispose = PM.Projects.destroy = vi.fn();
+    installBridgeForTests({ confirmProjectClose: async () => 'discard' } as any);
+    PM.store.flush = vi.fn().mockRejectedValueOnce(new Error('Disk full')).mockResolvedValue(undefined);
+    await expect(PM.prepareToClose({ id: 'failed', flush: true })).rejects.toThrow('Disk full');
+    expect(dispose).not.toHaveBeenCalled();
+    expect(PM.commitClosePreparation()).toBe(false);
+    expect(PM.proj.name).toBe('Unwritten edits');
+    expect(await PM.prepareToClose({ id: 'retry', flush: true })).toBe(true);
+    PM.cancelClosePreparation();
+    expect(dispose).not.toHaveBeenCalled();
+    expect(PM.commitClosePreparation()).toBe(false);
+  });
+
+  it('defers never-saved disposal until the confirmed native unload', async () => {
+    const { PM, listeners } = appRegistry();
+    PM.proj.name = 'Deferred discard'; PM.autosave();
+    installBridgeForTests({ confirmProjectClose: async () => 'discard' } as any);
+    const destroy = vi.spyOn(PM.Projects, 'destroy');
+    expect(await PM.prepareToClose({ id: 'first', flush: true })).toBe(true);
+    expect(destroy).not.toHaveBeenCalled();
+    PM.cancelClosePreparation();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(PM.Projects.get('P1')).not.toBeNull();
+    expect(await PM.prepareToClose({ id: 'second', flush: true })).toBe(true);
+    expect(PM.commitClosePreparation()).toBe(true);
+    expect(destroy).not.toHaveBeenCalled();
+    listeners.get('beforeunload')![0]({ preventDefault: vi.fn(), returnValue: undefined });
+    expect(destroy).toHaveBeenCalledExactlyOnceWith('P1');
+  });
+
+  it('vetoes unload when edits arrive during or after native close preparation', async () => {
+    const { PM, listeners } = appRegistry();
+    PM.Projects.upsertMeta = vi.fn();
+    PM.store.setSnapshotAsync = vi.fn(async (_key: string, _value: unknown, current: () => boolean) => {
+      PM.proj.name = 'Agent edit'; PM.autosave();
+      return current();
+    });
+    await expect(PM.prepareToClose({ id: 'changed', flush: true })).rejects.toThrow('changed while closing');
+    expect(PM.proj.name).toBe('Agent edit');
+    installBridgeForTests({ confirmProjectClose: async () => 'discard' } as any);
+    PM.store.setSnapshotAsync = async (_key: string, _value: unknown, current: () => boolean) => current();
+    expect(await PM.prepareToClose({ id: 'retry', flush: true })).toBe(true);
+    expect(PM.commitClosePreparation()).toBe(true);
+    PM.proj.name = 'Newer agent edit'; PM.autosave();
+    const event = { preventDefault: vi.fn(), returnValue: undefined };
+    listeners.get('beforeunload')![0](event);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(PM.Projects.get('P1')).not.toBeNull();
   });
 
   it('discards a never-saved project on window close, including recovery and later flushes', async () => {
@@ -985,4 +1202,27 @@ it('does not recapture a trashed active project while switching, but still captu
     expect(PM.proj.id).toBe('P2');
     expect(put.mock.calls.map(([project]) => (project as { id: string }).id)).toEqual(trashed ? ['P2'] : ['P1', 'P2']);
   }
+});
+
+it('resumes live project tabs without reading or rewriting serialized undo history', async () => {
+  const { PM, listeners } = appRegistry();
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.touch = vi.fn();
+  installHistory(PM);
+  PM.replaceProject = (project: any) => { PM.proj = project; };
+  PM.assets.suspend = vi.fn(() => ({})); PM.assets.resume = vi.fn();
+  PM.hist.do('Rename first', () => { PM.proj.name = 'Edited first'; });
+  const first = PM.proj;
+  const next = PM.mkProject({ id: 'P2', name: 'Second' });
+  listeners.get('pm-open-project')![0]({ detail: next });
+  const getState = vi.spyOn(PM.Projects, 'getState');
+  const putState = vi.spyOn(PM.Projects, 'putState');
+  await PM.Tabs.activate(first.id);
+  expect(PM.proj).toBe(first);
+  expect(getState).toHaveBeenCalledWith(first.id, { history: false });
+  const activation = putState.mock.calls.find(([id]) => id === first.id)!;
+  expect(activation[1]).not.toHaveProperty('history');
+  expect(PM.hist.canUndo()).toBe(true);
+  PM.hist.undo(); expect(PM.proj.name).toBe('Test');
+  PM.hist.redo(); expect(PM.proj.name).toBe('Edited first');
+  expect(PM.assets.resume).toHaveBeenCalledOnce();
 });

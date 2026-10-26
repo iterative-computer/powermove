@@ -8,6 +8,8 @@ export interface TimelineChrome {
   keyframeSize: number;
   showLayerNumbers: boolean;
   showTypeBadges: boolean;
+  /** The 3D / Continuously Rasterize switches on each layer row. */
+  showSwitches: boolean;
   toolbarDensity: 'compact' | 'normal';
 }
 
@@ -26,13 +28,14 @@ export function normalizeTimelineChrome(api: Pick<PowermoveAPI, 'util'>, value: 
   const raw = value && typeof value === 'object' ? value as Partial<TimelineChrome> : {};
   const finite = (candidate: unknown): candidate is number => Number.isFinite(candidate);
   return {
-    rowHeight: api.util.clamp(Math.round(finite(raw.rowHeight) ? raw.rowHeight : 30), 22, 48),
-    gutterWidth: api.util.clamp(Math.round(finite(raw.gutterWidth) ? raw.gutterWidth : 224), 160, 360),
-    rulerHeight: api.util.clamp(Math.round(finite(raw.rulerHeight) ? raw.rulerHeight : 28), 20, 42),
+    rowHeight: api.util.clamp(Math.round(finite(raw.rowHeight) ? raw.rowHeight : 28), 22, 48),
+    gutterWidth: api.util.clamp(Math.round(finite(raw.gutterWidth) ? raw.gutterWidth : 494), 160, 640),
+    rulerHeight: api.util.clamp(Math.round(finite(raw.rulerHeight) ? raw.rulerHeight : 32), 20, 42),
     clipRadius: api.util.clamp(finite(raw.clipRadius) ? raw.clipRadius : 5, 0, 12),
-    keyframeSize: api.util.clamp(finite(raw.keyframeSize) ? raw.keyframeSize : 8, 4, 12),
-    showLayerNumbers: raw.showLayerNumbers !== false,
+    keyframeSize: api.util.clamp(finite(raw.keyframeSize) ? raw.keyframeSize : 10, 4, 12),
+    showLayerNumbers: raw.showLayerNumbers === true,
     showTypeBadges: raw.showTypeBadges !== false,
+    showSwitches: raw.showSwitches !== false,
     toolbarDensity: raw.toolbarDensity === 'normal' ? 'normal' : 'compact',
   };
 }

@@ -1,4 +1,10 @@
+import {brushGeometry,brushBounds,rasterBrush} from './effect-path';
+import { createAutomaticPreviewVideos } from '../core/automatic-preview-video';
+import { motionBlurTimes } from '../../core/render-samples';
+import { layerInputPlan, hasLayerInputs, inputKey, assertInputBudget, temporalTimes, EffectInputError, referenceParam, referencedPath } from '../../core/effect-inputs';
+import { sampleLod, mipBytes, gridSize } from './effect-sampling';
 import {viewportCamera,viewportRevision,getViewportMode} from '../../core/scene3d/viewport';
+import { effectProgramKey } from '../../kernel/effect-versions';
 import { availableColorDepth, colorBufferBytes, normalizeColorDepth, supportedColorDepths } from '../../core/color-depth';
 import { videoClipsAt } from '../core/video-timeline';
 import { sizeAnchorOffset } from '../core/size-anchor';
@@ -6,9 +12,11 @@ import { previewSeekFrame, seekPreviewVideo } from '../core/video-seek';
 import { layerVideoElement, videoInstanceTextureKey } from '../core/video-instances';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
 import { GPUTiming } from './gpu-timing';
+import { createOpaqueReadback } from './opaque-readback';
+import { createAlphaReadback, createFloatReadback, createHalfReadback, type DeferredAlphaReader } from './half-readback';
 import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, inversePlane, affinePlane, projectPoint } from '../core/space-3d';
-import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
+import { pathValues, groupMatrix, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { createPreviewWarmup } from './preview-warmup';
 import { PreviewFrames } from './preview-frames';
 import { previewPlan } from './preview-plan';
@@ -85,9 +93,10 @@ export function groupContainsSolo(group: any, layers: any[], ancestors: (layer: 
     whole-frame failure path. */
 export function effectParamValue(PM: PMRegistry, layer: any, effect: any, param: any, time: number): any {
   const prop = effect?.p?.[param.k];
-  if (!prop) return param.def;
+  const fallback = () => PM.effectParamDefault?.(param, layer, PM.curComp?.() || PM.proj, time) ?? param.def;
+  if (!prop) return fallback();
   const value = PM.evP(layer, prop, time, param.k);
-  return value == null ? param.def : value;
+  return value == null ? fallback() : value;
 }
 
 /** Track frames the browser actually presents, rather than decoder totals that
@@ -172,6 +181,8 @@ let poolBytes = 0;
 let textureBytes = 0;
 let resourceTick = 0;
 let sourceGeneration = 0;
+let readbackGeneration = {};
+let preparedVideoTextures = new WeakMap<object, { version: unknown; sources: WeakMap<object, { key: string; version: object }> }>();
 /* Keep the composited FBO alive until the next frame. Resizing a canvas clears
    its drawing buffer synchronously; retaining this texture lets resize()
    present the last complete image at the new size instead of exposing black
@@ -204,16 +215,26 @@ let previewHasMotionBlur = false;
 let scenePreviewPlan: ReturnType<typeof previewPlan> | null = null;
 let rememberingPreview = false;
 let idleVideoFrames: Map<string, ImageBitmap> | null = null;
+const inputPreviewVideos = createAutomaticPreviewVideos(PM);
+let inputPreviewJob: {key:string;project:any;gl:any;time:number;pending:boolean;frames:Map<string,ImageBitmap>|null} | null = null;
+let exactInputPreviewRendering = false;
+function cancelInputPreview() {
+  inputPreviewVideos.cancel(); inputPreviewJob = null;
+}
+GL.cancelInputPreview = cancelInputPreview;
+Object.defineProperty(GL, 'inputPreviewBytes', {get:()=>inputPreviewVideos.bytes});
+if (typeof window !== 'undefined') window.addEventListener?.('pagehide',()=>inputPreviewVideos.dispose(),{once:true});
+
 let cancelPreviewPreparation: (() => void) | undefined;
 GL.previewPreparationBytes = 0;
 GL.cancelPreviewPreparation = () => cancelPreviewPreparation?.();
 for (const event of ['project', 'layers', 'assets', 'quality', 'fonts']) PM.bus?.on?.(event, () => {
-  GL.cancelPreviewPreparation();
+  GL.cancelPreviewPreparation(); cancelInputPreview();
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
 const previewStateKey = () => JSON.stringify([PM.animVersion?.(), sourceGeneration, GL.canvas?.width, GL.canvas?.height,
   GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM), normalizeColorDepth(PM.proj.colorDepth)]);
-const canCachePreview = (opt: any) => opt.previewReuse !== false && !opt.exporting && !PM.Export?.busy && !PM.agentFrameCapture
+const canCachePreview = (opt: any) => !hasLayerInputs(PM.proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type)) && opt.previewReuse !== false && !opt.exporting && !PM.Export?.busy && !PM.agentFrameCapture
   && !PM.Preview?.preparing && !PM.Preview?.active && !PM.preparedVideoFrames && !PM.assets?.loading?.size;
 GL.previewPreparationKey = previewStateKey;
 GL.reservePreviewPreparation = (bytes: number) => {
@@ -224,7 +245,7 @@ GL.reservePreviewPreparation = (bytes: number) => {
   previewFrames.trim(Math.max(0, budget - Math.min(bytes, budget * .9)), new Set([presentedFrame]));
 };
 for (const event of ['extensions:changed', 'theme:changed']) PM.Kernel?.events?.on?.(event, () => {
-  GL.cancelPreviewPreparation(); sourceGeneration++;
+  GL.cancelPreviewPreparation(); cancelInputPreview(); sourceGeneration++;
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
 function refreshPreviewState() {
@@ -233,7 +254,8 @@ function refreshPreviewState() {
     previewFrames.clear(); previewProject = PM.proj; previewLayers = PM.proj.layers; previewSignature = signature;
     previewHasMotionBlur = (PM.ProjectIndex?.allLayers?.() || PM.proj.layers).some((layer: any) => layer.mblur || layer.type === 'comp');
     scenePreviewPlan = previewPlan(PM.proj, (effect: any) => {
-      const definition = PM.FX[effect.type], linked = GL.progs.get('fx:' + effect.type);
+      const definition = PM.effectDef?.(effect) ?? (!PM.effectDef ? PM.FX[effect.type] : undefined);
+      const linked = GL.progs.get(effectProgramKey(effect.type, effect.version, PM.Kernel?.effects?.get?.(effect.type)));
       return !!definition && !!linked && !definition.backdrop
         && uloc(linked, 'u_time') === null && uloc(linked, 'u_prog') === null;
     });
@@ -388,7 +410,7 @@ function program(key: any, frag: any, vert?: any) {
 }
 GL.compileError = (key: any) => GL.errors.get(key) || null;
 GL.dropProgram = (key: any) => {
-  GL.cancelPreviewPreparation(); sourceGeneration++;
+  GL.cancelPreviewPreparation(); cancelInputPreview(); sourceGeneration++;
   previewSignature = ''; scenePreviewPlan = null;
   previewFrames.clear();
   const pending = pendingPrograms.get(key);
@@ -438,6 +460,7 @@ function setI(p: any, n: any, v: any) { const l = uloc(p, n); if (l !== null) GL
    is not present in the linked program. */
 function setParam(p: any, pd: any, index: number, value: any) {
   const name = paramUniformName(pd, index, uloc(p, 'u_' + pd.k) !== null);
+  if (referenceParam(pd)) return;
   if (pd.type === 'color') setU(p, name, PM.hex2rgb(String(value)));
   else if (pd.type === 'toggle') setU(p, name, [value ? 1 : 0]);
   else setU(p, name, [Number(value) || 0]);
@@ -457,6 +480,11 @@ function workingColorDepth() {
 }
 function grab(w: any, h: any, depth = false, colorDepth = workingColorDepth()) {
   const gl = GL.gl;
+  if (layerInputRendering) {
+    const bytes = colorBufferBytes(w, h, colorDepth, depth);
+    if (GL.pool.reduce((sum: number, f: any) => sum + (f.busy ? f.bytes : 0), 0) + bytes > (PM.Memory?.budget?.('framebuffers') ?? MAX_FBO_BYTES))
+      throw new EffectInputError('Layer inputs exceed the framebuffer memory budget');
+  }
   for (let i = 0; i < GL.pool.length; i++) {
     const f = GL.pool[i];
     if (!f.busy && f.w === w && f.h === h && !!f.depth === depth && f.colorDepth === colorDepth) { f.busy = true; f.used = ++resourceTick; return f; }
@@ -543,7 +571,11 @@ function canClipPreviewSources(W: number, H: number): boolean {
   return previewSourceClipping && PM.curComp?.() === PM.proj
     && W === GL.canvas.width && H === GL.canvas.height;
 }
+type SourceRaster = {layer:any;project:any;bounds:{x0:number;y0:number;w:number;h:number};extent?:{x0:number;y0:number;w:number;h:number};domain?:{x0:number;y0:number;w:number;h:number}};
+let sourceRaster: SourceRaster | null = null;
+const activeSourceRaster = () => sourceRaster && (PM.curComp?.() || PM.proj) === sourceRaster.project ? sourceRaster : null;
 function outputScale(W: number, H: number): [number, number] {
+  const raster=activeSourceRaster();if(raster)return[W/(raster.extent??raster.bounds).w,H/(raster.extent??raster.bounds).h];
   const viewport = activePreviewViewport(W, H);
   if (viewport) return [W / Math.max(1e-6, viewport.width), H / Math.max(1e-6, viewport.height)];
   const comp = PM.curComp?.() || PM.proj;
@@ -551,6 +583,7 @@ function outputScale(W: number, H: number): [number, number] {
 }
 
 function effectViewportCoordinates(W: number, H: number): { uv: [number, number, number, number]; origin: [number, number]; resolution: [number, number] } {
+  if(activeSourceRaster())return{uv:[0,0,1,1],origin:[0,0],resolution:[W,H]};
   const viewport = activePreviewViewport(W, H);
   const [sx, sy] = outputScale(W, H);
   const comp = PM.curComp?.() || PM.proj;
@@ -569,8 +602,29 @@ function effectViewportCoordinates(W: number, H: number): { uv: [number, number,
 /** Map composition pixels back to the layer's uncropped, normalized bounds.
  * Effects still sample the full-frame buffer; only their gradient geometry
  * follows the layer, including parent transforms and perspective. */
-function effectLayerCoordinates(L: any, T: number, W: number, H: number) {
-  const bounds = GL.bounds(L, T);
+function inputGroupBounds(group: any, time: number) {
+  const world = PM.worldMatrix(group, time), det = world[0]*world[3]-world[1]*world[2];
+  if (Math.abs(det) < 1e-10) return null;
+  const inverse = [world[3]/det,-world[1]/det,-world[2]/det,world[0]/det,
+    (world[2]*world[5]-world[3]*world[4])/det,(world[1]*world[4]-world[0]*world[5])/det];
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  const project=PM.curComp?.() || PM.proj;
+  for (const child of project.layers) {
+    if (['group','audio','null','adjustment'].includes(child.type)
+      || !(PM.groupAncestors?.(child,project.layers)||[]).some((g:any)=>g.id===group.id)
+      || !inputLayerActive(child,time,project,{inputVisibilityRoot:group.id})) continue;
+    const bounds=GL.bounds(child,time); if(!bounds)continue;
+    const local=PM.mul(inverse,PM.worldMatrix(child,time));
+    for(const x of [bounds.x0,bounds.x1]) for(const y of [bounds.y0,bounds.y1]) {
+      const px=local[0]*x+local[2]*y+local[4],py=local[1]*x+local[3]*y+local[5];
+      x0=Math.min(x0,px);y0=Math.min(y0,py);x1=Math.max(x1,px);y1=Math.max(y1,py);
+    }
+  }
+  return Number.isFinite(x0) ? {x0,y0,x1,y1,w:x1-x0,h:y1-y0} : null;
+}
+function effectLayerCoordinates(L: any, T: number, W: number, H: number, input = false):{uv:Float32Array;resolution:number[];valid?:boolean} {
+  const raster=activeSourceRaster();if(raster&&raster.layer===L){const e=raster.extent??raster.bounds,b=raster.bounds;return{uv:new Float32Array([e.w/(W*b.w),0,0,0,e.h/(H*b.h),0,(e.x0-b.x0)/b.w,(e.y0-b.y0)/b.h,1]),resolution:[b.w,b.h],valid:true};}
+  const bounds = input && L.type === 'group' ? inputGroupBounds(L,T) : GL.bounds(L, T);
   const [sx, sy] = outputScale(W, H);
   const world = PM.worldMatrix(L, T);
   const plane = is3DLayer(PM, L) ? planeMatrix(PM, L, T)
@@ -583,17 +637,18 @@ function effectLayerCoordinates(L: any, T: number, W: number, H: number) {
         const x = inverse[i * 3]!, y = inverse[i * 3 + 1]!, w = inverse[i * 3 + 2]!;
         return [(x - bounds.x0 * w) / bounds.w, (y - bounds.y0 * w) / bounds.h, w];
       })),
-      resolution: [bounds.w, bounds.h],
+      resolution: [bounds.w, bounds.h],valid:true,
     };
   }
   // Adjustment layers have no source bounds and operate on the composition.
   const { resolution } = effectViewportCoordinates(W, H);
-  return { uv: new Float32Array([1 / resolution[0], 0, 0, 0, 1 / resolution[1], 0, 0, 0, 1]), resolution };
+  return { uv: new Float32Array([1 / resolution[0], 0, 0, 0, 1 / resolution[1], 0, 0, 0, 1]), resolution,valid:L.type==='adjustment' };
 }
 
 function scaledWorld(layer: any, time: any, W: number, H: number): [number, number, number, number, number, number] {
-  const world = PM.worldMatrix(layer, time);
   const [sx, sy] = outputScale(W, H);
+  const raster=activeSourceRaster();if(raster&&raster.layer===layer){const e=raster.extent??raster.bounds;return[sx,0,0,sy,-e.x0*sx,-e.y0*sy];}
+  const world = PM.worldMatrix(layer, time);
   const viewport = activePreviewViewport(W, H);
   return [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, (world[4] - (viewport?.x || 0)) * sx, (world[5] - (viewport?.y || 0)) * sy];
 }
@@ -628,7 +683,7 @@ function texFor(key: any, source: any, opts: any = {}) {
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   let stored = true;
-  try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch (e) { stored = false; }
+  try { if(opts.float){gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,source.width,source.height,0,gl.RGBA,gl.FLOAT,source.data);}else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch (e) { stored = false; }
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   const width = Number(source?.videoWidth || source?.naturalWidth || source?.displayWidth || source?.width || 0);
   const height = Number(source?.videoHeight || source?.naturalHeight || source?.displayHeight || source?.height || 0);
@@ -637,7 +692,7 @@ function texFor(key: any, source: any, opts: any = {}) {
   // would draw nothing until its texture is dropped. Leave it unversioned so
   // the next frame uploads again from a real source.
   if (stored && width > 0 && height > 0) t.v = opts.version === undefined ? t.v : opts.version;
-  const bytes = Math.max(0, width * height * 4);
+  const bytes = Math.max(0, width * height * (opts.float?16:4));
   textureBytes += bytes - (t.bytes || 0);
   t.bytes = bytes;
   // Private uploads are removed immediately after their layer draw. Scheduling
@@ -676,7 +731,7 @@ function dropIsolatedVideoTexture(key: string) {
   GL.texes.delete(key);
 }
 GL.dropTextures = (prefix = '') => {
-  GL.cancelPreviewPreparation();
+  GL.cancelPreviewPreparation(); cancelInputPreview();
   previewFrames.clear();
   sourceGeneration++;
   dropTextures(prefix);
@@ -796,14 +851,18 @@ void main(){
 
 /* ── init ──────────────────────────────────────────────── */
 GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
-  GL.cancelPreviewPreparation();
+  readbackGeneration = {};
+  preparedVideoTextures = new WeakMap();
+  GL.cancelPreviewPreparation(); cancelInputPreview();
   previewFrames.clear();
   GL.canvas = canvas;
+  GL.maxTextureSize = undefined;
   const gl = canvas.getContext('webgl2', {
     alpha: options.alpha === true, antialias: false, premultipliedAlpha: true,
     preserveDrawingBuffer: true, powerPreference: 'high-performance', desynchronized: true,
   });
   if (!gl) { if (!options.quiet) window.alert('Powermove needs WebGL2.'); return false; }
+  cancelInputPreview();
   gpuTiming?.dispose();
   GL.gl = gl;
   sourceGeneration++;
@@ -813,7 +872,7 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
     watchedCanvases.add(canvas);
     canvas.addEventListener('webglcontextlost', (event: Event) => {
       event.preventDefault();
-      GL.cancelPreviewPreparation();
+      GL.cancelPreviewPreparation(); cancelInputPreview();
       previewFrames.clear();
       clearTimeout(compilePollTimer); compilePollTimer = undefined;
       pendingPrograms.clear(); GL.compiling = 0;
@@ -890,6 +949,26 @@ PM.bus?.on?.('assets', () => {
 });
 
 /* ── layer content ─────────────────────────────────────── */
+function sharedPreparedVideoTexture(source: object | undefined, key: string) {
+  const frames = PM.preparedVideoFrames;
+  if (!source || !frames || !PM.Export?.busy || useVideoPreviews || isolatedVideoTexturePrefix || idleVideoFrames) return null;
+  const version = PM.preparedVideoVersion;
+  let generation = preparedVideoTextures.get(frames);
+  if (!generation || generation.version !== version) {
+    generation = { version, sources: new WeakMap() };
+    preparedVideoTextures.set(frames, generation);
+  }
+  let entry = generation.sources.get(source);
+  if (!entry) {
+    // Keep the first asset-prefixed key so normal eviction/asset cleanup still
+    // owns this texture. The token also distinguishes replaced maps/canvases
+    // when a scoped caller restores the same numeric preparation version.
+    entry = { key, version: {} };
+    generation.sources.set(source, entry);
+  }
+  return entry;
+}
+
 function extensionParam(layer: any, definition: any, key: string, time: number, fallback: any) {
   const parameter = definition?.params?.find((item: any) => item.k === key);
   const property = layer.d?.params?.[key];
@@ -1061,9 +1140,10 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const a = PM.assets.get(d.asset);
     if (!a) return null;
     const preparedVideo = idleVideoFrames?.get(videoPath + L.id + '@' + T)
-      || PM.preparedVideoFrames?.get((isolatedVideoTexturePrefix ? videoPath : '') + L.id+'@'+T);
+      || PM.preparedVideoFrames?.get(videoPath + L.id+'@'+T)
+      || PM.preparedVideoFrames?.get(L.id+'@'+T);
     const liveVideo = L.type === 'video' && useVideoPreviews && !preparedVideo ? layerVideoElement(PM, a, videoPath + L.id) : a.el;
-    if (L.type === 'video' && isolatedVideoTexturePrefix && !preparedVideo) throw new MissingCaptureVideoFrame('Composition thumbnail is missing a prepared video frame');
+    if (L.type === 'video' && !preparedVideo && (isolatedVideoTexturePrefix || exactInputPreviewRendering || !useVideoPreviews && PM.preparedVideoExactInputs?.project === PM.proj && PM.preparedVideoExactInputs.frames === PM.preparedVideoFrames)) throw new MissingCaptureVideoFrame(`Capture is missing a prepared video frame: ${videoPath + L.id}@${T}`);
     const playbackFrame = PM.playing && useVideoPreviews && !preparedVideo
       ? PM.playbackVideoFrame?.frames.get(videoPath + L.id) : undefined;
     let captured: ReturnType<typeof previewSeekFrame>;
@@ -1094,13 +1174,15 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     let textureKey = 'a:' + a.id + (el===liveVideo?(el===a.el?'':':preview'):':'+L.id+'@'+T);
     if (L.type === 'video' && !preparedVideo) textureKey = videoInstanceTextureKey(liveVideo);
     if (L.type === 'video' && isolatedVideoTexturePrefix) textureKey = isolatedVideoTexturePrefix + videoPath + L.id + '@' + T;
+    const shared = L.type === 'video' ? sharedPreparedVideoTexture(preparedVideo, textureKey) : null;
+    if (shared) textureKey = shared.key;
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
       const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
       textureSource = raster.cv;
       textureKey = 'r:' + raster.key;
     }
-    const videoVersion = L.type === 'video' ? (decoded ? `decoded:${decoded.timestamp}` : playbackFrame ? `play:${playbackFrame.version}` : captured ? `seek:${captured.version}` : el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
+    const videoVersion = shared ? shared.version : L.type === 'video' ? (decoded ? `decoded:${decoded.timestamp}` : playbackFrame ? `play:${playbackFrame.version}` : captured ? `seek:${captured.version}` : el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
     // A seek can be pending while the previous decoded frame is still usable.
     // Gate on available pixels, not seeking, or seek-driven playback freezes.
     const waiting = L.type === 'video' && el === liveVideo
@@ -1248,7 +1330,8 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     const comp = PM.curComp?.() || PM.proj;
     const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
     const [sx, sy] = outputScale(W, H);
-    const targetW = Math.max(2, Math.round(w * sx)), targetH = Math.max(2, Math.round(hh * sy));
+    const density = L.continuousRaster ? precompRasterDensity(L, T, w * sx, hh * sy) : 1;
+    const targetW = Math.max(2, Math.round(w * sx * density)), targetH = Math.max(2, Math.round(hh * sy * density));
     const target = boundFbo;
     const f = grab(targetW, targetH);
     bind(f); clear(0, 0, 0, 0);
@@ -1257,7 +1340,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     pmScopePush(sub);
     try {
       const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH,
-        isolatedCaptureNoMotionBlur ? { transparent: true, mblur: false } : { transparent: true });
+        inputFrameOptions ? { transparent: true, ...inputFrameOptions } : isolatedCaptureNoMotionBlur ? { transparent: true, mblur: false } : { transparent: true });
       /* blit the nested result into our FBO so ownership stays with this level */
       bind(f);
       const p = program('copyA', PM.FRAG_DRAW);
@@ -1279,6 +1362,19 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
   }
   return null;
 }
+/** Continuously rasterize a pre-comp: render the nested composition at the
+    scale the layer is displayed at instead of enlarging a 1× frame. Never
+    below 1×, and bounded by the GPU's texture size and a pixel budget so a
+    huge scale cannot exhaust video memory. */
+const PRECOMP_RASTER_PIXELS = 24 * 1024 * 1024;
+function precompRasterDensity(L: any, T: number, baseW: number, baseH: number): number {
+  const world = is3DLayer(PM, L) ? affinePlane(planeMatrix(PM, L, T)) : PM.worldMatrix(L, T);
+  const wanted = Math.max(1, continuousRasterScale(world));
+  const side = Math.min(8192, GL.maxTextureSize ||= GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE) || 4096);
+  const bySide = side / Math.max(1, baseW, baseH);
+  const byPixels = Math.sqrt(PRECOMP_RASTER_PIXELS / Math.max(1, baseW * baseH));
+  return Math.max(1, Math.min(wanted, bySide, byPixels));
+}
 /* Scope management for nested rendering — renderProject runs inside these. */
 function pmScopePush(proj: any) { PM.scope.push(proj); pcDepth++; }
 function pmScopePop() { PM.scope.pop(); pcDepth--; }
@@ -1291,8 +1387,8 @@ function drawSample(additive: boolean) {
   gl.blendFunc(gl.ONE, gl.ONE);
   try { draw(); } finally { gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
 }
-function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWindow, additive = false) {
-  const c: any = contentQuad(L, T, W, H, clip);
+function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWindow, additive = false, prepared?:any) {
+  const c: any = prepared || contentQuad(L, T, W, H, clip);
   if (!c) return false;
   const world = scaledWorld(L, T, W, H);
   const M = c.screenSpace ? [W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
@@ -1336,47 +1432,232 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
   return true;
 }
 
+/** Mip allocation belongs to the FBO pool's budget and dies with its texture.
+ * Restore base-level filtering before a pooled target is reused elsewhere. */
+function prepareEffectMips(input: any, levels: number): (() => void) | undefined {
+  if (levels <= 0) return;
+  const gl = GL.gl;
+  bindTex(0, input.tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, levels);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+  try {
+    gl.generateMipmap(gl.TEXTURE_2D);
+    if (levels > (input.mipLevels || 0)) {
+      const bytes = mipBytes(input.w, input.h, input.colorDepth, levels);
+      const added = bytes - (input.mipBytes || 0);
+      input.mipLevels = levels; input.mipBytes = bytes;
+      input.bytes += added; poolBytes += added;
+    }
+  } catch (error) {
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+    throw error;
+  }
+  return () => {
+    bindTex(0, input.tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+  };
+}
+
+type InputContext = { project: any; time: number; width: number; height: number; frames: Map<string, any> };
+let layerInputs: InputContext | null = null;
+let layerInputRendering = 0;
+let inputFrameOptions: any = null;
+function inputLayerActive(layer: any, time: number, project: any, opt: any): boolean {
+  if (opt.inputLayer && (time<0 || time>project.dur+1e-6))return false;
+  if (opt.inputLayer) return layer.type === 'group' || time >= layer.from - 1e-6
+    && (time < layer.from + layer.dur - 1e-6 || Math.abs(time-project.dur) <= 1e-6 && Math.abs(time-layer.from-layer.dur) <= 1e-6);
+  if (!opt.inputVisibilityRoot) return PM.active(layer, time);
+  if (!PM.active({...layer, group: null}, time)) return false;
+  const ancestors = PM.groupAncestors?.(layer, project.layers) || [];
+  const at = ancestors.findIndex((g: any) => g.id === opt.inputVisibilityRoot);
+  return !ancestors.slice(0, Math.max(0, at)).some((g: any) => !evaluatedValue(PM,g,g.on,time,'l.on'));
+}
+
+/** Typed geometry is evaluated on its provider, then rasterized in owner-local
+ * coordinates. Image assets use their complete decoded image, without a layer. */
+function referenceImage(owner:any,fx:any,pd:any,ref:any,T:number,W:number,H:number):{tex:any;resolution:number[];lut?:any}|null{
+ if(pd.type==='asset'){
+  if(!ref?.assetId)return null;const asset=PM.assets.get(ref.assetId);
+  if(pd.assetKind==='lut'){const lut=asset?.kind==='lut'&&asset.lut;if(!lut)throw new EffectInputError(`${owner.name}: missing or invalid LUT asset`);if(lut.width>GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE)||lut.height>GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE)||lut.data.byteLength>(PM.Memory?.budget?.('textures')??128*1024*1024))throw new EffectInputError('LUT exceeds GPU or texture memory limits');return{tex:texFor('effect-lut:'+asset.id,{width:lut.width,height:lut.height,data:lut.data},{version:lut,float:true}),resolution:[lut.width,lut.height],lut};}
+  if(!asset||asset.kind!=='image'||!asset.el)throw new EffectInputError(`${owner.name}: missing or unsupported image asset`);
+  const width=asset.el.naturalWidth||asset.el.width||asset.w,height=asset.el.naturalHeight||asset.el.height||asset.h;
+  if(width>GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE)||height>GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE)||!Number.isSafeInteger(width*height*4)||width*height*4>(PM.Memory?.budget?.('textures')??128*1024*1024))throw new EffectInputError('Image reference exceeds GPU or texture memory limits');
+  return{tex:texFor('effect-asset:'+asset.id,asset.el,{version:asset.el}),resolution:[asset.w,asset.h]};
+ }
+ if(!ref?.layerId||!ref?.pathId)return null;
+ const project=PM.curComp?.()||PM.proj,provider=project.layers.find((l:any)=>l.id===ref.layerId),item=referencedPath(provider,ref.pathId);
+ if(!provider||!item)throw new EffectInputError(`${owner.name}: missing path reference`);
+ const bytes=W*H*4;if(bytes>Math.min(PM.Memory?.budget?.('raster')??96*1024*1024,PM.Memory?.budget?.('textures')??128*1024*1024))throw new EffectInputError('Path reference exceeds the raster memory budget');
+ const canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;const c=canvas.getContext('2d')!;
+ try{
+  c.transform(...scaledWorld(owner,T,W,H));c.strokeStyle='#FFFFFF';c.lineCap='round';c.lineJoin='round';
+  const width=pd.pathWidth?Number(effectParamValue(PM,owner,fx,PM.effectDef(fx).params.find((p:any)=>p.k===pd.pathWidth),T)):1;
+  if(pd.pathBrush){const b=pd.pathBrush,get=(key:string)=>effectParamValue(PM,owner,fx,PM.effectDef(fx).params.find((p:any)=>p.k===key),T),curves=brushGeometry(PM,provider,ref,T,!!get(b.allMasks));
+   c.setTransform(1,0,0,1,0,0);rasterBrush(canvas,curves,scaledWorld(owner,T,W,H),width,Number(get(b.hardness)),Number(get(b.spacing)),Number(get(b.start)),Number(get(b.end)),!!get(b.sequential));
+   return{tex:texFor(`effect-path:${owner.id}:${fx.id}:${pd.k}`,canvas,{version:{}}),resolution:[W,H]};}
+  c.lineWidth=Math.max(.001,width);
+  const mask=item.mask;
+  if(mask){const value=(key:string)=>Number(PM.evP(provider,mask.p[key],T,`m.${mask.id}.${key}`))||0;c.translate(value('x'),value('y'));c.rotate(value('rotation')*Math.PI/180);
+   if(!item.path){c.beginPath();if(evaluatedValue(PM,provider,mask.shape,T,`m.${mask.id}.shape`)==='ellipse')c.ellipse(0,0,Math.abs(value('w'))/2,Math.abs(value('h'))/2,0,0,Math.PI*2);else c.rect(-value('w')/2,-value('h')/2,value('w'),value('h'));}
+  }
+  if(item.path){const v=pathValues(PM,provider,item.path,T,`reference.${item.path.id}`);
+   if(mask){c.translate(v.x,v.y);c.rotate(v.rotation*Math.PI/180);c.scale(v.scaleX/100,v.scaleY/100);}else c.transform(...groupMatrix(PM,provider,item.path,T) as [number,number,number,number,number,number]);
+   for(let copy=0;copy<Math.min(256,Math.max(1,Math.round(v.copies??1)));copy++){c.save();c.translate(copy*(v.repeatX??0),copy*(v.repeatY??0));c.rotate(copy*(v.repeatRotation??0)*Math.PI/180);tracePath(c,v);if(width>0)c.stroke();c.restore();}
+  }else if(width>0)c.stroke();
+  return{tex:texFor(`effect-path:${owner.id}:${fx.id}:${pd.k}`,canvas,{version:{}}),resolution:[W,H]};
+ }finally{canvas.width=0;canvas.height=0;}
+}
+
+/** A temporal effect consumes immutable owner-prefix frames. Composition
+ * samples align provider-time layer coordinates to the current owner: moving
+ * the outer layer alone does not create an Echo trail. Source owners use actual
+ * extent metadata so animated dimensions/padding do not stretch old frames. */
+function runTemporalEffect(L:any,fx:any,def:any,index:number,T:number,src:any,W:number,H:number){
+ if(is3DLayer(PM,L))throw new EffectInputError(`${L.name}: temporal sampling requires a 2D content owner`);
+ const space=activeSourceRaster()?.layer===L?'source':'composition';
+ const times=[T,...temporalTimes(def,key=>effectParamValue(PM,L,fx,def.params.find((p:any)=>p.k===key),T),T)];
+ const p=program(effectProgramKey(fx.type,fx.version,PM.Kernel?.effects?.get?.(fx.type)),def.frag);
+ if(!p)return src;
+ const owner=effectLayerCoordinates(L,T,W,H),raster=activeSourceRaster();
+ if(raster?.domain)raster.domain=sourceEffectDomain(L,fx,def,T,raster.domain);
+ let acc:any=null;
+ try{
+  for(let sample=0;sample<times.length;sample++){
+   if(inputFrameOptions?.signal?.aborted||GL.contextLost||GL.gl.isContextLost?.())throw new EffectInputError('Temporal rendering cancelled or context lost');
+   const at=times[sample]!,frame=sample===0?src:layerInputs?.frames.get(inputKey(L.id,'effects',space,at,index));
+   if(!frame)throw new EffectInputError(`${L.name}: temporal owner prefix is unavailable at ${at}`);
+   let from:Float32Array|Parameters<typeof inversePlane>[0]=IDENT,valid=owner.valid!==false;
+   if(space==='composition'&&sample>0){
+    const historical=effectLayerCoordinates(L,at,frame.w,frame.h);from=inversePlane(Array.from(historical.uv) as unknown as Parameters<typeof inversePlane>[0])||IDENT;valid=valid&&historical.valid!==false;
+   }
+   const out=grab(W,H);bind(out);clear();const g=use(p);
+   bindTex(0,acc?.tex||src.tex);setI(p,'u_tex',0);bindTex(1,frame.tex);setI(p,'u_temporal',1);
+   g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);g.u('u_time',T);
+   g.u('u_temporalIndex',sample);g.u('u_temporalCount',times.length);g.u('u_temporalValid',valid?1:0);
+   g.u('u_temporalSource',space==='source'?1:0);g.u('u_temporalDirect',sample===0?1:0);
+   const currentBounds=GL.bounds(L,T),pastBounds=GL.bounds(L,at);
+   g.u('u_temporalBounds',...(currentBounds?[currentBounds.x0,currentBounds.y0,currentBounds.w,currentBounds.h]:[0,0,W,H]));
+   g.u('u_temporalPriorBounds',...(pastBounds?[pastBounds.x0,pastBounds.y0,pastBounds.w,pastBounds.h]:[0,0,frame.w,frame.h]));
+   g.u('u_temporalOwnerUV',owner.uv);g.u('u_temporalFromUV',from);g.u('u_temporalRes',frame.w,frame.h);
+   const extent=raster?.extent??raster?.bounds,prior=frame.sourceExtent;
+   g.u('u_temporalExtent',...(extent?[extent.x0,extent.y0,extent.w,extent.h]:[0,0,W,H]));
+   g.u('u_temporalPriorExtent',...(prior?[prior.x0,prior.y0,prior.w,prior.h]:[0,0,frame.w,frame.h]));
+   def.params.forEach((pd:any,i:number)=>setParam(p,pd,i,effectParamValue(PM,L,fx,pd,T)));
+   GL.gl.disable(GL.gl.BLEND);try{draw();}finally{GL.gl.enable(GL.gl.BLEND);}
+   GL.stats.passes++;if(acc)free(acc);acc=out;
+   if(inputFrameOptions?.signal?.aborted||GL.contextLost||GL.gl.isContextLost?.())throw new EffectInputError('Temporal rendering cancelled or context lost');
+  }
+  return acc;
+ }catch(error){free(acc);throw error;}
+}
+
 /* ── effects chain ─────────────────────────────────────── */
-function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = null) {
+function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = null, prefix?:number) {
   let cur = srcF;
   const coordinates = effectViewportCoordinates(W, H);
   let layerCoordinates: ReturnType<typeof effectLayerCoordinates> | undefined;
-  for (const fx of L.fx) {
+  for (const [effectIndex,fx] of L.fx.entries()) {
+    if(prefix!==undefined&&effectIndex>=prefix)break;
     /* `missing` marks an effect whose type is not registered (the extension
        providing it is off or gone). Skip it and keep its data intact. */
     if (!evaluatedValue(PM, L, fx.on, T, `${fx.id}.$enabled`) || fx.missing) continue;
-    const def = PM.FX[fx.type];
+    const def = PM.effectDef?.(fx) ?? (!PM.effectDef ? PM.FX[fx.type] : undefined);
     if (!def) continue;
-    const key = 'fx:' + fx.type;
+    if(def.temporal){const next=runTemporalEffect(L,fx,def,effectIndex,T,cur,W,H);if(cur!==srcF)free(cur);cur=next;continue;}
+    const raster=activeSourceRaster();
+    if(raster?.domain)raster.domain=sourceEffectDomain(L,fx,def,T,raster.domain);
+    const key = effectProgramKey(fx.type, fx.version, PM.Kernel?.effects?.get?.(fx.type));
     const p = program(key, def.frag);
     if (!p) continue;
     const usesLayerCoordinates = uloc(p, 'u_layerUV') !== null;
     if (usesLayerCoordinates) layerCoordinates ??= effectLayerCoordinates(L, T, W, H);
+    const inputParams = def.params.filter((pd:any)=>referenceParam(pd));
+    if (inputParams.length + 3 > GL.gl.getParameter(GL.gl.MAX_TEXTURE_IMAGE_UNITS)) throw new EffectInputError('Too many effect input textures for this GPU');
+    const assets=new Set<string>();const bytes=inputParams.reduce((sum:number,pd:any)=>{const ref=fx.inputs?.[pd.k];if(pd.type==='path'&&ref?.pathId)return sum+W*H*4;if(pd.type==='asset'&&ref?.assetId&&!assets.has(ref.assetId)){assets.add(ref.assetId);const a=PM.assets.get(ref.assetId);return sum+(a?.lut?.data.byteLength??(a?.w||0)*(a?.h||0)*4);}return sum;},0);if(bytes>(PM.Memory?.budget?.('textures')??128*1024*1024))throw new EffectInputError('Effect references exceed the texture memory budget');
     const orig = def.keepOrig ? cur : null;
+    const scale = outputScale(W, H);
+    const world = def.sampling?.space === 'layer' ? activeSourceRaster()?.layer===L ? [1,0,0,1,0,0] : PM.worldMatrix(L, T) : undefined;
+    const kernelScale = world ? [Math.hypot(world[0] * scale[0], world[1] * scale[1]), Math.hypot(world[2] * scale[0], world[3] * scale[1])] : scale;
+    const parameter = (name: string) => {
+      const pd = def.params.find((param: any) => param.k === name);
+      return pd ? effectParamValue(PM, L, fx, pd, T) : 0;
+    };
+    const grid = def.grid ? gridSize(Number(parameter(def.grid.columns)), Number(parameter(def.grid.rows)),
+      Math.min(2048, GL.maxTextureSize ||= GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE) || 2048)) : undefined;
     let input = cur;
     for (let pass = 0; pass < def.passes; pass++) {
-      const out = grab(W, H);
+      const targetW = grid && pass === 0 ? grid[0] : W, targetH = grid && pass === 0 ? grid[1] : H;
+      const out = grab(targetW, targetH);
       bind(out); clear();
       const g = use(p);
       bindTex(0, input.tex); setI(p, 'u_tex', 0);
-      if (orig) { bindTex(1, orig.tex); setI(p, 'u_orig', 1); }
-      /* Backdrop effects opt into the accumulated lower stack. Keep it on a
-         separate unit from u_orig so an effect may request both references. */
-      if (def.backdrop) { bindTex(2, backdropF?.tex || null); setI(p, 'u_backdrop', 2); }
-      g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', ...coordinates.uv);
-      g.u('u_coordRes', ...coordinates.resolution); g.u('u_pxOrigin', ...coordinates.origin);
-      if (usesLayerCoordinates) {
-        g.u('u_layerUV', layerCoordinates!.uv);
-        g.u('u_layerRes', ...layerCoordinates!.resolution);
-      }
-      g.u('u_texel', 1 / W, 1 / H);
-      g.u('u_time', T);
-      setI(p, 'u_pass', pass);
-      def.params.forEach((pd: any, i: any) => setParam(p, pd, i, effectParamValue(PM, L, fx, pd, T)));
-      GL.gl.disable(GL.gl.BLEND);
-      gpuTiming ? gpuTiming.measure({ id: `effect:${L.id}:${fx.id}:${pass}`, name: `${L.name} · ${def.label || fx.type}`, kind: 'effect', layerId: L.id }, draw) : draw();
-      GL.gl.enable(GL.gl.BLEND);
-      GL.stats.passes++;
+      let lod = def.sampling && pass >= (def.sampling.firstPass ?? 0) ? sampleLod(Number(parameter(def.sampling.radius)), def.sampling.support, def.sampling.maxRadius, kernelScale, input.w, input.h) : 0;
+      if (grid && pass === 0 && !(def.grid.pointSample && parameter(def.grid.pointSample))) lod = Math.floor(Math.log2(Math.max(input.w, input.h)));
+      const resetSampling = prepareEffectMips(input, lod);
+      try {
+        if (orig) { bindTex(1, orig.tex); setI(p, 'u_orig', 1); }
+        if (def.backdrop) { bindTex(2, backdropF?.tex || null); setI(p, 'u_backdrop', 2); }
+        g.u('u_m', fullQuad(targetW, targetH)); g.u('u_res', targetW, targetH); g.u('u_uv', ...coordinates.uv);
+        g.u('u_coordRes', ...coordinates.resolution); g.u('u_pxOrigin', ...coordinates.origin);
+        g.u('u_pixelScale', ...scale); g.u('u_sourceRes', W, H); g.u('u_sampleLod', lod);
+        if (grid) g.u('u_gridRes', ...grid);
+        if (inputParams.length) {
+          const owner = effectLayerCoordinates(L, T, W, H);
+          g.u('u_ownerFromUV', inversePlane(Array.from(owner.uv) as unknown as Parameters<typeof inversePlane>[0]) || IDENT);
+          inputParams.forEach((pd: any, index: number) => {
+            const ref=fx.inputs?.[pd.k];
+            if(pd.type==='asset'||pd.type==='path'){
+              const image=referenceImage(L,fx,pd,ref,T,W,H);
+              bindTex(index+3,image?.tex||input.tex);setI(p,'u_'+pd.k,index+3);g.u('u_has_'+pd.k,image?1:0);
+              g.u('u_'+pd.k+'Res',...(image?.resolution??owner.resolution));
+              if(pd.assetKind==='lut'){g.u('u_'+pd.k+'Size',image?.lut?.size??2);g.u('u_'+pd.k+'DomainMin',...(image?.lut?.domainMin??[0,0,0]));g.u('u_'+pd.k+'DomainMax',...(image?.lut?.domainMax??[1,1,1]));}
+              const forward=new Float32Array([W,0,0,0,-H,0,0,H,1]);g.u('u_'+pd.k+'FromUV',forward);g.u('u_'+pd.k+'UV',new Float32Array(inversePlane(Array.from(forward) as unknown as Parameters<typeof inversePlane>[0])!));g.u('u_'+pd.k+'Midpoint',128/255);return;
+            }
+            const frame = ref?.layerId ? layerInputs?.frames.get(inputKey(ref.layerId, ref.stage, ref.space,T)) : null;
+            if (ref?.layerId && !frame) throw new EffectInputError(`${L.name}: input ${pd.label} is unavailable`);
+            bindTex(index + 3, frame?.tex || input.tex); setI(p, 'u_' + pd.k, index + 3);
+            g.u('u_has_' + pd.k, frame ? 1 : 0);
+            g.u('u_'+pd.k+'Midpoint',(frame?.colorDepth??workingColorDepth())===8?128/255:.5);
+            const target = ref?.layerId && layerInputs?.project.layers.find((l: any) => l.id === ref.layerId);
+            let mapping=owner;
+            if(target&&frame){
+              if(ref.space==='source')mapping={uv:new Float32Array([1/W,0,0,0,1/H,0,0,0,1]),resolution:frame.inputResolution};
+              else {
+                const previous=sourceRaster;sourceRaster=null;
+                try{mapping=effectLayerCoordinates(target,T,frame.w,frame.h,true);}finally{sourceRaster=previous;}
+                // The shared sampler addresses normalized texture coordinates
+                // through the consumer's u_res, even for a source-sized owner.
+                const forward=inversePlane(Array.from(mapping.uv) as unknown as Parameters<typeof inversePlane>[0]);
+                if(forward&&(frame.w!==W||frame.h!==H)){const scaled=Array.from(forward).map((v,i)=>v*(i%3===0?W/frame.w:i%3===1?H/frame.h:1));mapping={...mapping,uv:new Float32Array(inversePlane(scaled as unknown as Parameters<typeof inversePlane>[0])!)};}
+              }
+            }
+            g.u('u_' + pd.k + 'UV', mapping.uv);
+            g.u('u_' + pd.k + 'FromUV', inversePlane(Array.from(mapping.uv) as unknown as Parameters<typeof inversePlane>[0]) || IDENT);
+            g.u('u_' + pd.k + 'Res', ...mapping.resolution);
+          });
+        }
+        // Uploading path/asset references can bind texture unit zero. Restore
+        // the actual effect source before sampling or the first frame differs
+        // from subsequent cached uploads (and from save/load).
+        if(inputParams.length)bindTex(0,input.tex);
+        if (usesLayerCoordinates) {
+          g.u('u_layerUV', layerCoordinates!.uv);
+          g.u('u_layerRes', ...layerCoordinates!.resolution);
+          g.u('u_ownerValid',layerCoordinates!.valid===false?0:1);
+        }
+        g.u('u_texel', 1 / input.w, 1 / input.h);
+        g.u('u_time', T);
+        setI(p, 'u_pass', pass);
+        def.params.forEach((pd: any, i: any) => setParam(p, pd, i, effectParamValue(PM, L, fx, pd, T)));
+        const domain=activeSourceRaster()?.domain,extent=activeSourceRaster()?.extent;
+        if(domain&&extent){const sx=targetW/extent.w,sy=targetH/extent.h;GL.gl.enable(GL.gl.SCISSOR_TEST);GL.gl.scissor(Math.floor((domain.x0-extent.x0)*sx),Math.floor((extent.y0+extent.h-domain.y0-domain.h)*sy),Math.ceil(domain.w*sx),Math.ceil(domain.h*sy));}
+        GL.gl.disable(GL.gl.BLEND);
+        try { gpuTiming ? gpuTiming.measure({ id: `effect:${L.id}:${fx.id}:${pass}`, name: `${L.name} · ${def.label || fx.type}`, kind: 'effect', layerId: L.id }, draw) : draw(); }
+        finally { GL.gl.enable(GL.gl.BLEND);if(domain)GL.gl.disable(GL.gl.SCISSOR_TEST); }
+        GL.stats.passes++;
+      } finally { resetSampling?.(); }
       if (input !== cur) free(input);
       input = out;
     }
@@ -1384,6 +1665,61 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
     cur = input;
   }
   return cur;
+}
+
+function sourceEffectPadding(L:any,fx:any,def:any,T:number){
+ const contract=def.sourceProcessing;if(!contract||def.backdrop)throw new EffectInputError(`${L.name}: ${def.label} does not declare source processing support`);
+ const value=(key:string)=>effectParamValue(PM,L,fx,def.params.find((p:any)=>p.k===key),T);
+ if(contract.when&&!value(contract.when))return 0;
+ return Math.ceil((contract.pixels??0)+(contract.padding??[]).reduce((sum:number,key:string)=>sum+Math.abs(Number(value(key))||0),0)*(contract.factor??1));
+}
+function sourceEffectDomain(L:any,fx:any,def:any,T:number,bounds:any){
+ if(def.temporal){
+  let result={...bounds};const index=L.fx.indexOf(fx);
+  for(const at of temporalTimes(def,key=>effectParamValue(PM,L,fx,def.params.find((p:any)=>p.k===key),T),T)){
+   const extent=layerInputs?.frames.get(inputKey(L.id,'effects','source',at,index))?.sourceExtent;if(!extent)continue;
+   const x=Math.min(result.x0,extent.x0),y=Math.min(result.y0,extent.y0);result={x0:x,y0:y,w:Math.max(result.x0+result.w,extent.x0+extent.w)-x,h:Math.max(result.y0+result.h,extent.y0+extent.h)-y};
+  }return result;
+ }
+ const pad=sourceEffectPadding(L,fx,def,T);let result={x0:bounds.x0-pad,y0:bounds.y0-pad,w:bounds.w+2*pad,h:bounds.h+2*pad};
+ for(const key of def.sourceProcessing.geometry??[]){const pd=def.params.find((p:any)=>p.k===key),ref=fx.inputs?.[key];if(!ref?.layerId||!ref.pathId)continue;const provider=(PM.curComp?.()??PM.proj).layers.find((l:any)=>l.id===ref.layerId);if(!provider)throw new EffectInputError('Missing stroke path provider');const value=(k:string)=>effectParamValue(PM,L,fx,def.params.find((p:any)=>p.k===k),T),b=brushBounds(brushGeometry(PM,provider,ref,T,!!value(pd.pathBrush.allMasks)),Number(value(pd.pathWidth)));if(b){const x=Math.min(result.x0,b.x0),y=Math.min(result.y0,b.y0);result={x0:x,y0:y,w:Math.max(result.x0+result.w,b.x0+b.w)-x,h:Math.max(result.y0+result.h,b.y0+b.h)-y};}}
+ return result;
+}
+function sourceOwnerEffects(L:any,T:number,prefix?:number){return(L.fx??[]).slice(0,prefix).filter((fx:any)=>!fx.missing&&evaluatedValue(PM,L,fx.on,T,`${fx.id}.$enabled`)).map((fx:any)=>({fx,def:PM.effectDef(fx)})).filter((item:any)=>item.def);}
+/** Source-space references retain native content bounds before layer transforms,
+ * opacity and composition clipping. Every lease belongs to the enclosing DAG. */
+function renderInputSource(project:any,L:any,T:number,stage:string,opt:any) {
+  const previous=sourceRaster,previousClip=previewSourceClipping,previousViewport=previewViewportActive;
+  const bounds=GL.bounds(L,T)||{x0:0,y0:0,w:1,h:1};
+  const checkedSize=(w:number,h:number)=>{
+    const limit=GL.maxTextureSize||GL.gl.getParameter(GL.gl.MAX_TEXTURE_SIZE);
+    if(!Number.isFinite(w*h)||w<=0||h<=0||Math.ceil(w)>limit||Math.ceil(h)>limit)throw new EffectInputError(`${L.name}: source raster exceeds GPU dimensions`);
+  };
+  checkedSize(bounds.w,bounds.h);
+  sourceRaster={layer:L,project,bounds};previewSourceClipping=false;previewViewportActive=false;
+  const check=()=>{if(opt.signal?.aborted||GL.contextLost||!GL.gl||GL.gl.isContextLost?.())throw new EffectInputError('Layer input rendering cancelled or context lost');};
+  try{
+    check();
+    // Inactive video inputs need no decoded frame and remain transparent.
+    if(!inputLayerActive(L,T,project,{inputLayer:L.id})) {const frame=grab(1,1);bind(frame);clear();frame.inputResolution=[bounds.w,bounds.h];frame.sourceExtent=bounds;return frame;}
+    const content=contentQuad(L,T,Math.ceil(bounds.w),Math.ceil(bounds.h));
+    check();
+    if(content?.screenSpace)throw new EffectInputError(`${L.name}: screen-space content cannot supply an unclipped source raster`);
+    const full=content?{x0:-content.ax,y0:-content.ay,w:content.w,h:content.h}:bounds;
+    try{checkedSize(full.w,full.h);}catch(error){free(content?.tmp);throw error;}
+    const grow=stage==='effects'&&(opt.ownerGrow||L.effectSpace==='source');
+    const extent=grow?sourceOwnerEffects(L,T,opt.inputPrefix).reduce((bounds:any,item:any)=>sourceEffectDomain(L,item.fx,item.def,T,bounds),full):full;checkedSize(extent.w,extent.h);
+    sourceRaster={layer:L,project,bounds:full,...(grow?{extent,domain:{...full}}:{})};
+    const W=Math.ceil(extent.w),H=Math.ceil(extent.h),src=grab(W,H);bind(src);clear();
+    if(content)drawContent(L,T,W,H,1,undefined,false,content);
+    check();
+    let result=src;
+    if(stage!=='source'){result=applyMasks(L,T,result,W,H);if(result!==src)free(src);}
+    check();
+    if(stage==='effects'){const prior=result;result=runEffects(L,T,prior,W,H,null,opt.inputPrefix);if(result!==prior)free(prior);}
+    check();
+    result.inputResolution=[extent.w,extent.h];result.sourceExtent=extent;return result;
+  }finally{sourceRaster=previous;previewSourceClipping=previousClip;previewViewportActive=previousViewport;}
 }
 
 /* ── masks ─────────────────────────────────────────────── */
@@ -1422,9 +1758,10 @@ function applyTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:
   const source=proj.layers.find((l:any)=>l.id===L.matteSource);
   const mode=evaluatedValue(PM,L,L.matteMode,T,'l.matteMode')||'alpha';
   if(!source || (opt.matteDepth||0)>=8)return srcF;
-  const matte=GL.renderProject({...proj,layers:[{...source,on:true}]},T,W,H,{...opt,transparent:true,mattePass:true,explicitLayers:true,matteDepth:(opt.matteDepth||0)+1,matteProject:proj});
+  const retained = layerInputs?.project === proj ? layerInputs!.frames.get(inputKey(source.id, 'effects','composition',T)) : null;
+  const matte=retained || GL.renderProject({...proj,layers:[{...source,on:true}]},T,W,H,{...opt,transparent:true,mattePass:true,explicitLayers:true,matteDepth:(opt.matteDepth||0)+1,matteProject:proj});
   const out=grab(W,H);bind(out);clear();const p=program('trackMatte',PM.GLSL_PRE+'uniform sampler2D u_matte; uniform int u_luma; uniform int u_invert; void main(){vec4 m=texture(u_matte,v_st);float a=u_luma==1?dot(m.rgb,vec3(.2126,.7152,.0722)):m.a;if(u_invert==1)a=1.-a;o=texture(u_tex,v_st)*clamp(a,0.,1.);}');
-  const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,matte.tex);setI(p,'u_matte',1);setI(p,'u_luma',mode.startsWith('luma')?1:0);setI(p,'u_invert',mode.endsWith('inverted')?1:0);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);free(matte);return out;
+  const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,matte.tex);setI(p,'u_matte',1);setI(p,'u_luma',mode.startsWith('luma')?1:0);setI(p,'u_invert',mode.endsWith('inverted')?1:0);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);if(!retained)free(matte);return out;
 }
 
 const MASK_MAX = 8;
@@ -1612,52 +1949,63 @@ function compositingPass(layers: any[], parentGroup: string | null, T: any, opt:
 
 /** Plan thumbnail source frames with the same passes, eligibility and scope
  * seen by renderProject. This visits no GPU resources or decoder state. */
-GL.thumbnailVideoRequests = (comp: any, time: number) => {
-  const requests: Array<{ key: string; asset: any; at: number }> = [];
+GL.frameVideoRequests = (comp: any, time: number, options: any = {}) => {
+  const requests = new Map<string, { key: string; layer: any; time: number; asset: any; at: number }>();
+  let visits=0;
   const visit = (proj: any, T: number, opt: any, depth: number, path: string) => {
-    const orderedLayers = proj.layers || [];
-    const layers = opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, opt.groupParent || null, T, opt);
-    const solo = orderedLayers.some((layer: any) => layer.solo);
-    const matteSources = new Set(orderedLayers.map((layer: any) => layer.matteSource));
-    for (let index = layers.length - 1; index >= 0; index--) {
-      const L = layers[index];
-      if (!opt.mattePass && matteSources.has(L.id)) continue;
-      const ancestors = PM.groupAncestors?.(L, proj.layers) || [];
-      if (solo && !L.solo && !ancestors.some((group: any) => group.solo)
-          && !groupContainsSolo(L, orderedLayers, (layer: any) => PM.groupAncestors?.(layer, proj.layers) || []) && !opt.mattePass) continue;
-      if (L.type !== 'group' && PM.TYPE_META?.[L.type]?.visual === false) continue;
-      if (!PM.active(L, T)) continue;
-      const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
-      if (alpha <= .001) continue;
-      if (L.type === 'group') {
-        visit(proj, T, { ...opt, transparent: true, groupParent: L.id, mblur: false, matteProject: opt.matteProject || proj }, depth, path);
-      } else if (L.type === 'video') {
-        const asset = PM.assets.get(resolveContent(PM, L, T).asset);
-        if (asset?.el) requests.push({ key: path + L.id + '@' + T, asset, at: videoPlaybackTime(asset, sourceTime(PM, L, T)) });
-      } else if (L.type === 'precomp' && depth < PC_MAX_DEPTH) {
-        const sub = PM.compOf(L);
-        if (sub) {
-          // contentQuad pushes the nested scope before evaluating retiming.
-          PM.scope.push(sub);
-          try { visit(sub, sourceTime(PM, L, T), { transparent: true, mblur: false }, depth + 1, path + L.id + '/'); }
-          finally { PM.scope.pop(); }
-        }
+    if(options.signal?.aborted)throw new EffectInputError('Temporal video preparation cancelled');
+    if(++visits>8192||requests.size>1024)throw new EffectInputError('Temporal video requests exceed the frame request limit');
+    if (depth > PC_MAX_DEPTH) throw new EffectInputError('Composition nesting is too deep');
+    if (!opt.preparedInputs && hasLayerInputs(proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) {
+      const plan = layerInputPlan(proj, {assets:PM.assets,definition:(fx:any)=>PM.effectDef?.(fx),time:T,value:(l:any,fx:any,key:string,at:number)=>effectParamValue(PM,l,fx,PM.effectDef(fx).params.find((p:any)=>p.k===key),at),
+        enabled:(l:any,fx:any,at=T)=>!!evaluatedValue(PM,l,fx.on,at,`${fx.id}.$enabled`),
+        active:(l:any,at=T)=>!!PM.active(l,at),contentActive:(l:any,at=T)=>!!PM.active({...l,group:null},at)});
+      for (const node of plan.requests) visit(proj,node.time!,{...opt,inputLayer:node.layer.id,inputStage:node.stage,inputPrefix:node.prefix,
+        preparedInputs:true,mblur:false,inputSpace:node.space},depth,path);
+      opt={...opt,preparedInputs:true};
+    }
+    const orderedLayers=proj.layers||[];
+    const layers=opt.inputLayer ? orderedLayers.filter((l:any)=>l.id===opt.inputLayer)
+      : opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers,opt.groupParent||null,T,opt);
+    const solo=orderedLayers.some((l:any)=>l.solo), matteSources=new Set(orderedLayers.map((l:any)=>l.matteSource));
+    const content = (L:any,at:number) => {
+      if (L.type==='video') {
+        const asset=PM.assets.get(resolveContent(PM,L,at).asset),key=path+L.id+'@'+at;
+        if(asset?.el){requests.set(key,{key,layer:L,time:at,asset,at:videoPlaybackTime(asset,sourceTime(PM,L,at),1/PM.proj.fps)});if(requests.size>1024)throw new EffectInputError('Temporal video requests exceed the frame request limit');}
+      } else if(L.type==='precomp') {
+        const sub=PM.compOf(L);if(!sub)return;
+        PM.scope.push(sub);
+        try{visit(sub,sourceTime(PM,L,at),{transparent:true,mblur:opt.mblur!==false,mbSamples:opt.mbSamples,shutter:opt.shutter},depth+1,path+L.id+'/');}
+        finally{PM.scope.pop();}
       }
-      if (L.matteSource && (opt.matteDepth || 0) < 8) {
-        const matteProject = opt.matteProject || proj;
-        const source = matteProject.layers.find((layer: any) => layer.id === L.matteSource);
-        // applyTrackMatte intentionally retains the current PM scope while
-        // rendering its forced-on, one-layer project record.
-        if (source) visit({ ...matteProject, layers: [{ ...source, on: true }] }, T,
-          { ...opt, transparent: true, mattePass: true, explicitLayers: true, matteDepth: (opt.matteDepth || 0) + 1, matteProject }, depth, path);
+    };
+    for(let index=layers.length-1;index>=0;index--){
+      const L=layers[index],ancestors=PM.groupAncestors?.(L,proj.layers)||[];
+      if(!opt.inputLayer&&!opt.mattePass&&matteSources.has(L.id))continue;
+      if(!opt.inputLayer&&!opt.inputVisibilityRoot&&solo&&!L.solo&&!ancestors.some((g:any)=>g.solo)
+        &&!groupContainsSolo(L,orderedLayers,(l:any)=>PM.groupAncestors?.(l,proj.layers)||[])&&!opt.mattePass)continue;
+      if(L.type!=='group'&&PM.TYPE_META?.[L.type]?.visual===false)continue;
+      if(!inputLayerActive(L,T,proj,opt)||opt.inputSpace!=='source'&&PM.clamp(PM.ev(L,'opacity',T)/100,0,1)<=.001)continue;
+      const mb=evaluatedValue(PM,L,L.mblur,T,'l.mblur')&&opt.mblur!==false;
+      if(L.type==='group'){
+        const times=mb?motionBlurTimes(T,proj.fps,opt):[T];
+        for(const at of times)visit(proj,at,{...opt,inputLayer:undefined,inputStage:undefined,inputPrefix:undefined,
+          inputVisibilityRoot:opt.inputLayer||opt.inputVisibilityRoot,groupParent:L.id,mblur:mb?false:opt.mblur,
+          preparedInputs:at===T&&opt.preparedInputs},depth,path);
+      }else if(L.effectSpace==='source'&&mb){for(const at of motionBlurTimes(T,proj.fps,opt))visit(proj,at,{...opt,inputLayer:L.id,inputStage:'effects',preparedInputs:false,mblur:false},depth,path);}
+      else for(const at of mb?motionBlurTimes(T,proj.fps,opt):[T])content(L,at);
+      if(L.matteSource&&opt.inputPrefix===undefined&&(!opt.inputLayer||opt.inputStage==='effects')&&(opt.matteDepth||0)<8){
+        const matteProject=opt.matteProject||proj,source=matteProject.layers.find((l:any)=>l.id===L.matteSource);
+        if(source)visit(matteProject,T,{...opt,inputLayer:source.id,inputStage:'effects',mblur:false,
+          mattePass:true,matteDepth:(opt.matteDepth||0)+1,preparedInputs:true},depth,path);
       }
     }
   };
-  PM.beginEval?.(time); PM.scope.push(comp);
-  try { visit(comp, time, { mblur: false }, 0, ''); }
-  finally { PM.scope.pop(); }
-  return requests;
+  PM.beginEval?.(time);PM.scope.push(comp);
+  try{visit(comp,time,options,0,'');}finally{PM.scope.pop();PM.beginEval?.(PM.time);}
+  return [...requests.values()];
 };
+GL.thumbnailVideoRequests = (comp:any,time:number) => GL.frameVideoRequests(comp,time,{mblur:false});
 
 function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: any, W: any, H: any) {
   const key = 'tr:' + activeTr.transition.type;
@@ -1701,12 +2049,36 @@ function reportLayerFailure(layer: any, error: unknown): void {
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(proj===PM.proj && !opt.groupParent && !opt.mattePass)pruneSceneRuntimes(PM);
   const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D;PM._renderComposition3D=proj;
+  const previousInputs = layerInputs, previousInputFrameOptions = inputFrameOptions;
+  if (inputFrameOptions || hasLayerInputs(proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) inputFrameOptions = { signal:opt.signal, mblur: opt.mblur, mbSamples: opt.mbSamples, shutter: opt.shutter };
+  const ownsInputs = !opt.inputContext && hasLayerInputs(proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type));
+  const baseline = ownsInputs ? new Set(GL.pool.filter((f: any) => f.busy)) : null;
+  let completed = false;
+  let ownedInputs: InputContext | null = null;
   try {
+  if (opt.signal?.aborted) throw new EffectInputError('Layer input rendering cancelled');
+  if (ownsInputs) {
+    const plan = layerInputPlan(proj, { assets:PM.assets, definition: (fx: any) => PM.effectDef?.(fx),time:T,value:(l:any,fx:any,key:string,at:number)=>effectParamValue(PM,l,fx,PM.effectDef(fx).params.find((p:any)=>p.k===key),at),
+      enabled: (l: any, fx: any, at=T) => !!evaluatedValue(PM, l, fx.on, at, `${fx.id}.$enabled`),
+      active: (l: any,at=T) => !!PM.active(l, at), contentActive: (l: any,at=T) => !!PM.active({...l, group: null}, at) });
+    const depth=workingColorDepth(),budget=PM.Memory?.budget?.('framebuffers')??MAX_FBO_BYTES;
+    const sourceBytes=plan.requests.filter(n=>n.space==='source').reduce((sum,n)=>{const b=GL.bounds(n.layer,n.time);return sum+colorBufferBytes(Math.max(1,Math.ceil(b?.w||1)),Math.max(1,Math.ceil(b?.h||1)),depth);},0);
+    assertInputBudget(plan.requests.filter(n=>n.space!=='source').length,colorBufferBytes(W,H,depth),budget-sourceBytes);
+    ownedInputs = layerInputs = { project: proj, time: T, width: W, height: H, frames: new Map() };
+    layerInputRendering++;
+    for (const node of plan.requests) {
+      if (opt.signal?.aborted || GL.contextLost || GL.gl.isContextLost?.()) throw new EffectInputError('Layer input rendering cancelled or context lost');
+      const frame = node.space==='source' ? renderInputSource(proj,node.layer,node.time!,node.stage,{...opt,inputPrefix:node.prefix}) : GL.renderProject(proj, node.time, W, H, { ...opt, rawOwner:undefined, inputContext: layerInputs, inputLayer: node.layer.id, inputStage: node.stage, inputPrefix:node.prefix, transparent: true, previewReuse: false, mblur: false });
+      frame.inputTime=node.time;frame.inputPrefix=node.prefix;layerInputs.frames.set(node.key, frame);
+    }
+  } else if (opt.inputContext) layerInputs = opt.inputContext;
+  if (opt.signal?.aborted || ownsInputs && GL.contextLost) throw new EffectInputError('Layer input rendering cancelled or context lost');
+  if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
   const gl = GL.gl;
   const orderedLayers = proj.layers;
   const parentGroup = typeof opt.groupParent === 'string' ? opt.groupParent : null;
-  const layers = compositionOrderedLayers(PM,opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, parentGroup, T, opt),T,PM._renderCamera3D);
+  const layers = compositionOrderedLayers(PM,opt.inputLayer ? orderedLayers.filter((l: any) => l.id === opt.inputLayer) : opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, parentGroup, T, opt),T,PM._renderCamera3D);
   PM._renderComposition3DPass=layers;
   const solo = orderedLayers.some((layer: any) => layer.solo);
   // Rebuild per composition/pass so edits and nested mattes cannot leave a
@@ -1789,24 +2161,24 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       if (!rememberPreview(prefixKey, saved)) free(saved);
     }
     const L = layers[i];
-    if (!opt.mattePass && matteSources.has(L.id)) continue;
+    if (!opt.inputLayer && !opt.mattePass && matteSources.has(L.id)) continue;
     const groupAncestors = PM.groupAncestors?.(L, proj.layers) || [];
-    if (solo && !L.solo && !groupAncestors.some((group: any) => group.solo)
+    if (!opt.inputLayer && !opt.inputVisibilityRoot && solo && !L.solo && !groupAncestors.some((group: any) => group.solo)
         && !groupContainsSolo(L, orderedLayers, (layer: any) => PM.groupAncestors?.(layer, proj.layers) || [])
         && !opt.mattePass) continue;
     if (L.type !== 'group' && PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
-    if (!PM.active(L, T)) continue;
+    if (!inputLayerActive(L, T, proj, opt)) continue;
     /* Each group owns an offscreen compositing boundary, so opacity is applied
        once at its own level instead of being multiplied into every descendant. */
     const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
     if (alpha <= .001) continue;
 
     try {
-      const hasFx = hasRenderableEffects(L.fx, PM, L, T);
-      const hasMasks = (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
-      const blend = (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
+      const hasFx = (!opt.inputLayer || opt.inputStage === 'effects') && hasRenderableEffects(opt.inputPrefix===undefined?L.fx:L.fx.slice(0,opt.inputPrefix), PM, L, T);
+      const hasMasks = (!opt.inputLayer || opt.inputStage !== 'source') && (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
+      const blend = opt.inputLayer ? 0 : (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
       const mb = (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
-      const transition = activeTransition(L, T);
+      const transition = opt.inputLayer ? null : activeTransition(L, T);
 
       /* Adjustment layers are full-frame processors over the already-rendered
          stack below. An adjustment without an enabled renderable effect is a
@@ -1835,36 +2207,43 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       }
 
       let lf: any;
-      if (L.type === 'group') {
+      const sourceOwner=L.effectSpace==='source'&&hasFx&&(!opt.inputLayer||opt.inputStage==='effects');
+      if(sourceOwner){
+        lf=grab(W,H);bind(lf);clear();
+        const times=mb?motionBlurTimes(T,proj.fps,opt):[T];
+        for(const at of times){
+          const frame=GL.renderProject(proj,at,W,H,{...opt,inputLayer:undefined,inputStage:undefined,rawOwner:L.id,ownerGrow:true,mblur:false,inputContext:layerInputs?.time===at?layerInputs:undefined});
+          const e=frame.sourceExtent??{x0:0,y0:0,w:frame.inputResolution[0],h:frame.inputResolution[1]};
+          bind(lf);drawContent(L,at,W,H,PM.clamp(PM.ev(L,'opacity',at)/100,0,1)/times.length,undefined,mb,{tex:frame.tex,w:e.w,h:e.h,ax:-e.x0,ay:-e.y0,uv:[0,0,1,1],fromFbo:true,tmp:frame});
+        }
+      }else if (L.type === 'group') {
         if (mb) {
           lf = grab(W, H); bind(lf); clear();
-          const n = opt.mbSamples || 10, shutter = (opt.shutter || .5) / proj.fps;
-          for (let s = 0; s < n; s++) {
-            const dt = ((s + .5) / n - .5) * shutter;
-            const sample = GL.renderProject(proj, T + dt, W, H, {
-              ...opt, transparent: true, groupParent: L.id, mblur: false,
+          const times = motionBlurTimes(T, proj.fps, opt), n = times.length;
+          for (const at of times) {
+            const sample = GL.renderProject(proj, at, W, H, {
+              ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj && layerInputs?.time === at ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id, mblur: false,
             });
             bind(lf); drawFbo(sample, W, H, 1 / n, true); free(sample);
           }
         } else {
-          lf = GL.renderProject(proj, T, W, H, { ...opt, transparent: true, groupParent: L.id });
+          lf = GL.renderProject(proj, T, W, H, { ...opt, inputLayer: undefined, inputStage: undefined, inputPrefix:undefined, inputContext: layerInputs?.project === proj ? layerInputs : undefined, inputVisibilityRoot: opt.inputLayer || opt.inputVisibilityRoot, transparent: true, groupParent: L.id });
         }
       } else {
         lf = grab(W, H);
         bind(lf); clear();
         if (mb) {
-          const n = opt.mbSamples || 10, shutter = (opt.shutter || .5) / proj.fps;
-          for (let s = 0; s < n; s++) {
-            const dt = ((s + .5) / n - .5) * shutter;
-            drawContent(L, T + dt, W, H, alpha / n, undefined, true);
+          const times = motionBlurTimes(T, proj.fps, opt), n = times.length;
+          for (const at of times) {
+            drawContent(L, at, W, H, alpha / n, undefined, true);
           }
         } else drawContent(L, T, W, H, alpha);
       }
 
       let res = lf;
-      if (hasMasks) res = applyMasks(L, T, res, W, H);
-      if (hasFx) { const prior=res;res = runEffects(L, T, res, W, H, acc);if(prior!==lf && res!==prior)free(prior); }
-      if (L.matteSource) {const prior=res;res=applyTrackMatte(L,T,res,W,H,opt.matteProject||proj,opt);if(prior!==lf && prior!==res)free(prior);}
+      if (hasMasks&&!sourceOwner) res = applyMasks(L, T, res, W, H);
+      if (hasFx&&!sourceOwner) { const prior=res;res = runEffects(L, T, res, W, H, acc, opt.inputPrefix);if(prior!==lf && res!==prior)free(prior); }
+      if (L.matteSource && opt.inputPrefix===undefined && (!opt.inputLayer || opt.inputStage === 'effects')) {const prior=res;res=applyTrackMatte(L,T,res,W,H,opt.matteProject||proj,opt);if(prior!==lf && prior!==res)free(prior);}
 
       let withLayer = acc;
       const compositeAlpha = L.type === 'group' ? alpha : 1;
@@ -1894,12 +2273,20 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       if (res !== lf) free(res);
       free(lf);
     } catch (error) {
-      if (error instanceof MissingCaptureVideoFrame) throw error;
+      if (error instanceof MissingCaptureVideoFrame || error instanceof EffectInputError || opt.inputLayer) throw error;
       reportLayerFailure(L, error);
     }
   }
+  completed = true;
   return acc;
-  }finally{PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;}
+  }finally{
+    if (ownsInputs) {
+      for (const frame of ownedInputs?.frames.values() || []) free(frame);
+      if (!completed) for (const frame of GL.pool) if (frame.busy && !baseline!.has(frame)) free(frame);
+      if (ownedInputs) layerInputRendering = Math.max(0, layerInputRendering - 1);
+    }
+    layerInputs = previousInputs; inputFrameOptions = previousInputFrameOptions;
+    PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;}
 };
 
 const requestSourceWarmup = createPreviewWarmup(
@@ -1937,6 +2324,31 @@ GL.render = (T: any, opt: any = {}) => {
   framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;
   const W = GL.canvas.width, H = GL.canvas.height;
+  let liveInputFrames: Map<string,ImageBitmap> | null = null;
+  GL.inputPreviewPresentedTime = undefined;
+  const inputPreviewKey = previewStateKey()+JSON.stringify([opt.mblur,opt.mbSamples,opt.shutter]);
+  if (inputPreviewJob && (inputPreviewJob.key!==inputPreviewKey || inputPreviewJob.project!==PM.proj || inputPreviewJob.gl!==gl)) cancelInputPreview();
+  if (!opt.exporting && !PM.agentFrameCapture && !PM.preparedVideoFrames && hasLayerInputs(PM.proj, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type))) {
+    if (!inputPreviewJob) {
+      const requests = GL.frameVideoRequests(PM.proj,T,opt);
+      // A streaming frame remains sufficient for single-time inputs. Private
+      // immutable frames are needed only when this picture consumes subframes.
+      if (requests.length && (requests.some((r:any)=>r.time!==T) || requests.length > videoClipsAt(PM,T).length)) {
+        const job = {key:inputPreviewKey,project:PM.proj,gl,time:T,pending:true,frames:null as Map<string,ImageBitmap>|null};
+        inputPreviewJob=job;
+        void inputPreviewVideos.prepare(T,()=>inputPreviewJob===job&&job.key===previewStateKey()+JSON.stringify([opt.mblur,opt.mbSamples,opt.shutter])&&GL.gl===gl,opt).then(frames=>{
+          if(inputPreviewJob!==job){if(frames)inputPreviewVideos.release(frames);return;}
+          job.pending=false;job.frames=frames;PM.invalidate?.('render');
+        });
+      }
+    }
+    if (inputPreviewJob?.pending) return false;
+    if (inputPreviewJob && !inputPreviewJob.frames) {
+      if(inputPreviewJob.time!==T){cancelInputPreview();return false;}
+      throw new EffectInputError('Exact input preview: '+(inputPreviewVideos.error || 'frames could not be prepared'));
+    }
+    if(inputPreviewJob?.frames){T=inputPreviewJob.time;liveInputFrames=inputPreviewJob.frames;}
+  } else if (inputPreviewJob) cancelInputPreview();
   refreshPreviewState();
   const cacheable = canCachePreview(opt);
   const frameKey = previewFrameKey(T, opt);
@@ -1946,7 +2358,7 @@ GL.render = (T: any, opt: any = {}) => {
   frameVideoExact = true;
   videoPath = '';
   previewVideoTimes = new Map();
-  if (!cached && !opt.exporting && !PM.agentFrameCapture && !PM.preparedVideoFrames) {
+  if (!liveInputFrames && !cached && !opt.exporting && !PM.agentFrameCapture && !PM.preparedVideoFrames) {
     let ready = true;
     for (const clip of videoClipsAt(PM, T)) {
       previewVideoTimes.set(clip.id, clip.time);
@@ -1977,18 +2389,22 @@ GL.render = (T: any, opt: any = {}) => {
   useVideoPreviews = !opt.exporting;
   previewSourceClipping = opt.sourceClipping !== false && !opt.exporting;
   let acc;
+  const priorIdleFrames=idleVideoFrames;
+  if(liveInputFrames){idleVideoFrames=liveInputFrames;exactInputPreviewRendering=true;}
   const priorParallel = allowParallelCompile; allowParallelCompile = !opt.exporting;
   rememberingPreview = cacheable && (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) >= colorBufferBytes(W, H, workingColorDepth());
   try {
     acc = cached || GL.renderProject(PM.proj, T, W, H, {...opt,editorViewport:!opt.exporting&&!PM.agentFrameCapture});
   } finally {
     allowParallelCompile = priorParallel;
+    if(liveInputFrames){idleVideoFrames=priorIdleFrames;exactInputPreviewRendering=false;inputPreviewVideos.release(liveInputFrames);inputPreviewJob=null;}
     rememberingPreview = false;
     PM.scope.pop();
     previewViewportActive = false;
     previewSourceClipping = false;
   }
 
+  GL.inputPreviewPresentedTime = liveInputFrames ? T : undefined;
   /* present */
   bind(null);
   gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
@@ -2125,7 +2541,9 @@ GL.preparePreviewFrame = async (T: number, opt: any, frames: Map<string, ImageBi
 /** Render one frame and read back raw RGBA pixels (bottom-up, premultiplied).
     Opaque callers can request topDownOpaque for directly consumable image data.
     `opt.comp` renders another composition record instead of the open one. */
-GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
+function renderToPixels(T: any, W: any, H: any, opt: any = {}, readOpaque?: () => void,
+  readHalf?: ((texture: WebGLTexture) => Uint8Array<ArrayBuffer> | null) | DeferredAlphaReader,
+  readFloat?: ((texture: WebGLTexture) => Uint8Array<ArrayBuffer> | null) | DeferredAlphaReader) {
   const gl = GL.gl; if (!gl) return null;
   const previousPreviews = useVideoPreviews; useVideoPreviews = false;
   const previousTexturePrefix = isolatedVideoTexturePrefix, previousNoMotionBlur = isolatedCaptureNoMotionBlur;
@@ -2142,22 +2560,36 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
     try { acc = GL.renderProject(comp, T, W, H, opt); }
     finally { PM.scope.pop(); }
     bind(acc);
-    const px = new Uint8Array(W * H * 4);
+    const reader = !opt.opaque && (acc.colorDepth === 16 ? readHalf : acc.colorDepth === 32 ? readFloat : undefined);
+    if (reader) {
+      if (typeof reader !== 'function') { reader.queue(acc.tex); return null; }
+      const pixels = reader(acc.tex);
+      if (pixels) return pixels;
+    }
+    // A deferred capture can encounter a hardware depth fallback. Leave its
+    // serial recapture to the caller, without allocating speculative CPU pixels.
+    if (readHalf && typeof readHalf === 'object' || readFloat && typeof readFloat === 'object') return null;
+    const px = readOpaque ? null : new Uint8Array(W * H * 4);
     if (opt.opaque) {
       // Match the visible RGBA8 presentation's quantization without touching its
       // canvas, viewport metadata, or retained frame. Read just the capture size.
       const target = gl.createFramebuffer(), color = gl.createRenderbuffer();
       try {
+        if (readOpaque && (!target || !color)) throw new Error('The GPU could not capture the export frame');
         gl.bindRenderbuffer(gl.RENDERBUFFER, color);
         gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
         gl.bindFramebuffer(gl.FRAMEBUFFER, target);
         gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+        if (readOpaque && gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+          throw new Error('The GPU could not capture the export frame');
+        }
         gl.viewport(0, 0, W, H);
         const p = opt.topDownOpaque ? program('capture-opaque', PM.FRAG_CAPTURE_OPAQUE) : program('present', PM.FRAG_COPY), g = use(p);
         bindTex(0, acc.tex); setI(p, 'u_tex', 0);
         g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
         gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
-        gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        if (readOpaque) readOpaque();
+        else gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
       } finally {
         gl.bindRenderbuffer(gl.RENDERBUFFER, null);
         gl.deleteFramebuffer(target); gl.deleteRenderbuffer(color);
@@ -2168,7 +2600,7 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
     } else {
       const floats=new Float32Array(W*H*4);
       gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,floats);
-      for(let i=0;i<px.length;i++)px[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
+      for(let i=0;i<px!.length;i++)px![i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
     }
     return px;
   } finally {
@@ -2192,6 +2624,34 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
     trimViewportPathRasters();
     bind(null);
   }
+}
+GL.renderToPixels = renderToPixels;
+GL.createOpaqueReadback = (W: number, H: number) => {
+  const gl = GL.gl;
+  return createOpaqueReadback(gl, W, H, (time, options, read) => {
+    renderToPixels(time, W, H, { ...options, opaque: true, topDownOpaque: true }, read);
+  }, () => GL.gl === gl && !GL.contextLost);
+};
+GL.createHalfReadback = (W: number, H: number) => {
+  const gl = GL.gl, generation = readbackGeneration;
+  return createHalfReadback(gl, W, H, generation, (time, options, readHalf) => {
+    return renderToPixels(time, W, H, options, undefined, readHalf);
+  }, () => GL.gl === gl && !GL.contextLost && generation === readbackGeneration);
+};
+GL.createFloatReadback = (W: number, H: number) => {
+  const gl = GL.gl, generation = readbackGeneration;
+  return createFloatReadback(gl, W, H, generation, (time, options, readFloat) => {
+    return renderToPixels(time, W, H, options, undefined, undefined, readFloat);
+  }, () => GL.gl === gl && !GL.contextLost && generation === readbackGeneration);
+};
+GL.createAlphaReadback = (W: number, H: number) => {
+  const gl = GL.gl, generation = readbackGeneration, depth = PM.proj.colorDepth === 32 ? 32 : 16;
+  const matchesDepth = () => PM.proj.colorDepth !== 8 && (PM.proj.colorDepth === 32 ? 32 : 16) === depth
+    && availableColorDepth(normalizeColorDepth(PM.proj.colorDepth), GL.supportedColorDepths || [8, 16]) === depth;
+  if (!matchesDepth()) return null;
+  return createAlphaReadback(gl, W, H, generation, depth, (time, options, reader) => {
+    renderToPixels(time, W, H, options, undefined, depth === 16 ? reader : undefined, depth === 32 ? reader : undefined);
+  }, () => GL.gl === gl && !GL.contextLost && generation === readbackGeneration, matchesDepth);
 };
 
 /* Hit test: which layer is under a comp-space point (top-most first). */

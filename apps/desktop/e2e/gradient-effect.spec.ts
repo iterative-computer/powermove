@@ -9,7 +9,7 @@ test.describe('@viewer gradient ramp effect', () => {
       const layer = PM.mkLayer('solid', { d: { color: '#FFFFFF', w: 16, h: 16 } }, project);
       layer.p['position.x'].v = 80;
       layer.p['position.y'].v = 80;
-      const effect = PM.mkEffect('gradient');
+      const effect = PM.mkEffect('gradient',1);
       for (const [key, value] of Object.entries({ angle: 0, startColor: '#FF0000', endColor: '#0000FF', dither: 0 })) effect.p[key].v = value;
       layer.fx.push(effect);
       project.layers = [layer];
@@ -82,7 +82,7 @@ test.describe('@viewer gradient ramp effect', () => {
           ? { w: 64, h: 64, radius: 0, color: '#FFFFFF' }
           : { text: 'H', font: 'Arial', size: 64, color: '#FFFFFF', align: 'center' } }, project);
         layer.p['position.x'].v = 320; layer.p['position.y'].v = 180;
-        const effect = PM.mkEffect('gradient');
+        const effect = PM.mkEffect('gradient',1);
         for (const [key, value] of Object.entries({ angle: 0, startColor: '#FF0000', endColor: '#0000FF', dither: 0 })) effect.p[key].v = value;
         layer.fx.push(effect); project.layers = [layer];
         for (const scale of [100, 300]) {
@@ -135,7 +135,7 @@ test.describe('@viewer gradient ramp effect', () => {
       const fill = PM.mkLayer('solid', {
         name: 'White fill', from: 0, dur: 4, d: { color: '#FFFFFF', w: 16, h: 16 },
       }, project);
-      const effect = PM.mkEffect('gradient');
+      const effect = PM.mkEffect('gradient',1);
       fill.fx.push(effect);
       project.layers = [fill];
       PM.replaceProject(project);
@@ -168,7 +168,7 @@ test.describe('@viewer gradient ramp effect', () => {
       }, small);
       patch.p['position.x'].v = 6;
       patch.p['position.y'].v = 6;
-      patch.fx.push(PM.mkEffect('gradient'));
+      patch.fx.push(PM.mkEffect('gradient',1));
       small.layers = [patch];
       PM.replaceProject(small);
       const outside = pixel(1, 1), inside = pixel(7, 7);

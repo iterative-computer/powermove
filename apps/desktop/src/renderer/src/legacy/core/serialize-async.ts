@@ -1,7 +1,7 @@
 import { yieldTask as yieldToBrowser } from './yield-task';
 /** Serialize plain project data in bounded slices, allowing input and paint between slices. */
 export async function stringifyAsync(value: unknown, yieldTask = yieldToBrowser): Promise<string> {
-  type Task = { value: any } | { text: string } | { leave: object } | { string: string; offset: number };
+  type Task = { value: any } | { text: string } | { leave: object } | { string: string; offset: number } | { entries: any; keys: string[] | null; index: number; count: number };
   const tasks: Task[] = [{ value }], ancestors = new Set<object>(), chunks: string[] = [], parts: string[] = [];
   let deadline = performance.now() + 4, steps = 0;
   // Small keyframe/property leaves are cheap for the native serializer. Keep
@@ -12,7 +12,18 @@ export async function stringifyAsync(value: unknown, yieldTask = yieldToBrowser)
     && item.every(value => typeof value !== 'function' && primitive(value));
   while (tasks.length) {
     const task = tasks.pop()!;
-    if ('string' in task) {
+    if ('entries' in task) {
+      // One child at a time. Expanding a million-keyframe array into millions
+      // of pending task objects before the next yield defeats the slice budget.
+      if (task.index < task.count) {
+        const index = task.index++;
+        tasks.push(task);
+        if (index) chunks.push(',');
+        const key = task.keys ? task.keys[index]! : index;
+        if (task.keys) chunks.push(JSON.stringify(key) + ':');
+        tasks.push({ value: task.entries[key] });
+      }
+    } else if ('string' in task) {
       let end = Math.min(task.string.length, task.offset + 16_384);
       const high = task.string.charCodeAt(end - 1), low = task.string.charCodeAt(end);
       if (high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff) end--;
@@ -44,12 +55,7 @@ export async function stringifyAsync(value: unknown, yieldTask = yieldToBrowser)
           chunks.push(array ? '[' : '{');
           tasks.push({ text: array ? ']' : '}' });
           const count = array ? item.length : keys!.length;
-          for (let i = count - 1; i >= 0; i--) {
-            if (i < count - 1) tasks.push({ text: ',' });
-            const key = array ? i : keys![i]!;
-            tasks.push({ value: item[key] });
-            if (!array) tasks.push({ text: JSON.stringify(key) + ':' });
-          }
+          tasks.push({ entries: item, keys: keys || null, index: 0, count });
         }
       }
     }

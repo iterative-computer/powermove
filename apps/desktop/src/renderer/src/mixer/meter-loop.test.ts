@@ -40,6 +40,24 @@ function harness(level = { peak: 0.5, rms: 0.3 }) {
 }
 
 describe('meter loop', () => {
+  it('keeps valid meter colours while theme values are temporarily empty during project restoration', () => {
+    const h = harness(), view = canvas(), colors: string[] = [];
+    const context = view.element.getContext('2d')!;
+    context.createLinearGradient = () => ({ addColorStop(_at: number, color: string) {
+      if (!color.trim()) throw new SyntaxError('Invalid canvas color');
+      colors.push(color);
+    } }) as CanvasGradient;
+    h.loop.attach('music', view.element, () => {});
+    h.loop.resize('music', 12, 100, 1);
+    expect(() => h.loop.setPalette({ track: '', nominal: '', warn: ' ', hot: '' })).not.toThrow();
+    expect(colors).toContain('#3FCF8E');
+    h.loop.setPalette({ track: '#112233', nominal: '#ABCDEF', warn: '#FEDCBA', hot: '#F36357' });
+    colors.length = 0;
+    h.loop.setPalette({ track: '', nominal: '', warn: '', hot: '' });
+    expect(colors).toContain('#ABCDEF');
+    expect(colors).toContain('#FEDCBA');
+  });
+
   it('draws nothing and holds no taps while hidden', () => {
     const h = harness();
     const view = canvas();

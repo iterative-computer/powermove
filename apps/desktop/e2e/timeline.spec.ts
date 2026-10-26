@@ -65,7 +65,7 @@ test('Scale keys move outside the layer, delete together, and never delete their
   const { page } = session;
   const id = await scaleFixture(page);
   const point = await scaleKeyPoint(page, 3);
-  const rows = await page.evaluate(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.map((row: any) => row.key).filter(Boolean); });
+  const rows = await page.evaluate(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.filter((row: any) => row.kind === 'prop').map((row: any) => row.key); });
   expect(rows).toEqual(['scale']);
   await page.mouse.move(point.x, point.y);
   await page.mouse.down();
@@ -145,7 +145,7 @@ test('the disclosure opens and collapses the selected layer strip', async ({ ses
     return PM.UIState.getLayerCollapsed(PM.L(id));
   }, id)).toBe(false);
 
-  const disclosure = await page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), b = timeline.cv.getBoundingClientRect(); return { x: b.x + 64, y: b.y + timeline.ruler + timeline.row / 2 }; });
+  const disclosure = await page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), b = timeline.cv.getBoundingClientRect(); return { x: b.x + 87, y: b.y + timeline.ruler + timeline.row / 2 }; });
   await page.mouse.click(disclosure.x, disclosure.y);
   await expect.poll(() => page.evaluate((id) => {
     const PM = (window as any).PM;
@@ -466,11 +466,11 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('project rename is available from the tab menu and persists the live document', async ({ session }) => {
+test('project rename is available from the title menu and persists the live document', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   await scaleFixture(page);
-  const chip = page.locator('#tabs .project-doc.on');
+  const chip = page.locator('.tb-title-btn');
   const id = await chip.getAttribute('data-project-id');
   await chooseNativeMenu(session, 'Rename Project…', () => chip.click({ button: 'right' }));
   const input = page.getByRole('textbox', { name: 'Rename project', exact: true });
@@ -482,7 +482,7 @@ test('project rename is available from the tab menu and persists the live docume
   await saveFixtureProject(session, 'Renamed composition.pmv');
   await session.relaunch();
   await session.openEditor();
-  await expect(session.page.locator('#tabs .project-doc.on')).toContainText('Renamed composition');
+  await expect(session.page.locator('.tb-title-btn')).toContainText('Renamed composition');
 });
 
 test('empty timeline clicks preserve the playhead and marquee selection still works', async ({ session }) => {

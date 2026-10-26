@@ -39,7 +39,7 @@
     {#snippet left()}
       <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={current}
         aria-label={`${current ? 'Remove keyframe for' : 'Add keyframe for'} ${axis.label} · ${axis.tag}`}
-        aria-pressed={current} disabled={!editable} onclick={toggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg></button>
+        aria-pressed={current} disabled={!editable} onclick={toggle}>{@html api.ui.icon(current ? 'diamondFill' : 'diamond')}</button>
     {/snippet}
     {@const Field = axis.min != null && axis.max != null && axis.max > axis.min ? SliderField : NumField}
     <Field {api} {mixed} get={() => value} {edit} label={`${axis.label} axis`} min={axis.min} max={axis.max} {step} speed={axis.min != null && axis.max != null ? Math.max(.01, (axis.max - axis.min) / 300) / step : 50} precision={2} />

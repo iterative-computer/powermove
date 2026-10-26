@@ -50,8 +50,10 @@ export async function hashHandle(handle: FileHandle, offset = 0, length?: number
   }
   return hash;
 }
-export const sameFile = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
-export const changedFile = () => new Error('The project file was moved, deleted, or changed outside Powermove. Use Save As to avoid overwriting other work.');
+export const sameIdentity = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino;
+const samePermissions = (a: Stats, b: Stats) => a.mode === b.mode && a.uid === b.uid && a.gid === b.gid;
+export const sameFile = (a: Stats, b: Stats) => sameIdentity(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+export const changedFile = () => new Error('The project file was moved, deleted, or changed outside Powermove. Your edits are still open. Use Save As with a different name to keep both versions.');
 export interface FileVersion { info: Stats; hash: string; digest: Hash }
 export async function fileVersion(destination: string): Promise<FileVersion | undefined> {
   let info: Stats;
@@ -66,50 +68,93 @@ export async function fileVersion(destination: string): Promise<FileVersion | un
     return { info, hash: digest.copy().digest('hex'), digest };
   } finally { await handle.close(); }
 }
-export async function checkVersion(destination: string, expected?: FileVersion): Promise<void> {
+export async function checkVersion(destination: string, expected?: FileVersion, verifyContent = false): Promise<void> {
   let current: Stats | undefined;
   try { current = await lstat(destination); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  if (expected ? !current || !sameFile(expected.info, current) : !!current) throw changedFile();
+  if (!expected) { if (current) throw changedFile(); return; }
+  if (!current?.isFile() || !sameIdentity(expected.info, current) || !samePermissions(expected.info, current) || expected.info.size !== current.size) throw changedFile();
+  // Timestamps also change for touches and filesystem metadata bookkeeping.
+  // Accept those only with proof of identical bytes on the SAME inode. Never
+  // use a timestamp tolerance, or let an equal hash excuse a replaced file.
+  if (verifyContent || !sameFile(expected.info, current)) {
+    const verified = await fileVersion(destination);
+    if (!verified || !sameIdentity(expected.info, verified.info) || !samePermissions(expected.info, verified.info) || verified.hash !== expected.hash) throw changedFile();
+  }
+}
+
+/** The displaced file belongs to another writer, including if renaming its
+ * recovery copy fails. Callers must not unlink that path as staging cleanup. */
+export class RecoveryFileError extends Error {
+  constructor(message: string, readonly recoveryPath: string, cause?: unknown) {
+    super(`${message} The other version was preserved at ${recoveryPath}`, { cause });
+  }
+}
+async function preserveConflict(temporary: string, destination: string, message: string): Promise<never> {
+  let preserved = temporary;
+  try {
+    const recovery = `${temporary}.conflict.pmv`;
+    await rename(temporary, recovery); preserved = recovery;
+    await syncDirectory(path.dirname(destination));
+  } catch (error) {
+    throw new RecoveryFileError(`${message} Recovery finalization failed.`, preserved, error);
+  }
+  throw new RecoveryFileError(message, preserved);
 }
 
 /** Publish only a flushed sibling. On macOS exchange preserves the displaced
  * inode until its content has been checked, closing the long upload race. */
-export async function publishFile(temporary: string, destination: string, expected: FileVersion | undefined, newHash: string): Promise<void> {
+export async function publishFile(temporary: string, destination: string, expected: FileVersion | undefined, newHash: string,
+  onPublished: () => void = () => undefined): Promise<void> {
+  // Exchange verifies the displaced bytes; the fallback hashes immediately
+  // before rename. Neither trusts timestamps alone at publication.
   await checkVersion(destination, expected);
-  if (expected && await swapFiles(temporary, destination)) {
-    let displaced: FileVersion | undefined;
-    try { displaced = await fileVersion(temporary); }
-    catch {
-      const preserved = `${temporary}.conflict.pmv`;
-      await rename(temporary, preserved);
-      await syncDirectory(path.dirname(destination));
-      throw new Error(`Could not verify the displaced project. It was preserved at ${preserved}`);
-    }
-    if (!displaced || displaced.hash !== expected.hash || displaced.info.ino !== expected.info.ino) {
-      // Only roll back our own published bytes. If another writer has already
-      // edited them, keep both versions and report the recovery file's path.
-      const current = await fileVersion(destination).catch(() => undefined);
-      if (current?.hash === newHash && await swapFiles(temporary, destination).catch(() => false)) {
-        await syncDirectory(path.dirname(destination));
-        throw changedFile();
+  let published = false;
+  const committed = () => { published = true; onPublished(); };
+  try {
+    const incomingInfo = await lstat(temporary);
+    if (expected && await swapFiles(temporary, destination)) {
+      let displaced: FileVersion | undefined;
+      try { displaced = await fileVersion(temporary); }
+      catch {
+        await preserveConflict(temporary, destination, 'Could not verify the displaced project.');
       }
-      const preserved = `${temporary}.conflict.pmv`;
-      await rename(temporary, preserved);
-      await syncDirectory(path.dirname(destination));
-      throw new Error(`The project changed during saving. Its other version was preserved at ${preserved}`);
-    }
-    await unlink(temporary);
-  } else if (!expected) {
-    // macOS exclusive rename also supports volumes without hard links. A file
-    // appearing after the check cannot be overwritten by first Save/Save As.
-    if (!await (await nativeFiles())?.installFile(temporary, destination)) {
-      const { link } = await import('node:fs/promises');
-      await link(temporary, destination);
+      if (!displaced || displaced.hash !== expected.hash || !sameIdentity(displaced.info, expected.info) || !samePermissions(displaced.info, expected.info)) {
+        // Only roll back our own published bytes. If another writer has already
+        // edited them, keep both versions and report the recovery file's path.
+        const current = await fileVersion(destination).catch(() => undefined);
+        if (current?.hash === newHash && sameIdentity(current.info, incomingInfo) && await swapFiles(temporary, destination).catch(() => false)) {
+          // The check and rollback exchange are separate operations. A writer
+          // can edit/replace our file between them; never let dispose() discard
+          // that newly displaced work, even though the original is restored.
+          const rolledBack = await fileVersion(temporary).catch(() => undefined);
+          if (!rolledBack || rolledBack.hash !== newHash || !sameIdentity(rolledBack.info, incomingInfo)) {
+            await preserveConflict(temporary, destination, 'The project changed during saving. The original was restored.');
+          }
+          await syncDirectory(path.dirname(destination));
+          throw changedFile();
+        }
+        await preserveConflict(temporary, destination, 'The project changed during saving.');
+      }
+      committed();
       await unlink(temporary);
+    } else if (!expected) {
+      // macOS exclusive rename also supports volumes without hard links. A file
+      // appearing after the check cannot be overwritten by first Save/Save As.
+      if (await (await nativeFiles())?.installFile(temporary, destination)) committed();
+      else {
+        const { link } = await import('node:fs/promises');
+        await link(temporary, destination);
+        committed();
+        await unlink(temporary);
+      }
+    } else {
+      await checkVersion(destination, expected, true);
+      await rename(temporary, destination);
+      committed();
     }
-  } else {
-    await checkVersion(destination, expected);
-    await rename(temporary, destination);
+    await syncDirectory(path.dirname(destination));
+  } catch (error) {
+    if (published) throw new Error('The project file was written, but save finalization failed. Your edits are still open. Try Save again to confirm, or Save As to keep a separate copy. ' + (error instanceof Error ? error.message : String(error)), { cause: error });
+    throw error;
   }
-  await syncDirectory(path.dirname(destination));
 }

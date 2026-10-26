@@ -4,11 +4,11 @@ import MixerPanel from './MixerPanel.svelte';
 import NotesPanel from './NotesPanel.svelte';
 import TakesPanel from './TakesPanel.svelte';
 import WorkspacesPanel from './WorkspacesPanel.svelte';
+import EasingPanel from './EasingPanel.svelte';
 import '../controls/controls.css';
 import './panels.css';
 import { registerSveltePanel } from './registerSveltePanel';
 import { mount } from 'svelte';
-import { fxBrowser } from './fx-browser.svelte';
 
 type LegacyPM = Record<string, any>;
 
@@ -30,7 +30,7 @@ function headerAction(PM: LegacyPM, hdr: HTMLElement, icon: string, label: strin
 
 export function registerSimplePanels(PM: LegacyPM): void {
   registerSveltePanel(PM, 'assets', {
-    title: 'Media',
+    title: 'Project',
     size: 200,
     component: AssetsPanel,
     /* AE's Project panel: new compositions and imported footage live together. */
@@ -43,15 +43,13 @@ export function registerSimplePanels(PM: LegacyPM): void {
     })
   });
   registerSveltePanel(PM, 'fxbrowser', {
-    title: 'Effects', size: 240, component: FxBrowserPanel,
-    header: (hdr) => headerAction(PM, hdr, 'search', 'Search', () => {
-      fxBrowser.searchOpen = !fxBrowser.searchOpen;
-      if (!fxBrowser.searchOpen) fxBrowser.query = '';
-    })
+    // The search field is always in view, so the header carries only the title.
+    title: 'Effects & Presets', size: 240, component: FxBrowserPanel
   });
   /* Channel strips with live meters; docks anywhere (a tall sidebar or a wide strip under the viewer). */
   registerSveltePanel(PM, 'mixer', { title: 'Mixer', size: 300, min: 150, noscroll: true, component: MixerPanel });
   registerSveltePanel(PM, 'workspaces', { title: 'Workspaces', size: 200, component: WorkspacesPanel });
   registerSveltePanel(PM, 'takes', { title: 'Takes', size: 180, component: TakesPanel });
   registerSveltePanel(PM, 'notes', { title: 'Notes', size: 180, component: NotesPanel });
+  registerSveltePanel(PM, 'easing', { title: 'Easing', icon: 'graph', size: 320, min: 240, component: EasingPanel });
 }

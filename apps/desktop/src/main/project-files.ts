@@ -6,10 +6,11 @@ import path from 'node:path';
 import { PROJECT_ID } from '../shared/ipc';
 import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
 import { FILE_CHUNK_BYTES } from './file-upload';
-import { checkVersion, changedFile, copySnapshot, fileVersion, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
+import { checkVersion, changedFile, copySnapshot, fileVersion, publishFile, RecoveryFileError, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
 import { hashProjectFile } from './project-file-hash';
+import { applyBackupRetention, deduplicateBackups, planBackupRetention } from './backup-retention';
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
 export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<void> {
@@ -38,7 +39,8 @@ export class ProjectFiles {
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
   private saving = new Set<string>();
-  constructor(private readonly registryPath: string, private readonly backupDirectory: string) {
+  constructor(private readonly registryPath: string, private readonly backupDirectory: string,
+    private readonly options: { recoveryDirectory?: string; nativeVersions?: boolean } = {}) {
     this.ready = this.load();
   }
   private async load(): Promise<void> {
@@ -99,6 +101,21 @@ export class ProjectFiles {
       throw error;
     }
   }
+  async recoveryPath(id: string): Promise<string> {
+    if (!PROJECT_ID.test(id) || !this.options.recoveryDirectory) throw new Error('Recovery storage is unavailable');
+    await mkdir(this.options.recoveryDirectory, { recursive: true });
+    return path.join(this.options.recoveryDirectory, id + '.pmv');
+  }
+  private async retain(id: string): Promise<void> {
+    const versions = await this.backups(id);
+    let bytes = 0;
+    for (let index = 0; index < versions.length; index++) {
+      const file = versions[index]!, info = await (await import('node:fs/promises')).lstat(file);
+      bytes += info.size;
+      // Keep two valid predecessors even when one project exceeds the budget.
+      if (index >= 2 && (index >= 12 || bytes > 1024 ** 3)) await unlink(file);
+    }
+  }
   private async backup(id: string, destination: string): Promise<string> {
     const directory = path.join(this.backupDirectory, id);
     await mkdir(directory, { recursive: true });
@@ -124,13 +141,18 @@ export class ProjectFiles {
       }
     }
   }
-  private async prune(id: string): Promise<void> {
-    try {
-      const backups = await this.backups(id);
-      await Promise.all(backups.slice(5).map(filePath => unlink(filePath)));
-    } catch (error) {
-      console.warn(`Could not prune project backups for ${id}.`, error);
-    }
+  /** Use the same queue as publication; cleanup can never prune an in-flight save. */
+  cleanupBackups(budgetBytes: number): Promise<number> {
+    return this.serial(async () => {
+      if (this.saving.size) throw new Error('A project is saving. Try cleanup again when it finishes.');
+      return applyBackupRetention(this.backupDirectory, await planBackupRetention(this.backupDirectory, budgetBytes));
+    });
+  }
+  optimizeBackups(): Promise<number> {
+    return this.serial(async () => {
+      if (this.saving.size) throw new Error('A project is saving. Storage optimization will resume later.');
+      return deduplicateBackups(this.backupDirectory);
+    });
   }
   private async commit(id: string, destination: string, temporary: string, hash: string, previous?: FileVersion): Promise<string> {
     await checkVersion(destination, previous);
@@ -142,13 +164,23 @@ export class ProjectFiles {
       await checkVersion(destination, previous);
       await mkdir(path.dirname(this.registryPath), { recursive: true });
       await atomicWrite(journal, Buffer.from(JSON.stringify({ id, path: destination, hash, generation })));
-      await publishFile(temporary, destination, previous, hash);
-      this.associations.set(id, { path: destination, hash, generation });
+      await publishFile(temporary, destination, previous, hash, () => {
+        // A finalization failure must compare the next retry with bytes that
+        // actually reached the destination. The renderer still stays dirty.
+        this.associations.set(id, { path: destination, hash, generation });
+      });
       // The user's file is durably committed. A failed private registry write
       // must not report that their file failed; retain the journal for restart.
       try { await this.persist(); await unlink(journal); }
       catch (error) { console.warn('Project saved; its file association will be repaired on restart.', error); }
-      await this.prune(id);
+      // Retain successful generations. Uncertain saves are outside retention.
+      if (this.options.nativeVersions) {
+        try {
+          const { snapshotNativeVersion } = await import('./native-versions');
+          await snapshotNativeVersion(destination, backup || destination);
+        } catch (error) { console.warn('Project saved; macOS version snapshot is unavailable.', error); }
+      }
+      await this.retain(id).catch(error => console.warn('Version cleanup will be retried after the next save.', error));
       return destination;
     } catch (error) {
       if (backup) {
@@ -196,16 +228,20 @@ export class ProjectFiles {
         }
       }
       const temporary = temporarySibling(destination);
+      let retainTemporary = false;
       try {
         const handle = await open(temporary, 'wx', 0o600);
         try { await handle.writeFile(writing()); await syncFile(handle); } finally { await handle.close(); }
         return await this.commit(id, destination, temporary, digest.digest('hex'), previous);
-      } finally { await unlink(temporary).catch(() => undefined); }
+      } catch (error) {
+        retainTemporary = error instanceof RecoveryFileError && error.recoveryPath === temporary;
+        throw error;
+      } finally { if (!retainTemporary) await unlink(temporary).catch(() => undefined); }
     });
   }
   open(filePath: string): Promise<FullProject>;
-  open(filePath: string, options: { allowDocumentRange?: boolean }): Promise<FullProject | RangeProject>;
-  open(filePath: string, options: { allowDocumentRange?: boolean } = {}): Promise<FullProject | RangeProject> {
+  open(filePath: string, options: { allowDocumentRange?: boolean; copy?: boolean }): Promise<FullProject | RangeProject>;
+  open(filePath: string, options: { allowDocumentRange?: boolean; copy?: boolean } = {}): Promise<FullProject | RangeProject> {
     return this.serial(async () => {
       const handle = await open(filePath, 'r');
       let hashing: Promise<HashResult> | undefined;
@@ -271,8 +307,7 @@ export class ProjectFiles {
         const after = await handle.stat();
         if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) throw new Error('The project changed while opening. Try opening it again.');
         const projectId = randomUUID(), token = randomUUID();
-        this.associations.set(projectId, { path: filePath, hash });
-        await this.persist();
+        if (!options.copy) { this.associations.set(projectId, { path: filePath, hash }); await this.persist(); }
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
         const opened = { path: filePath, projectId, token, size: info.size };
         return rangeValidated ? { ...opened, media, documentRange: documentRange! }

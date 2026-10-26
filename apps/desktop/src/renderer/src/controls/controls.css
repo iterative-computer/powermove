@@ -381,6 +381,12 @@ select.sel {
    Two segments, Off and On, with one pill gliding between them (after
    dialkit's Toggle). Same well material as the value fields; the pill is
    the raised panel colour like a pressed alignment segment. */
+/* Checkbox variant: a 16px box, accent-filled with a white check when on. */
+.checkbox-field { width: 16px; height: 16px; flex: none; display: grid; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg-field); cursor: pointer; }
+.checkbox-field.on { border-color: transparent; background: var(--accent); }
+.checkbox-field svg { width: 10px; height: 10px; fill: #fff; }
+.checkbox-field i { width: 8px; height: 2px; border-radius: 1px; background: var(--tx-2); }
+.checkbox-field:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .onoff {
   position: relative;
   display: flex;

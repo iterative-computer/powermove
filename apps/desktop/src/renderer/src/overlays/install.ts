@@ -7,6 +7,7 @@ import { ModalController } from './modal';
 import { PaletteController } from './palette';
 import ProjectGhost from './ProjectGhost.svelte';
 import Toasts from './Toasts.svelte';
+import { clearTasks, removeTask, upsertTask } from '../shell/tasks.svelte';
 import type { MenuItem, MenuOptions, ModalOptions, ToastOptions } from './types';
 
 type ToastInstance = ReturnType<typeof mount> & {
@@ -80,6 +81,15 @@ export function installSvelteOverlays(PM: PMRegistry): void {
   const openPalette = (): void => palette.open();
   const members: OverlayMembers = {
     toast: (message: unknown, milliseconds = 2200, options: ToastOptions = {}): void => {
+      if (options.task && options.key && message != null && !options.error) {
+        upsertTask(options.key, {
+          title: String(message), progress: options.progress ?? null, completed: !!options.completed,
+          detail: options.detail, count: options.count, step: options.step, action: options.action,
+        });
+        options.onClose?.();
+        return;
+      }
+      if (options.key && options.error) removeTask(options.key);
       flushSync(() => toasts.push(message, milliseconds, options));
     },
     menu: (anchor: HTMLElement, items: MenuItem[] | PromiseLike<MenuItem[]>, options: MenuOptions = {}): HTMLElement =>
@@ -92,7 +102,7 @@ export function installSvelteOverlays(PM: PMRegistry): void {
   installed = { PM, target, toasts, ghost, menu, modal, palette, previous, members, attributes };
   PM.toast = members.toast;
   /* Keyed notices (fork updates) need to retract without counting as a user dismissal. */
-  PM.dismissToast = (key: string): void => toasts.dismissKey(key);
+  PM.dismissToast = (key: string): void => { removeTask(key); toasts.dismissKey(key); };
   PM.menu = members.menu;
   PM.closeMenus = members.closeMenus;
   PM.modal = members.modal;
@@ -108,6 +118,7 @@ async function dispose(current: InstalledOverlays): Promise<void> {
   current.modal.closeAll();
   current.palette.close();
   current.toasts.clear();
+  clearTasks();
   restoreAttribute(current.target, 'role', current.attributes.role);
   restoreAttribute(current.target, 'aria-live', current.attributes.live);
   restoreAttribute(current.target, 'aria-atomic', current.attributes.atomic);

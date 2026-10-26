@@ -69,6 +69,41 @@ export function syncPanelMoveHandle(PM: PMRegistry, id: string): HTMLButtonEleme
   return handle;
 }
 
+/** Give a tab stack's shown panel a tab for each member in its header. The
+ * other members stay mounted, hidden, so switching keeps their state. */
+export function syncPanelTabs(PM: PMRegistry, specs: PanelSpec[], active: PanelSpec): void {
+  for (const spec of specs) {
+    const header = PM.panelInst[spec.id]?.header as HTMLElement | undefined;
+    if (!header) continue;
+    const tabbed = specs.length > 1 && spec === active;
+    header.classList.toggle('tabbed', tabbed);
+    let strip = header.querySelector(':scope > .ptabs');
+    if (!tabbed) { strip?.remove(); continue; }
+    if (!strip) {
+      strip = makeElement('div', 'ptabs');
+      strip.setAttribute('role', 'tablist');
+      const title = header.querySelector(':scope > .ptitle');
+      if (title) title.after(strip);
+      else header.prepend(strip);
+    }
+    strip.replaceChildren(...specs.map((member) => {
+      const tab = makeElement('button', member === active ? 'ptab on' : 'ptab');
+      tab.type = 'button';
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', String(member === active));
+      tab.dataset.tab = member.id;
+      tab.textContent = member.title || PM.PANELS[member.id]?.title || member.id;
+      // A panel may name what it shows (--panel-subtitle), beside its title.
+      tab.append(makeElement('span', 'ptab-sub'));
+      tab.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (member !== active) PM.Layout.activateTab?.(member.id);
+      });
+      return tab;
+    }));
+  }
+}
+
 export function syncPanelManifest(PM: PMRegistry, id: string, spec: PanelSpec, dock: DockSpec): HTMLElement | null {
   const inst = PM.panelInst[id];
   if (!inst?.el) return null;
@@ -201,7 +236,13 @@ export function panelPoolHost(node: HTMLElement, initial: PoolHostParams) {
   return {
     update(next: PoolHostParams) {
       const element = params.PM.panelInst[params.spec.id]?.el as HTMLElement | undefined;
-      if (element && params.dock.id !== next.dock.id) stagePanelMove(params.spec.id, element);
+      // A new slot may already own the live panel by the time the pool updates.
+      // Only stage it while it still belongs to the old dock; parking it after
+      // the destination attached leaves that slot blank until another layout.
+      if (element && params.dock.id !== next.dock.id
+        && element.closest('.dock')?.id === `dock-${params.dock.id}`) {
+        stagePanelMove(params.spec.id, element);
+      }
       params = next;
       syncPanelManifest(params.PM, params.spec.id, params.spec, params.dock);
       mount();

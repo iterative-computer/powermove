@@ -106,3 +106,8 @@ it('skips invisible unknown layers only during proven constant visibility spans'
   // Malformed switches are truthy objects in the live engine, not properties.
   expect(previewPlan({ layers }).prefixStart(layers, 2)).toBe(2);
 });
+
+it('reuses static artwork when disabled effect parameters contain animation or expressions',()=>{
+ for(const disabled of [{on:false},{on:{v:false,kf:[],expr:null}},{on:true,missing:true}]){const artwork=layer({fx:[{...disabled,p:{amount:{v:1,kf:[{t:0,v:1},{t:3,v:10}],expr:'time'}}}]});const plan=previewPlan({layers:[artwork]});expect(plan.timeKey(1)).toBe(plan.timeKey(2));expect(plan.staticLayers.has(artwork)).toBe(true);}
+ const artwork=layer({fx:[{on:{v:false,kf:[{t:0,v:false},{t:3,v:true}]}}]});expect(previewPlan({layers:[artwork]}).timeKey(1)).toBe(1);
+});

@@ -54,6 +54,9 @@ extraResources:
     to: builtin-extensions
     filter:
       - "**/*"
+      - "!**/*.test.*"
+      - "!**/*.spec.*"
+      - "!**/__tests__/**"
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
   - from: docs/SCENE3D.md
@@ -128,7 +131,7 @@ mac:
   entitlementsInherit: resources/entitlements.mac.plist
   # Apple Icon Composer catalog. electron-builder invokes actool so macOS can
   # select light, dark, tinted, and clear renditions from icon.json.
-  icon: resources/icon/app-icon/Powermove-playhead.icon
+  icon: resources/icon/Powermove.icon
   extendInfo:
     UTExportedTypeDeclarations:
       - UTTypeIdentifier: com.zellzoi.powermove.project

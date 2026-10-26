@@ -1,3 +1,4 @@
+import { EFFECTS } from '../../extensions/effects-basic/effects';
 // @vitest-environment happy-dom
 import { afterEach, expect, it } from 'vitest';
 import { createRpc } from '../../shared/sandbox-rpc';
@@ -217,4 +218,14 @@ it('sends ui.copy to the kernel as plain invoke, which decides permission and fo
   await api.ui.copy('#ff6600');
   expect(calls.filter(call => call[0] === 'invoke')).toEqual([['invoke', 'ui', 'copy', ['#ff6600']]]);
   expect(() => api.ui.read).toThrow(); // there is no clipboard read
+});
+
+it('resolves current and historical effect controls in the sandbox catalog', () => {
+  const { api, control } = harness();
+  const invert = EFFECTS.find(effect => effect.id === 'invert')!;
+  control.catalog({ effects: [invert] } as SandboxInit['catalog']);
+  expect(api.effects.supportsVersions).toBe(true);
+  expect(api.effects.get('invert').version).toBe(2);
+  expect(api.effects.get('invert', 1).params.map((param: any) => param.k)).toEqual(['amount']);
+  expect(api.effects.get('invert', 99)).toBeUndefined();
 });

@@ -409,6 +409,8 @@ export function install(PM: PMRegistry): void {
       }).then(async serialized => {
         if (!current()) return false;
         await bridge.store.setSerialized(service, serialized);
+        // A checkpoint may retire its journal only after the base is durable.
+        await bridge.store.flush();
         if (writeVersions.get(service) !== version) return false;
         stale.delete(service); lazy.delete(service);
         cached.delete(legacyKey(service)); encoded.set(service, serialized);

@@ -7,6 +7,7 @@ vi.mock('../agent-tools/user-mcp', async importOriginal => ({
 }));
 
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -24,7 +25,8 @@ import {
 } from './runner';
 import { PROJECT_PERMISSION_PROFILE } from './adapter';
 import { isolatedCodexHome } from './isolation';
-import { agentWorkspaceRoot, sessionPathFor } from './workspace';
+import { agentWorkspaceRoot, sessionPathFor, prepareAgentWorkspace, preserveCancelledRun } from './workspace';
+import { agentResultSchema } from './instructions';
 
 const fakeCodex = path.join(__dirname, '__fixtures__', 'fake-codex.sh');
 const temporaryDirectories: string[] = [];
@@ -147,6 +149,47 @@ it('starts each thread fresh and resumes only the selected thread', async () => 
 });
 
 describe('CodexRunner validation and authority', () => {
+  it('completes a resumed project-only run after another run installed an extension', async () => {
+    const userData = await temporaryDirectory('runner-live-extension-noop');
+    const req = request({ threadId: 'cancelled-project-thread' });
+    const options = fakeOptions(userData, { FAKE_CODEX_RESULT: JSON.stringify({ summary: 'Kept the edits', commands: [], artifacts: [], extensions: [] }) });
+    const layout = await prepareAgentWorkspace(req, userData, 'project', agentResultSchema(), {
+      extensionsDir: options.extensionsDir, apiPackFiles: await options.apiPackFiles()
+    });
+    await preserveCancelledRun(layout);
+    await mkdir(path.join(options.extensionsDir, 'other-run-panel'), { recursive: true });
+    await writeFile(path.join(options.extensionsDir, 'other-run-panel', 'index.ts'), 'export default "keep";');
+    const result = await new CodexRunner().run(req, options);
+    expect(result).toMatchObject({ ok: true, extensions: [] });
+    expect(await readFile(path.join(options.extensionsDir, 'other-run-panel', 'index.ts'), 'utf8')).toBe('export default "keep";');
+    await expect(readFile(`${layout.sessionPath}.checkpoint.json`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(layout.sessionPath, 'utf8')).toBe('thread-recorded-1');
+  });
+
+  it('retains conflicting staged work and completed live edits without replaying the provider', async () => {
+    const userData = await temporaryDirectory('runner-live-extension-conflict');
+    const id = 'conflicting-panel', live = path.join(userData, 'extensions', id);
+    await mkdir(live, { recursive: true });
+    await writeFile(path.join(live, 'manifest.json'), JSON.stringify({ id, name: 'Panel', version: '1.0.0', apiVersion: 1, entry: 'index.ts', author: 'agent' }));
+    await writeFile(path.join(live, 'index.ts'), 'export default "before";');
+    const options = fakeOptions(userData, { FAKE_CODEX_EXTENSION_ID: id, FAKE_CODEX_RESULT: JSON.stringify({
+      summary: 'Edited project and panel', commands: [], artifacts: [], extensions: [{ id, action: 'updated' }]
+    }) });
+    const spawnProcess = options.spawnProcess!;
+    options.spawnProcess = (command, args, spawnOptions) => {
+      writeFileSync(path.join(live, 'index.ts'), 'export default "newer-user-work";');
+      return spawnProcess(command, args, spawnOptions);
+    };
+    const spy = vi.spyOn(options, 'spawnProcess');
+    const req = request({ threadId: 'conflicted-thread' });
+    const result = await new CodexRunner().run(req, options);
+    expect(result).toMatchObject({ ok: false, preserveLiveEdits: true, error: expect.stringContaining('conflicting-panel') });
+    expect(spy).toHaveBeenCalledOnce();
+    expect(await readFile(path.join(live, 'index.ts'), 'utf8')).toBe('export default "newer-user-work";');
+    const checkpoint = JSON.parse(await readFile(`${sessionPathFor(agentWorkspaceRoot(userData, req.projectId), 'project', req.threadId)}.checkpoint.json`, 'utf8'));
+    expect(await readFile(path.join(checkpoint.stagingDirectory, id, 'index.ts'), 'utf8')).toContain('activate');
+  });
+
   it('keeps the staged mod when its correction attempt loses the provider connection', async () => {
     const userData = await temporaryDirectory('runner-repair-disconnect');
     const req = request({ threadId: 'disconnected-repair' });

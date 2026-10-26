@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { collectArtifacts } from '../src/main/codex/artifacts';
 import { expect, test } from './helpers/app';
@@ -59,5 +59,12 @@ test('generated PNGs reach the timeline and continuation groups and renders the 
   expect(proof.artifacts).toHaveLength(2);
   expect(proof.artifacts.every((artifact: any) => artifact.imported && artifact.layerIds.length === 1)).toBe(true);
   for (const id of proof.layerIds) expect(proof.prompt).toContain(id);
+  expect(await readdir(directory)).toEqual([]);
+  const archivedSize = await session.page.evaluate(async projectId => {
+    const file = await (window as any).PM.AgentArtifacts.load({ projectId, path: 'media-handoff/screen.png' });
+    return file.size;
+  }, prepared.projectId);
+  expect(archivedSize).toBe(Buffer.from(prepared.png, 'base64').byteLength);
+  expect((await readdir(path.join(session.userData, 'Media Store'))).filter(name => name.endsWith('.png'))).toHaveLength(1);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

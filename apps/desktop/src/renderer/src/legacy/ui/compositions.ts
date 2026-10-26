@@ -61,33 +61,49 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
   let n = 1;
   while (taken.has(`Pre-comp ${n}`)) n++;
   const name = h('input.settings-input.is-wide', { type: 'text', value: `Pre-comp ${n}`, 'aria-label': 'New composition name', spellcheck: false });
-  const radio = (value: string, checked: boolean, disabled: boolean) =>
-    h('input', { type: 'radio', name: 'precompose-mode', value, checked, disabled });
-  const leave = radio('leave', false, !canLeave);
-  const move = radio('move', true, false);
-  const adjust = h('input', { type: 'checkbox' });
-  const openAfter = h('input', { type: 'checkbox' });
-  const option = (input: HTMLElement, label: string, detail: string) =>
-    h('label.precompose-option', input, h('span', h('b', label), h('small', detail)));
-  const sync = () => {
-    adjust.disabled = !move.checked;
-    adjust.closest('label')?.classList.toggle('is-dim', adjust.disabled);
-  };
-  leave.addEventListener('change', sync); move.addEventListener('change', sync);
-  const body = h('div.precompose-form',
-    h('label.new-project-field', h('span', 'New composition name'), name),
-    h('div.precompose-options', { role: 'radiogroup', 'aria-label': 'Pre-compose' },
-      option(leave, `Leave all attributes in “${single ? single.name : 'layer'}”`,
-        canLeave
-          ? 'Creates a composition with only this layer’s source in it. The new composition becomes the source of the layer.'
-          : 'Available for a single layer with a source.'),
-      option(move, 'Move all attributes into the new composition',
-        'Places the selected layers together into a new composition.')),
-    h('label.precompose-check', adjust, h('span', 'Adjust composition duration to the time span of the selected layers')),
-    h('label.precompose-check', openAfter, h('span', 'Open New Composition')));
+  /* AE's two modes as one segmented choice, with a line that says what the
+     selected one does. Keeping attributes needs a single layer with a source. */
+  let mode: 'move' | 'leave' = 'move';
+  let adjustDuration = false;
+  let openAfter = false;
+  const layerName = single ? `“${single.name}”` : 'the layer';
+  const modes = [
+    { id: 'move', label: 'Move into new comp', note: 'Moves the selected layers, with their transforms and effects, into a new composition.' },
+    { id: 'leave', label: `Keep on layer`, note: `${layerName} keeps its transforms, effects and timing here. Only its source moves into the new composition.` },
+  ] as const;
+  const segmented = h('div.segmented', { role: 'radiogroup', 'aria-label': 'Attributes' });
+  const note = h('p.precompose-note');
+  const buttons = modes.map((item) => {
+    const disabled = item.id === 'leave' && !canLeave;
+    const button = h('button', { type: 'button', role: 'radio', disabled, title: disabled ? 'Available for a single layer with a source, such as footage, an image or a solid' : '' }, item.label);
+    button.addEventListener('click', () => { mode = item.id; sync(); });
+    segmented.appendChild(button);
+    return button;
+  });
+  const field = (label: string, control: HTMLElement) => h('div.new-project-field', h('span', label), control);
+  const adjust = PM.toggleField(() => adjustDuration, (value: boolean) => { adjustDuration = value; }, { local: true, label: 'Fit duration to layers' });
+  const openToggle = PM.toggleField(() => openAfter, (value: boolean) => { openAfter = value; }, { local: true, label: 'Open new composition' });
+  const adjustRow = field('Fit duration to layers', adjust);
+  function sync(): void {
+    buttons.forEach((button: HTMLButtonElement, index: number) => {
+      const on = modes[index]!.id === mode;
+      button.classList.toggle('on', on);
+      button.setAttribute('aria-checked', String(on));
+    });
+    note.textContent = modes.find((item) => item.id === mode)!.note;
+    // Duration fitting only applies when the layers move.
+    adjustRow.classList.toggle('is-dim', mode !== 'move');
+    adjust.querySelectorAll('button').forEach((button: HTMLButtonElement) => { button.disabled = mode !== 'move'; });
+  }
+  const body = h('div.new-project-form.precompose-form',
+    h('label.new-project-field', h('span', 'Name'), name),
+    field('Attributes', segmented),
+    note,
+    adjustRow,
+    field('Open new composition', openToggle));
   sync();
   PM.modal({
-    title: 'Pre-compose', body, width: 460,
+    title: 'Pre-compose', body, width: 440,
     actions: [
       { label: 'Cancel' },
       { label: 'OK', pri: true, run: () => {
@@ -103,9 +119,9 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
         }
         const created = PM.Comps.precompose(targets, {
           name: name.value.trim() || `Pre-comp ${n}`,
-          mode: leave.checked ? 'leave' : 'move',
-          adjustDuration: move.checked && adjust.checked,
-          open: openAfter.checked,
+          mode,
+          adjustDuration: mode === 'move' && adjustDuration,
+          open: openAfter,
         });
         if (!created) throw new Error('These layers could not be pre-composed');
       } },

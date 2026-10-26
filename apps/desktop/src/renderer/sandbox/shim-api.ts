@@ -1,3 +1,5 @@
+import { effectParameterDefault } from '../src/kernel/effect-defaults';
+import { resolveEffectDefinition } from '../src/kernel/effect-versions';
 import { createSubscriber } from 'svelte/reactivity';
 import type { PowermoveAPI, Selection } from '../src/kernel/api';
 import type { PMRegistry } from '../src/legacy/registry';
@@ -395,7 +397,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
   const menuContributors = new Set<{ location: string; fn: (...args: any[]) => unknown }>();
   const api: Record<string, any> = {
     id: init.id, apiVersion: init.apiVersion, manifest: init.manifest,
-    effects: { register: simpleRegister('effects'), list: () => list('effects'), get: (id: string) => list('effects').find(item => item.id === id) },
+    effects: { supportsVersions: true, supportsSpatialSampling: true, supportsLayerInputs: true, supportsInputSubframes: true, supportsSourceRasters: true, supportsSourceOwners: true, supportsBrushGeometry: true, supportsOwnerValidity: true, supportsLutAssets: true, supportsTypedReferences: true, parameterDefault: effectParameterDefault, register: simpleRegister('effects'), list: () => list('effects'), get: (id: string, version?: number) => resolveEffectDefinition(list('effects').find(item => item.id === id) as any, version) },
     transitions: { register: simpleRegister('transitions'), list: () => list('transitions'), get: (id: string) => list('transitions').find(item => item.id === id) },
     layers: { register: simpleRegister('layers'), list: () => list('layers'), get: (id: string) => list('layers').find(item => item.id === id) },
     theme: { register: simpleRegister('theme'), activate: (id: string) => fire('invoke', 'theme', 'activate', [id]), setScheme: () => { report('permission', 'theme.setScheme'); throw new PermissionError('theme.setScheme'); }, active: reactive(reads.theme, () => theme.active), scheme: reactive(reads.theme, () => theme.scheme), list: () => list('theme') },

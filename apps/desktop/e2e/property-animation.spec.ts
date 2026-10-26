@@ -90,8 +90,14 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
       return type === 'text' ? ['c.text', 'c.font', 'c.size', 'c.color', 'c.align']
         : type === 'shader' ? ['u.uTint', 'u.uEnabled', 'u.uAmount']
         : type === 'extension' ? ['x.objectColor', 'x.autoRotate', 'x.size']
-        : ['l.blend', 'l.mblur', `${layer.fx[0].id}.$enabled`, `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
+        // An effect turns on and off from its fx badge, as in After Effects.
+        : ['l.blend', 'l.mblur', `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
     }, type);
+    if (type === 'text') {
+      // Alignment folds under Content's More, after the prototype.
+      const more = page.locator('#panel-inspector .content-rows .control-disclosure');
+      if (!await more.evaluate(element => (element as HTMLDetailsElement).open)) await more.locator('summary').click();
+    }
     if (type === 'extension') {
       const more = page.locator('[data-parameter-prefix="x"] .control-disclosure');
       await expect(more).toBeVisible();

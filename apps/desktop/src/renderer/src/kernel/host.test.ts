@@ -1,3 +1,4 @@
+import { EFFECTS } from '../../../extensions/effects-basic/effects';
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 import type { ExtensionRecord, Project, ProjectAPI, StorageAPI, WorkspaceAPI, PowermoveAPI } from './api';
@@ -497,4 +498,16 @@ it.each([false, true])('retired unbind(all=%s) cannot remove a reloaded mod shor
     current.disposeAll();
     kernel.dispose();
   }
+});
+
+it('resolves revisioned effect metadata consistently for extension controls', () => {
+  const { kernel, deps } = harness();
+  const invert = EFFECTS.find(effect => effect.id === 'invert')!;
+  kernel.registerEffect('effects-basic', invert);
+  const extension = createExtensionAPI(kernel, record(), deps);
+  expect(extension.api.effects.supportsVersions).toBe(true);
+  expect(extension.api.effects.get('invert')).toBe(invert);
+  expect(extension.api.effects.get('invert', 1)).toBe(invert.legacy![0]);
+  expect(extension.api.effects.get('invert', 99)).toBeUndefined();
+  extension.disposeAll();
 });

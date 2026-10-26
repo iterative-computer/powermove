@@ -17,13 +17,16 @@
     get,
     edit,
     label,
-    mixed
+    mixed,
+    variant = 'segmented'
   }: {
     api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
     mixed?: (edit: EditBinding, value: unknown) => boolean;
+    /** A 16px checkbox, as After Effects' Effect Controls show a switch. */
+    variant?: 'segmented' | 'checkbox';
   } = $props();
 
   const labelledBy = rowLabelId();
@@ -49,6 +52,20 @@
   }
 </script>
 
+{#if variant === 'checkbox'}
+<button
+  type="button"
+  class="checkbox-field"
+  class:on={!isMixed && value}
+  class:mixed={isMixed}
+  role="checkbox"
+  aria-checked={isMixed ? 'mixed' : value}
+  aria-labelledby={labelledBy}
+  aria-label={labelledBy ? undefined : (label ?? edit.label)}
+  onpointerdown={(event) => event.stopPropagation()}
+  onclick={() => set(isMixed ? true : !get())}
+>{#if isMixed}<i></i>{:else if value}<svg viewBox="0 0 256 256" aria-hidden="true"><path d="M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"/></svg>{/if}</button>
+{:else}
 <div
   class="onoff"
   class:on={value}
@@ -64,3 +81,4 @@
   <button type="button" role="radio" aria-checked={!isMixed && !value} tabindex={!value || isMixed ? 0 : -1} onclick={() => set(false)}>Off</button>
   <button type="button" role="radio" aria-checked={!isMixed && value} tabindex={value && !isMixed ? 0 : -1} onclick={() => set(true)}>On</button>
 </div>
+{/if}

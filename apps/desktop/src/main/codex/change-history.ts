@@ -13,6 +13,9 @@ const SNAPSHOT_PREFIX = '.snapshot-';
 
 const liveTransactions = new Map<string, Promise<void>>();
 
+/** Keep the agent's stage and completed composition work for explicit review. */
+export class ExtensionPublicationConflictError extends Error {}
+
 /** One live tree owns its publication, recovery and baseline snapshots. */
 function withLiveTransaction<T>(liveDirectory: string, task: () => Promise<T>): Promise<T> {
   const key = path.resolve(liveDirectory);
@@ -120,11 +123,6 @@ async function publishExtensionChangesLocked(
   assertCurrent?: () => void
 ): Promise<ExtensionChangeSetRecord | null> {
   assertCurrent?.();
-  const currentHashes = await extensionHashes(stage.liveDirectory);
-  if (hashMap(currentHashes) !== stage.baselineRootHash) {
-    throw new Error('Extensions changed while the agent was working. Nothing was overwritten; retry the request.');
-  }
-
   const stagedHashes = await extensionHashes(stage.stagingDirectory);
   for (const id of stage.unchanged ?? []) stagedHashes[id] = stage.baselineHashes[id]!;
   const actualIds = changedIds(stage.baselineHashes, stagedHashes);
@@ -144,6 +142,15 @@ async function publishExtensionChangesLocked(
     reportError('The agent change report did not match its staged files.');
   }
   if (actualIds.length === 0) return null;
+
+  // Project-only runs publish nothing. Their completion must not depend on
+  // an old extension snapshot (including one retained by a cancelled run).
+  // For real edits, compare only the extensions this run will replace.
+  const currentHashes = await extensionHashes(stage.liveDirectory);
+  const conflicts = actualIds.filter(id => currentHashes[id] !== stage.baselineHashes[id]);
+  if (conflicts.length) {
+    throw new ExtensionPublicationConflictError(`Newer changes exist in these extensions: ${conflicts.join(', ')}. No extension files were overwritten. Completed project edits were kept. Review the retained staged edits against the current versions before publishing; repeating the request cannot resolve this conflict.`);
+  }
 
   for (const id of actualIds) {
     const before = stage.baselineHashes[id];
@@ -166,7 +173,7 @@ async function publishExtensionChangesLocked(
       await copyRegularTree(path.join(stage.stagingDirectory, id), path.join(next, id));
     }
   }
-  const afterHashes = { ...stage.baselineHashes };
+  const afterHashes = { ...currentHashes };
   for (const id of actualIds) {
     if (stagedHashes[id] === undefined) delete afterHashes[id];
     else afterHashes[id] = stagedHashes[id];
@@ -177,7 +184,7 @@ async function publishExtensionChangesLocked(
     id: stage.runId,
     projectId: stage.projectId,
     createdAt: new Date().toISOString(),
-    beforeRootHash: stage.baselineRootHash,
+    beforeRootHash: hashMap(currentHashes),
     afterRootHash,
     changes: declaredChanges.map((change) => ({ ...change }))
   };

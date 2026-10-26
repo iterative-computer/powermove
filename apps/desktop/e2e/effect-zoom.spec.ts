@@ -19,7 +19,8 @@ test('adding a neutral effect preserves sharp text at 800% zoom', async ({ sessi
     const before = capture();
     text.fx.push(PM.mkEffect('color')); PM.touch();
     const after = capture();
-    text.fx.push(PM.mkEffect('blur')); PM.touch();
+    const blurEffect = PM.mkEffect('blur'); blurEffect.p.amount.v = 24;
+    text.fx.push(blurEffect); PM.touch();
     const blur = capture();
     let different = 0, max = 0;
     if (before.pixels.length === after.pixels.length) for (let i = 0; i < before.pixels.length; i++) {

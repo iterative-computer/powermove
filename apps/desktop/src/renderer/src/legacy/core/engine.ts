@@ -18,7 +18,7 @@ import type { PMRegistry } from '../registry';
 const ENGINE_RUNTIME = Symbol.for('powermove.engine.runtime');
 
 export function install(PM: PMRegistry): void {
-PM.prepareFrame=(time:number)=>prepareFrame(PM,time);
+PM.prepareFrame=(time:number,options?:any)=>prepareFrame(PM,time,PM.proj,options);
 
 // Renderer bootstrap can be evaluated again while the same PM registry stays
 // alive. A second animation loop advances the shared playhead a second time on
@@ -337,7 +337,11 @@ PM.pause = () => {
   E.fps = 0; clock.frames = 0;
   // Playback has a continuous clock, but edits belong to the frame on screen.
   // Leaving a fractional time here lets key creation round into the next frame.
-  if (wasPlaying) PM.setTime(Math.floor(PM.time * PM.proj.fps + 1e-7) / PM.proj.fps, { raw: true });
+  if (wasPlaying) {
+    const displayed = lastRenderHadInputPreview && lastProject === PM.proj && renderedGeneration === contentGeneration
+      && Number.isFinite(lastRenderTime) ? lastRenderTime : PM.time;
+    PM.setTime(Math.floor(displayed * PM.proj.fps + 1e-7) / PM.proj.fps, { raw: true });
+  }
   PM.Audio.pause(); videoClipPlans.clear(); scrubVideos(PM.time);
   if (!wasPlaying) return;
   PM.bus.emit('transport');
@@ -352,6 +356,7 @@ const clock = { last: 0, base: 0, origin:0, cycle:0, acc: 0, frames: 0, t0: 0 };
 let needsDraw = true;
 let contentGeneration = 0, renderedGeneration = -1;
 let lastRenderTime = NaN, lastProject: any = null;
+let lastRenderHadInputPreview = false;
 let lastPresentedSeekGeneration = -1;
 let lastPresentedFps = 0;
 let pausedFrame: { time: number; project: any; generation: number } | null = null;
@@ -479,6 +484,7 @@ function frame(now: any) {
   let presented = true;
   try {
     presented = PM.GL.render(renderTime, renderOptions) !== false;
+    if (presented && Number.isFinite(PM.GL.inputPreviewPresentedTime)) renderTime = PM.GL.inputPreviewPresentedTime;
   } catch (error) {
     presented = false;
     /* A throw here used to escape the animation frame with the redraw flag
@@ -491,7 +497,7 @@ function frame(now: any) {
     }
   }
   flushFrameVideoSeeks();
-  if (presented) { lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration; lastPresentedSeekGeneration = videoSeekGeneration; lastPresentedFps = drawnFps(); synchronizedFrame = null; }
+  if (presented) { lastRenderHadInputPreview = Number.isFinite(PM.GL.inputPreviewPresentedTime); lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration; lastPresentedSeekGeneration = videoSeekGeneration; lastPresentedFps = drawnFps(); synchronizedFrame = null; }
   else needsDraw = true;
   if (!PM.playing && presented) { pausedFrame = null; if (renderTime !== PM.time) needsDraw = true; }
   PM.bus.emit('overlay');
@@ -521,10 +527,10 @@ window.document?.addEventListener?.('visibilitychange',resumeView);
 ['layers', 'sel', 'project', 'assets', 'quality'].forEach(ev => PM.bus.on(ev, () => PM.invalidate()));
 
 /* ── offscreen frame render (agent `look`, exporter, thumbnails) ── */
-PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}) => {
+PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}, target?: HTMLCanvasElement) => {
   const image = renderOpaqueFrame(PM, T, w, h, options);
-  const out = window.document.createElement('canvas');
-  out.width = w; out.height = h;
+  const out = target || window.document.createElement('canvas');
+  if (out.width !== w || out.height !== h) { out.width = w; out.height = h; }
   out.getContext('2d')!.putImageData(image, 0, 0);
   return out;
 };

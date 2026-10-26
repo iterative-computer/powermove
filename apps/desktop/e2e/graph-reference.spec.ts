@@ -19,11 +19,11 @@ test('reference graph supports combined editing, persistent handles, and group s
     timeline.pps = 100; timeline.scrollT = 0;
     PM.setTime(3.5); PM.bus.emit('layers'); PM.invalidate();
   });
-  const both = page.getByRole('button', { name: 'Dope sheet and graph', exact: true });
+  // One Graph Editor switch; "layer bars with the graph" is its menu option.
   const graph = page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true });
-  const dope = page.getByRole('button', { name: 'Dope sheet', exact: true });
-  await both.click();
-  await expect(both).toHaveAttribute('aria-pressed', 'true');
+  await page.evaluate(() => { (window as any).PM.Kernel.services.get('timeline').graphCombined = true; });
+  await graph.click();
+  await expect(graph).toHaveAttribute('aria-pressed', 'true');
   await page.waitForFunction(() => (window as any).PM.Kernel.services.get('timeline')._graph?.points.length === 9);
   const dopeKey = await page.evaluate(() => {
     const PM = (window as any).PM, T = PM.Kernel.services.get('timeline'), b = T.cv.getBoundingClientRect();
@@ -44,8 +44,9 @@ test('reference graph supports combined editing, persistent handles, and group s
   await page.mouse.move(split.x, split.y + 25, { steps: 5 }); await page.mouse.up();
   await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').graphSplit)).toBeGreaterThan(.38);
   await page.locator('#panel-timeline').screenshot({ path: info.outputPath('combined-graph.png') });
-  await dope.click(); await expect(dope).toHaveAttribute('aria-pressed', 'true');
-  await graph.click(); await graph.click(); await expect(graph).toHaveAttribute('aria-pressed', 'true');
+  await graph.click(); await expect(graph).toHaveAttribute('aria-pressed', 'false');
+  await page.evaluate(() => { (window as any).PM.Kernel.services.get('timeline').graphCombined = false; });
+  await graph.click(); await expect(graph).toHaveAttribute('aria-pressed', 'true');
   await chooseNativeMenu(session, 'Fit selected curves', () => page.getByRole('button', { name: 'Graph options', exact: true }).click());
   // Clear selection: the curves and curved-key tangents stay available.
   await page.evaluate(() => { const PM = (window as any).PM; PM.sel.keys = []; PM.bus.emit('sel'); PM.invalidate(); });

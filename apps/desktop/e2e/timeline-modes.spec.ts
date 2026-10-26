@@ -53,8 +53,9 @@ test('the track timeline packs layers onto Premiere-style tracks and moves clips
 
   // Drag B-roll up past the titles: it leaves V2 and becomes the top track,
   // which also moves it to the top of the layer stack.
-  const from = await point(page, 7, 'video', 1);
-  const to = await point(page, 7, 'video', 4);
+  // Grab the clip's body, clear of its name and Link Layers pickwhip.
+  const from = await point(page, 8.5, 'video', 1);
+  const to = await point(page, 8.5, 'video', 4);
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
   await page.mouse.move(from.x, from.y - 10, { steps: 2 });

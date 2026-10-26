@@ -4,6 +4,10 @@ import { createTimelineRuntime } from './timeline';
 import { fakePowermoveAPI } from './fake-api.test-helper';
 import { install as installUIState } from '../../renderer/src/legacy/core/ui-state';
 
+// The Paper head ends above the stem, leaving its small reference gap.
+/* The playhead's line starts under its 13px head, at the foot of the time scale. */
+const stemTop = (value: { timeline: any }) => value.timeline.ruler - (value.timeline.header || 0) - 2;
+const labelY = (value: { timeline: any }) => Math.round((value.timeline.ruler - (value.timeline.header || 0)) / 2) - 1;
 const disposers: Array<() => void> = [];
 afterEach(() => {
   disposers.splice(0).forEach(dispose => dispose());
@@ -316,13 +320,13 @@ it.each([true, false])('preserves all 120 subpixel playback positions with playi
     value.moves.mockClear();
     value.state.time = frame / 120;
     value.emit('time', value.state.time); value.flush();
-    positions.push(value.moves.mock.calls.find(([, y]) => y === 7)![0]);
+    positions.push(value.moves.mock.calls.find(([, y]) => y === stemTop(value))![0]);
   }
   expect(new Set(positions).size).toBe(120);
   expect(positions[1] - positions[0]).toBeCloseTo(.25);
 });
 
-it('moves ruler ticks, labels, and rows continuously through fractional pans', () => {
+it('moves ruler labels and rows continuously through fractional pans', () => {
   const value = harness({ collapsed: true, height: 300 });
   value.timeline.pps = 30;
   const positions = [];
@@ -331,15 +335,13 @@ it('moves ruler ticks, labels, and rows continuously through fractional pans', (
     value.timeline.scrollY = 10 + i / 4;
     value.moves.mockClear(); value.text.mockClear();
     value.emit('invalidate', 'timeline');
-    const labelX = value.text.mock.calls.find(([, x, y]) => y === 13 && x > value.timeline.gut)![1];
+    const labelX = value.text.mock.calls.find(([, x, y]) => y === labelY(value) && x > value.timeline.gut)![1];
     positions.push({
-      tick: value.moves.mock.calls.find(([x, y]) => y === value.timeline.ruler - 8 && x === labelX)![0],
       label: labelX,
       row: value.text.mock.calls.find(([label]) => label === 'Layer 0')![2],
     });
   }
   for (let i = 1; i < positions.length; i++) {
-    expect(positions[i]!.tick - positions[i - 1]!.tick).toBeCloseTo(-.25);
     expect(positions[i]!.label - positions[i - 1]!.label).toBeCloseTo(-.25);
     expect(positions[i]!.row - positions[i - 1]!.row).toBeCloseTo(-.25);
   }
@@ -450,7 +452,7 @@ it.each(['up', 'cancel'])('scrubs at pointer precision, selects project frames, 
     const dx = frame / 4;
     drag.move(dx, 0, { clientX: startX + dx });
     value.moves.mockClear(); value.flush();
-    positions.push(value.moves.mock.calls.find(([, y]) => y === 7)![0]);
+    positions.push(value.moves.mock.calls.find(([, y]) => y === stemTop(value))![0]);
     expect(value.state.time * 30).toBeCloseTo(Math.round(value.state.time * 30));
   }
   expect(new Set(positions).size).toBe(120);
@@ -465,15 +467,15 @@ it.each(['up', 'cancel'])('scrubs at pointer precision, selects project frames, 
   value.moves.mockClear(); value.flush();
   // Snaps to the strip's last visible frame, not the exclusive out edge.
   expect(value.state.time).toBeCloseTo(10 - 1 / 30, 9);
-  expect(value.moves.mock.calls.find(([, y]) => y === 7)![0]).toBeCloseTo(value.timeline.gut + 299 + .5);
+  expect(value.moves.mock.calls.find(([, y]) => y === stemTop(value))![0]).toBeCloseTo(value.timeline.gut + 299 + .5);
   window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift' }));
   value.moves.mockClear(); value.flush();
   expect(value.state.time).toBe(10);
   expect(value.timeline.snapGuide).toBeNull();
-  expect(value.moves.mock.calls.find(([, y]) => y === 7)![0]).toBeCloseTo(value.timeline.gut + 299.7 + .5);
+  expect(value.moves.mock.calls.find(([, y]) => y === stemTop(value))![0]).toBeCloseTo(value.timeline.gut + 299.7 + .5);
   drag.move(30.25, 0, { clientX: startX + 30.25 }); value.flush();
   drag[finish](); value.moves.mockClear(); value.flush();
-  expect(value.moves.mock.calls.find(([, y]) => y === 7)![0]).toBeCloseTo(value.timeline.gut + value.state.time * 30 + .5);
+  expect(value.moves.mock.calls.find(([, y]) => y === stemTop(value))![0]).toBeCloseTo(value.timeline.gut + value.state.time * 30 + .5);
 });
 
 it('keeps static clip, waveform, ruler, and gutter drawing out of ordinary playback ticks', () => {
@@ -507,7 +509,7 @@ it('keeps expanded static property evaluation and artwork out of time-only frame
   // A real edit must replace the retained value immediately.
   value.state.project.layers[0].p.opacity.v = 42;
   value.emit('project:changed', { kind: 'values' }); value.flush();
-  expect(value.text.mock.calls.some(([text]) => text === '42')).toBe(true);
+  expect(value.text.mock.calls.some(([text]) => text === '42%')).toBe(true);
 });
 
 it('retains held property values until their value or key-navigation state changes', () => {
@@ -519,7 +521,7 @@ it('retains held property values until their value or key-navigation state chang
   expect(value.fonts).not.toHaveBeenCalled();
   vi.mocked(value.api.anim.evP).mockReturnValue(73);
   value.state.time = 1.2; value.emit('time', 1.2); value.flush();
-  expect(value.text.mock.calls.some(([text]) => text === '73')).toBe(true);
+  expect(value.text.mock.calls.some(([text]) => text === '73%')).toBe(true);
   value.text.mockClear();
   value.state.time = 1.3; value.emit('time', 1.3); value.flush();
   expect(value.text).not.toHaveBeenCalled();
@@ -536,7 +538,7 @@ it('keeps library previews from consuming live row and readout invalidation', ()
   value.timeline.renderPreview(document.createElement('canvas'), 500, 300);
   value.text.mockClear();
   value.emit('time', 1); value.flush();
-  expect(value.text.mock.calls.some(([text]) => text === '73')).toBe(true);
+  expect(value.text.mock.calls.some(([text]) => text === '73%')).toBe(true);
   const layer = value.state.project.layers[0];
   value.api.uiState.setLayerCollapsed(layer, true);
   value.timeline.renderPreview(document.createElement('canvas'), 500, 300);
@@ -573,7 +575,7 @@ it('updates visible property values while reusing static keyframes and labels', 
   expect(value.copies.mock.calls.some(args => args.length === 9 && args[0] === value.timeline.cv)).toBe(true);
   expect(value.api.anim.evP).toHaveBeenCalled();
   expect(value.text.mock.calls.some(([text]) => String(text).startsWith('Layer '))).toBe(false);
-  expect(value.text.mock.calls.some(([text]) => text === '100')).toBe(true);
+  expect(value.text.mock.calls.some(([text]) => text === '100%')).toBe(true);
 });
 
 it('refreshes the backdrop for edits, selection, viewport changes, and external repaint requests', () => {
@@ -659,7 +661,8 @@ it('refreshes cached rows for disclosure, reveal, keyframes, and search changes'
   expect(value.timeline.rows.filter((row: any) => row.L === layer)).toHaveLength(1);
   value.api.uiState.setReveal(layer, ['opacity']);
   value.emit('invalidate', 'timeline');
-  expect(value.timeline.rows.filter((row: any) => row.L === layer)).toHaveLength(2);
+  // The revealed property sits under its Properties-panel section heading.
+  expect(value.timeline.rows.filter((row: any) => row.L === layer).map((row: any) => row.kind)).toEqual(['layer', 'heading', 'prop']);
   const rows = value.timeline.rows;
   vi.mocked(value.api.anim.version).mockReturnValue(1);
   value.emit('invalidate', 'timeline');

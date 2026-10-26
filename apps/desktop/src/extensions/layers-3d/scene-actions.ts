@@ -43,5 +43,5 @@ export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[
   ...PRIMITIVES.map(p=>({label:p.label,icon:'cube',run:()=>addPrimitive(api,p.id)})),
   {label:'Import 3D model…',icon:'download',run:()=>importModelIntoScene(api)},'-',
   ...LIGHT_TYPES.map(l=>({label:`${l.label} light`,icon:'sun',run:()=>addLight(api,l.id)})),
-  {label:'Camera',icon:'camera',run:()=>addCamera(api)}
+  {label:'Camera',icon:'cam',run:()=>addCamera(api)}
 ];

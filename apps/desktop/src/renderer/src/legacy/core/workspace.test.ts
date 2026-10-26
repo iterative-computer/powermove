@@ -94,11 +94,52 @@ describe('legacy workspace install', () => {
     const ids = (id: string) => PM.WS.get(id).layout.docks.find((dock: any) => dock.id === 'left').panels.map((panel: any) => panel.id);
 
     expect(ids('design')).toEqual(['assets', 'layer-effects', 'takes']);
-    expect(PM.WS.get('design').layout.docks[0].panels[1]).toMatchObject({ id: 'layer-effects', size: 350 });
+    // Default then tabs it with Project, shown, in Project's place and size.
+    expect(PM.WS.get('design').layout.docks[0].panels.slice(0, 2)).toEqual([
+      { id: 'assets', flex: true, group: 'project' },
+      { id: 'layer-effects', flex: true, group: 'project', active: true },
+    ]);
     expect(ids('hidden')).toEqual(['assets', 'takes']);
     expect(ids('current')).toEqual(['assets', 'takes']);
     // Closing it afterwards sticks: normalization marks the workspace as migrated.
     expect(PM.WS.normalize({ ...PM.WS.get('design'), layout: { docks: [left, center] } }).layout.docks[0].panels.map((panel: any) => panel.id)).toEqual(['assets', 'takes']);
+  });
+
+  it('lays out the Default workspace as the After Effects prototype once, keeping a docked agent', () => {
+    // The shape of a real saved Default: agent under Media, Properties alone,
+    // Effects & Presets hidden and Layer Effects nowhere.
+    const PM = workspaceModel({
+      workspace: 'design',
+      workspaces: [
+        { id: 'design', name: 'Design', builtin: true, agentDockMigration: 4,
+          hiddenPanels: [{ id: 'fxbrowser', dockId: 'right', index: 1, spec: { id: 'fxbrowser', flex: true, size: 353 } }],
+          layout: { docks: [
+            { id: 'left', size: 317, panels: [{ id: 'assets', flex: true }, { id: 'agent', size: 593 }] },
+            { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+            { id: 'bottom', size: 448, panels: [{ id: 'timeline', flex: true }] },
+            { id: 'right', size: 372, panels: [{ id: 'inspector', flex: true }] },
+          ] } },
+        { id: 'custom', name: 'Grading', agentDockMigration: 4, layout: { docks: [
+          { id: 'left', panels: [{ id: 'assets', flex: true }, { id: 'agent', size: 300 }] },
+          { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+        ] } },
+      ],
+    });
+    PM.WS.init();
+    const design = PM.WS.get('design');
+    const panels = (id: string) => design.layout.docks.find((dock: any) => dock.id === id).panels;
+    expect(design.name).toBe('Default');
+    expect(panels('left')).toEqual([
+      { id: 'assets', flex: true, group: 'project' },
+      { id: 'layer-effects', flex: true, group: 'project', active: true },
+      { id: 'agent', size: 593 },
+    ]);
+    expect(panels('right').map((panel: any) => panel.id)).toEqual(['inspector', 'fxbrowser']);
+    expect(design.hiddenPanels ?? []).toEqual([]);
+    // Other workspaces keep their own layout.
+    expect(PM.WS.get('custom').layout.docks[0].panels.map((panel: any) => panel.id)).toEqual(['assets', 'agent']);
+    // The new Effects workspace is seeded.
+    expect(PM.WS.get('effects')?.name).toBe('Effects');
   });
 
   it('moves a sized center Timeline into a bottom dock under the left column once', () => {

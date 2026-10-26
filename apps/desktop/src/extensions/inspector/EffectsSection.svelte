@@ -1,17 +1,18 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { inspectorContext, type EditBinding } from './context';
-  import type { EditCommand } from 'powermove';
+  import { validMatteSource, type EditCommand } from 'powermove';
   import { evaluatedValue } from './multi-edit';
-  import AnimatedRow from './AnimatedRow.svelte';
   import ParameterList from './ParameterList.svelte';
   /* App-local effect snapshots survive layer/inspector remounts. */
   import { effectPasteCommands } from './effect-clipboard';
   import Icon from './Icon.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
+  import { provideEffectControls } from './effect-controls';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector } = inspectorContext();
-  const { ToggleField } = api.ui.controls;
+  const { ToggleField, SelectField, Row } = api.ui.controls;
+  provideEffectControls();
 
   let { layer }: { layer: any } = $props();
 
@@ -21,20 +22,15 @@
   let effectsSection: HTMLElement;
   const effects = $derived((inspectorRefresh.version, doc.tick.structure, doc.proj, [...(layer.fx ?? [])]));
 
-  function propertyEdit(path: string, label: string): EditBinding {
-    return {
-      mode: 'command',
-      label,
-      origin: 'inspector',
-      command: (value) => ({
-        type: 'set_property',
-        target: layer.id,
-        path,
-        value: value as any,
-        time: transport.time,
-        preserveHandEdits: false
-      })
-    };
+  function swapColors(effect: any, keys: [string, string]): void {
+    const [first, second] = keys;
+    const read = (key: string) => String(api.anim.evP(layer, effect.p[key], transport.time, key) ?? effect.p[key]?.v ?? '#000000');
+    const values = [read(second), read(first)];
+    inspectorEdit.apply(keys.map((key, index) => ({
+      type: 'set_property' as const, target: layer.id, path: `${effect.id}.${key}`,
+      value: values[index]!, time: transport.time, preserveHandEdits: false
+    })), { label: 'Swap Colors', origin: 'inspector' });
+    api.transport.invalidate?.();
   }
 
   function isOpen(effect: any): boolean {
@@ -78,6 +74,49 @@
     );
     api.transport.invalidate?.();
   }
+
+  /* After Effects' Reset: every parameter back to its default, as one step.
+     Animated parameters take the default at the playhead, as a keyframe. */
+  function reset(event: MouseEvent, effect: any, definition: any): void {
+    event.stopPropagation();
+    const commands: EditCommand[] = (definition.params ?? [])
+      .filter((param: any) => param.def !== undefined && effect.p?.[param.k] !== undefined)
+      .map((param: any) => ({
+        type: 'set_property', target: layer.id, path: `${effect.id}.${param.k}`,
+        value: param.def, time: transport.time, preserveHandEdits: false
+      }));
+    if (!commands.length) return;
+    inspectorEdit.apply(commands.length === 1 ? commands[0]! : commands, { label: `Reset ${definition.label}`, origin: 'inspector' });
+    api.transport.invalidate?.();
+  }
+
+  /* Track Matte reads as an effect, as in Effects & Presets: the layer's matte
+     source and mode, shown and reset (removed) like any effect. */
+  // A layer setting, not part of the effects list: read it through the document ticks.
+  const matteSource = $derived((inspectorRefresh.version, doc.tick.structure, doc.tick.values, doc.tick.history, doc.proj, layer.matteSource ?? null));
+  // Open until folded, as a newly applied effect is.
+  const matteFold = () => ({ id: `matte-folded:${layer.id}` }) as any;
+  const matteOpen = $derived.by(() => { void openVersion; return !api.uiState.getFxOpen(matteFold()); });
+  const matteSources = $derived((doc.tick.structure, doc.proj,
+    api.project.get().layers.filter((candidate: any) => candidate.id !== layer.id && validMatteSource(api.project.get().layers, layer, candidate.id))));
+  const matteMode = $derived((doc.tick.values, transport.time, String(evaluatedValue(api, layer, layer.matteMode, transport.time, 'l.matteMode') ?? 'alpha')));
+  function toggleMatte(event: MouseEvent): void {
+    event.stopPropagation();
+    api.uiState.setFxOpen(matteFold(), matteOpen);
+    openVersion++;
+  }
+  function removeMatte(event: MouseEvent): void {
+    event.stopPropagation();
+    inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { matteSource: null } }, { label: 'Remove Track Matte', origin: 'inspector' });
+    api.transport.invalidate?.();
+  }
+  const matteModeEdit = (mode: (current: string) => string, label: string): EditBinding => ({
+    mode: 'command', label, origin: 'inspector',
+    command: (value) => ({ type: 'set_property', target: layer.id, path: 'l.matteMode', value: mode(String(value)) as any, time: transport.time, preserveHandEdits: false })
+  });
+  const matteUse = $derived(matteMode.startsWith('luma') ? 'luma' : 'alpha');
+  const matteInverted = $derived(matteMode.endsWith('-inverted'));
+  const modeFor = (use: string, inverted: boolean) => `${use}${inverted ? '-inverted' : ''}`;
 
   function remove(event: MouseEvent, effect: any): void {
     event.stopPropagation();
@@ -260,15 +299,19 @@
   role="group"
   aria-label="Effects section"
 >
+  {#if effects.length === 0 && !matteSource}
+    <div class="fx-empty">Add effects from Effects &amp; Presets: double-click one, or drag it onto a layer.</div>
+  {/if}
   {#if effects.length > 0}
   <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
     {#each effects as effect, index (effect.id)}
-      {@const definition = api.effects.get(effect.type)}
+      {@const definition = api.effects.get(effect.type, effect.version ?? 1)}
       {#if definition}
       {@const expanded = isOpen(effect)}
       {@const paramsId = `fx-params-${layer.id}-${effect.id}`}
       <div
         class="row fx-head"
+        class:open={expanded}
         class:selected={selected(effect)}
         class:dragging={draggingId === effect.id}
         class:drop-before={dropSlot === index && draggingId !== null}
@@ -295,20 +338,22 @@
           aria-controls={paramsId}
           onclick={(event) => toggleOpen(event, effect)}
         >
-          <span class:open={expanded} class="twirl" aria-hidden="true"><Icon name="chev" /></span>
+          <span class="twirl" aria-hidden="true"><Icon name={expanded ? 'chevD' : 'chev'} /></span>
         </button>
-        <span class="k fx-label">{definition.label}</span>
         <button
           type="button"
-          class:on={enabled(effect)}
-          class="stopwatch"
+          class="fx-badge"
+          class:off={!enabled(effect)}
+          title={enabled(effect) ? `Turn ${definition.label} off` : `Turn ${definition.label} on`}
           aria-label={`${enabled(effect) ? 'Disable' : 'Enable'} ${definition.label}`}
           aria-pressed={!!enabled(effect)}
           onclick={(event) => setEnabled(event, effect)}
-        ><Icon name="eye" /></button>
+        >fx</button>
+        <span class="k fx-label">{definition.label}</span>
+        <button type="button" class="fx-reset" title={`Reset ${definition.label} to its defaults`} onclick={(event) => reset(event, effect, definition)}>Reset</button>
         <button
           type="button"
-          class="stopwatch"
+          class="stopwatch fx-remove"
           title="Remove effect"
           aria-label={`Remove ${definition.label}`}
           onclick={(event) => remove(event, effect)}
@@ -317,13 +362,13 @@
 
       {#if expanded}
         <div class="grp fx-params" id={paramsId}>
-          <ParameterList {layer} params={definition.params ?? []} properties={effect.p ?? {}} prefix={effect.id} ui={definition.ui}>
-            {#snippet extra()}
-              <AnimatedRow {layer} path={`${effect.id}.$enabled`} label="Enabled">
-                <ToggleField {api} {mixed} get={() => enabled(effect)} edit={propertyEdit(`${effect.id}.$enabled`, 'Enable effect')} label="Enabled" />
-              </AnimatedRow>
-            {/snippet}
-          </ParameterList>
+          {#each definition.actions ?? [] as action}
+            {#if action.kind === 'swap'}
+              <Row {api} label=""><button type="button" class="chip" onclick={() => swapColors(effect, action.keys)}>{action.label}</button></Row>
+            {/if}
+          {/each}
+          <!-- On/off is the fx badge, as in After Effects. -->
+          <ParameterList {layer} params={definition.params ?? []} properties={effect.p ?? {}} inputs={effect.inputs ?? {}} prefix={effect.id} ui={definition.ui} />
         </div>
       {/if}
       {/if}
@@ -331,26 +376,57 @@
   </div>
   {/if}
 
+  {#if matteSource}
+    <div class="row fx-head fx-matte" class:open={matteOpen} data-effect-id="track-matte" role="group" aria-label="Track Matte effect">
+      <button type="button" class="fx-expand" aria-label={`${matteOpen ? 'Collapse' : 'Expand'} Track Matte`} aria-expanded={matteOpen} onclick={toggleMatte}>
+        <span class="twirl" aria-hidden="true"><Icon name={matteOpen ? 'chevD' : 'chev'} /></span>
+      </button>
+      <span class="fx-badge" aria-hidden="true">fx</span>
+      <span class="k fx-label">Track Matte</span>
+      <button type="button" class="fx-reset" title="Remove the track matte" onclick={removeMatte}>Reset</button>
+    </div>
+    {#if matteOpen}
+      <div class="grp fx-params">
+        <Row {api} label="Matte Layer"><SelectField {api} {mixed} label="Matte Layer" get={() => matteSource}
+          edit={{ mode: 'command', label: 'Track Matte', origin: 'inspector', command: (value: unknown) => ({ type: 'set_layer', target: layer.id, patch: { matteSource: value == null ? null : String(value) } }) }}
+          options={matteSources.map((source: any) => ({ v: source.id, label: `${api.project.get().layers.indexOf(source) + 1}. ${source.name}` }))} /></Row>
+        <Row {api} label="Use"><SelectField {api} {mixed} label="Use" get={() => matteUse}
+          edit={matteModeEdit((use) => modeFor(use, matteInverted), 'Matte Use')}
+          options={[{ v: 'alpha', label: 'Alpha' }, { v: 'luma', label: 'Luma' }]} /></Row>
+        <Row {api} label="Invert"><ToggleField {api} {mixed} label="Invert matte" get={() => matteInverted} variant="checkbox"
+          edit={matteModeEdit((on) => modeFor(matteUse, on === 'true'), 'Invert Matte')} /></Row>
+      </div>
+    {/if}
+  {/if}
+
 </div>
 
 <style>
+  /* Effect Controls, after the prototype: 30px effect headers (tinted while
+     open), then 32px parameter rows: stopwatch, label, and a 110px field. */
   .effects-section {
     display: flex;
     flex-direction: column;
     gap: 0;
+    margin: 0 calc(8px - var(--pad));
+    padding: 8px 0 4px;
   }
+
+  .fx-list { display: flex; flex-direction: column; }
 
   .fx-head {
     position: relative;
-    margin-top: 4px;
-    background: var(--ink-1);
+    height: 30px;
+    margin: 0;
+    padding: 0 6px;
+    gap: 8px;
+    border-radius: 7px;
+    background: transparent;
     cursor: default;
     outline: none;
   }
-
-  .fx-head.selected {
-    background: var(--accent-dim);
-  }
+  .fx-head.open { background: var(--bg-row); }
+  .fx-head.selected { background: var(--accent-dim); }
 
   .fx-head.dragging {
     opacity: 0.45;
@@ -386,16 +462,90 @@
     flex: none;
     align-items: center;
     align-self: stretch;
-    width: 18px;
+    width: 10px;
+    padding: 0;
+    border: 0;
+    background: none;
     place-items: center;
   }
+  .fx-expand :global(.twirl) { width: 10px; height: 10px; color: var(--tx-2); transform: none; }
+  .fx-expand :global(.twirl svg) { width: 10px; height: 10px; }
 
   .fx-label {
     flex: 1;
     min-width: 0;
     color: var(--tx);
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: var(--fw-semibold);
+    line-height: 16px;
     text-align: left;
+  }
+
+  /* The fx badge is the effect's on/off switch, as in After Effects. */
+  .fx-badge {
+    flex: none;
+    height: 18px;
+    padding: 0 5px;
+    border: 0;
+    border-radius: 4px;
+    background: rgb(255 96 25 / .15);
+    color: #FF7A3D;
+    font: 600 10px/12px var(--f-mono);
+    cursor: pointer;
+  }
+  .fx-badge.off { background: var(--ink-2, var(--bg-field)); color: var(--tx-4); }
+  span.fx-badge { display: inline-grid; place-items: center; cursor: default; }
+
+  .fx-reset {
+    flex: none;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--tx-3);
+    font-size: 12px;
+    line-height: 16px;
+    cursor: pointer;
+  }
+  .fx-reset:hover { color: var(--tx); }
+
+  /* Remove stays out of the way until the row is pointed at or selected. */
+  .fx-head .fx-remove.fx-remove { display: none; }
+  .fx-head:hover .fx-remove.fx-remove, .fx-head.selected .fx-remove.fx-remove, .fx-head .fx-remove.fx-remove:focus-visible { display: grid; }
+
+  .fx-matte { margin-top: 0; }
+
+  /* Parameter rows: 22px in, a 13px stopwatch (or its empty slot), the
+     label, and a 110px field on the right. */
+  .effects-section .fx-params :global(.row.split) {
+    height: 32px;
+    margin: 0;
+    padding: 0 6px 0 22px;
+    gap: 8px;
+  }
+  .effects-section .fx-params :global(.row.split > .k) {
+    flex: 1;
+    width: auto;
+    padding-left: 0;
+    color: var(--tx-label);
+    font-size: 12px;
+    line-height: 16px;
+  }
+  .effects-section .fx-params :global(.row.split:not(:has(> .stopwatch)) > .k) { width: auto; padding-left: 20px; }
+  .effects-section .fx-params :global(.row.split > .stopwatch) { width: 13px; height: 24px; background: none; }
+  .effects-section .fx-params :global(.row.split > .stopwatch svg) { width: 13px; height: 13px; }
+  .effects-section .fx-params :global(.row.split > .vwrap) { flex: 0 0 110px; width: 110px; height: 24px; }
+  .effects-section .fx-params :global(.row.split > .vwrap:has(.checkbox-field)) { justify-content: flex-start; }
+  .effects-section .fx-params :global(.row.split :is(.num, .sel, .color-field, .pm-select)) { height: 24px; border-radius: 6px; background: var(--bg-field); font-size: 12px; line-height: 24px; }
+  .effects-section .fx-params :global(.row.split .pm-select) { font-family: var(--f-ui); color: var(--tx-value); }
+  .effects-section .fx-params :global(.row.split .pm-select .pm-select-chevron) { width: 8px; height: 8px; margin-top: -4px; }
+  .effects-section .fx-params :global(.row.split .num) { color: var(--tx-value); }
+  .effects-section .fx-params :global(.row.split:has(> .stopwatch.on) .num) { color: var(--accent-tx); }
+
+  .fx-empty {
+    padding: 10px 6px;
+    color: var(--tx-3);
+    font-size: var(--fs-sm);
+    line-height: 1.45;
   }
 
 </style>

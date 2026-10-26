@@ -15,7 +15,7 @@ async function disclosurePoint(page: Page, name: string) {
     const timeline = (window as any).PM.Kernel.services.get('timeline');
     const index = timeline.rows.findIndex((row: any) => row.kind === 'layer' && row.L.name === name);
     const row = timeline.rows[index], box = timeline.cv.getBoundingClientRect();
-    return { x: box.x + 64 + (row.depth || 0) * 12, y: box.y + timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
+    return { x: box.x + 87 + (row.depth || 0) * 12, y: box.y + timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
   }, name);
 }
 
@@ -43,7 +43,7 @@ test('compact layer rows keep names centered and parenting in dedicated controls
   await expect(page.getByRole('menu')).toHaveCount(0);
   await chooseNativeMenu(session, 'Info circle', () => page.mouse.click(box.x+box.gut-12,box.y+box.ruler+box.row/2));
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.L(PM.firstSel().parent).name;})).toBe('Info circle');
-  await page.mouse.move(box.x+box.gut-30,box.y+box.ruler+box.row/2);await page.mouse.down();
+  await page.mouse.move(box.x+box.gut-90,box.y+box.ruler+box.row/2);await page.mouse.down();
   await page.mouse.move(box.x+110,box.y+box.ruler+box.row*2.5,{steps:8});await page.mouse.up();
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.L(PM.firstSel().parent).name;})).toBe('Info button');
   // Nested disclosure buttons follow the indentation of their badges and names.

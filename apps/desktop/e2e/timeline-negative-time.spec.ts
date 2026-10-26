@@ -51,7 +51,8 @@ for (const mode of ['layers', 'tracks']) test(`${mode}: strips move before zero 
     const fillText = CanvasRenderingContext2D.prototype.fillText;
     (window as any).__negativeRulerLabels = [];
     CanvasRenderingContext2D.prototype.fillText = function(text, x, y, maxWidth?) {
-      if (this.canvas.id === 'tl-canvas' && y === 13 && this.textAlign === 'center')
+      // Ruler labels: mono, in the time scale's band (left-aligned after their moment).
+      if (this.canvas.id === 'tl-canvas' && y < 30 && /^-?\d+(s|f|m\d\ds)$/.test(String(text)))
         (window as any).__negativeRulerLabels.push(String(text));
       if (maxWidth === undefined) fillText.call(this, text, x, y);
       else fillText.call(this, text, x, y, maxWidth);
@@ -62,7 +63,7 @@ for (const mode of ['layers', 'tracks']) test(`${mode}: strips move before zero 
   const scroll = () => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').scrollT);
   await scrollToStart(page);
   await expect.poll(scroll).toBe(-5);
-  await expect.poll(() => page.evaluate(() => (window as any).__negativeRulerLabels)).toContain('-0:04');
+  await expect.poll(() => page.evaluate(() => (window as any).__negativeRulerLabels)).toContain('-4s');
 
   const timing = () => page.evaluate((ids) => {
     const PM = (window as any).PM;

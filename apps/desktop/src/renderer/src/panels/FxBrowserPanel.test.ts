@@ -34,12 +34,12 @@ function mountPanel() {
   return { target, component };
 }
 
-const labels = (target: HTMLElement) => [...target.querySelectorAll('.fxb-label')].map((node) => node.textContent);
-const secs = (target: HTMLElement) => [...target.querySelectorAll('.fxb-sec')].map((node) => node.textContent);
+const labels = (target: HTMLElement) => [...target.querySelectorAll('.fxb-name')].map((node) => node.textContent);
+const secs = (target: HTMLElement) => [...target.querySelectorAll('.fxb-sec')].map((node) => node.textContent?.trim());
 
 afterEach(() => {
   fxBrowser.query = ''; fxBrowser.searchOpen = false;
-  fxBrowser.category = 'all';
+  fxBrowser.category = 'all'; fxBrowser.folded = [];
   window.localStorage?.clear();
   document.body.replaceChildren();
   delete window.PM;
@@ -52,8 +52,8 @@ describe('FxBrowserPanel', () => {
     window.PM = PM as any;
     const { target, component } = mountPanel();
 
-    expect(secs(target)).toEqual(['Blur', 'Stylize']);
-    expect(labels(target)).toEqual(['Gaussian Blur', 'Sharpen', 'Glow']);
+    expect(secs(target)).toEqual(['Blur', 'Stylize', 'Matte']);
+    expect(labels(target)).toEqual(['Gaussian Blur', 'Sharpen', 'Glow', 'Track Matte']);
 
     const card = target.querySelector<HTMLElement>('.fxb-row');
     expect(card?.textContent).toContain('Gaussian Blur');
@@ -82,9 +82,10 @@ describe('FxBrowserPanel', () => {
   it('filters by search into a flat list', async () => {
     window.PM = basePM() as any;
     const { target, component } = mountPanel();
-    expect(target.querySelector('.fxb-search')).toBeNull();
-    flushSync(() => { fxBrowser.searchOpen = true; });
+    // The search field is always there; the header's search action focuses it.
     const search = target.querySelector<HTMLInputElement>('.fxb-search')!;
+    expect(search).not.toBeNull();
+    flushSync(() => { fxBrowser.searchOpen = true; });
     expect(document.activeElement).toBe(search);
     search.value = 'sharp';
     flushSync(() => search.dispatchEvent(new Event('input', { bubbles: true })));
@@ -94,7 +95,7 @@ describe('FxBrowserPanel', () => {
     await unmount(component);
   });
 
-  it('mounts only the search action into the panel header', () => {
+  it('keeps the panel header to its title; search is always in the panel', () => {
     const PM = basePM({ PANELS: {}, registerPanel: vi.fn(), icon: () => document.createElement('span'), pickFiles: vi.fn() });
     PM.registerPanel = (id: string, def: any) => { PM.PANELS[id] = def; };
     window.PM = PM as any;
@@ -102,9 +103,9 @@ describe('FxBrowserPanel', () => {
     const hdr = document.createElement('header');
     hdr.append(Object.assign(document.createElement('span'), { className: 'ptitle' }));
     document.body.append(hdr);
-    PM.PANELS.fxbrowser.header(hdr, {});
+    PM.PANELS.fxbrowser.header?.(hdr, {});
     expect(hdr.querySelectorAll('[role="tab"]')).toHaveLength(0);
-    expect(hdr.querySelector('.iconbtn[aria-label="Search"]')).not.toBeNull();
+    expect(hdr.querySelector('.iconbtn')).toBeNull();
   });
 
   it('reports when no layer is selected and toasts', async () => {
@@ -150,7 +151,7 @@ describe('FxBrowserPanel', () => {
       id: 'blur', label: 'Gaussian Blur', group: 'Blur', params: [], frag: 'o = texture(u_tex, v_st);'
     });
     const { target, component } = mountPanel();
-    expect(labels(target)).toEqual(['Gaussian Blur']);
+    expect(labels(target)).toEqual(['Gaussian Blur', 'Track Matte']);
 
     let registration: { dispose(): void } | undefined;
     flushSync(() => {
@@ -158,11 +159,11 @@ describe('FxBrowserPanel', () => {
         id: 'vhs', label: 'VHS', group: 'Stylize', params: [], frag: 'o = texture(u_tex, v_st);'
       });
     });
-    expect(secs(target)).toEqual(['Blur', 'Stylize']);
-    expect(labels(target)).toEqual(['Gaussian Blur', 'VHS']);
+    expect(secs(target)).toEqual(['Blur', 'Stylize', 'Matte']);
+    expect(labels(target)).toEqual(['Gaussian Blur', 'VHS', 'Track Matte']);
 
     flushSync(() => registration?.dispose());
-    expect(labels(target)).toEqual(['Gaussian Blur']);
+    expect(labels(target)).toEqual(['Gaussian Blur', 'Track Matte']);
 
     signals.dispose();
     resetKernelSignals();
@@ -178,8 +179,8 @@ describe('FxBrowserPanel', () => {
     });
 
     expect([...definitions].map(([id, definition]) => [id, definition.title, definition.size])).toEqual([
-      ['assets', 'Media', 200],
-      ['fxbrowser', 'Effects', 240],
+      ['assets', 'Project', 200],
+      ['fxbrowser', 'Effects & Presets', 240],
       ['mixer', 'Mixer', 300],
       ['workspaces', 'Workspaces', 200],
       ['takes', 'Takes', 180],
@@ -189,5 +190,37 @@ describe('FxBrowserPanel', () => {
       expect(definition.persist).toBe(true);
       expect(definition.build).toBeTypeOf('function');
     }
+  });
+});
+
+it('browses registry metadata without translating unused shader definitions',async()=>{
+ const PM=basePM({Kernel:{effects:{list:()=>[{id:'lazy',label:'Lazy effect',group:'Channel'}]}}});Object.defineProperty(PM,'FX',{get(){throw new Error('Unused shader translation must stay lazy');}});window.PM=PM as any;const{target,component}=mountPanel();expect(labels(target)).toEqual(['Lazy effect', 'Track Matte']);await unmount(component);
+});
+
+describe('FxBrowserPanel tree', () => {
+  it('applies on double-click and folds a family shut', async () => {
+    const PM = basePM();
+    window.PM = PM as any;
+    const { target, component } = mountPanel();
+    const pick = target.querySelector<HTMLButtonElement>('.fxb-pick')!;
+    flushSync(() => pick.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+    expect(PM.Edit.apply).toHaveBeenCalledWith({ type: 'add_effect', target: 'layer-1', effect: 'blur' }, { label: 'Add Gaussian Blur', origin: 'fx-browser' });
+    // Applying it also lists it under Recently Used, ahead of the families.
+    expect(secs(target)[0]).toBe('Recently Used');
+    const blur = [...target.querySelectorAll<HTMLButtonElement>('.fxb-sec')].find((node) => node.textContent?.trim() === 'Blur')!;
+    flushSync(() => blur.click());
+    expect(labels(target)).not.toContain('Sharpen');
+    expect(blur.getAttribute('aria-expanded')).toBe('false');
+    await unmount(component);
+  });
+
+  it('applies Track Matte by matting the layer to the one above it', async () => {
+    const above = { id: 'above', type: 'shape' }, layer = { id: 'layer-1', type: 'text' };
+    const PM = basePM({ proj: { layers: [above, layer] }, firstSel: () => layer });
+    window.PM = PM as any;
+    const { target, component } = mountPanel();
+    flushSync(() => target.querySelector<HTMLButtonElement>('button[aria-label="Add Track Matte"]')!.click());
+    expect(PM.Edit.apply).toHaveBeenCalledWith({ type: 'set_layer', target: 'layer-1', patch: { matteSource: 'above' } }, { label: 'Add Track Matte', origin: 'fx-browser' });
+    await unmount(component);
   });
 });

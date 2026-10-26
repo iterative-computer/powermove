@@ -1,3 +1,4 @@
+import { publishVisualReply } from '../../panels/agent/publish-visual-reply';
 import { workspaceImportHandoff } from '../../onboarding/workspace-import';
 import { createForkUpdater } from '../../shell/update-fork';
 import { WORKSPACE_IMPORT_PROMPT, expandAgentRequest } from '../../../../shared/creative-workspace';
@@ -238,7 +239,7 @@ PM.AgentArtifacts = {
     const id: any = PM.uid('agent-artifact-');
     return new Promise((resolve: any, reject: any) => {
       const timer: any = window.setTimeout(() => { artifactPending.delete(id); reject(new Error('The artifact took too long to load')); }, 120_000);
-      artifactPending.set(id, { resolve, reject, timer });
+      artifactPending.set(id, { resolve, reject, timer, artifact: { projectId: artifact.projectId, path: artifact.path } });
       bridge.postMessage({ id, projectId: artifact.projectId, path: artifact.path });
     });
   },
@@ -249,7 +250,9 @@ PM.AgentArtifacts = {
     try {
       const bytes: any = result.data instanceof Uint8Array ? result.data
         : Uint8Array.from(window.atob(result.dataBase64 || ''), (character: any) => character.charCodeAt(0));
-      job.resolve(new window.File([bytes], result.name || 'agent-artifact', { type: result.mime || 'application/octet-stream' }));
+      const file = new window.File([bytes], result.name || 'agent-artifact', { type: result.mime || 'application/octet-stream' });
+      Object.defineProperty(file, '__powermoveArtifact', { value: job.artifact });
+      job.resolve(file);
     } catch { job.reject(new Error('The artifact could not be decoded')); }
   },
   reveal(artifact: any) {
@@ -887,6 +890,11 @@ const Spatial: any = {
   canSwitchRunProject(runId: string) {
     const session = [...sessions.values()].find(item => item.codexRequestId === runId);
     return !session || session.projectId === APP_AGENT_PROJECT_ID;
+  },
+  publishVisualReply(runId: string, value: unknown) {
+    return publishVisualReply({ runId, value, sessions: sessions.values(), busy: sessionBusy,
+      archive: projectId => threadArchives.get(projectId), uid: prefix => PM.uid(prefix),
+      changed: session => touch(session, { flush: true }) });
   },
   assertRunProject(runId: string) {
     const session = [...sessions.values()].find(item => item.codexRequestId === runId);
@@ -2183,7 +2191,7 @@ async function runAutonomousRequest({ session, request, token, controller, acces
   const checkpoint = createAgentCheckpoint(PM, checkpointLabel);
   const projectJSON = agentProjectSnapshot(PM.proj);
   const placementInstructions = uiPlacementInstructions(PM.WS?.current);
-  const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual() : Promise.resolve({ state: {}, times: [], images: [] });
+  const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : Promise.resolve({ state: {}, times: [], images: [] });
   let [observation]: any = await Promise.all([
     observationPromise,
     new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
@@ -2298,7 +2306,7 @@ async function runAutonomousRequest({ session, request, token, controller, acces
       proposalRevision = Number(PM.proj.revision) || 0;
       proposalChangeSerial = projectChangeSerial;
       session.activity = 'Project changed — reconciling with the latest version…'; touch(session);
-      observation = PM.AgentHarness ? await PM.AgentHarness.observeVisual() : { state: {}, times: [], images: [] };
+      observation = PM.AgentHarness ? await PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : { state: {}, times: [], images: [] };
       await waitForSessionProject(session, controller.signal);
       if (token !== session.requestToken) return;
       const reconcileRequest: any = `Reconcile the autonomous agent's proposed Powermove source edits with the project as it exists now.
@@ -2413,7 +2421,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
     checkpoint.historyId = liveEditsApplied
       ? (typeof raw === 'object' ? raw?.liveEditHistoryId || null : null)
       : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
-    const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observeVisual() : observation;
+    const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : observation;
     if (finalFrames.visualError) reviewError += `${reviewError ? ' ' : ''}${finalFrames.visualError}`;
     await waitForSessionProject(session, controller.signal);
     if (token !== session.requestToken || controller.signal.aborted) return;
@@ -2462,7 +2470,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
         : attemptedImports ? 'Media import verification did not finish within the repair limit.' : result.extensions.length ? 'The last extension update loaded, but its live verification did not finish within the repair limit.' : 'The last composition repair has not been reviewed within the repair limit.';
     }
     if (token !== session.requestToken) return;
-    run.reviewError = runs.map(entry => entry.reviewError).filter(Boolean).join(' ');
+    run.reviewError = [...new Set(runs.map(entry => entry.reviewError).filter(Boolean))].join(' ');
     finishSteps(session);
     archiveAutonomousReply(session, result.summary, result.notes);
     // Refresh earlier contributions' health after the last verification, without
@@ -2474,7 +2482,10 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       session.conversation.push({ role: 'assistant', text: `${change.action === 'removed' ? 'Removed' : change.action === 'created' ? 'Added' : 'Updated'} mod ${name}`,
         modResult: { id: change.id, name, action: change.action, status: change.action === 'removed' ? 'removed' : error || run.reviewError ? 'error' : 'ready' } });
     }
-    if (run.reviewError) session.conversation.push({ role: 'assistant', text: run.reviewError });
+    if (run.reviewError) {
+      session.conversation.push({ role: 'assistant', text: run.reviewError });
+      run.reviewErrorInConversation = true;
+    }
     session.run = {
       ...run, undoRuns: runs,
       changed: runs.some(entry => entry.changed),
@@ -2602,7 +2613,7 @@ async function runEditorRequest({ session, request, token, controller, focus, co
     /* Let the send handoff finish before the next progress render replaces the
        message DOM. Observation still runs immediately, so the beat adds only
        the portion of the 240 ms transition that useful work did not consume. */
-    const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual() : Promise.resolve({ state: {}, times: [], images: [] });
+    const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual(undefined, { signal: controller.signal }) : Promise.resolve({ state: {}, times: [], images: [] });
     const [observation]: any = await Promise.all([
       observationPromise,
       new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
@@ -2717,6 +2728,7 @@ async function sendRequest(input: any) {
     const attachmentContext: any = steeringAttachments.map((item: any) => ({
       name: item.name,
       type: item.type,
+      note: item.promptNote,
       content: item.content ? String(item.content).slice(0, 30_000) : undefined,
     }));
     const steeringImages: any = steeringAttachments
@@ -2867,7 +2879,7 @@ function agentPrompt(request: any, observation: any, steering: any = false, focu
   const commands: any = Object.values(PM.commands || {}).map((c: any) => ({ id: c.id, label: c.label }));
   const attachedFiles: any = session.requestAttachments.slice(0, 6).map((item: any) => ({
     name: item.name, type: item.type, content: item.content ? item.content.slice(0, 30_000) : undefined,
-    image: !!item.dataUrl,
+    image: !!item.dataUrl, note: item.promptNote,
   }));
   const editableSource: any = boundedEditableSource(
     PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {},
@@ -3604,6 +3616,9 @@ async function undoSceneRun() {
 
 function onKey(event: any) {
   if (!S.active) return;
+  // A deliberately expanded attachment owns Escape; it must not cancel a run
+  // or undo the result behind its modal dialog.
+  if (document.querySelector('.visual-reply dialog[open]')) return;
   if (event.key === 'Escape') {
     event.preventDefault(); event.stopPropagation();
     if (S.phase === 'applying') return;

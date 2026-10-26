@@ -5,9 +5,11 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../../../../shared/project-incremental';
 import { Sha256, sha256HexOf } from '../../../../shared/sha256';
 import type { PowermoveBridge, FileSaveResult } from '../../../../shared/ipc';
+import { writeBlobChunks } from './blob-chunks';
+import type { MediaReadSource } from '../../../../shared/media-source';
 
-type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
-  getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null> };
+type MediaStore = { get(asset: any, options?: { signal?: AbortSignal }): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
+  getForSave?(asset: any): Promise<{ blob?: Blob; source?: MediaReadSource; revision: string; linked?: boolean } | null> };
 
 /** Include media reachable only by undo/redo, such as a deleted image. */
 function fileAssets(document: any): Record<string, any> {
@@ -23,57 +25,106 @@ function fileAssets(document: any): Record<string, any> {
   return Object.assign(assets, (document.proj || document).assets || {});
 }
 
+/** Prepare one record at a time. Native sources are small immutable range
+ * capabilities; no complete media response is retained before Save begins. */
+async function readProjectMedia(assets: Array<readonly [string, any]>, store: MediaStore, revisions: boolean,
+  onProgress?: (value: number) => void, signal?: AbortSignal): Promise<Array<{ id: string; asset: any; blob?: Blob; source?: MediaReadSource; revision?: string }>> {
+  const sources: Array<{ id: string; asset: any; blob?: Blob; source?: MediaReadSource; revision?: string }> = [];
+  let processed = 0;
+  for (const [id, asset] of assets) {
+    signal?.throwIfAborted();
+    try {
+      const saved = revisions && store.getForSave ? await store.getForSave(asset) : null;
+      const source = saved?.source;
+      const blob = saved?.blob ?? (revisions && store.getForSave ? null : await store.get(asset, { signal }));
+      signal?.throwIfAborted();
+      if (source || blob) sources.push({ id, asset, blob: blob ?? undefined, source, revision: saved?.revision });
+      onProgress?.(++processed / assets.length);
+    } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
+      throw new Error(`Could not prepare media “${asset.name || id}”: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+  }
+  return sources;
+}
+
 /** Pin immutable Blobs and their storage revisions before any native upload.
  * Only the main process decides which prior file ranges may be reused. */
 export async function saveIncrementalProject(document: any, serialized: string, store: MediaStore,
-  bridge: NonNullable<PowermoveBridge['projectSave']>, metadata: { name: string; projectId: string; saveAs: boolean },
-  progress: (value: number) => void): Promise<FileSaveResult> {
+  bridge: NonNullable<PowermoveBridge['projectSave']>, metadata: { name: string; projectId: string; saveAs: boolean; background?: boolean },
+  progress: (value: number) => void, signal?: AbortSignal): Promise<FileSaveResult> {
   const assets = Object.entries<any>(fileAssets(document)).map(([id, asset]) => [id, { ...asset }] as const);
-  const sources = new Map<string, Blob>(), media: SaveMedia[] = [];
-  for (const [id, asset] of assets) {
-    const saved = store.getForSave ? await store.getForSave(asset) : null;
-    const blob = saved?.blob ?? (store.getForSave ? null : await store.get(asset));
-    if (!blob) continue;
-    sources.set(id, blob);
-    media.push({ id, revision: saved?.revision || crypto.randomUUID(), type: blob.type || asset.type || '', length: blob.size });
+  const sources = new Map<string, { blob?: Blob; source?: MediaReadSource; asset: any }>(), media: SaveMedia[] = [];
+  for (const { id, asset, blob, source, revision } of await readProjectMedia(assets, store, true, undefined, signal)) {
+    const data = source ?? blob!;
+    sources.set(id, { blob, source, asset });
+    media.push({ id, revision: revision || crypto.randomUUID(), type: data.type || asset.type || '', length: data.size });
   }
   const documentBlob = new Blob(await encodeTextChunks(serialized) as BlobPart[]);
+  signal?.throwIfAborted();
   progress(.3);
   const begin = await bridge.begin({ ...metadata, documentBytes: documentBlob.size, media });
   if (!begin.ok) return begin;
   try {
-    const total = documentBlob.size + begin.required.reduce((sum, id) => sum + (sources.get(id)?.size || 0), 0);
+    const total = documentBlob.size + begin.required.reduce((sum, id) => sum + (sources.get(id)?.source?.size ?? sources.get(id)?.blob?.size ?? 0), 0);
     let uploaded = 0;
     for (const id of [null, ...begin.required]) {
-      const blob = id === null ? documentBlob : sources.get(id);
-      if (!blob) throw new Error('The save requested unavailable media.');
-      for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
-        const data = new Uint8Array(await blob.slice(offset, offset + 1024 * 1024).arrayBuffer());
-        await bridge.chunk(begin.token, id, data);
-        uploaded += data.length; progress(.3 + .6 * uploaded / total);
+      signal?.throwIfAborted();
+      const saved = id === null ? { blob: documentBlob, source: undefined, asset: undefined } : sources.get(id);
+      if (!saved) throw new Error('The save requested unavailable media.');
+      const { blob, source, asset } = saved;
+      try {
+        if (source) {
+          const digest = source.sha256 ? new Sha256() : undefined;
+          for (let offset = 0; offset < source.size; offset += 1024 * 1024) {
+            signal?.throwIfAborted();
+            const length = Math.min(1024 * 1024, source.size - offset);
+            const bytes = await source.read(offset, length, signal);
+            signal?.throwIfAborted();
+            if (!(bytes instanceof Uint8Array) || bytes.length !== length) throw new Error('The project media is incomplete.');
+            digest?.update(bytes);
+            await bridge.chunk(begin.token, id, bytes);
+            uploaded += bytes.length; progress(.3 + .6 * uploaded / total);
+          }
+          if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
+        } else if (id !== null) {
+          await writeBlobChunks(blob!, async data => {
+            signal?.throwIfAborted();
+            await bridge.chunk(begin.token, id, data);
+            uploaded += data.length; progress(.3 + .6 * uploaded / total);
+          }, 1024 * 1024, signal);
+        } else {
+          for (let offset = 0; offset < blob!.size; offset += 1024 * 1024) {
+            signal?.throwIfAborted();
+            const data = new Uint8Array(await blob!.slice(offset, offset + 1024 * 1024).arrayBuffer());
+            signal?.throwIfAborted();
+            await bridge.chunk(begin.token, id, data);
+            uploaded += data.length; progress(.3 + .6 * uploaded / total);
+          }
+        }
+      } catch (error) {
+        if (signal?.aborted) signal.throwIfAborted();
+        throw new Error(`Could not save ${id === null ? 'the project document' : `media “${asset?.name || id}”`}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     }
+    signal?.throwIfAborted();
     return await bridge.finish(begin.token);
   } finally { await bridge.abort(begin.token).catch(() => undefined); }
 }
 
 /** Embed available media; keep missing-media references editable on reopening. */
-export async function packProjectFileBlob(snapshot: string | any, store: MediaStore, serialized?: string, onProgress?: (value: number) => void): Promise<Blob> {
+export async function packProjectFileBlob(snapshot: string | any, store: MediaStore, serialized?: string, onProgress?: (value: number) => void, signal?: AbortSignal): Promise<Blob> {
   const document = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
   const assets = fileAssets(document);
   const media: Array<{ id: string; type: string; data: Blob }> = [];
   const documentJSON = serialized ?? await stringifyAsync(document);
   const documentBytes = await encodeTextChunks(documentJSON);
-  const entries = Object.entries<any>(assets);
-  let processed = 0;
-  for (const [id, asset] of entries) {
-    const blob = await store.get(asset);
-    onProgress?.(++processed / entries.length);
+  for (const { id, asset, blob } of await readProjectMedia(Object.entries<any>(assets), store, false, onProgress, signal)) {
     // Missing sources (including deleted assets retained by undo/redo) must not
     // prevent saving edits. Their metadata stays in the document and history.
-    if (!blob) continue;
-    media.push({ id, type: blob.type || asset.type || '', data: blob });
+    media.push({ id, type: blob!.type || asset.type || '', data: blob! });
   }
+  signal?.throwIfAborted();
   const packed = encodeProjectContainerBlob(documentBytes, media);
   return packed;
 }

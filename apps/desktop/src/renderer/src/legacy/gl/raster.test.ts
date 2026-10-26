@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { makePM } from '../__tests__/make-pm';
+import { install as installMedia } from '../core/media';
 import { install, videoImportFailureMessage, waitForPresentedVideoFrame } from './raster';
 import { restoreProjectFileStream } from '../core/project-file';
 
@@ -610,4 +611,67 @@ it('restores OBJ assets beyond 64 MB without marking their geometry missing', as
   await PM.assets.restoreProject(project);
   expect(PM.assets.get('model')?.mesh.triangleCount).toBe(1);
   expect(PM.assets.get('model')?.size).toBe(blob.size);
+});
+
+describe('responsive media batches', () => {
+  function batch() {
+    const PM = rasterRegistry({
+      proj: { id: 'original', assets: {}, layers: [], comps: {} },
+      uid: (() => { let n = 0; return () => `a${++n}`; })(),
+      touch: vi.fn(), bus: { emit: vi.fn(), on: vi.fn() },
+    });
+    Object.assign(window, { navigator: { hardwareConcurrency: 4 },
+      URL: { revokeObjectURL: vi.fn() } });
+    installMedia(PM);
+    PM.MediaStore.put = vi.fn(async () => true);
+    PM.Audio = { accepts: () => true, rebalanceCache: vi.fn(), disposeAsset: vi.fn(),
+      prepareAsset: vi.fn(async ({ id, name, blob }: any) => ({ id, name, kind: 'audio', audioBlob: blob, dur: 1, size: blob.size })),
+    };
+    const file = (name: string) => Object.assign(new Blob([name], { type: 'audio/wav' }), { name });
+    return { PM, file };
+  }
+
+  it('keeps order and partial success when one decode fails, without storing failed bytes', async () => {
+    const { PM, file } = batch();
+    const prepare = PM.Audio.prepareAsset.getMockImplementation();
+    PM.Audio.prepareAsset.mockImplementation((options: any) => options.name === 'bad.wav'
+      ? Promise.reject(new Error('Damaged audio')) : prepare(options));
+    let heartbeat = false;
+    setTimeout(() => { heartbeat = true; }, 0);
+    const results = await PM.assets.importBatch([file('one.wav'), file('bad.wav'), file('three.wav')]);
+    expect(heartbeat).toBe(true);
+    expect(results.map((r: any) => r.status)).toEqual(['created', 'failed', 'created']);
+    expect(results[1].error.message).toBe('Damaged audio');
+    expect(Object.values(PM.proj.assets).map((a: any) => a.name).sort()).toEqual(['one.wav', 'three.wav']);
+    expect(PM.MediaStore.put).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels preparation before storage, disposes runtime and allows a later import', async () => {
+    const { PM, file } = batch(), controller = new AbortController();
+    const prepare = PM.Audio.prepareAsset.getMockImplementation();
+    PM.Audio.prepareAsset.mockImplementationOnce(async (options: any) => {
+      controller.abort(); return prepare(options);
+    });
+    const results = await PM.assets.importBatch([file('one.wav'), file('two.wav')], { concurrency: 1, signal: controller.signal });
+    expect(results.map((r: any) => r.status)).toEqual(['cancelled', 'cancelled']);
+    expect(PM.Audio.disposeAsset).toHaveBeenCalledOnce();
+    expect(PM.MediaStore.put).not.toHaveBeenCalled();
+    expect(PM.assets.map.size).toBe(0);
+    expect(PM.proj.assets).toEqual({});
+    const retry = await PM.assets.importBatch([file('retry.wav')]);
+    expect(retry[0].status).toBe('created');
+  });
+
+  it('never starts later files in a newly selected project', async () => {
+    const { PM, file } = batch();
+    const original = PM.proj, next = { id: 'next', assets: {}, layers: [], comps: {} };
+    const results = await PM.assets.importBatch([file('one.wav'), file('two.wav')], {
+      concurrency: 1, onProgress: () => { PM.proj = next; },
+    });
+    expect(results.map((r: any) => r.status)).toEqual(['created', 'failed']);
+    expect(results[1].error.message).toMatch(/switched projects/);
+    expect(Object.keys(original.assets)).toHaveLength(1);
+    expect(next.assets).toEqual({});
+    expect(PM.Audio.prepareAsset).toHaveBeenCalledOnce();
+  });
 });

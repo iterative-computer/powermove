@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest';
 
-import { addPanel, applyPanelSize, ensureDockFill, movePanel, type DockSpec, type Workspace } from './model';
+import { addPanel, applyPanelSize, ensureDockFill, movePanel, panelFlex, panelFloor, type DockSpec, type Workspace } from './model';
 
 describe('set-height panels', () => {
   it('pins the agent and gives spare dock height to an eligible neighbour', () => {
@@ -45,5 +45,62 @@ describe('set-height panels', () => {
     ensureDockFill({ id: 'left', panels: [{ id: 'assets' }, spec] });
     applyPanelSize(element, spec, { size: 350 });
     expect(element.style.flex).toBe('0 0 420px');
+  });
+});
+
+describe('content-height panels', () => {
+  it('show every row in a side column and let the column scroll', () => {
+    const element = document.createElement('div');
+    const fluid = { id: 'inspector', flex: true };
+
+    applyPanelSize(element, fluid, { fitContent: true }, 'right');
+    expect(element.style.flex).toBe('1 0 auto');
+    // No usable-height floor: the rows are the height.
+    expect(element.style.minHeight).toBe('88px');
+
+    const sized = { id: 'inspector', size: 640 };
+    applyPanelSize(element, sized, { fitContent: true }, 'right');
+    expect(element.style.flex).toBe('0 0 auto');
+    // A dragged height adds room below the rows; it never caps them.
+    expect(element.style.minHeight).toBe('640px');
+    expect(panelFloor(sized, { fitContent: true }, 'right')).toBe(640);
+  });
+
+  it('keep their ordinary sizing outside side columns', () => {
+    const element = document.createElement('div');
+    applyPanelSize(element, { id: 'inspector', flex: true }, { fitContent: true }, 'center');
+    expect(element.style.flex).toBe('1 1 auto');
+    expect(panelFlex({ id: 'inspector', size: 300 }, { fitContent: true }, 'bottom')).toBe('0 0 300px');
+  });
+});
+
+describe('tab stacks', () => {
+  it('stacks consecutive panels that share a group and shows the active one', async () => {
+    const { dockSlots } = await import('./model');
+    const slots = dockSlots([
+      { id: 'assets', flex: true, group: 'project' },
+      { id: 'layer-effects', group: 'project', active: true },
+      { id: 'agent', size: 300 },
+      { id: 'notes', group: 'project' },
+    ]);
+    expect(slots.map((slot) => [slot.specs.map((spec) => spec.id), slot.active.id])).toEqual([
+      [['assets', 'layer-effects'], 'layer-effects'],
+      [['agent'], 'agent'],
+      [['notes'], 'notes'],
+    ]);
+  });
+
+  it('switching tabs hands the slot size to the newly shown panel', async () => {
+    const { activateTab } = await import('./model');
+    const ws: any = { layout: { docks: [{ id: 'left', panels: [
+      { id: 'assets', group: 'project' },
+      { id: 'layer-effects', group: 'project', active: true, size: 420 },
+    ] }] } };
+    expect(activateTab(ws, 'assets')).toBe(true);
+    expect(ws.layout.docks[0].panels).toEqual([
+      { id: 'assets', group: 'project', active: true, size: 420 },
+      { id: 'layer-effects', group: 'project', size: 420 },
+    ]);
+    expect(activateTab(ws, 'assets')).toBe(false);
   });
 });

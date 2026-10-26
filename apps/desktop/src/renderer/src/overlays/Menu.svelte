@@ -119,6 +119,7 @@
         class:disabled={!!item.disabled}
         class:curve-option={!!item.curve}
         role="menuitem"
+        aria-haspopup={item.submenu ? 'menu' : undefined}
         aria-disabled={!!item.disabled}
         tabindex="-1"
         onclick={(event) => {
@@ -145,6 +146,8 @@
         <span>{item.label}</span>
         {#if item.kb}
           <span class="kb">{item.kb}</span>
+        {:else if item.submenu}
+          <span class="kb" aria-hidden="true">›</span>
         {/if}
       </button>
     {/if}

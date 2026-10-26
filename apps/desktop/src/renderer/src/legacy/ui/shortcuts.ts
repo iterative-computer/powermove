@@ -1,3 +1,4 @@
+import { remapLayerInputs } from '../../core/effect-inputs';
 import { installLayerMenu } from './layer-menu';
 import { installParentPickwhip } from './parent-pickwhip';
 import { evaluatedValue } from '../core/content-properties';
@@ -202,6 +203,7 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
       select: true,
     };
   }
+  if(a.kind==='lut')return null;
   const type: any = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
   const content: any = type === 'audio'
     ? { asset: id, trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 }
@@ -437,7 +439,7 @@ def('zoomIn', 'Zoom in', '.', () => zoomViewer(PM, 1.25), 'View', preserveFalse)
 def('zoomOut', 'Zoom out', ',', () => zoomViewer(PM, .8), 'View', preserveFalse);
 def('actualSize', 'Actual size', '/', () => setViewerZoom(PM, 1), 'View', preserveFalse);
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
-def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
+def('agent', 'Ask Powermove agent', '⌘⇧K', () => { if (!PM.ProjectsScreen?.isOpen) PM.SpatialAssistant?.open?.(); }, 'View');
 def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.isOpen ? PM.SettingsUI.close?.() : PM.SettingsUI?.open?.(), 'View');
 def('projectSettings', 'Project settings…', '⌘⇧,', () => PM.SettingsUI?.open?.('project'), 'File');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
@@ -451,6 +453,23 @@ def('newProject', 'New project', '⌥⌘N', () => PM.newProject(), 'File');
 def('newComposition', 'New composition…', '⌘N', () => compositionSettingsDialog(PM), 'Composition');
 def('compositionSettings', 'Composition settings…', '⌥⌘K', (id?: any) => compositionSettingsDialog(PM, typeof id === 'string' ? id : PM.Comps.active()), 'Composition');
 def('precompose', 'Pre-compose…', '⇧⌘C', () => precomposeDialog(PM), 'Layer');
+def('releasePrecomp', 'Release pre-comp', null, (id?: any) => {
+  const layer = PM.L(typeof id === 'string' ? id : PM.sel.layers[0]);
+  const issue = PM.Comps.releaseIssue(layer);
+  if (issue) { PM.toast?.(issue); return; }
+  try { PM.Comps.release(layer.id); } catch (error) { PM.toast?.(error instanceof Error ? error.message : String(error), 4000, { error: true }); }
+}, 'Layer');
+/* The timeline's layer switches as commands, so ⌘K and menus reach them. */
+const toggleLayerSwitch = (field: 'threeD' | 'continuousRaster', label: string, applies: (layer: any) => boolean) => {
+  const layers = (PM.sel.layers as string[]).map((id) => PM.L(id)).filter((layer: any) => layer && applies(layer));
+  if (!layers.length) { PM.toast?.(`Select a layer that has a ${label} switch`); return false; }
+  const on = !layers.every((layer: any) => !!layer[field]);
+  return PM.Edit.apply(layers.map((layer: any) => ({ type: 'set_layer', target: layer.id, patch: { [field]: on } })), { label, origin: 'command-palette' });
+};
+def('toggle3DLayer', '3D Layer', null, () => toggleLayerSwitch('threeD', '3D layer',
+  (layer: any) => PM.TYPE_META[layer.type]?.transform !== false && layer.type !== 'audio' && layer.type !== 'adjustment'), 'Layer');
+def('toggleContinuousRaster', 'Continuously Rasterize', null, () => toggleLayerSwitch('continuousRaster', 'Continuously rasterize',
+  (layer: any) => layer.type === 'precomp'), 'Layer');
 def('openComposition', 'Open composition', null, (id?: any) => PM.Comps.open(id), 'Composition', hidden);
 def('closeComposition', 'Close composition', null, (id?: any) => PM.Comps.close(id ?? PM.Comps.active()), 'Composition', hidden);
 def('addCompositionToTimeline', 'Add composition to timeline', null, (id?: any, options?: any) => PM.Comps.addToTimeline(id, options), 'Composition', hidden);
@@ -811,6 +830,7 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
       else clone.parent = source.parent && currentIds.has(source.parent) ? source.parent : null;
       clone.group = idMap.get(source.group) || (currentIds.has(source.group) ? source.group : null);
       if (source.matteSource && idMap.has(source.matteSource)) clone.matteSource = idMap.get(source.matteSource);
+      remapLayerInputs(clone, idMap);
       return clone;
     });
     layers.splice(insertAt, 0, ...pasted);

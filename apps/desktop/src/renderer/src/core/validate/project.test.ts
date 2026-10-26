@@ -229,7 +229,7 @@ describe('sanitizeProject', () => {
 
     const bad = project.layers[0];
     expect(bad?.type).toBe('null');
-    expect(bad).toMatchObject({ name: 'Layer 1', from: -8, dur: 5, parent: null, fx: [] });
+    expect(bad).toMatchObject({ name: 'Layer 1', from: -8, dur: 5, parent: null, fx: [{ type: 'made-up', version: 1, p: {} }] });
     expect(Object.keys(bad?.p ?? {})).toEqual(Object.keys((project.layers[2] as Exclude<Layer, { type: 'audio' }>).p));
     expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.v : null).toBe(100);
     expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf : []).toHaveLength(1);
@@ -471,4 +471,20 @@ describe('sanitizeProject', () => {
     expect(layer.fx[0]).toMatchObject({ id: 'grade-color', type: 'color', on: true });
     expect(layer.masks[0]).toMatchObject({ id: 'grade-mask', shape: 'ellipse', mode: 'add', on: true });
   });
+});
+
+it('preserves registered-extension IDs, missing providers and implementation revisions through typed hydration', () => {
+  const PM = makePM('core/easing', 'core/model');
+  const raw = PM.mkProject({ w: 640, h: 360 });
+  const layer = PM.mkLayer('shape', {}, raw);
+  layer.fx = [
+    { id: 'old', type: 'invert', on: true, p: { amount: { v: 37, kf: [], expr: null } } },
+    { id: 'new', type: 'shiftChannels', version: 1, on: true, p: {} },
+    { id: 'future', type: 'custom.effect', version: 99, missing: true, on: true, p: {} },
+  ];
+  raw.layers = [layer];
+  const restored = sanitizeProject(raw);
+  expect(restored.layers[0]?.fx.map(effect => [effect.type, effect.version, effect.missing])).toEqual([
+    ['invert', 1, undefined], ['shiftChannels', 1, undefined], ['custom.effect', 99, true],
+  ]);
 });

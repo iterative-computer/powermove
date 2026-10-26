@@ -68,3 +68,21 @@ it('can reconnect after an earlier discovery retry failed while the app was stop
   await host(root);
   await expect(client.listTools()).resolves.toEqual([{ name: 'start_session' }]);
 });
+
+it('reports when the app ends the connection, but not when the client closes it', async () => {
+  const root = await profile(), first = await host(root);
+  const onHostClosed = vi.fn();
+  const client = await connectMcpHost(root, { onHostClosed });
+  cleanup.push(() => client.close());
+  await client.listTools();
+  await first.close();
+  await vi.waitFor(() => expect(onHostClosed).toHaveBeenCalledOnce());
+
+  const second = await host(root);
+  const quiet = vi.fn();
+  const other = await connectMcpHost(root, { onHostClosed: quiet });
+  await other.close();
+  await second.close();
+  await new Promise(resolve => setImmediate(resolve));
+  expect(quiet).not.toHaveBeenCalled();
+});

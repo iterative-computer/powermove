@@ -26,7 +26,7 @@ test('expanding a layer strip immediately shows its existing keyframed propertie
     const row = timeline.rows.findIndex((item: any) => item.kind === 'layer' && item.L.id === id);
     const box = timeline.cv.getBoundingClientRect();
     return {
-      x: box.x + 66,
+      x: box.x + 87,
       y: box.y + timeline.ruler + row * timeline.row - timeline.scrollY + timeline.row / 2,
     };
   }, layerId);
@@ -61,17 +61,22 @@ test('disclosure shows only keyframed properties and refreshes animation changes
     const PM = (window as any).PM;
     const timeline = PM.Kernel.services.get('timeline');
     const box = timeline.cv.getBoundingClientRect();
-    return { x: box.x + 66, y: box.y + timeline.ruler + timeline.row / 2 };
+    return { x: box.x + 87, y: box.y + timeline.ruler + timeline.row / 2 };
   });
+  const collapsed = () => page.evaluate(() => { const PM = (window as any).PM; return PM.UIState.getLayerCollapsed(PM.proj.layers[0]); });
+  // With nothing keyframed there is no chevron, so the click opens nothing.
   await page.mouse.click(point.x, point.y);
   const rows = () => page.evaluate(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.filter((r: any) => r.kind === 'prop').map((r: any) => r.key); });
   await expect.poll(rows).toEqual([]);
-  expect(await rows()).not.toContain('skew');
+  expect(await collapsed()).toBe(true);
   // The same stopwatch operation used by Properties, without selection changes.
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.toggleStopwatch(PM.proj.layers[0], 'skew', 0);
   });
+  // A keyframe brings the chevron, and opening the layer lists it.
+  await page.mouse.click(point.x, point.y);
+  await expect.poll(collapsed).toBe(false);
   await expect.poll(rows).toEqual(['skew']);
   await page.evaluate(() => {
     const PM = (window as any).PM;

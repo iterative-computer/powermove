@@ -23,6 +23,20 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('cancels a multi-frame observation without mixing project state or images after a switch', async () => {
+    const PM = harnessEditor(), originalId = PM.proj.id;
+    PM.Export.snapshotAsync = vi.fn(async () => {
+      PM.proj = PM.mkProject({ name: 'Other project' });
+      return 'data:image/jpeg;base64,stale-frame';
+    });
+    const observation = await PM.AgentHarness.observeVisual([0, 1]);
+    expect(observation.cancelled).toBe(true);
+    expect(observation.images).toEqual([]);
+    expect(observation.state.composition.id).toBe(originalId);
+    expect(PM.Export.snapshotAsync).toHaveBeenCalledOnce();
+    expect(observation.visualError).toBe('');
+  });
+
   it('keeps oversized review context valid and directs discovery to complete live pages', async () => {
     const PM = harnessEditor();
     PM.proj.layers = [PM.mkLayer('text', { d: { text: 'Long content '.repeat(20_000) } })];

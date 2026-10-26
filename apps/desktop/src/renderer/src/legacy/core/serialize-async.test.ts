@@ -49,3 +49,16 @@ it('keeps large leaf-heavy checkpoints interruptible between bounded slices', as
   expect(yields).toBe(2);
   expect(await stringifyAsync(project, async () => {})).toBe(JSON.stringify(project));
 });
+
+it('does not expand a huge track before giving Cancel a chance to run', async () => {
+  let reads = 0, clock = 0;
+  const keys = new Proxy(Array.from({ length: 20_000 }, (_, i) => ({ t: i, v: i })), {
+    get(target, key, receiver) { if (typeof key === 'string' && /^\d+$/.test(key)) reads++; return Reflect.get(target, key, receiver); },
+  });
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 5);
+  try {
+    const cancelled = new Error('Cancel Close');
+    await expect(stringifyAsync(keys, async () => { throw cancelled; })).rejects.toBe(cancelled);
+    expect(reads).toBeLessThan(64);
+  } finally { now.mockRestore(); }
+});

@@ -1,3 +1,4 @@
+import { hasLayerInputs } from '../../core/effect-inputs';
 import { createAutomaticPreview } from './automatic-preview';
 import { createAutomaticPreviewVideos } from './automatic-preview-video';
 import { viewerService } from './services';
@@ -15,7 +16,9 @@ export function installAutomaticPreview(PM: any) {
       eligibilityProject = project; eligibilityVersion = version;
       const layers = PM.ProjectIndex?.allLayers?.() || project?.layers || [];
       // A single frozen source time cannot stand in for temporal video samples.
-      eligible = !(layers.some((layer: any) => layer.mblur)
+      // Input effects currently use invocation-owned dependency surfaces, not
+      // retained preview frames. Avoid competing speculative decoder work.
+      eligible = !hasLayerInputs(project, (fx:any)=>PM.effectDef?.(fx) ?? PM.Kernel?.effects?.get?.(fx.type)) && !(layers.some((layer: any) => layer.mblur)
         && layers.some((layer: any) => layer.type === 'video'));
     }
     return eligible;

@@ -38,6 +38,9 @@ export function parameterLayout(params: EffectParamDefinition[], authored?: Para
     const advanced=!rampColor && (param.advanced ?? (secondary.test(param.k)||(visible>=5&&!/^(amount|mix)$/i.test(param.k))));
     if (advanced) more.push(param); else {primary.push(param); visible++;}
   }
-  primary.sort((a,b)=>Number(/^(amount|mix)$/i.test(a.k))-Number(/^(amount|mix)$/i.test(b.k)));
+  // Automatic legacy layouts place Amount last; explicitly visible controls
+  // retain their authored order (for example Gaussian Blur and Unsharp Mask).
+  const trailing = (p: EffectParamDefinition) => p.advanced == null && /^(amount|mix)$/i.test(p.k);
+  primary.sort((a,b)=>Number(trailing(a))-Number(trailing(b)));
   return { widgets, primary, more };
 }

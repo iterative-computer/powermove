@@ -1,3 +1,4 @@
+import { createEditorClosePreparation } from './editor-close';
 import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
 import { registerClaudeDesktopMcp } from './claude-desktop-mcp';
@@ -73,8 +74,14 @@ import { registerMediaPasteIpc } from './media-paste';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
 import { openProjectForWindow, registerProjectOpenPathIpc, registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
+import { installStorageUpgrade, StorageUpgrade, visitSourceReferences } from './storage-upgrade';
+import { CACHE_BUDGET_BYTES, installStorageManagement } from './storage-management';
+import { LibraryMedia, registerLibraryMedia } from './library-media';
+import { agentWorkspaceRoot } from './codex/workspace';
+import { validatedArtifactPath } from './codex/artifacts';
 import { registerShellIpc } from './shell';
 import { registerRemoteMediaIpc } from './remote-media';
+import { isVisualReplyUrl, VISUAL_REPLY_CSP } from '../shared/visual-reply';
 import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSandboxCsp, sandboxFrameNavigationAllowed, sandboxHostOwner, sandboxProcessesToKill, type ContentsFrames } from './security-policy';
 import { SANDBOX_DOCUMENT, isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox-origin';
 import { EXTENSION_ID } from '../shared/extensions';
@@ -119,6 +126,8 @@ const userDataOverride = process.env['POWERMOVE_USER_DATA'];
 if (userDataOverride && path.isAbsolute(userDataOverride)) {
   app.setPath('userData', userDataOverride);
 }
+// Chromium manages its own HTTP cache; never trim a live cache by deleting files.
+app.commandLine.appendSwitch('disk-cache-size', String(CACHE_BUDGET_BYTES));
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 /* Any number of windows, each with its own project tabs. `editors` is the whole
@@ -135,6 +144,7 @@ let prefetchProject: (id: string | null) => Promise<void> = async () => {};
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
 let projects: ProjectFiles | null = null;
+let libraryMedia: LibraryMedia | null = null;
 const pendingOpenFiles: string[] = [];
 /* Editors whose current page has subscribed to projectOpenExternal. A message
    sent before that (on a cold start, `did-finish-load` comes first) is lost. */
@@ -180,25 +190,9 @@ function drainPendingOpenFiles(): void {
     });
   }
 }
-async function prepareEditorClose(window: BrowserWindow): Promise<void> {
-  if (window.isDestroyed() || window.webContents.isDestroyed()
-    || window.webContents.isCrashed()
-    || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
-  // User decisions and large file saves must not be cut off by the recovery-flush timeout.
-  const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
-  if (!allowed) throw new Error('Close cancelled');
-  await flushEditor(window);
-}
-async function flushEditor(window: BrowserWindow): Promise<void> {
-  if (window.isDestroyed() || window.webContents.isDestroyed()
-    || window.webContents.isCrashed()
-    || !isAllowedNavigation(window.webContents.getURL(),devRendererUrl)) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([window.webContents.executeJavaScript('window.PM?.flushProject?.()'),
-      new Promise<never>((_resolve,reject) => {timer=setTimeout(() => reject(new Error('Editor save timed out')),5000);})]);
-  } finally { clearTimeout(timer); }
-}
+const editorClose = createEditorClosePreparation(window => isAllowedNavigation(window.webContents.getURL(), devRendererUrl));
+let resetQuitPreparation = () => {};
+const prepareEditorClose = editorClose.prepare;
 
 function responseHeaders(contentType: string): Record<string, string> {
   return {
@@ -309,6 +303,8 @@ function registerAppProtocol(): void {
 
       const pathname = decodeURIComponent(requestUrl.pathname);
       const requestedPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+      if (requestedPath.startsWith('_media/')) return libraryMedia
+        ? libraryMedia.serve(requestedPath.slice('_media/'.length), request) : errorResponse(404, 'Not found');
       if (requestedPath.startsWith('ext/')) {
         const asset = await serveExtensionAsset(requestedPath);
         if (asset === null) return errorResponse(404, 'Not found');
@@ -328,6 +324,7 @@ function registerAppProtocol(): void {
       const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
       const headers = responseHeaders(contentType);
       if (relativePath === SANDBOX_PATH) headers['Content-Security-Policy'] = SANDBOX_CSP;
+      if (relativePath === 'visual-reply.html') headers['Content-Security-Policy'] = VISUAL_REPLY_CSP;
       if (relativePath.startsWith('host/') && relativePath.endsWith('.js')) headers['Access-Control-Allow-Origin'] = '*';
       if (/\.(?:woff2?|ttf|otf)$/i.test(relativePath)) headers['Access-Control-Allow-Origin'] = '*';
       return new Response(contents, { headers });
@@ -361,6 +358,9 @@ function secureWebContents(webContents: WebContents, devRendererUrl: string | un
   // will-navigate on the host, so they need their own hook. A Store
   // extension's frame may load its sandbox document on its own host only.
   webContents.on('will-frame-navigate', (event) => {
+    if (!event.isMainFrame && [event.frame, event.initiator].some(frame => {
+      try { return !!frame && isVisualReplyUrl(frame.url); } catch { return false; }
+    })) { event.preventDefault(); return; }
     if (!event.isMainFrame && sandboxFrameNavigationAllowed(event.url, [frameUrl(event.frame), frameUrl(event.initiator)])) return;
     guard(event, event.url);
   });
@@ -497,6 +497,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
       autoplayPolicy: 'no-user-gesture-required'
     }
   });
@@ -539,9 +540,10 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
     event.preventDefault();
     if (closing) return;
     closing = true;
-    void prepareEditorClose(window).then(() => {
+    void prepareEditorClose(window).then(() => editorClose.commit([window])).then(() => {
       if (!window.isDestroyed()) { closePrepared=true;window.close();closePrepared=false; }
     }).catch(error => {
+      editorClose.cancel(window);
       if (error.message === 'Close cancelled') return;
       console.error('Could not save before closing',error);
       // Keep the editable document open when its durable save fails.
@@ -549,7 +551,12 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
     }).finally(() => {closing=false;});
   });
 
+  window.webContents.on('will-prevent-unload', () => {
+    resetQuitPreparation();
+    editorClose.cancel(window);
+  });
   window.on('closed', () => {
+    editorClose.forget(window);
     editors.remove(window);
     persistOpenWindows();
   });
@@ -925,6 +932,11 @@ if (!hasSingleInstanceLock) {
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the settings and the active project must be ready before the window exists.
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
+    libraryMedia = new LibraryMedia(path.join(app.getPath('userData'), 'Media Store'), reference => validatedArtifactPath(
+      path.join(agentWorkspaceRoot(app.getPath('userData'), reference.projectId), 'artifacts'), reference.path),
+      async source => await cloudFileState(source) === 'local');
+    await libraryMedia.initialize();
+    registerLibraryMedia(ipcMain, libraryMedia, isTrustedSender);
     const store = createStore(path.join(app.getPath('userData'), 'store'));
     await store.load();
     prefetchProject = async id => { if (id) await store.preloadProject?.(id); };
@@ -957,8 +969,18 @@ if (!hasSingleInstanceLock) {
     registerWindowIpc();
     const quitBarrier = installQuitFlush(app, store, async () => {
       for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
+    }, {
+      commit: () => editorClose.commit(BrowserWindow.getAllWindows()),
+      cancel: () => { editorClose.cancelAll(); quitting = false; persistOpenWindows(); },
+      onError: error => {
+        if (error instanceof Error && error.message === 'Close cancelled') return;
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.webContents.isDestroyed()) void window.webContents.executeJavaScript("window.PM?.toast?.('Could not finish closing. Your projects are still open.',6000,{error:true})").catch(() => undefined);
+        }
+      },
     });
     quitPrepared = quitBarrier.isPrepared;
+    resetQuitPreparation = () => { quitBarrier.reset(); quitting = false; persistOpenWindows(); };
 
     const userDir = path.join(app.getPath('userData'), 'extensions');
     const buildDir = path.join(app.getPath('userData'), 'extensions-build');
@@ -1053,8 +1075,44 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'));
-    registerSaveIpc(ipcMain, { ...ctx, projects });
+    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), { nativeVersions: process.platform === 'darwin' });
+    const recoveryProjects = new ProjectFiles(path.join(app.getPath('userData'), 'recovery', 'files.json'), path.join(app.getPath('userData'), 'recovery', 'versions'), { recoveryDirectory: path.join(app.getPath('userData'), 'recovery', 'documents') });
+    let cleanupAgentCaches: (manual: boolean, dryRun?: boolean) => Promise<number> = async () => 0;
+    let agentStorageBusy: () => boolean = () => true;
+    const storageManagement = installStorageManagement(ipcMain, {
+      root: app.getPath('userData'),
+      settings: () => store.get?.('storageSettings'),
+      saveSettings: async (settings) => { store.set('storageSettings', settings); await store.flushAll(); },
+      cleanupBackups: budget => projects!.cleanupBackups(budget),
+      cacheBytes: () => session.defaultSession.getCacheSize(),
+      clearCaches: async () => { await session.defaultSession.clearCache(); await session.defaultSession.clearCodeCaches({}); },
+      reveal: async () => { const error = await shell.openPath(app.getPath('userData')); if (error) throw new Error(error); },
+      cleanupWorkspaces: manual => cleanupAgentCaches(manual),
+      cleanupMedia: () => libraryMedia!.collectUnused(),
+      workspaceCacheBytes: () => cleanupAgentCaches(true, true),
+      unusedMediaBytes: () => libraryMedia!.collectUnused(Date.now(), true),
+      isTrustedSender
+    });
+    app.once('will-quit', () => storageManagement.dispose());
+    installStorageUpgrade(ipcMain, new StorageUpgrade({
+      root: app.getPath('userData'),
+      measure: async () => (await storageManagement.service.status()).totalBytes,
+      exclusive: action => storageManagement.service.exclusive(action),
+      recovery: () => store.optimizeStorage!(),
+      sources: async () => {
+        await store.optimizeStorage!(value => visitSourceReferences(value, (key, source) => libraryMedia!.optimizeSource(key, source)));
+        await libraryMedia!.collectLinkedDuplicates();
+      },
+      cleanup: async () => {
+        if (agentStorageBusy()) throw new Error('AI work is active.');
+        await projects!.optimizeBackups();
+        await cleanupAgentCaches(true);
+        if (agentStorageBusy()) throw new Error('AI work started during cleanup.');
+        await session.defaultSession.clearCache();
+        await session.defaultSession.clearCodeCaches({});
+      }
+    }), isTrustedSender);
+    registerSaveIpc(ipcMain, { ...ctx, projects, recoveryProjects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
@@ -1075,6 +1133,7 @@ if (!hasSingleInstanceLock) {
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
     /* agent media tools: an asset's bytes as a file path (media-tools lane) */
     const mediaPaths = new MediaPathCache(path.join(app.getPath('userData'), 'Media Tool Cache'), {
+      libraryFile: key => libraryMedia!.fileFor(key),
       isLocal: async (file) => { const state = await cloudFileState(file); return state !== 'icloud' && state !== 'cloud'; }
     });
     registerMediaPathIpc(ipcMain, mediaPaths, ctx);
@@ -1274,6 +1333,9 @@ if (!hasSingleInstanceLock) {
     };
 
     registerCodexIpc(ipcMain, {
+      registerStorageCleanup: (cleanup, busy) => { cleanupAgentCaches = cleanup; agentStorageBusy = busy ?? (() => false); },
+      archivedArtifact: reference => libraryMedia!.archivedArtifact(reference),
+      forgetArchivedArtifacts: projectId => libraryMedia!.forgetArtifacts(projectId),
       acquireProject: id => store.acquireProject!(id),
       getWindow: () => currentEditor(),
       broadcast: (send) => {
@@ -1407,7 +1469,6 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // Closing the final window should also stop agents and background services.
+  app.quit();
 });

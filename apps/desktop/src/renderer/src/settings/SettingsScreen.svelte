@@ -12,8 +12,9 @@
   import Avatar from '../cloud/Avatar.svelte';
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
   import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
+  import StorageSettings from './StorageSettings.svelte';
 
-  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project' | 'memory';
+  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'storage' | 'project' | 'memory';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -38,7 +39,8 @@
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
         { id: 'transcription', label: 'Transcription', icon: 'waveform' },
-        { id: 'extensions', label: 'Extensions', icon: 'puzzle' }
+        { id: 'extensions', label: 'Extensions', icon: 'puzzle' },
+        { id: 'storage', label: 'Storage', icon: 'project' }
       ]
     }
   ];
@@ -85,6 +87,29 @@
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
   let columnEl = $state<HTMLElement | null>(null);
+  const SECTION_SCROLL_MS = 140;
+  let scrollFrame = 0;
+
+  function cancelSectionScroll(): void {
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+  }
+
+  // Manual scrolling always takes over. These listeners never consume input.
+  $effect(() => {
+    const node = scrollEl;
+    if (!node) return;
+    const media = matchMedia('(prefers-reduced-motion: reduce)');
+    const motionChanged = () => { if (media.matches) cancelSectionScroll(); };
+    const events = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+    for (const event of events) node.addEventListener(event, cancelSectionScroll, { passive: true });
+    media.addEventListener('change', motionChanged);
+    return () => {
+      cancelSectionScroll();
+      for (const event of events) node.removeEventListener(event, cancelSectionScroll);
+      media.removeEventListener('change', motionChanged);
+    };
+  });
   let matchedPages = $state<string[]>([]);
   let matchCount = $state(0);
   let lastFocus: HTMLElement | null = null;
@@ -172,6 +197,7 @@
   }
 
   export function open(target?: SettingsPage): void {
+    cancelSectionScroll();
     build();
     themeMode = PM.theme?.mode ?? 'system';
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
@@ -195,6 +221,7 @@
   }
 
   export function close(): void {
+    cancelSectionScroll();
     if (!shown) return;
     shown = false;
     searchText = '';
@@ -210,12 +237,30 @@
   }
 
   function show(id: SettingsPage, behavior: ScrollBehavior = 'smooth'): void {
+    cancelSectionScroll();
     page = id;
+    const node = scrollEl;
     const section = columnEl?.querySelector<HTMLElement>(`[data-settings-page="${id}"]`);
-    if (!scrollEl || !section) return;
-    const top = section.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top
-      + scrollEl.scrollTop - parseFloat(getComputedStyle(scrollEl).paddingTop);
-    scrollEl.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : behavior });
+    if (!node || !section) return;
+    const top = Math.max(0, Math.min(node.scrollHeight - node.clientHeight,
+      section.getBoundingClientRect().top - node.getBoundingClientRect().top
+        + node.scrollTop - parseFloat(getComputedStyle(node).paddingTop)
+        + (id === 'extensions' ? parseFloat(getComputedStyle(section).paddingTop) : 0)));
+    if (behavior !== 'smooth' || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      node.scrollTo({ top, behavior: 'instant' });
+      return;
+    }
+    const from = node.scrollTop;
+    if (Math.abs(top - from) < 1) return;
+    const started = performance.now();
+    const step = (now: number) => {
+      scrollFrame = 0;
+      if (!shown || !node.isConnected) return;
+      const progress = Math.min(1, (now - started) / SECTION_SCROLL_MS);
+      node.scrollTo({ top: from + (top - from) * (1 - (1 - progress) ** 3), behavior: 'instant' });
+      if (progress < 1) scrollFrame = requestAnimationFrame(step);
+    };
+    scrollFrame = requestAnimationFrame(step);
   }
 
   function syncSection(): void {
@@ -244,6 +289,7 @@
       syncSection();
     };
     update();
+    cancelSectionScroll();
     scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
     let frame = 0;
     const observer = new MutationObserver(records => {
@@ -392,7 +438,7 @@
         ? visibleItems.length - 1
         : (index + (event.key === 'ArrowDown' ? 1 : -1) + visibleItems.length) % visibleItems.length;
     const target = visibleItems[next]!;
-    show(target.id);
+    show(target.id, 'instant');
     rootEl?.querySelector<HTMLElement>(`[data-settings-tab="${target.id}"]`)?.focus();
   }
 </script>
@@ -560,6 +606,8 @@
                   </div>
                 </section>
               {/if}
+            {:else if item.id === 'storage'}
+              <StorageSettings {PM} active={shown} />
             {:else if item.id === 'accounts'}
               <header class="sg-heading">
                 <h2>Accounts</h2>

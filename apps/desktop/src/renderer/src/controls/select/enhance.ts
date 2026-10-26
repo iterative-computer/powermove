@@ -38,7 +38,8 @@ export function enhanceSelect(select: HTMLSelectElement): () => void {
     if (select.id) trigger.id = `${select.id}-trigger`;
     trigger.disabled = select.disabled;
     const opt = select.options[select.selectedIndex] ?? select.selectedOptions[0];
-    label.textContent = opt?.textContent ?? '';
+    // An option may carry a shorter label for the closed control (data-short).
+    label.textContent = opt?.dataset.short ?? opt?.textContent ?? '';
     if (!opt || opt.value === '') trigger.setAttribute('data-empty', ''); else trigger.removeAttribute('data-empty');
   }
 

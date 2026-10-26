@@ -1,4 +1,19 @@
+import {ECHO} from './echo';
+import {COLOR_TRANSFORMS} from './color-transforms';
+import {LAYER_COMPOSITING} from './layer-compositing';
+import {SOLID_COMPOSITE,ARITHMETIC} from './channel-operators';
+import {APPLY_COLOR_LUT} from './apply-color-lut';
+import { STROKE } from './stroke';
+import { TEXTURIZE } from './texturize';
+import { SET_CHANNELS } from './set-channels';
+import { COMPOUND_BLUR } from './compound-blur';
 import type { EffectDefinition } from 'powermove';
+import { LAYER_EFFECTS } from './layer-effects';
+import { TONAL_EFFECTS } from './tonal';
+import { reviseShadowRamp } from './shadow-ramp';
+import { SPATIAL_EFFECTS, reviseSpatialEffects } from './spatial';
+import { CORE_IMAGE_EFFECTS, reviseCoreEffects } from './core-image';
+import { COLOR_CORRECTION_EFFECTS } from './color-correction';
 
 const PRE = `#version 300 es
 precision highp float;
@@ -273,10 +288,15 @@ const VIEWPORT_PADDING: Record<string, string[]> = {
   displace: ['amount'], shadow: ['distance', 'softness'], chroma: ['amount'],
 };
 
-export const EFFECTS: EffectDefinition[] = Object.entries(FX).map(([id, definition]) => ({
+export const LEGACY_EFFECTS: EffectDefinition[] = Object.entries(FX).map(([id, definition]) => ({
   ...definition,
   id,
   rawShader: true,
   viewportSafe: true,
   viewportPadding: VIEWPORT_PADDING[id] || [],
 }));
+
+export const EFFECTS: EffectDefinition[] = [...reviseShadowRamp(reviseSpatialEffects(reviseCoreEffects(LEGACY_EFFECTS))), ...COLOR_CORRECTION_EFFECTS, ...CORE_IMAGE_EFFECTS, ...SPATIAL_EFFECTS, ...TONAL_EFFECTS, ...LAYER_EFFECTS, COMPOUND_BLUR, SET_CHANNELS, TEXTURIZE, STROKE, APPLY_COLOR_LUT, SOLID_COMPOSITE, ARITHMETIC, ...LAYER_COMPOSITING, ...COLOR_TRANSFORMS, ECHO].map(def=>({...def,sourceProcessing:
+ def.sourceProcessing??(def.id==='compoundBlur'?{padding:['maximumBlur'],factor:1.5}:
+ def.id==='displacementMap'?{padding:['maxHorizontal','maxVertical'],factor:1,when:'expand'}:
+ {padding:def.viewportPadding??[],factor:def.viewportPaddingFactor??2,pixels:def.viewportPaddingPixels??0})}));

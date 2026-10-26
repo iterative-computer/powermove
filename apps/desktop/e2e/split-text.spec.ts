@@ -27,7 +27,7 @@ for (const [label, expected] of [
     const x = glyph.x + 15, y = glyph.y + 20, rect = document.querySelector('#stage-inner')!.getBoundingClientRect();
     return { x: rect.x + (m[0]*x + m[2]*y + m[4])*viewer.shown, y: rect.y + (m[1]*x + m[3]*y + m[5])*viewer.shown };
   });
-  await chooseNativeMenu(session, ['Split text into layers…', label], () => page.mouse.click(point.x, point.y, { button: 'right' }));
+  await chooseNativeMenu(session, ['Split text into layers', label], () => page.mouse.click(point.x, point.y, { button: 'right' }));
   const result = await page.evaluate(() => {
     const PM = (window as any).PM;
     const group = PM.firstSel(), members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
@@ -65,7 +65,7 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
     (window as any).expectedLines = PM.textLayout(layer).lines.map((p: any) => p.text);
 
   });
-  await chooseNativeMenu(session, ['Split text into layers…', 'By line'], () => page.evaluate(() => { const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200}, 'timeline'); }));
+  await chooseNativeMenu(session, ['Split text into layers', 'By line'], () => page.evaluate(() => { const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200}, 'timeline'); }));
   expect(await page.evaluate(() => {
     const PM = (window as any).PM;
     const group = PM.firstSel();
@@ -78,11 +78,11 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
   const menu = await inspectNativeMenu(session, () => page.evaluate(() => {
     const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200});
   }));
-  expect(menu).toContainEqual({ label: 'Split text into layers…', enabled: false });
+  expect(menu).toContainEqual({ label: 'Split text into layers', enabled: false });
   const before = await page.evaluate(() => {
     const PM = (window as any).PM, layer = PM.proj.layers[0]; layer.lock = false; layer.d.text = '';
     return JSON.stringify(PM.proj);
   });
-  await chooseNativeMenu(session, ['Split text into layers…', 'By character'], () => page.evaluate(() => { const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200}); }));
+  await chooseNativeMenu(session, ['Split text into layers', 'By character'], () => page.evaluate(() => { const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200}); }));
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(before);
 });

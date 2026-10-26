@@ -15,6 +15,7 @@ import {
 } from '../shared/ipc';
 import { parseStoreKey, storeFileName } from '../shared/store-keys';
 import { HistoryRecords, isHistoryDictionary, packStoredHistory, unpackStoredHistory } from '../shared/history-memory';
+import { decodeStorageJSON, encodeStorageJSON, STORAGE_COMPRESSION_THRESHOLD } from './storage-codec';
 
 const WRITE_DELAY_MS = 150;
 const HEAVY_KEY = /^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./;
@@ -23,6 +24,8 @@ const QUIT_FLUSH_CEILING_MS = 5_000;
 // Takes retain up to 24 complete editable snapshots; large tracked projects
 // can exceed the ordinary settings limit without being corrupt.
 const MAX_TAKES_BYTES = 24 * LIMITS.storeValueBytes;
+const COMPRESSED_KEY = /^(?:project\.|projectHistory\.|projectState\.|projectJournal\.|takes$)/;
+const diskLimit = (key: string) => key === 'takes' ? MAX_TAKES_BYTES : LIMITS.fileSaveBytes;
 
 export type StoreFileSystem = Pick<
   typeof nodeFs,
@@ -45,7 +48,9 @@ export interface Store {
   set(key: string, value: unknown): void;
   setSerialized?(key: string, serialized: string): void;
   delete(key: string): void;
-  flushAll(): Promise<void>;
+  flushAll(options?: { strict?: boolean }): Promise<void>;
+  /** Upgrade one record at a time through the ordinary persistence queues. */
+  optimizeStorage?(visit?: (value: unknown) => Promise<void>): Promise<void>;
   onError(cb: (event: StoreErrorEvent) => void): () => void;
 }
 
@@ -73,9 +78,11 @@ class FileStore implements Store {
   private readonly loading = new Map<string, Promise<unknown>>();
   // A failed write still owns the only current copy; keep it until a successful write.
   private readonly failedWrites = new Set<string>();
+  private readonly failedOperations = new Map<string, PendingOperation>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private readonly pending = new Map<string, PendingOperation>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly deadlines = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly queues = new Map<string, Promise<void>>();
 
   constructor(
@@ -283,15 +290,16 @@ class FileStore implements Store {
   }
 
   private acceptSerialized(key: string, serialized: string): unknown {
-    const value: unknown = JSON.parse(serialized);
+    const { value, compressed, bytes } = decodeStorageJSON(serialized, diskLimit(key));
     const packed = packStoredHistory(key, value, this.historyRecords);
     this.values.set(key, packed);
     const before = key.startsWith('projectState.') && isRecord(value) ? value.history : value;
     const after = key.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
-    if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
+    if (isHistoryDictionary(after) && !isHistoryDictionary(before)
+      || !compressed && COMPRESSED_KEY.test(key) && Buffer.byteLength(serialized) >= STORAGE_COMPRESSION_THRESHOLD) {
       this.schedule(key, { kind: 'set', serialized: JSON.stringify(packed) });
     }
-    this.touchCache(key, Buffer.byteLength(serialized));
+    this.touchCache(key, bytes);
     return packed;
   }
 
@@ -414,13 +422,41 @@ class FileStore implements Store {
     this.evict();
   }
 
-  async flushAll(): Promise<void> {
+  async flushAll(options: { strict?: boolean } = {}): Promise<void> {
+    // A user retry after freeing disk space must retry the retained operation,
+    // including deletes, without serializing a huge document on the main thread.
+    if (options.strict) for (const [key, operation] of this.failedOperations) {
+      if (!this.pending.has(key) && !this.queues.has(key)) this.pending.set(key, operation);
+    }
     // Scheduling a pending operation appends it to that key's existing chain.
     for (const key of [...this.pending.keys()]) this.enqueuePending(key);
 
     // Writes can finish while this array is assembled, but every promise here
     // represents the tail of its key's queue at the flush boundary.
     await Promise.all([...this.queues.values()]);
+    if (options.strict && this.failedWrites.size) {
+      throw new Error('Recovery data could not be saved. Your projects are still open.');
+    }
+  }
+
+  async optimizeStorage(visit?: (value: unknown) => Promise<void>): Promise<void> {
+    for (const key of [...this.keys].filter(key => COMPRESSED_KEY.test(key))) {
+      await this.loadValue(key);
+      const value = this.readThrough(key);
+      if (value === undefined && this.keys.has(key)) throw new Error('Storage optimization will resume when recovery data can be read.');
+      if (value !== undefined && visit) await visit(unpackStoredHistory(key, value));
+      if (this.failedWrites.has(key)) {
+        // The visitor can yield to an edit or deletion. Retry the current
+        // value rather than resurrecting the snapshot inspected above.
+        const latest = this.readThrough(key);
+        if (latest !== undefined) this.schedule(key, { kind: 'set', serialized: JSON.stringify(latest) });
+      }
+      await this.flushAll();
+      if (this.failedWrites.has(key)) throw new Error('Storage optimization will resume when recovery data can be saved.');
+      // Yield between projects, and let the normal LRU release old records.
+      this.evict();
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
   }
 
   onError(cb: (event: StoreErrorEvent) => void): () => void {
@@ -430,6 +466,7 @@ class FileStore implements Store {
 
   private schedule(key: string, operation: PendingOperation): void {
     this.pending.set(key, operation);
+    if (!this.deadlines.has(key)) this.deadlines.set(key, setTimeout(() => this.enqueuePending(key), 1000));
     const previousTimer = this.timers.get(key);
     if (previousTimer !== undefined) clearTimeout(previousTimer);
     this.timers.set(
@@ -439,6 +476,7 @@ class FileStore implements Store {
   }
 
   private enqueuePending(key: string): void {
+    clearTimeout(this.deadlines.get(key)); this.deadlines.delete(key);
     const timer = this.timers.get(key);
     if (timer !== undefined) clearTimeout(timer);
     this.timers.delete(key);
@@ -449,9 +487,10 @@ class FileStore implements Store {
 
     const previous = this.queues.get(key) ?? Promise.resolve();
     const current = previous
-      .then(async () => { await this.persist(key, operation); this.failedWrites.delete(key); })
+      .then(async () => { await this.persist(key, operation); this.failedWrites.delete(key); this.failedOperations.delete(key); })
       .catch((error: unknown) => {
         this.failedWrites.add(key);
+        this.failedOperations.set(key, operation);
         this.emitError(key, errorText(error));
       });
     this.queues.set(key, current);
@@ -476,7 +515,8 @@ class FileStore implements Store {
     try {
       // Atomic replacement sequence: write a sibling temporary file, open and
       // fsync that file, close it, then rename it over the destination.
-      await this.fs.writeFile(temporaryPath, operation.serialized, { encoding: 'utf8', flag: 'wx' });
+      const diskJSON = COMPRESSED_KEY.test(key) ? await encodeStorageJSON(operation.serialized) : operation.serialized;
+      await this.fs.writeFile(temporaryPath, diskJSON, { encoding: 'utf8', flag: 'wx' });
       const handle = await this.fs.open(temporaryPath, 'r');
       try {
         await handle.sync();
@@ -484,6 +524,8 @@ class FileStore implements Store {
         await handle.close();
       }
       await this.fs.rename(temporaryPath, finalPath);
+      const directory = await this.fs.open(this.directory, 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
     } catch (error) {
       try {
         await this.fs.unlink(temporaryPath);
@@ -720,7 +762,7 @@ export function registerStoreIpc(
 
   ipcMain.handle(IPC.storeFlush, async (event) => {
     requireTrusted(event, IPC.storeFlush);
-    await store.flushAll();
+    await store.flushAll({ strict: true });
   });
 }
 
@@ -737,7 +779,12 @@ function sendValidationError(
  * Installs the two-pass quit barrier. The integrator owns and acquires the
  * application's single-instance lock before installing this helper.
  */
-export function installQuitFlush(app: Pick<App, 'on' | 'quit'>, store: Store, prepare?: () => Promise<void>): { isPrepared(): boolean } {
+export function installQuitFlush(
+  app: Pick<App, 'on' | 'quit'>,
+  store: Store,
+  prepare?: () => Promise<void>,
+  options: { commit?: () => Promise<void>; cancel?: () => void; onError?: (error: unknown) => void } = {},
+): { isPrepared(): boolean; reset(): void } {
   let flushing = false;
   let flushed = false;
 
@@ -746,29 +793,34 @@ export function installQuitFlush(app: Pick<App, 'on' | 'quit'>, store: Store, pr
     event.preventDefault();
     if (flushing) return;
     flushing = true;
-
-    const finish = () => withCeiling(store.flushAll(), QUIT_FLUSH_CEILING_MS).finally(() => {
-      flushed = true; flushing = false; app.quit();
+    void (async () => {
+      if (prepare) await prepare();
+      await withCeiling(store.flushAll({ strict: true }), QUIT_FLUSH_CEILING_MS);
+      await options.commit?.();
+      flushed = true;
+      flushing = false;
+      app.quit();
+    })().catch(error => {
+      flushing = false;
+      flushed = false;
+      options.cancel?.();
+      options.onError?.(error);
+      if (!(error instanceof Error && error.message === 'Close cancelled')) {
+        console.error('Could not prepare editor state for quitting; keeping the app open', error);
+      }
     });
-    if (prepare) {
-      void prepare().then(finish).catch(error => {
-        flushing = false;
-        console.error('Could not prepare editor state for quitting; keeping the app open',error);
-      });
-    } else void finish();
   });
-  return {isPrepared:() => flushed};
+  return { isPrepared: () => flushed, reset: () => { flushed = false; } };
 }
 
 async function withCeiling(operation: Promise<void>, milliseconds: number): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  const ceiling = new Promise<void>((resolve) => {
-    timeout = setTimeout(resolve, milliseconds);
-  });
   try {
-    await Promise.race([operation.catch(() => undefined), ceiling]);
+    await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error('Project storage timed out; keeping the app open')), milliseconds);
+    })]);
   } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
+    clearTimeout(timeout);
   }
 }
 

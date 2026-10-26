@@ -59,6 +59,19 @@ async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string
 }
 
 describe('native Powermove agent tool bridge', () => {
+  it('publishes via the authenticated renderer lane in app and planning runs without widening edit access', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
+    try {
+      const session = await bridge.openSession({ runId: 'visual-planning', owner: owner as never, baseRevision: 0, context:'app', inspectionOnly:true });
+      expect((await bridge.callTool(session,'publish_visual_reply',{title:'Palette',html:'<h1>Palette</h1>'})).ok).toBe(true);
+      expect(owner.requests[0]?.tool).toBe('publish_visual_reply');
+      await expect(bridge.callTool(session,'apply_commands',{commands:[]})).rejects.toThrow('only inspect');
+      await session.finish(false);
+      await expect(bridge.callTool(session,'publish_visual_reply',{})).rejects.toThrow('not active');
+    } finally { await bridge.shutdown(); }
+  });
+
   it('routes default delivery tools through the production exporter and keeps planning read-only', async () => {
     const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
     const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
@@ -122,6 +135,7 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
+      'publish_visual_reply',
       'get_timeline', 'edit_layer_strips', 'manage_project', 'save_project', 'export_video', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'project_memory', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
@@ -167,6 +181,7 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
+      'publish_visual_reply',
       'manage_project', 'fork_builtin_extension', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'validate_effect', 'stage_fork_rebase',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'
     ]);
@@ -545,8 +560,8 @@ describe('native Powermove agent tool bridge', () => {
       if (channel === IPC.agentToolInput) { log.push(`renderer ${payload}`); return; }
       const request = payload as AgentToolRequestEvent;
       log.push(request.tool);
-      const text = request.tool === '__prepare_panel_input' ? { points: [{ x: 5, y: 6 }] }
-        : request.tool === '__panel_bounds' ? { x: 0, y: 0, width: 10, height: 10 } : {};
+      const text = request.tool === '__prepare_panel_input' ? { points: [{ x: 5, y: 6 }], target: 'panel-1' }
+        : request.tool === '__panel_bounds' ? { x: 0, y: 0, width: 10, height: 10, target: 'panel-1' } : {};
       queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
         runId: request.runId, callId: request.callId, ok: true, revision: 1, content: [{ type: 'text', text: JSON.stringify(text) }]
       }));
@@ -560,14 +575,14 @@ describe('native Powermove agent tool bridge', () => {
     await bridge.callTool(session, 'computer_use_panel', { panelId: 'ext.panel', action: 'click', points: [{ x: 5, y: 6 }] });
     expect(input.drive).toHaveBeenCalledExactlyOnceWith(owner);
     expect(log).toEqual([
-      'drive', 'renderer true', '__prepare_panel_input',
+      'drive', 'renderer true', '__prepare_panel_input', '__validate_panel_target',
       'mouseMove (driven)', 'mouseDown (driven)', 'mouseUp (driven)',
-      'get_project_state', '__panel_bounds', 'release', 'renderer false'
+      '__validate_panel_target', 'get_project_state', '__panel_bounds', '__validate_panel_target', 'release', 'renderer false'
     ]);
     log.length = 0;
     owner.sendInputEvent = () => { throw new Error('no input'); };
     await expect(bridge.callTool(session, 'computer_use_panel', { panelId: 'ext.panel', action: 'click', points: [{ x: 5, y: 6 }] })).rejects.toThrow('no input');
-    expect(log).toEqual(['drive', 'renderer true', '__prepare_panel_input', 'release', 'renderer false']);
+    expect(log).toEqual(['drive', 'renderer true', '__prepare_panel_input', '__validate_panel_target', 'release', 'renderer false']);
     owner.destroyed = true;
   });
 

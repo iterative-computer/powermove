@@ -1,5 +1,6 @@
 /* Ported from js/core/util.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { writeBlobChunks } from './blob-chunks';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
@@ -80,6 +81,8 @@ PM.ICONS = {
   aspectRatio: '<path d="M216,48V96a8,8,0,0,1-16,0V67.31l-50.34,50.35a8,8,0,0,1-11.32-11.32L188.69,56H160a8,8,0,0,1,0-16h48A8,8,0,0,1,216,48ZM106.34,138.34,56,188.69V160a8,8,0,0,0-16,0v48a8,8,0,0,0,8,8H96a8,8,0,0,0,0-16H67.31l50.35-50.34a8,8,0,0,0-11.32-11.32Z"/>',
   music: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M56 128v0m0-16v32m36-64v96m36-128v160m36-128v96m36-64v32"/></g>',
   film: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="32" y="40" width="192" height="176" rx="16"/><path d="M72 40v176m112-176v176M32 88h40m-40 80h40m112-80h40m-40 80h40m-116-68 48 28-48 28z"/></g>',
+  // Dashed marquee: select part of the composition frame for the agent.
+  marquee: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M40 76V48a8 8 0 0 1 8-8h28m36 0h32m36 0h28a8 8 0 0 1 8 8v28m0 36v32m0 36v28a8 8 0 0 1-8 8h-28m-36 0h-32m-36 0H48a8 8 0 0 1-8-8v-28m0-36v-32"/><path d="M128 108v40m-20-20h40"/></g>',
   image: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="32" y="40" width="192" height="176" rx="16"/><circle cx="92" cy="92" r="16"/><path d="m32 176 56-48 40 32 40-48 56 64"/></g>',
   puzzle: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M48 48h56a24 24 0 1 1 48 0h56v56a24 24 0 1 1 0 48v56h-56a24 24 0 1 0-48 0H48v-56a24 24 0 1 0 0-48z"/></g>',
   note: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M160 32H48v192h160V80zM160 32v48h48M80 120h96M80 152h96M80 184h64"/></g>',
@@ -111,6 +114,7 @@ PM.ICONS = {
   trash: '<path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/>',
   more: '<path d="M140,128a12,12,0,1,1-12-12A12,12,0,0,1,140,128Zm56-12a12,12,0,1,0,12,12A12,12,0,0,0,196,116ZM60,116a12,12,0,1,0,12,12A12,12,0,0,0,60,116Z"/>',
   chev: '<path d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"/>',
+  timer: '<path d="M128,40a96,96,0,1,0,96,96A96.11,96.11,0,0,0,128,40Zm0,176a80,80,0,1,1,80-80A80.09,80.09,0,0,1,128,216ZM173.66,90.34a8,8,0,0,1,0,11.32l-40,40a8,8,0,0,1-11.32-11.32l40-40A8,8,0,0,1,173.66,90.34ZM96,16a8,8,0,0,1,8-8h48a8,8,0,0,1,0,16H104A8,8,0,0,1,96,16Z"/>',
   chevD: '<path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"/>',
   // Phosphor warning, regular: an alert an extension raised, where the editor
   // itself is intact — told apart from the failure marker by its shape.
@@ -159,6 +163,19 @@ PM.ICONS = {
   mask: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M40 64h96a24 24 0 0 1 24 24v96a24 24 0 0 1-24 24H40a24 24 0 0 1-24-24V88a24 24 0 0 1 24-24Z"/><path d="M88 40h96a24 24 0 0 1 24 24v96a24 24 0 0 1-24 24h-24"/></g>',
   scissors: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><circle cx="64" cy="72" r="32"/><circle cx="64" cy="184" r="32"/><path d="M92 90l132 78M92 166l132-78"/></g>',
   speaker: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M80 96H40a8 8 0 0 0-8 8v48a8 8 0 0 0 8 8h40l64 48V48zM184 104a34 34 0 0 1 0 48M208 80a68 68 0 0 1 0 96"/></g>',
+  // Phosphor align-*, text-align-* and diamond-fill (regular weight).
+  alignLeft: '<path d="M48,40V216a8,8,0,0,1-16,0V40a8,8,0,0,1,16,0Zm16,64V64A16,16,0,0,1,80,48h96a16,16,0,0,1,16,16v40a16,16,0,0,1-16,16H80A16,16,0,0,1,64,104Zm16,0h96V64H80Zm152,48v40a16,16,0,0,1-16,16H80a16,16,0,0,1-16-16V152a16,16,0,0,1,16-16H216A16,16,0,0,1,232,152Zm-16,40V152H80v40H216Z"/>',
+  alignCenterH: '<path d="M208,136H136V120h48a16,16,0,0,0,16-16V64a16,16,0,0,0-16-16H136V32a8,8,0,0,0-16,0V48H72A16,16,0,0,0,56,64v40a16,16,0,0,0,16,16h48v16H48a16,16,0,0,0-16,16v40a16,16,0,0,0,16,16h72v16a8,8,0,0,0,16,0V208h72a16,16,0,0,0,16-16V152A16,16,0,0,0,208,136ZM72,64H184v40H72ZM208,192H48V152H208v40Z"/>',
+  alignRight: '<path d="M224,40V216a8,8,0,0,1-16,0V40a8,8,0,0,1,16,0ZM192,64v40a16,16,0,0,1-16,16H80a16,16,0,0,1-16-16V64A16,16,0,0,1,80,48h96A16,16,0,0,1,192,64Zm-16,0H80v40h96Zm16,88v40a16,16,0,0,1-16,16H40a16,16,0,0,1-16-16V152a16,16,0,0,1,16-16H176A16,16,0,0,1,192,152Zm-16,0H40v40H176Z"/>',
+  alignTop: '<path d="M224,40a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,40ZM208,80v96a16,16,0,0,1-16,16H152a16,16,0,0,1-16-16V80a16,16,0,0,1,16-16h40A16,16,0,0,1,208,80Zm-16,0H152v96h40Zm-72,0V216a16,16,0,0,1-16,16H64a16,16,0,0,1-16-16V80A16,16,0,0,1,64,64h40A16,16,0,0,1,120,80Zm-16,0H64V216h40Z"/>',
+  alignCenterV: '<path d="M224,120H208V72a16,16,0,0,0-16-16H152a16,16,0,0,0-16,16v48H120V48a16,16,0,0,0-16-16H64A16,16,0,0,0,48,48v72H32a8,8,0,0,0,0,16H48v72a16,16,0,0,0,16,16h40a16,16,0,0,0,16-16V136h16v48a16,16,0,0,0,16,16h40a16,16,0,0,0,16-16V136h16a8,8,0,0,0,0-16ZM104,208H64V48h40Zm88-24H152V72h40Z"/>',
+  alignBottom: '<path d="M224,216a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,216Zm-88-40V80a16,16,0,0,1,16-16h40a16,16,0,0,1,16,16v96a16,16,0,0,1-16,16H152A16,16,0,0,1,136,176Zm16,0h40V80H152ZM48,176V40A16,16,0,0,1,64,24h40a16,16,0,0,1,16,16V176a16,16,0,0,1-16,16H64A16,16,0,0,1,48,176Zm16,0h40V40H64Z"/>',
+  textLeft: '<path d="M32,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H40A8,8,0,0,1,32,64Zm8,48H168a8,8,0,0,0,0-16H40a8,8,0,0,0,0,16Zm176,24H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm-48,40H40a8,8,0,0,0,0,16H168a8,8,0,0,0,0-16Z"/>',
+  textCenter: '<path d="M32,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H40A8,8,0,0,1,32,64ZM64,96a8,8,0,0,0,0,16H192a8,8,0,0,0,0-16Zm152,40H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm-24,40H64a8,8,0,0,0,0,16H192a8,8,0,0,0,0-16Z"/>',
+  textRight: '<path d="M32,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H40A8,8,0,0,1,32,64ZM216,96H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm0,40H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm0,40H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Z"/>',
+  diamondFill: '<path d="M240,128a15.85,15.85,0,0,1-4.67,11.28l-96.05,96.06a16,16,0,0,1-22.56,0h0l-96-96.06a16,16,0,0,1,0-22.56l96.05-96.06a16,16,0,0,1,22.56,0l96.05,96.06A15.85,15.85,0,0,1,240,128Z"/>',
+  // Phosphor speaker-x shape: the speaker with a cross for muted audio.
+  speakerOff: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M80 96H40a8 8 0 0 0-8 8v48a8 8 0 0 0 8 8h40l64 48V48zM184 104l48 48m0-48-48 48"/></g>',
   headphones: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M40 176v-40a88 88 0 0 1 176 0v40"/><rect x="40" y="144" width="48" height="72" rx="12"/><rect x="168" y="144" width="48" height="72" rx="12"/></g>',
   // Phosphor waveform, regular: Settings › Transcription.
   waveform: '<path d="M56,96v64a8,8,0,0,1-16,0V96a8,8,0,0,1,16,0ZM88,24a8,8,0,0,0-8,8V224a8,8,0,0,0,16,0V32A8,8,0,0,0,88,24Zm40,32a8,8,0,0,0-8,8V192a8,8,0,0,0,16,0V64A8,8,0,0,0,128,56Zm40,32a8,8,0,0,0-8,8v64a8,8,0,0,0,16,0V96A8,8,0,0,0,168,88Zm40-16a8,8,0,0,0-8,8v96a8,8,0,0,0,16,0V80A8,8,0,0,0,208,72Z"/>',
@@ -336,9 +353,7 @@ PM.download = (blob: any, name: any) => {
   if (upload) return (async () => {
     const token = await upload.begin(blob.size);
     try {
-      for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
-        await upload.chunk(token, new Uint8Array(await blob.slice(offset, offset + 1024 * 1024).arrayBuffer()));
-      }
+      await writeBlobChunks(blob, bytes => upload.chunk(token, bytes));
       const result = await upload.finish(token, { name: String(name || 'powermove.bin') });
       if (!result.ok && !result.cancelled) throw new Error(result.error || 'Save failed');
       return result;

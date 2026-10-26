@@ -66,3 +66,27 @@ describe('canRenderNatively', () => {
     expect(canRenderNatively([{ label: 'Ease', curve: [0.4, 0, 0.2, 1] }])).toBe(false);
   });
 });
+
+describe('planNativeMenu submenus', () => {
+  it('nests rows under their parent id and keeps every action in one map', async () => {
+    const camera = vi.fn(), text = vi.fn();
+    const plan = await planNativeMenu([
+      { label: 'Duplicate', run: vi.fn() },
+      { label: 'New', submenu: [{ label: 'Text', run: text }, '-', { label: 'Camera', run: camera }] },
+      { label: 'Nothing', submenu: [{ header: 'Empty' }] }
+    ]);
+    expect(plan.items[1]).toEqual({
+      type: 'submenu', id: 'm1', label: 'New', enabled: true, icon: undefined,
+      items: [
+        { type: 'normal', id: 'm1.0', label: 'Text', enabled: true, checked: false, accelerator: undefined, icon: undefined },
+        { type: 'separator' },
+        { type: 'normal', id: 'm1.2', label: 'Camera', enabled: true, checked: false, accelerator: undefined, icon: undefined }
+      ]
+    });
+    // A submenu with nothing to run is shown disabled rather than empty.
+    expect(plan.items[2]).toMatchObject({ type: 'submenu', enabled: false });
+    plan.actions.get('m1.2')?.run?.();
+    expect(camera).toHaveBeenCalledOnce();
+    expect(plan.actions.has('m1')).toBe(false);
+  });
+});

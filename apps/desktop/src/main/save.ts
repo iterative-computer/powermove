@@ -45,6 +45,7 @@ export interface SaveIpcContext {
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
   dialogs?: SaveDialogAdapter;
   projects?: ProjectFiles;
+  recoveryProjects?: ProjectFiles;
 }
 
 type ReaderState = {
@@ -88,7 +89,7 @@ function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): vo
 export async function openProjectForWindow(
   ctx: { projects: ProjectFiles },
   webContents: WebContents,
-  filePath: string
+  filePath: string, copy = false
 ): Promise<ProjectOpenResult> {
   // Recovery reuses WebContents. An open started by the old renderer must not
   // grant its completed reader to the replacement process.
@@ -97,7 +98,7 @@ export async function openProjectForWindow(
   const stopWatching = watchRendererDocument(webContents, gone);
   try {
     if (isRendererUnavailable(webContents)) throw new Error('Project window is unavailable');
-    const opened = await ctx.projects.open(filePath, { allowDocumentRange: true });
+    const opened = await ctx.projects.open(filePath, { allowDocumentRange: true, copy });
     if (rendererGone || isRendererUnavailable(webContents)) {
       await ctx.projects.close(opened.token, false).catch(() => undefined);
       throw new Error('Project window is unavailable');
@@ -112,10 +113,10 @@ export async function openProjectForWindow(
     // Electron's context bridge deeply copies objects. Large PMV4 documents
     // use the existing bounded reader instead of copying their full history.
     if (opened.documentRange && opened.documentRange.length >= FILE_CHUNK_BYTES) {
-      return { ok: true, path: opened.path, projectId: opened.projectId, token: opened.token,
+      return { ok: true, ...(copy ? { copy: true } : {}), path: opened.path, projectId: opened.projectId, token: opened.token,
         size: opened.size, media: opened.media, documentRange: opened.documentRange };
     }
-    return { ok: true, ...opened };
+    return { ok: true, ...opened, ...(copy ? { copy: true } : {}) };
   } catch (error: any) {
     return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };
   } finally { stopWatching(); }
@@ -173,7 +174,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
   const destinations = new Map<object, { token: string; path: string; directory: boolean }>();
   const watchedOwners = new WeakSet<object>();
   const uploads = new Map<object, { id: string; ready: Promise<FileUpload>; timer: ReturnType<typeof setTimeout>; disposing?: Promise<void> }>();
-  const projectSaves = new Map<object, { id: string; ready: Promise<ProjectSave>; timer: ReturnType<typeof setTimeout>; finishing: boolean; marker: symbol; disposing?: Promise<void> }>();
+  const projectSaves = new Map<object, { id: string; ready: Promise<ProjectSave>; timer: ReturnType<typeof setTimeout>; finishing: boolean; marker: symbol; recovery?: boolean; disposing?: Promise<void> }>();
   const discardProjectSave = async (owner: object, id?: string) => {
     const save = projectSaves.get(owner);
     if (!save || (id && save.id !== id)) return;
@@ -213,9 +214,44 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     };
     watchRendererDocument(owner, release);
   };
+  const versionGrants = new WeakMap<object, Map<string, { projectId: string; path: string }>>();
+  ipcMain.handle(IPC.projectVersions, async (event, projectId: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (typeof projectId !== 'string' || !PROJECT_ID.test(projectId) || !ctx.projects) throw new Error('Invalid project id');
+    const grants = new Map<string, { projectId: string; path: string }>();
+    const versions: import('../shared/ipc').ProjectVersion[] = [];
+    const add = async (file: string, source: 'recovery' | 'file' | 'macos', at?: number) => {
+      const id = randomUUID();
+      grants.set(id, { projectId, path: file });
+      versions.push({ id, source, at: at ?? (await (await import('node:fs/promises')).stat(file)).mtimeMs });
+    };
+    for (const file of await ctx.projects.backups(projectId)) await add(file, 'file');
+    if (ctx.recoveryProjects) {
+      const current = await ctx.recoveryProjects.destination(projectId);
+      if (current) await add(current, 'recovery');
+      for (const file of await ctx.recoveryProjects.backups(projectId)) await add(file, 'recovery');
+    }
+    const destination = await ctx.projects.destination(projectId);
+    if (destination) {
+      try {
+        const { listNativeVersions } = await import('./native-versions');
+        for (const version of await listNativeVersions(destination)) await add(version.path, 'macos', version.at);
+      } catch (error) { console.warn('macOS version history is unavailable.', error); }
+    }
+    versionGrants.set(event.sender, grants);
+    return versions.sort((a, b) => b.at - a.at);
+  });
+  ipcMain.handle(IPC.projectVersionOpen, async (event, request: unknown): Promise<ProjectOpenResult> => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!isRecord(request) || typeof request.projectId !== 'string' || typeof request.versionId !== 'string' || !ctx.projects) throw new Error('Invalid version request');
+    const grant = versionGrants.get(event.sender)?.get(request.versionId);
+    if (!grant || grant.projectId !== request.projectId) throw new Error('This version is no longer available. Reopen Version History.');
+    return openProjectForWindow({ projects: ctx.projects }, event.sender, grant.path, true);
+  });
   ipcMain.handle(IPC.projectSaveBegin, async (event, request: unknown): Promise<ProjectSaveBeginResult> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!ctx.projects || !isRecord(request) || typeof request.projectId !== 'string' || !PROJECT_ID.test(request.projectId)
+      || (request.background !== undefined && typeof request.background !== 'boolean') || request.background === true && request.saveAs === true
       || (request.saveAs !== undefined && typeof request.saveAs !== 'boolean') || typeof request.documentBytes !== 'number'
       || !Number.isSafeInteger(request.documentBytes) || request.documentBytes < 2 || request.documentBytes > 0xffffffff) throw new Error('Invalid project save request');
     validateSaveMedia(request.media);
@@ -235,7 +271,12 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       const known = await ctx.projects.destination(request.projectId);
       checkRenderer();
       let selectedPath: string | undefined;
-      if (!known || request.saveAs) {
+      const recovery = request.background === true && !known;
+      const target = recovery ? ctx.recoveryProjects : ctx.projects;
+      if (!target) throw new Error('Background recovery is unavailable');
+      if (recovery) {
+        if (!await target.destination(request.projectId)) selectedPath = await target.recoveryPath(request.projectId);
+      } else if (!known || request.saveAs) {
         const options = { defaultPath: known || name, filters: saveFiltersForName(name) };
         const result = ctx.dialogs?.showSave ? await ctx.dialogs.showSave(window, options) : await dialog.showSaveDialog(window, options);
         checkRenderer();
@@ -245,8 +286,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       if (window.isDestroyed() || event.sender.isDestroyed()) throw new Error('Save window is unavailable');
       id = randomUUID();
       const timer = setTimeout(() => { void discardProjectSave(event.sender, id).catch(() => undefined); }, 120_000); timer.unref();
-      const ready = ctx.projects.beginIncremental(request.projectId, request.media, request.documentBytes, selectedPath);
-      projectSaves.set(event.sender, { id, ready, timer, finishing: false, marker });
+      const ready = target.beginIncremental(request.projectId, request.media, request.documentBytes, selectedPath);
+      projectSaves.set(event.sender, { id, ready, timer, finishing: false, marker, recovery });
       const save = await ready;
       checkRenderer();
       if (projectSaves.get(event.sender)?.id !== id || projectSaves.get(event.sender)?.disposing) throw new Error('Save cancelled');
@@ -273,7 +314,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     const save = projectSaves.get(event.sender);
     if (!save || save.finishing || save.disposing || save.id !== token) throw new Error('Unknown project save token');
     save.finishing = true; clearTimeout(save.timer);
-    try { return { ok: true, path: await (await save.ready).finish() }; }
+    try { return { ok: true, path: await (await save.ready).finish(), ...(save.recovery ? { recovery: true } : {}) }; }
     catch (error: any) { return { ok: false, cancelled: false, error: error.message || 'Could not save project.' }; }
     finally { await discardProjectSave(event.sender, save.id); }
   });
@@ -390,6 +431,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
 
     let data = payload['data'];
     let stream: AsyncIterable<Uint8Array> | undefined;
+    let publishUpload: ((destination: string) => Promise<void>) | undefined;
     if (payload.uploadId !== undefined) {
       const upload = uploads.get(event.sender);
       if (!upload || upload.disposing || payload.uploadId !== upload.id) throw new Error('The save upload is incomplete.');
@@ -397,13 +439,14 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       // A busy response must leave the upload retryable and its idle cleanup
       // running. Claiming it first consumes the spool and cancels that timer.
       if (pending.has(event.sender)) return { ok: false, cancelled: false, error: 'A save is already in progress.' };
-      stream = staged.claim();
+      if (projectId && ctx.projects) stream = staged.claim();
+      else publishUpload = staged.claimForExport();
       clearTimeout(upload.timer);
     }
-    if (!stream && !(data instanceof Uint8Array)) {
+    if (!stream && !publishUpload && !(data instanceof Uint8Array)) {
       throw new IpcValidationError(IPC.fileSave, 'data must be Uint8Array');
     }
-    if (!stream && !isBytes(data, LIMITS.fileSaveBytes)) {
+    if (!stream && !publishUpload && !isBytes(data, LIMITS.fileSaveBytes)) {
       return { ok: false, cancelled: false, error: 'too large; use streaming export' };
     }
 
@@ -437,7 +480,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       if (projectId && ctx.projects) {
         return { ok: true, path: await ctx.projects.save(projectId, stream || data as Uint8Array, selectedPath) };
       }
-      await atomicWrite(selectedPath!, stream || data as Uint8Array);
+      if (publishUpload) await publishUpload(selectedPath!);
+      else await atomicWrite(selectedPath!, data as Uint8Array);
       if (destination && !destination.directory) rememberExport(event.sender.id, selectedPath!);
       return { ok: true, path: selectedPath! };
     } catch (error: any) {

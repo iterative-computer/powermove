@@ -104,7 +104,7 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   });
   await expect(page.locator('#panel-inspector [data-inspector-header]')).toHaveCount(0);
   const graph = page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true });
-  await expect(graph.locator('[data-icon="bezier"]')).toHaveCount(1);
+  await expect(graph.locator('[data-icon="dopeGraph"]')).toHaveCount(1);
   expect(await graph.evaluate((button) => ({
     graphSlot: !!button.closest('.tl-graph-slot'),
     transport: !!button.closest('.tl-transport'),
@@ -132,7 +132,8 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
       head: { x: head.x, y: head.y, width: head.width, height: head.height },
       canvas: { x: canvas.x, y: canvas.y },
       gutter: timeline.gut,
-      ruler: timeline.ruler,
+      // The header sits over the time scale; the column headings strip is below it.
+      ruler: timeline.ruler - (timeline.header || 0),
       controlsInside: controls.every((rect) => rect.left >= head.left && rect.right <= head.right
         && rect.top >= head.top && rect.bottom <= head.bottom)
     };
@@ -142,8 +143,16 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   expect(Math.abs(geometry.head.width - geometry.gutter)).toBeLessThan(1.5);
   expect(Math.abs(geometry.head.height - geometry.ruler)).toBeLessThan(1.5);
   expect(geometry.controlsInside).toBe(true);
+  // The timecode reads in the accent's text tone, as in the prototype.
   expect(await page.locator('#tl-time').evaluate((element) => getComputedStyle(element).color))
-    .toBe(await graph.evaluate((element) => getComputedStyle(element).color));
+    .toBe(await page.evaluate(() => {
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--accent-tx)';
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    }));
   const dragPoint = await page.evaluate(() => {
     const head = document.querySelector('#tl-head')!.getBoundingClientRect();
     const time = document.querySelector('#tl-time')!.getBoundingClientRect();
@@ -171,6 +180,8 @@ test('panel context menus reach the native menu at the pointer position', async 
     };
   });
   try {
+    // Project shares its slot with Effect Controls, which is the tab shown by default.
+    await page.evaluate(() => (window as any).PM.Layout.activateTab?.('assets'));
     for (const [index, selector] of ['#panel-assets > header', '#panel-timeline .panel-move-handle'].entries()) {
       const box = await page.locator(selector).boundingBox();
       if (!box) throw new Error('context-menu trigger is not visible');

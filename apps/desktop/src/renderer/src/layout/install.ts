@@ -10,6 +10,7 @@ import {
   visibleDockPlan
 } from './geometry';
 import {
+  activateTab,
   addPanel,
   ensureDock,
   findPanel,
@@ -166,6 +167,10 @@ export function installSvelteLayout(PM: PMRegistry): void {
     }
     syncPanelMoveHandle(PM, id);
     inst.def.header?.(inst.header, inst);
+  };
+  layout.activateTab = (id: string): void => {
+    // Choosing a tab is a view state, not an edit: it never forks a built-in workspace.
+    PM.WS.mutate((workspace: Workspace) => { activateTab(workspace, id); }, { inPlace: true });
   };
   layout.applyTheme = (theme: Record<string, any>): void => applyTheme(PM, theme);
   layout.setCollapsed = (id: string, collapsed: boolean, emit = true) => setPanelCollapsed(PM, id, collapsed, emit);

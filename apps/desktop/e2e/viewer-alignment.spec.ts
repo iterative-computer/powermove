@@ -43,10 +43,10 @@ test.describe('@viewer alignment snapping', () => {
 
     expect(rendering.segments).toContainEqual([320, 0, 320, 360]);
     expect(rendering.segments).toContainEqual([0, 180, 640, 180]);
-    expect(rendering.arcs).toEqual(expect.arrayContaining([
-      [320, 180, 6],
-      [320, 180, 1.5],
-    ]));
+    // Radii are converted through the view scale; compare to well under a pixel.
+    for (const [x, y, radius] of [[320, 180, 6], [320, 180, 1.5]]) {
+      expect(rendering.arcs.some(([ax, ay, ar]: number[]) => Math.abs(ax - x) < 1e-6 && Math.abs(ay - y) < 1e-6 && Math.abs(ar - radius) < 1e-6)).toBe(true);
+    }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

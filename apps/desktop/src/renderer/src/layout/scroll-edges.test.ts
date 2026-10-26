@@ -70,3 +70,31 @@ describe('dock scroll edges', () => {
     expect(node.dataset.overflowBottom).toBeUndefined();
   });
 });
+
+describe('panel clips across columns', () => {
+  it('clears a clip a panel brings from another column', async () => {
+    // The panel was cut off at the bottom of the right column…
+    const right = dockElement(900, 400);
+    const left = dockElement(400, 400);
+    left.id = 'dock-left';
+    const slot = document.createElement('div');
+    slot.className = 'panel-slot';
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    slot.append(panel);
+    right.append(slot);
+    panel.style.clipPath = 'inset(0 0 55px 0)';
+    panel.style.borderRadius = '0px';
+    panel.dataset.scrollClipped = '';
+    // …and arrives in the left column, fully visible, before the right
+    // column's next frame has run.
+    left.append(slot);
+    const leftHandle = roundedScroll(left)!;
+    await settle();
+    expect(panel.style.clipPath).toBe('');
+    expect(panel.style.borderRadius).toBe('');
+    expect(panel.dataset.scrollClipped).toBeUndefined();
+    leftHandle.destroy();
+    void right;
+  });
+});

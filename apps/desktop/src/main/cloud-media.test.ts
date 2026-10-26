@@ -4,7 +4,12 @@ import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ inspect: vi.fn(), show: vi.fn(), window: vi.fn(), open: vi.fn() }));
+const mocks = vi.hoisted(() => ({ inspect: vi.fn(), show: vi.fn(), window: vi.fn(), open: vi.fn(), spawn: vi.fn() }));
+vi.mock('node:child_process', async importOriginal => {
+  const child = await importOriginal<typeof import('node:child_process')>();
+  mocks.spawn.mockImplementation(child.spawn);
+  return { ...child, spawn: mocks.spawn };
+});
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
   mocks.open.mockImplementation(fs.open);
@@ -12,7 +17,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 });
 vi.mock('@powermove/macos-haptics', () => ({ cloudFileState: mocks.inspect }));
 vi.mock('electron', () => ({ BrowserWindow: { fromWebContents: mocks.window }, dialog: { showMessageBox: mocks.show } }));
-import { CloudMediaService, cloudPath, cloudPromptOptions, materializeFile, registerCloudMediaIpc } from './cloud-media';
+import { CloudMediaService, CloudFileNotReadyError, cloudPath, cloudPromptOptions, materializeFile, registerCloudMediaIpc } from './cloud-media';
 import { IPC } from '../shared/ipc';
 const directories: string[] = [];
 afterEach(async () => { vi.clearAllMocks(); await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
@@ -38,7 +43,7 @@ it('deduplicates downloads and materializes before reporting success', async () 
   const read = vi.fn(materializeFile);
   const service = new CloudMediaService(inspect, read);
   await Promise.all([service.download(source), service.download(source)]);
-  expect(read).toHaveBeenCalledExactlyOnceWith(source);
+  expect(read).toHaveBeenCalledExactlyOnceWith(source, expect.any(AbortSignal));
   expect(inspect).toHaveBeenNthCalledWith(1, source, true);
 });
 it('does not try reading deleted files or mistake a failed hydration for success', async () => {
@@ -47,7 +52,19 @@ it('does not try reading deleted files or mistake a failed hydration for success
   await expect(service.download('/missing.mov')).rejects.toThrow('unavailable');
   expect(read).not.toHaveBeenCalled();
   const source = await file();
-  await expect(new CloudMediaService(vi.fn().mockResolvedValue('cloud'), read).download(source)).rejects.toThrow('still in the cloud');
+  read.mockRejectedValueOnce(new Error('Cloud provider could not read the file'));
+  await expect(new CloudMediaService(vi.fn().mockResolvedValue('cloud'), read).download(source)).rejects.toThrow('could not read');
+});
+it('restores readable cloud media even when provider metadata still says offloaded after download', async () => {
+  const source = await file();
+  const inspect = vi.fn().mockResolvedValue('icloud');
+  const read = vi.fn(materializeFile);
+  const { call } = ipc(new CloudMediaService(inspect, read));
+  const result = await call(IPC.cloudDownload, source);
+  try {
+    expect(new TextDecoder().decode(await call(IPC.cloudRead, { token: result.token, offset: 0, length: result.size }))).toBe('video bytes');
+    expect(read).toHaveBeenCalledExactlyOnceWith(source, expect.any(AbortSignal));
+  } finally { if (result) await call(IPC.cloudRelease, result.token); }
 });
 it('checks trust before touching filesystem paths', async () => {
   const service = new CloudMediaService();
@@ -208,4 +225,71 @@ it.each(['status', 'download', 'stat'] as const)('does not publish an old source
     if (result?.token) await call(IPC.cloudRelease, result.token);
     if (handle && handle.fd !== -1) await handle.close();
   }
+});
+
+
+it('bounds a stalled native metadata check and permits a fresh attempt', async () => {
+  vi.useFakeTimers();
+  try {
+    const source = await file();
+    const inspect = vi.fn().mockImplementationOnce(() => new Promise(() => {})).mockResolvedValue('local');
+    const read = vi.fn().mockResolvedValue(undefined);
+    const service = new CloudMediaService(inspect, read);
+    const failure = expect(service.download(source)).rejects.toThrow('timed out');
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await failure;
+    await service.download(source);
+    expect(read).toHaveBeenCalledExactlyOnceWith(source, expect.any(AbortSignal));
+  } finally { vi.useRealTimers(); }
+});
+
+
+it('times out stalled materialization, ignores its late completion, and allows retry', async () => {
+  vi.useFakeTimers();
+  try {
+    const source = await file();
+    let finish!: () => void;
+    const inspect = vi.fn().mockResolvedValue('local');
+    const read = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; })).mockResolvedValue(undefined);
+    const service = new CloudMediaService(inspect, read);
+    const failure = expect(service.download(source)).rejects.toThrow('timed out');
+    // Let real filesystem metadata settle before advancing the download clock.
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await failure;
+    finish();
+    await Promise.resolve();
+    await service.download(source);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(inspect).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
+
+it('waits for all cloud bytes to arrive before opening a restored video', async () => {
+  const source = await file();
+  const read = vi.fn().mockRejectedValueOnce(new CloudFileNotReadyError('Still downloading')).mockImplementation(materializeFile);
+  const { call } = ipc(new CloudMediaService(vi.fn().mockResolvedValue('icloud'), read));
+  const result = await call(IPC.cloudDownload, source);
+  try {
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(new TextDecoder().decode(await call(IPC.cloudRead, { token: result.token, offset: 0, length: result.size }))).toBe('video bytes');
+  } finally { await call(IPC.cloudRelease, result.token); }
+});
+
+it('rejects a source changed during hydration instead of importing partial bytes', async () => {
+  const source = await file();
+  const service = new CloudMediaService(vi.fn().mockResolvedValue('icloud'), async () => { await writeFile(source, 'changed'); });
+  await expect(service.download(source)).rejects.toThrow('changed while downloading');
+});
+
+it('does not treat a successful cat exit with a short data fork as downloaded media', async () => {
+  const source = await file();
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn() });
+  mocks.spawn.mockReturnValueOnce(child);
+  const reading = materializeFile(source);
+  const rejected = expect(reading).rejects.toBeInstanceOf(CloudFileNotReadyError);
+  await vi.waitFor(() => expect(child.listenerCount('close')).toBe(1));
+  child.stdout.emit('data', Buffer.from('short'));
+  child.emit('close', 0);
+  await rejected;
 });
