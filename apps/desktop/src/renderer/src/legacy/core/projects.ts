@@ -28,6 +28,9 @@ const CHECKPOINT_REVISIONS = 50;
 const journalBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 /* The store's limit for a journal value (LIMITS.storeValueBytes): past it main refuses entries. */
 const STORE_JOURNAL_BYTES = 32 * 1024 * 1024;
+/* A periodic checkpoint is serialized in slices only while the journal since
+   the last one is at most this long (half of main's journal limit). */
+const SLICED_JOURNAL_BYTES = 4 * MAX_JOURNAL_BYTES;
 
 /** The journal entries this window appended since its last checkpoint, with each one's size (see `append`). */
 type JournalState = { id: string; entries: any[]; sizes: number[] };
@@ -331,18 +334,23 @@ R.recover = (proj: any, thumb: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
   const entries = mainKeepsJournal() ? sinceCheckpoint(proj.id) : journal(proj.id);
   if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length) return R.put(proj, thumb);
-  if (checkpointsDue.has(proj.id) || journalBytes(entries) > MAX_JOURNAL_BYTES || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
-    if (!sliceable(proj)) return R.put(proj, thumb);
+  const bytes = journalBytes(entries);
+  if (checkpointsDue.has(proj.id) || bytes > MAX_JOURNAL_BYTES || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
+    if (!sliceable(proj, bytes)) return R.put(proj, thumb);
     void checkpointInSlices(proj).catch(error => console.warn('Project checkpoint failed', error));
   }
   return meta;
 };
-/** Whether a periodic checkpoint of `proj` is serialized in slices: main keeps
- *  the journal and takes slots as text, and the slot is not a small one this
- *  window wrote and measured (written at once, as before). */
-function sliceable(proj: any): boolean {
+/** Whether a periodic checkpoint of `proj`, whose journal since its last one
+ *  is `journaled` bytes, is serialized in slices: main keeps the journal and
+ *  takes slots as text, the slot is not a small one this window wrote and
+ *  measured, and the journal is short of SLICED_JOURNAL_BYTES. Otherwise it is
+ *  written at once, as before: edits that keep landing while one is read must
+ *  not grow the journal to main's limit, where main refuses entries. */
+function sliceable(proj: any, journaled: number): boolean {
   const slot = slots.get(proj.id);
-  return mainKeepsJournal() && typeof PM.store.setText === 'function' && !(slot && slot.chars < VERIFY_MIN_CHARS) && !needsNewerReader(proj);
+  return mainKeepsJournal() && typeof PM.store.setText === 'function' && !(slot && slot.chars < VERIFY_MIN_CHARS) && !needsNewerReader(proj)
+    && journaled <= SLICED_JOURNAL_BYTES;
 }
 
 /** Playback-safe checkpoint. Explicit save/close still uses the synchronous
@@ -642,7 +650,7 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
     /* Past the bound the project is checkpointed, unless its slot writes are
        failing: then main's journal holds these edits on disk. */
     if (measure() > MAX_JOURNAL_BYTES && !unsaved.has(id) && PM.proj?.id === id) {
-      if (sliceable(PM.proj)) void checkpointInSlices(PM.proj).catch(error => console.warn('Project checkpoint failed', error));
+      if (sliceable(PM.proj, measure())) void checkpointInSlices(PM.proj).catch(error => console.warn('Project checkpoint failed', error));
       else R.put(PM.proj);
     }
     return;

@@ -472,6 +472,31 @@ describe('periodic checkpoints of a large project', () => {
     }
     await expectEveryCrashPointSafe(log, states, 'W');
   });
+
+  it('are written at once when edits landing while one is read grow the journal past its bound', { timeout: 120_000 }, async () => {
+    const log: Op[] = [];
+    const store = createStore(await temporaryDirectory(), { fs: loggingFs(log), writeDelayMs: 0 });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('B');
+    PM.proj = project;
+    PM.Projects.put(project);
+    await settle(PM, store);
+    const set = vi.spyOn(PM.store, 'set');
+    const slotSets = () => set.mock.calls.filter(([key]) => key === 'project.B').length;
+    // Each edit lands while the checkpoint the journal bound started is read.
+    const name = (layer: number) => String(layer).repeat(5 << 20);
+    edit(PM, project, 8, 0, name(0));
+    expect(slotSets()).toBe(0);
+    edit(PM, project, 9, 1, name(1));
+    edit(PM, project, 10, 2, name(2));
+    expect(slotSets()).toBe(0);
+    // Past four times the bound: written in this task, as before slices.
+    edit(PM, project, 11, 3, name(3));
+    expect(slotSets()).toBe(1);
+    await settle(PM, store);
+    expect(jsonDiff(JSON.stringify(project), await recover(stateAfter(log, log.length), 'B'))).toEqual([]);
+  });
 });
 
 describe('edits while a checkpoint is failing', () => {

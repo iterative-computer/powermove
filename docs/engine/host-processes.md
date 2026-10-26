@@ -680,7 +680,9 @@ The writes are also coalesced (`core/projects.ts`):
   barrier epoch, open history transaction or other slot write. It is then
   the document as it was when posted, with exactly the entries posted before
   it, as main numbers it. Otherwise it stays due and the next autosave tries
-  again; main keeps every entry meanwhile. Written in one task it was a 0.5
+  again; main keeps every entry meanwhile. Past 16 MiB of journal (edits
+  kept landing while one was read) it is written at once, as before, so the
+  journal stays well short of main's limit. Written in one task it was a 0.5
   to 1 s freeze every 50 edits of the private project.
 
 **SAVE-1: one owner for a project's durability.** Three review rounds
