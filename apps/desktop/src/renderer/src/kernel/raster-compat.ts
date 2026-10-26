@@ -117,6 +117,8 @@ export interface RasterCompatStats extends RasterReadbackStats {
   syncLoads: number;
   /** Asynchronous base preparations started, and reused from the content cache. */
   asyncLoads: number;
+  /** Of those, the ones that joined an engine raster already on its way. */
+  sharedLoads: number;
   cacheHits: number;
   /** Completed pass-through answers: no base pixels were needed. */
   passThroughSkips: number;
@@ -277,24 +279,22 @@ function promote(entry: Preparing): void {
   entry.promote?.();
 }
 
-/** Give frame delivery and input a turn before non-urgent wrapper work.
- *  Native replies often arrive together; chaining their continuations as
- *  microtasks would run several wrappers before a presentation event. The
- *  turn is a task of its own, never `background`: background tasks run only
- *  when no other task is queued, and a long sliced job (a project
- *  fingerprint, for tens of seconds on a large document) starved them, with
- *  the frame on screen waiting behind them. A frame the running clock is
- *  about to show (`due`) goes ahead of ordinary tasks (`user-blocking`): on a
- *  busy window an ordinary turn waited 40 to 150 ms (measured), and every
- *  answer that late made its frame late, so playback skipped it. An urgent
- *  ask for the same answer ends the turn. */
+/** Give frame delivery and input a turn before other wrapper work once a
+ *  base arrived. The turn is a task of its own, never `background`:
+ *  background tasks run only when no other task is queued, and a long sliced
+ *  job (a project fingerprint, for tens of seconds on a large document)
+ *  starved them, with the frame on screen waiting behind them. The frame on
+ *  screen (`urgent`) and a frame the running clock shows (`due`) go on in
+ *  the task their base arrived in: on a busy window every turn waited 40 to
+ *  150 ms (measured), and each such wait made the frame later, until
+ *  playback skipped it. An urgent ask for the same answer ends the turn. */
 async function preparationTurn(entry: Preparing): Promise<void> {
-  if (entry.urgent) return;
-  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' | 'user-blocking' }) => Promise<void> } }).scheduler;
+  if (entry.urgent || entry.due) return;
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' }) => Promise<void> } }).scheduler;
   if (!scheduler?.postTask) return;
   await new Promise<void>(resolve => {
     entry.promote = resolve;
-    void scheduler.postTask(() => {}, { priority: entry.due ? 'user-blocking' : 'user-visible' }).then(resolve, resolve);
+    void scheduler.postTask(() => {}, { priority: 'user-visible' }).then(resolve, resolve);
   });
   entry.promote = null;
 }
@@ -315,10 +315,13 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => CompatAnswerResult | Promise<CompatAnswerResult>) | null } | null = null;
   const preparing = new Map<string, Preparing>();
   const bases = new Map<string, { surface: any; bytes: number; persistent: boolean }>();
+  /** Bases on their way by content key: preparations of the frames ahead
+   *  asking for the same pixels share one engine raster. */
+  const loading = new Map<string, { generation: number; promise: Promise<{ surface: any; revision: number } | null> }>();
   let baseBytes = 0;
   let generation = 0, readyRevision: number | null = null;
   let serial = 0;
-  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0,
+  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, sharedLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0,
     readbacks: 0, readbackMs: 0, readbackMsMax: 0, preparations: 0, prepareMs: 0, prepareMsMax: 0,
     bitmapCaptures: 0, bitmapMs: 0, bitmapMsMax: 0, workerReplies: 0, workerMs: 0, workerMsMax: 0, workerComputeMs: 0, workerComputeMsMax: 0,
     slowPreparations: [], syncLoadSites: [] };
@@ -339,7 +342,22 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     }
     generation++;
   };
-  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); loading.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  /** The engine's base for a dependency, shared with other preparations
+   *  asking for the same content in this generation. */
+  const loadBase = (missing: Dependency): Promise<{ surface: any; revision: number } | null> => {
+    const load = () => options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+    const key = missing.content?.key;
+    if (key === undefined) return load();
+    const shared = loading.get(key);
+    if (shared && shared.generation === generation) { stats.sharedLoads++; return shared.promise; }
+    const promise = load();
+    const entry = { generation, promise };
+    loading.set(key, entry);
+    const done = () => { if (loading.get(key) === entry) loading.delete(key); };
+    promise.then(done, done);
+    return promise;
+  };
   const rememberBase = (content: BaseKey | null, surface: any) => {
     if (!content || !surface) return;
     const key = content.key;
@@ -613,7 +631,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           const missing = step.missing;
           stats.asyncLoads++;
           const began = performance.now();
-          const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+          const loaded = await loadBase(missing);
           transport?.trace?.record('base dependency', revision, need.time, began);
           const ms = performance.now() - began;
           stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
