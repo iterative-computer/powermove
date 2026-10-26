@@ -176,9 +176,9 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
   let complete = false;
   try {
     const encoder = new TextEncoder();
-    const inFlight: Promise<void>[] = [], free: Uint8Array[] = [];
+    const inFlight: Promise<void>[] = [], free: Uint8Array<ArrayBuffer>[] = [];
     let chunk = new Uint8Array(CHUNK_BYTES), filled = 0;
-    const send = async (bytes: Uint8Array) => {
+    const send = async (bytes: Uint8Array<ArrayBuffer>) => {
       if (inFlight.length >= 2) await inFlight.shift();
       inFlight.push(bridge.write(token, bytes).then(() => { if (bytes.byteLength === CHUNK_BYTES) free.push(bytes); }));
     };
