@@ -82,6 +82,13 @@ viewer's complete canvas including its pan buffer
 (`CompatNeed.crop`) and is part of the answer's identity. Exports and
 snapshots are never cropped.
 
+A wrapper that drops the crop argument (an assigned `PM.raster` calling
+the chain with three arguments) returns the whole base for a cropped need.
+Today the compositor draws that whole raster on the layer's quad, and only
+the window is on screen, so it is a pass-through too (`Native`), unless
+today's 8,192-pixel cap lowered the whole raster's density (a window keeps
+its density): then the result is read back and posted.
+
 ### `PM.raster` assigned directly
 
 Before the services registry, extensions wrapped the raster by assigning
