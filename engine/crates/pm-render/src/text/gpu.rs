@@ -1026,6 +1026,14 @@ impl TextGpu {
         }
         pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
+        // Glyphs, sizes, or transforms the cache has not met (a layer first
+        // drawn, or animated) get their geometry on several threads at once.
+        self.cpu
+            .coverage_cache()
+            .prepare(scene.items.iter().flat_map(|item| match &item.content {
+                ItemContent::Coverage { paths } => paths.as_slice(),
+                _ => &[],
+            }));
         let atlas = atlas::pack(scene, MAX_PAGE);
         // A scene uses one coverage source throughout, including when any
         // contour is too large or otherwise unsuitable for direct integration.
