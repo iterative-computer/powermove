@@ -157,7 +157,7 @@ impl Schedule {
     }
 
     /// The frame index after `k` in the clock's direction.
-    fn step(clock: &TransportClock) -> i64 {
+    pub fn step(clock: &TransportClock) -> i64 {
         if clock.rate().num < 0 { -1 } else { 1 }
     }
 

@@ -813,6 +813,69 @@ impl Composer {
         Some(canvas)
     }
 
+    /// The request a viewer frame of `place` renders its region with.
+    fn viewer_request(
+        &self,
+        place: &Placement,
+        region: PixelRect,
+        state: &ViewerState,
+    ) -> RenderRequest {
+        RenderRequest {
+            output_size: place.output,
+            scale: place.scale,
+            origin: place.origin,
+            region: Some(region),
+            preview_canvas: place.canvas,
+            precision: Precision::Float16,
+            depth_id: false,
+            background: true,
+            export: false,
+            // The viewer's override: editor camera, Wireframe and
+            // X-ray looks, Local View, and shading.
+            view: state.view.clone(),
+            // Today's viewer: 6 samples while playing, 12 when paused;
+            // the playback resampler while playing.
+            motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
+                pm_protocol::frame::MotionBlurKind::PreviewPlaying
+            } else {
+                pm_protocol::frame::MotionBlurKind::PreviewPaused
+            }),
+            sampling: if self.playing {
+                pm_render::sampling::Sampling::Playback
+            } else {
+                pm_render::sampling::Sampling::Final
+            },
+            output_kind: pm_render::OutputKind::Preview,
+        }
+    }
+
+    /// The compatibility needs a viewer frame of `composition` at `time`
+    /// would ask for and the producers have not answered (nothing is drawn).
+    pub fn compat_missing(
+        &mut self,
+        doc: &pm_model::Document,
+        composition: &str,
+        media: &dyn AssetResolver,
+        time: Ticks,
+        state: &ViewerState,
+    ) -> Vec<pm_protocol::snapshot::CompatNeed> {
+        let Ok(comp) = pm_eval::Comp::resolve(doc, composition) else {
+            return Vec::new();
+        };
+        let number = |key: &str| {
+            let v = pm_eval::node::to_number(comp.member(key));
+            if v.is_finite() && v > 0.0 { v } else { 1.0 }
+        };
+        let place = placement(state, number("w"), number("h"));
+        let Some(region) = place.region else {
+            return Vec::new();
+        };
+        let request = self.viewer_request(&place, region, state);
+        self.renderer
+            .compat_missing(doc, composition, time, &request, media)
+            .unwrap_or_default()
+    }
+
     /// Draws `composition` of `doc` at `time` into `working` for `state`.
     /// On an error the working texture is left as it was.
     #[allow(clippy::too_many_arguments)]
@@ -858,33 +921,7 @@ impl Composer {
         let mut stand_ins = Vec::new();
         let mut scene3d_meta = Vec::new();
         if let Some(region) = place.region {
-            let request = RenderRequest {
-                output_size: place.output,
-                scale: place.scale,
-                origin: place.origin,
-                region: Some(region),
-                preview_canvas: place.canvas,
-                precision: Precision::Float16,
-                depth_id: false,
-                background: true,
-                export: false,
-                // The viewer's override: editor camera, Wireframe and
-                // X-ray looks, Local View, and shading.
-                view: state.view.clone(),
-                // Today's viewer: 6 samples while playing, 12 when paused;
-                // the playback resampler while playing.
-                motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {
-                    pm_protocol::frame::MotionBlurKind::PreviewPlaying
-                } else {
-                    pm_protocol::frame::MotionBlurKind::PreviewPaused
-                }),
-                sampling: if self.playing {
-                    pm_render::sampling::Sampling::Playback
-                } else {
-                    pm_render::sampling::Sampling::Final
-                },
-                output_kind: pm_render::OutputKind::Preview,
-            };
+            let request = self.viewer_request(&place, region, state);
             let format = self.renderer.device_target_format(doc, &request);
             let reuse = self.scratch.as_ref().is_some_and(|t| {
                 t.width() == region.width && t.height() == region.height && t.format() == format
