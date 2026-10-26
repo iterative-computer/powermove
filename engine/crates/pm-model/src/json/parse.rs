@@ -80,11 +80,7 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
 
 /// [`parse`] into the tree `builder` makes.
 pub fn parse_with<B: TreeBuilder>(text: &str, builder: &mut B) -> Result<B::Out, ParseError> {
-    let mut parser = Parser {
-        bytes: text.as_bytes(),
-        pos: 0,
-        depth: 0,
-    };
+    let mut parser = Parser::new(text.as_bytes(), 0, 0);
     parser.skip_whitespace();
     let value = parser.value(builder)?;
     parser.skip_whitespace();
@@ -235,11 +231,7 @@ where
     let shared = &*builder;
     let parsed = crate::parallel::map(units.len(), |i| {
         let unit = &units[i];
-        let mut parser = Parser {
-            bytes,
-            pos: unit.start,
-            depth: unit.depth,
-        };
+        let mut parser = Parser::new(bytes, unit.start, unit.depth);
         let value = parser.value(&mut shared.clone()).ok()?;
         (parser.pos == unit.end).then_some(value)
     });
@@ -275,13 +267,29 @@ pub fn parse_file_text(bytes: &[u8]) -> Result<Value, ParseError> {
     parse(&text)
 }
 
-struct Parser<'a> {
+struct Parser<'a, O> {
     bytes: &'a [u8],
     pos: usize,
     depth: usize,
+    /// The members and elements of the containers being parsed, innermost
+    /// last. Each container's move out at its end into a vector of exactly
+    /// their number: one allocation, where growing one vector per container
+    /// reallocated (twice for an object: its values were shrunk to fit too).
+    members: Vec<(JsString, O)>,
+    items: Vec<O>,
 }
 
-impl Parser<'_> {
+impl<'a, O> Parser<'a, O> {
+    fn new(bytes: &'a [u8], pos: usize, depth: usize) -> Self {
+        Parser {
+            bytes,
+            pos,
+            depth,
+            members: Vec::new(),
+            items: Vec::new(),
+        }
+    }
+
     fn error(&self, message: &'static str) -> ParseError {
         ParseError {
             offset: self.pos,
@@ -312,7 +320,7 @@ impl Parser<'_> {
         }
     }
 
-    fn value<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
+    fn value<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
         if let Some((value, end)) = b.prebuilt(self.pos) {
             self.pos = end;
             return Ok(value);
@@ -344,17 +352,17 @@ impl Parser<'_> {
         Ok(())
     }
 
-    fn object<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
+    fn object<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
         self.enter()?;
         self.pos += 1; // {
         // Members are collected, then sorted once (already sorted in
         // canonical JSON) into a map holding exactly them.
-        let mut members: Vec<(JsString, B::Out)> = Vec::new();
+        let base = self.members.len();
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(b.object(members));
+            return Ok(b.object(Vec::new()));
         }
         loop {
             self.skip_whitespace();
@@ -369,7 +377,7 @@ impl Parser<'_> {
             self.pos += 1;
             self.skip_whitespace();
             let value = self.value(b)?;
-            members.push((key, value));
+            self.members.push((key, value));
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -381,22 +389,24 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
+        let members = self.members.drain(base..).collect();
         Ok(b.object(members))
     }
 
-    fn array<B: TreeBuilder>(&mut self, b: &mut B) -> Result<B::Out, ParseError> {
+    fn array<B: TreeBuilder<Out = O>>(&mut self, b: &mut B) -> Result<O, ParseError> {
         self.enter()?;
         self.pos += 1; // [
-        let mut items = Vec::new();
+        let base = self.items.len();
         self.skip_whitespace();
         if self.peek() == Some(b']') {
             self.pos += 1;
             self.depth -= 1;
-            return Ok(b.array(items));
+            return Ok(b.array(Vec::new()));
         }
         loop {
             self.skip_whitespace();
-            items.push(self.value(b)?);
+            let item = self.value(b)?;
+            self.items.push(item);
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -408,7 +418,7 @@ impl Parser<'_> {
             }
         }
         self.depth -= 1;
-        items.shrink_to_fit();
+        let items = self.items.drain(base..).collect();
         Ok(b.array(items))
     }
 

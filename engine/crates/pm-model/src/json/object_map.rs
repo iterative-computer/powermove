@@ -326,20 +326,22 @@ impl<V> FromIterator<(JsString, V)> for ObjectMap<V> {
     fn from_iter<I: IntoIterator<Item = (JsString, V)>>(iter: I) -> Self {
         let mut entries: Vec<(JsString, V)> = iter.into_iter().collect();
         if !entries.windows(2).all(|w| w[0].0 < w[1].0) {
-            // Stable, so equal keys stay in arrival order; the last one wins.
+            // Stable, so equal keys stay in arrival order; the last one wins
+            // (moved into the first of its run, which is kept).
             entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut out: Vec<(JsString, V)> = Vec::with_capacity(entries.len());
-            for entry in entries {
-                match out.last_mut() {
-                    Some(last) if last.0 == entry.0 => *last = entry,
-                    _ => out.push(entry),
+            entries.dedup_by(|later, kept| {
+                let same = later.0 == kept.0;
+                if same {
+                    core::mem::swap(later, kept);
                 }
-            }
-            entries = out;
+                same
+            });
         }
         let schema = schema_for(entries.iter().map(|(key, _)| key));
-        let mut values: Vec<V> = entries.into_iter().map(|(_, value)| value).collect();
-        values.shrink_to_fit();
+        // A vector of its own: collected in place, the values would keep the
+        // pairs' allocation and need shrinking (a reallocation).
+        let mut values: Vec<V> = Vec::with_capacity(entries.len());
+        values.extend(entries.into_iter().map(|(_, value)| value));
         Self { schema, values }
     }
 }
