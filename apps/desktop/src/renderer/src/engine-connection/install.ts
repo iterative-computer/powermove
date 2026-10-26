@@ -249,6 +249,15 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     );
   };
   PM.setTransportDriver?.(transport);
+  // A playhead the editor moves without seeking (a project opened at its
+  // saved time, a composition switch restoring its own): a stopped engine
+  // goes there too, or it would show another frame than the playhead's.
+  const followPlayhead = (): void => {
+    if (PM.playing || !Number.isFinite(PM.time)) return;
+    const resting = transport.resting();
+    if (resting !== null && Math.abs(resting - ticks(PM.time)) > 1) transport.seek(PM.time, false);
+  };
+  const offPlayhead = ['time', 'project', 'comps'].map(event => PM.bus?.on?.(event, followPlayhead) ?? (() => {}));
 
   // The engine's levels, monitor solo, and waveform peaks for today's audio
   // panels (the mixer's meters and solo, `asset.peaks`).
@@ -818,6 +827,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offHomeTabs();
       offAssets();
       follower.dispose();
+      for (const off of offPlayhead) off();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
