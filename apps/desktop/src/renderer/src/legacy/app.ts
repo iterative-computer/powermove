@@ -19,7 +19,7 @@ import { temporalKeys } from './core/temporal-bridge';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile, withProjectReader } from './core/project-file';
 import { fingerprintJSON, projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
-import { yieldTask } from './core/yield-task';
+import { yieldTask, yieldTurn } from './core/yield-task';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
@@ -496,12 +496,16 @@ function hydrate(p: any) {
   while (!result.done) result = steps.next();
   return result.value;
 }
+/** How long hydration's prioritized slices may hold back other tasks (an
+ *  open's embedded media is copied in round trips meanwhile). */
+const HYDRATE_TURN_MS = 16;
 async function hydrateAsync(p: any, isCurrent = () => true) {
   const steps = hydrateSteps(p);
-  let deadline = performance.now() + 4, result = steps.next();
+  let deadline = performance.now() + 4, turn = performance.now() + HYDRATE_TURN_MS, result = steps.next();
   while (!result.done) {
     if (performance.now() >= deadline) {
-      await yieldLoad();
+      if (performance.now() >= turn) { await yieldTurn(); turn = performance.now() + HYDRATE_TURN_MS; }
+      else await yieldLoad();
       if (!isCurrent()) return null;
       deadline = performance.now() + 4;
     }
@@ -1174,11 +1178,16 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);
     if (!current()) return abandon();
+    // One serialization writes both the local checkpoint and the new engine's
+    // copy (project-text.ts). Nothing below writes the project before it is
+    // published, so both texts stay the document's.
+    let texts = PM.Projects.texts?.(project) ?? null;
     // The new engine's copy of the document is prepared while media finishes
-    // restoring and this window checkpoints the project: most of it is the
-    // engine process parsing and hashing, not this thread. Nothing below
-    // writes the project before it is published.
-    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project));
+    // restoring: most of it is the engine process parsing as the text
+    // arrives, and hashing, not this thread.
+    let streamed!: () => void;
+    const sent = new Promise<void>(resolve => { streamed = resolve; });
+    const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project, texts?.canonical, streamed));
     preparing.catch(() => {});
     release = () => { void preparing.then(() => PM.EngineDoc?.discardPrepared?.(project), () => {}); };
     if (restoring) await restoring;
@@ -1216,12 +1225,20 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // The text a checkpoint writes is at hand only during the call that
     // writes it: the opened file's hash then needs no serialization of its own.
     let openedJSON: string | null = null;
+    // The checkpoint posts the whole document to main as well: once main has
+    // the engine's copy, while the engine parses it.
+    await Promise.race([sent, preparing.then(() => {}, () => {})]);
+    if (!current()) return abandon();
+    // Without the text (a serialization error), the checkpoint reports it as before.
+    const slot: string | undefined = texts ? await texts.slot.catch(() => undefined) : undefined;
+    texts = null;
+    if (!current()) return abandon();
     if (PM.Projects.recoverAsync) {
-      const storing = PM.Projects.recoverAsync(project, undefined, current);
+      const storing = PM.Projects.recoverAsync(project, undefined, current, slot);
       openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
       await storing;
     } else {
-      PM.Projects.put(project);
+      PM.Projects.put(project, undefined, slot);
       openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
     }
     if (!current()) return abandon();

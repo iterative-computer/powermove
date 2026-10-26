@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
 import type { IpcMain } from 'electron';
-import { DOCUMENT_KERNEL_IPC as IPC } from '../../shared/document-kernel';
+import { DOCUMENT_CHUNK_BYTES, DOCUMENT_KERNEL_IPC as IPC, DOCUMENT_QUEUED_WRITES } from '../../shared/document-kernel';
 import { canonicalStringify } from '../../shared/canonical-json';
 import { installDocumentKernelIpc } from './document-kernel';
 
@@ -52,7 +52,9 @@ it('streams exactly the supplied bytes, independently hashes them and removes st
       const token = await ipc.invoke(IPC.begin, event);
       const bytes = new TextEncoder().encode('{"a":"🦀","z":2}');
       await ipc.invoke(IPC.write, event, token, bytes.subarray(0, 9));
-      await ipc.invoke(IPC.write, event, token, bytes.subarray(9));
+      await ipc.invoke(IPC.write, event, token, bytes.subarray(9, 10));
+      // Text is encoded as UTF-8 by main.
+      await ipc.invoke(IPC.write, event, token, '","z":2}');
       const committed = ipc.invoke(IPC.commit, event, token, 'document', 4);
       if (fail) await expect(committed).rejects.toThrow('reader failed');
       else expect(await committed).toMatchObject({ pending: false, revision: 4 });
@@ -70,7 +72,10 @@ it('fences owners, bounds chunks, refuses page-supplied file loads, and releases
     await expect(ipc.invoke(IPC.begin, one)).rejects.toThrow('already open');
     const token = await pending;
     await expect(ipc.invoke(IPC.write, two, token, new Uint8Array([1]))).rejects.toThrow('closed');
-    await expect(ipc.invoke(IPC.write, one, token, new Uint8Array(1024 * 1024 + 1))).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, new Uint8Array(DOCUMENT_CHUNK_BYTES + 1))).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, 'x'.repeat(DOCUMENT_CHUNK_BYTES + 1))).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, '')).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, { length: 1 })).rejects.toThrow('Invalid document chunk');
     const event = { ...one, returnValue: undefined as unknown };
     ipc.emit(IPC.call, event, '{"op":"load","args":{"path":"/arbitrary"}}');
     await vi.waitFor(() => expect(event.returnValue).toBeDefined());
@@ -146,12 +151,12 @@ it('bounds pending staging writes and releases capacity after awaited streaming'
   const stop = installDocumentKernelIpc({ ipc: ipc as unknown as IpcMain, cache, trusted: () => true, call: async () => '{"ok":true,"value":null}' });
   try {
     const token = await ipc.invoke(IPC.begin, event);
-    const first = ipc.invoke(IPC.write, event, token, new Uint8Array(1024 * 1024));
+    const first = ipc.invoke(IPC.write, event, token, new Uint8Array(DOCUMENT_CHUNK_BYTES));
     await held.pending;
-    const second = ipc.invoke(IPC.write, event, token, new Uint8Array(1024 * 1024));
+    const queued = Array.from({ length: DOCUMENT_QUEUED_WRITES - 1 }, () => ipc.invoke(IPC.write, event, token, new Uint8Array(DOCUMENT_CHUNK_BYTES)));
     await expect(ipc.invoke(IPC.write, event, token, new Uint8Array([1]))).rejects.toThrow(/backpressure/);
     held.release();
-    await Promise.all([first, second]);
+    await Promise.all([first, ...queued]);
     await ipc.invoke(IPC.write, event, token, new Uint8Array([1]));
     await ipc.invoke(IPC.abort, event, token);
     expect(await readdir(cache)).toEqual([]);
@@ -418,4 +423,46 @@ it('expires abandoned stream and digest tokens but not a write in flight', async
     await ipc.invoke(IPC.abort, event, active);
     expect(await readdir(cache)).toEqual([]);
   } finally { held.release(); held.restore(); await stop(); vi.useRealTimers(); await rm(cache, { recursive: true, force: true }); }
+});
+
+it('names the staging file to the utility as a stream begins and tells it how much is written after every chunk', async () => {
+  const cache = await mkdtemp(path.join(os.tmpdir(), 'pm-kernel-test-'));
+  const ipc = new Ipc(), event = owner(7);
+  const told: Array<{ op: string; args: any; bytes?: number }> = [];
+  const call = vi.fn(async (_id: number, request: string) => {
+    const { op, args } = JSON.parse(request);
+    const entry: { op: string; args: any; bytes?: number } = { op, args };
+    told.push(entry);
+    // What the file holds (at least) when the utility hears of it.
+    if (op === 'grow') entry.bytes = (await readFile(args.path)).byteLength;
+    if (op === 'load') return JSON.stringify({ ok: true, value: { pending: false, revision: args.revision, hash: 'c'.repeat(64), integrity: 'checked' } });
+    return '{"ok":true,"value":null}';
+  });
+  const stop = installDocumentKernelIpc({ ipc: ipc as unknown as IpcMain, cache, trusted: () => true, call });
+  try {
+    const token = await ipc.invoke(IPC.begin, event, 5);
+    await ipc.invoke(IPC.write, event, token, new TextEncoder().encode('{"a":'));
+    await ipc.invoke(IPC.write, event, token, new TextEncoder().encode('[1,2]}'));
+    await ipc.invoke(IPC.commit, event, token, 'document', 5);
+    const file = told[0]!.args.path;
+    expect(told.map(t => t.op)).toEqual(['preparse', 'grow', 'grow', 'load']);
+    expect(told[0]!.args).toEqual({ path: file, revision: 5 });
+    const grown = told.filter(t => t.op === 'grow');
+    expect(grown.map(t => [t.args.path, t.args.length])).toEqual([[file, 5], [file, 11]]);
+    // Never ahead of the file.
+    for (const t of grown) expect(t.bytes).toBeGreaterThanOrEqual(t.args.length);
+    expect(told[3]!.args.path).toBe(file);
+    // An abandoned stream ends the utility's parse; one without a revision never starts one.
+    told.length = 0;
+    const abandoned = await ipc.invoke(IPC.begin, event, 6);
+    await ipc.invoke(IPC.write, event, abandoned, new Uint8Array([1]));
+    await ipc.invoke(IPC.abort, event, abandoned);
+    expect(told.map(t => t.op)).toEqual(['preparse', 'grow', 'preparseEnd']);
+    told.length = 0;
+    const plain = await ipc.invoke(IPC.begin, event);
+    await ipc.invoke(IPC.write, event, plain, new Uint8Array([1]));
+    await ipc.invoke(IPC.abort, event, plain);
+    expect(told).toEqual([]);
+    expect(await readdir(cache)).toEqual([]);
+  } finally { await stop(); await rm(cache, { recursive: true, force: true }); }
 });

@@ -1010,6 +1010,36 @@ Preparation (engine on) also lost two of its three whole-document passes:
   main's hash of the stream and answers the canonical hash of the parsed
   tree. Recovery copies keep the byte hash (document-recovery.md).
 
+The engine's copy then moved off the open's critical path:
+
+- One serialization (`legacy/core/project-text.ts`) makes both the
+  checkpoint's slot text (exactly `JSON.stringify` of the envelope) and the
+  canonical text. The canonical form only rearranges the project's own
+  members, so each member, composition and layer is stringified once. The
+  canonical text streams to main piece by piece as it is made, as text that
+  main encodes.
+- Main names its staging file to the utility as the stream begins
+  (`preparse`, with the revision the load will use) and says how much is on
+  disk after every chunk (`grow`). The utility finds the parallel parse's
+  units as they close (`UnitScanner`), parses them on workers, and hashes
+  what it reads. The load uses a unit only where the file's bytes have its
+  digest. It skips its own SHA-256 of the file when what was read hashes to
+  main's hash of the stream and the file still holds each read.
+- The shadow is cloned while the utility parses, with slices that resume
+  ahead of other tasks. The checkpoint is posted once main has the engine's
+  copy: posted earlier, it slowed the stream, and posted later, the
+  synchronous activation in `switchProject` waited behind it.
+- Main copies embedded media into the store eight ranges at a time. Its
+  project reader queues the reads. The copies run alongside hydration,
+  which gives other tasks a turn every 16 ms.
+
+The shadow stays a full copy. Many writers change `PM.proj` in place and
+only then name the paths (`touchedDocument`, history's patch paths), and
+a `touch()` without paths diffs the whole open composition. A shadow that
+shared objects with `PM.proj` would compare each written value with
+itself and send nothing. Copy-on-write would need every write announced
+before it happens (only `PM.doc.write` does).
+
 The font prewarm yields every 8 ms. A simulated memory-pressure
 notification to the window after a large ingestion was tried and removed:
 it fired before the RSS peak, did not lower the measured RSS, and could

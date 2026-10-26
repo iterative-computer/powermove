@@ -1,4 +1,4 @@
-import type { DocumentKernelBridge, DocumentKernelReceipt } from '../../../shared/document-kernel';
+import { DOCUMENT_CHUNK_BYTES, DOCUMENT_QUEUED_WRITES, type DocumentKernelBridge, type DocumentKernelReceipt } from '../../../shared/document-kernel';
 import { serializeInSlices } from '../legacy/core/json-slices';
 import { canonicalChunks } from '../../../shared/canonical-async';
 import { KIND, PmWasm, revive, type PmWasmExports } from './wasm';
@@ -164,46 +164,55 @@ export async function remoteCanonicalHash(bridge: DocumentKernelBridge, value: a
 }
 
 /** The shadow's JSON text (JSON.stringify's member order, serialized in
- * slices), encoded straight into full 1 MiB chunks with two writes in
- * flight; a chunk's buffer is filled again once main has it (180 buffers
- * of garbage for the real project otherwise). The utility parses it into the same tree its canonical JSON would
- * give and answers that tree's canonical hash; main checks the file against
- * its own hash of the stream. About a tenth of the cost of the canonical
- * stream (sorted members, a generator step per token) for the large private
- * project. */
-export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
-  const token = await bridge.begin();
+ * slices), sent in chunks of DOCUMENT_CHUNK_BYTES UTF-16 units with main's
+ * queue of writes in flight (main encodes them). The utility parses it into
+ * the same tree its canonical JSON would give and answers that tree's
+ * canonical hash; main checks the file against its own hash of the stream.
+ * About a tenth of the cost of the canonical stream (sorted members, a
+ * generator step per token) for the large private project. */
+export function ingestDocumentText(bridge: DocumentKernelBridge, shadow: any, document: string, revision: number): Promise<DocumentKernelReceipt> {
+  return ingest(bridge, emit => serializeInSlices(shadow, emit), document, revision);
+}
+
+/** The same, from text made elsewhere: `JSON.stringify` of the document in
+ *  pieces, streamed as they come (an open's canonical text,
+ *  legacy/core/project-text.ts). */
+export function ingestDocumentPieces(bridge: DocumentKernelBridge, pieces: AsyncIterable<string> | Iterable<string>, document: string, revision: number, onStreamed?: () => void): Promise<DocumentKernelReceipt> {
+  return ingest(bridge, async emit => { for await (const piece of pieces) await emit(piece); }, document, revision, onStreamed);
+}
+
+/** `onStreamed`: called once main has every byte, as the engine starts parsing. */
+async function ingest(bridge: DocumentKernelBridge, produce: (emit: (text: string) => Promise<void>) => Promise<void>, document: string, revision: number, onStreamed?: () => void): Promise<DocumentKernelReceipt> {
+  const token = await bridge.begin(revision);
   let complete = false;
   try {
-    const encoder = new TextEncoder();
-    const inFlight: Promise<void>[] = [], free: Uint8Array<ArrayBuffer>[] = [];
-    let chunk = new Uint8Array(CHUNK_BYTES), filled = 0;
-    const send = async (bytes: Uint8Array<ArrayBuffer>) => {
-      if (inFlight.length >= 2) await inFlight.shift();
-      inFlight.push(bridge.write(token, bytes).then(() => { if (bytes.byteLength === CHUNK_BYTES) free.push(bytes); }));
+    const inFlight: Promise<void>[] = [];
+    const send = async (text: string) => {
+      if (inFlight.length >= DOCUMENT_QUEUED_WRITES) await inFlight.shift();
+      inFlight.push(bridge.write(token, text));
     };
-    // The text has no lone surrogates (JSON.stringify escapes them): it
-    // encodes as it would whole, a chunk ending where the next character
-    // does not fit.
-    await serializeInSlices(shadow, async text => {
-      for (let read = 0; read < text.length;) {
-        const result = encoder.encodeInto(read ? text.slice(read) : text, chunk.subarray(filled));
-        read += result.read; filled += result.written;
-        if (read < text.length || filled === CHUNK_BYTES) {
-          // A subarray would cross the context bridge with its whole buffer.
-          const full = filled === CHUNK_BYTES;
-          await send(full ? chunk : chunk.slice(0, filled));
-          if (full) chunk = free.pop() ?? new Uint8Array(CHUNK_BYTES);
-          filled = 0;
-        }
+    // Whole chunks of text (main encodes them): the text has no lone
+    // surrogates (JSON.stringify escapes them), and a chunk never ends
+    // between the halves of a pair.
+    let parts: string[] = [], size = 0;
+    await produce(async text => {
+      for (let at = 0; at < text.length;) {
+        let end = Math.min(text.length, at + CHUNK_CHARS - size);
+        if (end < text.length && isHigh(text.charCodeAt(end - 1))) end--;
+        parts.push(at === 0 && end === text.length ? text : text.slice(at, end));
+        size += end - at; at = end;
+        if (CHUNK_CHARS - size < 2) { await send(parts.join('')); parts = []; size = 0; }
       }
     });
-    if (filled) await send(chunk.slice(0, filled));
+    if (size) await send(parts.join(''));
     await Promise.all(inFlight);
-    const receipt = await bridge.commit(token, document, revision);
+    const committing = bridge.commit(token, document, revision);
+    onStreamed?.();
+    const receipt = await committing;
     complete = true;
     return receipt;
   } finally { if (!complete) await bridge.abort(token).catch(() => {}); }
 }
-const CHUNK_BYTES = 1024 * 1024;
+const CHUNK_CHARS = DOCUMENT_CHUNK_BYTES;
+const isHigh = (code: number) => code >= 0xd800 && code <= 0xdbff;
 

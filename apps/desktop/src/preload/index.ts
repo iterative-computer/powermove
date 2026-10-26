@@ -590,7 +590,7 @@ const bridge: PowermoveBridge = {
     documentKernel: {
       automaticRecovery: true,
       call: (request, bytes) => ipcRenderer.sendSync(DOCUMENT_KERNEL_IPC.call, String(request), bytes),
-      begin: () => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.begin),
+      begin: (revision) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.begin, revision),
       write: (token, chunk) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.write, String(token), chunk),
       commit: (token, document, revision) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.commit, String(token), String(document), revision),
       abort: (token) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.abort, String(token)),

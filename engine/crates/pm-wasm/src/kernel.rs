@@ -34,10 +34,24 @@ impl PreparedDocument {
     /// The reader drops its owned file bytes after this step, before hashing
     /// allocates integrity-cache entries or serializer scratch space.
     pub fn parse_tree(bytes: &[u8], revision: u64) -> Result<Document, String> {
+        Self::parse_tree_prebuilt(bytes, revision, Vec::new(), false)
+    }
+
+    /// [`Self::parse_tree`] with units parsed as the text arrived
+    /// ([`Node::parse_bytes_prebuilt`]).
+    pub fn parse_tree_prebuilt(
+        bytes: &[u8],
+        revision: u64,
+        prebuilt: Vec<pm_model::json::Prebuilt<Node>>,
+        complete: bool,
+    ) -> Result<Document, String> {
         let root = if bytes.is_empty() {
             None
         } else {
-            Some(Node::parse_bytes(bytes, revision).map_err(|e| e.to_string())?)
+            Some(
+                Node::parse_bytes_prebuilt(bytes, revision, prebuilt, complete)
+                    .map_err(|e| e.to_string())?,
+            )
         };
         Ok(Document::from_root(root, revision))
     }

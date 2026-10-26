@@ -112,59 +112,156 @@ const UNIT_MIN_BYTES: usize = 16 << 10;
 
 /// A container a worker parses: its text is `start..end`, inside `depth`
 /// enclosing containers.
-struct Unit {
-    start: usize,
-    end: usize,
-    depth: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unit {
+    pub start: usize,
+    pub end: usize,
+    pub depth: usize,
 }
 
 /// The units of a parallel parse, in source order, found by one pass over
 /// the text that follows only strings and brackets. `None` when that pass
 /// finds the text malformed (the sequential parse reports how).
 fn units(bytes: &[u8]) -> Option<Vec<Unit>> {
-    let mut units: Vec<Unit> = Vec::new();
-    let mut open: Vec<usize> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                i += 1;
-                loop {
-                    match *bytes.get(i)? {
-                        b'"' => break,
-                        b'\\' => i += 2,
-                        _ => i += 1,
-                    }
-                }
-            }
-            b'{' | b'[' => {
-                if open.len() >= MAX_DEPTH {
-                    return None;
-                }
-                open.push(i);
-            }
-            b'}' | b']' => {
-                let start = open.pop()?;
-                let end = i + 1;
-                if end - start <= UNIT_MAX_BYTES {
-                    // It contains the units found since it opened.
-                    while units.last().is_some_and(|unit| unit.start > start) {
-                        units.pop();
-                    }
-                    if end - start >= UNIT_MIN_BYTES {
-                        units.push(Unit {
-                            start,
-                            end,
-                            depth: open.len(),
-                        });
-                    }
-                }
-            }
-            _ => {}
+    let mut scanner = UnitScanner::default();
+    let mut units = scanner.feed(bytes);
+    units.extend(scanner.finish()?);
+    Some(units)
+}
+
+/// The units of a parallel parse found as the text arrives: bytes are fed in
+/// order, in pieces of any size, and a unit is handed out once no container
+/// still open could hold it. Together with [`UnitScanner::finish`], exactly
+/// the units of the whole text, in source order.
+#[derive(Default)]
+pub struct UnitScanner {
+    /// Bytes fed so far.
+    pos: usize,
+    /// Where the containers still open start, outermost first.
+    open: Vec<usize>,
+    /// Units a container still open may yet hold, in source order.
+    pending: Vec<Unit>,
+    string: bool,
+    escape: bool,
+    broken: bool,
+}
+
+impl UnitScanner {
+    /// Scans the next bytes; the units that became final, in source order.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Unit> {
+        if self.broken {
+            return Vec::new();
         }
-        i += 1;
+        let base = self.pos;
+        let mut i = 0;
+        let mut closed = false;
+        while i < bytes.len() {
+            if self.string {
+                if self.escape {
+                    self.escape = false;
+                } else {
+                    match bytes[i] {
+                        b'"' => self.string = false,
+                        b'\\' => self.escape = true,
+                        _ => {}
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            match bytes[i] {
+                b'"' => self.string = true,
+                b'{' | b'[' => {
+                    if self.open.len() >= MAX_DEPTH {
+                        self.broken = true;
+                        return Vec::new();
+                    }
+                    self.open.push(base + i);
+                }
+                b'}' | b']' => {
+                    let Some(start) = self.open.pop() else {
+                        self.broken = true;
+                        return Vec::new();
+                    };
+                    let end = base + i + 1;
+                    if end - start <= UNIT_MAX_BYTES {
+                        // It contains the units found since it opened.
+                        while self.pending.last().is_some_and(|unit| unit.start > start) {
+                            self.pending.pop();
+                        }
+                        if end - start >= UNIT_MIN_BYTES {
+                            self.pending.push(Unit {
+                                start,
+                                end,
+                                depth: self.open.len(),
+                            });
+                        }
+                    }
+                    closed = true;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        self.pos = base + bytes.len();
+        if !closed && self.pending.is_empty() {
+            return Vec::new();
+        }
+        // A unit is final once the innermost open container around it is
+        // already longer than a unit may be (or none is open around it).
+        let mut done = 0;
+        while let Some(unit) = self.pending.get(done) {
+            let around = self.open.partition_point(|&start| start < unit.start);
+            if around > 0 && self.pos - self.open[around - 1] <= UNIT_MAX_BYTES {
+                break;
+            }
+            done += 1;
+        }
+        self.pending.drain(..done).collect()
     }
-    open.is_empty().then_some(units)
+
+    /// The first byte a unit not yet handed out can start at: the text
+    /// before it is no longer needed for units.
+    pub fn needed_from(&self) -> usize {
+        let open = self
+            .open
+            .iter()
+            .copied()
+            .find(|&start| self.pos - start <= UNIT_MAX_BYTES)
+            .unwrap_or(self.pos);
+        self.pending
+            .first()
+            .map_or(open, |unit| unit.start.min(open))
+    }
+
+    /// After the last byte: the units still held, or `None` when the text is
+    /// malformed (the sequential parse reports how).
+    pub fn finish(self) -> Option<Vec<Unit>> {
+        (!self.broken && !self.string && self.open.is_empty()).then_some(self.pending)
+    }
+}
+
+/// A unit's value, parsed from its own text ahead of the parse of the whole
+/// (as the text arrives), and the SHA-256 of that text. The whole parse uses
+/// it only where the bytes there have the same digest.
+pub struct Prebuilt<T> {
+    pub unit: Unit,
+    pub digest: [u8; 32],
+    pub value: T,
+}
+
+/// Parses the text of one unit (`text`, inside `depth` enclosing containers)
+/// as [`parse_bytes_parallel`]'s workers do; `None` when it is not exactly one
+/// well-formed UTF-8 JSON value.
+pub fn parse_unit_with<B: TreeBuilder>(
+    text: &[u8],
+    depth: usize,
+    builder: &mut B,
+) -> Option<B::Out> {
+    core::str::from_utf8(text).ok()?;
+    let mut parser = Parser::new(text, 0, depth);
+    let value = parser.value(builder).ok()?;
+    (parser.pos == text.len()).then_some(value)
 }
 
 /// The skeleton pass of a parallel parse: `inner` builds everything but the
@@ -219,29 +316,88 @@ pub fn parse_bytes_parallel<B: TreeBuilder + Clone + Send + Sync>(
 where
     B::Out: Send,
 {
+    parse_bytes_parallel_prebuilt(bytes, builder, Vec::new(), false)
+}
+
+/// [`parse_bytes_parallel`] with units already parsed as the text arrived
+/// ([`UnitScanner`], [`parse_unit_with`]). With `complete`, `prebuilt` are
+/// every unit of the text, so it is not scanned again. A unit whose text is
+/// not exactly the bytes at its place is parsed again here; any unit set the
+/// whole parse cannot place falls back to one thread, as malformed text does.
+pub fn parse_bytes_parallel_prebuilt<B: TreeBuilder + Clone + Send + Sync>(
+    bytes: &[u8],
+    builder: &mut B,
+    prebuilt: Vec<Prebuilt<B::Out>>,
+    complete: bool,
+) -> Result<B::Out, ParseError>
+where
+    B::Out: Send,
+{
     let text = core::str::from_utf8(bytes).map_err(|e| ParseError {
         offset: e.valid_up_to(),
         message: "invalid UTF-8",
     })?;
-    if bytes.len() < PARALLEL_MIN_BYTES || crate::parallel::workers() < 2 {
+    if prebuilt.is_empty() && (bytes.len() < PARALLEL_MIN_BYTES || crate::parallel::workers() < 2) {
         return parse_with(text, builder);
     }
-    let Some(units) = units(bytes).filter(|units| units.len() > 1) else {
+    let units = if complete {
+        Some(prebuilt.iter().map(|p| p.unit).collect::<Vec<_>>())
+    } else {
+        units(bytes)
+    };
+    let Some(units) = units.filter(|units| units.len() > 1) else {
         return parse_with(text, builder);
     };
+    // The prebuilt value of each unit, where its text is the text there.
+    let mut given: Vec<Option<B::Out>> = (0..units.len()).map(|_| None).collect();
+    let mut digests: Vec<Option<[u8; 32]>> = vec![None; units.len()];
+    let mut next = 0;
+    for p in prebuilt {
+        while next < units.len() && units[next].start < p.unit.start {
+            next += 1;
+        }
+        if next < units.len() && units[next] == p.unit {
+            given[next] = Some(p.value);
+            digests[next] = Some(p.digest);
+        }
+    }
+    let exact = crate::parallel::map(units.len(), |i| {
+        let unit = &units[i];
+        digests[i].is_some_and(|digest| {
+            unit.end <= bytes.len() && digest == crate::hash::sha256(&bytes[unit.start..unit.end])
+        })
+    });
     let shared = &*builder;
     let parsed = crate::parallel::map(units.len(), |i| {
+        if exact[i] {
+            return Some(None);
+        }
         let unit = &units[i];
+        if unit.end > bytes.len() {
+            return None;
+        }
         let mut parser = Parser::new(bytes, unit.start, unit.depth);
         let value = parser.value(&mut shared.clone()).ok()?;
-        (parser.pos == unit.end).then_some(value)
+        (parser.pos == unit.end).then_some(Some(value))
     });
     let Some(parsed) = parsed.into_iter().collect::<Option<Vec<_>>>() else {
         return parse_with(text, builder);
     };
+    let values: Vec<B::Out> = parsed
+        .into_iter()
+        .zip(given)
+        .zip(exact)
+        .map(|((parsed, given), exact)| {
+            if exact {
+                given.expect("exact units are given")
+            } else {
+                parsed.expect("parsed here")
+            }
+        })
+        .collect();
     let mut assemble = Assemble {
         inner: builder,
-        units: units.iter().zip(parsed).peekable(),
+        units: units.iter().zip(values).peekable(),
     };
     match parse_with(text, &mut assemble) {
         Ok(value) if assemble.units.peek().is_none() => Ok(value),
@@ -674,6 +830,120 @@ mod tests {
                 .as_str(),
             Some("M4")
         );
+    }
+
+    /// Feeds `text` to a scanner in pieces of the given sizes, keeping only
+    /// the bytes it still needs, as a stream reader does: every unit, and the
+    /// text each one had when it was handed out.
+    fn scan_in_pieces(text: &[u8], sizes: &[usize]) -> Option<Vec<(Unit, Vec<u8>)>> {
+        let mut scanner = UnitScanner::default();
+        let (mut kept, mut base, mut at, mut out) = (Vec::new(), 0, 0, Vec::new());
+        let mut take = |units: Vec<Unit>, kept: &Vec<u8>, base: usize| {
+            for unit in units {
+                assert!(unit.start >= base, "a unit's text was dropped");
+                out.push((unit, kept[unit.start - base..unit.end - base].to_vec()));
+            }
+        };
+        for &size in sizes.iter().cycle() {
+            if at >= text.len() {
+                break;
+            }
+            let piece = &text[at..(at + size).min(text.len())];
+            at += piece.len();
+            kept.extend_from_slice(piece);
+            let units = scanner.feed(piece);
+            take(units, &kept, base);
+            let from = scanner.needed_from();
+            kept.drain(..from - base);
+            base = from;
+        }
+        let rest = scanner.finish()?;
+        take(rest, &kept, base);
+        Some(out)
+    }
+
+    #[test]
+    fn units_found_as_the_text_arrives_are_the_units_of_the_whole_text() {
+        let text = large_document();
+        let whole = units(text.as_bytes()).unwrap();
+        for sizes in [
+            &[7usize, 1 << 12, 1, 3][..],
+            &[1 << 20],
+            &[text.len()],
+            &[65_537, 13],
+        ] {
+            let scanned = scan_in_pieces(text.as_bytes(), sizes).unwrap();
+            assert_eq!(
+                scanned.iter().map(|(unit, _)| *unit).collect::<Vec<_>>(),
+                whole,
+                "{sizes:?}"
+            );
+            for (unit, kept) in &scanned {
+                assert_eq!(kept.as_slice(), &text.as_bytes()[unit.start..unit.end]);
+            }
+        }
+        // Malformed text: no units at the end.
+        assert!(scan_in_pieces(&text.as_bytes()[..text.len() - 3], &[1 << 16]).is_none());
+        assert!(scan_in_pieces(b"[1]]", &[1]).is_none());
+    }
+
+    #[test]
+    fn prebuilt_units_build_the_same_tree_and_mismatched_ones_are_parsed_again() {
+        let text = large_document();
+        let bytes = text.as_bytes();
+        let expected = parse(&text).unwrap();
+        let prebuilt = |change: &dyn Fn(usize, &mut Prebuilt<Value>)| -> Vec<Prebuilt<Value>> {
+            scan_in_pieces(bytes, &[1 << 16])
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .map(|(i, (unit, text))| {
+                    let value = parse_unit_with(&text, unit.depth, &mut ValueBuilder).unwrap();
+                    let digest = crate::hash::sha256(&text);
+                    let mut p = Prebuilt {
+                        unit,
+                        digest,
+                        value,
+                    };
+                    change(i, &mut p);
+                    p
+                })
+                .collect()
+        };
+        // Every unit given: the text is not scanned again.
+        assert!(
+            parse_bytes_parallel_prebuilt(bytes, &mut ValueBuilder, prebuilt(&|_, _| {}), true)
+                .unwrap()
+                == expected
+        );
+        // A unit whose text was not the bytes there (another file, a changed
+        // byte) is never used, though its value would place.
+        let stale = prebuilt(&|i, p| {
+            if i == 3 {
+                p.digest[5] ^= 1;
+                p.value = Value::Null;
+            }
+        });
+        assert!(
+            parse_bytes_parallel_prebuilt(bytes, &mut ValueBuilder, stale, true).unwrap()
+                == expected
+        );
+        // Some units given, the rest scanned and parsed here.
+        let some: Vec<_> = prebuilt(&|_, _| {}).into_iter().step_by(3).collect();
+        assert!(
+            parse_bytes_parallel_prebuilt(bytes, &mut ValueBuilder, some, false).unwrap()
+                == expected
+        );
+        // A unit list that cannot be placed falls back to one thread.
+        let mut moved = prebuilt(&|_, _| {});
+        moved[2].unit.start += 1;
+        assert!(
+            parse_bytes_parallel_prebuilt(bytes, &mut ValueBuilder, moved, true).unwrap()
+                == expected
+        );
+        // A unit's own text must be one whole value.
+        assert!(parse_unit_with(b"[1,2] ", 0, &mut ValueBuilder).is_none());
+        assert!(parse_unit_with(b"[\"\xff\"]", 0, &mut ValueBuilder).is_none());
     }
 
     #[test]
