@@ -22,8 +22,11 @@ export function installAutomaticPreview(PM: any) {
   };
   const options = () => ({ mblur: true, mbSamples: 6, shutter: PM.proj?.shutter || .5, hideShy: false });
   const blocked = () => {
+    // The native engine draws the viewer: legacy idle frames are never shown,
+    // and reading `GL.gl` would allocate the deferred compatibility context.
+    if (PM.EngineConnection) return true;
     const gl = PM.GL;
-    return !gl?.gl || !gl.canvas?.width || !gl.canvas?.height || !PM.proj?.layers?.length
+    return !(gl?.peekContext ? gl.peekContext() : gl?.gl) || !gl.canvas?.width || !gl.canvas?.height || !PM.proj?.layers?.length
       || PM.playing || PM.Export?.busy || PM.agentFrameCapture || PM.Preview?.preparing || PM.Preview?.active
       || PM.preparedVideoFrames || PM.assets?.loading?.size || gl.compiling || gl.errors?.size
       || PM.interactionActive?.() || PM.ProjectsScreen?.isOpen || PM.SettingsUI?.isOpen
