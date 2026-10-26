@@ -84,6 +84,14 @@ function installEffectCompat(effect: any) {
   defineCompat(effect, 'open', () => !!fxOpen.get(id), (value: any) => fxOpen.set(id, !!value));
 }
 
+function groupCollapsedOf(layer: any) {
+  const id = idOf(layer);
+  /* Preserve the old hierarchy state during the one-time split from the
+     legacy shared disclosure field. */
+  if (!groupCollapsed.has(id)) groupCollapsed.set(id, layer && typeof layer === 'object' ? layer.collapsed !== false : true);
+  return groupCollapsed.get(id);
+}
+
 function syncLayerCollapsed(layer: any) {
   const id = idOf(layer);
   if (!id) return;
@@ -94,7 +102,9 @@ function syncLayerCollapsed(layer: any) {
   if (!layerCollapsedBase.has(id)) {
     timelineVersion++;
     layerCollapsedBase.set(id, persistent);
-    if (!layerCollapsed.has(id)) layerCollapsed.set(id, persistent);
+    /* An open group still starts with its animated properties showing, as an
+       open layer does; without a reveal only keyframed rows appear. */
+    if (!layerCollapsed.has(id)) layerCollapsed.set(id, layer.type === 'group' ? groupCollapsedOf(layer) : persistent);
   } else if (layerCollapsedBase.get(id) !== persistent) {
     timelineVersion++;
     layerCollapsedBase.set(id, persistent);
@@ -261,13 +271,8 @@ const UIState = PM.UIState = {
     current();
     const id = idOf(layer);
     if (!id) return true;
-    if (!groupCollapsed.has(id)) {
-      timelineVersion++;
-      /* Preserve the old hierarchy state during the one-time split from the
-         legacy shared disclosure field. */
-      groupCollapsed.set(id, layer && typeof layer === 'object' ? layer.collapsed !== false : true);
-    }
-    return groupCollapsed.get(id);
+    if (!groupCollapsed.has(id)) timelineVersion++;
+    return groupCollapsedOf(layer);
   },
   setGroupCollapsed(layer: any, collapsed: any) {
     current();

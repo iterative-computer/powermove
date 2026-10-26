@@ -142,7 +142,10 @@ export function toggleTimelineDisclosure(api: PowermoveAPI, layer: any, wasColla
   ? api.uiState.getGroupCollapsed(layer) : api.uiState.getLayerCollapsed(layer)): boolean {
   const collapsed = !wasCollapsed;
   if (layer.type === 'group') {
+    // A group's chevron shows its members and, like a layer's, its animated
+    // properties. U and the other reveals still toggle the properties alone.
     api.uiState.setGroupCollapsed(layer, collapsed);
+    api.uiState.setLayerCollapsed(layer, collapsed);
     return collapsed;
   }
   layer.collapsed = collapsed;

@@ -31,6 +31,15 @@ function uiStateRegistry() {
   return { PM, key, layer, effect };
 }
 
+/** A project loaded with one group, as a saved file would open. */
+function groupRegistry(collapsed: boolean) {
+  const { PM } = uiStateRegistry();
+  const layer: any = { id: 'group-a', type: 'group', collapsed, p: {}, fx: [], masks: [] };
+  PM.proj = { layers: [layer], comps: {} };
+  PM.UIState.prune(PM.proj);
+  return { PM, layer };
+}
+
 describe('legacy ui-state install', () => {
   it('versions timeline row changes without invalidating on read-only access or repeated values', () => {
     const { PM, layer, key } = uiStateRegistry();
@@ -79,16 +88,29 @@ describe('legacy ui-state install', () => {
     expect(JSON.stringify(PM.proj).includes('"open"')).toBe(false);
   });
 
-  it('keeps group hierarchy disclosure separate from property disclosure', () => {
-    const { PM, layer } = uiStateRegistry();
-    layer.type = 'group';
-    PM.UIState.prune(PM.proj);
+  it('starts an open group with its animated properties showing', () => {
+    const { PM, layer } = groupRegistry(false);
 
-    expect(PM.UIState.getLayerCollapsed(layer)).toBe(true);
     expect(PM.UIState.getGroupCollapsed(layer)).toBe(false);
-    PM.UIState.setGroupCollapsed(layer, true);
+    expect(PM.UIState.getLayerCollapsed(layer)).toBe(false);
+  });
+
+  it('starts a closed group with its properties closed too', () => {
+    const { PM, layer } = groupRegistry(true);
 
     expect(PM.UIState.getGroupCollapsed(layer)).toBe(true);
     expect(PM.UIState.getLayerCollapsed(layer)).toBe(true);
+  });
+
+  it('keeps group hierarchy disclosure separate from property disclosure afterwards', () => {
+    const { PM, layer } = groupRegistry(false);
+
+    PM.UIState.setLayerCollapsed(layer, true);
+    expect(PM.UIState.getGroupCollapsed(layer)).toBe(false);
+    PM.UIState.setGroupCollapsed(layer, true);
+    PM.UIState.setLayerCollapsed(layer, false);
+
+    expect(PM.UIState.getGroupCollapsed(layer)).toBe(true);
+    expect(PM.UIState.getLayerCollapsed(layer)).toBe(false);
   });
 });

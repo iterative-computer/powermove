@@ -62,7 +62,7 @@ describe('timeline runtime', () => {
     expect(timelineStartTime(undefined, [{ from: NaN }, { from: Infinity }])).toBe(-5);
   });
 
-  it('opens a group hierarchy without opening its property strip', () => {
+  it('opens and closes a group hierarchy together with its animated properties', () => {
     const harness = timelineHarness();
     const group = { id: 'group', type: 'group', collapsed: true };
     const state = { groupCollapsed: true, layerCollapsed: true };
@@ -72,7 +72,10 @@ describe('timeline runtime', () => {
     vi.mocked(harness.api.uiState.setLayerCollapsed).mockImplementation((_layer, value) => (state.layerCollapsed = value));
 
     expect(toggleTimelineDisclosure(harness.api, group)).toBe(false);
-    expect(state).toEqual({ groupCollapsed: false, layerCollapsed: true });
+    expect(state).toEqual({ groupCollapsed: false, layerCollapsed: false });
+    expect(toggleTimelineDisclosure(harness.api, group)).toBe(true);
+    expect(state).toEqual({ groupCollapsed: true, layerCollapsed: true });
+    // The persistent legacy field is left alone.
     expect(group.collapsed).toBe(true);
   });
 
