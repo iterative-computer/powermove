@@ -81,6 +81,27 @@ describe('real project files', () => {
     } finally { await files.close(result.token); }
   }, 30000);
 
+  it('answers reads of one reader asked at once in turn, and refuses past the queue', async () => {
+    const destination = path.join(directory, 'ranges.pmv');
+    const file = bytes('ranges '.repeat(20));
+    await writeFile(destination, file);
+    const opened = await files.open(destination);
+    try {
+      const range = (offset: number, length: number) => [...file.subarray(offset, offset + length)];
+      // Embedded media copies run side by side, each reading its own range.
+      const reads = await Promise.all(Array.from({ length: 8 }, (_, i) => files.read(opened.token, i * 8, 8)));
+      expect(reads.map(read => [...read])).toEqual(Array.from({ length: 8 }, (_, i) => range(i * 8, 8)));
+      const queued = Array.from({ length: 8 }, () => files.read(opened.token, 0, 1));
+      await expect(files.read(opened.token, 0, 1)).rejects.toThrow('range');
+      await Promise.all(queued);
+      expect([...await files.read(opened.token, 63, 1)]).toEqual(range(63, 1));
+      // A read still waiting when the reader closes refuses; close waits for it.
+      const refused = expect(files.read(opened.token, 0, 4)).rejects.toThrow('token');
+      await files.close(opened.token);
+      await refused;
+    } finally { await files.close(opened.token); }
+  });
+
   it('writes, backs up the previous version, and remembers the destination across restarts', async () => {
     const destination = path.join(directory, 'Demo.pmv');
     await files.save('project-one', bytes('first'), destination);

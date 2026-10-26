@@ -13,6 +13,9 @@ import { hashProjectFile } from './project-file-hash';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader } from '../shared/reader-version';
 import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
 
+/** Reads of one project reader at once: one runs, the others wait their turn. */
+const READS_QUEUED = 8;
+
 export interface ProjectFilesOptions {
   /** Checks a saved document before it is published; defaults to this thread. */
   validateDocument?: ProjectDocumentValidator;
@@ -42,7 +45,8 @@ type HashResult = { ok: true; hash: string } | { ok: false; error: unknown };
 
 /** Main-process-only grants: renderer data can never invent an overwrite path. */
 export class ProjectFiles {
-  private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; busy: boolean }>();
+  /** `reads`: the reader's reads, one after another; `queued`: how many wait in it. */
+  private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; reads: Promise<unknown>; queued: number }>();
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
   private queue: Promise<void> = Promise.resolve();
@@ -319,7 +323,7 @@ export class ProjectFiles {
           this.associations.set(projectId, { path: filePath, hash });
           await this.persist();
         }
-        this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
+        this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, reads: Promise.resolve(), queued: 0 });
         const opened = { path: filePath, projectId, token, size: info.size };
         return rangeValidated ? { ...opened, media, documentRange: documentRange! }
           : { ...opened, document, documentJSON, ...(documentMember ? { documentMember } : {}), media, ...(documentRange ? { documentRange } : {}) };
@@ -327,17 +331,23 @@ export class ProjectFiles {
     });
   }
 
+  /** Reads of one reader run one at a time, a few waiting their turn (the
+   *  page copies several embedded media ranges at once); each holds at most
+   *  one chunk while it runs. */
   async read(token: string, offset: number, length: number): Promise<Uint8Array> {
     const reader = this.readers.get(token);
-    if (!reader || reader.busy || !Number.isSafeInteger(offset) || offset < 0 || offset > reader.size
+    if (!reader || reader.queued >= READS_QUEUED || !Number.isSafeInteger(offset) || offset < 0 || offset > reader.size
       || !Number.isSafeInteger(length) || length < 1 || length > FILE_CHUNK_BYTES || length > reader.size - offset) throw new Error('Invalid project read range');
-    reader.busy = true;
-    try {
+    reader.queued++;
+    const read = reader.reads.then(async () => {
+      if (this.readers.get(token) !== reader) throw new Error('Unknown project read token');
       const data = Buffer.allocUnsafe(length);
       const { bytesRead } = await readWithRetry(() => reader.handle.read(data, 0, length, offset));
       if (!bytesRead) throw new Error('The project container is truncated.');
       return data.subarray(0, bytesRead);
-    } finally { reader.busy = false; }
+    });
+    reader.reads = read.catch(() => undefined).finally(() => { reader.queued--; });
+    return read;
   }
 
   async close(token: string, verify = true): Promise<void> {
@@ -349,6 +359,10 @@ export class ProjectFiles {
         const info = await reader.handle.stat();
         if (info.size !== reader.size || info.mtimeMs !== reader.mtime || info.ctimeMs !== reader.ctime) throw new Error('The project changed while opening. Try opening it again.');
       }
-    } finally { await reader.handle.close(); }
+    } finally {
+      // A read already running finishes on the open handle; queued ones refuse.
+      await reader.reads;
+      await reader.handle.close();
+    }
   }
 }
