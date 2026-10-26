@@ -40,8 +40,13 @@ async function closeUnopenedReader(result: any): Promise<void> {
   if (result?.token) await Promise.resolve(hostBridge()?.projectRead?.close(result.token)).catch(() => {});
 }
 const document = window.document;
-type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any };
+/** `compared`: the count of writes outside history (otherWrites) the last
+ *  answer covered; see PM.autosave. */
+type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any; compared?: number };
 const fileStates = new Map<string, FileState>();
+/** Per project: autosaves for writes other than history commits (undo, redo,
+ *  writers outside history), which may have made the document equal its file. */
+const otherWrites = new Map<string, number>();
 const comparisonVersions = new Map<string, number>();
 const pendingDiscards = new Set<string>();
 const discardedProjects = new Set<string>();
@@ -74,8 +79,9 @@ function finishProjectLoading(generation: number) {
   document.getElementById('boot-ghost')?.remove();
   PM.bus.emit('project:loading');
   // A failed or cancelled open must not strand edits whose recovery timer
-  // was paused while the outgoing editor was inert.
-  if (APP.dirty && PM.proj?.id !== homeProjectId) PM.autosave?.();
+  // was paused while the outgoing editor was inert. A project that did open
+  // is not edited by having opened.
+  if (resumeSource && APP.dirty && PM.proj?.id !== homeProjectId) PM.autosave?.();
 }
 function discardUnsavedProject(id: string) {
   if (!pendingDiscards.delete(id)) return;
@@ -139,6 +145,7 @@ async function refreshFileDirty(project = PM.proj, isCurrent?: () => boolean): P
   // latest comparison may publish state, but both can answer Close correctly.
   if (comparisonVersions.get(project.id) !== version) return dirty;
   state.dirty = dirty;
+  state.compared = otherWrites.get(project.id) || 0;
   if (PM.proj.id === project.id) fileUI();
   else PM.bus.emit('projects:open');
   return state.dirty;
@@ -565,6 +572,9 @@ async function restoreProjectAssets(project: any, warn: any = true) {
      file is missing. */
   PM.assetsRestoring = (PM.assetsRestoring || 0) + 1;
   PM.bus.emit('assets', { runtimeOnly: true });
+  // What a restore can write to the document: asset metadata (posters,
+  // formats) and, by relinking, layers (announced: an autosave of its own).
+  const assetsBefore = JSON.stringify(project?.assets ?? null);
   let result: any;
   // Started synchronously, as before; a synchronous throw still becomes this pass's rejection.
   let pass: Promise<any>;
@@ -586,8 +596,13 @@ async function restoreProjectAssets(project: any, warn: any = true) {
       : `${count} media files are missing · import them again to relink them`, 5000);
   }
   // Runtime pixels do not change the document. Compare persistent metadata
-  // against the existing saved baseline without clearing intervening edits.
-  if (await refreshFileDirty(project) && PM.proj === project) PM.autosave();
+  // against the existing saved baseline without clearing intervening edits;
+  // when the restore wrote none and nothing outside history was written
+  // since the last comparison, that comparison still stands.
+  const state = fileStates.get(project.id);
+  const standing = !!state && state.compared === (otherWrites.get(project.id) || 0)
+    && JSON.stringify(project.assets ?? null) === assetsBefore;
+  if (!standing && await refreshFileDirty(project) && PM.proj === project) PM.autosave();
   return result;
 }
 
@@ -858,8 +873,14 @@ function closeProjectTransients() {
 let lastAutosaveMs = 0;
 /** An autosave failed and nothing has saved since: the failure is shown once, not once per edit. */
 let autosaveFailing = false;
-PM.autosave = () => {
+/* `origin` 'history': a history commit (or an announcement inside its open
+   transaction). A commit always changes the document, so it never makes it
+   equal its file again: after commits alone the project stays changed without
+   hashing the whole document (C1: tens of seconds per autosave). Anything
+   else (undo and redo included) compares the document with its file. */
+PM.autosave = (origin?: 'history') => {
   if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
+  if (origin !== 'history') otherWrites.set(PM.proj.id, (otherWrites.get(PM.proj.id) || 0) + 1);
   APP.dirty = true;
   fileState().dirty = true;
   comparisonVersions.set(PM.proj.id, (comparisonVersions.get(PM.proj.id) || 0) + 1);
@@ -888,10 +909,12 @@ PM.autosave = () => {
       }
       if (!isCurrent()) return;
       // Local recovery is not the user's .pmv file and must never mark it saved.
-      const editVersion = PM.animVersion?.();
+      const editVersion = PM.animVersion?.(), writes = otherWrites.get(projectId) || 0;
       const comparisonCurrent = () => isCurrent() && editVersion === PM.animVersion?.() && !PM.hist.busy?.();
-      await refreshFileDirty(project, comparisonCurrent);
-      if (!comparisonCurrent()) return;
+      if (fileState(projectId).compared !== writes) {
+        await refreshFileDirty(project, comparisonCurrent);
+        if (!comparisonCurrent()) return;
+      }
       if (!readOnly) PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
@@ -903,14 +926,23 @@ PM.autosave = () => {
   }, Math.max(550, Math.min(60_000, lastAutosaveMs)));
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
-['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+/* Putting a document on screen announces it to every panel with the same
+   events writers use. Those announcements are not edits: they neither mark
+   the project changed nor write it again. */
+let showingDocument = 0;
+function announceShown(announce: () => void) {
+  showingDocument++;
+  try { announce(); } finally { showingDocument--; }
+}
+const autosaveAnnounced = () => { if (!showingDocument) PM.autosave(PM.hist.busy?.() ? 'history' : undefined); };
+['layers','project','library'].forEach(ev => PM.bus.on(ev, autosaveAnnounced));
 // Disposable decoder previews change runtime readiness, not saved project
 // data. Asset metadata a restore writes (posters, durations) arrives one
 // asset at a time; with media read through main those came further apart
 // than the debounce and each wrote the whole project again (C1: a 50 s write
 // each for a 180 MB project). The restore compares the project when it ends
 // and autosaves only if it changed (restoreProjectAssets).
-PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly && !PM.assetsRestoring) PM.autosave(); });
+PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly && !PM.assetsRestoring) autosaveAnnounced(); });
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   // A live background tab may be ahead of its recovery checkpoint.
@@ -965,7 +997,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       state.savedHash = await projectFingerprint(projectJSON);
       if (projectId === PM.proj.id && snapshot.proj === PM.proj && capturedEditVersion === PM.animVersion?.()
         && capturedGeneration === (comparisonVersions.get(projectId) || 0)) {
-        state.dirty = false; fileUI();
+        state.dirty = false; state.compared = otherWrites.get(projectId) || 0; fileUI();
       } else await refreshFileDirty(currentProject() || project);
       let recoveryFailed = false;
       try {
@@ -1086,14 +1118,23 @@ async function openProjectFile(file: any, association?: { path: string; projectI
   const current = () => loadGeneration === loading && isCurrentOpen(generation);
   // Releases the engine's prepared copy of a document this open abandons.
   let release = () => {};
+  // Embedded media streamed from main's project reader is restored while the
+  // document hydrates: neither needs the other, and the copy is main's work.
+  let restoring: Promise<void> | null = null, closeReader = () => {};
+  // An open that does not publish its document still owns main's reader: it
+  // closes it now, so a superseded restore stops at its next read, and returns
+  // only once that restore has let go of the file.
+  const settleReader = async () => { closeReader(); await restoring?.catch(() => {}); };
+  const abandon = async () => { release(); opening.close(); await settleReader(); return false; };
   try {
     await yieldLoad();
-    // Embedded media streamed from main's project reader is restored while the
-    // document hydrates: neither needs the other, and the copy is main's work.
-    let o: any, restoring: Promise<void> | null = null;
+    let o: any;
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
       const { token, media, documentRange } = file.native;
+      let closing: Promise<unknown> | null = null;
+      const close = () => (closing ??= Promise.resolve().then(() => bridge.close(token)));
+      closeReader = () => { void close().catch(() => {}); };
       let documentRead!: (document: any) => void;
       const read = new Promise<any>(resolve => { documentRead = resolve; });
       restoring = withProjectReader(async () => {
@@ -1110,7 +1151,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
         await settleAssetRestores();
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           completed => opening.update({ label: file.name, completed: documentBytes + completed, total }), token);
-      }, () => bridge.close(token));
+      }, close);
       // Awaited after hydration; a failure before the document is read fails the read.
       restoring.catch(() => {});
       o = await Promise.race([read, restoring.then(() => read)]);
@@ -1128,11 +1169,11 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (requiredReader > CURRENT_READER_VERSION) source.minReaderVersion = requiredReader;
     source.id = association?.projectId || PM.uid('project');
     const project = await hydrateAsync(source, current);
-    if (!project || !current()) { opening.close(); return false; }
+    if (!project || !current()) return abandon();
     // Parsing and restoring media have already overlapped module loading.
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);
-    if (!current()) { opening.close(); return false; }
+    if (!current()) return abandon();
     // The new engine's copy of the document is prepared while media finishes
     // restoring and this window checkpoints the project: most of it is the
     // engine process parsing and hashing, not this thread. Nothing below
@@ -1140,7 +1181,6 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project));
     preparing.catch(() => {});
     release = () => { void preparing.then(() => PM.EngineDoc?.discardPrepared?.(project), () => {}); };
-    const abandon = () => { release(); opening.close(); return false; };
     if (restoring) await restoring;
     else { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
     if (!current()) return abandon();
@@ -1173,28 +1213,41 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (!await captureProjectSessionAsync(current) || !current()) return abandon();
     const historyToken = await PM.hist.prepareImport?.(o.history, current, project.compId);
     if (!current()) return abandon();
-    if (PM.Projects.recoverAsync) await PM.Projects.recoverAsync(project, undefined, current);
-    else PM.Projects.put(project);
+    // The text a checkpoint writes is at hand only during the call that
+    // writes it: the opened file's hash then needs no serialization of its own.
+    let openedJSON: string | null = null;
+    if (PM.Projects.recoverAsync) {
+      const storing = PM.Projects.recoverAsync(project, undefined, current);
+      openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
+      await storing;
+    } else {
+      PM.Projects.put(project);
+      openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
+    }
     if (!current()) return abandon();
     await preparing;
     if (!current()) return abandon();
-    // A file's state starts here, so the switch does not serialize a local
-    // baseline of the whole document: the file's fingerprint replaces it.
-    if (association && !fileStates.has(project.id)) fileStates.set(project.id, { path: association.path, dirty: true });
+    // The opened document is its file, unchanged; without a file it is its own
+    // unsaved baseline. Its hash is taken in slices, never as one string, and
+    // comparisons wait for it (refreshFileDirty).
+    const state: FileState = { path: association?.path, dirty: false, compared: otherWrites.get(project.id) || 0 };
+    state.baselineReady = (openedJSON ? projectFingerprint(openedJSON) : fingerprintJSON(project)).then(hash => {
+      if (association) state.savedHash = hash; else state.baselineHash = hash;
+    });
+    // The checkpoint wrote this very document (not only journaled its id).
+    const storedAsOpened = openedJSON !== null;
+    openedJSON = null;
+    fileStates.set(project.id, state);
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
-    const state = fileState(project.id);
-    state.path = association?.path;
-    // The checkpoint may already have JSON text. Otherwise hash the hydrated
-    // project in slices instead of materializing another whole-document string.
-    const writtenJSON = association && PM.Projects.writtenJSON?.(project);
-    state.savedHash = association ? await (writtenJSON ? projectFingerprint(writtenJSON) : fingerprintJSON(project)) : undefined;
+    await state.baselineReady;
     if (!current()) { opening.close(); return false; }
     rememberFile(project.id, state);
-    await refreshFileDirty(project, current);
-    if (!current()) { opening.close(); return false; }
     const workspace = rememberedWorkspace || o.ws;
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
-    await captureProjectSessionAsync(current);
+    // The session only when the checkpoint wrote this document as it opened:
+    // verifying that slot again would serialize the whole document.
+    if (storedAsOpened) captureProjectSession(false);
+    else await captureProjectSessionAsync(current);
     await paintProject();
     if (!current()) { opening.close(); return false; }
     opening.finish('Opened ' + file.name, 2200);
@@ -1204,6 +1257,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     release();
     opening.close();
     if (current()) PM.toast('Could not open project: ' + e.message, 4500);
+    await settleReader();
     return false;
   } finally {
     finishProjectLoading(loading);
@@ -1436,10 +1490,12 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: true 
   else if (!parkable) PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = fileState().dirty;
-  notifyDocument(PM, 'project');
-  notifyDocument(PM, 'layers');
-  PM.bus.emit('sel');
-  notifyDocument(PM, 'assets');
+  announceShown(() => {
+    notifyDocument(PM, 'project');
+    notifyDocument(PM, 'layers');
+    PM.bus.emit('sel');
+    notifyDocument(PM, 'assets');
+  });
   inspectorService(PM)?.refresh();
   viewerService(PM)?.layout();
   PM.invalidate('all');
@@ -1448,8 +1504,8 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: true 
   // already said what was missing.
   PM.projectAssetsReady = restoreProjectAssets(PM.proj, !live);
   // Showing a document is not an edit. A new one is written once; a live one
-  // already was when it was set aside.
-  if (live) fileUI();
+  // already was when it was set aside, and an opened one when it was stored.
+  if (live || ready?.stored) fileUI();
   else PM.autosave();
   if (isReadOnlyProject(PM.proj)) showReadOnlyNotice();
   else PM.dismissToast?.(READ_ONLY_TOAST);
@@ -2184,8 +2240,7 @@ let documentFrameDone = false;
 function firstDocumentFrame() {
   if (documentFrameDone) return;
   documentFrameDone = true;
-  PM.bus.emit('layers');
-  PM.bus.emit('sel');
+  announceShown(() => { PM.bus.emit('layers'); PM.bus.emit('sel'); });
   inspectorService(PM)?.refresh();
   PM.invalidate('all');
   PM.invalidate('status');

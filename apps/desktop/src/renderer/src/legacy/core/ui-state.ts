@@ -297,6 +297,28 @@ const UIState = PM.UIState = {
   },
 };
 
-PM.bus.on('project', () => prune(PM.proj));
-PM.bus.on('layers', () => { if (PM.proj) prune(PM.proj); });
+/* Pruning walks every keyframe of the document (C1: 770k, over 100 ms), and
+   documents announce every edit. Another project is pruned at once. Within
+   one project the side tables only lose entries for what was deleted, and
+   every reader installs and syncs what it reads, so the walk waits until the
+   edits stop; an announcement after which no layer, effect or keyframe can
+   have changed (a composition setting: the evaluator's version and the layer
+   index both stand) needs none. */
+const PRUNE_SETTLE_MS = 400;
+let pruned: { project: any; evaluation: unknown; structure: unknown } | null = null;
+let pruneTimer: ReturnType<typeof setTimeout> | null = null;
+const pruneNow = () => {
+  if (pruneTimer !== null) { clearTimeout(pruneTimer); pruneTimer = null; }
+  prune(PM.proj);
+  pruned = { project: PM.proj, evaluation: PM.evaluationVersion?.(), structure: PM.ProjectIndex?.generation?.() };
+};
+const pruneChanged = () => {
+  const evaluation = PM.evaluationVersion?.(), structure = PM.ProjectIndex?.generation?.();
+  if (!pruned || pruned.project !== PM.proj || evaluation === undefined || structure === undefined) { pruneNow(); return; }
+  if (pruned.evaluation === evaluation && pruned.structure === structure) return;
+  if (pruneTimer !== null) clearTimeout(pruneTimer);
+  pruneTimer = setTimeout(() => { pruneTimer = null; if (PM.proj) pruneNow(); }, PRUNE_SETTLE_MS);
+};
+PM.bus.on('project', pruneChanged);
+PM.bus.on('layers', () => { if (PM.proj) pruneChanged(); });
 }

@@ -21,8 +21,9 @@ import { documentId } from '../../../shared/engine-document-id';
  *   barrier calls; history commits, undo, and redo hand over their patch paths.
  * - `PM.EngineDoc.api` answers the kernel's synchronous queries (kernel/
  *   install.ts and kernel/editor-helpers.ts route through it).
- * - The production consistency check runs before saves and exports and on
- *   idle; the auditor and dual answers run in the test modes.
+ * - The production consistency check runs before saves the user asks for
+ *   and before exports; the test modes also check on idle and before every
+ *   autosave, and run the auditor and dual answers.
  */
 import type { PathPart } from '../../../shared/patch';
 import type { PMRegistry } from '../legacy/registry';
@@ -386,7 +387,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       record(paths, { canonical });
       if (!PM.hist?.scoped?.()) held.clear();
     } else unknownWrite();
-    return legacyTouch?.();
+    // The paths reach the legacy evaluator too: a composition setting keeps its caches.
+    return legacyTouch?.(paths, canonical);
   };
   // Writers that skip touch() still announce on the bus (PM.addLayer,
   // PM.removeLayers, settings, asset changes): diff what they may have written.
@@ -685,6 +687,12 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       return ready;
     },
     beforeSave(reason = 'save') {
+      // The barrier is exact by dirty paths: the whole-document comparison
+      // only finds writers that skip it. A save the user asks for checks; an
+      // autosave (after every edit) checks only in the test modes, which
+      // exist to find those writers. On a large project the check is seconds
+      // of renderer work per edit.
+      if (reason === 'autosave' && !mode.audit) return;
       if (wasm instanceof RemotePmWasm) {
         // Saving serializes the authoritative live document. Diagnostic
         // traversal and a possible repair must never delay persistence.
@@ -878,9 +886,12 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const reviveTimer = setInterval(revive, 1000);
   (reviveTimer as any)?.unref?.();
 
-  // The consistency check on idle: at most every 30 s, after writes.
+  // The consistency check on idle, in the test modes: at most every 30 s,
+  // after writes. Production checks before a save the user asks for and
+  // before every export (see beforeSave).
   let lastCheckedRevision = -1;
   function scheduleIdleCheck() {
+    if (!mode.audit) return;
     const idle = (globalThis as any).requestIdleCallback as ((cb: () => void, o?: object) => number) | undefined;
     const run = () => {
       if (state.ready && barrier && barrier.revision !== lastCheckedRevision) {

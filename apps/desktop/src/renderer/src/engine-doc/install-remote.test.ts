@@ -278,6 +278,21 @@ it('does not deadlock an open queued before a later recovery request', async () 
   expect(doc.api!.ev(second.layers[0], 'position.x', 0)).toBe(20);
 });
 
+it('leaves the whole-document check out of autosaves outside the test modes, and keeps it for saves and exports', async () => {
+  const setup = await editor(), { PM, doc, bridge } = setup;
+  const raw = await publishLarge(setup), before = doc.barrier!;
+  raw.layers[0].p['position.x'].v = 777;
+  const calls = bridge.calls.length, checks = before.stats.checks;
+  expect(doc.beforeSave('autosave')).toBeUndefined();
+  await Promise.resolve();
+  expect(before.stats.checks).toBe(checks);
+  expect(bridge.calls.slice(calls).length).toBe(0);
+  await doc.beforeExport('export');
+  expect(before.stats.checks).toBe(checks + 1);
+  expect(before.stats.checkMismatches).toBe(1);
+  expect(bridge.live.toJson()).toBe(canonicalStringify(canonicalProject(raw)));
+});
+
 it('persists live raw-alias writes immediately while their diagnostic repair runs in the background', async () => {
   const setup = await editor(), { PM, doc, bridge } = setup;
   const raw = await publishLarge(setup), layer = raw.layers[0], before = doc.barrier!;
