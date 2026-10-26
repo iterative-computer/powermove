@@ -165,7 +165,8 @@ export async function remoteCanonicalHash(bridge: DocumentKernelBridge, value: a
 
 /** The shadow's JSON text (JSON.stringify's member order, serialized in
  * slices), encoded straight into full 1 MiB chunks with two writes in
- * flight. The utility parses it into the same tree its canonical JSON would
+ * flight; a chunk's buffer is filled again once main has it (180 buffers
+ * of garbage for the real project otherwise). The utility parses it into the same tree its canonical JSON would
  * give and answers that tree's canonical hash; main checks the file against
  * its own hash of the stream. About a tenth of the cost of the canonical
  * stream (sorted members, a generator step per token) for the large private
@@ -175,11 +176,11 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
   let complete = false;
   try {
     const encoder = new TextEncoder();
-    const inFlight: Promise<void>[] = [];
+    const inFlight: Promise<void>[] = [], free: Uint8Array[] = [];
     let chunk = new Uint8Array(CHUNK_BYTES), filled = 0;
     const send = async (bytes: Uint8Array) => {
       if (inFlight.length >= 2) await inFlight.shift();
-      inFlight.push(bridge.write(token, bytes));
+      inFlight.push(bridge.write(token, bytes).then(() => { if (bytes.byteLength === CHUNK_BYTES) free.push(bytes); }));
     };
     // The text has no lone surrogates (JSON.stringify escapes them): it
     // encodes as it would whole, a chunk ending where the next character
@@ -190,8 +191,10 @@ export async function ingestDocumentText(bridge: DocumentKernelBridge, shadow: a
         read += result.read; filled += result.written;
         if (read < text.length || filled === CHUNK_BYTES) {
           // A subarray would cross the context bridge with its whole buffer.
-          await send(filled === CHUNK_BYTES ? chunk : chunk.slice(0, filled));
-          chunk = new Uint8Array(CHUNK_BYTES); filled = 0;
+          const full = filled === CHUNK_BYTES;
+          await send(full ? chunk : chunk.slice(0, filled));
+          if (full) chunk = free.pop() ?? new Uint8Array(CHUNK_BYTES);
+          filled = 0;
         }
       }
     });
