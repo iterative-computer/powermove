@@ -1283,6 +1283,14 @@ impl Renderer {
             .prewarm(self.device_target_format(document, &request));
     }
 
+    /// Asks the font registry for the faces `document`'s text layers lay out
+    /// with ([`crate::text::TextContext::prefetch_fonts`]): the presenter
+    /// calls this at rest, so the first seek to a text layer does not wait
+    /// for them.
+    pub fn prefetch_fonts(&mut self, document: &Document) {
+        self.text.prefetch_fonts(document);
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,

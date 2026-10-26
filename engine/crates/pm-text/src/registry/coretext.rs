@@ -397,6 +397,28 @@ impl CoreTextRegistry {
         Ok(())
     }
 
+    /// Makes CoreText ready to find fallbacks for `face` (answers are
+    /// unchanged). CoreText gives a font its fallback cascade on its first
+    /// fallback lookup, reading the character sets of the fonts after it:
+    /// 6-20 ms in a fresh process (a check mark: 6 ms with Times as the
+    /// primary, 18 ms with a font registered from data), then well under a
+    /// millisecond for every later character. A frame that first shows a
+    /// character its font lacks waited for that; asking once ahead, for a
+    /// code point no font has (so the whole cascade is read), moves it off
+    /// the frame. The lookup goes through the face's own font object, the
+    /// one its fallback lookups use.
+    pub fn warm_fallback(&self, face: FaceId) {
+        let Some(face) = self.faces.get(face as usize) else {
+            return;
+        };
+        let string = char_string(UNASSIGNED);
+        let range = CFRange {
+            location: 0,
+            length: string.length(),
+        };
+        let _ = unsafe { face.ct.for_string(&string, range) };
+    }
+
     /// Removes every project font and source (a project closed).
     pub fn clear_project_fonts(&mut self) {
         self.project.clear();
@@ -1590,6 +1612,9 @@ fn alternate_family(family: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// A noncharacter no font maps ([`CoreTextRegistry::warm_fallback`]).
+const UNASSIGNED: u32 = 0x10FFFD;
 
 fn char_string(ch: u32) -> CFRetained<CFString> {
     let s = char::from_u32(ch)

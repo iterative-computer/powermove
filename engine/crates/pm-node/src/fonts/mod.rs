@@ -276,7 +276,18 @@ pub struct FontService {
     /// Main finished replaying to a port (its seeds come last, after the
     /// open and the project fonts).
     opened: bool,
+    /// Faces (by id, in the order the registry handed them out) whose
+    /// fallback cascade CoreText has made ([`FontService::warm_fallbacks`]).
+    warmed: u32,
+    /// When a render thread's queries were last answered.
+    answered: Option<std::time::Instant>,
 }
+
+/// How long render threads have asked nothing before a face's fallbacks are
+/// made ahead: a frame that just met a new face is likely to ask through it
+/// next, and must not wait behind the warm-up.
+#[cfg(target_os = "macos")]
+const WARM_AFTER_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[cfg(target_os = "macos")]
 impl FontService {
@@ -289,7 +300,31 @@ impl FontService {
             generation_base: 0,
             seeds: SeedTable::default(),
             opened: false,
+            warmed: 0,
+            answered: None,
         })
+    }
+
+    /// While nothing waits for fonts: makes CoreText ready to find
+    /// fallbacks for the next face the registry handed out that is not
+    /// (`CoreTextRegistry::warm_fallback`, 6-20 ms each), so the frame that
+    /// first shows a character the face lacks does not wait for it: a face
+    /// laid out at one frame is often the primary of another. Only once
+    /// main's replay is done, and once render threads asked nothing for
+    /// [`WARM_AFTER_QUIET`]. Returns whether it warmed one.
+    pub fn warm_fallbacks(&mut self) -> bool {
+        let faces = self.layout.resolver().faces().count();
+        if !self.opened
+            || self.warmed as usize >= faces
+            || self
+                .answered
+                .is_some_and(|at| at.elapsed() < WARM_AFTER_QUIET)
+        {
+            return false;
+        }
+        self.layout.resolver().warm_fallback(self.warmed);
+        self.warmed += 1;
+        true
     }
 
     fn registry(&mut self) -> &mut Registry {
@@ -442,6 +477,7 @@ impl FontService {
         &mut self,
         queries: &[pm_text::answers::Query],
     ) -> Result<pm_text::served::Served, String> {
+        self.answered = Some(std::time::Instant::now());
         let generation = self.generation();
         let answers = self.registry().answer(queries).map_err(|e| e.to_string())?;
         let mut fonts: Vec<pm_text::served::ServedFont> = Vec::new();
@@ -549,6 +585,10 @@ impl FontService {
     }
 
     pub fn opened(&self) -> bool {
+        false
+    }
+
+    pub fn warm_fallbacks(&mut self) -> bool {
         false
     }
 }

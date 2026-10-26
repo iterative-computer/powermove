@@ -1631,15 +1631,20 @@ impl Thread {
     }
 
     /// Compiles the frame pipelines of every viewed document once nothing
-    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]).
-    /// Pipelines are built on first use, so without this an import or the
-    /// first layer of an empty project pays for them in its frame. Once per
+    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]),
+    /// and asks for the faces its text lays out with
+    /// ([`pm_render::Renderer::prefetch_fonts`]). Both happen on first use,
+    /// so without this an import, the first layer of an empty project, or
+    /// the first seek to a text layer pays for them in its frame. Once per
     /// rest, never while anything is drawing.
     fn prewarm_at_rest(&mut self) {
         if self.busy() {
             return;
         }
         self.rest.prewarmed = true;
+        // Fonts are asked for only once main opened the font port: before,
+        // a request waits for it.
+        let fonts = self.config.fonts.as_ref().is_some_and(|f| f.open());
         let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) else {
             return;
         };
@@ -1648,6 +1653,9 @@ impl Thread {
                 && let Some(doc) = self.docs.get(key)
             {
                 composer.renderer().prewarm(doc.document());
+                if fonts {
+                    composer.renderer().prefetch_fonts(doc.document());
+                }
             }
         }
     }

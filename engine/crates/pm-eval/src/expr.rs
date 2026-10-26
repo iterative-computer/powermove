@@ -289,7 +289,7 @@ impl<'a> ExprContext<'a> {
             .map(|(_, prop)| {
                 let kf = node::get(prop, b"kf").node();
                 let keyed = kf.is_some_and(|k| node::get(k, b"length").truthy());
-                let track = keyed.then(|| keyframes::PreparedTrack::prepare(kf, &mut springs));
+                let track = keyed.then(|| keyframes::PreparedTrack::prepare(kf));
                 (kf, track, node::get(prop, b"v").to_js())
             })
             .collect();

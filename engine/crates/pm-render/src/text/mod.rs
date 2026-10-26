@@ -69,6 +69,11 @@ pub trait TextFonts: Send {
     fn take_failures(&mut self) -> Vec<String> {
         Vec::new()
     }
+    /// Asks the registry for these queries' answers ahead, in one round
+    /// trip, keeping them for the layouts that ask (a served registry).
+    fn prefetch(&mut self, queries: &[pm_text::answers::Query]) {
+        let _ = queries;
+    }
     /// What the next layers are laid out for (the window whose font cache
     /// seeds they measure with); applied at the next [`TextFonts::sync`].
     fn set_seed_scope(&mut self, scope: served::SeedScope) {
@@ -136,6 +141,68 @@ impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<
     }
 }
 
+/// The registry queries the canvas fonts of `root`'s text layers ask first
+/// (the open composition's and every nested one's), each once.
+fn document_font_queries(root: &Node) -> Vec<pm_text::answers::Query> {
+    use pm_text::answers::Query;
+    use pm_text::blink::measure::{Family, generic_family};
+    let mut queries: Vec<Query> = Vec::new();
+    let mut add = |q: Query| {
+        if !queries.contains(&q) {
+            queries.push(q);
+        }
+    };
+    // The open composition (at the top level in the stored form) and every
+    // composition of `comps` (a map in the canonical form).
+    let comps: Vec<&Node> = match pm_eval::node::member(Some(root), "comps").map(Node::kind) {
+        Some(pm_model::NodeKind::Object(map)) => map.values().collect(),
+        Some(pm_model::NodeKind::Array(items)) => items.iter().collect(),
+        _ => Vec::new(),
+    };
+    let lists = std::iter::once(root)
+        .chain(comps)
+        .filter_map(|c| pm_eval::node::array(pm_eval::node::member(Some(c), "layers")));
+    for layer in lists.flatten() {
+        if pm_eval::node::string(pm_eval::node::member(Some(layer), "type")).map(|t| t.as_bytes())
+            != Some(b"text".as_slice())
+        {
+            continue;
+        }
+        let Some(d) = pm_eval::node::member(Some(layer), "d") else {
+            continue;
+        };
+        let content = TextContent::from_json(&node_json(d));
+        let font = pm_text::compat::canvas::canvas_font(&content, None);
+        for family in &font.families {
+            match family {
+                Family::Named(name) => add(Query::family(name, &font.desc)),
+                Family::Generic(g) => add(Query::family(generic_family(g), &font.desc)),
+                Family::Custom { .. } => {}
+            }
+        }
+        add(Query::standard(&font.desc));
+    }
+    queries
+}
+
+/// A node as JSON.
+fn node_json(node: &Node) -> serde_json::Value {
+    use pm_model::NodeKind;
+    match node.kind() {
+        NodeKind::Null => serde_json::Value::Null,
+        NodeKind::Bool(b) => (*b).into(),
+        NodeKind::Number(n) => {
+            serde_json::Number::from_f64(*n).map_or(serde_json::Value::Null, Into::into)
+        }
+        NodeKind::String(s) => s.to_string_lossy().into(),
+        NodeKind::Array(items) => items.iter().map(node_json).collect(),
+        NodeKind::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.to_string_lossy(), node_json(v)))
+            .collect(),
+    }
+}
+
 /// Everything text rendering keeps across frames.
 pub struct TextContext {
     pub(crate) fonts: Option<Box<dyn TextFonts>>,
@@ -146,6 +213,9 @@ pub struct TextContext {
     fonts_generation: u64,
     captions_hidden: bool,
     unsupported: Vec<String>,
+    /// The document edition whose text fonts were asked for ahead
+    /// ([`TextContext::prefetch_fonts`]).
+    prefetched: Option<u64>,
 }
 
 impl Default for TextContext {
@@ -158,13 +228,47 @@ impl Default for TextContext {
             fonts_generation: 0,
             captions_hidden: false,
             unsupported: Vec::new(),
+            prefetched: None,
         }
     }
 }
 
 impl TextContext {
+    /// Asks the registry ahead, in one round trip, for the faces every text
+    /// layer of `document` lays out with (each family of its canvas font,
+    /// and the standard font, at its weight, slope, and size), once per
+    /// document edition. A face first met in a frame costs that frame a
+    /// round trip, and the font service makes its fallback cascade only
+    /// once it has handed the face out (`FontService::warm_fallbacks`):
+    /// asked for at rest, a face is ready before a seek shows its text.
+    pub fn prefetch_fonts(&mut self, document: &pm_model::Document) {
+        if self.fonts.is_none() || self.prefetched == Some(document.edition()) {
+            return;
+        }
+        self.prefetched = Some(document.edition());
+        let queries = document
+            .root()
+            .map(document_font_queries)
+            .unwrap_or_default();
+        if queries.is_empty() {
+            return;
+        }
+        // The answers are the current fonts' (as before a layer).
+        self.sync_fonts();
+        if let Some(fonts) = self.fonts.as_deref_mut() {
+            let earlier = fonts.take_failures();
+            fonts.prefetch(&queries);
+            // Asking ahead is advice: a query it could not answer stays
+            // unanswered, and the layer that needs it asks and reports
+            // itself. Never left for the next layer built to be refused for.
+            drop(fonts.take_failures());
+            self.unsupported.extend(earlier);
+        }
+    }
+
     pub fn set_fonts(&mut self, fonts: Option<Box<dyn TextFonts>>) {
         self.fonts = fonts;
+        self.prefetched = None;
         self.forget_glyphs();
         self.generation += 1;
         self.fonts_generation = self.fonts.as_ref().map_or(0, |f| f.generation());
@@ -971,6 +1075,110 @@ fn run_refs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The faces a document's text lays out with are asked for once per
+    /// edition, in one round trip: every family of each text layer's canvas
+    /// font and the standard font at its description, nested compositions'
+    /// layers included, each query once.
+    #[test]
+    fn a_documents_text_fonts_are_asked_for_ahead_once_per_edition() {
+        use pm_text::answers::Query;
+        use pm_text::font::FontDesc;
+        use pm_text::served::{FontServer, Served};
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Asked(Mutex<Vec<Vec<Query>>>);
+        impl FontServer for Asked {
+            fn serve(&self, queries: &[Query]) -> Result<Served, String> {
+                self.0.lock().unwrap().push(queries.to_vec());
+                Err("no registry".into())
+            }
+            fn generation(&self) -> u64 {
+                0
+            }
+        }
+        let asked = Arc::new(Asked::default());
+        let mut cx = TextContext::default();
+        cx.set_fonts(Some(Box::new(served::ServedFonts::new(
+            asked.clone(),
+            Arc::new(served::NoSeeds),
+        ))));
+        let doc = |edition: u64| {
+            pm_model::Document::new(
+                Some(
+                    pm_model::json::parse(
+                        r#"{"compId":"C1","comps":{
+                            "C1":{"layers":[
+                              {"type":"text","d":{"text":"a ✓","font":"Avenir","weight":600,"italic":true,"size":40}},
+                              {"type":"shape","d":{"font":"Ignored"}},
+                              {"type":"text","d":{"text":"b","font":"Avenir","weight":600,"italic":true,"size":40}}]},
+                            "C2":{"layers":[{"type":"text","d":{"text":"c","size":20.5}}]}}}"#,
+                    )
+                    .unwrap(),
+                ),
+                edition,
+            )
+        };
+        let first = doc(1);
+        cx.prefetch_fonts(&first);
+        cx.prefetch_fonts(&first);
+        let asked_once = asked.0.lock().unwrap().clone();
+        assert_eq!(asked_once.len(), 1, "one round trip");
+        // The registry did not answer: no layer built next is refused for it.
+        assert_eq!(cx.take_unsupported(), Vec::<String>::new());
+        let queries = &asked_once[0];
+        let avenir = FontDesc {
+            weight: 600.0,
+            italic: true,
+            size: 40.0,
+        };
+        let nested = FontDesc {
+            weight: 500.0,
+            italic: false,
+            size: 20.5,
+        };
+        for want in [
+            Query::family("Avenir", &avenir),
+            Query::family("SF Pro Display", &avenir),
+            Query::family("-apple-system", &avenir),
+            Query::family(
+                pm_text::blink::measure::generic_family("sans-serif"),
+                &avenir,
+            ),
+            Query::standard(&avenir),
+            Query::family("SF Pro Display", &nested),
+            Query::standard(&nested),
+        ] {
+            assert!(queries.contains(&want), "{want:?} in {queries:?}");
+        }
+        assert!(
+            !queries
+                .iter()
+                .any(|q| matches!(q, Query::Family { name, .. } if name == "Ignored"))
+        );
+        let unique: std::collections::HashSet<String> =
+            queries.iter().map(|q| format!("{q:?}")).collect();
+        assert_eq!(unique.len(), queries.len(), "each query once");
+        // Another edition asks again.
+        cx.prefetch_fonts(&doc(2));
+        assert_eq!(asked.0.lock().unwrap().len(), 2);
+        // The stored form keeps the open composition's layers at the top.
+        let stored = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r#"{"layers":[{"type":"text","d":{"font":"Avenir","size":12}}]}"#,
+                )
+                .unwrap(),
+            ),
+            1,
+        );
+        let queries = document_font_queries(stored.root().unwrap());
+        assert!(
+            queries
+                .iter()
+                .any(|q| matches!(q, Query::Family { name, .. } if name == "Avenir"))
+        );
+    }
 
     #[test]
     fn rasters_keep_only_their_ink_through_the_same_layer_rectangle() {

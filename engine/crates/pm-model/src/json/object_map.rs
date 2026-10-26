@@ -202,6 +202,28 @@ impl<V> ObjectMap<V> {
         self.find(key).ok().map(|i| &self.values[i])
     }
 
+    /// The identity of this map's key schema. Maps alive at once with the
+    /// same identity have the same keys in the same order, so a key's
+    /// [`ObjectMap::position`] in one is its position in every one of them
+    /// (millions of keyframes share a handful of schemas).
+    pub fn schema_id(&self) -> usize {
+        Arc::as_ptr(&self.schema) as usize
+    }
+
+    /// Where `key` is among this map's keys, if it is one.
+    pub fn position<Q>(&self, key: &Q) -> Option<usize>
+    where
+        JsString: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.find(key).ok()
+    }
+
+    /// The value at a [`ObjectMap::position`].
+    pub fn value_at(&self, index: usize) -> Option<&V> {
+        self.values.get(index)
+    }
+
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         JsString: Borrow<Q>,
@@ -409,6 +431,27 @@ mod tests {
 
     fn k(s: &str) -> JsString {
         JsString::from(s)
+    }
+
+    #[test]
+    fn maps_of_one_shape_read_by_one_position() {
+        let map = |t: f64| -> ObjectMap<f64> {
+            [(k("v"), t * 2.0), (k("t"), t), (k("ease"), 0.0)]
+                .into_iter()
+                .collect()
+        };
+        let (a, b) = (map(1.0), map(2.0));
+        let other: ObjectMap<f64> = [(k("t"), 5.0), (k("v"), 6.0)].into_iter().collect();
+        assert_eq!(a.schema_id(), b.schema_id());
+        assert_ne!(a.schema_id(), other.schema_id());
+        let t = a.position(b"t".as_slice()).unwrap();
+        assert_eq!((a.value_at(t), b.value_at(t)), (Some(&1.0), Some(&2.0)));
+        assert_eq!(
+            other.value_at(other.position(b"t".as_slice()).unwrap()),
+            Some(&5.0)
+        );
+        assert_eq!(a.position(b"x".as_slice()), None);
+        assert_eq!(a.value_at(3), None);
     }
 
     #[test]
