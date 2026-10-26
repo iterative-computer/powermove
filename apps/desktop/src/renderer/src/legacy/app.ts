@@ -1186,8 +1186,17 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (!await captureProjectSessionAsync(current) || !current()) { opening.close(); return false; }
     const historyToken = await PM.hist.prepareImport?.(o.history, current, project.compId);
     if (!current()) { opening.close(); return false; }
-    if (PM.Projects.recoverAsync) await PM.Projects.recoverAsync(project, undefined, current);
-    else PM.Projects.put(project);
+    // The text a checkpoint writes is at hand only during the call that
+    // writes it: the opened file's hash then needs no serialization of its own.
+    let openedJSON: string | null = null;
+    if (PM.Projects.recoverAsync) {
+      const storing = PM.Projects.recoverAsync(project, undefined, current);
+      openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
+      await storing;
+    } else {
+      PM.Projects.put(project);
+      openedJSON = PM.Projects.writtenJSON?.(project) ?? null;
+    }
     if (!current()) { opening.close(); return false; }
     await PM.EngineDoc?.prepare?.(project);
     if (!current()) { PM.EngineDoc?.discardPrepared?.(project); opening.close(); return false; }
@@ -1195,10 +1204,10 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     // unsaved baseline. Its hash is taken in slices, never as one string, and
     // comparisons wait for it (refreshFileDirty).
     const state: FileState = { path: association?.path, dirty: false, compared: otherWrites.get(project.id) || 0 };
-    const writtenJSON = PM.Projects.writtenJSON?.(project);
-    state.baselineReady = (writtenJSON ? projectFingerprint(writtenJSON) : fingerprintJSON(project)).then(hash => {
+    state.baselineReady = (openedJSON ? projectFingerprint(openedJSON) : fingerprintJSON(project)).then(hash => {
       if (association) state.savedHash = hash; else state.baselineHash = hash;
     });
+    openedJSON = null;
     fileStates.set(project.id, state);
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
     await state.baselineReady;
@@ -1206,7 +1215,9 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     rememberFile(project.id, state);
     const workspace = rememberedWorkspace || o.ws;
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
-    await captureProjectSessionAsync(current);
+    // The session only: the document was stored as it opened, and verifying
+    // that slot again would serialize the whole document.
+    captureProjectSession(false);
     await paintProject();
     if (!current()) { opening.close(); return false; }
     opening.finish('Opened ' + file.name, 2200);
