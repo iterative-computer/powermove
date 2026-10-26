@@ -65,35 +65,49 @@ export function projectTexts(version: string, project: any, pause: Pause = nextT
   const push = (...made: string[]) => { for (const piece of made) pieces.push(piece); wake(); };
 
   let deadline = performance.now() + SLICE_MS;
-  /** A value's text in pieces (undefined: no JSON form); arrays and records
-   *  `depth` levels down are assembled from their members' texts. */
-  const text = async (value: any, depth: number): Promise<string[] | undefined> => {
-    if (depth === 0 || value === null || typeof value !== 'object' || boxed(value)) {
-      const json = JSON.stringify(value);
-      if (performance.now() >= deadline) { await pause(); deadline = performance.now() + SLICE_MS; }
-      return json === undefined ? undefined : [json];
+  const walked = (value: any, depth: number) => depth > 0 && value !== null && typeof value === 'object' && !boxed(value);
+  /** A value serialized whole: its text, or undefined without a JSON form. */
+  const whole = async (value: any): Promise<string | undefined> => {
+    const json = JSON.stringify(value);
+    if (performance.now() >= deadline) { await pause(); deadline = performance.now() + SLICE_MS; }
+    return json;
+  };
+  /** A value's text, handed to `put` piece by piece as it is made (arrays
+   *  and records `depth` levels down are assembled from their members'
+   *  texts); false when it has no JSON form. */
+  const text = async (value: any, depth: number, put: (piece: string) => void): Promise<boolean> => {
+    if (!walked(value, depth)) {
+      const json = await whole(value);
+      if (json === undefined) return false;
+      put(json);
+      return true;
     }
-    const out: string[] = [];
     if (Array.isArray(value)) {
-      out.push('[');
+      put('[');
       for (let index = 0; index < value.length; index++) {
-        if (index) out.push(',');
-        const item = await text(value[index], depth - 1);
-        if (item) out.push(...item); else out.push('null');
+        if (index) put(',');
+        if (!await text(value[index], depth - 1, put)) put('null');
       }
-      out.push(']');
-      return out;
+      put(']');
+      return true;
     }
-    out.push('{');
+    put('{');
     let first = true;
     for (const key of Object.keys(value)) {
-      const member = await text(value[key], depth - 1);
-      if (!member) continue;
-      out.push(`${first ? '' : ','}${JSON.stringify(key)}:`, ...member);
-      first = false;
+      if (await entry(key, value[key], depth - 1, first, put)) first = false;
     }
-    out.push('}');
-    return out;
+    put('}');
+    return true;
+  };
+  /** A record member `"key":value` (with its comma unless first); false when
+   *  the value has no JSON form. A container's key goes out before its value. */
+  const entry = async (key: string, value: any, depth: number, first: boolean, put: (piece: string) => void): Promise<boolean> => {
+    const name = `${first ? '' : ','}${JSON.stringify(key)}:`;
+    if (walked(value, depth)) { put(name); return text(value, depth, put); }
+    const json = await whole(value);
+    if (json === undefined) return false;
+    put(name); put(json);
+    return true;
   };
   /** A record's text from its members' texts, in order. */
   const record = (entries: Iterable<[string, string[] | undefined]>): string[] => {
@@ -110,48 +124,60 @@ export function projectTexts(version: string, project: any, pause: Pause = nextT
 
   const members = new Map<string, string[] | undefined>();
   const comps = new Map<string, string[] | undefined>();
-  const member = async (key: string) => {
-    if (!members.has(key)) members.set(key, key === 'comps' && compsRecord ? undefined : await text(project[key], depthOf(key)));
-    return members.get(key);
+  /** A member's text into `map`, made once; `stream`: also into the
+   *  canonical text, as a member of the record being streamed (`first`:
+   *  without a comma). */
+  const made = async (map: Map<string, string[] | undefined>, key: string, value: any, depth: number, stream?: { name: string; first: boolean }): Promise<boolean> => {
+    const own: string[] = [];
+    if (!stream) { map.set(key, await text(value, depth, piece => { own.push(piece); }) ? own : undefined); return false; }
+    // The stream gets the entry; the slot keeps the value's pieces (all
+    // but the first, which entry() makes the member's name).
+    let named = false;
+    const entered = await entry(stream.name, value, depth, stream.first, piece => {
+      if (named) own.push(piece); else named = true;
+      push(piece);
+    });
+    map.set(key, entered ? own : undefined);
+    return entered;
   };
   const slot = (async () => {
     try {
       if (canonicalForm) {
         // canonicalProject (shared/canonical-json.ts), member for member: the
-        // project's own members, then the other compositions, then the open one.
+        // project's own members, then the other compositions, then the open
+        // one, each streamed as it is made.
+        push('{');
         let first = true;
-        const entry = (key: string, made: string[] | undefined) => {
-          if (!made) return;
-          push(`${first ? '{' : ','}${JSON.stringify(key)}:`, ...made);
-          first = false;
-        };
         for (const key of Object.keys(project)) {
           if (COMP_FIELDS.has(key) || key === 'compName' || key === 'comps') continue;
-          entry(key, await member(key));
+          if (await made(members, key, project[key], depthOf(key), { name: key, first })) first = false;
         }
-        push(`${first ? '{' : ','}"comps":{`);
-        let firstComp = true;
+        push(`${first ? '' : ','}"comps":{`);
+        first = true;
+        let stale: any;
         for (const comp of compsRecord ? Object.keys(compsRecord) : []) {
-          const made = await text(compsRecord![comp], 2);
-          comps.set(comp, made);
-          if (comp === id || !made) continue;
-          push(`${firstComp ? '' : ','}${JSON.stringify(comp)}:`, ...made);
-          firstComp = false;
+          // A stale entry for the open composition is in the slot only.
+          if (comp === id) { stale = compsRecord![comp]; continue; }
+          if (await made(comps, comp, compsRecord![comp], 2, { name: comp, first })) first = false;
         }
-        push(`${firstComp ? '' : ','}${JSON.stringify(id)}:{"id":${JSON.stringify(id)}`);
+        push(`${first ? '' : ','}${JSON.stringify(id)}:{"id":${JSON.stringify(id)}`);
         for (const key of ['compName', ...CANONICAL_COMP_FIELDS]) {
           if (!hasOwn(project, key)) continue;
+          const name = key === 'compName' ? 'name' : key;
           // Own but not enumerable: in the composition, never in the slot.
-          const made = Object.prototype.propertyIsEnumerable.call(project, key) ? await member(key) : await text(project[key], depthOf(key));
-          if (made) push(`,${JSON.stringify(key === 'compName' ? 'name' : key)}:`, ...made);
+          if (Object.prototype.propertyIsEnumerable.call(project, key)) await made(members, key, project[key], depthOf(key), { name, first: false });
+          else await entry(name, project[key], depthOf(key), false, push);
         }
         push('}}}');
+        if (stale !== undefined) await made(comps, id, stale, 2);
       } else {
-        for (const comp of compsRecord ? Object.keys(compsRecord) : []) comps.set(comp, await text(compsRecord![comp], 2));
+        for (const comp of compsRecord ? Object.keys(compsRecord) : []) await made(comps, comp, compsRecord![comp], 2);
       }
-      for (const key of Object.keys(project)) await member(key);
+      for (const key of Object.keys(project)) {
+        if (!members.has(key) && !(key === 'comps' && compsRecord)) await made(members, key, project[key], depthOf(key));
+      }
       const realized = record(Object.keys(project).map((key): [string, string[] | undefined] =>
-        [key, key === 'comps' && compsRecord ? record(comps) : members.get(key)]));
+        [key, key === 'comps' && compsRecord ? record([...Object.keys(compsRecord)].map(comp => [comp, comps.get(comp)])) : members.get(key)]));
       if (!canonicalForm) push(...realized);
       return `{"v":${JSON.stringify(version)},"proj":${realized.join('')}}`;
     } catch (error) {

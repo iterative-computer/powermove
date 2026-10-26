@@ -76,15 +76,24 @@ describe('projectTexts', () => {
     // The first pause holds the serialization until the first piece was read.
     const texts = projectTexts('1', big, async () => { if (pauses++ === 0) await gate; });
     const reader = texts!.canonical[Symbol.asyncIterator]();
-    const first = await reader.next();
-    expect(first.value).toBe('{"id":');
     let slotMade = false;
     void texts!.slot.then(() => { slotMade = true; });
-    await Promise.resolve();
+    // Held at its first pause, in the middle of the layers: what is made so
+    // far, layers included, is already handed out.
+    const early: string[] = [];
+    let pending = reader.next();
+    for (;;) {
+      const next = await Promise.race([pending, new Promise<null>(resolve => setTimeout(() => resolve(null), 20))]);
+      if (!next) break;
+      early.push(next.value as string);
+      pending = reader.next();
+    }
+    expect(early[0]).toBe('{');
+    expect(early.some(piece => piece.startsWith('{"id":"l1"'))).toBe(true);
     expect(slotMade).toBe(false);
     release();
-    const rest: string[] = [first.value];
-    for (let piece = await reader.next(); !piece.done; piece = await reader.next()) rest.push(piece.value);
+    const rest: string[] = [...early];
+    for (let piece = await pending; !piece.done; piece = await reader.next()) rest.push(piece.value);
     expect(await texts!.slot).toBe(JSON.stringify({ v: '1', proj: big }));
     expect(canonicalStringify(JSON.parse(rest.join('')))).toBe(canonicalStringify(canonicalProject(big)));
     expect(pauses).toBeGreaterThan(0);
