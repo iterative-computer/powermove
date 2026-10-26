@@ -201,7 +201,11 @@
 /* Short of room, the lineage gives way first; the state is the last thing cut. */
 .st-item-meta{overflow:hidden}
 .st-item-meta>*{flex:0 0 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.st-item-meta>.st-item-lineage,.st-item-meta:not(:has(>.st-item-lineage))>:last-child{flex-shrink:1}
+/* Sibling selectors, not a negated structural `:has()`: Chromium restyled the whole page
+   (3,800 elements, 11 ms) for that rule whenever any node was inserted
+   anywhere, e.g. every playback frame. */
+.st-item-meta>.st-item-lineage,.st-item-meta>:last-child{flex-shrink:1}
+.st-item-meta>.st-item-lineage~:last-child{flex-shrink:0}
 .st-item-meta>*+*::before{content:"·";margin:0 5px;color:var(--tx-4);font-weight:var(--fw-regular)}
 /* Who made it opens their page: a link above the card's own target, quiet
    until pointed at. */
