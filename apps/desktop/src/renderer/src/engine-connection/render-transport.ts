@@ -101,6 +101,10 @@ export type EngineSnapshotOptions = {
   layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null; content?: Uint8Array | null };
   /** Original media at source time, without composition effects or transforms. */
   source?: { asset: string; fit?: 'stretch' | 'contain' | 'cover'; color?: 'display' | 'interpreted' | 'compositor' };
+  /** The output size of a layer raster is a guess at its largest result: a
+   *  larger one is refused without a failure report, for the caller to ask
+   *  again with the whole bound. */
+  guessedBound?: boolean;
 };
 
 /** A rendered snapshot. `data` is RGBA8, top-down, in `pixels`'s encoding. */
@@ -225,9 +229,14 @@ export type CompatAnswerResult =
   | null;
 
 /** Frames of compatibility answers prepared ahead of the clock during
- *  playback (600 ms at 30 fps: well beyond the engine's render-ahead, so a
- *  frame whose wrappers read bases is complete before the engine asks). */
+ *  playback, at least (600 ms at 30 fps: well beyond the engine's
+ *  render-ahead). The horizon reaches further while a layer's answers take
+ *  longer, by their time plus {@link HORIZON_MARGIN_MS}, up to
+ *  {@link COMPAT_MAX_LOOKAHEAD} frames: a frame whose wrappers wait for bases
+ *  is then started early enough to be complete when the engine draws it. */
 export const COMPAT_LOOKAHEAD = 18;
+export const COMPAT_MAX_LOOKAHEAD = 60;
+const HORIZON_MARGIN_MS = 250;
 /** Main-thread time one playback turn may take (ms). A frame once started
  *  is prepared whole; the next one waits for a later task, so presentation
  *  events and input run between frames. */
@@ -235,7 +244,7 @@ const LOOKAHEAD_BUDGET_MS = 6;
 /** Playback preparations waiting on engine bases or readbacks at once.
  *  Pass-through answers finish in their frame's turn and take none; paused
  *  frames on screen have their own. */
-export const COMPAT_PREPARE_IN_FLIGHT = 12;
+export const COMPAT_PREPARE_IN_FLIGHT = 24;
 /** The most frames the engine renders ahead (pm-node `schedule::MAX_LEAD`):
  *  a need further ahead along a loop is a late one from before the wrap. */
 const ENGINE_AHEAD_FRAMES = 28;
@@ -269,7 +278,17 @@ export function intoLoop(time: number, loop: PlaybackLoop | null): number {
 /** `loop`: the clock's loop in the entry's own time (a nested composition's
  *  times are the open one's shifted), while playback loops and the shift
  *  is known. */
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null;
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null;
+  /** The needs the engine asked for by time (a frame it waits for, or one
+   *  ahead of playback it will draw), each with its own crop window. */
+  required: Map<number, CompatNeed>;
+  /** The engine asked for this layer with another crop window than the
+   *  last (a moving layer partly in view): its frames ahead are only the
+   *  ones the engine names, never guessed from the last window. */
+  askedOnly: boolean;
+  /** Whether its last preparation waited for bases (null: none yet). A
+   *  layer answered at once never waits for the playback budget. */
+  waits: boolean | null;
   /** The layer's own time span in the open composition (ticks), at `revision`. */
   span?: { start: number; end: number } | null;
   /** How long this layer's answers take to complete (ms, weighted): a
@@ -320,6 +339,7 @@ export type RenderTransportOptions = {
   /** A layer's own time span in the open composition, `[start, end)` in
    *  ticks (null elsewhere): playback prepares no answer for it outside. */
   layerSpan?: (composition: string, layer: string) => { start: number; end: number } | null;
+
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -419,6 +439,8 @@ export class EngineRenderTransport {
   private aheadTurn = 0;
   /** A completion asked for a turn (one per task, however many completed). */
   private pumpQueued = false;
+  /** Frames prepared ahead of the clock now (see {@link COMPAT_LOOKAHEAD}). */
+  private horizon = COMPAT_LOOKAHEAD;
   /** `frames`: frames whose preparation a turn started; `pumps`: turns. */
   readonly lookaheadStats = { frames: 0, pumps: 0, latePrepareSkips: 0, answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
   private readonly offAsk: () => void;
@@ -524,7 +546,7 @@ export class EngineRenderTransport {
       if (asynchronous && !stale) {
         const entry = this.ahead.get(this.aheadTag(need));
         entry?.sent.delete(need.time);
-        if (!playing) entry?.required.add(need.time);
+        entry?.required.set(need.time, need);
       }
     }
     if (playing || this.preparers.size) this.pump();
@@ -585,7 +607,7 @@ export class EngineRenderTransport {
       // further than the horizon at once) starts the windows over.
       const moved = runAhead(entry.cursor, cursor, step, entryLoop);
       if (revision !== entry.revision || Math.sign(step) !== Math.sign(entry.step)
-        || moved < 0 || (entryLoop && moved > COMPAT_LOOKAHEAD * Math.abs(step))) entry.sent.clear();
+        || moved < 0 || (entryLoop && moved > this.horizon * Math.abs(step))) entry.sent.clear();
       if (revision !== entry.revision || entry.span === undefined) entry.span = this.options.layerSpan?.(String(entry.need.composition), String(entry.need.layer)) ?? null;
       if (runAhead(entry.posted, cursor, step, entryLoop) > Math.abs(step)) this.lookaheadStats.recoveries++;
       entry.revision = revision;
@@ -593,9 +615,9 @@ export class EngineRenderTransport {
       entry.cursor = cursor;
       entry.loop = entryLoop;
       for (const times of [entry.sent, entry.required]) {
-        for (const time of times) {
+        for (const time of times.keys()) {
           const distance = runAhead(cursor, time, step, entryLoop);
-          if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) times.delete(time);
+          if (distance < -Math.abs(step) || distance > COMPAT_MAX_LOOKAHEAD * Math.abs(step)) times.delete(time);
         }
       }
       return step !== 0;
@@ -630,29 +652,47 @@ export class EngineRenderTransport {
     const frameMs = ((this.options.frameTicks?.() ?? 0) / ticks(1)) * 1000;
     const speed = clock ? Math.abs(clock.rate) : 0;
     const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
-    let pending = 0, more = false, started = false;
-    for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
-      const frame: { entry: AheadEntry; time: number }[] = [];
+    let pending = 0, more = false, started = false, held = false;
+    let slowest = 0;
+    for (const entry of entries) if (entry.waits && entry.readyMs !== null) slowest = Math.max(slowest, entry.readyMs);
+    this.horizon = frameMs > 0 && speed > 0
+      ? Math.max(COMPAT_LOOKAHEAD, Math.min(COMPAT_MAX_LOOKAHEAD, Math.ceil((slowest * speed + HORIZON_MARGIN_MS) / frameMs)))
+      : COMPAT_LOOKAHEAD;
+    // The frames the engine named reach further: a layer coming into view.
+    let reach = this.horizon;
+    for (const entry of entries) {
+      for (const time of entry.required.keys()) reach = Math.max(reach, Math.round(runAhead(entry.cursor, time, entry.step, entry.loop ?? null) / Math.abs(entry.step)));
+    }
+    reach = Math.min(reach, COMPAT_MAX_LOOKAHEAD);
+    for (let offset = 0; offset <= reach; offset++) {
+      const frame: { entry: AheadEntry; need: CompatNeed }[] = [];
       for (const entry of entries) {
         // Past the loop's end, the frames after the wrap.
         const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
-        if (this.outside(entry, time, span) || entry.sent.has(time) || entry.pending.has(time)) continue;
+        const asked = entry.required.get(time);
+        if (((entry.askedOnly || offset > this.horizon) && !asked) || this.outside(entry, time, span) || entry.sent.has(time) || entry.pending.has(time)) continue;
         if (speed > 0 && frameMs > 0 && entry.readyMs !== null && entry.readyMs * speed > Math.max(offset, 0.5) * frameMs && this.preparers.has(entry.need.source)) {
           this.lookaheadStats.latePrepareSkips++;
           continue;
         }
-        frame.push({ entry, time });
+        // Frames stay in order: a layer that waits for bases and cannot
+        // start holds its later frames; layers answered at once go on.
+        if (held && entry.waits !== false) { pending++; continue; }
+        frame.push({ entry, need: asked ?? { ...entry.need, time } });
       }
       if (!frame.length) continue;
-      // Frames stay in order: one that cannot start holds the later ones.
-      if (more || this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT || (started && performance.now() >= deadline)) {
-        more ||= this.aheadInFlight < COMPAT_PREPARE_IN_FLIGHT;
+      if (more || (started && performance.now() >= deadline)) {
+        more = true;
         pending += frame.length;
         continue;
       }
+      if (this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT) held = true;
       started = true;
       this.lookaheadStats.frames++;
-      for (const { entry, time } of frame) this.prepareAhead(entry, time, revision, false);
+      for (const { entry, need } of frame) {
+        if (held && entry.waits !== false) { pending++; continue; }
+        this.prepareAhead(entry, need, revision, false);
+      }
     }
     this.lookaheadStats.pending = pending;
     this.lookaheadStats.maxPending = Math.max(this.lookaheadStats.maxPending, pending);
@@ -666,18 +706,18 @@ export class EngineRenderTransport {
     const revision = this.options.revision() ?? 0;
     const span = this.options.span?.() ?? null;
     for (const entry of entries) {
-      const times = new Set(entry.required);
-      if (!entry.sent.has(entry.cursor) && !this.outside(entry, entry.cursor, span)) times.add(entry.cursor);
-      for (const time of times) {
-        if (entry.pending.has(time)) { entry.promote?.get(time)?.(); continue; }
-        this.prepareAhead(entry, time, revision, true);
+      const needs = new Map(entry.required);
+      if (!entry.sent.has(entry.cursor) && !needs.has(entry.cursor) && !this.outside(entry, entry.cursor, span)) needs.set(entry.cursor, { ...entry.need, time: entry.cursor });
+      for (const need of needs.values()) {
+        if (entry.pending.has(need.time)) { entry.promote?.get(need.time)?.(); continue; }
+        this.prepareAhead(entry, need, revision, true);
       }
     }
   }
 
-  /** Runs `entry`'s producer for `time` and posts its answer once ready. */
-  private prepareAhead(entry: AheadEntry, time: number, revision: number, urgent: boolean): void {
-    const need = { ...entry.need, time };
+  /** Runs `entry`'s producer for `need` and posts its answer once ready. */
+  private prepareAhead(entry: AheadEntry, need: CompatNeed, revision: number, urgent: boolean): void {
+    const time = need.time;
     const prepare = this.preparers.get(need.source);
     if (!prepare) {
       // A synchronous producer answers now.
@@ -700,6 +740,7 @@ export class EngineRenderTransport {
     } catch (error) {
       result = Promise.reject(error);
     }
+    entry.waits = result !== null;
     if (result === null) {
       this.prepared(entry, need, revision, prepare, began);
       return;
@@ -719,7 +760,7 @@ export class EngineRenderTransport {
     }).finally(() => {
       entry.pending.delete(time);
       entry.required.delete(time);
-      if (entry.promote?.get(time) === promote) entry.promote.delete(time);
+      if (!urgent && entry.promote?.get(time) === promote) entry.promote.delete(time);
       if (urgent) this.aheadUrgentInFlight--;
       else this.aheadInFlight--;
       this.lookaheadStats.inFlight = this.aheadInFlight;
@@ -741,7 +782,7 @@ export class EngineRenderTransport {
       ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
     const distance = runAhead(cursor, time, entry.step, entry.loop ?? null);
     if ((!playing && !entry.required.has(time) && time !== entry.cursor) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
-      || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
+      || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_MAX_LOOKAHEAD * Math.abs(entry.step)) {
       this.lookaheadStats.obsolete++;
       return;
     }
@@ -802,14 +843,16 @@ export class EngineRenderTransport {
     const frame = this.options.frameTicks?.() ?? 0;
     if (!frame) return;
     const previous = this.ahead.get(tag);
-    const same = previous?.session === session && previous.need.scale === need.scale
-      && JSON.stringify(previous.need.crop) === JSON.stringify(need.crop);
+    const same = previous?.session === session && previous.need.scale === need.scale;
     const clock = this.options.playhead?.();
     const step = frame * (clock && clock.rate < 0 ? -1 : 1);
     const entry: AheadEntry = same ? previous : {
       need, session, step, cursor: need.time, posted: need.time,
-      sent: new Set<number>(), pending: new Set<number>(), required: new Set<number>(), revision: this.options.revision(), clockCursor: null, readyMs: null
+      sent: new Set<number>(), pending: new Set<number>(), required: new Map(), revision: this.options.revision(), clockCursor: null,
+      readyMs: previous?.readyMs ?? null, waits: previous?.waits ?? null, askedOnly: false
     };
+    // Another crop window at the same density: the window moves.
+    if (same && JSON.stringify(previous.need.crop) !== JSON.stringify(need.crop)) entry.askedOnly = true;
     entry.need = need;
     // Never infer reverse playback from a late need. Only the transport's
     // rate determines direction; an explicit seek resets the sent window.
@@ -1230,10 +1273,10 @@ export class EngineRenderTransport {
    * (today's capture waits for the GPU), retried as slots free up, within
    * the class's own wait.
    */
-  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>): Promise<EngineSnapshotReply> {
+  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>, bytes: number): Promise<EngineSnapshotReply> {
     const until = performance.now() + (cls === 'idle' ? IDLE_WAIT_MS : ASYNC_WAIT_MS);
     for (let attempt = 0; ; attempt++) {
-      const reply = await this.slots.run(cls, ask);
+      const reply = await this.slots.run(cls, ask, bytes);
       if (reply.status !== 'failed' || reply.code !== 'refused' || performance.now() >= until) return reply;
       await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
     }
@@ -1257,7 +1300,8 @@ export class EngineRenderTransport {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
         const began = performance.now();
-        const reply = await this.admitted(cls, () => this.askSnapshot(request, options.signal));
+        const { width, height } = request.snapshot.outputSize;
+        const reply = await this.admitted(cls, () => this.askSnapshot(request, options.signal), width * height * 4);
         this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
         if (reply.status === 'rendered') {
           this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));
@@ -1289,6 +1333,7 @@ export class EngineRenderTransport {
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
+      if (error instanceof EngineSnapshotError && error.code === 'budgetExceeded' && options.guessedBound) throw error;
       throw this.fail(error, 'snapshot');
     }
   }
@@ -1366,18 +1411,37 @@ export class EngineRenderTransport {
    * sync priority: ordinary async snapshots yield to a due viewer frame,
    * which itself cannot render until this compatibility answer arrives. */
   async rasterForCompat(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): Promise<EngineSnapshot | null> {
+    // Main reserves each raster's bound until its reply (a whole 8192²
+    // canvas: four at once). The bound is twice the largest raster this
+    // window got so far; a larger one is asked again with the whole bound.
+    const edge = options.maxEdge ?? MAX_RASTER_EDGE;
+    const guess = this.rasterArea > 0 ? Math.min(edge, Math.ceil(Math.sqrt(2 * this.rasterArea))) : edge;
+    const ask = (maxEdge: number) => this.snapshotAsyncAt({ ...this.rasterOptions(layer, scale, time, crop, { ...options, maxEdge }), ...(maxEdge < edge ? { guessedBound: true } : {}) }, 'sync');
     try {
-      return await this.snapshotAsyncAt(this.rasterOptions(layer, scale, time, crop, options), 'sync');
+      let snapshot: EngineSnapshot;
+      try { snapshot = await ask(guess); }
+      catch (error) {
+        if (!(error instanceof EngineSnapshotError && error.code === 'budgetExceeded' && guess < edge)) throw error;
+        snapshot = await ask(edge);
+      }
+      this.rasterArea = Math.max(this.rasterArea, snapshot.width * snapshot.height);
+      return snapshot;
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
       throw error;
     }
   }
 
+  /** The largest compatibility base raster this window received (pixels). */
+  private rasterArea = 0;
+
   private rasterOptions(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null, options: RasterOptions): EngineSnapshotOptions {
     scale = layerRasterScale(scale);
     const edge = options.maxEdge ?? MAX_RASTER_EDGE;
-    return { time, width: edge, height: edge, pixels: 'premultiplied', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
+    // Straight alpha, as the canvas the raster becomes takes it: the engine
+    // divides the quantized premultiplied pixels by alpha exactly as
+    // `unpremultiply` does, off this thread.
+    return { time, width: edge, height: edge, pixels: 'straight', composition: options.composition, layer: { id: layer, scale, crop, content: options.content ?? null } };
   }
 
   /* ── today's render API shapes (apiVersion 1 to 3 and the async siblings) ── */
@@ -1394,7 +1458,9 @@ export class EngineRenderTransport {
     out.height = snapshot.height;
     // `putImageData` takes straight alpha; opaque pixels are the same either way.
     const straight = snapshot.pixels === 'premultiplied' ? unpremultiply(snapshot.data) : snapshot.data;
-    out.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(straight), snapshot.width, snapshot.height), 0, 0);
+    // The reply's own buffer when it may back an ImageData (not shared memory).
+    const data = straight.buffer instanceof ArrayBuffer ? straight : new Uint8ClampedArray(straight);
+    out.getContext('2d')!.putImageData(new ImageData(data, snapshot.width, snapshot.height), 0, 0);
     return out;
   }
 

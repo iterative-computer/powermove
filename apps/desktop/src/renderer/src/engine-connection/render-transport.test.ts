@@ -389,15 +389,32 @@ describe('EngineRenderTransport', () => {
   });
 
   it('layer rasters: pixels with anchor and box, null when the layer draws nothing', () => {
-    const raster: EngineSnapshotReply = { ...rendered(3, 2), pixels: 'premultiplied', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
-    const { transport, asked } = setup([raster, { status: 'empty', revision: 12 }, { status: 'failed', code: 'unsupported', message: 'not text' }]);
+    const raster: EngineSnapshotReply = { ...rendered(3, 2), pixels: 'straight', origin: [4, 5], layerBox: [3, 2] } as EngineSnapshotReply;
+    const { transport, asked, fake } = setup([raster, { status: 'empty', revision: 12 }, { status: 'failed', code: 'unsupported', message: 'not text' }]);
     const surface = transport.rasterSync('T1', 2, 0.5, { x: 0, y: 0, width: 3, height: 2 });
     expect(surface).toMatchObject({ width: 3, height: 2, origin: [4, 5], layerBox: [3, 2] });
-    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'premultiplied', outputSize: { width: 8192, height: 8192 } });
+    // Straight alpha from the engine (its division is `unpremultiply`'s), onto the canvas as it came.
+    expect(asked[0]!.snapshot).toMatchObject({ target: { kind: 'layer', layer: 'T1', scale: 2, crop: { x: 0, y: 0, width: 3, height: 2 } }, pixels: 'straight', outputSize: { width: 8192, height: 8192 } });
+    transport.toCanvas(surface!);
+    expect(Array.from(fake.drawn.at(-1)!.data)).toEqual(Array.from(surface!.data));
     expect(transport.rasterSync('T1', 1, 0.5)).toBeNull();
     expect(() => transport.rasterSync('S1', 1, 0.5)).toThrow(EngineSnapshotError);
     // An empty raster is not a failure.
     expect(transport.stats.failed).toBe(1);
+  });
+
+  it('bounds a playback base by twice the largest one so far, and asks again with the whole bound for a larger one', async () => {
+    const raster = (w: number, h: number): EngineSnapshotReply => ({ ...rendered(w, h), pixels: 'straight', origin: [0, 0], layerBox: [w, h] } as EngineSnapshotReply);
+    const { transport, asked } = setup([raster(30, 20), raster(10, 10), { status: 'failed', code: 'budgetExceeded', message: 'The layer raster is 60×60, over the 35×35 asked for.' }, raster(60, 60)]);
+    const edge = () => asked.at(-1)!.snapshot.outputSize;
+    expect(await transport.rasterForCompat('T1', 2, 0.5)).toMatchObject({ width: 30, height: 20 });
+    expect(edge()).toEqual({ width: 8192, height: 8192 });
+    expect(await transport.rasterForCompat('T1', 2, 0.6)).toMatchObject({ width: 10, height: 10 });
+    expect(edge()).toEqual({ width: 35, height: 35 });
+    // Larger than the guess: refused, then asked with the whole bound; no failure reported.
+    expect(await transport.rasterForCompat('T2', 2, 0.6)).toMatchObject({ width: 60, height: 60 });
+    expect(asked.slice(-2).map(a => a.snapshot.outputSize.width)).toEqual([35, 8192]);
+    expect(transport.stats.failed).toBe(0);
   });
 
   it('layer rasters take any scale, as today\'s PM.raster: the engine caps the density at the 8192-pixel edge', () => {
@@ -666,6 +683,64 @@ describe('compatibility answers during playback', () => {
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
+  it('never holds a layer answered at once behind the budget of layers waiting for bases', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(true);
+    const slow: Array<{ time: number; done: () => void }> = [];
+    const fast: number[] = [];
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), n => {
+      if (n.layer === 'fast') { fast.push(n.time); return null; }
+      return new Promise<void>(done => slow.push({ time: n.time, done }));
+    });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: ['s1', 's2', 'fast'].map(l => need(0, l)) }, session);
+      // Two waiting layers fill the budget by frame 11; the pass-through layer goes on to the horizon.
+      expect(slow).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
+      expect(Math.max(...slow.map(c => c.time))).toBe((COMPAT_PREPARE_IN_FLIGHT / 2 - 1) * frame);
+      expect(fast).toEqual(frames(0, COMPAT_LOOKAHEAD + 1));
+      // Room again: the waiting layers continue in frame order.
+      slow.shift()!.done(); slow.shift()!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(slow.slice(-2).map(c => c.time)).toEqual(frames(COMPAT_PREPARE_IN_FLIGHT / 2, 2, 0));
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('prepares a layer whose crop window moves only at the frames the engine names, each with its own window', () => {
+    const { t, session, state } = rig(true);
+    const { prepared } = passThrough(t);
+    const crops: Array<[number, unknown]> = [];
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), n => { crops.push([n.time / frame, n.crop ?? null]); return null; });
+    const at = (time: number, x: number) => ({ ...need(time), crop: { x, y: 0, width: 100, height: 50 } });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [at(0, 0)] }, session);
+      // One window so far: frames ahead are prepared with it.
+      expect(crops).toHaveLength(COMPAT_LOOKAHEAD + 1);
+      crops.length = 0;
+      // The engine names frames ahead (its plan of frame 12, then 13) with other windows.
+      t.receiveCompat({ compat: 'needs', needs: [at(12 * frame, 40)] }, session);
+      t.receiveCompat({ compat: 'needs', needs: [at(13 * frame, 50)] }, session);
+      expect(crops).toEqual([[12, { x: 40, y: 0, width: 100, height: 50 }], [13, { x: 50, y: 0, width: 100, height: 50 }]]);
+      // The clock moves on: nothing is guessed for the moving layer.
+      state.time = 2 * frame;
+      t.pump();
+      expect(crops).toHaveLength(2);
+      expect(prepared).toHaveLength(0);
+    } finally { state.playing = false; t.dispose(); }
+  });
+
+  it('prepares a frame the engine names beyond the horizon (a layer coming into view), and nothing else there', () => {
+    const { t, session } = rig(true, { layerSpan: (_c: string, layer: string) => layer === 'entering' ? { start: 30 * frame, end: 90 * frame } : null });
+    const { prepared } = passThrough(t);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      expect(Math.max(...prepared.map(p => p.time))).toBe(COMPAT_LOOKAHEAD * frame);
+      prepared.length = 0;
+      // The engine's plan of the frame a second ahead.
+      t.receiveCompat({ compat: 'needs', needs: [need(30 * frame, 'entering')] }, session);
+      expect(prepared.map(p => [p.layer, p.time / frame])).toEqual([['entering', 30]]);
+    } finally { t.dispose(); }
+  });
+
   it('moves on with the clock once a frame while playing, never as a poll, and stops when playback does', async () => {
     vi.useFakeTimers();
     const { t, session, state } = rig(true);
@@ -715,30 +790,33 @@ describe('compatibility answers during playback', () => {
     const { t, session, state } = rig(true);
     const { calls, answered } = waiting(t);
     try {
-      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      t.receiveCompat({ compat: 'needs', needs: [need(0), need(0, 'other')] }, session);
       expect(calls).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
       state.playing = false;
       // Stopped on frame 2, which playback is still preparing.
+      const playback = calls.find(c => c.layer === 'title' && c.time === 2 * frame)!;
       let promoted = false;
-      void calls[2]!.options!.promoted!.then(() => { promoted = true; });
+      void playback.options!.promoted!.then(() => { promoted = true; });
       t.receiveCompat({ compat: 'needs', needs: [need(2 * frame)] }, session);
       await vi.advanceTimersByTimeAsync(0);
       expect(promoted).toBe(true);
-      expect(calls.filter(c => c.time === 2 * frame)).toHaveLength(1);
-      calls[2]!.done();
+      expect(calls.filter(c => c.layer === 'title' && c.time === 2 * frame)).toHaveLength(1);
+      playback.done();
       await vi.advanceTimersByTimeAsync(0);
-      expect(answered).toEqual([{ layer: 'title', time: 2 * frame }]);
+      const titles = () => answered.filter(a => a.layer === 'title').map(a => a.time / frame);
+      expect(titles()).toEqual([2]);
       // A seek while every playback slot is held: the frame starts at once.
       t.receiveCompat({ compat: 'needs', needs: [need(40 * frame)] }, session);
       const seek = calls.find(c => c.time === 40 * frame);
       expect(seek?.options).toEqual({ urgent: true });
       seek!.done();
       await vi.advanceTimersByTimeAsync(0);
-      expect(answered.at(-1)).toEqual({ layer: 'title', time: 40 * frame });
+      expect(titles()).toEqual([2, 40]);
       // Playback's other completions are not the paused frame's: dropped.
       for (const c of calls) c.done();
       await vi.advanceTimersByTimeAsync(0);
-      expect(answered).toHaveLength(2);
+      expect(titles()).toEqual([2, 40]);
+      expect(answered.filter(a => a.layer === 'other').map(a => a.time)).toEqual([0]);
       expect(t.lookaheadStats.inFlight).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }
@@ -812,6 +890,30 @@ describe('compatibility answers during playback', () => {
       prepared.length = 0;
       t.pump();
       expect(prepared).toContainEqual(['slow', 80]);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('reaches further ahead while a layer\'s answers take longer than the horizon leaves', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(true);
+    const prepared: Array<[string, number]> = [];
+    const slow: Array<() => void> = [];
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), n => {
+      prepared.push([n.layer, n.time / frame]);
+      return n.layer === 'slow' ? new Promise<void>(resolve => slow.push(resolve)) : null;
+    });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0, 'slow'), need(0, 'fast')] }, session);
+      expect(Math.max(...prepared.map(([, n]) => n))).toBe(COMPAT_LOOKAHEAD);
+      // Its answers take a second: 30 frames, plus the margin.
+      await vi.advanceTimersByTimeAsync(1000);
+      state.time = 40 * frame;
+      prepared.length = 0;
+      slow.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      const fast = prepared.filter(([layer]) => layer === 'fast').map(([, n]) => n);
+      expect(Math.max(...fast)).toBe(40 + Math.ceil((1000 + 250) / (1000 / 30)));
+      expect(Math.min(...prepared.filter(([layer]) => layer === 'slow').map(([, n]) => n))).toBe(70);
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
