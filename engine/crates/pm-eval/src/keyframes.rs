@@ -136,6 +136,29 @@ fn spring_of(key: &Node) -> Option<SpringConfig> {
     node::truthy(spring).then(|| SpringConfig::from_node(spring))
 }
 
+/// A key's time as a number (`numeric(t)` of the stored `t`). `time_at`:
+/// a key schema and where `t` is among its members, read without a member
+/// search by the keys of that shape.
+#[inline]
+fn key_time(key: &Node, time_at: (usize, Option<usize>)) -> f64 {
+    let t = match key.kind() {
+        NodeKind::Object(map) if map.schema_id() == time_at.0 => time_at
+            .1
+            .and_then(|i| map.value_at(i))
+            .map_or(Got::Undefined, Got::Node),
+        _ => node::get(key, b"t"),
+    };
+    match t {
+        Got::Node(n) if let NodeKind::Number(t) = n.kind() => *t,
+        t => KeyTime::from_got(&t).1,
+    }
+}
+
+/// A key's value as stored.
+fn key_value(key: &Node) -> JsValue {
+    node::js_value_opt(node::member(Some(key), "v"))
+}
+
 /// Reads an object key as stored (no adoption).
 fn raw_seg_key(key: &Node) -> SegKey {
     let k = Some(key);
@@ -444,59 +467,45 @@ impl Curve {
 
 /// A track on the temporal path, prepared once per content revision.
 ///
-/// Preparing reads only every key's time and value (the segment search and
-/// the answers outside the keys); a segment's curve (its keys' adopted
-/// easing) is made the first time a time inside it is asked for. A layer
-/// first drawn at a frame reads a few segments of tracks thousands of keys
-/// long, and a frame stays exact: each curve is the one preparing every
-/// segment at once made.
+/// Preparing reads only the first and last keys; the segment search reads
+/// the times of the keys it passes, and a segment's curve (its keys'
+/// adopted easing) is made the first time a time inside it is asked for. A
+/// layer first drawn at a frame reads a few keys of tracks thousands of
+/// keys long, and every answer stays exact: the search compares the same
+/// times, and each curve is the one adopting the whole track made.
 #[derive(Clone, Debug)]
 pub struct TemporalTrack {
     keys: Arc<Vec<Node>>,
-    times: Vec<f64>,
-    values: Vec<f64>,
+    /// The first and last keys' times and values (the answers outside the keys).
+    ends: [(f64, f64); 2],
+    /// The first key's schema and where its `t` is: the keys of that shape
+    /// read their times without a member search.
+    time_at: (usize, Option<usize>),
     curves: Box<[OnceLock<Curve>]>,
-    /// Every segment base is a number, so every answer is a number.
-    numeric: bool,
+    numeric: OnceLock<bool>,
 }
 
 impl TemporalTrack {
-    /// `keys` must all be objects ([`adoption_error`]).
+    /// `keys` must all be objects ([`adoption_error`]), at least one.
     fn new(keys: Arc<Vec<Node>>) -> TemporalTrack {
-        let mut times = Vec::with_capacity(keys.len());
-        let mut values = Vec::with_capacity(keys.len());
-        let mut numeric = true;
-        // Where `t` and `v` are in the keys of the last key schema seen:
-        // keys of one shape are read without a key search each.
-        let mut schema = (usize::MAX, None, None);
-        for (index, key) in keys.iter().enumerate() {
-            let (t, v) = match key.kind() {
-                NodeKind::Object(map) => {
-                    if map.schema_id() != schema.0 {
-                        schema = (
-                            map.schema_id(),
-                            map.position(b"t".as_slice()),
-                            map.position(b"v".as_slice()),
-                        );
-                    }
-                    let at = |i: Option<usize>| i.and_then(|i| map.value_at(i));
-                    (at(schema.1).map_or(Got::Undefined, Got::Node), at(schema.2))
-                }
-                _ => (node::get(key, b"t"), node::member(Some(key), "v")),
-            };
-            times.push(KeyTime::from_got(&t).1);
-            let v = node::js_value_opt(v);
-            values.push(v.to_number());
-            // A segment's base is its first key's value.
-            numeric &= index + 1 == keys.len() || matches!(v, JsValue::Number(_));
-        }
+        let time_at = match keys[0].kind() {
+            NodeKind::Object(map) => (map.schema_id(), map.position(b"t".as_slice())),
+            _ => (usize::MAX, None),
+        };
+        let end = |key: &Node| {
+            (
+                key_time(key, (usize::MAX, None)),
+                key_value(key).to_number(),
+            )
+        };
+        let ends = [end(&keys[0]), end(&keys[keys.len() - 1])];
         let curves = (1..keys.len()).map(|_| OnceLock::new()).collect();
         TemporalTrack {
             keys,
-            times,
-            values,
+            ends,
+            time_at,
             curves,
-            numeric,
+            numeric: OnceLock::new(),
         }
     }
 
@@ -511,33 +520,40 @@ impl TemporalTrack {
     }
 
     pub fn len(&self) -> usize {
-        self.times.len()
+        self.keys.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.times.is_empty()
+        self.keys.is_empty()
     }
 
-    /// Whether every answer is a number ([`TemporalTrack::value_number`]).
+    /// Whether every answer is a number ([`TemporalTrack::value_number`]):
+    /// every segment's base (its first key's value) is one. Reads every key
+    /// the first time.
     pub fn is_numeric(&self) -> bool {
-        self.numeric
+        *self.numeric.get_or_init(|| {
+            let bases = &self.keys[..self.keys.len() - 1];
+            bases
+                .iter()
+                .all(|key| matches!(key_value(key), JsValue::Number(_)))
+        })
     }
 
     #[inline]
     fn segment(&self, time: f64) -> Result<usize, f64> {
-        let times = &self.times;
-        let n = times.len();
-        if time <= times[0] {
-            return Err(self.values[0]);
+        let n = self.keys.len();
+        let [(first_time, first), (last_time, last)] = self.ends;
+        if time <= first_time {
+            return Err(first);
         }
-        if time >= times[n - 1] {
-            return Err(self.values[n - 1]);
+        if time >= last_time {
+            return Err(last);
         }
         let mut lo = 0usize;
         let mut hi = n - 1;
         while hi - lo > 1 {
             let m = (lo + hi) >> 1;
-            if times[m] <= time {
+            if key_time(&self.keys[m], self.time_at) <= time {
                 lo = m;
             } else {
                 hi = m;
