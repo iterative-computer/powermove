@@ -1129,21 +1129,21 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     source.id = association?.projectId || PM.uid('project');
     const project = await hydrateAsync(source, current);
     if (!project || !current()) { opening.close(); return false; }
-    if (restoring) await restoring;
-    else { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
-    if (!current()) { opening.close(); return false; }
     // Parsing and restoring media have already overlapped module loading.
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);
     if (!current()) { opening.close(); return false; }
-    // The new engine's copy of the document is prepared while this window
-    // checkpoints the project: most of it is the engine process parsing and
-    // hashing, not this thread. Nothing below writes the project before it is
-    // published.
+    // The new engine's copy of the document is prepared while media finishes
+    // restoring and this window checkpoints the project: most of it is the
+    // engine process parsing and hashing, not this thread. Nothing below
+    // writes the project before it is published.
     const preparing = Promise.resolve(PM.EngineDoc?.prepare?.(project));
     preparing.catch(() => {});
     release = () => { void preparing.then(() => PM.EngineDoc?.discardPrepared?.(project), () => {}); };
     const abandon = () => { release(); opening.close(); return false; };
+    if (restoring) await restoring;
+    else { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
+    if (!current()) return abandon();
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.

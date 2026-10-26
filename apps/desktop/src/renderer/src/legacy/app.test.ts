@@ -1621,7 +1621,7 @@ it.each([false, true])('reads a streamed document range, then lets main copy its
   }
 });
 
-it.each([true, false])('publishes a streamed project only after main copied its media (copy succeeds: %s)', async succeeds => {
+it.each([true, false])('publishes a streamed project only after main copied its media, while the engine prepares it (copy succeeds: %s)', async succeeds => {
   const { PM, toasts } = appRegistry();
   installHistory(PM);
   PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
@@ -1633,7 +1633,7 @@ it.each([true, false])('publishes a streamed project only after main copied its 
   let copied!: (ok: boolean) => void;
   const putProjectRange = vi.fn(() => new Promise<boolean>((resolve, reject) => { copied = ok => ok ? resolve(true) : reject(new Error('The project media checksum does not match.')); }));
   PM.MediaStore = { get: async () => null, put: vi.fn(async () => true), putProjectRange };
-  PM.EngineDoc = { prepare: vi.fn(async () => {}) };
+  PM.EngineDoc = { prepare: vi.fn(async () => {}), discardPrepared: vi.fn() };
   installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Ranged.pmv', projectId: 'ranged-open', token: 'ranged-reader',
     size: offset + bytes.length + 4096, media, documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }),
     projectRead: { read, close: vi.fn(async () => undefined) } } as any);
@@ -1641,10 +1641,13 @@ it.each([true, false])('publishes a streamed project only after main copied its 
   await vi.waitFor(() => expect(putProjectRange).toHaveBeenCalledOnce());
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(PM.proj.id).not.toBe('ranged-open');
-  expect(PM.EngineDoc.prepare).not.toHaveBeenCalled();
+  // The engine prepares the hydrated document while the copy runs.
+  expect(PM.EngineDoc.prepare).toHaveBeenCalledOnce();
   copied(succeeds);
   await opening;
+  await Promise.resolve();
   expect(PM.proj.id === 'ranged-open').toBe(succeeds);
+  expect(PM.EngineDoc.discardPrepared).toHaveBeenCalledTimes(succeeds ? 0 : 1);
   expect(toasts.some(message => message.startsWith('Could not open'))).toBe(!succeeds);
 });
 
