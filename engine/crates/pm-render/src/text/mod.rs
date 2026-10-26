@@ -152,7 +152,13 @@ fn document_font_queries(root: &Node) -> Vec<pm_text::answers::Query> {
             queries.push(q);
         }
     };
-    let comps = pm_eval::node::array(pm_eval::node::member(Some(root), "comps")).unwrap_or(&[]);
+    // The open composition (at the top level in the stored form) and every
+    // composition of `comps` (a map in the canonical form).
+    let comps: Vec<&Node> = match pm_eval::node::member(Some(root), "comps").map(Node::kind) {
+        Some(pm_model::NodeKind::Object(map)) => map.values().collect(),
+        Some(pm_model::NodeKind::Array(items)) => items.iter().collect(),
+        _ => Vec::new(),
+    };
     let lists = std::iter::once(root)
         .chain(comps)
         .filter_map(|c| pm_eval::node::array(pm_eval::node::member(Some(c), "layers")));
@@ -1095,11 +1101,12 @@ mod tests {
             pm_model::Document::new(
                 Some(
                     pm_model::json::parse(
-                        r#"{"layers":[
-                            {"type":"text","d":{"text":"a ✓","font":"Avenir","weight":600,"italic":true,"size":40}},
-                            {"type":"shape","d":{"font":"Ignored"}},
-                            {"type":"text","d":{"text":"b","font":"Avenir","weight":600,"italic":true,"size":40}}],
-                          "comps":[{"layers":[{"type":"text","d":{"text":"c","size":20.5}}]}]}"#,
+                        r#"{"compId":"C1","comps":{
+                            "C1":{"layers":[
+                              {"type":"text","d":{"text":"a ✓","font":"Avenir","weight":600,"italic":true,"size":40}},
+                              {"type":"shape","d":{"font":"Ignored"}},
+                              {"type":"text","d":{"text":"b","font":"Avenir","weight":600,"italic":true,"size":40}}]},
+                            "C2":{"layers":[{"type":"text","d":{"text":"c","size":20.5}}]}}}"#,
                     )
                     .unwrap(),
                 ),
@@ -1147,6 +1154,22 @@ mod tests {
         // Another edition asks again.
         cx.prefetch_fonts(&doc(2));
         assert_eq!(asked.0.lock().unwrap().len(), 2);
+        // The stored form keeps the open composition's layers at the top.
+        let stored = pm_model::Document::new(
+            Some(
+                pm_model::json::parse(
+                    r#"{"layers":[{"type":"text","d":{"font":"Avenir","size":12}}]}"#,
+                )
+                .unwrap(),
+            ),
+            1,
+        );
+        let queries = document_font_queries(stored.root().unwrap());
+        assert!(
+            queries
+                .iter()
+                .any(|q| matches!(q, Query::Family { name, .. } if name == "Avenir"))
+        );
     }
 
     #[test]
