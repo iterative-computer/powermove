@@ -8,7 +8,7 @@ import { makePM } from './make-pm';
 describe('the paused engine redraw', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('answers a real draw once, and not the draws its own announcement raised', () => {
+  it('answers a real draw once; a draw its own announcement raised redraws only the overlay', () => {
     const frames: Array<(t: number) => void> = [];
     const raf = (fn: (t: number) => void) => { frames.push(fn); return frames.length; };
     vi.stubGlobal('window', { performance, requestAnimationFrame: raf, cancelAnimationFrame: () => {}, addEventListener() {}, document: { addEventListener() {}, visibilityState: 'visible' } });
@@ -26,7 +26,9 @@ describe('the paused engine redraw', () => {
       return true;
     };
     const overlays: number[] = [];
-    PM.bus.on('overlay', () => { overlays.push(1); PM.bus.emit('draw'); });
+    let animating = false;
+    // An overlay that animates by invalidating from its own draw.
+    PM.bus.on('overlay', () => { overlays.push(1); if (animating) PM.bus.emit('draw'); });
     // An extension that redraws whenever a frame is rendered.
     PM.bus.on('frame:rendered', () => PM.bus.emit('draw'));
     PM.setTransportDriver({ active: () => true, play() {}, shuttle() {}, playAround() {}, setAudioScrub() {}, pause() {}, seek() {}, setLoop() {},
@@ -36,11 +38,25 @@ describe('the paused engine redraw', () => {
     announced.length = 0; overlays.length = 0;
     PM.bus.emit('draw');
     for (let i = 1; i <= 10; i++) tick(i * 16);
+    // The frame:rendered listener's draw redraws the overlay once, and
+    // announces nothing again.
     expect(announced).toEqual(['presented']);
-    expect(overlays).toEqual([1]);
+    expect(overlays).toEqual([1, 1]);
     // A later real draw is answered again.
     PM.bus.emit('draw');
     tick(200); tick(216);
     expect(announced).toEqual(['presented', 'presented']);
+    // An animating overlay is drawn at every animation frame, as today's
+    // frame loop draws it, without announcing the same frame again.
+    announced.length = 0; overlays.length = 0; animating = true;
+    PM.bus.emit('draw');
+    for (let i = 1; i <= 10; i++) tick(300 + i * 16);
+    expect(announced).toEqual(['presented']);
+    expect(overlays.length).toBe(10);
+    animating = false;
+    tick(500); tick(516);
+    const settled = overlays.length;
+    tick(532); tick(548);
+    expect(overlays.length).toBe(settled);
   });
 });

@@ -524,17 +524,24 @@ for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event,
 
 /* While the engine presents, a draw is a request to announce the frame on
    screen again (or to redraw what changed). One raised by a listener of
-   that announcement (`frame:rendered`, `overlay`) asks for nothing new:
-   answering it would announce the same frame at every animation frame for
-   as long as the listener invalidates. */
+   that announcement (`frame:rendered`, `overlay`) asks for no new frame:
+   answering it with the same frame would announce it at every animation
+   frame for as long as the listener invalidates. It is still a request to
+   draw the overlay again, as today's frame loop does: an overlay that
+   animates by invalidating from its own draw keeps animating. */
 let redrawRequested = true;
+let overlayRequested = false;
 let overlayEmissions = 0;
 const announcing = () => overlayEmissions > 0 || !!(PM as any).EnginePresentedEvents?.announcing;
 const emitOverlay = () => {
   overlayEmissions++;
   try { PM.bus.emit('overlay'); } finally { overlayEmissions--; }
 };
-PM.bus.on('draw', () => { needsDraw = true; if (!announcing()) redrawRequested = true; });
+PM.bus.on('draw', () => {
+  needsDraw = true;
+  if (announcing()) overlayRequested = true;
+  else redrawRequested = true;
+});
 
 function frame(now: any) {
   window.requestAnimationFrame(frame);
@@ -584,7 +591,11 @@ function frame(now: any) {
       // then `overlay`); the engine presents one only for a change.
       if (redrawRequested) {
         redrawRequested = false;
+        overlayRequested = false;
         if (!PM.playing) (PM as any).EngineRedraw?.();
+        emitOverlay();
+      } else if (overlayRequested) {
+        overlayRequested = false;
         emitOverlay();
       }
     }
