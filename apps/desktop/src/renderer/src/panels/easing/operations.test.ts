@@ -19,6 +19,13 @@ function app() {
 function samples(PM: any, id: string, path = 'position.x') { const prop = PM.L(id).p[path]; return Array.from({ length: 31 }, (_, i) => PM.evalKfs(prop.kf, i / 5)); }
 
 describe('Easing curves', () => {
+  it('finds no tracks without reading keyframes when no key is selected', () => {
+    const { PM } = app();
+    PM.sel.keys = [];
+    let reads = 0; const allProps = PM.allProps; PM.allProps = (...args: any[]) => { reads++; return allProps(...args); };
+    expect(tracks(PM)).toEqual([]);
+    expect(reads).toBe(0);
+  });
   it('splits a curve without changing its evaluated shape', () => {
     const original = cubic([.8, -.4, .2, 1.5]), split = insertPoint(original, .37);
     expect(split.points).toHaveLength(3);
