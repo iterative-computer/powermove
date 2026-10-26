@@ -43,9 +43,15 @@ impl PreparedDocument {
     }
 
     pub fn from_document(document: Document, source_bytes: usize) -> Self {
-        let hash = document.canonical_hash().unwrap_or_default();
-        let mut consistency = ConsistencyHash::default();
-        let integrity = consistency.digest(document.root());
+        // Two independent full walks of one immutable tree (about 0.65 s each
+        // for a 180 MB document): natively they run side by side.
+        let (hash, (integrity, consistency)) = join(
+            || document.canonical_hash().unwrap_or_default(),
+            || {
+                let mut consistency = ConsistencyHash::default();
+                (consistency.digest(document.root()), consistency)
+            },
+        );
         let mut seen = StorageSeen::default();
         let tree_bytes_estimate = std::mem::size_of::<Document>()
             + document
@@ -59,6 +65,23 @@ impl PreparedDocument {
             tree_bytes_estimate,
             consistency,
         }
+    }
+}
+
+/// Runs `a` on another thread while `b` runs on this one (natively; the
+/// WASM build has no threads and runs them in turn).
+pub fn join<A: Send, B>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B) -> (A, B) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|scope| {
+            let a = scope.spawn(a);
+            let b = b();
+            (a.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)), b)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        (a(), b())
     }
 }
 

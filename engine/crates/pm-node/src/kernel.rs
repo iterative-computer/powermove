@@ -652,10 +652,15 @@ fn read(work: &Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, String
     }
     drop(chunk);
     metrics.input(bytes.capacity());
-    if work.text && pm_model::hash::sha256_hex(&bytes) != work.hash {
+    // The stream's checksum and the parse each read every byte: side by side.
+    let (sha256, document) = pm_wasm::kernel::join(
+        || work.text.then(|| pm_model::hash::sha256_hex(&bytes)),
+        || PreparedDocument::parse_tree(&bytes, work.revision),
+    );
+    if sha256.is_some_and(|sha256| sha256 != work.hash) {
         return Err("The native document file does not match the hash of its stream".into());
     }
-    let document = PreparedDocument::parse_tree(&bytes, work.revision)?;
+    let document = document?;
     let source_bytes = bytes.len();
     drop(bytes);
     metrics.input(0);
