@@ -1088,11 +1088,15 @@ async function openProjectFile(file: any, association?: { path: string; projectI
   let release = () => {};
   try {
     await yieldLoad();
-    let o: any, mediaRestored = false;
+    // Embedded media streamed from main's project reader is restored while the
+    // document hydrates: neither needs the other, and the copy is main's work.
+    let o: any, restoring: Promise<void> | null = null;
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
       const { token, media, documentRange } = file.native;
-      await withProjectReader(async () => {
+      let documentRead!: (document: any) => void;
+      const read = new Promise<any>(resolve => { documentRead = resolve; });
+      restoring = withProjectReader(async () => {
         // A large PMV4 document stays in the file; others arrive as JSON text.
         const ranged = typeof file.native.documentJSON !== 'string';
         const documentBytes = ranged ? documentRange?.length || 0 : 0;
@@ -1102,11 +1106,14 @@ async function openProjectFile(file: any, association?: { path: string; projectI
             completed => opening.update({ label: file.name, completed, total }))
           : openedDocument(file.native);
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
+        documentRead(document);
         await settleAssetRestores();
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           completed => opening.update({ label: file.name, completed: documentBytes + completed, total }), token);
-        o = document; mediaRestored = true;
       }, () => bridge.close(token));
+      // Awaited after hydration; a failure before the document is read fails the read.
+      restoring.catch(() => {});
+      o = await Promise.race([read, restoring.then(() => read)]);
     } else if (file.native) o = unpackProjectFile(file.native.data);
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
@@ -1122,7 +1129,9 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     source.id = association?.projectId || PM.uid('project');
     const project = await hydrateAsync(source, current);
     if (!project || !current()) { opening.close(); return false; }
-    if (!mediaRestored) { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
+    if (restoring) await restoring;
+    else { await settleAssetRestores(); await restoreProjectFileMedia(o, PM.MediaStore); }
+    if (!current()) { opening.close(); return false; }
     // Parsing and restoring media have already overlapped module loading.
     // Do not publish the new document to renderer readers before its mirror can answer.
     if (documentPending(PM)) await waitForDocumentReady(PM);

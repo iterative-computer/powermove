@@ -1621,6 +1621,33 @@ it.each([false, true])('reads a streamed document range, then lets main copy its
   }
 });
 
+it.each([true, false])('publishes a streamed project only after main copied its media (copy succeeds: %s)', async succeeds => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  const project = PM.mkProject({ id: 'source', name: 'Ranged', assets: { clip: { id: 'clip', kind: 'video', storageKey: 'media:clip' } } });
+  const bytes = new TextEncoder().encode(JSON.stringify({ proj: project, history: { version: 1, index: -1, entries: [] } }));
+  const offset = 9, media = [{ id: 'clip', type: 'video/mp4', offset: offset + bytes.length, length: 4096, revision: 'saved', sha256: 'a'.repeat(64) }];
+  const read = vi.fn(async (_token: string, at: number, length: number) => bytes.subarray(at - offset, at - offset + length));
+  let copied!: (ok: boolean) => void;
+  const putProjectRange = vi.fn(() => new Promise<boolean>((resolve, reject) => { copied = ok => ok ? resolve(true) : reject(new Error('The project media checksum does not match.')); }));
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true), putProjectRange };
+  PM.EngineDoc = { prepare: vi.fn(async () => {}) };
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Ranged.pmv', projectId: 'ranged-open', token: 'ranged-reader',
+    size: offset + bytes.length + 4096, media, documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }),
+    projectRead: { read, close: vi.fn(async () => undefined) } } as any);
+  const opening = PM.openProject();
+  await vi.waitFor(() => expect(putProjectRange).toHaveBeenCalledOnce());
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(PM.proj.id).not.toBe('ranged-open');
+  expect(PM.EngineDoc.prepare).not.toHaveBeenCalled();
+  copied(succeeds);
+  await opening;
+  expect(PM.proj.id === 'ranged-open').toBe(succeeds);
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(!succeeds);
+});
+
 it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {
   for (const trashed of [true, false]) {
     const { PM, listeners } = appRegistry();
