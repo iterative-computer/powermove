@@ -126,6 +126,28 @@ impl Node {
         crate::json::parse_bytes_parallel(bytes, &mut NodeBuilder { rev })
     }
 
+    /// [`Node::parse_bytes`] with units parsed as the text arrived
+    /// ([`Node::parse_unit`]; see [`crate::json::parse_bytes_parallel_prebuilt`]).
+    pub fn parse_bytes_prebuilt(
+        bytes: &[u8],
+        rev: u64,
+        prebuilt: Vec<crate::json::Prebuilt<Node>>,
+        complete: bool,
+    ) -> Result<Node, crate::json::ParseError> {
+        crate::json::parse_bytes_parallel_prebuilt(
+            bytes,
+            &mut NodeBuilder { rev },
+            prebuilt,
+            complete,
+        )
+    }
+
+    /// One unit of a document's text (inside `depth` containers) at revision
+    /// `rev`, as [`Node::parse_bytes`] builds it.
+    pub fn parse_unit(text: &[u8], depth: usize, rev: u64) -> Option<Node> {
+        crate::json::parse_unit_with(text, depth, &mut NodeBuilder { rev })
+    }
+
     /// The revision at which this subtree last changed.
     pub fn rev(&self) -> u64 {
         self.rev

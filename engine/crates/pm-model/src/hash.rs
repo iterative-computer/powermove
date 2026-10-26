@@ -86,6 +86,11 @@ pub fn canonical_hash<T: JsonTree>(value: &T) -> String {
     to_hex(&canonical_digest(value))
 }
 
+/// SHA-256 of raw bytes.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 /// SHA-256 of raw bytes as lowercase hex (PMV4 checksums).
 pub fn sha256_hex(bytes: &[u8]) -> String {
     to_hex(&Sha256::digest(bytes).into())
