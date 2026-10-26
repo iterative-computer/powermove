@@ -397,23 +397,18 @@ impl CoreTextRegistry {
         Ok(())
     }
 
-    /// How many project faces are registered: [`Self::warm_project_fallback`]
-    /// takes each one's index.
-    pub fn project_faces(&self) -> usize {
-        self.project.len()
-    }
-
-    /// Makes CoreText ready to find fallbacks for project face `index`
-    /// (answers are unchanged). A font registered from data gets its
-    /// fallback cascade on its first fallback lookup, which reads the
-    /// character sets of the fonts after it: about 15-20 ms, then well under
-    /// a millisecond for every later character. A frame that first shows a
-    /// character the face lacks waited for that; asking once ahead, for a
+    /// Makes CoreText ready to find fallbacks for `face` (answers are
+    /// unchanged). CoreText gives a font its fallback cascade on its first
+    /// fallback lookup, reading the character sets of the fonts after it:
+    /// 6-20 ms in a fresh process (a check mark: 6 ms with Times as the
+    /// primary, 18 ms with a font registered from data), then well under a
+    /// millisecond for every later character. A frame that first shows a
+    /// character its font lacks waited for that; asking once ahead, for a
     /// code point no font has (so the whole cascade is read), moves it off
     /// the frame. The lookup goes through the face's own font object, the
-    /// one the face's fallback lookups use.
-    pub fn warm_project_fallback(&self, index: usize) {
-        let Some(face) = self.project.get(index) else {
+    /// one its fallback lookups use.
+    pub fn warm_fallback(&self, face: FaceId) {
+        let Some(face) = self.faces.get(face as usize) else {
             return;
         };
         let string = char_string(UNASSIGNED);
@@ -1618,7 +1613,7 @@ fn alternate_family(family: &str) -> Option<&'static str> {
     }
 }
 
-/// A noncharacter no font maps ([`CoreTextRegistry::warm_project_fallback`]).
+/// A noncharacter no font maps ([`CoreTextRegistry::warm_fallback`]).
 const UNASSIGNED: u32 = 0x10FFFD;
 
 fn char_string(ch: u32) -> CFRetained<CFString> {

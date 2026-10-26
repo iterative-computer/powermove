@@ -276,9 +276,9 @@ pub struct FontService {
     /// Main finished replaying to a port (its seeds come last, after the
     /// open and the project fonts).
     opened: bool,
-    /// Project faces whose fallback cascade CoreText has made
-    /// ([`FontService::warm_fallbacks`]), in the order they were added.
-    warmed: usize,
+    /// Faces (by id, in the order the registry handed them out) whose
+    /// fallback cascade CoreText has made ([`FontService::warm_fallbacks`]).
+    warmed: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -297,15 +297,17 @@ impl FontService {
     }
 
     /// While nothing waits for fonts: makes CoreText ready to find
-    /// fallbacks for the next project face that is not
-    /// (`CoreTextRegistry::warm_project_fallback`, 15-20 ms each), so the
-    /// frame that first shows a character the face lacks does not wait for
-    /// it. Only once main's replay is done. Returns whether it warmed one.
+    /// fallbacks for the next face the registry handed out that is not
+    /// (`CoreTextRegistry::warm_fallback`, 6-20 ms each), so the frame that
+    /// first shows a character the face lacks does not wait for it: a face
+    /// laid out at one frame is often the primary of another. Only once
+    /// main's replay is done. Returns whether it warmed one.
     pub fn warm_fallbacks(&mut self) -> bool {
-        if !self.opened || self.warmed >= self.layout.resolver().project_faces() {
+        let faces = self.layout.resolver().faces().count();
+        if !self.opened || self.warmed as usize >= faces {
             return false;
         }
-        self.layout.resolver().warm_project_fallback(self.warmed);
+        self.layout.resolver().warm_fallback(self.warmed);
         self.warmed += 1;
         true
     }
@@ -427,7 +429,6 @@ impl FontService {
             Op::ClearProjectFonts => {
                 let _: NoArgs = parse(json)?;
                 self.registry().clear_project_fonts();
-                self.warmed = 0;
                 Ok(generation_json(self.generation()))
             }
             Op::Generation => {

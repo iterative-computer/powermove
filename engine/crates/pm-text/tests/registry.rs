@@ -83,12 +83,11 @@ fn main() {
         r.generation() > generation,
         String::new(),
     );
-    // Warming a project face's fallbacks changes no answer: no face is
-    // added, the generation stays, and its fallbacks resolve as before.
+    // Warming a face's fallbacks changes no answer: no face is added, the
+    // generation stays, and its fallbacks resolve as before.
     let (faces, generation) = (r.faces().count(), r.generation());
-    check("one project face", r.project_faces() == 1, String::new());
-    r.warm_project_fallback(0);
-    r.warm_project_fallback(1);
+    r.warm_fallback(shadow);
+    r.warm_fallback(faces as u32);
     check(
         "warming leaves the registry as it was",
         r.faces().count() == faces && r.generation() == generation,
