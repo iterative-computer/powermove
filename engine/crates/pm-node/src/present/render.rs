@@ -3876,11 +3876,13 @@ impl Thread {
     /// A session with compatibility producers keeps its transport on this
     /// thread, whose Play may first preroll the producers' answers.
     fn ingress_enabled(&self, key: Key, link: &AudioLink) -> bool {
+        // `audible` walks the composition: the cheap conditions first (a
+        // transport command or a document update asks this every time).
         !self.config.host_clock
             && !link.failed()
-            && self.audible(key)
             && takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()))
             && !self.compat_store().has_producers(key)
+            && self.audible(key)
     }
 
     /// Whether the composition a view shows has anything to hear
