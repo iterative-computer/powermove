@@ -3143,21 +3143,38 @@ function selectLayerForPointer(L: any, event: PointerEvent) {
   return !selected;
 }
 
+/* A work-area gesture edits once per animation frame, with the newest
+   position: pointer events can arrive several times a frame, and each edit
+   is a document write. Release applies the last one before committing. */
+function frameEdits() {
+  let pending: any = null, id = 0;
+  const apply = () => {
+    id = 0;
+    const patch = pending; pending = null;
+    if (patch) api.edit.dispatch({ type: 'set_composition', patch });
+  };
+  return {
+    push(patch: any) { pending = patch; if (!id) id = scheduleFrame(apply); },
+    flush() { if (id) { window.cancelAnimationFrame(id); frameIds.delete(id); } apply(); },
+    drop() { if (id) { window.cancelAnimationFrame(id); frameIds.delete(id); } id = 0; pending = null; },
+  };
+}
+
 function workAreaDrag(e: any, idx: any) {
   const startWork = [...(api.project.get().work || [0, api.project.get().dur])];
   const startDuration = api.project.get().dur;
   const frame = 1 / Math.max(1, api.project.get().fps);
+  const edits = frameEdits();
   api.edit.begin('Work area', { origin: 'timeline' });
   beginDrag(e, {
     cursor: 'ew-resize',
     move: (dx: any, dy: any, ev: any) => {
       const r = T.cv.getBoundingClientRect();
       const t = Math.max(0, api.util.snapF(x2t(ev.clientX - r.left), api.project.get().fps));
-      const patch = WorkArea.resize(startWork, idx, t, Math.max(startDuration, api.project.get().dur), frame);
-      api.edit.dispatch({ type: 'set_composition', patch });
+      edits.push(WorkArea.resize(startWork, idx, t, Math.max(startDuration, api.project.get().dur), frame));
     },
-    up: () => api.edit.commit('Work area'),
-    cancel: () => api.edit.cancel(),
+    up: () => { edits.flush(); api.edit.commit('Work area'); },
+    cancel: () => { edits.drop(); api.edit.cancel(); },
   });
 }
 
@@ -3165,6 +3182,7 @@ function workAreaMove(e: any) {
   const startWork = [...(api.project.get().work || [0, api.project.get().dur])];
   const duration = api.project.get().dur;
   const frame = 1 / Math.max(1, api.project.get().fps);
+  const edits = frameEdits();
   api.edit.begin('Move work area', { origin: 'timeline' });
   let moved = false;
   beginDrag(e, {
@@ -3173,10 +3191,10 @@ function workAreaMove(e: any) {
       if (!moved && Math.abs(dx) < 2) return;
       moved = true;
       const delta = api.util.snapF(dx / T.pps, api.project.get().fps);
-      api.edit.dispatch({ type: 'set_composition', patch: WorkArea.move(startWork, delta, duration, frame) });
+      edits.push(WorkArea.move(startWork, delta, duration, frame));
     },
-    up: () => moved ? api.edit.commit('Move work area') : api.edit.cancel(),
-    cancel: () => api.edit.cancel(),
+    up: () => { edits.flush(); if (moved) api.edit.commit('Move work area'); else api.edit.cancel(); },
+    cancel: () => { edits.drop(); api.edit.cancel(); },
   });
 }
 
