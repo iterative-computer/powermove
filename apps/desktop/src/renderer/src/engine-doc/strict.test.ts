@@ -334,6 +334,32 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(doc.failures()).toEqual([]);
   });
 
+  it('answers a keyframed channel again at earlier times of the revision without evaluating it, and anew after an edit', async () => {
+    const { PM, doc } = await editor('on');
+    const { parent } = content(PM);
+    const prop = parent.p['position.x'];
+    const times = [0, 0.5, 1, 1.5, 2];
+    const want = times.map(t => PM.evP(parent, prop, t, 'position.x'));
+    expect(times.map(t => doc.api!.evP(parent, prop, t, 'position.x'))).toEqual(want);
+    const exports = doc.wasm!.x;
+    const ev = vi.fn((id: number, t: number) => exports.pm_ev(id, t));
+    (doc.wasm as any).x = new Proxy(Object.create(exports), { get: (target, key) => key === 'pm_ev' ? ev : (exports as any)[key] });
+    // A wrapper scanning the frames before this one (a typewriter's caret blink).
+    for (let i = 0; i < 3; i++) expect([...times].reverse().map(t => doc.api!.evP(parent, prop, t, 'position.x'))).toEqual([...want].reverse());
+    expect(ev).not.toHaveBeenCalled();
+    expect(doc.api!.ev(parent, 'position.x', 0.5)).toBe(want[1]);
+    ev.mockClear();
+    expect(doc.api!.ev(parent, 'position.x', 0.5)).toBe(want[1]);
+    expect(ev).not.toHaveBeenCalled();
+    prop.kf[1].v = 700;
+    PM.touch();
+    const edited = times.map(t => PM.evP(parent, prop, t, 'position.x'));
+    expect(edited).not.toEqual(want);
+    expect(times.map(t => doc.api!.evP(parent, prop, t, 'position.x'))).toEqual(edited);
+    expect(doc.api!.ev(parent, 'position.x', 0.5)).toBe(edited[1]);
+    expect(fallbacks(doc)).toEqual({});
+  });
+
   it('invalidates numeric scope answers on writes and revives a dead module before reusing them', async () => {
     const { PM, doc } = await editor('on');
     const { child } = content(PM);
