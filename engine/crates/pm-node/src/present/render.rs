@@ -1495,16 +1495,31 @@ pub fn run(
             Ok(command) => {
                 let started = now();
                 let what = command_name(&command);
+                // A paused edit's answers follow its batch: until a gap in
+                // them (at most `SETTLE_MAX_US`), the frame waits for them
+                // rather than composing without them.
+                let mut settle = thread.settles(&command).then(|| started + SETTLE_MAX_US);
                 if !objc2::rc::autoreleasepool(|_| thread.apply(command)) {
                     break;
                 }
                 thread.note_turn(what, started);
                 let drain_started = thread.config.trace.then(now);
                 let mut drained = 0;
-                while let Ok(command) = rx.try_recv() {
+                loop {
+                    let next = match (rx.try_recv(), settle) {
+                        (Ok(command), _) => Some(command),
+                        (Err(_), Some(until)) if now() < until => rx.recv_timeout(SETTLE_GAP).ok(),
+                        _ => None,
+                    };
+                    let Some(command) = next else { break };
                     drained += 1;
                     let started = now();
                     let what = command_name(&command);
+                    if thread.settles(&command) {
+                        settle = Some(started + SETTLE_MAX_US);
+                    } else if !matches!(command, Command::Compat { .. }) {
+                        settle = None;
+                    }
                     if matches!(command, Command::Shutdown)
                         || !objc2::rc::autoreleasepool(|_| thread.apply(command))
                     {
@@ -1536,6 +1551,16 @@ pub fn run(
     }
     objc2::rc::autoreleasepool(|_| thread.shutdown());
 }
+
+/// How long the render thread waits, after a paused document update of a
+/// session with compatibility producers, for the answers the window sends
+/// right behind it ([`Thread::settles`]). They leave the window together
+/// with the batch; the engine's port thread hands them over one message at
+/// a time, so a frame composed at once missed them, asked for them and was
+/// composed again (12-16 ms on the real project).
+const SETTLE_GAP: Duration = Duration::from_micros(1_500);
+/// The longest the render thread waits for those answers.
+const SETTLE_MAX_US: i64 = 8_000;
 
 /// A render-thread turn longer than this is a stall (diagnostics: the
 /// status report and a warning in the engine log).
@@ -1801,6 +1826,17 @@ impl Thread {
     }
     fn log(&self, level: LogLevel, message: String) {
         (self.sink)(vec![Action::Log { level, message }]);
+    }
+
+    /// Whether `command` is a paused document update of a session whose
+    /// frames take compatibility answers: the window sends the answers for
+    /// the frame on screen right behind it (`SETTLE_GAP`).
+    fn settles(&self, command: &Command) -> bool {
+        let Command::Document { key, .. } = command else {
+            return false;
+        };
+        self.views.get(key).is_some_and(|v| !v.clock.is_playing())
+            && self.compat_store().has_producers(*key)
     }
 
     /// Records a render-thread event in the trace (trace builds only).
@@ -7653,6 +7689,51 @@ mod tests {
         thread.arm(key);
         assert!(thread.views[&key].paused_sent.is_some(), "producers refuse the start frames");
         assert!(thread.next_wake() >= Duration::from_millis(10), "a refused arm must not spin");
+    }
+
+    /// A paused document update of a session with producers waits for the
+    /// answers the window sends behind it; nothing else does.
+    #[test]
+    fn a_paused_edit_of_a_producing_session_settles_for_its_answers() {
+        use pm_protocol::snapshot::{CompatMessage, CompatSource};
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.configure(key, headless_test_state(false), None, None);
+        let update = || Command::Document {
+            audio_forwarded: true,
+            key,
+            update: DocumentUpdate::Patches {
+                patches: Vec::new().into(),
+                revision: Revision::new(2).unwrap(),
+            },
+            posted: 0,
+            provisional: false,
+        };
+        assert!(!thread.settles(&update()), "no producers: nothing follows the batch");
+        thread.apply(Command::Compat {
+            key,
+            message: CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        });
+        assert!(thread.settles(&update()));
+        assert!(!thread.settles(&Command::Compat {
+            key,
+            message: CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        }));
+        let other = (PortId(9), SessionId::new(9).unwrap());
+        assert!(!thread.settles(&Command::Document {
+            audio_forwarded: true,
+            key: other,
+            update: DocumentUpdate::Patches {
+                patches: Vec::new().into(),
+                revision: Revision::new(2).unwrap(),
+            },
+            posted: 0,
+            provisional: false,
+        }));
     }
 
     /// A view on a route the engine does not draw keeps no paused-frame work.

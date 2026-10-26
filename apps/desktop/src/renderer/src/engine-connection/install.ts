@@ -185,7 +185,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // it already, so its `frame:rendered` comes again at the next frame.
     fromRest: () => { presentedEvents.replay(shownState()); },
     // A paused seek: the frame it goes to is answered ahead of it.
-    beforeSeek: (time) => { if (!PM.playing) renderTransport.prepareShown(time); }
+    beforeSeek: (time) => {
+      if (PM.playing) return;
+      const c = connection;
+      if (c) c.together(() => renderTransport.prepareShown(time));
+      else renderTransport.prepareShown(time);
+    }
   });
   const preview = new EnginePreview(
     () => current, openComposition, () => Number(PM.time) || 0,
@@ -328,7 +333,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         // draws it in one pass (today draws an edit in the frame it
         // happens). The edit may have left already (flushed before the
         // document's listeners): answers already posted are not posted again.
-        renderTransport.prepareShown();
+        const c = connection;
+        if (c) c.together(() => renderTransport.prepareShown());
+        else renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {

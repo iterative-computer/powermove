@@ -111,4 +111,26 @@ describe('one patch batch per run', () => {
     await tick();
     expect(port.types()).toHaveLength(4);
   });
+
+  it('sends a batch and what is made for it together, in the page\'s order, when the run that made them returns', () => {
+    const port = new Port();
+    const connection = new EngineConnection(1, port, () => {});
+    connection.patches(batch(3, 4, x), 5, 1 << 20);
+    const answer = (layer: string) => connection.event({ type: 'compat', compat: 'native', layer } as never, 5);
+    const result = connection.together(() => {
+      answer('a');
+      // Nothing leaves while the answers are made one after another.
+      expect(port.types()).toEqual([]);
+      connection.together(() => answer('b'));
+      answer('c');
+      expect(port.types()).toEqual([]);
+      return 7;
+    });
+    expect(result).toBe(7);
+    expect(port.types()).toEqual(['applyPatches', 'compat', 'compat', 'compat']);
+    expect(port.sent.slice(1).map((e) => (e.message as { body: { layer: string } }).body.layer)).toEqual(['a', 'b', 'c']);
+    // A connection closed meanwhile sends nothing more.
+    connection.together(() => { answer('d'); connection.close('test'); });
+    expect(port.types()).toHaveLength(4);
+  });
 });
