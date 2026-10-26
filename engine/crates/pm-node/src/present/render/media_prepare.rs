@@ -13,6 +13,14 @@ pub(super) fn changes_video_sources(update: &DocumentUpdate) -> bool {
         if path.is_empty() || matches!(key(0).as_deref(), Some("assets" | "color")) {
             return true;
         }
+        // The edit log and the project's own metadata, which every edit
+        // writes beside its change, name no media.
+        if matches!(
+            key(0).as_deref(),
+            Some("revision" | "edits" | "name" | "created" | "notes" | "exportDefaults")
+        ) {
+            return false;
+        }
         if path.len() == 1 || (key(0).as_deref() == Some("comps") && path.len() <= 2) {
             return true;
         }
@@ -150,6 +158,33 @@ mod tests {
         }));
         assert!(!changes_video_sources(&patch(&["p", "position.x", "v"])));
         assert!(!changes_video_sources(&patch(&["p", "rotation", "v"])));
+        // Every edit also writes the project's revision and edit log: a
+        // keyframe change with them still keeps the decoders.
+        let root = |key: &str| Patch::set(vec![key.into()], pm_model::json::Value::Number(1.0));
+        let mut keyframe = layers.clone();
+        keyframe.extend([
+            0usize.into(),
+            "p".into(),
+            "rotation".into(),
+            "kf".into(),
+            3usize.into(),
+            "v".into(),
+        ]);
+        assert!(!changes_video_sources(&DocumentUpdate::Patches {
+            patches: vec![
+                root("revision"),
+                root("edits"),
+                Patch::set(keyframe, pm_model::json::Value::Number(0.5))
+            ]
+            .into(),
+            revision: Revision::ZERO,
+        }));
+        for key in ["compId", "comps", "params"] {
+            assert!(changes_video_sources(&DocumentUpdate::Patches {
+                patches: vec![root("revision"), root(key)].into(),
+                revision: Revision::ZERO,
+            }));
+        }
         assert!(!changes_video_sources(&DocumentUpdate::Ops {
             ops: vec![Op::Order {
                 path: layers,

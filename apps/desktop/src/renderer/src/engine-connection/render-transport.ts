@@ -293,6 +293,9 @@ type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; c
   waits: boolean | null;
   /** The layer's own time span in the open composition (ticks), at `revision`. */
   span?: { start: number; end: number } | null;
+  /** The paused frame on screen (ticks) when the engine last asked for this
+   *  layer: a nested composition's layer is that frame's only while it is. */
+  shownAt?: number | null;
   /** How long this layer's answers take to complete (ms, weighted): a
    *  pass-through is ready in its frame's turn, a wrapper that reads bases
    *  waits for the engine. Playback starts it where it can still be in time. */
@@ -332,6 +335,9 @@ export type RenderTransportOptions = {
   frameTicks?: () => number | null;
   /** Audio-clock playhead in ticks, independent of frames reaching the viewer. */
   playhead?: () => { time: number; rate: number } | null;
+  /** Paused: the open composition's frame the engine draws (ticks): the
+   *  last seek sent, else where the clock stopped. Defaults to `playhead`. */
+  shown?: () => number | null;
   /** The open composition's playable span in ticks, `[start, end)`: the
    *  loop the clock wraps by, else the composition. Playback never shows a
    *  frame outside it, so the lookahead prepares none there. `loop`: the
@@ -562,7 +568,7 @@ export class EngineRenderTransport {
    * playing once a frame (or at once after a turn its budget cut short),
    * never as a poll.
    */
-  pump(): void {
+  pump(shown?: { time: number | null }): void {
     if (this.pumpingAhead) return;
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
     this.aheadTimer = null;
@@ -574,7 +580,7 @@ export class EngineRenderTransport {
       this.lookaheadStats.pumps++;
       const entries = this.aheadEntries(playing);
       if (playing) more = this.pumpPlayback(entries);
-      else this.pumpShown(entries);
+      else this.pumpShown(entries, shown?.time ?? null);
     } finally { this.pumpingAhead = false; }
     this.scheduleAhead(more);
   }
@@ -715,15 +721,38 @@ export class EngineRenderTransport {
     return more;
   }
 
-  /** Paused: the frame on screen (each layer's own need, else the cursor),
-   *  urgently, with nothing ahead of it. A preparation playback started for
-   *  it goes on without yielding. */
-  private pumpShown(entries: AheadEntry[]): void {
+  /** Paused: the open composition's frame the engine draws (ticks). */
+  private shown(): number | null {
+    return this.options.shown ? this.options.shown() : this.options.playhead?.()?.time ?? null;
+  }
+
+  /** The time `entry`'s layer is drawn at in the paused frame `shown`, if
+   *  known: the open composition's layers at that frame, a nested
+   *  composition's at the time the engine last asked for while that frame
+   *  was shown. Never a frame shown earlier: its answers would be wasted
+   *  (a wrapper reading bases costs the engine a raster each). */
+  private shownTime(entry: AheadEntry, shown: number | null): number | null {
+    if (shown === null) return null;
+    if (entry.need.composition === this.options.composition()) return shown;
+    return entry.shownAt === shown ? entry.cursor : null;
+  }
+
+  /** Paused: the frame on screen, urgently, with nothing ahead of it: the
+   *  needs the engine named, and with `shown` (the frame's time, from
+   *  {@link prepareShown}) every layer's time in that frame. A preparation
+   *  playback started for it goes on without yielding. */
+  private pumpShown(entries: AheadEntry[], shown: number | null): void {
     const revision = this.options.revision() ?? 0;
     const span = this.options.span?.() ?? null;
     for (const entry of entries) {
       const needs = new Map(entry.required);
-      if (!entry.sent.has(entry.cursor) && !needs.has(entry.cursor) && !this.outside(entry, entry.cursor, span)) needs.set(entry.cursor, { ...entry.need, time: entry.cursor });
+      const time = this.shownTime(entry, shown);
+      if (time !== null && !this.outside(entry, time, span)) {
+        // The cursor is the frame on screen (`prepared` posts only that).
+        entry.cursor = time;
+        entry.shownAt = shown;
+        if (!entry.sent.has(time) && !needs.has(time)) needs.set(time, { ...entry.need, time });
+      }
       for (const need of needs.values()) {
         if (entry.pending.has(need.time)) { entry.promote?.get(need.time)?.(); continue; }
         this.prepareAhead(entry, need, revision, true);
@@ -876,6 +905,7 @@ export class EngineRenderTransport {
       entry.cursor = need.time;
       entry.clockCursor = clock ? Math.floor(clock.time / frame) * frame : null;
     }
+    entry.shownAt = this.options.playing?.() ? null : this.shown();
     if (answered) entry.sent.add(need.time);
     this.ahead.set(tag, entry);
     if (this.ahead.size > 256) this.ahead.delete(this.ahead.keys().next().value!);
@@ -921,11 +951,17 @@ export class EngineRenderTransport {
     return changed;
   }
 
-  /** An edit while paused: prepares the frame on screen at the new
-   *  revision at once, beside the engine's render that will ask for it. */
-  prepareShown(): void {
-    if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
-    this.pump();
+  /**
+   * Paused: answers the frame on screen before the engine asks, so it draws
+   * that frame in one pass instead of composing it, asking, and composing
+   * it again once the answers came back. After an edit: the frame at the
+   * new revision. Before a seek is sent (`shown`: its time in ticks): the
+   * frame it goes to, so the answers reach the engine ahead of the seek.
+   * Layers the engine has not asked for yet are its to ask.
+   */
+  prepareShown(shown: number | null = this.shown()): void {
+    if (this.options.playing?.() || !this.ahead.size) return;
+    this.pump({ time: shown });
   }
 
   private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false, beforePost?: (answer: string) => void): boolean {

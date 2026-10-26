@@ -42,6 +42,8 @@ export class EngineConnection {
   private heldPatches: Array<{ body: ApplyPatches; session: number }> = [];
   private heldLimit = Infinity;
   private patchesQueued = false;
+  /** Messages posted inside `together`, in order, sent when it returns. */
+  private burst: Envelope[] | null = null;
 
   constructor(
     readonly generation: number,
@@ -96,7 +98,7 @@ export class EngineConnection {
     queueMicrotask(() => this.sendPatches());
   }
 
-  /** Sends the held patch batches now. */
+  /** Sends the held patch batches now (inside `together`, with its messages). */
   sendPatches(): void {
     this.patchesQueued = false;
     if (!this.heldPatches.length) return;
@@ -105,6 +107,24 @@ export class EngineConnection {
     this.heldLimit = Infinity;
     if (this.closed) return;
     for (const { body, session } of held) this.send(envelope(eventMessage(body), session));
+  }
+
+  /**
+   * Runs `fn` and sends what it sent when it returns, back to back and in
+   * order. The engine then takes an edit's batch and the answers made for
+   * it in one turn: posted as each producer finished, the answers trailed
+   * the batch by the producers' time, and the engine composed the frame
+   * without them in between (and again once they came).
+   */
+  together<T>(fn: () => T): T {
+    if (this.burst) return fn();
+    const burst: Envelope[] = this.burst = [];
+    try {
+      return fn();
+    } finally {
+      this.burst = null;
+      if (!this.closed) for (const message of burst) this.send(message);
+    }
   }
 
   /** Routes the session's events (and nothing else) to `listener`. */
@@ -152,6 +172,10 @@ export class EngineConnection {
   }
 
   private send(message: Envelope): void {
+    if (this.burst) {
+      this.burst.push(message);
+      return;
+    }
     try {
       this.port.postMessage(encodeEnvelope(message));
     } catch (error) {
