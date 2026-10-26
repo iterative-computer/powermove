@@ -32,20 +32,43 @@ try { defaultHandles = Ease.handles('power') || defaultHandles; } catch (e) { }
 /* `version` advances on every document write (PM.animVersion: "did anything
    change"); `evaluation` only on writes that can change what layers and
    keyframes evaluate to. A composition setting (the work area, the name, the
-   background) keeps every prepared track and hierarchy memo: re-preparing
+   background) that no expression reads keeps every prepared track and hierarchy memo: re-preparing
    them walks every keyframe of the document. */
 let version = 0;
 let evaluation = 0;
 let parentIndexes = new WeakMap<object, any>();
 let staticTransforms = new WeakMap<object, { values: any[]; matrix: number[] }>();
+/* An expression's `comp` is its composition object, every setting included
+   (`comp.name`, `comp.work`): while one reads it, a setting is an edit like
+   any other. Walked once per evaluation version and document. */
+let compositionReaders: { project: unknown; evaluation: number; read: boolean } | null = null;
+function expressionsReadComposition(): boolean {
+  const project = PM.proj, cached = compositionReaders;
+  if (cached && cached.project === project && cached.evaluation === evaluation) return cached.read;
+  const seen = new Set<unknown>();
+  const reads = (comp: any): boolean => {
+    if (!comp || typeof comp !== 'object' || seen.has(comp)) return false;
+    seen.add(comp);
+    for (const layer of Array.isArray(comp.layers) ? comp.layers : []) {
+      for (const { prop } of PM.allProps(layer)) if (typeof prop?.expr === 'string' && /\bcomp\b/.test(prop.expr)) return true;
+    }
+    return Object.values(comp.comps || {}).some(reads);
+  };
+  const read = reads(project);
+  compositionReaders = { project, evaluation, read };
+  return read;
+}
 PM.touch = (paths?: unknown) => {
   version++;
-  if (settingsOnly(paths, LAYER_FREE_SETTINGS)) {
+  const setting = settingsOnly(paths, LAYER_FREE_SETTINGS);
+  if (setting && !expressionsReadComposition()) {
     if (!settingsOnly(paths, UNRENDERED_SETTINGS)) PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
     return;
   }
   PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
   evaluation++;
+  // A setting writes no expression: the walk's answer stands.
+  if (setting && compositionReaders) compositionReaders.evaluation = evaluation;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
   woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); memoT = null;
@@ -54,6 +77,8 @@ PM.touch = (paths?: unknown) => {
 };
 PM.animVersion = () => version;
 PM.evaluationVersion = () => evaluation;
+/** settingsOnly, and no expression can read those settings. */
+PM.settingsOnly = (paths: unknown, settings: ReadonlySet<string>) => settingsOnly(paths, settings) && !expressionsReadComposition();
 let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 

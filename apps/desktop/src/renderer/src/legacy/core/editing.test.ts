@@ -55,6 +55,27 @@ describe('legacy editing install', () => {
     expect(PM.proj.work).toEqual([1, 4]);
   });
 
+  it('re-evaluates and redraws after a composition setting when an expression reads the composition', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject({ fps: 30, dur: 10 });
+    const layer = PM.mkLayer('solid', { from: 0, dur: 10 });
+    PM.addLayer(layer, 0);
+    layer.p['position.x'].expr = 'comp.work[0] * 100';
+    PM.touch();
+    PM.hist.clear();
+    PM.beginEval(2);
+    expect(PM.worldMatrix(layer, 2)[4]).toBe(0);
+    const invalidated: unknown[] = [];
+    PM.invalidate = (what = 'all') => { invalidated.push(what); };
+    const evaluation = PM.evaluationVersion();
+    expect(PM.Edit.apply({ type: 'set_composition', patch: { workArea: [1, 4] } }).ok).toBe(true);
+    // Paused on the same frame: the expression's new answer, drawn again.
+    expect(PM.evaluationVersion()).toBeGreaterThan(evaluation);
+    PM.beginEval(2);
+    expect(PM.worldMatrix(layer, 2)[4]).toBe(100);
+    expect(invalidated).toContain('all');
+  });
+
   it('records the exact frame rate a composition patch writes, so undo restores both forms', () => {
     const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
     PM.proj = PM.mkProject({ fps: 30, dur: 10 });

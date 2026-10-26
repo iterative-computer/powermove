@@ -10,7 +10,7 @@ import { reparentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
-import { LAYER_FREE_SETTINGS, UNRENDERED_SETTINGS, settingsOnly } from './anim';
+import { LAYER_FREE_SETTINGS, UNRENDERED_SETTINGS } from './anim';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateSceneLayer } from '../../core/scene3d/operations';
@@ -1129,12 +1129,12 @@ function settingPaths(list: any[], recorded = true): any[][] | undefined {
  *  the panels that show it, not the viewer. */
 function changed(notify: any = true, paths?: any[][]) {
   PM.touch(paths);
-  const layerFree = settingsOnly(paths, LAYER_FREE_SETTINGS);
+  const layerFree = !!PM.settingsOnly?.(paths, LAYER_FREE_SETTINGS);
   if (notify) {
     if (!layerFree) PM.bus.emit('layers');
     PM.bus.emit('project');
   }
-  if (layerFree && settingsOnly(paths, UNRENDERED_SETTINGS)) { PM.invalidate('timeline'); PM.invalidate('ui'); }
+  if (layerFree && PM.settingsOnly(paths, UNRENDERED_SETTINGS)) { PM.invalidate('timeline'); PM.invalidate('ui'); }
   else PM.invalidate();
   if (notify) inspectorService(PM)?.refresh();
 }
