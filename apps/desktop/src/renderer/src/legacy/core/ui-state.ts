@@ -64,16 +64,23 @@ function defineCompat(object: any, key: any, get: any, set: any) {
   if (descriptor?.enumerable && descriptor.value !== undefined) PM.doc?.wroteObject?.(object);
 }
 
+/* One getter and setter per field, shared by every key and resolved through
+   the key itself: closures per key were six functions and a context for each
+   of a dense project's million keys, and gave every key its own shape. */
+const keyCompat = (['_ho', '_hi', '_pt'] as const).map(name => {
+  const field = name.slice(1);
+  return [name, function (this: any) { return keyHandles.get(idOf(this))?.[field]; },
+    function (this: any, value: any) { return setKeyPatch(idOf(this), { [field]: value }); }] as const;
+});
+
 function installKeyCompat(key: any) {
   const id = idOf(key);
   if (!id) return;
   const legacy: any = {};
-  for (const [name, field] of [['_ho', 'ho'], ['_hi', 'hi'], ['_pt', 'pt']] as any) {
+  for (const [name, get, set] of keyCompat) {
     const descriptor = Object.getOwnPropertyDescriptor(key, name);
-    if (descriptor && descriptor.enumerable && descriptor.value != null) legacy[field] = descriptor.value;
-    defineCompat(key, name,
-      () => keyHandles.get(id)?.[field],
-      (value: any) => setKeyPatch(id, { [field]: value }));
+    if (descriptor && descriptor.enumerable && descriptor.value != null) legacy[name.slice(1)] = descriptor.value;
+    defineCompat(key, name, get, set);
   }
   if (Object.keys(legacy).length) setKeyPatch(id, legacy);
 }

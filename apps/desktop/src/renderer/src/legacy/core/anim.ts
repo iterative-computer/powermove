@@ -6,7 +6,7 @@ import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
 import { compileExpression } from './expression';
 import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge';
-import { applyUnitCurve } from '../../core/anim/temporal-ease';
+import { applyUnitCurve, hasNativeEase } from '../../core/anim/temporal-ease';
 import { derivedId } from './derived-id';
 
 export function install(PM: PMRegistry): void {
@@ -93,26 +93,39 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0, 
   };
   const pair = (value: any, fallback: any) => Array.isArray(value) && value.length >= 2 &&
     Number.isFinite(value[0]) && Number.isFinite(value[1]) ? [value[0], value[1]] : [...fallback];
-  const normalized = (Array.isArray(raw) ? raw : [])
+  const valid = (Array.isArray(raw) ? raw : [])
     .map((key: any, index: number) => ({ key, index, time: Number(key?.t) }))
     .filter(({ key, time }: any) => key && typeof key === 'object' &&
       Number.isFinite(time) && time >= minTime && validValue(key.v))
-    .map(({ key, index, time }: any) => ({
-      ...key,
-      t: time === 0 ? 0 : time,
-      i: (typeof key.i === 'string' && key.i) || (options.stable ? `k${index}` : PM.uid('k')),
+    .sort((a: any, b: any) => a.time - b.time || a.index - b.index);
+  /* A numeric track's keys are adopted below (temporalKeys): a key already
+     in the native ease model gets `eo`/`ei`/`hold` as views of that model,
+     so legacy copies made here would only be replaced (and the replacement
+     leaves the JSON, which made every opened track look rewritten). Each key
+     is one object literal, never edited with `delete`: that keeps it in
+     V8's fast mode, sharing its shape with the other keys (a dictionary-mode
+     key costs several times the memory, at a million keys per project). */
+  const adopted = valid.length > 0 && valid.every(({ key }: any) => typeof key.v === 'number');
+  const normalized = valid.map(({ key, index, time }: any) => {
+    const t = time === 0 ? 0 : time;
+    const i = (typeof key.i === 'string' && key.i) || (options.stable ? `k${index}` : PM.uid('k'));
+    if (adopted && hasNativeEase(key)) {
+      // Adoption makes these views of the native ease; no stored copy is kept.
+      const { __order: _order, eo: _eo, ei: _ei, hold: _hold, ...fields } = key;
+      return { ...fields, t, i };
+    }
+    const { __order: _order, ...fields } = key;
+    return {
+      ...fields, t, i,
       eo: pair(key.eo, pair(defaultHandles.eo, [.33, 0])),
       ei: pair(key.ei, pair(defaultHandles.ei, [.67, 1])),
       hold: key.hold === true,
-      __order: index,
-    }))
-    .sort((a: any, b: any) => a.t - b.t || a.__order - b.__order);
+    };
+  });
   const collapsed: any[] = [];
   const ids = new Set<string>();
-  normalized.forEach((key: any) => {
+  normalized.forEach((clean: any) => {
     const previous = collapsed[collapsed.length - 1];
-    const clean = { ...key };
-    delete clean.__order;
     if (ids.has(clean.i)) clean.i = options.stable ? derivedId(clean.i, ids) : PM.uid('k');
     ids.add(clean.i);
     if (previous && Math.abs(previous.t - clean.t) <= 1e-6) {
