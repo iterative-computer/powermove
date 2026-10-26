@@ -7,7 +7,9 @@ export const DOCUMENT_KERNEL_IPC = {
 /** A document stream's largest chunk, and how many main holds unwritten:
  *  main writes each chunk to its staging file and hashes it before the next,
  *  so fewer, larger round trips keep it busy (1 MiB two at a time left a
- *  180 MB stream waiting on replies for half a second). */
+ *  180 MB stream waiting on replies for half a second). A chunk is bytes or
+ *  JSON text (main encodes it as UTF-8; text has at most DOCUMENT_CHUNK_BYTES
+ *  UTF-16 units, so at most three times as many bytes). */
 export const DOCUMENT_CHUNK_BYTES = 4 * 1024 * 1024;
 export const DOCUMENT_QUEUED_WRITES = 4;
 
@@ -26,7 +28,7 @@ export interface DocumentKernelBridge {
   /** `revision`: the revision the document will be committed at, so the
    *  engine can parse the text as it arrives (main's `preparse`). */
   begin(revision?: number): Promise<string>;
-  write(token: string, chunk: Uint8Array): Promise<void>;
+  write(token: string, chunk: Uint8Array | string): Promise<void>;
   commit(token: string, document: string, revision: number): Promise<DocumentKernelReceipt>;
   abort(token: string): Promise<void>;
   beginDigest(prefix: string): Promise<string>;

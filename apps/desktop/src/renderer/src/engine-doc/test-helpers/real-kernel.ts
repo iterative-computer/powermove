@@ -52,10 +52,10 @@ export class RealKernelBridge implements DocumentKernelBridge {
   }
 
   async begin(): Promise<string> { const token = `stream-${++this.next}`; this.streams.set(token, []); return token; }
-  async write(token: string, chunk: Uint8Array): Promise<void> {
+  async write(token: string, chunk: Uint8Array | string): Promise<void> {
     const stream = this.streams.get(token);
     if (!stream) throw new Error('The document stream is closed');
-    stream.push(chunk.slice());
+    stream.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk.slice());
   }
   async commit(token: string, document: string, revision: number): Promise<DocumentKernelReceipt> {
     const stream = this.streams.get(token);

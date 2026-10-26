@@ -52,7 +52,9 @@ it('streams exactly the supplied bytes, independently hashes them and removes st
       const token = await ipc.invoke(IPC.begin, event);
       const bytes = new TextEncoder().encode('{"a":"🦀","z":2}');
       await ipc.invoke(IPC.write, event, token, bytes.subarray(0, 9));
-      await ipc.invoke(IPC.write, event, token, bytes.subarray(9));
+      await ipc.invoke(IPC.write, event, token, bytes.subarray(9, 10));
+      // Text is encoded as UTF-8 by main.
+      await ipc.invoke(IPC.write, event, token, '","z":2}');
       const committed = ipc.invoke(IPC.commit, event, token, 'document', 4);
       if (fail) await expect(committed).rejects.toThrow('reader failed');
       else expect(await committed).toMatchObject({ pending: false, revision: 4 });
@@ -71,6 +73,9 @@ it('fences owners, bounds chunks, refuses page-supplied file loads, and releases
     const token = await pending;
     await expect(ipc.invoke(IPC.write, two, token, new Uint8Array([1]))).rejects.toThrow('closed');
     await expect(ipc.invoke(IPC.write, one, token, new Uint8Array(DOCUMENT_CHUNK_BYTES + 1))).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, 'x'.repeat(DOCUMENT_CHUNK_BYTES + 1))).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, '')).rejects.toThrow('Invalid document chunk');
+    await expect(ipc.invoke(IPC.write, one, token, { length: 1 })).rejects.toThrow('Invalid document chunk');
     const event = { ...one, returnValue: undefined as unknown };
     ipc.emit(IPC.call, event, '{"op":"load","args":{"path":"/arbitrary"}}');
     await vi.waitFor(() => expect(event.returnValue).toBeDefined());

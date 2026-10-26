@@ -165,10 +165,14 @@ export function installDocumentKernelIpc(options: {
     state.beginning.add(job);
     try { return await job; } finally { beginningJobs.delete(job); state.beginning.delete(job); }
   });
-  options.ipc.handle(DOCUMENT_KERNEL_IPC.write, async (event, token: unknown, bytes: unknown) => {
+  options.ipc.handle(DOCUMENT_KERNEL_IPC.write, async (event, token: unknown, chunk: unknown) => {
     const [, s] = owned(event, token);
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > CHUNK_LIMIT || s.bytes + bytes.byteLength > LIMIT) throw new Error('Invalid document chunk');
-    if (s.pendingWrites >= QUEUED_WRITES || s.queuedBytes + bytes.byteLength > QUEUED_WRITES * CHUNK_LIMIT) throw new Error('Document stream backpressure: await pending writes');
+    // Text is encoded here: the page's thread is the busier one while it opens.
+    const text = typeof chunk === 'string';
+    if (text ? chunk.length === 0 || chunk.length > CHUNK_LIMIT : !(chunk instanceof Uint8Array)) throw new Error('Invalid document chunk');
+    const bytes: Uint8Array = text ? Buffer.from(chunk, 'utf8') : chunk as Uint8Array;
+    if (bytes.byteLength === 0 || bytes.byteLength > (text ? 3 : 1) * CHUNK_LIMIT || s.bytes + bytes.byteLength > LIMIT) throw new Error('Invalid document chunk');
+    if (s.pendingWrites >= QUEUED_WRITES || s.queuedBytes + bytes.byteLength > 3 * QUEUED_WRITES * CHUNK_LIMIT) throw new Error('Document stream backpressure: await pending writes');
     clearTimeout(s.idle);
     s.bytes += bytes.byteLength; s.pendingWrites++; s.queuedBytes += bytes.byteLength;
     // Chunks arrive in order: hashed now, while earlier ones are still written.
