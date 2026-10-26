@@ -19,7 +19,7 @@ import { temporalKeys } from './core/temporal-bridge';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile, withProjectReader } from './core/project-file';
 import { fingerprintJSON, projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
-import { yieldTask } from './core/yield-task';
+import { yieldTask, yieldTurn } from './core/yield-task';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
@@ -496,12 +496,16 @@ function hydrate(p: any) {
   while (!result.done) result = steps.next();
   return result.value;
 }
+/** How long hydration's prioritized slices may hold back other tasks (an
+ *  open's embedded media is copied in round trips meanwhile). */
+const HYDRATE_TURN_MS = 48;
 async function hydrateAsync(p: any, isCurrent = () => true) {
   const steps = hydrateSteps(p);
-  let deadline = performance.now() + 4, result = steps.next();
+  let deadline = performance.now() + 4, turn = performance.now() + HYDRATE_TURN_MS, result = steps.next();
   while (!result.done) {
     if (performance.now() >= deadline) {
-      await yieldLoad();
+      if (performance.now() >= turn) { await yieldTurn(); turn = performance.now() + HYDRATE_TURN_MS; }
+      else await yieldLoad();
       if (!isCurrent()) return null;
       deadline = performance.now() + 4;
     }
