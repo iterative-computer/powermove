@@ -462,7 +462,7 @@ describe('engine source consumers', () => {
       const monitor = f.source.monitor('clip');
       const width = vi.spyOn(monitor.surface, 'clientWidth', 'get').mockReturnValue(160);
       const height = vi.spyOn(monitor.surface, 'clientHeight', 'get').mockReturnValue(90);
-      resized([{ target: monitor.surface } as ResizeObserverEntry], {} as ResizeObserver);
+      resized([{ target: monitor.surface } as unknown as ResizeObserverEntry], {} as ResizeObserver);
       await vi.waitFor(() => expect(present).toHaveBeenCalledOnce());
       expect(monitor.paused).toBe(true);
       expect(queries.map(entry => entry.query)).toEqual(['(resolution: 1dppx)']);

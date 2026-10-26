@@ -114,6 +114,54 @@ describe('the raster override producer', () => {
     } finally { compat.dispose(); vi.unstubAllGlobals(); }
   });
 
+  it('yields non-urgent preparations an ordinary turn, and an urgent ask ends a turn that never comes', async () => {
+    // A long sliced job keeps the task queue busy: the turn never runs.
+    const postTask = vi.fn((_callback: () => void, _options: { priority: string }) => new Promise<void>(() => {}));
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'ahead' }));
+    try {
+      let promote!: () => void;
+      const promoted = new Promise<void>(resolve => { promote = resolve; });
+      let done = false;
+      const speculative = compat.prepare(need('box', 1), 4, { promoted }).then(() => { done = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(postTask).toHaveBeenCalledOnce();
+      expect(postTask.mock.calls[0]![1]).toEqual({ priority: 'user-visible' });
+      expect(done).toBe(false);
+      // The paused frame comes to need it: it goes on at once.
+      promote();
+      await speculative;
+      expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'ahead' });
+      // An urgent ask for an answer still waiting for its turn joins it, and ends the wait.
+      done = false;
+      const waiting = compat.prepare(need('box', 2), 4).then(() => { done = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(done).toBe(false);
+      await compat.prepare(need('box', 2), 4, { urgent: true });
+      await waiting;
+      expect(compat.answer(need('box', 2), 4, { prepared: true })).toMatchObject({ key: 'ahead' });
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
+  it('turns a frame the running clock is about to show ahead of ordinary tasks', async () => {
+    const postTask = vi.fn(async (_callback: () => void, _options: { priority: string }) => {});
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'due' }));
+    try {
+      const priorities = () => postTask.mock.calls.map(call => call[1].priority);
+      await compat.prepare(need('box', 1), 4, { due: true });
+      const due = priorities().length;
+      expect(due).toBeGreaterThan(0);
+      expect(new Set(priorities())).toEqual(new Set(['user-blocking']));
+      await compat.prepare(need('box', 2), 4);
+      expect(new Set(priorities().slice(due))).toEqual(new Set(['user-visible']));
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('reads a paused edit\'s own answer back on the window\'s thread, and other preparations on the worker', async () => {
     const readPixelsAsync = vi.fn(async (source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4) }));
     const { services, compat, readPixels, need } = setup(true, undefined, readPixelsAsync);

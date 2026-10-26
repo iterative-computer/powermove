@@ -124,6 +124,22 @@ describe('a paused redraw announces the frame on screen when nothing new is comi
   });
 });
 
+describe('an announcement in progress', () => {
+  it('is visible to the listeners of a presented frame and of a redraw, and only to them', () => {
+    const frames: Array<(t: number) => void> = [];
+    const seen: boolean[] = [];
+    let events!: PresentedEvents;
+    events = new PresentedEvents(() => seen.push(events.announcing), (fn) => frames.push(fn));
+    expect(events.announcing).toBe(false);
+    events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 1 }, 1);
+    frames.shift()!(0);
+    expect(events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { seen.push(events.announcing); return true; })).toBe(true);
+    expect(() => events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { throw new Error('listener'); })).toThrow('listener');
+    expect(seen).toEqual([true, true]);
+    expect(events.announcing).toBe(false);
+  });
+});
+
 describe('engine stats for the status bar', () => {
   const stats = (frames: number, avg: number): RenderStats => ({ frames, timedFrames: frames, lateSkipped: 0, cpuUs: 1000, gpuUs: 2000, layers: 12, frameUsAvg: avg, programs: 4, rasters: 9, layerFailures: 0, snapshots: 0, snapshotUsMax: 0, revision: 3 });
 

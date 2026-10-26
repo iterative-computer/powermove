@@ -88,11 +88,20 @@ impl Thread {
             doc.media(),
         ) {
             Ok(prepared) => {
+                self.media_unprepared.remove(&key);
                 for failure in prepared.failures {
                     self.log(LogLevel::Info, format!("video preparation: {failure}"));
                 }
             }
-            Err(error) => self.log(LogLevel::Info, format!("video preparation: {error}")),
+            // The view state names a composition the document does not hold
+            // yet (it arrives in a later update): prepare on that update.
+            Err(pm_render::RenderError::Composition(_)) => {
+                self.media_unprepared.insert(key);
+            }
+            Err(error) => {
+                self.media_unprepared.remove(&key);
+                self.log(LogLevel::Info, format!("video preparation: {error}"));
+            }
         }
     }
 }

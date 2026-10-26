@@ -1183,6 +1183,10 @@ struct Thread {
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
+    /// Sessions whose video preparation found the viewer's composition
+    /// missing from the document (the view state can lead the document):
+    /// the next document update prepares again.
+    media_unprepared: BTreeSet<Key>,
     /// Waveform peaks, computed off this thread.
     peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
@@ -1429,6 +1433,7 @@ pub fn run(
         source_timing: BTreeMap::new(),
         source_intent: BTreeMap::new(),
         audio_prefs: BTreeMap::new(),
+        media_unprepared: BTreeSet::new(),
         peaks,
         generations,
         preview_controls: Default::default(),
@@ -2922,6 +2927,7 @@ impl Thread {
         self.source_timing.remove(&key);
         self.source_intent.remove(&key);
         self.audio_prefs.remove(&key);
+        self.media_unprepared.remove(&key);
         if self
             .views
             .values()
@@ -2942,7 +2948,8 @@ impl Thread {
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
     fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64, audio_forwarded: bool) {
-        let preparing = media_prepare::changes_video_sources(&update);
+        let preparing =
+            media_prepare::changes_video_sources(&update) || self.media_unprepared.contains(&key);
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         let copies = doc.copies();
@@ -7321,6 +7328,7 @@ mod tests {
             source_timing: BTreeMap::new(),
             source_intent: BTreeMap::new(),
             audio_prefs: BTreeMap::new(),
+            media_unprepared: BTreeSet::new(),
             peaks,
             frame_ticks: TICKS_PER_SECOND / 60,
             generations: Generations::default(),
