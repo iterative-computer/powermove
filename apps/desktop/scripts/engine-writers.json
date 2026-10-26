@@ -735,13 +735,13 @@
       "code": "PM?.Edit?.mutate?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:592",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:613",
       "class": "doc.touched",
       "scope": "makeUIState > setLayerCollapsed",
       "code": "touchedDocument(PM, [['layers', index, 'collapsed']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:1178",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:1199",
       "class": "extension-layer-refresh",
       "scope": "installKernel > kernel.layerTypes.onChange(callback)",
       "code": "writeDocument(PM, [['layers'], ['comps']], () => { for (const container of containers) for (const layer of container?.layers ?? []) { if ..."
@@ -753,49 +753,49 @@
       "code": "shaderHooks(PM)?.syncShaderUniforms(L)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:609",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:613",
       "class": "project-swap",
       "scope": "install",
       "code": "PM.proj = loadBootProject()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:630",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:634",
       "class": "doc.write",
       "scope": "install > revalidateContributionPlaceholders",
       "code": "writeDocument(PM, paths, revalidateContributions)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:725",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:729",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1445",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1462",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : prepared ? p : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1452",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1469",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1832",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1849",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1833",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1850",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1844",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1861",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
@@ -1671,13 +1671,13 @@
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:369",
+      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:430",
       "class": "doc.write",
       "scope": "install > R.rename",
       "code": "writeDocument(PM, [['name']], () => { active.name = next; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:371",
+      "site": "apps/desktop/src/renderer/src/legacy/core/projects.ts:432",
       "class": "touch",
       "scope": "install > R.rename",
       "code": "PM.touch?.()"
