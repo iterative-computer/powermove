@@ -432,16 +432,20 @@ export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: 
   const d = layer?.d;
   if (!d || typeof d !== 'object') return null;
   if (layer.type === 'shape') { if (d.paths?.length) return null; }
-  else if (layer.type === 'text') { if (d.animators?.length || d.styles?.length || d.fontAnchorBounds || d.paths?.length) return null; }
+  else if (layer.type === 'text') { if (d.animators?.length || d.styles?.length || d.paths?.length || Number(layer.compat) >= 2) return null; }
   else return null;
   const evaluator = native(PM);
   if (!evaluator) return null;
   const where = rasterHost(PM).locate(layer);
   const owner = where.own ? ['own', where.composition, String(layer.id ?? '')] : ['detached'];
   try {
+    // Font anchoring places the raster by the layer's anchor at `time` as
+    // well (pm-eval `text_raster_with`; today's `fontAnchorOffset`).
+    const placement = layer.type === 'text' && d.fontAnchorBounds
+      ? [String(evaluator.ev(layer, 'anchor.x', time)), String(evaluator.ev(layer, 'anchor.y', time))] : null;
     // A plain shape's raster is its resolved content at a density: the key
     // holds across revisions. Text depends on the fonts too.
-    return { key: JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), scale, crop ?? null]), persistent: layer.type === 'shape' };
+    return { key: JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), placement, scale, crop ?? null]), persistent: layer.type === 'shape' };
   } catch {
     return null;
   }
