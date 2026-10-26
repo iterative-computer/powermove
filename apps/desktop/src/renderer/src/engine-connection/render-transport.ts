@@ -666,21 +666,35 @@ export class EngineRenderTransport {
       for (const time of entry.required.keys()) reach = Math.max(reach, Math.round(runAhead(entry.cursor, time, entry.step, entry.loop ?? null) / Math.abs(entry.step)));
     }
     reach = Math.min(reach, COMPAT_MAX_LOOKAHEAD);
+    /** `entry`'s need at `offset` frames from its cursor, if one is to be prepared. */
+    const candidate = (entry: AheadEntry, offset: number): CompatNeed | null => {
+      // Past the loop's end, the frames after the wrap.
+      const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
+      const asked = entry.required.get(time);
+      if (((entry.askedOnly || offset > this.horizon) && !asked) || this.outside(entry, time, span) || entry.sent.has(time) || entry.pending.has(time)) return null;
+      return asked ?? { ...entry.need, time };
+    };
+    // A layer slower than every frame it has left, with none on its way,
+    // still starts its furthest one: its next answer measures it again (it
+    // would otherwise never be prepared while playing).
+    const last = new Map<AheadEntry, number>();
+    for (const entry of entries) {
+      if (entry.pending.size) continue;
+      for (let offset = reach; offset >= 0; offset--) if (candidate(entry, offset)) { last.set(entry, offset); break; }
+    }
     for (let offset = 0; offset <= reach; offset++) {
       const frame: { entry: AheadEntry; need: CompatNeed }[] = [];
       for (const entry of entries) {
-        // Past the loop's end, the frames after the wrap.
-        const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
-        const asked = entry.required.get(time);
-        if (((entry.askedOnly || offset > this.horizon) && !asked) || this.outside(entry, time, span) || entry.sent.has(time) || entry.pending.has(time)) continue;
-        if (speed > 0 && frameMs > 0 && entry.readyMs !== null && entry.readyMs * speed > Math.max(offset, 0.5) * frameMs && this.preparers.has(entry.need.source)) {
+        const need = candidate(entry, offset);
+        if (!need) continue;
+        if (speed > 0 && frameMs > 0 && entry.readyMs !== null && Math.min(entry.readyMs * speed, (last.get(entry) ?? Infinity) * frameMs) > Math.max(offset, 0.5) * frameMs && this.preparers.has(entry.need.source)) {
           this.lookaheadStats.latePrepareSkips++;
           continue;
         }
         // Frames stay in order: a layer that waits for bases and cannot
         // start holds its later frames; layers answered at once go on.
         if (held && entry.waits !== false) { pending++; continue; }
-        frame.push({ entry, need: asked ?? { ...entry.need, time } });
+        frame.push({ entry, need });
       }
       if (!frame.length) continue;
       if (more || (started && performance.now() >= deadline)) {

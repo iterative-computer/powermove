@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest, SnapshotViewer } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type CompatPrepareOptions, layerRasterScale, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, COMPAT_MAX_LOOKAHEAD, intoLoop, runAhead, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type CompatPrepareOptions, layerRasterScale, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -757,6 +757,42 @@ describe('compatibility answers during playback', () => {
       expect(t.lookaheadStats.skipped).toBe(skipped);
       expect(prepared.map(p => [p.layer, p.time / frame])).toEqual([['entering', 58]]);
     } finally { t.dispose(); }
+  });
+
+  it('still starts a layer slower than every frame it has left, at the furthest one', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(true);
+    const prepared: Array<[string, number]> = [];
+    const slow: Array<() => void> = [];
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), n => {
+      prepared.push([n.layer, n.time / frame]);
+      return new Promise<void>(resolve => slow.push(resolve));
+    });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0, 'slow')] }, session);
+      // Its answers take three seconds: more than the furthest horizon.
+      await vi.advanceTimersByTimeAsync(3000);
+      state.time = 200 * frame;
+      prepared.length = 0;
+      while (slow.length) slow.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      // Its furthest frame, and only that one while it is on its way.
+      expect(prepared).toEqual([['slow', 200 + COMPAT_MAX_LOOKAHEAD]]);
+      t.receiveCompat({ compat: 'needs', needs: [need(200 * frame, 'slow')] }, session);
+      t.pump();
+      expect(prepared).toHaveLength(1);
+      while (slow.length) slow.shift()!();
+      // A layer whose crop window moves has only the frames the engine names.
+      prepared.length = 0;
+      const moving = (time: number, x: number) => ({ ...need(time, 'moving'), crop: { x, y: 0, width: 10, height: 10 } });
+      t.receiveCompat({ compat: 'needs', needs: [moving(200 * frame, 0), moving(200 * frame, 5)] }, session);
+      await vi.advanceTimersByTimeAsync(3000);
+      while (slow.length) slow.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      prepared.length = 0;
+      t.receiveCompat({ compat: 'needs', needs: [moving(230 * frame, 9)] }, session);
+      expect(prepared).toContainEqual(['moving', 230]);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 
   it('moves on with the clock once a frame while playing, never as a poll, and stops when playback does', async () => {
