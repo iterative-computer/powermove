@@ -149,3 +149,18 @@ it('shows nothing when the save panel is cancelled', async () => {
   expect(f.sheet()).toBeNull();
   expect(f.toasts).toEqual([]);
 });
+
+it('stays cancelled when the job engine declines after Cancel during its setup', async () => {
+  const f = fixture();
+  const run = f.run();
+  await f.choose();
+  f.check();
+  await vi.waitFor(() => expect(f.exportVideo).toHaveBeenCalledOnce());
+  f.cancel();
+  f.answer({ status: 'unavailable', reason: 'The job engine is not running.' });
+  expect(await run).toEqual({ cancelled: true });
+  // The current exporter never takes over: no second check, no second question.
+  expect(f.beforeExport).toHaveBeenCalledOnce();
+  expect(f.sheet()).toBeNull();
+  expect(f.PM.Export.busy).toBe(false);
+});

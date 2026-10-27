@@ -770,7 +770,8 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
     await PM.EngineDefinitions?.settle?.();
     if (X.cancel) return { cancelled: true };
     const started = await engine.exportVideo(request);
-    if (started.status !== 'accepted') return null;
+    // Cancelled during the job's setup: the current exporter never takes over.
+    if (started.status !== 'accepted') return X.cancel ? { cancelled: true } : null;
     const total = Math.max(1, started.frames);
     const began = window.performance.now();
     ui.begin(total);
