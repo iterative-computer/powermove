@@ -28,6 +28,8 @@ export const IPC = {
   exportRelease: 'export:release',
   /* Captions: an .srt/.vtt beside a video this window just exported. */
   exportSidecar: 'export:sidecar',
+  /* Show in Finder for a file this window just exported. */
+  exportReveal: 'export:reveal',
   fileSaveUpload: 'file:save-upload',
   fileSaveChunk: 'file:save-chunk',
   fileSaveAbort: 'file:save-abort',
@@ -764,6 +766,8 @@ export interface PowermoveBridge {
   };
   /** Captions: write a subtitle sidecar next to an exported video. */
   exportSidecar?(request: ExportSidecarRequest): Promise<FileSaveResult>;
+  /** Shows a file this window exported in Finder; false for any other path. */
+  revealExport?(path: string): Promise<boolean>;
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
   /** Opens a project file the user already picked, keeping its path for Save.

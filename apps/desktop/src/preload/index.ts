@@ -167,6 +167,7 @@ const bridge: PowermoveBridge = {
     release: token => ipcRenderer.invoke(IPC.exportRelease, token),
   },
   exportSidecar: request => ipcRenderer.invoke(IPC.exportSidecar, request),
+  revealExport: file => ipcRenderer.invoke(IPC.exportReveal, file),
   fileUpload: {
     begin: size => ipcRenderer.invoke(IPC.fileSaveUpload, size),
     chunk: (uploadId, data) => ipcRenderer.invoke(IPC.fileSaveChunk, { uploadId, data }),
