@@ -17,8 +17,8 @@ function fixture() {
   let chose!: (destination: unknown) => void;
   let answer!: (start: unknown) => void;
   let listener: ((status: unknown) => void) | null = null;
-  const exportDestination = vi.fn(() => new Promise(resolve => { chose = resolve; }));
-  const exportVideo = vi.fn(() => new Promise(resolve => { answer = resolve; }));
+  const exportDestination = vi.fn((_request: any) => new Promise(resolve => { chose = resolve; }));
+  const exportVideo = vi.fn((_request: any) => new Promise(resolve => { answer = resolve; }));
   const beforeExport = vi.fn(() => new Promise<void>(resolve => { checked = resolve; }));
   const cancelExport = vi.fn(async () => undefined);
   const revealExport = vi.fn(async () => true);
