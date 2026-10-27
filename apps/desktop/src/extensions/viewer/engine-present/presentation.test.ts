@@ -303,7 +303,7 @@ describe('ViewerPresentation', () => {
 
   it('keeps a worker alive and trims only after the worker GPU fence drains', async () => {
     const service = new Service();
-    const { stage, overlay } = stageIn(window as unknown as Window);
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     offscreenCanvases(window as unknown as Window);
     const painter = new Painter();
     let finish: () => void = () => {};
@@ -316,6 +316,8 @@ describe('ViewerPresentation', () => {
       const first = service.channels[0]!;
       first.handlers.message({ type: 'surfacePool', pool: { generation: 7, surfaces: [] } }, performance.now());
       first.handlers.message({ type: 'frame', frame: desc(1, 1, 7) }, performance.now());
+      // Sent to the worker, and announced, at the page's animation frame.
+      runFrames(rafs, performance.now());
       await settleLong();
       expect(painter.draws).toBe(1);
       presentation.suspend();
@@ -469,7 +471,7 @@ describe('ViewerPresentation', () => {
 
   it('waits for a worker GPU fence before retiring its final imported pool', async () => {
     const service = new Service();
-    const { stage, overlay } = stageIn(window as unknown as Window);
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     offscreenCanvases(window as unknown as Window);
     const painter = new Painter();
     let finish: () => void = () => {};
@@ -481,6 +483,8 @@ describe('ViewerPresentation', () => {
     const channel = service.channels[0]!;
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 13, surfaces: [] } }, performance.now());
     channel.handlers.message({ type: 'frame', frame: desc(1, 1, 13) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     expect(painter.draws).toBe(1);
     presentation.dispose();
@@ -660,6 +664,8 @@ describe('ViewerPresentation', () => {
     presentation.onPresented((frame) => presented.push(frame.seq));
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     expect(painter.draws).toBe(1);
     // Animation frames pass while the GPU has not finished the frame.
@@ -986,7 +992,7 @@ describe('ViewerPresentation', () => {
 
   it('presents from a worker when the viewer can start one: frames, tags, releases, and teardown', async () => {
     const service = new Service();
-    const { stage, overlay } = stageIn(window as unknown as Window);
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     const canvases = offscreenCanvases(window as unknown as Window);
     const painter = new Painter();
     const worker = inProcessWorker(painter);
@@ -1000,6 +1006,8 @@ describe('ViewerPresentation', () => {
     expect(channel.states).toHaveLength(1);
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     // Drawn by the worker as it arrived (a next-refresh frame).
     expect(painter.draws).toBe(1);
@@ -1046,7 +1054,7 @@ describe('ViewerPresentation', () => {
 
   it('replaces a worker whose device was lost with a new canvas and worker, keeping the session', async () => {
     const service = new Service();
-    const { stage, overlay } = stageIn(window as unknown as Window);
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     offscreenCanvases(window as unknown as Window);
     const logs: string[] = [];
     const painters = [new Painter(), new Painter()];
@@ -1059,6 +1067,8 @@ describe('ViewerPresentation', () => {
     const channel = service.channels[0]!;
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     expect(painters[0]!.draws).toBe(1);
     painters[0]!.lose('A valid external Instance reference no longer exists.');
@@ -1080,6 +1090,8 @@ describe('ViewerPresentation', () => {
     expect(presentation.canvas).not.toBe(first);
     expect(service.channels).toHaveLength(1);
     channel.handlers.message({ type: 'frame', frame: desc(2, 1) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     expect(painters[1]!.draws).toBe(1);
     expect(presentation.presenting).toBe(true);
@@ -1133,7 +1145,7 @@ describe('ViewerPresentation', () => {
 
   it('asks for new surfaces when a presentation worker cannot read a pool', async () => {
     const service = new Service();
-    const { stage, overlay } = stageIn(window as unknown as Window);
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     offscreenCanvases(window as unknown as Window);
     const logs: string[] = [];
     const painter = new Painter();
@@ -1145,6 +1157,8 @@ describe('ViewerPresentation', () => {
     painter.unreadable.add(1);
     painter.from(1);
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     expect(presentation.offMainThread).toBe(true);
     expect(painter.draws).toBe(0);
@@ -1153,6 +1167,8 @@ describe('ViewerPresentation', () => {
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 2, surfaces: [] } }, performance.now());
     painter.from(2);
     channel.handlers.message({ type: 'frame', frame: desc(2, 2, 2) }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(rafs, performance.now());
     await settleLong();
     expect(painter.draws).toBe(1);
     expect(presentation.presenting).toBe(true);
@@ -1265,6 +1281,8 @@ describe('ViewerPresentation', () => {
     expect(presentation.stats()?.generation).toBe(3);
     expect(channel.states.at(-1)).toMatchObject({ size: { width: 800, height: 450 }, devicePixelRatio: 1 });
     channel.handlers.message({ type: 'frame', frame: { ...desc(4, channel.states.at(-1)!.viewSeq), poolGeneration: 3 } }, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame.
+    runFrames(target.rafs, performance.now());
     await settleLong();
     expect(presentation.latest?.seq).toBe(4);
     presentation.dispose();
