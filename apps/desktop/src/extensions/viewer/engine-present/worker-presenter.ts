@@ -250,9 +250,11 @@ export class WorkerPresenter implements Presenter {
   /** The newest frame shown on arrival, waiting for the page's animation frame. */
   private arrival: { desc: FrameDescriptor; frame: VideoFrame; arrivedMs: number } | null = null;
   private arrivalFrame = 0;
-  /** Frames announced at the page's animation frame (`showArrival`): the
-   *  worker's report of each is not announced again. */
-  private readonly announced = new Set<number>();
+  /** The newest frame announced at the page's animation frame
+   *  (`showArrival`): the worker's report of it, or of any older frame it
+   *  drew before that one reached it, is not announced (it would announce
+   *  a frame no longer on screen, after the one that is). */
+  private announcedSeq = -1;
   /**
    * Frames in the worker that it has not handed back yet, by
    * `poolIndex:seq`, with the page's own reference to each.
@@ -427,7 +429,7 @@ export class WorkerPresenter implements Presenter {
     }
     const presented = presentedFrame(desc, { width: frame.codedWidth, height: frame.codedHeight }, rafMs, null, this.depthGeneration);
     if (!this.send(desc, frame, arrivedMs)) return;
-    this.announced.add(desc.seq);
+    this.announcedSeq = desc.seq;
     for (const listener of this.listeners) listener(presented);
   }
 
@@ -514,11 +516,7 @@ export class WorkerPresenter implements Presenter {
       case 'presented': {
         this.remote = message.stats;
         if (this.disposed) return;
-        const seq = message.frame.seq;
-        const early = this.announced.has(seq);
-        // Frames announced before this one that the worker never drew are forgotten too.
-        for (const announced of this.announced) if (announced <= seq) this.announced.delete(announced);
-        if (early) return;
+        if (message.frame.seq <= this.announcedSeq) return;
         for (const listener of this.listeners) listener(message.frame);
         return;
       }
@@ -592,7 +590,6 @@ export class WorkerPresenter implements Presenter {
       this.options.link.release({ poolIndex: this.arrival.desc.poolIndex, seq: this.arrival.desc.seq });
       this.arrival = null;
     }
-    this.announced.clear();
     for (const { desc } of this.parked) this.releaseUndrawn(desc);
     this.parked = [];
     this.unsubscribe();

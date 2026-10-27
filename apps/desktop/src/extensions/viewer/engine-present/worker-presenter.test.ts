@@ -511,6 +511,21 @@ describe('a frame shown on arrival, with the page\'s animation frames', () => {
     expect(pair.posted.filter((m) => m.type === 'frame').map((m) => (m as Extract<ToWorker, { type: 'frame' }>).desc.seq)).toEqual([3, 2]);
   });
 
+  it('never announces a frame older than one it announced at the page\'s animation frame', async () => {
+    const { pair, presenter, presented, pageFrame } = withPageFrames();
+    presenter.receive({ type: 'frame', frame: desc(2) }, 0);
+    pageFrame(20);
+    expect(presented.map((f) => f.seq)).toEqual([2]);
+    // The worker's report of an older frame (a playback frame it drew just
+    // before this one reached it) lands after: it is not on screen once
+    // this one is, and must not take its place.
+    const stats = presenter.stats;
+    pair.late({ type: 'presented', session: 1, frame: { ...presented[0]!, seq: 1, pts: 0, timed: true }, stats });
+    pair.late({ type: 'presented', session: 1, frame: presented[0]!, stats });
+    pair.late({ type: 'presented', session: 1, frame: { ...presented[0]!, seq: 3, timed: true }, stats });
+    expect(presented.map((f) => f.seq)).toEqual([2, 3]);
+  });
+
   it('hands a held frame back when its pool is replaced or the session ends', async () => {
     const { pair, source, link, presenter, presented, pageFrame, pageRafs } = withPageFrames();
     source.imports.add('2:2');
