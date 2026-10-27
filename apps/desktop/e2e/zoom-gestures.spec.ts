@@ -56,7 +56,7 @@ for (const panel of ['viewer', 'timeline'] as const) {
     await page.evaluate((panel) => {
       const view = (window as any).PM.Kernel.services.get(panel);
       (panel === 'viewer' ? view.stage : view.cv).dispatchEvent(new WheelEvent('wheel', {
-        bubbles: true, cancelable: true, deltaX: 12.5, deltaY: 8.25,
+        bubbles: true, cancelable: true, deltaX: 12.5, deltaY: 8.25, shiftKey: panel === 'viewer',
       }));
     }, panel);
     const afterPan = await state();

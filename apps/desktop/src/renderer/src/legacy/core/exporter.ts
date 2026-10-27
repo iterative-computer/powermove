@@ -8,7 +8,8 @@ import { exportEffects, type EffectRef } from './export-effects';
 import { AlphaReadbackRetryError } from '../gl/half-readback';
 import { installRenderQueue, wavBytes } from './render-queue';
 import { WEBM_ENCODE_QUEUE_LIMIT, WEBM_VIDEO_CODECS, webmFrameTiming, webmKeyFrame, webmVideoConfig } from './webm-video';
-import { openRenderQueuePanel } from './render-queue-panel';
+import { openRenderQueuePanel, queueBridge } from './render-queue-panel';
+import { trackExportTasks } from './export-tasks';
 import { muxWebM as muxEncodedWebM } from './webm-mux';
 import { writeBlobChunks } from './blob-chunks';
 /* Ported from js/core/exporter.js — behavior-preserving. */
@@ -444,7 +445,12 @@ function range(opts: any) {
   return opts.range === 'work' && p.work && p.work[1] > p.work[0] ? [p.work[0], p.work[1]] : [0, p.dur];
 }
 
-function progressUI(total: any, preparingMedia = false, operation: { cancel: boolean; busy?: boolean } = X) {
+/** The export sheet: open from the moment an export starts until it ends,
+ *  so every step before the first frame (the project check, media, the
+ *  job engine starting) shows as "Preparing…" with the scan moving, and the
+ *  frames then count with the time left. */
+type ExportSheet = ReturnType<typeof progressUI>;
+function progressUI(total = 1, preparingMedia = false, operation: { cancel: boolean; busy?: boolean } = X) {
   const bar: any = h('i', { style: { width: '0%' } });
   const label: any = h('span', 'Preparing…');
   const eta: any = h('span');
@@ -467,12 +473,25 @@ function progressUI(total: any, preparingMedia = false, operation: { cancel: boo
   });
   mod.el.classList.add('export-modal');
   try { stopPreview = animateExportPreview(scan); } catch { scan.hidden = true; }
-  const started: any = window.performance.now();
+  let started: any = window.performance.now();
   /* Engine previews: JPEG frames streamed with the job's statuses. */
   let decoding = false;
   return {
     mod, prev,
-    set(i: any, extra: any) {
+    /** Work before the first frame: no percentage yet. */
+    phase(text: string) {
+      if (operation.cancel) return;
+      bar.parentElement.setAttribute('aria-valuenow', '0');
+      bar.style.width = '0%';
+      label.textContent = text;
+      eta.textContent = '';
+    },
+    /** The render starts: frames and the time left count from here. */
+    begin(frames: number) {
+      total = Math.max(1, frames);
+      started = window.performance.now();
+    },
+    set(i: any, extra?: any) {
       if (operation.cancel) return;
       bar.parentElement.setAttribute('aria-valuenow', String(Math.round(i / total * 100)));
       bar.style.width = (i / total * 100).toFixed(1) + '%';
@@ -517,22 +536,45 @@ function progressUI(total: any, preparingMedia = false, operation: { cancel: boo
 /** Reuses the export sheet while old media is copied into the engine store.
  * The host calls back only when there is migration work, so already-bound
  * projects proceed straight to the destination dialog. */
-async function prepareMedia(project: any, operation: { cancel: boolean; busy?: boolean } = X): Promise<boolean> {
-  let ui: ReturnType<typeof progressUI> | null = null;
+async function prepareMedia(project: any, operation: { cancel: boolean; busy?: boolean } = X, sheet: ExportSheet | null = null): Promise<boolean> {
+  let ui: ExportSheet | null = null;
   try {
     await PM.HostMedia?.flushBindings(project, (done: number, total: number) => {
       if (!(total > 0)) return;
-      ui ??= progressUI(1, true, operation);
+      ui ??= sheet ?? progressUI(1, true, operation);
       ui.preparing(done, total);
     });
+    if (ui && sheet) sheet.phase('Preparing…');
     return !operation.cancel;
   } finally {
-    if (ui) {
+    if (ui && !sheet) {
       const cancelled = operation.cancel;
-      (ui as ReturnType<typeof progressUI>).mod.close();
+      (ui as ExportSheet).mod.close();
       operation.cancel = cancelled;
     }
   }
+}
+
+/** Closes the sheet, which marks a running export cancelled; keeps the outcome. */
+function closeSheet(sheet: ExportSheet | null | undefined): void {
+  if (!sheet) return;
+  const cancelled = X.cancel;
+  sheet.mod.close();
+  X.cancel = cancelled;
+}
+
+/** The finished export, with Show in Finder for the file it wrote. */
+function exportFinished(ms: number, sidecars: number, file: string | null): void {
+  const reveal = (hostBridge() as any)?.revealExport;
+  PM.toast(`Export finished in ${(ms / 1000).toFixed(1)}s${sidecars ? ` · ${sidecars} caption ${sidecars === 1 ? 'file' : 'files'}` : ''}`, 8000, {
+    key: 'export-result', error: false,
+    ...(file && typeof reveal === 'function' ? { action: { label: 'Show in Finder', run: () => { void reveal(file); } } } : {})
+  });
+}
+
+/** A failed export stays on screen until dismissed. */
+function exportFailed(message: string): void {
+  PM.toast('Export failed: ' + message, 5000, { key: 'export-result', error: true });
 }
 
 let destinationToken: string | null = null;
@@ -552,17 +594,17 @@ async function run(opts: any) {
   const bridge = (hostBridge() as any);
   const releaseJob = isRenderFormat(opts.format) && !opts.reportPath ? holdExportJob() : () => {};
   try {
+    // With Use New Engine on, every render format runs in the job engine; a
+    // project it cannot render yet comes back here and the current exporter
+    // writes the file the user already chose (agent exports route in main).
+    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportDestination) {
+      const engine = await exportThroughEngine(opts);
+      if (engine) return engine;
+    }
     // The native engine's consistency check (docs/rust-engine.md, section 6).
     await PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
     if (PM.proj !== requestedProject) return { cancelled: true };
     const p = requestedProject;
-    // With Use New Engine on, every render format runs in the job engine; a
-    // project it cannot render yet comes back here and the current exporter
-    // writes the file the user already chose (agent exports route in main).
-    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
-      const engine = await exportThroughEngine(opts);
-      if (engine) return engine;
-    }
     if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.offlineExport) {
       const referenced = referencedClips(p);
       /* Media still loading is not offline. The export waits for the
@@ -628,7 +670,7 @@ async function run(opts: any) {
     return await runPrepared(opts);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    PM.toast('Export failed: ' + message, 5000);
+    exportFailed(message);
     return { error: message };
   } finally {
     try {
@@ -690,9 +732,14 @@ function locateMedia(assets: string[]): void {
   PM.pickFiles?.(false, { replaceAssetId: first });
 }
 
-/** An export through the job engine (main/engine/agent-jobs.ts), with the
- *  progress sheet driven by its job statuses and live previews. Resolves null
- *  when the engine is off or routes the project to the current exporter. */
+/** An export through the job engine (main/engine/agent-jobs.ts). Like the
+ *  current exporter it asks for the destination first (the offline message,
+ *  then the save panel); the sheet then shows from there to the end: the
+ *  steps before the first frame (the project check, media, the job engine
+ *  reading the project) take seconds on a large project and read
+ *  "Preparing…" with the scan moving, then the job's statuses count frames
+ *  with live previews. Resolves null when the engine is off or routes the
+ *  project to the current exporter. */
 async function exportThroughEngine(opts: any): Promise<any | null> {
   const engine = (hostBridge() as any)?.nativeEngine;
   const status = await engine.status().catch(() => null);
@@ -702,23 +749,32 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   if (!status?.enabled) return null;
   const p: any = PM.proj;
   const [t0, t1]: any = range(opts);
+  const name = outputName(opts), options = sheetOptions(opts);
+  const chosen = await engine.exportDestination({ name, options, clips: referencedClips(p) });
+  if (chosen.status === 'cancelled') return { cancelled: true };
+  if (chosen.status === 'locate') { locateMedia(chosen.assets); return { cancelled: true }; }
+  if (chosen.status !== 'chosen') return null;
+  const ui = progressUI();
   // Statuses can arrive before the start answer; keep them until the job id is known.
   const early: any[] = [];
   let listener: ((s: any) => void) | null = null;
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
-    const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
-    if (!await prepareMedia(p)) return { cancelled: true };
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    await PM.EngineDoc?.beforeExport?.('export');
+    if (PM.proj !== p || X.cancel) return { cancelled: true };
+    const request = { project: JSON.stringify(p), name, options, destination: chosen.destination };
+    if (!await prepareMedia(p, X, ui)) return { cancelled: true };
     // Main captures this window's definitions for the job (contract 10):
     // pending registrations and extension reloads reach it first.
     await PM.EngineDefinitions?.settle?.();
+    if (X.cancel) return { cancelled: true };
     const started = await engine.exportVideo(request);
-    if (started.status === 'cancelled') return { cancelled: true };
-    if (started.status === 'locate') { locateMedia(started.assets); return { cancelled: true }; }
-    if (started.status !== 'accepted') return null;
+    // Cancelled during the job's setup: the current exporter never takes over.
+    if (started.status !== 'accepted') return X.cancel ? { cancelled: true } : null;
     const total = Math.max(1, started.frames);
     const began = window.performance.now();
-    const ui = progressUI(total);
+    ui.begin(total);
     let final: any;
     try {
       final = await new Promise<any>((resolve) => {
@@ -741,10 +797,7 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
         for (const s of early.splice(0)) on(s);
       });
     } finally {
-      // Closing the sheet marks a running export cancelled; keep the outcome.
-      const cancelled = X.cancel;
-      ui.mod.close();
-      X.cancel = cancelled;
+      closeSheet(ui);
     }
     if (final.routed) {
       // Never silent: the reason the engine refused goes to the console and
@@ -758,9 +811,10 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
     if (final.state === 'failed') throw new Error(final.error || 'The export failed.');
     lastOutputPath = final.path ?? started.path;
     const sidecars = await writeCaptionSidecars(opts, t0, t1);
-    PM.toast(`Export finished in ${((window.performance.now() - began) / 1000).toFixed(1)}s${sidecars ? ` · ${sidecars} caption ${sidecars === 1 ? 'file' : 'files'}` : ''}`, 3400);
+    exportFinished(window.performance.now() - began, sidecars, lastOutputPath);
     return { cancelled: false };
   } finally {
+    closeSheet(ui);
     off();
   }
 }
@@ -905,14 +959,14 @@ async function runPrepared(opts: any) {
     if (X.cancel) PM.toast('Export cancelled');
     else {
       const sidecars = await writeCaptionSidecars(opts, t0, t1);
-      PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s${sidecars ? ` · ${sidecars} caption ${sidecars === 1 ? 'file' : 'files'}` : ''}`, 3400);
+      exportFinished(window.performance.now() - t, sidecars, lastOutputPath);
     }
     return {cancelled:X.cancel, ...(opts.reportPath && !X.cancel && lastOutputPath ? { path: lastOutputPath } : {})};
   } catch (e: any) {
     if (X.cancel && (e?.name === 'AbortError' || e?.name === 'EffectInputError' && /cancelled/.test(e.message))) { PM.toast('Export cancelled'); return { cancelled: true }; }
     window.console.error(e);
     const message = e instanceof Error ? e.message : String(e);
-    PM.toast('Export failed: ' + message, 5000);
+    exportFailed(message);
     return {error:message};
   } finally {
     // Closing completed progress must not mark a successful export as cancelled.
@@ -1525,6 +1579,11 @@ installRenderQueue(PM,X);
    (render-queue-panel.ts); today's queue dialog stays for the current exporter. */
 const legacyQueueDialog = X.queueDialog;
 X.queueDialog = () => (engineOn() && openRenderQueuePanel(PM)) || legacyQueueDialog();
+/* Queue and agent exports render without the sheet: they show in the task pill. */
+{
+  const queue = engineOn() ? queueBridge() : null;
+  if (queue) trackExportTasks(PM, queue);
+}
 /* "Locate Media…" from the offline message reaches this window too when the
    export started elsewhere (an agent, the queue). */
 (hostBridge() as any)?.nativeEngine?.onLocateMedia?.((assets: string[]) => { if (!X.busy) locateMedia(assets); });

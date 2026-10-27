@@ -20,9 +20,11 @@ A kernel works on an `Edit`: a scratch copy of the document with its own
 evaluator. Writes land in the copy as they are made, so later reads see them, as
 in the TypeScript code (a reparented parent before its children, a parent's
 baked keys before the child sampled against them). `Edit::finish` diffs the
-touched compositions into the smallest operation list (`pm_model::ops::diff_ops`):
-leaf sets where a value changed, id-keyed inserts and deletes where layers or keys
-came or went.
+touched compositions into the smallest operation list (`pm_model::ops::diff_node_ops`,
+the same operations as `diff_ops` of their values): leaf sets where a value changed,
+id-keyed inserts and deletes where layers or keys came or went. The copy shares every
+subtree the kernel did not write with the original, so the diff skips them and costs
+what changed, not the composition's size.
 
 | Module | Ports | Kernel |
 |---|---|---|

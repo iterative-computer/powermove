@@ -944,7 +944,14 @@ export class ViewerPresentation {
       }
     };
     const presenter: Presenter = this.worker
-      ? this.worker.open({ ...common, displayHz: view ? (this.options.service.displayHz?.(view) ?? null) : null })
+      ? this.worker.open({
+          ...common,
+          displayHz: view ? (this.options.service.displayHz?.(view) ?? null) : null,
+          // The worker draws into this window's canvas (a move replaces it);
+          // a popout's timestamps are moved onto this realm's clock.
+          requestFrame: view ? (cb) => view.requestAnimationFrame((t) => cb(t + timeOriginShift(view))) : undefined,
+          cancelFrame: view ? (id) => view.cancelAnimationFrame(id) : undefined
+        })
       : new EnginePresenter({ ...common, painter: this.painter! });
     this.presenter = presenter;
     presenter.onPresented((frame) => {

@@ -726,7 +726,18 @@ function readExportDefaults(): ExportDefaults {
 function writeExportDefaults(patch: Partial<ExportDefaults>) {
   if (!PM.proj) return;
   const next = normalizeExportDefaults({ ...readExportDefaults(), ...patch }, PM.proj.fps);
-  PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); });
+  /* A scoped entry: only `exportDefaults` is snapshotted and compared. The
+     whole-project snapshot of `hist.do` cost seconds on a large project each
+     time the export sheet's Export button was clicked. */
+  PM.hist.beginScoped('Export settings');
+  try {
+    PM.hist.track([['exportDefaults']]);
+    PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults);
+  } catch (error) {
+    PM.hist.rollback();
+    throw error;
+  }
+  PM.hist.commit('Export settings');
 }
 PM.exportDefaults = { read: readExportDefaults, write: writeExportDefaults };
 

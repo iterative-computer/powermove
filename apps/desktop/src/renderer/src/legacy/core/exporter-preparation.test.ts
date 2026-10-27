@@ -14,11 +14,13 @@ function fixture(queue = false) {
     await new Promise<void>(resolve => { finish = resolve; });
     progress(2, 2);
   });
-  const submit = vi.fn(async () => ({ status: 'cancelled' }));
+  // The queue's add is cancelled at its save panel; the run's start stops the export.
+  const submit = vi.fn(async () => { if (!queue) throw new Error('Stopped'); return { status: 'cancelled' }; });
   installBridgeForTests({ nativeEngine: {
     enabledSync: () => true,
     status: async () => ({ enabled: true, processes: { job: { state: 'ready' } } }),
     onExportStatus: () => () => {}, exportVideo: submit, queueAdd: submit,
+    exportDestination: async () => ({ status: 'chosen', destination: 'D1', path: '/x/Preparation.png' }),
   } } as any);
   let cancel!: () => void;
   const PM: any = {

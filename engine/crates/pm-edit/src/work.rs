@@ -227,14 +227,16 @@ impl<'o> Edit<'o> {
     }
 
     /// The operations that turn the original document into the edited one:
-    /// `diff_ops` of every written composition, with canonical paths.
+    /// `diff_ops` of every written composition, with canonical paths. The
+    /// scratch document shares every subtree the kernel did not write with
+    /// the original, so only the written ones are compared.
     pub fn finish(self) -> Vec<Op> {
         let mut out = Vec::new();
         for id in &self.touched {
             let path = [PathPart::from("comps"), PathPart::Key(id.clone())];
-            let before = self.original.lookup(&path).map(Node::to_value);
-            let after = self.doc.lookup(&path).map(Node::to_value);
-            for op in pm_model::ops::diff_ops(before.as_ref(), after.as_ref()) {
+            let before = self.original.lookup(&path);
+            let after = self.doc.lookup(&path);
+            for op in pm_model::ops::diff_node_ops(before, after) {
                 out.push(prefixed(op, &path));
             }
         }

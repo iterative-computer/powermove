@@ -119,7 +119,7 @@ test('fractional pans reuse covered pixels while crop changes and independent re
     PM.GL.render = (...args: any[]) => { renders++; return original(...args); };
     const pan = (deltaX: number) => {
       const r = viewer.stage.getBoundingClientRect();
-      viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX, clientX: r.left+r.width/2, clientY:r.top+r.height/2 }));
+      viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, shiftKey: true, deltaX, clientX: r.left+r.width/2, clientY:r.top+r.height/2 }));
     };
     const frame = async () => { await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); };
     try {

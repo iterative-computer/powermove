@@ -1219,7 +1219,9 @@ listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover()
 let observedQuality = api.transport.quality;
 listen('time', () => {
   if (observedQuality !== api.transport.quality) { observedQuality = api.transport.quality; V.layout(); }
-  schedulePresentation();
+  // While the engine presents, the overlay follows the frame on screen: the
+  // new time's frame announces it (`overlay`) when it lands.
+  if (!enginePresentation?.presenting) schedulePresentation();
 });
 listen('transport', () => { if (api.transport.playing()) commitPendingResize(); schedulePresentation(); });
 
@@ -1286,14 +1288,22 @@ listen('frame:rendered', (frame: { viewport: PreviewViewport | null; time: numbe
 });
 listen('overlay', () => drawOverlay());
 
-/* While the engine presents, the selection box, handles, and anchor are
-   drawn at the revision of the frame on screen (section 18, item 6): a
-   drag's newest edit may still be on its way to the engine, and the
-   handles must not lead the pixels. The geometry drawn for each document
-   revision is kept, and the newest one the presented frame includes is
-   drawn; hit-testing and transforms keep using the current geometry. */
+/* While the engine presents, the overlay is drawn for the frame on screen:
+   at its time (`overlayTime`), as a scrub's newest playhead may still be on
+   its way to the engine, and at its revision (section 18, item 6), as a
+   drag's newest edit may be. The box, handles, anchor, and paths must never
+   lead or trail the pixels. The geometry drawn for each document revision
+   is kept, and the newest one the presented frame includes is drawn;
+   hit-testing and transforms keep using the playhead and current geometry. */
+const overlayTime = (): number => {
+  const time = api.transport.time();
+  const frame = enginePresentation?.presenting ? enginePresentation.latest : null;
+  if (!frame || frame.pts === Math.max(0, Math.round(time * TICKS_PER_SECOND))) return time;
+  return frame.pts / TICKS_PER_SECOND;
+};
+V.overlayTime = overlayTime;
 const selectionHistory = new GeometryAtRevision<SelectionGeometry | null>();
-function selectionOnScreen(current: SelectionGeometry | null, sels: any[]): SelectionGeometry | null {
+function selectionOnScreen(current: SelectionGeometry | null, sels: any[], time: number): SelectionGeometry | null {
   const frame = enginePresentation?.presenting ? enginePresentation.latest : null;
   const revision = frame ? engineService?.revision?.() ?? null : null;
   if (!frame || revision === null) {
@@ -1301,7 +1311,7 @@ function selectionOnScreen(current: SelectionGeometry | null, sels: any[]): Sele
     V.overlayRevision = null;
     return current;
   }
-  const key = `${sels.map((layer: any) => layer.id).join(',')}@${api.transport.time()}`;
+  const key = `${sels.map((layer: any) => layer.id).join(',')}@${time}`;
   selectionHistory.record(revision, key, current);
   const shown = selectionHistory.at(frame.revision, key, current);
   V.overlayRevision = shown.revision;
@@ -1319,6 +1329,7 @@ function drawOverlay() {
      paint. Pan/zoom call layout directly, so their controls remain immediate. */
   if (!overlayGeometry) return;
   const selectionInk = selectionOutlineColor(api.project.get());
+  const T = overlayTime();
   const p = api.project.get(), dpr = V.ov.width / overlayGeometry.width;
   const gizmoSelection=api.selection.layers();
   const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
@@ -1345,7 +1356,7 @@ function drawOverlay() {
   c.lineWidth = 1 / S;
 
   drawSnapLines(c);
-  if(V.showControls !== false && !visualSelection(api).some((layer: any) => space3d.is3DLayer(layer)))drawEditablePaths(api,c,S);
+  if(V.showControls !== false && !visualSelection(api).some((layer: any) => space3d.is3DLayer(layer)))drawEditablePaths(api,c,S,T);
 
   if (V.toolRect) {
     const box = V.toolRect.box as DragBox;
@@ -1375,8 +1386,8 @@ function drawOverlay() {
   }
 
   const hovered = hoverId ? api.model.layer(hoverId) : null;
-  if (hovered && !isModel3D(hovered) && api.anim.active(hovered, api.transport.time()) && hovered.id !== V.canvasTextEditing) {
-    const geometry = resolveSelectionGeometry(api, [hovered], api.transport.time(), space3d);
+  if (hovered && !isModel3D(hovered) && api.anim.active(hovered, T) && hovered.id !== V.canvasTextEditing) {
+    const geometry = resolveSelectionGeometry(api, [hovered], T, space3d);
     if (geometry) {
       c.strokeStyle = selectionInk;
       c.lineWidth = 1.5 / Math.max(.02, V.shown);
@@ -1388,16 +1399,16 @@ function drawOverlay() {
     }
   }
 
-  const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
-  const selection = selectionOnScreen(resolveSelectionGeometry(api, sels, api.transport.time(), space3d), sels);
+  const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, T) && L.id !== V.canvasTextEditing);
+  const selection = selectionOnScreen(resolveSelectionGeometry(api, sels, T, space3d), sels, T);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
   if (sels.length > 1 || !selection) for (const L of sels) {
-    const b = layerBounds(api, L, api.transport.time());
+    const b = layerBounds(api, L, T);
     if (!b) continue;
-    const m = api.anim.worldMatrix(L, api.transport.time());
+    const m = api.anim.worldMatrix(L, T);
     const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map((corner) =>
-      space3d.is3DLayer(L) ? space3d.projectPoint(space3d.planeMatrix(L,api.transport.time()),pointInBounds(b,corner)) : applyMatrix(m, pointInBounds(b, corner)));
+      space3d.is3DLayer(L) ? space3d.projectPoint(space3d.planeMatrix(L,T),pointInBounds(b,corner)) : applyMatrix(m, pointInBounds(b, corner)));
     c.strokeStyle = selectionInk;
     c.lineWidth = 1 / Math.max(.02, V.shown);
     c.beginPath();
@@ -1411,9 +1422,9 @@ function drawOverlay() {
   c.save();
   const anchorUnit = 1 / Math.max(.02, V.shown);
   for (const layer of sels) {
-    if (!layerBounds(api, layer, api.transport.time())) continue;
+    if (!layerBounds(api, layer, T)) continue;
     // A single selection's anchor moves with its box (the geometry on screen).
-    const pivot = sels.length === 1 && selection?.mode === 'single' ? selection.pivotWorld : layerWorldPivot(api, layer, api.transport.time(), space3d);
+    const pivot = sels.length === 1 && selection?.mode === 'single' ? selection.pivotWorld : layerWorldPivot(api, layer, T, space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
     c.beginPath();
     c.arc(pivot.x, pivot.y, 5 * anchorUnit, 0, Math.PI * 2);
@@ -1777,6 +1788,8 @@ function bindStage(stage: any, inner: any): () => void {
       zoomAtEvent(e, factor);
       return;
     }
+    // A plain two-finger scroll leaves the view where it is; Shift scrolls it.
+    if (!e.shiftKey) return;
     leaveFitMode();
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
     const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
@@ -2395,18 +2408,23 @@ function handleAt(selection: SelectionGeometry, x: any, y: any) {
 
 function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
+  /* Whether a layer is 3D cannot change while it is dragged: asked once
+     here, not on every move (with the engine on, a structural question
+     after the move's edits waits for them to reach pm-wasm first). */
   const start = layers.map((L: any) => {
     const x = ev(api, L, 'position.x', T), y = ev(api, L, 'position.y', T);
-    const m = space3d.is3DLayer(L) ? space3d.planeMatrix(L,T,true) : null;
-    return {L,x,y,inverse:m ? space3d.inversePlane(m) : null,pivot:m ? space3d.projectPoint(m,{x,y}) : null};
+    const is3D = space3d.is3DLayer(L);
+    const m = is3D ? space3d.planeMatrix(L,T,true) : null;
+    return {L,x,y,is3D,inverse:m ? space3d.inversePlane(m) : null,pivot:m ? space3d.projectPoint(m,{x,y}) : null};
   });
   const moveDelta = (s: any, dx: number, dy: number): [number,number] => {
-    if (!space3d.is3DLayer(s.L)) return worldDeltaToLocal(s.L,T,dx,dy);
+    if (!s.is3D) return worldDeltaToLocal(s.L,T,dx,dy);
     if (!s.inverse) return [0,0];
     const p = space3d.projectPoint(s.inverse,{x:s.pivot.x+dx,y:s.pivot.y+dy});
     return [p.x-s.x,p.y-s.y];
   };
   const selectionLayers = options.selectionLayers || layers;
+  const snapsBox = !selectionLayers.some((layer: any) => space3d.is3DLayer(layer));
   const candidates = snapshotSnapCandidates(T, selectionLayers);
   const clearGuides = () => { V.snapLines = null; invalidate('render'); };
   api.edit.begin(selectionLayers.length > 1 ? 'Move selection' : 'Move layer', { origin: 'canvas' });
@@ -2433,7 +2451,7 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
          snapping for precise free movement. Keeping those jobs separate also
          lets an unconstrained drag align both axes at once. */
       let snap: SnapResult = { dx: 0, dy: 0, lines: [] };
-      const box = !(ev.metaKey || ev.ctrlKey) && !selectionLayers.some((layer: any) => space3d.is3DLayer(layer)) ? unionBounds(selectionLayers, T) : null;
+      const box = !(ev.metaKey || ev.ctrlKey) && snapsBox ? unionBounds(selectionLayers, T) : null;
       if (box) {
         snap = snapBox(snapCandidatesFromPoints(boxSnapPoints(box)), candidates,
           SNAP_DISTANCE / Math.max(.02, V.shown), axes);

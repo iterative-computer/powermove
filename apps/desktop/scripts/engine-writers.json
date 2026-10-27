@@ -50,7 +50,7 @@
     "aim-preserving": "edit"
   },
   "counts": {
-    "hist.do": 39,
+    "hist.do": 38,
     "history.do": 21,
     "edit.mutate": 39,
     "history.transaction": 13,
@@ -66,7 +66,7 @@
     "project-swap": 4,
     "revision": 1,
     "asset-metadata": 3,
-    "project-write": 78,
+    "project-write": 79,
     "render-queue-swap": 3,
     "home-composition-match": 1,
     "agent-media-folders": 1,
@@ -531,55 +531,55 @@
       "code": "api.edit.mutate('Place clip on track', () => { (added as any).track = lane; api.anim.touch(); }, { origin: 'timeline' })"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:66",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:65",
       "class": "edit.mutate",
       "scope": "startPathEdit",
       "code": "api.edit.mutate('Close path',()=>{hit.path.p.closed.v=true;state.activePath=null;},{origin:'canvas'})"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:67",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:66",
       "class": "edit.mutate",
       "scope": "startPathEdit",
       "code": "api.edit.mutate('Delete path vertex',()=>hit.path.vertices.splice(hit.index,1),{origin:'canvas'})"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:73",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:72",
       "class": "anim.touch",
       "scope": "startPathEdit > cancel",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:78",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:77",
       "class": "history.transaction",
       "scope": "startPathEdit",
       "code": "api.history.begin('Draw path vertex')"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:82",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:81",
       "class": "history.transaction",
       "scope": "startPathEdit",
       "code": "api.history.begin('Edit path vertex')"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:83",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:82",
       "class": "anim.touch",
       "scope": "startPathEdit",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:88",
+      "site": "apps/desktop/src/extensions/viewer/path-editing.ts:87",
       "class": "anim.touch",
       "scope": "startPathEdit > move",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1827",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1840",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > bindStage > guarded(callback)",
       "code": "api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path...."
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2198",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2211",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > createShape",
       "code": "api.edit.mutate('Draw mask', () => { const mask = api.model.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect'); mask.p.x!.v = (first.x + ..."
@@ -765,37 +765,37 @@
       "code": "writeDocument(PM, paths, revalidateContributions)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:729",
-      "class": "hist.do",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:735",
+      "class": "project-write",
       "scope": "install > writeExportDefaults",
-      "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
+      "code": "PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1462",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1473",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : prepared ? p : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1469",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1480",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1849",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1860",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1850",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1861",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1861",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1872",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."

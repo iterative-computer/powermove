@@ -74,6 +74,26 @@ export type PresentedFrame = {
   height?: number;
 };
 
+/** What a presenter reports for `desc` drawn at `rafMs` (`onPresented`):
+ *  `size` is its frame's, `depthGeneration` the depth pool's it knows. */
+export function presentedFrame(desc: FrameDescriptor, size: { width: number; height: number }, rafMs: number, displayUs: number | null, depthGeneration: number): PresentedFrame {
+  return {
+    seq: desc.seq,
+    revision: desc.revision,
+    viewSeq: desc.viewSeq,
+    pts: desc.pts,
+    overlay: desc.overlay,
+    scene3dMeta: desc.scene3dMeta,
+    rafMs,
+    timed: desc.duration !== null,
+    standIn: desc.quality.standIn === true,
+    displayUs,
+    depthId: desc.depthId && desc.depthId.poolGeneration === depthGeneration ? { ...desc.depthId } : null,
+    width: size.width,
+    height: size.height
+  };
+}
+
 export type PresenterOptions = {
   link: FrameLink;
   source: FrameSource;
@@ -602,21 +622,7 @@ export class EnginePresenter implements Presenter {
     );
     this.submitted.add(completed);
     void completed.then(() => this.submitted.delete(completed));
-    const presented: PresentedFrame = {
-      seq: desc.seq,
-      revision: desc.revision,
-      viewSeq: desc.viewSeq,
-      pts: desc.pts,
-      overlay: desc.overlay,
-      scene3dMeta: desc.scene3dMeta,
-      rafMs,
-      timed: desc.duration !== null,
-      standIn: desc.quality.standIn === true,
-      displayUs,
-      depthId: desc.depthId && desc.depthId.poolGeneration === this.depthGeneration ? { ...desc.depthId } : null,
-      width,
-      height
-    };
+    const presented = presentedFrame(desc, { width, height }, rafMs, displayUs, this.depthGeneration);
     for (const listener of this.listeners) listener(presented);
   }
 

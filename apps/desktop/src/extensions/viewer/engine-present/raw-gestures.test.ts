@@ -9,13 +9,19 @@ function rawUpdate(type: string, clientX: number, clientY: number, pointerId = 1
   return event;
 }
 
-/** A manual clock and timers. */
+/** A manual clock, timers, and task queue. */
 function clock() {
   let t = 1000;
   let next = 1;
   const pending = new Map<number, { at: number; fn: () => void }>();
+  const queued: Array<() => void> = [];
   return {
     now: () => t,
+    task: (fn: () => void) => void queued.push(fn),
+    /** Runs the tasks posted so far (and those they post). */
+    tasks() {
+      while (queued.length) queued.shift()!();
+    },
     timers: {
       set: (fn: () => void, ms: number) => {
         const id = next++;
@@ -25,13 +31,16 @@ function clock() {
       clear: (id: number) => void pending.delete(id)
     },
     pending: () => pending.size,
+    /** Runs the queued tasks, then moves the clock on, firing due timers and the tasks they post. */
     advance(ms: number) {
+      this.tasks();
       t += ms;
       for (const [id, timer] of [...pending]) {
         if (timer.at > t) continue;
         pending.delete(id);
         timer.fn();
       }
+      this.tasks();
     }
   };
 }
@@ -47,9 +56,22 @@ describe('engine-path gestures read pointerrawupdate', () => {
     target.dispatchEvent(rawUpdate('pointerrawupdate', 130, 40));
     // The helper's own rAF-aligned move is a no-op.
     drag.move(30, -10, rawUpdate('pointermove', 130, 40) as PointerEvent);
+    c.tasks();
     expect(moves).toEqual([[10, 5], [30, -10]]);
     expect(drag.updates()).toBe(2);
     expect(drag.applied()).toBe(2);
+  });
+
+  it('never moves inside the raw update: the move runs in the next task, and updates waiting for it collapse into the newest', () => {
+    const target = new EventTarget();
+    const c = clock();
+    const moves: number[] = [];
+    rawDragMoves({ clientX: 0, clientY: 0 }, (dx) => moves.push(dx), target, c);
+    target.dispatchEvent(rawUpdate('pointerrawupdate', 3, 0));
+    target.dispatchEvent(rawUpdate('pointerrawupdate', 5, 0));
+    expect(moves).toEqual([]);
+    c.tasks();
+    expect(moves).toEqual([5]);
   });
 
   it('applies a high-rate device at most once per interval, newest wins, and never loses the last update', () => {
@@ -63,8 +85,9 @@ describe('engine-path gestures read pointerrawupdate', () => {
       if (i === 2) expect(drag.pending()).toBe(true);
       c.advance(1);
     }
-    // Applied at once (1), then the newest when each interval ends (4, 8).
+    // The first at once (in its task), then the newest as each interval ends.
     expect(moves).toEqual([1, 4, 8]);
+    expect(moves.length).toBeLessThanOrEqual(Math.ceil(10 / RAW_MOVE_MIN_INTERVAL_MS));
     expect(drag.pending()).toBe(true);
     c.advance(RAW_MOVE_MIN_INTERVAL_MS);
     expect(moves).toEqual([1, 4, 8, 10]);
@@ -79,8 +102,11 @@ describe('engine-path gestures read pointerrawupdate', () => {
     const upMoves: number[] = [];
     const up = rawDragMoves({ clientX: 0, clientY: 0 }, (dx) => upMoves.push(dx), upTarget, c);
     upTarget.dispatchEvent(rawUpdate('pointerrawupdate', 3, 0));
+    c.tasks();
     upTarget.dispatchEvent(rawUpdate('pointerrawupdate', 7, 0));
     up.stop(true);
+    expect(upMoves).toEqual([3, 7]);
+    c.advance(RAW_MOVE_MIN_INTERVAL_MS);
     expect(upMoves).toEqual([3, 7]);
     expect(c.pending()).toBe(0);
 
@@ -88,6 +114,7 @@ describe('engine-path gestures read pointerrawupdate', () => {
     const cancelMoves: number[] = [];
     const cancel = rawDragMoves({ clientX: 0, clientY: 0 }, (dx) => cancelMoves.push(dx), cancelTarget, c);
     cancelTarget.dispatchEvent(rawUpdate('pointerrawupdate', 3, 0));
+    c.tasks();
     cancelTarget.dispatchEvent(rawUpdate('pointerrawupdate', 7, 0));
     cancel.stop();
     c.advance(RAW_MOVE_MIN_INTERVAL_MS);
@@ -101,9 +128,11 @@ describe('engine-path gestures read pointerrawupdate', () => {
     const drag = rawDragMoves({ clientX: 0, clientY: 0, pointerId: 7 }, (dx) => moves.push(dx), target, c);
     target.dispatchEvent(rawUpdate('pointerrawupdate', 5, 0, 8));
     target.dispatchEvent(rawUpdate('pointerrawupdate', 6, 0, 7));
+    c.tasks();
     drag.stop();
     drag.stop();
     target.dispatchEvent(rawUpdate('pointerrawupdate', 9, 0, 7));
+    c.advance(RAW_MOVE_MIN_INTERVAL_MS);
     expect(moves).toEqual([6]);
   });
 

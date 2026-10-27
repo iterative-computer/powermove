@@ -34,7 +34,7 @@ import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
 import { EngineSourceMedia, SOURCE_SERVICE } from './source-media';
-import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
+import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented, type RedrawOutcome } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
 import { installAppCaptures } from './app-captures';
@@ -230,9 +230,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const stats = new EngineStatsView();
   (PM as any).EngineStats = stats;
   (PM as any).EnginePresentedEvents = presentedEvents;
-  /** A paused redraw request with nothing new for the engine to present:
-   *  today's frame loop announces the frame it draws again
-   *  (`PresentedEvents.redraw`). Called by the frame loop on `draw`. */
   /** What the engine shows now: revision, view, and playhead time. */
   function shownState(): { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number } {
     const doc = PM.EngineDoc;
@@ -240,7 +237,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     const fps = Number((PM.curComp?.() ?? PM.proj)?.fps) || 30;
     return { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps };
   }
-  (PM as any).EngineRedraw = (): boolean => {
+  /** A paused redraw request with nothing new for the engine to present:
+   *  today's frame loop announces the frame it draws again; with a new
+   *  frame on its way, it announces itself (`PresentedEvents.redraw`).
+   *  Called by the frame loop on `draw`. */
+  (PM as any).EngineRedraw = (): RedrawOutcome => {
     return presentedEvents.redraw(
       shownState(),
       (frame, quality) => {

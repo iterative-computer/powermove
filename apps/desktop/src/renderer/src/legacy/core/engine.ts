@@ -532,6 +532,15 @@ for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event,
 let redrawRequested = true;
 let overlayRequested = false;
 let overlayEmissions = 0;
+/* A paused draw while a new frame is on its way (another time, revision or
+   view): that frame announces the overlay when it lands, as today's loop
+   draws the overlay after the frame it renders. An overlay drawn now would
+   be drawn for a frame the pixels do not show yet. Since when one has been
+   awaited; past OVERLAY_HOLD_MS (the engine never presented it) the overlay
+   is drawn anyway. */
+const OVERLAY_HOLD_MS = 500;
+let awaitingFrame: number | null = null;
+PM.bus.on('preview:presented', () => { awaitingFrame = null; });
 const announcing = () => overlayEmissions > 0 || !!(PM as any).EnginePresentedEvents?.announcing;
 const emitOverlay = () => {
   overlayEmissions++;
@@ -592,12 +601,16 @@ function frame(now: any) {
       if (redrawRequested) {
         redrawRequested = false;
         overlayRequested = false;
-        if (!PM.playing) (PM as any).EngineRedraw?.();
-        emitOverlay();
+        if (!PM.playing && (PM as any).EngineRedraw?.() === 'coming') awaitingFrame ??= now;
+        else { awaitingFrame = null; emitOverlay(); }
       } else if (overlayRequested) {
         overlayRequested = false;
         emitOverlay();
       }
+    }
+    if (awaitingFrame !== null && (PM.playing || now - awaitingFrame >= OVERLAY_HOLD_MS)) {
+      awaitingFrame = null;
+      emitOverlay();
     }
     return;
   }

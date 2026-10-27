@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { forgetExports, rememberExport, sidecarPath, writeSidecar } from './export-sidecar';
+import { forgetExports, rememberExport, revealExport, sidecarPath, writeSidecar } from './export-sidecar';
 
 const dirs: string[] = [];
 afterEach(async () => { forgetExports(7); await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
@@ -27,5 +27,17 @@ describe('caption sidecars', () => {
     const result = await writeSidecar(7, { path: video, extension: 'srt', suffix: 'en', text: '1\n00:00:00,000 --> 00:00:01,000\nHi\n' });
     expect(result).toEqual({ ok: true, path: path.join(dir, 'Film.en.srt') });
     expect(await readFile(path.join(dir, 'Film.en.srt'), 'utf8')).toContain('Hi');
+  });
+
+  it('shows in Finder only a file this window exported', () => {
+    const shown: string[] = [];
+    const show = (file: string) => { shown.push(file); };
+    expect(revealExport(7, '/x/Film.mp4', show)).toBe(false);
+    rememberExport(7, '/x/Film.mp4');
+    expect(revealExport(8, '/x/Film.mp4', show)).toBe(false);
+    expect(revealExport(7, '/x/Other.mp4', show)).toBe(false);
+    expect(revealExport(7, 42, show)).toBe(false);
+    expect(revealExport(7, '/x/Film.mp4', show)).toBe(true);
+    expect(shown).toEqual(['/x/Film.mp4']);
   });
 });

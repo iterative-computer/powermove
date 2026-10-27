@@ -2,10 +2,11 @@
  * Caption sidecars written next to an exported video ("Film.mp4" →
  * "Film.srt" or "Film.en.vtt"). The renderer can only name a video this
  * window itself just exported through a save dialog; the sidecar shares its
- * folder and base name, and only .srt / .vtt text is ever written.
+ * folder and base name, and only .srt / .vtt text is ever written. The same
+ * list answers Show in Finder after an export.
  */
 import path from 'node:path';
-import type { IpcMain } from 'electron';
+import { shell, type IpcMain } from 'electron';
 import { IPC, SIDECAR_SUFFIX_PATTERN, type ExportSidecarRequest, type FileSaveResult } from '../shared/ipc';
 import { atomicWrite } from './project-files';
 
@@ -53,9 +54,20 @@ export async function writeSidecar(owner: number, request: unknown): Promise<Fil
   }
 }
 
+/** Show in Finder, only for a file this window itself exported. */
+export function revealExport(owner: number, filePath: unknown, show: (file: string) => void = file => shell.showItemInFolder(file)): boolean {
+  if (typeof filePath !== 'string' || !(exported.get(owner) ?? []).includes(filePath)) return false;
+  show(filePath);
+  return true;
+}
+
 export function registerExportSidecar(ipcMain: Pick<IpcMain, 'handle'>, ctx: { isTrustedSender(event: any): boolean }): void {
   ipcMain.handle(IPC.exportSidecar, async (event, request: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     return writeSidecar(event.sender.id, request);
+  });
+  ipcMain.handle(IPC.exportReveal, async (event, filePath: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return revealExport(event.sender.id, filePath);
   });
 }

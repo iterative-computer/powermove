@@ -65,7 +65,7 @@ test('profile sustained 800% pan at Retina density', async ({ session }, testInf
         await new Promise(requestAnimationFrame);
         const now = performance.now(); frames.push(now - previous); previous = now;
         const rect = viewer.stage.getBoundingClientRect();
-        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7, deltaY: 3, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, shiftKey: true, deltaX: 7, deltaY: 3, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
       }
       await new Promise(requestAnimationFrame);
       return { frames, costs, pan: [...viewer.pan], zoom: viewer.zoom };
