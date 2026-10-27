@@ -15,10 +15,23 @@
  * mouse would run the gesture's move (a document edit and a viewer state
  * for a layer drag) eight times a refresh at 120 Hz. Moves are therefore
  * applied at most once per `minIntervalMs` (4 ms: two a refresh at
- * 120 Hz). The first update after a quiet interval is applied at once, so
- * a 120 Hz trackpad or a 125 Hz mouse is never delayed; updates inside the
- * interval collapse into the newest, applied when the interval ends (or
- * when the gesture ends with `up`, so the final position always lands).
+ * 120 Hz); updates inside the interval collapse into the newest, applied
+ * when the interval ends (or when the gesture ends with `up`, so the final
+ * position always lands).
+ *
+ * A move never runs inside the input event. The engine's frames reach the
+ * page as port messages (the presentation worker gets each one through the
+ * page's main thread, and its releases go back the same way), and Chromium
+ * runs input ahead of every other task: a drag whose moves ran in its raw
+ * updates (a document edit, a flush to the engine and the frame's raster
+ * answers, 5 to 12 ms each on the real project) kept the main thread in
+ * input tasks for the whole gesture, so the engine's frames and releases
+ * waited behind it, the engine ran out of free surfaces, and the viewer
+ * showed nothing new until the pointer stopped (0 frames in a 1 s drag,
+ * pointer to pixels 0.6 to 2.3 s). The update only records the newest
+ * pointer; the move runs in an ordinary task posted right behind it (a
+ * message, never a clamped timer), in turn with the engine's messages, and
+ * the updates that arrive while it waits collapse into the newest.
  *
  * Only moves change source: the drag helper (`api.ui.drag`) still owns
  * pointer capture, the up and cancel paths, and the cursor; its own
@@ -57,7 +70,27 @@ export type RawDragOptions = {
   minIntervalMs?: number;
   now?: () => number;
   timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
+  /** Runs `fn` in an ordinary task right behind the current one (default: a message on a channel). */
+  task?: (fn: () => void) => void;
 };
+
+/** Ordinary tasks right behind the current one: messages on a channel (timers are clamped). */
+function messageTasks(): { post(fn: () => void): void; close(): void } {
+  const channel = new MessageChannel();
+  const queue: Array<() => void> = [];
+  channel.port1.onmessage = () => queue.shift()?.();
+  return {
+    post(fn) {
+      queue.push(fn);
+      channel.port2.postMessage(null);
+    },
+    close() {
+      queue.length = 0;
+      channel.port1.close();
+      channel.port2.close();
+    }
+  };
+}
 
 /**
  * Drives `move` from the pointer's raw updates on `target` (the window
@@ -73,38 +106,44 @@ export function rawDragMoves(
   const minInterval = options.minIntervalMs ?? RAW_MOVE_MIN_INTERVAL_MS;
   const now = options.now ?? (() => performance.now());
   const timers = options.timers ?? { set: (fn, ms) => setTimeout(fn, ms) as unknown as number, clear: (id) => clearTimeout(id) };
+  const tasks = options.task ? null : messageTasks();
+  const task = options.task ?? tasks!.post;
   let count = 0;
   let appliedCount = 0;
   let stopped = false;
   let lastApplied = -Infinity;
   let waiting: PointerEvent | null = null;
+  /** A task or an interval timer is due to apply `waiting`. */
+  let scheduled = false;
   let timer = 0;
   const apply = (pointer: PointerEvent): void => {
     lastApplied = now();
     appliedCount++;
     move(pointer.clientX - press.clientX, pointer.clientY - press.clientY, pointer);
   };
-  const flushWaiting = (): void => {
+  const run = (): void => {
+    scheduled = false;
     timer = 0;
+    if (stopped || !waiting) return;
+    const wait = lastApplied + minInterval - now();
+    if (wait > 0) {
+      // Inside the interval: the newest when it ends.
+      scheduled = true;
+      timer = timers.set(run, wait);
+      return;
+    }
     const pointer = waiting;
     waiting = null;
-    if (pointer && !stopped) apply(pointer);
+    apply(pointer);
   };
   const onRaw = (event: Event): void => {
     const pointer = event as PointerEvent;
     if (stopped || (press.pointerId !== undefined && pointer.pointerId !== undefined && pointer.pointerId !== press.pointerId)) return;
     count++;
-    const wait = lastApplied + minInterval - now();
-    if (wait <= 0) {
-      // A quiet interval (or a late timer): apply the newest at once.
-      if (timer) timers.clear(timer);
-      timer = 0;
-      waiting = null;
-      apply(pointer);
-      return;
-    }
     waiting = pointer;
-    if (!timer) timer = timers.set(flushWaiting, Math.max(0, wait));
+    if (scheduled) return;
+    scheduled = true;
+    task(run);
   };
   target.addEventListener('pointerrawupdate', onRaw, true);
   return {
@@ -116,6 +155,8 @@ export function rawDragMoves(
       if (stopped) return;
       if (timer) timers.clear(timer);
       timer = 0;
+      scheduled = false;
+      tasks?.close();
       if (flush && waiting) apply(waiting);
       waiting = null;
       stopped = true;
