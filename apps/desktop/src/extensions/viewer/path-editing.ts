@@ -38,9 +38,8 @@ function targetTransform(api: PowermoveAPI,layer:any,target:any,time:number){
 
 function inverse(m:[number,number,number,number,number,number],p:any){const d=m[0]*m[3]-m[1]*m[2];return Math.abs(d)<1e-9?null:{x:(m[3]*(p.x-m[4])-m[2]*(p.y-m[5]))/d,y:(-m[1]*(p.x-m[4])+m[0]*(p.y-m[5]))/d};}
 
-export function drawEditablePaths(api:PowermoveAPI,c:CanvasRenderingContext2D,scale:number) {
+export function drawEditablePaths(api:PowermoveAPI,c:CanvasRenderingContext2D,scale:number,time=api.transport.time()) {
   if(api.services.get<{tool:string}>('tool')?.tool!=='pen')return;
-  const time=api.transport.time();
   for(const layer of api.selection.layers().map(id=>api.model.layer(id)).filter((value):value is Layer=>!!value))for(const target of pathTargets(layer)){
     const m=api.anim.mul(api.anim.worldMatrix(layer,time),targetTransform(api,layer,target,time));
     const value=pathValues(api,layer,target.path,time,target.prefix);
