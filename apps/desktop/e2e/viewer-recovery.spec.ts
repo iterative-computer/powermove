@@ -253,7 +253,7 @@ test.describe('@viewer composition recovery', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('zooms with a mouse wheel, pans with trackpad scroll, pinches to zoom, and middle-drags', async ({ session }) => {
+  test('zooms with a mouse wheel, holds still for a plain trackpad scroll, pans with Shift, pinches to zoom, and middle-drags', async ({ session }) => {
     await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
@@ -269,13 +269,19 @@ test.describe('@viewer composition recovery', () => {
     expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; })).toBeGreaterThan(fittedZoom);
 
     await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.returnToComposition(); });
-    await page.evaluate(({ x, y }) => {
+    const scroll = (shiftKey: boolean) => page.evaluate(({ x, y, shiftKey }) => {
       const stageElement = document.querySelector('#stage')!;
       stageElement.dispatchEvent(new WheelEvent('wheel', {
-        bubbles: true, cancelable: true, clientX: x, clientY: y,
+        bubbles: true, cancelable: true, clientX: x, clientY: y, shiftKey,
         deltaMode: WheelEvent.DOM_DELTA_PIXEL, deltaX: 6.5, deltaY: 10.25,
       }));
-    }, pointer);
+    }, { ...pointer, shiftKey });
+    await scroll(false);
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return ({
+      fit: viewer.fit,
+      pan: [...viewer.pan],
+    }); })).toEqual({ fit: true, pan: [0, 0] });
+    await scroll(true);
     expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return ({
       fit: viewer.fit,
       zoom: viewer.shown,

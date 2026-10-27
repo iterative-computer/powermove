@@ -38,7 +38,7 @@ for (const camera of [
         const now = performance.now(); frames.push(now - previous); previous = now;
         const rect = viewer.stage.getBoundingClientRect();
         const direction = (Math.floor(i / 45) % 2 ? -1 : 1) * (camera.outward ? -1 : 1);
-        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7.3 * direction, deltaY: 2.7 * direction, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 }));
+        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, shiftKey: true, deltaX: 7.3 * direction, deltaY: 2.7 * direction, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 }));
 
       }
       await new Promise(resolve => setTimeout(resolve, 150));

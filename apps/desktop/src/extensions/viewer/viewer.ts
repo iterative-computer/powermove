@@ -1777,6 +1777,8 @@ function bindStage(stage: any, inner: any): () => void {
       zoomAtEvent(e, factor);
       return;
     }
+    // A plain two-finger scroll leaves the view where it is; Shift scrolls it.
+    if (!e.shiftKey) return;
     leaveFitMode();
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
     const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
