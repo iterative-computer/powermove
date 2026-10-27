@@ -1281,10 +1281,12 @@ describe('ViewerPresentation', () => {
     expect(presentation.stats()?.generation).toBe(3);
     expect(channel.states.at(-1)).toMatchObject({ size: { width: 800, height: 450 }, devicePixelRatio: 1 });
     channel.handlers.message({ type: 'frame', frame: { ...desc(4, channel.states.at(-1)!.viewSeq), poolGeneration: 3 } }, performance.now());
-    // Sent to the worker, and announced, at the page's animation frame.
-    runFrames(target.rafs, performance.now());
+    // Sent to the worker, and announced, at the page's animation frame, on
+    // this realm's clock (the popout's starts 5 s later).
+    runFrames(target.rafs, 100);
     await settleLong();
     expect(presentation.latest?.seq).toBe(4);
+    expect(presentation.latest?.rafMs).toBe(5100);
     presentation.dispose();
     await (popout as unknown as HappyWindow).happyDOM.close();
     delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
