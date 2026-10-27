@@ -1,3 +1,6 @@
+import os from 'node:os';
+import path from 'node:path';
+
 import { expect, test } from '@playwright/test';
 import { launchApp } from './helpers/app';
 
@@ -18,13 +21,14 @@ test('export settings and save panels keep an on-demand job utility warm until d
     await active.page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect.poll(async () => (await status()).state).toBe('stopped');
 
-    // Direct export callers also hold the save panel without a settings sheet.
+    // Direct export callers also hold the save panel without a settings sheet,
+    // then the preflight after it (the destination is asked first).
     // Substitution stays in the hidden host; no native dialog reaches the user.
-    await active.app.evaluate(({ dialog }) => {
+    await active.app.evaluate(({ dialog }, filePath) => {
       dialog.showSaveDialog = () => new Promise(resolve => {
-        (globalThis as any).__cancelWarmthPanel = () => resolve({ canceled: true, filePath: '' });
+        (globalThis as any).__answerWarmthPanel = () => resolve({ canceled: false, filePath });
       });
-    });
+    }, path.join(os.tmpdir(), 'powermove-warmth-never-written.mp4'));
     await active.page.evaluate(() => {
       const PM = (window as any).PM;
       const flush = PM.HostMedia.flushBindings.bind(PM.HostMedia);
@@ -36,20 +40,19 @@ test('export settings and save panels keep an on-demand job utility warm until d
         format: 'h264', scale: 1, fps: 24, range: 'all', quality: 'high', audio: false, mblur: false
       });
     });
-    await active.page.waitForFunction(() => typeof (window as any).__finishExportPreflight === 'function');
-    await expect.poll(async () => (await status()).state).toBe('ready');
-    const preflightLaunch = (await status()).generation;
-    expect(preflightLaunch).toBeGreaterThan(sheetLaunch);
-    await active.page.waitForTimeout(1500);
-    expect(await status()).toMatchObject({ state: 'ready', generation: preflightLaunch });
-    await active.page.evaluate(() => (window as any).__finishExportPreflight());
-    await expect.poll(() => active.app.evaluate(() => typeof (globalThis as any).__cancelWarmthPanel)).toBe('function');
+    await expect.poll(() => active.app.evaluate(() => typeof (globalThis as any).__answerWarmthPanel)).toBe('function');
     await expect.poll(async () => (await status()).state).toBe('ready');
     const panelLaunch = (await status()).generation;
-    expect(panelLaunch).toBe(preflightLaunch);
+    expect(panelLaunch).toBeGreaterThan(sheetLaunch);
     await active.page.waitForTimeout(1500);
     expect(await status()).toMatchObject({ state: 'ready', generation: panelLaunch });
-    await active.app.evaluate(() => (globalThis as any).__cancelWarmthPanel());
+    await active.app.evaluate(() => (globalThis as any).__answerWarmthPanel());
+    await active.page.waitForFunction(() => typeof (window as any).__finishExportPreflight === 'function');
+    await active.page.waitForTimeout(1500);
+    expect(await status()).toMatchObject({ state: 'ready', generation: panelLaunch });
+    // Cancelled from the progress sheet before the job starts.
+    await active.page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await active.page.evaluate(() => (window as any).__finishExportPreflight());
     expect(await active.page.evaluate(() => (window as any).__warmthExport)).toEqual({ cancelled: true });
     await expect.poll(async () => (await status()).state).toBe('stopped');
   } finally { await active.close(); }

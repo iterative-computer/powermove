@@ -3,19 +3,23 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { install } from './exporter';
 import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 
-/* With Use New Engine on, the export sheet shows from the click: the project
-   check, the save panel and the job engine's setup take seconds on a large
-   project, and the sheet stays until the job ends, which a notice then
-   reports (Show in Finder, or why it failed). */
+/* With Use New Engine on, an export asks for its destination first, then the
+   sheet shows at once and stays until the job ends: the project check, media
+   and the job engine's setup take seconds on a large project and read
+   "Preparing…". A notice then reports the outcome (Show in Finder, or why it
+   failed). */
 
 vi.mock('./export-preview', () => ({ animateExportPreview: () => () => {} }));
 afterEach(() => { resetBridgeForTests(); document.body.replaceChildren(); });
 
 function fixture() {
   let checked!: () => void;
+  let chose!: (destination: unknown) => void;
   let answer!: (start: unknown) => void;
   let listener: ((status: unknown) => void) | null = null;
+  const exportDestination = vi.fn(() => new Promise(resolve => { chose = resolve; }));
   const exportVideo = vi.fn(() => new Promise(resolve => { answer = resolve; }));
+  const beforeExport = vi.fn(() => new Promise<void>(resolve => { checked = resolve; }));
   const cancelExport = vi.fn(async () => undefined);
   const revealExport = vi.fn(async () => true);
   installBridgeForTests({
@@ -25,7 +29,7 @@ function fixture() {
       exportSheet: () => {},
       status: async () => ({ enabled: true, processes: { job: { state: 'ready' } } }),
       onExportStatus: (fn: (status: unknown) => void) => { listener = fn; return () => { listener = null; }; },
-      exportVideo, cancelExport,
+      exportDestination, exportVideo, cancelExport,
     }
   } as any);
   const toasts: Array<[string, any]> = [];
@@ -53,7 +57,7 @@ function fixture() {
       cancel = options.actions[0].run;
       return { el, close() { if (el.isConnected) { el.remove(); options.onClose?.(); } } };
     },
-    EngineDoc: { beforeExport: () => new Promise<void>(resolve => { checked = resolve; }) },
+    EngineDoc: { beforeExport },
     toast: (text: string, _ms: number, options: any = {}) => { toasts.push([text, options]); },
     round: (n: number) => n,
   };
@@ -62,22 +66,35 @@ function fixture() {
   const label = () => document.querySelector('.export-progress-label')?.textContent ?? null;
   const percent = () => document.querySelector('.export-progress [role="progressbar"]')?.getAttribute('aria-valuenow') ?? null;
   return {
-    PM, exportVideo, cancelExport, revealExport, toasts, sheet, label, percent,
+    PM, exportDestination, exportVideo, beforeExport, cancelExport, revealExport, toasts, sheet, label, percent,
     check: () => checked(), answer: (start: unknown) => answer(start), status: (status: unknown) => listener?.(status),
+    choose: async (destination: unknown = { status: 'chosen', destination: 'D1', path: '/x/Film.mp4' }) => {
+      await vi.waitFor(() => expect(exportDestination).toHaveBeenCalledOnce());
+      chose(destination);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    },
     cancel: () => cancel(),
     run: () => PM.Export.run({ format: 'h264', fps: 30, scale: 1, range: 'all', quality: 'high', audio: false }),
   };
 }
 
-it('shows the sheet from the click, counts frames, and ends with Show in Finder', async () => {
+it('asks for the destination first, then shows the sheet through setup to Show in Finder', async () => {
   const f = fixture();
   const run = f.run();
-  // Before the project check has finished: the sheet is already up.
+  await vi.waitFor(() => expect(f.exportDestination).toHaveBeenCalledOnce());
+  // The save panel comes before any progress or project work.
+  expect(f.sheet()).toBeNull();
+  expect(f.beforeExport).not.toHaveBeenCalled();
+  expect(f.exportDestination.mock.calls[0]![0]).toMatchObject({ name: 'Film', options: { format: 'h264' }, clips: [] });
+  await f.choose();
+  // The project check runs with the sheet up.
+  expect(f.beforeExport).toHaveBeenCalledOnce();
   expect(f.sheet()).not.toBeNull();
   expect(f.label()).toBe('Preparing…');
   expect(f.PM.Export.busy).toBe(true);
   f.check();
   await vi.waitFor(() => expect(f.exportVideo).toHaveBeenCalledOnce());
+  expect(f.exportVideo.mock.calls[0]![0]).toMatchObject({ destination: 'D1' });
   f.answer({ status: 'accepted', jobId: 'J1', frames: 10, path: '/x/Film.mp4' });
   await new Promise(resolve => setTimeout(resolve, 0));
   f.status({ jobId: 'J1', state: 'queued', progress: 0 });
@@ -98,6 +115,7 @@ it('shows the sheet from the click, counts frames, and ends with Show in Finder'
 it('closes the sheet and reports a failed job until dismissed', async () => {
   const f = fixture();
   const run = f.run();
+  await f.choose();
   f.check();
   await vi.waitFor(() => expect(f.exportVideo).toHaveBeenCalledOnce());
   f.answer({ status: 'accepted', jobId: 'J1', frames: 10, path: '/x/Film.mp4' });
@@ -111,6 +129,7 @@ it('closes the sheet and reports a failed job until dismissed', async () => {
 it('cancels while preparing without starting a job', async () => {
   const f = fixture();
   const run = f.run();
+  await f.choose();
   f.cancel();
   expect(f.label()).toBe('Cancelling…');
   f.check();
@@ -120,13 +139,13 @@ it('cancels while preparing without starting a job', async () => {
   expect(f.PM.Export.busy).toBe(false);
 });
 
-it('closes the sheet quietly when the save panel is cancelled', async () => {
+it('shows nothing when the save panel is cancelled', async () => {
   const f = fixture();
   const run = f.run();
-  f.check();
-  await vi.waitFor(() => expect(f.exportVideo).toHaveBeenCalledOnce());
-  f.answer({ status: 'cancelled' });
+  await f.choose({ status: 'cancelled' });
   expect(await run).toEqual({ cancelled: true });
+  expect(f.beforeExport).not.toHaveBeenCalled();
+  expect(f.exportVideo).not.toHaveBeenCalled();
   expect(f.sheet()).toBeNull();
   expect(f.toasts).toEqual([]);
 });

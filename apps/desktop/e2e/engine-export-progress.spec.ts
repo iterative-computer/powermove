@@ -6,18 +6,22 @@ import { expect, test, type ElectronApplication } from '@playwright/test';
 
 import { launchApp } from './helpers/app';
 
-/* With Use New Engine on, an export shows its progress in the native UI from
-   the click on Export until it ends: the export sheet (Preparing…, then
-   frames, percent and time left), then a notice with Show in Finder. A render
-   queue job, which renders without the sheet, shows in the titlebar's task
-   pill while it renders and ends with the same notice. */
+/* With Use New Engine on, an export asks for its destination first and then
+   shows its progress in the native UI until it ends: the export sheet
+   (Preparing… while the project is checked and the job starts, then frames,
+   percent and time left), then a notice with Show in Finder. A render queue
+   job, which renders without the sheet, shows in the titlebar's task pill
+   while it renders and ends with the same notice. */
 
 async function stubPanels(app: ElectronApplication, files: string[]): Promise<void> {
-  await app.evaluate(({ dialog, shell }, paths) => {
-    const g = globalThis as { __panels?: string[]; __revealed?: string[] };
+  await app.evaluate(({ dialog, shell, BrowserWindow }, paths) => {
+    const g = globalThis as { __panels?: string[]; __revealed?: string[]; __progressAtPanel?: boolean[] };
     g.__panels = [...paths];
     g.__revealed = [];
+    g.__progressAtPanel = [];
     dialog.showSaveDialog = (async () => {
+      const window = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.getURL().length > 0)!;
+      g.__progressAtPanel!.push(await window.webContents.executeJavaScript(`!!document.querySelector('.export-progress')`));
       const filePath = g.__panels!.shift();
       return filePath ? { canceled: false, filePath } : { canceled: true, filePath: '' };
     }) as typeof dialog.showSaveDialog;
@@ -26,7 +30,7 @@ async function stubPanels(app: ElectronApplication, files: string[]): Promise<vo
 }
 const revealed = (app: ElectronApplication) => app.evaluate(() => (globalThis as { __revealed?: string[] }).__revealed ?? []);
 
-test('an engine export shows progress from the click to Show in Finder', async () => {
+test('an engine export asks where first, then shows progress to Show in Finder', async () => {
   test.setTimeout(180_000);
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-progress-'));
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
@@ -75,6 +79,7 @@ test('an engine export shows progress from the click to Show in Finder', async (
     await expect(page.locator('.toast', { hasText: 'Export finished' })).toBeVisible({ timeout: 120_000 });
     await expect(progress).toBeHidden();
 
+    expect(await app.evaluate(() => (globalThis as { __progressAtPanel?: boolean[] }).__progressAtPanel), 'the save panel comes before any progress').toEqual([false]);
     const seen = await page.evaluate(() => (window as any).__progress as { values: number[]; labels: string[] });
     expect(seen.labels[0], 'the sheet opens before the job is accepted').toBe('Preparing…');
     expect(seen.labels.some((label) => /^Frame \d+ \/ 120/.test(label)), seen.labels.join(' | ')).toBe(true);

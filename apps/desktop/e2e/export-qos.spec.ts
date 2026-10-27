@@ -68,11 +68,13 @@ test('user export protects playback cadence across playback start and stop', asy
       const w = window as any, PM = w.PM, engine = w.__powermoveTestBridge.nativeEngine;
       w.__exportQosStatuses = [];
       engine.onExportStatus((status: any) => w.__exportQosStatuses.push(status));
-      await PM.HostMedia?.flushBindings(PM.proj); await PM.EngineDefinitions?.settle?.();
-      return engine.exportVideo({ project: JSON.stringify(PM.proj), name: 'Export QoS', options: {
+      const options = {
         format: 'webm-vp9', alpha: false, fps: 60, scale: 1, start: 0, end: 120,
         audio: false, motionBlur: false, quality: 'high'
-      } });
+      };
+      const chosen = await engine.exportDestination({ name: 'Export QoS', options, clips: [] });
+      await PM.HostMedia?.flushBindings(PM.proj); await PM.EngineDefinitions?.settle?.();
+      return engine.exportVideo({ project: JSON.stringify(PM.proj), name: 'Export QoS', options, destination: chosen.destination });
     });
     expect(start.status).toBe('accepted');
     await expect.poll(() => session!.page.evaluate(() => (window as any).__exportQosStatuses.some((s: any) => s.progress > 0)), { timeout: 45_000 }).toBe(true);

@@ -593,25 +593,18 @@ async function run(opts: any) {
   X.cancel = false;
   const bridge = (hostBridge() as any);
   const releaseJob = isRenderFormat(opts.format) && !opts.reportPath ? holdExportJob() : () => {};
-  // With Use New Engine on, every render format runs in the job engine; a
-  // project it cannot render yet comes back here and the current exporter
-  // writes the file the user already chose (agent exports route in main).
-  const throughEngine = isRenderFormat(opts.format) && !opts.reportPath && !!bridge?.nativeEngine?.exportVideo;
-  // The sheet shows from the click: the steps before the first frame take
-  // seconds on a large project (the check below, the offline message and save
-  // panel over the sheet, the job engine reading the project).
-  let sheet: ExportSheet | null = throughEngine && engineOn() ? progressUI() : null;
   try {
-    // The native engine's consistency check (docs/rust-engine.md, section 6).
-    await PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
-    if (PM.proj !== requestedProject || X.cancel) return { cancelled: true };
-    const p = requestedProject;
-    if (throughEngine) {
-      const engine = await exportThroughEngine(opts, sheet);
+    // With Use New Engine on, every render format runs in the job engine; a
+    // project it cannot render yet comes back here and the current exporter
+    // writes the file the user already chose (agent exports route in main).
+    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportDestination) {
+      const engine = await exportThroughEngine(opts);
       if (engine) return engine;
     }
-    closeSheet(sheet);
-    sheet = null;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    await PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+    if (PM.proj !== requestedProject) return { cancelled: true };
+    const p = requestedProject;
     if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.offlineExport) {
       const referenced = referencedClips(p);
       /* Media still loading is not offline. The export waits for the
@@ -676,12 +669,10 @@ async function run(opts: any) {
     PM.captionsHidden = opts.captionsBurn === false;
     return await runPrepared(opts);
   } catch (error) {
-    closeSheet(sheet);
     const message = error instanceof Error ? error.message : String(error);
     exportFailed(message);
     return { error: message };
   } finally {
-    closeSheet(sheet);
     try {
       if (nativeToken) await bridge.render.cancel(nativeToken).catch(() => undefined);
       if (destinationToken) await bridge.exportDestination.release(destinationToken).catch(() => undefined);
@@ -741,10 +732,15 @@ function locateMedia(assets: string[]): void {
   PM.pickFiles?.(false, { replaceAssetId: first });
 }
 
-/** An export through the job engine (main/engine/agent-jobs.ts), with the
- *  progress sheet driven by its job statuses and live previews. Resolves null
- *  when the engine is off or routes the project to the current exporter. */
-async function exportThroughEngine(opts: any, sheet: ExportSheet | null): Promise<any | null> {
+/** An export through the job engine (main/engine/agent-jobs.ts). Like the
+ *  current exporter it asks for the destination first (the offline message,
+ *  then the save panel); the sheet then shows from there to the end: the
+ *  steps before the first frame (the project check, media, the job engine
+ *  reading the project) take seconds on a large project and read
+ *  "Preparing…" with the scan moving, then the job's statuses count frames
+ *  with live previews. Resolves null when the engine is off or routes the
+ *  project to the current exporter. */
+async function exportThroughEngine(opts: any): Promise<any | null> {
   const engine = (hostBridge() as any)?.nativeEngine;
   const status = await engine.status().catch(() => null);
   // The job engine starts on demand and exits when unused: a stopped one is
@@ -753,24 +749,30 @@ async function exportThroughEngine(opts: any, sheet: ExportSheet | null): Promis
   if (!status?.enabled) return null;
   const p: any = PM.proj;
   const [t0, t1]: any = range(opts);
+  const name = outputName(opts), options = sheetOptions(opts);
+  const chosen = await engine.exportDestination({ name, options, clips: referencedClips(p) });
+  if (chosen.status === 'cancelled') return { cancelled: true };
+  if (chosen.status === 'locate') { locateMedia(chosen.assets); return { cancelled: true }; }
+  if (chosen.status !== 'chosen') return null;
+  const ui = progressUI();
   // Statuses can arrive before the start answer; keep them until the job id is known.
   const early: any[] = [];
   let listener: ((s: any) => void) | null = null;
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
-    const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
-    if (!await prepareMedia(p, X, sheet)) return { cancelled: true };
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    await PM.EngineDoc?.beforeExport?.('export');
+    if (PM.proj !== p || X.cancel) return { cancelled: true };
+    const request = { project: JSON.stringify(p), name, options, destination: chosen.destination };
+    if (!await prepareMedia(p, X, ui)) return { cancelled: true };
     // Main captures this window's definitions for the job (contract 10):
     // pending registrations and extension reloads reach it first.
     await PM.EngineDefinitions?.settle?.();
     if (X.cancel) return { cancelled: true };
     const started = await engine.exportVideo(request);
-    if (started.status === 'cancelled') return { cancelled: true };
-    if (started.status === 'locate') { locateMedia(started.assets); return { cancelled: true }; }
     if (started.status !== 'accepted') return null;
     const total = Math.max(1, started.frames);
     const began = window.performance.now();
-    const ui = sheet ?? progressUI(total);
     ui.begin(total);
     let final: any;
     try {
@@ -811,6 +813,7 @@ async function exportThroughEngine(opts: any, sheet: ExportSheet | null): Promis
     exportFinished(window.performance.now() - began, sidecars, lastOutputPath);
     return { cancelled: false };
   } finally {
+    closeSheet(ui);
     off();
   }
 }

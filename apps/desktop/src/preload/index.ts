@@ -41,7 +41,7 @@ import { MEDIA_PATH_IPC } from '../shared/media-tools';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
-import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAsk, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
+import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineCompatAsk, type EngineExportDestination, type EngineExportStart, type EngineExportStatus, type EngineProbeResult, type EngineSnapshotReply, type EngineSnapshotRequest, type EngineStatusMessage, type RenderQueueState, type StageDocumentResult } from '../shared/engine-ipc';
 import { ENGINE_FONTS_EVENTS, ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, RELEASE_NOTICE_CHANNEL, type ReceiverModule } from './frame-bridge';
@@ -620,10 +620,16 @@ const bridge: PowermoveBridge = {
     browserRendition: (request) => ipcRenderer.invoke(ENGINE_IPC.browserRendition, { ...request }),
     cancelMediaJob: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelMediaJob, String(requestId)),
     exportSheet: (sheet, open) => ipcRenderer.send(ENGINE_IPC.exportSheet, sheet, open === true),
+    exportDestination: (request) => ipcRenderer.invoke(ENGINE_IPC.exportDestination, {
+      name: String(request.name),
+      options: { ...request.options },
+      clips: request.clips.map((clip) => ({ asset: String(clip.asset), name: String(clip.name) }))
+    }) as Promise<EngineExportDestination>,
     exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
       project: String(request.project),
       name: String(request.name),
       options: { ...request.options },
+      destination: String(request.destination),
       ...(request.sidecars ? { sidecars: request.sidecars.map((s) => ({ ...s })) } : {})
     }) as Promise<EngineExportStart>,
     queueAdd: (request) => ipcRenderer.invoke(ENGINE_IPC.queueAdd, {

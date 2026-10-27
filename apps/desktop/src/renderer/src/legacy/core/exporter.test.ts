@@ -108,17 +108,21 @@ describe('export lifecycle', () => {
 it('awaits the media binding acknowledgement before an export is submitted', async () => {
   let acknowledge!: () => void;
   const flushBindings = vi.fn(() => new Promise<void>(resolve => { acknowledge = resolve; }));
-  const exportVideo = vi.fn(async () => ({ status: 'cancelled' }));
+  const exportVideo = vi.fn(async () => { throw new Error('Stopped'); });
   installBridgeForTests({ nativeEngine: {
     status: async () => ({ enabled: true, processes: { job: { state: 'ready' } } }),
-    onExportStatus: () => () => {}, exportVideo
+    onExportStatus: () => () => {}, exportVideo,
+    exportDestination: async () => ({ status: 'chosen', destination: 'D1', path: '/x/test.png' })
   } } as any);
-  const X = exporter({ HostMedia: { flushBindings }, proj: { id: 'P1', name: 'test', fps: 30, w: 64, h: 64, dur: 1, work: [0, 1] } });
+  const X = exporter({
+    HostMedia: { flushBindings }, proj: { id: 'P1', name: 'test', fps: 30, w: 64, h: 64, dur: 1, work: [0, 1] },
+    modal: () => ({ el: { classList: { add() {} }, querySelector: () => null }, close() {} }),
+  });
   const exported = X.run({ format: 'still' });
   await vi.waitFor(() => expect(flushBindings).toHaveBeenCalled());
   expect(exportVideo).not.toHaveBeenCalled();
   acknowledge();
-  expect(await exported).toEqual({ cancelled: true });
+  expect(await exported).toEqual({ error: 'Stopped' });
   expect(exportVideo).toHaveBeenCalledOnce();
 });
 
