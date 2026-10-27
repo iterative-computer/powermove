@@ -303,6 +303,8 @@ export interface NativeStats {
   calls: Record<string, number>;
   /** Structural answers served again at an unchanged shape (`shaped`). */
   shapeHits: number;
+  /** `hasKeyAt` answers served again from unchanged mirrored keyframes (`keyAnswers`). */
+  keyHits: number;
   /** Queries that found the mirror missing a structural write and repaired it first. */
   repairs: number;
   fallbacks: Record<string, number>;
@@ -311,7 +313,7 @@ export interface NativeStats {
 }
 
 export class NativeApi {
-  readonly stats: NativeStats = { calls: {}, shapeHits: 0, repairs: 0, fallbacks: {}, fastPath: 0, interned: 0 };
+  readonly stats: NativeStats = { calls: {}, shapeHits: 0, keyHits: 0, repairs: 0, fallbacks: {}, fastPath: 0, interned: 0 };
   /**
    * Structural answers (group ancestry, parenting cycles, the 3D switch) by
    * live layer, valid while the document's shape is unchanged
@@ -322,6 +324,16 @@ export class NativeApi {
    * (docs/engine/perf.md).
    */
   private shapes = new WeakMap<object, Map<string, { shape: number; cur: unknown; live: unknown; index: number; value: unknown }>>();
+  /**
+   * `hasKeyAt` answers by live channel: the key index pm-wasm found, and
+   * what it read (the shadow's keyframes array, unchanged since `revision`,
+   * the layer's `from`, the project rate, the time). The inspector asks for
+   * every row's key at each change; through pm-wasm that was a third of a
+   * layer drag's main-thread time on the real project.
+   */
+  private keyAnswers = new WeakMap<object, { kf: object; from: unknown; fps: unknown; t: unknown; index: number | null; revision: number }>();
+  /** Where a live channel was found in its layer (`channelPath`). */
+  private channelPaths = new WeakMap<object, { layer: object; path: PathPart[] }>();
   private rootsAnswer: { key: string; shape: number; cur: unknown; live: unknown; value: any[] } | null = null;
   /** Set by `layerQuery` and `answer` for `shaped`: the last answer came from
    *  pm-wasm for a layer of the current composition. */
@@ -1306,12 +1318,55 @@ export class NativeApi {
       if (!isObject(prop)) return { threw: prop == null ? readThrows(prop, 'kf') : readThrows(undefined, 'find') };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
-      const path = findPath(ctx.raw, this.unwrap(prop));
+      const raw = this.unwrap(prop);
+      const path = this.channelPath(ctx.raw, raw);
       // A channel outside the layer: pm-wasm reads its JSON (its keys are
       // found by index, so the answer is still the live key).
-      const detached = path ? {} : { prop: prop && typeof prop === 'object' ? asJson(this.unwrap(prop)) : prop };
-      return this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path: path ?? [], ...detached, t: T }, (i) => i == null ? null : prop.kf[i] ?? null);
+      const detached = path ? {} : { prop: prop && typeof prop === 'object' ? asJson(raw) : prop };
+      const mirrored = path && typeof ctx.layer === 'number' ? this.mirroredKeys(ctx, path, T) : null;
+      const memo = mirrored && this.keyAnswers.get(raw);
+      if (mirrored && memo && memo.kf === mirrored.kf && this.barrier()!.unchangedSince(mirrored.kf, memo.revision)
+        && Object.is(memo.from, mirrored.from) && Object.is(memo.fps, mirrored.fps) && Object.is(memo.t, T)) {
+        this.stats.keyHits += 1;
+        return { value: memo.index == null ? null : prop.kf[memo.index] ?? null };
+      }
+      let index: number | null = null;
+      const got = this.query('hasKeyAt', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path: path ?? [], ...detached, t: T }, (i) => {
+        index = i ?? null;
+        return i == null ? null : prop.kf[i] ?? null;
+      });
+      if (mirrored && 'value' in got) this.keyAnswers.set(raw, { ...mirrored, t: T, index, revision: this.barrier()!.revision });
+      return got;
     }, () => this.legacy.hasKeyAt(L, prop, T), () => ({ layer: L?.id, t: T }));
+  }
+
+  /** Where channel `prop` is in layer `layer` (remembered, and checked at each use), or null. */
+  private channelPath(layer: any, prop: any): PathPart[] | null {
+    const known = prop && typeof prop === 'object' ? this.channelPaths.get(prop) : undefined;
+    if (known && known.layer === layer && at(layer, known.path) === prop) return known.path;
+    const path = findPath(layer, prop);
+    if (path && prop && typeof prop === 'object') this.channelPaths.set(prop, { layer, path });
+    return path;
+  }
+
+  /**
+   * What pm-wasm reads for `hasKeyAt` of the channel at `path` in the
+   * layer of `ctx` (`p.kf.find(k => Math.abs(k.t - (T - L.from)) < .5 /
+   * PM.proj.fps)`), from the shadow after a flush: the keyframes array (a
+   * shadow container) and the two numbers. Null when the mirror cannot say.
+   */
+  private mirroredKeys(ctx: Context, path: PathPart[], T: unknown): { kf: object; from: unknown; fps: unknown } | null {
+    if (this.dual || typeof T !== 'number') return null;
+    const barrier = this.barrier();
+    const c = this.comps();
+    if (!barrier || !c || ctx.comp.startsWith('@scope:') || !this.ready()) return null;
+    const layer = [...this.mirrorBase(ctx.comp, c.cur), 'layers', ctx.layer as number];
+    const kf = lookup(barrier.shadow, [...layer, ...path, 'kf']);
+    if (!kf.exists || !Array.isArray(kf.value)) return null;
+    const root = barrier.shadow;
+    const own = lookup(root, ['fps']);
+    const fps = own.exists ? own.value : lookup(root, ['comps', String(root?.compId), 'fps']).value;
+    return { kf: kf.value, from: lookup(barrier.shadow, [...layer, 'from']).value, fps };
   }
 
   wouldCycle(L: any, parentId: any): boolean {

@@ -614,6 +614,37 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.auditor!.audit()).toBe(true);
   });
 
+  it('serves hasKeyAt again while the keys, the layer start, and the rate it read are unchanged', async () => {
+    const { PM, doc } = await editor('on');
+    const api = doc.api!;
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid', { name: 'A', from: 1 })));
+    const L = PM.proj.layers.find((l: any) => l.name === 'A');
+    PM.hist.do('Keys', () => {
+      L.p.opacity.kf = [PM.KF(0, 10, 'linear'), PM.KF(1, 90, 'linear')];
+      L.p.rotation.kf = [PM.KF(0.5, 0, 'linear')];
+      PM.touch();
+    });
+    const legacy = (p: any, T: number) => p.kf.find((k: any) => Math.abs(k.t - (T - L.from)) < .5 / PM.proj.fps) || null;
+    const same = (T: number) => {
+      for (const p of [L.p.opacity, L.p.rotation, L.p['scale.x']]) expect(api.hasKeyAt(L, p, T)).toBe(legacy(p, T));
+    };
+    same(2);
+    const hits = api.stats.keyHits;
+    // Another channel's edit leaves these answers alone.
+    expect(PM.Edit.apply({ type: 'set_property', target: L.id, path: 'position.x', value: 40 }).ok).toBe(true);
+    same(2);
+    expect(api.stats.keyHits).toBe(hits + 3);
+    // A key moved in place, a key added, the layer's start, and the rate all change them.
+    PM.hist.do('Move key', () => { L.p.opacity.kf[1].t = 1.5; PM.touch(); });
+    same(2); same(2.5);
+    PM.hist.do('Add key', () => { L.p['scale.x'].kf = [PM.KF(1, 50, 'linear')]; PM.touch(); });
+    same(2);
+    PM.hist.do('Slide', () => { L.from = 0.5; PM.touch(); });
+    same(2); same(1.5);
+    PM.hist.do('Rate', () => { PM.proj.fps = 1; PM.touch(); });
+    same(1.1);
+  });
+
   it('serves structural answers again until the composition shape changes', async () => {
     const { PM, doc } = await editor('on');
     const api = doc.api!;
