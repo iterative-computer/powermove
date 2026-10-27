@@ -2408,18 +2408,23 @@ function handleAt(selection: SelectionGeometry, x: any, y: any) {
 
 function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
+  /* Whether a layer is 3D cannot change while it is dragged: asked once
+     here, not on every move (with the engine on, a structural question
+     after the move's edits waits for them to reach pm-wasm first). */
   const start = layers.map((L: any) => {
     const x = ev(api, L, 'position.x', T), y = ev(api, L, 'position.y', T);
-    const m = space3d.is3DLayer(L) ? space3d.planeMatrix(L,T,true) : null;
-    return {L,x,y,inverse:m ? space3d.inversePlane(m) : null,pivot:m ? space3d.projectPoint(m,{x,y}) : null};
+    const is3D = space3d.is3DLayer(L);
+    const m = is3D ? space3d.planeMatrix(L,T,true) : null;
+    return {L,x,y,is3D,inverse:m ? space3d.inversePlane(m) : null,pivot:m ? space3d.projectPoint(m,{x,y}) : null};
   });
   const moveDelta = (s: any, dx: number, dy: number): [number,number] => {
-    if (!space3d.is3DLayer(s.L)) return worldDeltaToLocal(s.L,T,dx,dy);
+    if (!s.is3D) return worldDeltaToLocal(s.L,T,dx,dy);
     if (!s.inverse) return [0,0];
     const p = space3d.projectPoint(s.inverse,{x:s.pivot.x+dx,y:s.pivot.y+dy});
     return [p.x-s.x,p.y-s.y];
   };
   const selectionLayers = options.selectionLayers || layers;
+  const snapsBox = !selectionLayers.some((layer: any) => space3d.is3DLayer(layer));
   const candidates = snapshotSnapCandidates(T, selectionLayers);
   const clearGuides = () => { V.snapLines = null; invalidate('render'); };
   api.edit.begin(selectionLayers.length > 1 ? 'Move selection' : 'Move layer', { origin: 'canvas' });
@@ -2446,7 +2451,7 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
          snapping for precise free movement. Keeping those jobs separate also
          lets an unconstrained drag align both axes at once. */
       let snap: SnapResult = { dx: 0, dy: 0, lines: [] };
-      const box = !(ev.metaKey || ev.ctrlKey) && !selectionLayers.some((layer: any) => space3d.is3DLayer(layer)) ? unionBounds(selectionLayers, T) : null;
+      const box = !(ev.metaKey || ev.ctrlKey) && snapsBox ? unionBounds(selectionLayers, T) : null;
       if (box) {
         snap = snapBox(snapCandidatesFromPoints(boxSnapPoints(box)), candidates,
           SNAP_DISTANCE / Math.max(.02, V.shown), axes);

@@ -12,7 +12,8 @@
 //! are made, so later reads see them (the legacy code reads what it wrote a
 //! line earlier: a reparented parent before its children, a baked parent key
 //! before the child that depends on it), and [`Edit::finish`] diffs the
-//! touched compositions into the smallest operation list (`diff_ops`): leaf
+//! touched compositions into the smallest operation list
+//! (`diff_node_ops`, skipping the subtrees the copy still shares): leaf
 //! sets where a value changed, id-keyed inserts and deletes where layers or
 //! keys came or went. Leaf sets keep the identities of the live objects the
 //! renderer holds (a channel's keys stay the same objects).

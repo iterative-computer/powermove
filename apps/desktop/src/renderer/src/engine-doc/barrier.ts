@@ -208,6 +208,8 @@ export class DocumentBarrier {
   shadow: any = undefined;
   /** What unchanged shadow elements were last compared equal to. */
   private memo = new JsonMemo();
+  /** The revision that last changed each shadow container (see `unchangedSince`). */
+  private changedAt = new WeakMap<object, number>();
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
   private integrity = new ConsistencyHash();
@@ -543,6 +545,7 @@ export class DocumentBarrier {
       for (const op of ops) {
         this.integrity.invalidate(this.shadow, [op]);
         this.memo.forgetAlong(this.shadow, op.path);
+        this.markAlong(op.path, base + 1);
         this.shadow = applyOps(this.shadow, [op]);
       }
       this.trace?.('document encode and shadow', encodeStarted);
@@ -575,6 +578,28 @@ export class DocumentBarrier {
     const postStarted = this.trace ? performance.now() : 0;
     this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets, ...(provisional ? { provisional: true } : {}) });
     this.trace?.('document patch dispatch', postStarted);
+  }
+
+  /** Stamps every shadow container an operation at `path` changes in place. */
+  private markAlong(path: readonly PathPart[], revision: number): void {
+    let node = this.shadow;
+    for (let i = 0; ; i++) {
+      if (node === null || typeof node !== 'object') return;
+      this.changedAt.set(node, revision);
+      if (i === path.length) return;
+      node = node[path[i] as any];
+    }
+  }
+
+  /**
+   * Whether `node`, a container of the shadow, holds what it held at
+   * `revision`: operations change the shadow in place along their paths
+   * (stamping each container there), and a container they replace is a new
+   * object. Answers memoized on a shadow container stay exact while this
+   * holds.
+   */
+  unchangedSince(node: object, revision: number): boolean {
+    return (this.changedAt.get(node) ?? -Infinity) <= revision;
   }
 
   private requireNativeAvailable(): void {

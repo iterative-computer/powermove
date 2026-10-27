@@ -169,9 +169,13 @@ keeps it hidden until the engine presents a frame for the session, and:
 - **Gestures on raw updates.** While the engine presents, the viewer's
   drags take their moves from `pointerrawupdate` instead of the
   rAF-aligned `pointermove` (`raw-gestures.ts`), so the engine hears about
-  a move before the animation frame that would carry it. The drag helper
-  keeps capture, up, cancel, and the cursor; pointer-lock drags keep
-  `pointermove`. The view state leaves before `V.layout` writes styles.
+  a move before the animation frame that would carry it. A raw update
+  only records the pointer; the move runs in an ordinary task right behind
+  it (newest wins), never inside the input event, so the engine's frames
+  and releases (port messages the page relays) are not held behind a
+  gesture's input tasks. The drag helper keeps capture, up, cancel, and
+  the cursor; pointer-lock drags keep `pointermove`. The view state
+  leaves before `V.layout` writes styles.
 - **Vsync hint.** The presenter fits its animation frames to a refresh
   grid, maps it to the host clock, and the presentation re-sends the
   current view with it (`ViewerState.vsync`, same `viewSeq`; contract 2

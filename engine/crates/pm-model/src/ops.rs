@@ -53,10 +53,12 @@
 
 use std::collections::HashMap;
 
+use crate::doc::{Node, NodeKind};
+use crate::json::write::{JsonTree, View};
 use crate::json::{self, JsString, Map, Value};
 use crate::patch::{
     self, MAX_ARRAY_LENGTH, NodeMut, Patch, PatchDecodeError, PatchError, PatchErrorKind, PathPart,
-    Tree, clone_patch_value, object_is, record_id,
+    Tree, clone_patch_value, record_id,
 };
 
 /// One operation of a patch stream: a leaf patch or an id-keyed structural
@@ -387,9 +389,53 @@ fn apply_to_array<T: Tree>(
 
 // ── The generator ───────────────────────────────────────────────────────────
 
+/// A tree [`diff_ops`] can compare: plain [`Value`]s, and the revisioned
+/// document tree ([`crate::doc::Node`]), whose untouched subtrees two
+/// versions of a document share.
+pub(crate) trait DiffTree: JsonTree + Tree {
+    /// The subtree as the JSON value an operation carries (normalized as
+    /// `clone_patch_value` normalizes it).
+    fn normalized(&self) -> Value;
+    /// Whether `other` is this very subtree (shared, so equal without a
+    /// look inside). Never true for plain values.
+    fn shares(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl DiffTree for Value {
+    fn normalized(&self) -> Value {
+        self.json_normalized()
+    }
+}
+
+impl DiffTree for Node {
+    fn normalized(&self) -> Value {
+        self.to_value().json_normalized()
+    }
+    fn shares(&self, other: &Node) -> bool {
+        match (self.kind(), other.kind()) {
+            (NodeKind::Array(x), NodeKind::Array(y)) => std::sync::Arc::ptr_eq(x, y),
+            (NodeKind::Object(x), NodeKind::Object(y)) => std::sync::Arc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+}
+
 /// Operations turning `before` into `after` (see the module documentation).
 /// `None` is `undefined`.
 pub fn diff_ops(before: Option<&Value>, after: Option<&Value>) -> Vec<Op> {
+    let mut out = Vec::new();
+    diff_into(before, after, &mut Vec::new(), &mut out);
+    out
+}
+
+/// [`diff_ops`] of two versions of a document subtree: the same operations,
+/// without converting either tree. Subtrees the versions share are equal
+/// and skipped, so the cost follows what changed, not the subtree's size
+/// (a kernel's edit of one layer of a composition with 770,000 keyframes
+/// diffed the whole composition as values: 1.6 s).
+pub fn diff_node_ops(before: Option<&Node>, after: Option<&Node>) -> Vec<Op> {
     let mut out = Vec::new();
     diff_into(before, after, &mut Vec::new(), &mut out);
     out
@@ -407,45 +453,66 @@ pub fn diff_array_ops(before: &[Value], after: &[Value], path: &[PathPart]) -> V
 
 /// Whether every element is an object with a string `id`, no two alike.
 pub fn is_id_keyed(items: &[Value]) -> bool {
+    id_keyed(items)
+}
+
+fn id_keyed<T: DiffTree>(items: &[T]) -> bool {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     items
         .iter()
-        .all(|item| record_id(item).is_some_and(|id| seen.insert(id)))
+        .all(|item| item.record_id().is_some_and(|id| seen.insert(id)))
 }
 
-fn leaf_set(path: &[PathPart], value: Option<&Value>) -> Op {
+/// `object_is` (SameValue for primitives; never for containers).
+fn same_primitive<T: DiffTree>(a: Option<&T>, b: Option<&T>) -> bool {
+    match (a.map(JsonTree::view), b.map(JsonTree::view)) {
+        (None, None) => true,
+        (Some(View::Null), Some(View::Null)) => true,
+        (Some(View::Bool(x)), Some(View::Bool(y))) => x == y,
+        (Some(View::Number(x)), Some(View::Number(y))) => {
+            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
+        }
+        (Some(View::String(x)), Some(View::String(y))) => x == y,
+        _ => false,
+    }
+}
+
+fn leaf_set<T: DiffTree>(path: &[PathPart], value: Option<&T>) -> Op {
     Op::Leaf(Patch {
         path: path.to_vec(),
         exists: true,
-        value: clone_patch_value(value),
+        value: value.map(T::normalized),
     })
 }
 
-fn diff_into(
-    before: Option<&Value>,
-    after: Option<&Value>,
+fn diff_into<T: DiffTree>(
+    before: Option<&T>,
+    after: Option<&T>,
     path: &mut Vec<PathPart>,
     out: &mut Vec<Op>,
 ) {
-    if object_is(before, after) {
+    if same_primitive(before, after) {
         return;
     }
-    match (before, after) {
-        (Some(Value::Array(b)), Some(Value::Array(a))) => diff_arrays(b, a, path, out),
-        (Some(Value::Object(b)), Some(Value::Object(a))) => {
+    if let (Some(b), Some(a)) = (before, after)
+        && b.shares(a)
+    {
+        return;
+    }
+    match (before.map(JsonTree::view), after.map(JsonTree::view)) {
+        (Some(View::Array(b)), Some(View::Array(a))) => diff_arrays(b, a, path, out),
+        (Some(View::Object(b)), Some(View::Object(a))) => {
             let mut keys: Vec<&JsString> = b
                 .keys()
-                .chain(a.keys().filter(|k| b.get_key(k).is_none()))
+                .chain(a.keys().filter(|k| b.get(*k).is_none()))
                 .collect();
             keys.sort_by(|x, y| x.cmp_utf16(y));
             for key in keys {
-                let (x, y) = (b.get_key(key), a.get_key(key));
+                let (x, y) = (b.get(key), a.get(key));
                 path.push(PathPart::Key(key.clone()));
                 match (x, y) {
                     (Some(_), Some(_)) => diff_into(x, y, path, out),
-                    (_, Some(y)) => {
-                        out.push(Op::Leaf(Patch::set(path.clone(), y.json_normalized())))
-                    }
+                    (_, Some(y)) => out.push(Op::Leaf(Patch::set(path.clone(), y.normalized()))),
                     _ => out.push(Op::Leaf(Patch::delete(path.clone()))),
                 }
                 path.pop();
@@ -455,11 +522,11 @@ fn diff_into(
     }
 }
 
-fn diff_arrays(b: &[Value], a: &[Value], path: &mut Vec<PathPart>, out: &mut Vec<Op>) {
+fn diff_arrays<T: DiffTree>(b: &[T], a: &[T], path: &mut Vec<PathPart>, out: &mut Vec<Op>) {
     let identity_order_changed = b.len() == a.len()
         && b.iter()
             .zip(a)
-            .any(|(x, y)| matches!((record_id(x), record_id(y)), (Some(i), Some(j)) if i != j));
+            .any(|(x, y)| matches!((x.record_id(), y.record_id()), (Some(i), Some(j)) if i != j));
     if b.len() == a.len() && !identity_order_changed {
         for (i, (x, y)) in b.iter().zip(a).enumerate() {
             path.push(PathPart::Index(i as f64));
@@ -468,38 +535,37 @@ fn diff_arrays(b: &[Value], a: &[Value], path: &mut Vec<PathPart>, out: &mut Vec
         }
         return;
     }
-    if !(is_id_keyed(b) && is_id_keyed(a)) {
-        out.push(Op::Leaf(Patch {
-            path: path.clone(),
+    let whole = |path: &[PathPart]| {
+        Op::Leaf(Patch {
+            path: path.to_vec(),
             exists: true,
-            value: Some(Value::Array(a.to_vec()).json_normalized()),
-        }));
+            value: Some(Value::Array(a.iter().map(T::normalized).collect())),
+        })
+    };
+    if !(id_keyed(b) && id_keyed(a)) {
+        out.push(whole(path));
         return;
     }
     let old: HashMap<&JsString, usize> = b
         .iter()
         .enumerate()
-        .map(|(i, item)| (record_id(item).expect("id-keyed"), i))
+        .map(|(i, item)| (item.record_id().expect("id-keyed"), i))
         .collect();
     let new: HashMap<&JsString, usize> = a
         .iter()
         .enumerate()
-        .map(|(i, item)| (record_id(item).expect("id-keyed"), i))
+        .map(|(i, item)| (item.record_id().expect("id-keyed"), i))
         .collect();
     if !b
         .iter()
-        .any(|item| new.contains_key(record_id(item).expect("id-keyed")))
+        .any(|item| new.contains_key(item.record_id().expect("id-keyed")))
     {
-        out.push(Op::Leaf(Patch {
-            path: path.clone(),
-            exists: true,
-            value: Some(Value::Array(a.to_vec()).json_normalized()),
-        }));
+        out.push(whole(path));
         return;
     }
     // 1. Deletes, in old order.
     for item in b {
-        let id = record_id(item).expect("id-keyed");
+        let id = item.record_id().expect("id-keyed");
         if !new.contains_key(id) {
             out.push(Op::Delete {
                 path: path.clone(),
@@ -510,12 +576,12 @@ fn diff_arrays(b: &[Value], a: &[Value], path: &mut Vec<PathPart>, out: &mut Vec
     // 2. The survivors' new order, when it changed.
     let survivors_old: Vec<&JsString> = b
         .iter()
-        .map(|item| record_id(item).expect("id-keyed"))
+        .map(|item| item.record_id().expect("id-keyed"))
         .filter(|id| new.contains_key(id))
         .collect();
     let survivors_new: Vec<&JsString> = a
         .iter()
-        .map(|item| record_id(item).expect("id-keyed"))
+        .map(|item| item.record_id().expect("id-keyed"))
         .filter(|id| old.contains_key(id))
         .collect();
     if survivors_old != survivors_new {
@@ -526,17 +592,17 @@ fn diff_arrays(b: &[Value], a: &[Value], path: &mut Vec<PathPart>, out: &mut Vec
     }
     // 3. Inserts, in ascending final index.
     for (i, item) in a.iter().enumerate() {
-        if !old.contains_key(record_id(item).expect("id-keyed")) {
+        if !old.contains_key(item.record_id().expect("id-keyed")) {
             out.push(Op::Insert {
                 path: path.clone(),
                 index: i as u32,
-                value: item.json_normalized(),
+                value: item.normalized(),
             });
         }
     }
     // 4. The survivors' content, at their final indices.
     for (i, item) in a.iter().enumerate() {
-        if let Some(&j) = old.get(record_id(item).expect("id-keyed")) {
+        if let Some(&j) = old.get(item.record_id().expect("id-keyed")) {
             path.push(PathPart::Index(i as f64));
             diff_into(Some(&b[j]), Some(item), path, out);
             path.pop();
@@ -581,6 +647,111 @@ mod tests {
         let mut root = Some(before);
         assert!(apply_ops(&mut root, &ops).unwrap());
         assert_eq!(root, Some(after));
+    }
+
+    /// `diff_node_ops` of a document and a copy that applied `ops` gives
+    /// what `diff_ops` of their values gives.
+    fn node_diff_matches(before: &str, ops: &[Op]) -> Vec<Op> {
+        let original = crate::Document::new(Some(v(before)), 1);
+        let mut edited = original.clone();
+        edited.apply_ops_at(ops, 2).unwrap();
+        let by_node = diff_node_ops(original.root(), edited.root());
+        let by_value = diff_ops(
+            original.root().map(Node::to_value).as_ref(),
+            edited.root().map(Node::to_value).as_ref(),
+        );
+        assert_eq!(by_node, by_value);
+        by_node
+    }
+
+    #[test]
+    fn document_versions_diff_as_their_values() {
+        let doc = r#"{"layers":[{"id":"a","p":{"x":[{"t":0,"v":1},{"t":1,"v":-0.0}]},"name":"A"},{"id":"b","n":null},{"id":"c","s":"x"}],"w":1920}"#;
+        // A leaf, a member added and one removed, a value of another kind.
+        node_diff_matches(
+            doc,
+            &[
+                Op::Leaf(Patch::set(
+                    path!["layers", 0, "p", "x", 1, "v"],
+                    Value::Number(3.0),
+                )),
+                Op::Leaf(Patch::set(path!["layers", 1, "fresh"], v(r#"{"k":[1,2]}"#))),
+                Op::Leaf(Patch::delete(path!["layers", 2, "s"])),
+                Op::Leaf(Patch::set(path!["w"], v("[1920]"))),
+            ],
+        );
+        // Id-keyed structure: a delete, an order change, an insert.
+        node_diff_matches(
+            doc,
+            &[
+                Op::Delete {
+                    path: path!["layers"].to_vec(),
+                    id: "b".into(),
+                },
+                Op::Order {
+                    path: path!["layers"].to_vec(),
+                    ids: vec!["c".into(), "a".into()],
+                },
+                Op::Insert {
+                    path: path!["layers"].to_vec(),
+                    index: 1,
+                    value: v(r#"{"id":"n","y":2}"#),
+                },
+            ],
+        );
+        // Rewriting a value with itself changes nothing.
+        assert!(
+            node_diff_matches(
+                doc,
+                &[Op::Leaf(Patch::set(
+                    path!["layers", 0, "name"],
+                    v(r#""A""#)
+                ))]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn document_versions_compare_only_what_changed() {
+        // A composition far too large to walk: one changed leaf is one op,
+        // found without visiting the shared layers.
+        let layers: Vec<Value> = (0..2000)
+            .map(|i| {
+                v(&format!(
+                    r#"{{"id":"L{i}","k":[{}]}}"#,
+                    (0..200)
+                        .map(|t| format!(r#"{{"t":{t},"v":{t}}}"#))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+            })
+            .collect();
+        let mut root = Map::new();
+        root.insert("layers", Value::Array(layers));
+        let original = crate::Document::new(Some(Value::Object(root)), 1);
+        let mut edited = original.clone();
+        edited
+            .apply_at(
+                &[Patch::set(
+                    path!["layers", 1500, "k", 3, "v"],
+                    Value::Number(9.0),
+                )],
+                2,
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let ops = diff_node_ops(original.root(), edited.root());
+        let took = started.elapsed();
+        assert_eq!(
+            ops,
+            vec![Op::Leaf(Patch::set(
+                path!["layers", 1500, "k", 3, "v"],
+                Value::Number(9.0)
+            ))]
+        );
+        // Converting and diffing the 400,000 keyframes takes far longer.
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
     }
 
     #[test]
