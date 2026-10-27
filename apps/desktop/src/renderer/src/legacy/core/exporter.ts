@@ -8,7 +8,8 @@ import { exportEffects, type EffectRef } from './export-effects';
 import { AlphaReadbackRetryError } from '../gl/half-readback';
 import { installRenderQueue, wavBytes } from './render-queue';
 import { WEBM_ENCODE_QUEUE_LIMIT, WEBM_VIDEO_CODECS, webmFrameTiming, webmKeyFrame, webmVideoConfig } from './webm-video';
-import { openRenderQueuePanel } from './render-queue-panel';
+import { openRenderQueuePanel, queueBridge } from './render-queue-panel';
+import { trackExportTasks } from './export-tasks';
 import { muxWebM as muxEncodedWebM } from './webm-mux';
 import { writeBlobChunks } from './blob-chunks';
 /* Ported from js/core/exporter.js — behavior-preserving. */
@@ -1574,6 +1575,11 @@ installRenderQueue(PM,X);
    (render-queue-panel.ts); today's queue dialog stays for the current exporter. */
 const legacyQueueDialog = X.queueDialog;
 X.queueDialog = () => (engineOn() && openRenderQueuePanel(PM)) || legacyQueueDialog();
+/* Queue and agent exports render without the sheet: they show in the task pill. */
+{
+  const queue = engineOn() ? queueBridge() : null;
+  if (queue) trackExportTasks(PM, queue);
+}
 /* "Locate Media…" from the offline message reaches this window too when the
    export started elsewhere (an agent, the queue). */
 (hostBridge() as any)?.nativeEngine?.onLocateMedia?.((assets: string[]) => { if (!X.busy) locateMedia(assets); });

@@ -20,7 +20,7 @@ type QueueBridge = {
   onQueueChanged(listener: (state: RenderQueueState) => void): () => void;
 };
 
-function queueBridge(): QueueBridge | null {
+export function queueBridge(): QueueBridge | null {
   const engine = (hostBridge() as { nativeEngine?: Partial<QueueBridge> } | undefined)?.nativeEngine;
   return engine?.queueList && engine.queueAction && engine.onQueueChanged ? engine as QueueBridge : null;
 }
