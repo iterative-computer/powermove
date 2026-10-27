@@ -440,6 +440,9 @@ for (const failure of [false, true]) test(`native video waits for an encoder ack
         }, (error: any) => { (window as any).__heldNativeResult = { unexpectedRejection: String(error) }; });
     });
     await expect.poll(() => session.app.evaluate(() => (globalThis as any).__heldNativeVideo.held)).toBe(true);
+    // A clip decoded in order (issue #185) may prepare and submit the next
+    // frame while this ACK is held; let that settle before cancelling.
+    await session.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const before = await session.page.evaluate(() => {
       const PM = (window as any).PM, media = (window as any).__readyNativeMedia;
       PM.Export.cancel = true;
@@ -453,7 +456,9 @@ for (const failure of [false, true]) test(`native video waits for an encoder ack
       return { currentTime: media.asset.el.currentTime, seeks: media.seeks, begins: media.begins.slice(), result: (window as any).__heldNativeResult };
     })).toEqual({ ...before, result: null });
     expect(before.currentTime).toBe(0);
-    expect(before.begins).toEqual([0]);
+    // Seeking clips wait for the ACK before the next frame; sequentially
+    // decoded clips prepare it without seeking, but never read back or write.
+    expect([[0], [0, .25]]).toContainEqual(before.begins);
     await session.app.evaluate(() => (globalThis as any).__releaseNativeVideo());
     const result = await session.page.evaluate(() => (window as any).__heldNativeJob);
     if (failure) expect(result.error).toContain('Synthetic held encoder write failure');

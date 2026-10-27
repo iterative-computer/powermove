@@ -61,9 +61,12 @@ export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<
       options = { ...input, mblur: input.motionBlur, fps: PM.proj.fps, scale: 1, reportPath: true };
     }
     const result = await PM.Export.run(options);
-    if (!result || result.error || result.cancelled || !result.path) throw new Error(result?.error || (result?.cancelled ? 'Export cancelled.' : 'Export produced no saved file.'));
+    // Name the stage that failed: decoding, rendering, encoding, mixing audio or finalizing.
+    const stage = result?.error && PM.Export.lastFailureStage;
+    if (!result || result.error || result.cancelled || !result.path) throw new Error(result?.error ? `${result.error}${stage ? ` (while ${stage})` : ''}` : result?.cancelled ? 'Export cancelled.' : 'Export produced no saved file.');
     PM.Projects.put(PM.proj);
-    return { path: result.path, projectId: PM.proj.id, ...(tool === '__mcp_export_video' ? { width: PM.proj.w, height: PM.proj.h, fps: PM.proj.fps } : {}) };
+    const timings = tool === '__mcp_export_video' ? PM.Export.lastStats : undefined;
+    return { path: result.path, projectId: PM.proj.id, ...(tool === '__mcp_export_video' ? { width: PM.proj.w, height: PM.proj.h, fps: PM.proj.fps, ...(timings ? { timings } : {}) } : {}) };
   }
   throw new Error('Unknown MCP project operation.');
 }
