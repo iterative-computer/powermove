@@ -534,9 +534,18 @@ describe('legacy app install', () => {
     const hydrated = PM.hydrateProject({ ...PM.proj, exportDefaults: { format: 'prores', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: true, audio: true, alpha: true } });
     expect(hydrated.exportDefaults.format).toBe('prores');
     PM.proj = hydrated;
-    PM.hist.do = (_label: string, fn: () => void) => fn();
+    // One scoped history entry per write, tracking only the export settings (no whole-project snapshot).
+    const history: unknown[][] = [];
+    Object.assign(PM.hist, {
+      do: () => { throw new Error('export settings never snapshot the whole project'); },
+      beginScoped: (label: string) => { history.push(['begin', label]); return true; },
+      track: (paths: unknown[]) => { history.push(['track', paths]); return true; },
+      commit: (label: string) => { history.push(['commit', label]); return true; },
+      rollback: () => { history.push(['rollback']); return true; },
+    });
     expect(PM.exportDefaults.read().format).toBe('prores-4444');
     PM.exportDefaults.write({ format: 'h264' });
+    expect(history).toEqual([['begin', 'Export settings'], ['track', [['exportDefaults']]], ['commit', 'Export settings']]);
     expect(PM.proj.exportDefaults.format).toBe('mp4');
     expect(PM.exportDefaults.read().format).toBe('h264');
     PM.exportDefaults.write({ format: 'prores-hq' });
