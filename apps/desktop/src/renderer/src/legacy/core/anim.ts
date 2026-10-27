@@ -6,20 +6,69 @@ import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
 import { compileExpression } from './expression';
 import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge';
-import { applyUnitCurve } from '../../core/anim/temporal-ease';
+import { applyUnitCurve, hasNativeEase } from '../../core/anim/temporal-ease';
 import { derivedId } from './derived-id';
+
+/** Composition settings no layer, keyframe or evaluation depends on. */
+export const LAYER_FREE_SETTINGS: ReadonlySet<string> = new Set(['name', 'work', 'audioGain', 'bg', 'backgroundFill', 'shutter', 'colorDepth']);
+/** Of those, the ones no rendered pixel depends on either. */
+export const UNRENDERED_SETTINGS: ReadonlySet<string> = new Set(['name', 'work', 'audioGain']);
+/** Whether every path (as writers or history give them: `['work']` or
+ *  `['comps', id, 'work']`) is one of `settings` or the edit's provenance. */
+export function settingsOnly(paths: unknown, settings: ReadonlySet<string>): boolean {
+  if (!Array.isArray(paths) || !paths.length) return false;
+  return paths.every(path => {
+    if (!Array.isArray(path)) return false;
+    if (path.length === 1) return path[0] === 'revision' || path[0] === 'edits' || settings.has(String(path[0]));
+    return path.length === 3 && path[0] === 'comps' && settings.has(String(path[2]));
+  });
+}
 
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
 let defaultHandles: any = { eo: [.33, 0], ei: [.67, 1] };
 try { defaultHandles = Ease.handles('power') || defaultHandles; } catch (e) { }
 
+/* `version` advances on every document write (PM.animVersion: "did anything
+   change"); `evaluation` only on writes that can change what layers and
+   keyframes evaluate to. A composition setting (the work area, the name, the
+   background) that no expression reads keeps every prepared track and hierarchy memo: re-preparing
+   them walks every keyframe of the document. */
 let version = 0;
+let evaluation = 0;
 let parentIndexes = new WeakMap<object, any>();
 let staticTransforms = new WeakMap<object, { values: any[]; matrix: number[] }>();
-PM.touch = () => {
-  PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
+/* An expression's `comp` is its composition object, every setting included
+   (`comp.name`, `comp.work`): while one reads it, a setting is an edit like
+   any other. Walked once per evaluation version and document. */
+let compositionReaders: { project: unknown; evaluation: number; read: boolean } | null = null;
+function expressionsReadComposition(): boolean {
+  const project = PM.proj, cached = compositionReaders;
+  if (cached && cached.project === project && cached.evaluation === evaluation) return cached.read;
+  const seen = new Set<unknown>();
+  const reads = (comp: any): boolean => {
+    if (!comp || typeof comp !== 'object' || seen.has(comp)) return false;
+    seen.add(comp);
+    for (const layer of Array.isArray(comp.layers) ? comp.layers : []) {
+      for (const { prop } of PM.allProps(layer)) if (typeof prop?.expr === 'string' && /\bcomp\b/.test(prop.expr)) return true;
+    }
+    return Object.values(comp.comps || {}).some(reads);
+  };
+  const read = reads(project);
+  compositionReaders = { project, evaluation, read };
+  return read;
+}
+PM.touch = (paths?: unknown) => {
   version++;
+  const setting = settingsOnly(paths, LAYER_FREE_SETTINGS);
+  if (setting && !expressionsReadComposition()) {
+    if (!settingsOnly(paths, UNRENDERED_SETTINGS)) PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
+    return;
+  }
+  PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
+  evaluation++;
+  // A setting writes no expression: the walk's answer stands.
+  if (setting && compositionReaders) compositionReaders.evaluation = evaluation;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
   woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); memoT = null;
@@ -27,6 +76,9 @@ PM.touch = () => {
   staticTransforms = new WeakMap();
 };
 PM.animVersion = () => version;
+PM.evaluationVersion = () => evaluation;
+/** settingsOnly, and no expression can read those settings. */
+PM.settingsOnly = (paths: unknown, settings: ReadonlySet<string>) => settingsOnly(paths, settings) && !expressionsReadComposition();
 let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
@@ -35,12 +87,12 @@ function evalKfs(kf: any, t: any, interpolateColor = false) {
   const n = Array.isArray(kf) ? kf.length : 0;
   if (n === 0) return null;
   if (typeof t !== 'number' || !Number.isFinite(t)) return kf[0]?.v ?? null;
-  if (typeof kf[0].v === 'number' && typeof kf[n-1].v === 'number') return temporalEvaluate(kf,t,version,Ease.spring);
+  if (typeof kf[0].v === 'number' && typeof kf[n-1].v === 'number') return temporalEvaluate(kf,t,evaluation,Ease.spring);
   if (t <= kf[0].t) return kf[0].v;
   if (t >= kf[n - 1].t) return kf[n - 1].v;
   let lo = 0, hi = n - 1;
   while (hi - lo > 1) { const m = (lo + hi) >> 1; kf[m].t <= t ? (lo = m) : (hi = m); }
-  temporalKeys(kf,version);
+  temporalKeys(kf,evaluation);
   const a = kf[lo], b = kf[hi];
   if (a.hold) return a.v;
   const hexColor = (v: any) => typeof v === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v);
@@ -93,26 +145,39 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0, 
   };
   const pair = (value: any, fallback: any) => Array.isArray(value) && value.length >= 2 &&
     Number.isFinite(value[0]) && Number.isFinite(value[1]) ? [value[0], value[1]] : [...fallback];
-  const normalized = (Array.isArray(raw) ? raw : [])
+  const valid = (Array.isArray(raw) ? raw : [])
     .map((key: any, index: number) => ({ key, index, time: Number(key?.t) }))
     .filter(({ key, time }: any) => key && typeof key === 'object' &&
       Number.isFinite(time) && time >= minTime && validValue(key.v))
-    .map(({ key, index, time }: any) => ({
-      ...key,
-      t: time === 0 ? 0 : time,
-      i: (typeof key.i === 'string' && key.i) || (options.stable ? `k${index}` : PM.uid('k')),
+    .sort((a: any, b: any) => a.time - b.time || a.index - b.index);
+  /* A numeric track's keys are adopted below (temporalKeys): a key already
+     in the native ease model gets `eo`/`ei`/`hold` as views of that model,
+     so legacy copies made here would only be replaced (and the replacement
+     leaves the JSON, which made every opened track look rewritten). Each key
+     is one object literal, never edited with `delete`: that keeps it in
+     V8's fast mode, sharing its shape with the other keys (a dictionary-mode
+     key costs several times the memory, at a million keys per project). */
+  const adopted = valid.length > 0 && valid.every(({ key }: any) => typeof key.v === 'number');
+  const normalized = valid.map(({ key, index, time }: any) => {
+    const t = time === 0 ? 0 : time;
+    const i = (typeof key.i === 'string' && key.i) || (options.stable ? `k${index}` : PM.uid('k'));
+    if (adopted && hasNativeEase(key)) {
+      // Adoption makes these views of the native ease; no stored copy is kept.
+      const { __order: _order, eo: _eo, ei: _ei, hold: _hold, ...fields } = key;
+      return { ...fields, t, i };
+    }
+    const { __order: _order, ...fields } = key;
+    return {
+      ...fields, t, i,
       eo: pair(key.eo, pair(defaultHandles.eo, [.33, 0])),
       ei: pair(key.ei, pair(defaultHandles.ei, [.67, 1])),
       hold: key.hold === true,
-      __order: index,
-    }))
-    .sort((a: any, b: any) => a.t - b.t || a.__order - b.__order);
+    };
+  });
   const collapsed: any[] = [];
   const ids = new Set<string>();
-  normalized.forEach((key: any) => {
+  normalized.forEach((clean: any) => {
     const previous = collapsed[collapsed.length - 1];
-    const clean = { ...key };
-    delete clean.__order;
     if (ids.has(clean.i)) clean.i = options.stable ? derivedId(clean.i, ids) : PM.uid('k');
     ids.add(clean.i);
     if (previous && Math.abs(previous.t - clean.t) <= 1e-6) {
@@ -142,12 +207,12 @@ function motionPathValue(comp: any, layerId: string, channel: string, progress: 
   if (!cache) { cache = new Map(); pathTimings.set(layer, cache); }
   const key = `${start}:${end}`;
   let entry = cache.get(key);
-  if (!entry || entry.version !== version) {
+  if (!entry || entry.version !== evaluation) {
     const channels = axes.map(axis => layer.p[axis]);
     const sample = (time: number) => channels.map(prop => prop.kf?.length ? Number(evalKfs(prop.kf, time)) : Number(prop.v));
     const timing = createPathTiming(sample, channels.flatMap(prop => prop.kf.map((k: any) => k.t)), start, end);
     if (cache.size >= 16) cache.delete(cache.keys().next().value!);
-    entry = { version, timing }; cache.set(key, entry);
+    entry = { version: evaluation, timing }; cache.set(key, entry);
   }
   return entry.timing.position(progress)[index]!;
 }

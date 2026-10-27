@@ -183,8 +183,8 @@ fn webm_vp9_with_opus_is_frame_exact_and_tagged() {
         (r.codec.as_str(), r.pixel_format.as_str(), r.frames, r.alpha),
         ("vp09", "4:2:0", 30, false)
     );
-    assert_eq!(r.cicp, (2, 2, 1));
-    // 60060 input samples, then WebCodecs' untrimmed final Opus frame.
+    assert_eq!(r.cicp, s.tags.cicp());
+    // 60060 input samples, then the final Opus frame's padding.
     assert_eq!(r.audio.as_ref().unwrap().samples, 60_168);
     if let Some(p) = probe(
         &done.path,
@@ -195,10 +195,10 @@ fn webm_vp9_with_opus_is_frame_exact_and_tagged() {
             "codec_name=vp9",
             "pix_fmt=yuv420p",
             "color_range=tv",
-            "color_transfer=unknown",
-            "color_primaries=unknown",
+            "color_transfer=iec61966-2-1",
+            "color_primaries=bt709",
             "color_space=bt709",
-            "chroma_location=unspecified",
+            "chroma_location=left",
             "nb_read_frames=30",
             "r_frame_rate=24000/1001",
             "codec_name=opus",
@@ -223,13 +223,14 @@ fn webm_vp9_and_vp8_with_alpha() {
         let mut s = spec(&dir, &codec.name(), codec, Container::Webm);
         s.alpha = AlphaOutput::Straight;
         s.tags = ColorTags::Rec709Broadcast;
+        let tags = s.tags.cicp();
         let done = run(s).unwrap();
         let r = &done.report;
         assert_eq!(
             (r.pixel_format.as_str(), r.alpha, r.frames),
             ("4:2:0:4", true, 30)
         );
-        assert_eq!(r.cicp, (2, 2, 1));
+        assert_eq!(r.cicp, tags);
         let alphas: Vec<f64> = r
             .pixels
             .iter()
@@ -264,7 +265,7 @@ fn webm_vp8_opaque_at_29_97() {
     let done = run(s).unwrap();
     let r = &done.report;
     assert_eq!((r.codec.as_str(), r.frames), ("vp08", 45));
-    // 72072 input samples, then WebCodecs' untrimmed final Opus frame.
+    // 72072 input samples, then the final Opus frame's padding.
     assert_eq!(r.audio.as_ref().unwrap().samples, 72_648);
     std::fs::remove_dir_all(dir).unwrap();
 }

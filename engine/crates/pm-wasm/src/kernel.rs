@@ -3,7 +3,7 @@
 //! Replies are JSON fragments with `Reply` number markers. Request values use
 //! pm-model's JSON parser so JSON.stringify's unpaired surrogates survive.
 use pm_eval::{PropId, ValueKind};
-use pm_model::{Document, Node, NodeKind, Value, consistency::ConsistencyHash};
+use pm_model::{Document, Node, NodeKind, Value, consistency::ConsistencyHash, parallel::join};
 
 use crate::{ApplyError, Engine, reply::Reply};
 use std::collections::HashSet;
@@ -34,23 +34,49 @@ impl PreparedDocument {
     /// The reader drops its owned file bytes after this step, before hashing
     /// allocates integrity-cache entries or serializer scratch space.
     pub fn parse_tree(bytes: &[u8], revision: u64) -> Result<Document, String> {
+        Self::parse_tree_prebuilt(bytes, revision, Vec::new(), false)
+    }
+
+    /// [`Self::parse_tree`] with units parsed as the text arrived
+    /// ([`Node::parse_bytes_prebuilt`]).
+    pub fn parse_tree_prebuilt(
+        bytes: &[u8],
+        revision: u64,
+        prebuilt: Vec<pm_model::json::Prebuilt<Node>>,
+        complete: bool,
+    ) -> Result<Document, String> {
         let root = if bytes.is_empty() {
             None
         } else {
-            Some(Node::parse_bytes(bytes, revision).map_err(|e| e.to_string())?)
+            Some(
+                Node::parse_bytes_prebuilt(bytes, revision, prebuilt, complete)
+                    .map_err(|e| e.to_string())?,
+            )
         };
         Ok(Document::from_root(root, revision))
     }
 
     pub fn from_document(document: Document, source_bytes: usize) -> Self {
-        let hash = document.canonical_hash().unwrap_or_default();
-        let mut consistency = ConsistencyHash::default();
-        let integrity = consistency.digest(document.root());
-        let mut seen = StorageSeen::default();
-        let tree_bytes_estimate = std::mem::size_of::<Document>()
-            + document
-                .root()
-                .map_or(0, |root| estimate_node_payload(root, &mut seen));
+        // Three independent full walks of one immutable tree: natively they
+        // run side by side, and both digests on several threads of their own.
+        let (hash, ((integrity, consistency), tree_bytes_estimate)) = join(
+            || document.canonical_hash().unwrap_or_default(),
+            || {
+                join(
+                    || {
+                        let mut consistency = ConsistencyHash::default();
+                        (consistency.digest(document.root()), consistency)
+                    },
+                    || {
+                        let mut seen = StorageSeen::default();
+                        std::mem::size_of::<Document>()
+                            + document
+                                .root()
+                                .map_or(0, |root| estimate_node_payload(root, &mut seen))
+                    },
+                )
+            },
+        );
         Self {
             document,
             hash,

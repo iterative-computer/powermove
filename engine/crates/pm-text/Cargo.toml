@@ -16,8 +16,11 @@ system = []
 level2 = ["dep:parley", "dep:parlance"]
 # The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
 corpus-tools = ["system", "level2", "dep:flate2"]
+# Where color glyphs (COLR paint graphs, bitmap strikes) draw, without the
+# painter: pm-eval's text ink bounds, also in pm-wasm.
+ink = ["dep:kurbo", "dep:skrifa", "dep:png"]
 # Unhinted outline coverage, float paint and color glyphs. Off for layout-only users.
-render = ["dep:kurbo", "dep:skrifa", "dep:png", "dep:vello_cpu", "dep:libm", "dep:pm-color", "dep:i_overlay"]
+render = ["ink", "dep:vello_cpu", "dep:libm", "dep:pm-color", "dep:i_overlay"]
 # The CoreText reference rasterizer (macOS; level 2 gate and review sheets).
 coretext-reference = ["render", "system", "objc2-core-graphics/CGContext", "objc2-core-graphics/CGBitmapContext", "objc2-core-graphics/CGColorSpace", "objc2-core-graphics/CGDataProvider"]
 

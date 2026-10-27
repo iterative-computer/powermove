@@ -11,9 +11,9 @@ publish.workspace = true
 pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
 # Level 1 text layout (units for text animators, text bounds) without the
-# platform registry, so the same code runs in pm-wasm. Render geometry
-# supplies the same color-glyph ink placement used by the native painter.
-pm-text = { path = "../pm-text", default-features = false, features = ["level2", "render"] }
+# platform registry, so the same code runs in pm-wasm. `ink` supplies the
+# color-glyph ink placement the native painter uses, without the painter.
+pm-text = { path = "../pm-text", default-features = false, features = ["level2", "ink"] }
 pm-vector = { path = "../pm-vector" }
 # 3D picks and bounds (`query3d`): geometry, glTF models, three.js raycasts.
 pm-geom3d = { path = "../pm-geom3d" }

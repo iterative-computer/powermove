@@ -5,7 +5,8 @@ import { needsNewerReader } from '../../../../shared/reader-version';
 import { writeDocument } from '../../engine-doc/write';
 import { parseAsync } from './parse-async';
 import { yieldTask } from './yield-task';
-import { digestJSON } from './json-slices';
+import { digestJSON, serializeInSlices } from './json-slices';
+import { projectTexts } from './project-text';
 import { applyPatches, entriesAfter, recoverProject, supersede } from '../../../../shared/project-journal';
 
 export { supersede };
@@ -28,6 +29,9 @@ const CHECKPOINT_REVISIONS = 50;
 const journalBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 /* The store's limit for a journal value (LIMITS.storeValueBytes): past it main refuses entries. */
 const STORE_JOURNAL_BYTES = 32 * 1024 * 1024;
+/* A periodic checkpoint is serialized in slices only while the journal since
+   the last one is at most this long (half of main's journal limit). */
+const SLICED_JOURNAL_BYTES = 4 * MAX_JOURNAL_BYTES;
 
 /** The journal entries this window appended since its last checkpoint, with each one's size (see `append`). */
 type JournalState = { id: string; entries: any[]; sizes: number[] };
@@ -178,9 +182,18 @@ R.writtenJSON = (proj: any): string | null => {
   return entry.text.startsWith(prefix) && entry.text.endsWith('}') ? entry.text.slice(prefix.length, -1) : null;
 };
 
-function writeSlot(proj: any) {
+/** The slot's text and the engine's canonical text of a project, from one
+ *  serialization in slices (project-text.ts); null when it has to be
+ *  serialized as a whole. */
+R.texts = (proj: any) => projectTexts(PM.version || '1.0.0', proj);
+
+/** `serialized`: the envelope's JSON text, already made (`checkpointInSlices`). */
+function writeSlot(proj: any, serialized?: string) {
   const envelope = { v: PM.version || '1.0.0', proj };
-  if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
+  slotWrites.set(proj.id, (slotWrites.get(proj.id) || 0) + 1);
+  checkpointsDue.delete(proj.id);
+  const stored = serialized !== undefined && PM.store.setText?.(R.SLOT + proj.id, serialized) || PM.store.set(R.SLOT + proj.id, envelope);
+  if (stored === false) throw new Error('Project storage is unavailable or full');
   unsaved.delete(proj.id);
   const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
   if (text) {
@@ -241,8 +254,9 @@ function checkSlot(proj: any): void {
   PM.store.track?.(R.SLOT + id, work);
 }
 
-/** Upsert registry metadata for a project and persist its data. */
-R.put = (proj: any, thumb: any) => {
+/** Upsert registry metadata for a project and persist its data.
+ *  `serialized`: the slot's text, already made (projectTexts, for an open). */
+R.put = (proj: any, thumb: any, serialized?: string) => {
   if (!proj || !proj.id) return;
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
@@ -258,7 +272,7 @@ R.put = (proj: any, thumb: any) => {
   const slot = unsaved.has(proj.id) ? undefined : slots.get(proj.id);
   if (slot && slot.project === proj && slot.digest && slot.chars >= VERIFY_MIN_CHARS && slot.journal !== 'other'
     && (slot.journal === 'assets' || !journaledSince(proj.id))) checkSlot(proj);
-  else writeSlot(proj);
+  else writeSlot(proj, serialized);
   return meta;
 };
 
@@ -284,29 +298,76 @@ R.checkpointAssets = (proj: any) => {
   }
 };
 
+/*
+ * Periodic checkpoints (SAVE-1): every CHECKPOINT_REVISIONS revisions, or
+ * once the journal passes MAX_JOURNAL_BYTES, the slot is written again so the
+ * journal stays short. Nothing waits on one: main keeps every entry until a
+ * slot holding it lands. A large project's slot was serialized in one task
+ * (0.5 to 1 s for the private 180 MB project, every 50 edits); it is now
+ * serialized in slices and posted only if nothing changed while it was read
+ * (announced changes, document writes, the engine barrier's epoch, an open
+ * history transaction, another slot write). Then it is the document as it
+ * was when posted, with exactly the entries posted before it, as main
+ * numbers it. Otherwise it is due: the next autosave tries again.
+ */
+const slotWrites = new Map<string, number>();
+const checkpointsDue = new Set<string>();
+const slicing = new Set<string>();
+const sliceToken = (id: string) => `${changeToken()}:${PM.EngineDoc?.barrier?.changeEpoch ?? ''}:${slotWrites.get(id) || 0}`;
+async function checkpointInSlices(proj: any) {
+  const id = proj.id;
+  checkpointsDue.add(id);
+  if (slicing.has(id) || PM.hist?.busy?.()) return;
+  slicing.add(id);
+  const work = (async () => {
+    try {
+      const token = sliceToken(id), parts: string[] = [];
+      await serializeInSlices({ v: PM.version || '1.0.0', proj }, text => { parts.push(text); });
+      // Changed while it was read, or no longer this window's document: due.
+      if (token !== sliceToken(id) || PM.hist?.busy?.() || PM.proj !== proj || !checkpointsDue.has(id)) return;
+      writeSlot(proj, parts.join(''));
+    } finally { slicing.delete(id); }
+  })();
+  PM.store.track?.(R.SLOT + id, work);
+  await work;
+}
+
 /** Lightweight crash recovery: compact typed-history patches between checkpoints. */
-R.recover = (proj: any, thumb: any) => {
+R.recover = (proj: any, thumb: any, serialized?: string) => {
   if (!proj?.id) return null;
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
   const entries = mainKeepsJournal() ? sinceCheckpoint(proj.id) : journal(proj.id);
-  if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
-      || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
-    return R.put(proj, thumb);
+  if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length) return R.put(proj, thumb, serialized);
+  const bytes = journalBytes(entries);
+  if (checkpointsDue.has(proj.id) || bytes > MAX_JOURNAL_BYTES || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
+    if (!sliceable(proj, bytes)) return R.put(proj, thumb);
+    void checkpointInSlices(proj).catch(error => console.warn('Project checkpoint failed', error));
   }
   return meta;
 };
+/** Whether a periodic checkpoint of `proj`, whose journal since its last one
+ *  is `journaled` bytes, is serialized in slices: main keeps the journal and
+ *  takes slots as text, the slot is not a small one this window wrote and
+ *  measured, and the journal is short of SLICED_JOURNAL_BYTES. Otherwise it is
+ *  written at once, as before: edits that keep landing while one is read must
+ *  not grow the journal to main's limit, where main refuses entries. */
+function sliceable(proj: any, journaled: number): boolean {
+  const slot = slots.get(proj.id);
+  return mainKeepsJournal() && typeof PM.store.setText === 'function' && !(slot && slot.chars < VERIFY_MIN_CHARS) && !needsNewerReader(proj)
+    && journaled <= SLICED_JOURNAL_BYTES;
+}
 
 /** Playback-safe checkpoint. Explicit save/close still uses the synchronous
  * barrier in put, which supersedes any in-progress background checkpoint.
  * When main keeps the journal (SAVE-1) the slot is posted synchronously: main
  * numbers a slot against the entries posted before it, so a snapshot captured
  * earlier and posted later would claim edits it does not hold. */
-R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
+R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean, serialized?: string) => {
   if (!proj?.id || !isCurrent()) return false;
-  if (!PM.store.setSnapshotAsync || mainKeepsJournal()) { R.recover(proj, thumb); return true; }
+  if (!PM.store.setSnapshotAsync || mainKeepsJournal()) { R.recover(proj, thumb, serialized); return true; }
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
@@ -595,7 +656,10 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
     if (measure() > STORE_JOURNAL_BYTES) { state.entries = []; state.sizes = []; }
     /* Past the bound the project is checkpointed, unless its slot writes are
        failing: then main's journal holds these edits on disk. */
-    if (measure() > MAX_JOURNAL_BYTES && !unsaved.has(id) && PM.proj?.id === id) R.put(PM.proj);
+    if (measure() > MAX_JOURNAL_BYTES && !unsaved.has(id) && PM.proj?.id === id) {
+      if (sliceable(PM.proj, measure())) void checkpointInSlices(PM.proj).catch(error => console.warn('Project checkpoint failed', error));
+      else R.put(PM.proj);
+    }
     return;
   }
   supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });

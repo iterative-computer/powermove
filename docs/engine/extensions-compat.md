@@ -43,9 +43,11 @@ keeps that contract:
    density. An answer counts when it was made at the frame's revision or a
    newer one.
 3. A frame without every answer fails with `RenderError::CompatPending`. The
-   presenter sends the needs to the window (`Needs`) and draws the frame when
-   they arrive. A snapshot answers `needsRenderer.compat`; the renderer draws
-   the needs, posts them on the session's port, and asks again.
+   presenter sends the needs to the window (`Needs`) and draws the frame once
+   the store answers all of them (not at each answer: every attempt plans the
+   whole composition). A snapshot answers `needsRenderer.compat`; the
+   renderer draws the needs, posts them on the session's port, and asks
+   again.
 4. The window runs the chain over a lazy engine raster (made on first field
    read). The wrapper's own base back means pass-through (`Native`: no
    pixels, the engine draws the layer). Any other result is read back as
@@ -80,6 +82,13 @@ viewer's complete canvas including its pan buffer
 (`CompatNeed.crop`) and is part of the answer's identity. Exports and
 snapshots are never cropped.
 
+A wrapper that drops the crop argument (an assigned `PM.raster` calling
+the chain with three arguments) returns the whole base for a cropped need.
+Today the compositor draws that whole raster on the layer's quad, and only
+the window is on screen, so it is a pass-through too (`Native`), unless
+today's 8,192-pixel cap lowered the whole raster's density (a window keeps
+its density): then the result is read back and posted.
+
 ### `PM.raster` assigned directly
 
 Before the services registry, extensions wrapped the raster by assigning
@@ -113,10 +122,14 @@ updated in place, so no revision copies it. Pixels come from the same
 Bases follow today's raster cache (`legacy/gl/raster.ts`): plain text and
 plain shapes key by native-evaluated content, density and crop, with layer
 identity for document layers and content identity for detached copies (at
-most sixteen surfaces, 32 MiB). Paths, text animators and styles, font
-anchoring and captions are never cached. A plain shape's raster depends only
-on its content and density, so its base survives document revisions; text
-bases expire at each revision.
+most sixteen surfaces, 32 MiB). Content without keyframes or expressions is
+its own resolution and keys by what is stored, without asking the
+evaluator. Font-anchored text keys by its placement too: the layer's anchor
+at that time (pm-eval `text_raster_with`). Paths, text animators and
+styles, compatibility level 2 text and captions are never cached. A plain
+shape's raster depends only on its content and density, so its base
+survives document revisions; text bases expire at each revision.
+Preparations asking for the same content at once share one engine raster.
 
 The content key is read when the base is requested, together with the
 document revision it was read at. An asynchronous base is remembered under
@@ -127,14 +140,32 @@ before the edit.
 ### Playback
 
 A frame whose answers are missing waits for its producer, keeping its slot
-until it can no longer be shown. Preparation follows the audio-clock
-playhead, eighteen frames ahead along the loop (`runAhead`, `intoLoop`), and
-complete results for the next six frames speculatively. It starts at the
-first frame a preparation can still reach in time, and stops at the
-composition's or loop's end. Each producer turn admits at most sixteen
-answers in 6 ms; at most two answer preparations and one speculative
-preparation are in flight; prepared results stay within 64 MiB and 4096
-entries. A paused edit prepares only the frame on screen.
+until it can no longer be shown, and is drawn once all of them arrived.
+
+Preparation schedules complete frames. It follows the audio-clock playhead
+along the loop (`runAhead`, `intoLoop`), frame by frame in playback order:
+every layer of a frame runs its chain in one turn, and the producer answers
+a pass-through in that turn (`prepare` returns null; no base, no round
+trip), so only wrappers that read bases continue later, as the engine draws
+them (in the task their base arrived in). A turn takes at most 6 ms, but
+never splits a frame; the rest is the next task. The horizon is eighteen
+frames, and reaches as far as the slowest layer's answers take plus 250 ms,
+up to sixty. A layer whose answers take longer than the clock leaves starts
+where it can still be in time (with none on its way, at its furthest frame
+when it can make none); at most 24 preparations wait for bases, and
+layers answered at once never wait behind them. Preparation runs on the
+engine's needs, completed preparations and presented frames, and once a
+frame while playing; never as a poll. It stops at the composition's or
+loop's end, and at a layer's own time span. Prepared results stay within
+64 MiB and 4096 entries.
+
+While playing, after each frame the presenter plans (without drawing) the
+frame a second ahead and sends the window the needs it has not answered
+(`ask_ahead`): a layer coming into view, a crop window that moved. A layer
+whose crop window moves is prepared only at the frames the engine names,
+each with its own window.
+
+A paused edit prepares only the frame on screen, urgently.
 
 The base is lazy: reading an unavailable base during preparation suspends
 the attempt, the engine draws the base asynchronously, and the wrapper
@@ -142,7 +173,13 @@ retries (at most 64 dependency phases; a nonconvergent chain fails by name).
 A wrapper that catches a missing-base read cannot publish its incomplete
 result. Canvases are captured as premultiplied ImageBitmaps and read back on
 a dedicated worker with the same upload and readback function as the
-synchronous path; geometry is captured first. A paused edit's own answer is
+synchronous path; geometry is captured first. Bases arrive with straight
+alpha: the engine divides the quantized premultiplied pixels by alpha
+exactly as the window's `unpremultiply` did, so the base canvas is byte for
+byte the same. The window keeps base requests within main's byte
+reservation (each reserves its bound) instead of being refused; a playback
+base reserves twice the largest one so far and asks again with the whole
+8192² bound if the engine refuses it as larger. A paused edit's own answer is
 read back on the renderer thread, since its frame waits for it.
 
 With producers, a Play whose first six frames are not answered holds the

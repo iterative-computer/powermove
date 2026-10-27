@@ -5,6 +5,8 @@ import { installEngineDoc } from './install';
 import { parseMode } from './flags';
 import { RemotePmWasm } from './remote';
 import { loadTestModule, RealKernelBridge } from './test-helpers/real-kernel';
+import { projectTexts } from '../legacy/core/project-text';
+import * as jsonSlices from '../legacy/core/json-slices';
 
 const host = vi.hoisted(() => ({ native: null as RealKernelBridge | null }));
 vi.mock('../kernel/bridge', async original => ({ ...await original<typeof import('../kernel/bridge')>(), bridge: () => ({ nativeEngine: { documentKernel: host.native } }) }));
@@ -278,6 +280,21 @@ it('does not deadlock an open queued before a later recovery request', async () 
   expect(doc.api!.ev(second.layers[0], 'position.x', 0)).toBe(20);
 });
 
+it('leaves the whole-document check out of autosaves outside the test modes, and keeps it for saves and exports', async () => {
+  const setup = await editor(), { PM, doc, bridge } = setup;
+  const raw = await publishLarge(setup), before = doc.barrier!;
+  raw.layers[0].p['position.x'].v = 777;
+  const calls = bridge.calls.length, checks = before.stats.checks;
+  expect(doc.beforeSave('autosave')).toBeUndefined();
+  await Promise.resolve();
+  expect(before.stats.checks).toBe(checks);
+  expect(bridge.calls.slice(calls).length).toBe(0);
+  await doc.beforeExport('export');
+  expect(before.stats.checks).toBe(checks + 1);
+  expect(before.stats.checkMismatches).toBe(1);
+  expect(bridge.live.toJson()).toBe(canonicalStringify(canonicalProject(raw)));
+});
+
 it('persists live raw-alias writes immediately while their diagnostic repair runs in the background', async () => {
   const setup = await editor(), { PM, doc, bridge } = setup;
   const raw = await publishLarge(setup), layer = raw.layers[0], before = doc.barrier!;
@@ -342,4 +359,26 @@ it('discards an in-flight repair for a project replaced before the asynchronous 
   expect(bridge.calls.filter(call => call.op === 'activate').map(call => call.args.hash)).not.toContain(staleHash);
   expect(bridge.live.toJson()).toBe(canonicalStringify(canonicalProject(next)));
   expect(doc.failures()).toEqual([]);
+});
+
+it('prepares an opened project from its canonical text, streamed while the text is still being made', async () => {
+  const setup = await editor(), { PM, doc, bridge } = setup;
+  const raw = project(PM, 'texts-project', 63, true), layer = raw.layers[0];
+  const texts = projectTexts('1.0.0', raw)!;
+  const writes: Array<Uint8Array | string> = [], write = bridge.write.bind(bridge);
+  bridge.write = async (token, chunk) => { writes.push(chunk); return write(token, chunk); };
+  const serialize = vi.spyOn(jsonSlices, 'serializeInSlices');
+  await doc.prepare(raw, texts.canonical); PM.proj = raw;
+  // The engine read the open's own text: nothing serialized the shadow again.
+  expect(serialize).not.toHaveBeenCalled();
+  expect(JSON.parse(new TextDecoder().decode(bridge.lastStream!))).toEqual(JSON.parse(JSON.stringify(canonicalProject(raw))));
+  expect(doc.barrier!.shadow).toEqual(JSON.parse(JSON.stringify(canonicalProject(raw))));
+  expect(bridge.live.toJson()).toBe(canonicalStringify(canonicalProject(raw)));
+  expect(doc.api!.ev(layer, 'position.x', 0)).toBe(63);
+  expect(await texts.slot).toBe(JSON.stringify({ v: '1.0.0', proj: raw }));
+  // The shadow is exact: an edit afterwards is one small batch at the edited path.
+  PM.doc.write([['layers', 0, 'p', 'position.x', 'v']], () => { layer.p['position.x'].v = 64; });
+  expect(doc.api!.ev(layer, 'position.x', 0)).toBe(64);
+  expect(bridge.live.toJson()).toBe(canonicalStringify(canonicalProject(raw)));
+  expect(writes.length).toBeGreaterThan(0);
 });

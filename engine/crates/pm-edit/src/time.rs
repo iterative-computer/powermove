@@ -58,24 +58,6 @@ impl Clock {
     }
 }
 
-/// `t + from - to` for a key moved from a layer starting at `from` (on
-/// `source`'s grid) to one starting at `to` (on `target`'s grid): echoes `t`
-/// when the two starts are the same instant.
-pub fn shifted(t: f64, from: f64, to: f64, source: &Clock, target: &Clock) -> f64 {
-    let ticks = (source.ticks(t), source.ticks(from), target.ticks(to));
-    if let (Some(k), Some(f), Some(g)) = ticks {
-        if f == g {
-            return t;
-        }
-        if let Some(moved) = k.checked_add(f).and_then(|x| x.checked_sub(g))
-            && let Some(s) = target.seconds(moved)
-        {
-            return s;
-        }
-    }
-    t + from - to
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,20 +88,8 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_shift_echoes_the_time() {
-        let c = clock(29.97);
-        let t = 0.1 + 0.2;
-        assert_eq!(shifted(t, 1.5, 1.5, &c, &c), t);
-        assert_eq!(
-            shifted(10.0 / 29.97, 2.0 / 29.97, 1.0 / 29.97, &c, &c),
-            11.0 / 29.97
-        );
-    }
-
-    #[test]
     fn unresolved_rates_keep_float_arithmetic() {
         let c = clock(0.0);
         assert_eq!(c.local(1.0, 0.25), 0.75);
-        assert_eq!(shifted(1.0, 0.5, 0.25, &c, &c), 1.25);
     }
 }

@@ -283,7 +283,7 @@ export function wireAudioCoding(format: DeliveryFormat, options: Pick<DeliveryOp
   }
 }
 
-/** Codec depth for dither defaults: 8-bit outputs dither (section 17). */
+/** Codec depth (8-bit PNG is dithered; section 17, EXPORT-DITHER-1). */
 export function outputDepth(format: DeliveryFormat, options: Pick<DeliveryOptions, 'highDepth'>): number {
   switch (format) {
     case 'prores-4444': case 'prores-4444xq': return 12;

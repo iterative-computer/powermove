@@ -964,7 +964,7 @@ describe('the raster override base cache key (today\'s raster cache identity)', 
     for (const k of Object.keys(d)) if (d[k] && typeof d[k] === 'object' && Array.isArray(d[k].kf)) d[k] = time < 1 ? d[k].kf[0][1] : d[k].kf[1][1];
     return d;
   };
-  const host = (layers: any[]) => ({ proj: { id: 'P', compId: 'P', layers, comps: {} }, EngineDoc: { enabled: true, api: { resolveContent: resolve } } });
+  const host = (layers: any[]) => ({ proj: { id: 'P', compId: 'P', layers, comps: {} }, EngineDoc: { enabled: true, api: { resolveContent: resolve } as Record<string, unknown> } });
   const key = (...args: Parameters<typeof rasterContentKey>) => rasterContentKey(...args)?.key;
 
   it('keys plain text and shapes by resolved content and density, not time', () => {
@@ -990,11 +990,37 @@ describe('the raster override base cache key (today\'s raster cache identity)', 
     expect(key(PM, { ...title }, 1, 0)).not.toBe(key(PM, title, 1, 0));
   });
 
+  it('keys font-anchored text by its placement too: the anchor at that time', () => {
+    const anchorX = { v: 10, kf: [[0, 10], [2, 30]] };
+    const title = { id: 'title', type: 'text', d: { text: 'Hello', fontAnchorBounds: { x0: 0, y0: 0, x1: 10, y1: 10 } }, p: { 'anchor.x': anchorX }, fx: [] };
+    const PM = host([title]);
+    PM.EngineDoc.api.ev = (layer: any, key: string, time: number) => key === 'anchor.x' ? (time < 1 ? 10 : 30) : 0;
+    expect(key(PM, title, 1, 0.2)).toBe(key(PM, title, 1, 0.7));
+    expect(key(PM, title, 1, 0.2)).not.toBe(key(PM, title, 1, 1.5));
+    expect(key(PM, title, 1, 0.2)).not.toBe(key(PM, { ...title, d: { text: 'Hello' } }, 1, 0.2));
+  });
+
+  it('names content and an anchor without keyframes or expressions by what is stored, asking the evaluator nothing', () => {
+    const title = { id: 'title', type: 'text', d: { text: 'Hello', size: { v: 30 }, fontAnchorBounds: { x0: 0, y0: 0, x1: 10, y1: 10 } }, p: { 'anchor.x': { v: 4 }, 'anchor.y': { v: 2 } }, fx: [] };
+    const PM = host([title]);
+    const resolveContent = vi.fn(resolve), ev = vi.fn(() => 0);
+    Object.assign(PM.EngineDoc.api, { resolveContent, ev });
+    const typed = { ...title, id: 'title:typed:3', d: { ...title.d, text: 'Hel' } };
+    expect(key(PM, typed, 1, 0.2)).toBe(key(PM, { ...typed }, 1, 2.5));
+    expect(key(PM, typed, 1, 0.2)).not.toBe(key(PM, { ...typed, p: { ...title.p, 'anchor.x': { v: 5 } } }, 1, 0.2));
+    expect(key(PM, typed, 1, 0.2)).not.toBe(key(PM, { ...typed, d: { ...typed.d, size: { v: 31 } } }, 1, 0.2));
+    expect(resolveContent).not.toHaveBeenCalled();
+    expect(ev).not.toHaveBeenCalled();
+    // A keyframed member anywhere in the content: its resolution at that time.
+    key(PM, { ...typed, d: { ...typed.d, size: { v: 30, kf: [[0, 30], [2, 40]] } } }, 1, 0.2);
+    expect(resolveContent).toHaveBeenCalledTimes(1);
+  });
+
   it('never caches what changes with time beyond its content, or without the native evaluator', () => {
     const PM = host([]);
     expect(rasterContentKey(PM, { id: 'a', type: 'text', d: { text: 'x', animators: [{}] } }, 1, 0)).toBeNull();
     expect(rasterContentKey(PM, { id: 'b', type: 'text', d: { text: 'x', styles: [{}] } }, 1, 0)).toBeNull();
-    expect(rasterContentKey(PM, { id: 'c', type: 'text', d: { text: 'x', fontAnchorBounds: { x: 0 } } }, 1, 0)).toBeNull();
+    expect(rasterContentKey(PM, { id: 'c', type: 'text', compat: 2, d: { text: 'x' } }, 1, 0)).toBeNull();
     expect(rasterContentKey(PM, { id: 'd', type: 'shape', d: { paths: [{}] } }, 1, 0)).toBeNull();
     expect(rasterContentKey(PM, { id: 'e', type: 'captions', d: {} }, 1, 0)).toBeNull();
     expect(rasterContentKey({ proj: { layers: [] } }, { id: 'f', type: 'text', d: { text: 'x' } }, 1, 0)).toBeNull();

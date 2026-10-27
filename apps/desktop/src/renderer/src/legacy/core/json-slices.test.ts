@@ -83,6 +83,23 @@ describe('serializeInSlices', () => {
     expect(longest).toBeLessThan(60);
   });
 
+  it('keeps a slice short where a container of few members deep in the document holds many values, or array elements are large', async () => {
+    const numbers = (n: number) => Array.from({ length: n }, (_, i) => i / 7);
+    const deep = (value: unknown) => [[[[[[[value]]]]]]];
+    const project = {
+      held: deep({ points: numbers(1_500_000), name: 'path' }),
+      nested: deep([1, numbers(1_500_000)]),
+      elements: deep(Array.from({ length: 300 }, (_, i) => ({ id: i, samples: numbers(20_000) }))),
+    };
+    let longest = 0, last = performance.now();
+    const pause = async () => { const now = performance.now(); longest = Math.max(longest, now - last); await Promise.resolve(); last = performance.now(); };
+    const pieces: string[] = [];
+    await serializeInSlices(project, text => { pieces.push(text); }, pause);
+    expect(pieces.join('')).toBe(JSON.stringify(project));
+    // Generous for loaded CI machines; one native call over each array takes far longer.
+    expect(longest).toBeLessThan(60);
+  });
+
   it('matches the top-level cases, toJSON keys, and errors', async () => {
     for (const input of [null, 1, 'text', [undefined, () => 1], new Date(0), Object(3), { toJSON: () => [1, { toJSON: (k: string) => k }] }]) {
       expect(await sliced(input)).toBe(JSON.stringify(input));

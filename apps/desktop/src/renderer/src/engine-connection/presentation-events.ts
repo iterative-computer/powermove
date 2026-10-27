@@ -97,8 +97,13 @@ export function emitPresented(
  * runs; taken in arrival order, a report on either side of that frame
  * left one animation frame with nothing and the next with two, and the
  * older was never announced (docs/engine/bridge.md, "Pacing at 120 Hz").
- * Frames drawn on arrival (paused, scrub, gesture) go at the next
- * animation frame. When the page skipped refreshes, the newest frame due
+ * A frame drawn on arrival (paused, scrub, gesture) is on screen when its
+ * report arrives: it goes then, as today's frame loop announces the frame
+ * it has just drawn. Waiting for the page's next animation frame added a
+ * refresh, more while an extension's animation frames keep this thread
+ * busy. Another such frame before an animation frame with nothing to
+ * announce has passed waits for the next animation frame, so at most one
+ * goes per refresh. When the page skipped refreshes, the newest frame due
  * wins (`coalesced` counts the others), as today's loop draws once.
  *
  * `listenersMs` and `slowestMs` record what the listeners cost on the
@@ -109,6 +114,9 @@ export class PresentedEvents {
   /** Reported frames not yet emitted, oldest first. */
   private queue: { frame: PresentedFrameLike; quality: number }[] = [];
   private scheduled = false;
+  /** A frame drawn on arrival may go at once: no such frame went since the
+   *  last animation frame that announced nothing. */
+  private open = true;
   /** The frame last emitted (the one on screen). */
   private last: { frame: PresentedFrameLike; quality: number } | null = null;
   emitted = 0;
@@ -126,6 +134,27 @@ export class PresentedEvents {
     return this.queue.length;
   }
 
+  private announcements = 0;
+  /**
+   * Whether a frame is being announced now: its listeners (`frame:rendered`,
+   * `overlay`) are running. A redraw they request asks for nothing new, as
+   * the frame they react to is the one on screen; answering it with that
+   * frame again would announce it once per animation frame for as long as
+   * a listener invalidates (the frame loop ignores those requests).
+   */
+  get announcing(): boolean {
+    return this.announcements > 0;
+  }
+
+  private announce<T>(fn: () => T): T {
+    this.announcements++;
+    try {
+      return fn();
+    } finally {
+      this.announcements--;
+    }
+  }
+
   /** Why the latest redraw request announced nothing (diagnostics). */
   lastRedraw: string | null = null;
   /** Main-thread time the emissions' listeners took (ms), and the slowest. */
@@ -138,6 +167,12 @@ export class PresentedEvents {
   ) {}
 
   push(frame: PresentedFrameLike, quality: number): void {
+    if (!frame.timed && this.open && !this.queue.length) {
+      this.open = false;
+      this.schedule();
+      this.send({ frame, quality });
+      return;
+    }
     this.queue.push({ frame, quality });
     this.schedule();
   }
@@ -153,20 +188,27 @@ export class PresentedEvents {
       for (let i = this.queue.length - 1; i >= 0; i--) if (due(this.queue[i]!.frame)) { index = i; break; }
       if (index < 0) {
         if (this.queue.length) this.schedule();
+        else this.open = true;
         return;
       }
       const next = this.queue[index]!;
       this.coalesced += index;
       this.queue.splice(0, index + 1);
-      if (this.queue.length) this.schedule();
-      this.last = next;
-      this.emitted++;
-      const started = performance.now();
-      this.emit(next.frame, next.quality);
-      const ms = performance.now() - started;
-      this.listenersMs += ms;
-      this.slowestMs = Math.max(this.slowestMs, ms);
+      // A frame drawn on arrival announced here keeps the next one for the
+      // next animation frame.
+      if (this.queue.length || !this.open) this.schedule();
+      this.send(next);
     });
+  }
+
+  private send(next: { frame: PresentedFrameLike; quality: number }): void {
+    this.last = next;
+    this.emitted++;
+    const started = performance.now();
+    this.announce(() => this.emit(next.frame, next.quality));
+    const ms = performance.now() - started;
+    this.listenersMs += ms;
+    this.slowestMs = Math.max(this.slowestMs, ms);
   }
 
   /**
@@ -181,7 +223,9 @@ export class PresentedEvents {
     const last = this.last;
     if (!last || this.queue.length || !this.matches(last.frame, current)) return false;
     this.replays++;
-    this.push({ ...last.frame, timed: false }, last.quality);
+    // At the next animation frame, ahead of the run's frames.
+    this.queue.push({ frame: { ...last.frame, timed: false }, quality: last.quality });
+    this.schedule();
     return true;
   }
 
@@ -213,7 +257,7 @@ export class PresentedEvents {
     if (current.pts !== null && Math.abs(current.pts - last.frame.pts) >= Math.max(1, current.frameTicks) / 2) return skip(`time ${current.pts} after ${last.frame.pts}`);
     // `announce` declines when the redraw changed what the engine draws (it
     // presents the new frame itself).
-    if (!announce(last.frame, last.quality)) return skip('the producers\' output changed');
+    if (!this.announce(() => announce(last.frame, last.quality))) return skip('the producers\' output changed');
     this.lastRedraw = 'announced';
     this.redraws++;
     return true;

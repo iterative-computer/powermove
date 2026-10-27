@@ -187,6 +187,10 @@ impl TextFonts for ServedFonts {
         self.generation
     }
 
+    fn prefetch(&mut self, queries: &[pm_text::answers::Query]) {
+        ServedFonts::prefetch(self, queries);
+    }
+
     fn sync(&mut self) {
         let now = self.server.generation();
         if now != self.generation || !self.measure.compat().resolver().is_current() {

@@ -30,6 +30,30 @@ describe('snapshot slots', () => {
     expect(slots.inFlight).toBe(0);
   });
 
+  it('keeps the results in flight within main\'s byte reservation, in order, so main never refuses one', async () => {
+    const slots = new SnapshotSlots(8, 100);
+    const order: string[] = [];
+    const gates = new Map<string, ReturnType<typeof deferred>>();
+    const job = (name: string, bytes: number) => slots.run('sync', async () => {
+      order.push(name);
+      const gate = deferred(); gates.set(name, gate); await gate.promise; return name;
+    }, bytes);
+    const all = [job('a', 40), job('b', 40), job('c', 40), job('d', 10), job('e', 500)];
+    await Promise.resolve(); await Promise.resolve();
+    // c does not fit beside a and b; d waits behind it.
+    expect(order).toEqual(['a', 'b']);
+    gates.get('a')!.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(['a', 'b', 'c', 'd']);
+    gates.get('b')!.resolve(); gates.get('c')!.resolve(); gates.get('d')!.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    // One larger than the whole reservation runs alone.
+    expect(order).toEqual(['a', 'b', 'c', 'd', 'e']);
+    gates.get('e')!.resolve();
+    expect(await Promise.all(all)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(slots.inFlight).toBe(0);
+  });
+
   it('frees a slot when a request fails', async () => {
     const slots = new SnapshotSlots(1);
     await expect(slots.run('async', async () => { throw new Error('engine said no'); })).rejects.toThrow('engine said no');

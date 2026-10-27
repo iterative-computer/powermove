@@ -1,5 +1,8 @@
 //! Exact outline text coverage, ordered float paint, and color glyphs.
+//! The `ink` feature has only the color glyph programs and strikes, and
+//! where they draw (`ink`); `render` adds the painter.
 
+#[cfg(feature = "render")]
 pub mod atlas;
 pub mod bitmap;
 pub mod color;
@@ -7,19 +10,26 @@ pub mod color4;
 pub mod colr;
 #[cfg(all(target_os = "macos", feature = "coretext-reference"))]
 pub mod coretext;
+#[cfg(feature = "render")]
 pub mod cpu;
+pub mod ink;
 pub mod outline;
+#[cfg(feature = "render")]
 pub mod paint;
+#[cfg(feature = "render")]
 pub mod scene;
 
-use kurbo::Affine;
-
+#[cfg(feature = "render")]
 use crate::compat::{Compat, GlyphRun, TextContent};
+#[cfg(feature = "render")]
 use crate::font::FontResolver;
+#[cfg(feature = "render")]
 use outline::FaceRef;
+#[cfg(feature = "render")]
 use scene::{Painter, Run, TextScene};
 
 /// Runs borrowed from a resolver's faces.
+#[cfg(feature = "render")]
 pub fn runs<'a>(resolver: &'a dyn FontResolver, runs: &'a [GlyphRun]) -> Vec<Run<'a>> {
     runs.iter()
         .map(|r| Run {
@@ -39,6 +49,7 @@ pub fn runs<'a>(resolver: &'a dyn FontResolver, runs: &'a [GlyphRun]) -> Vec<Run
 /// scene: a `width` × `height` canvas scaled by `density`, every wrapped
 /// line drawn with `fillText(line, x, pad + lh × i + size × 0.82)` in
 /// `color`. `pad` and `x` come from the text geometry.
+#[cfg(feature = "render")]
 #[allow(clippy::too_many_arguments)]
 pub fn text_raster<R: FontResolver>(
     painter: &mut Painter<'_>,
@@ -57,7 +68,7 @@ pub fn text_raster<R: FontResolver>(
         height,
         items: Vec::new(),
     };
-    let m = Affine::scale(density);
+    let m = kurbo::Affine::scale(density);
     for (row, line) in lines.iter().enumerate() {
         let (relative, _) = compat.text_runs(d, &line.text, d.tracking.unwrap_or(0.0));
         let runs = runs(compat.resolver(), &relative);

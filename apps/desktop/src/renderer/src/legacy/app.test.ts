@@ -270,6 +270,8 @@ describe('legacy app install', () => {
       return fingerprint(value);
     });
     try {
+      // A write outside history since the open: the restoration compares again.
+      PM.autosave();
       release();
       await vi.waitFor(() => expect(hashing).toHaveBeenCalled());
       PM.proj.name = 'Newer edit during comparison'; PM.autosave();
@@ -303,6 +305,41 @@ describe('legacy app install', () => {
     handlers.forEach((run: any) => run());
     expect(PM.app.saveTimer).not.toBe(previous.timer);
     expect(PM.app.dirty).toBe(true);
+  });
+
+  it('opens a saved file unchanged: no autosave, and no whole-document comparison after its media restore', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const autosave = vi.spyOn(PM, 'autosave');
+    const fingerprint = vi.spyOn(fingerprints, 'fingerprintJSON');
+    // Panels hearing about the document again is not an edit either.
+    PM.__busHandlers.get('assets').forEach((run: any) => run({ runtimeOnly: true }));
+    release(); await PM.projectAssetsReady;
+    expect(autosave).not.toHaveBeenCalled();
+    expect(fingerprint).not.toHaveBeenCalled();
+    expect(PM.app.dirty).toBe(false);
+  });
+
+  it('keeps history commits changed without hashing the document, and compares again after any other write', async () => {
+    const { PM, timers } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.Projects.recoverAsync = vi.fn(async () => true);
+    const fingerprint = vi.spyOn(fingerprints, 'fingerprintJSON');
+    const name = PM.proj.name;
+    PM.proj.name = 'Committed edit'; PM.autosave('history');
+    await timers.get(PM.app.saveTimer)();
+    expect(fingerprint).not.toHaveBeenCalled();
+    expect(PM.projectFileState().dirty).toBe(true);
+    // An announcement inside an open history transaction is that transaction's commit.
+    PM.hist.busy = () => true;
+    PM.__busHandlers.get('layers').forEach((run: any) => run());
+    PM.hist.busy = () => false;
+    await timers.get(PM.app.saveTimer)();
+    expect(fingerprint).not.toHaveBeenCalled();
+    // Undo, redo and writers outside history may return to the file's content.
+    PM.proj.name = name; PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(fingerprint).toHaveBeenCalled();
+    expect(PM.projectFileState().dirty).toBe(false);
   });
 
   it('checks autosave file status once while retaining exact Close comparisons', async () => {
@@ -395,6 +432,46 @@ describe('legacy app install', () => {
     expect(PM.proj.id).toBe('from-finder');
     expect(hide).toHaveBeenCalledOnce();
     expect(toasts).toContain('Opened Finder Project.pmv');
+  });
+
+  it('checkpoints an opened file once main has the engine\'s copy, while the engine prepares it, without a second baseline', async () => {
+    let externalOpen!: (result: any) => Promise<void>;
+    const { PM } = appRegistry(true, undefined, undefined, { onProjectOpenExternal: (callback: typeof externalOpen) => { externalOpen = callback; return () => {}; } });
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    PM.ProjectsScreen = { hide: vi.fn() };
+    let finishPrepare!: () => void, streamed!: () => void;
+    const checkpointed: string[] = [];
+    PM.EngineDoc = { prepare: vi.fn((_project: any, _text: any, sent: () => void) => {
+      checkpointed.push('prepare'); streamed = sent;
+      return new Promise<void>(resolve => { finishPrepare = resolve; });
+    }), discardPrepared: vi.fn() };
+    const recover = PM.Projects.recoverAsync, put = PM.Projects.put;
+    if (recover) PM.Projects.recoverAsync = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return recover(project, ...rest); };
+    else PM.Projects.put = (project: any, ...rest: any[]) => { checkpointed.push(project.id); return put(project, ...rest); };
+    const document = { proj: { ...PM.proj, id: 'from-finder', name: 'Finder Project' } };
+
+    const opening = externalOpen({ ok: true, path: '/tmp/Finder Project.pmv', projectId: 'from-finder', data: new TextEncoder().encode(JSON.stringify(document)) });
+    // The checkpoint posts the document to main too: not while the engine's copy streams there.
+    await vi.waitFor(() => expect(checkpointed).toContain('prepare'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(checkpointed).not.toContain('from-finder');
+    streamed();
+    await vi.waitFor(() => expect(checkpointed).toContain('from-finder'));
+    expect(checkpointed.indexOf('prepare')).toBeGreaterThanOrEqual(0);
+    expect(checkpointed.indexOf('prepare')).toBeLessThan(checkpointed.indexOf('from-finder'));
+    expect(PM.proj.id).not.toBe('from-finder');
+    finishPrepare();
+    await opening;
+    expect(PM.proj.id).toBe('from-finder');
+    const state = PM.projectFileState('from-finder');
+    expect(state.path).toBe('/tmp/Finder Project.pmv');
+    expect(state.savedHash).toMatch(/\S/);
+    expect(state.baselineHash).toBeUndefined();
+    expect(state.dirty).toBe(false);
+    expect(PM.EngineDoc.discardPrepared).not.toHaveBeenCalled();
   });
 
   it('reopens negative strip starts and their earlier local keys, including nested compositions', () => {
@@ -1587,6 +1664,36 @@ it.each([false, true])('reads a streamed document range, then lets main copy its
     expect(PM.proj.id).toBe('ranged-open');
     expect(PM.proj.name).toBe('Ranged');
   }
+});
+
+it.each([true, false])('publishes a streamed project only after main copied its media, while the engine prepares it (copy succeeds: %s)', async succeeds => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  const project = PM.mkProject({ id: 'source', name: 'Ranged', assets: { clip: { id: 'clip', kind: 'video', storageKey: 'media:clip' } } });
+  const bytes = new TextEncoder().encode(JSON.stringify({ proj: project, history: { version: 1, index: -1, entries: [] } }));
+  const offset = 9, media = [{ id: 'clip', type: 'video/mp4', offset: offset + bytes.length, length: 4096, revision: 'saved', sha256: 'a'.repeat(64) }];
+  const read = vi.fn(async (_token: string, at: number, length: number) => bytes.subarray(at - offset, at - offset + length));
+  let copied!: (ok: boolean) => void;
+  const putProjectRange = vi.fn(() => new Promise<boolean>((resolve, reject) => { copied = ok => ok ? resolve(true) : reject(new Error('The project media checksum does not match.')); }));
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true), putProjectRange };
+  PM.EngineDoc = { prepare: vi.fn(async () => {}), discardPrepared: vi.fn() };
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Ranged.pmv', projectId: 'ranged-open', token: 'ranged-reader',
+    size: offset + bytes.length + 4096, media, documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }),
+    projectRead: { read, close: vi.fn(async () => undefined) } } as any);
+  const opening = PM.openProject();
+  await vi.waitFor(() => expect(putProjectRange).toHaveBeenCalledOnce());
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(PM.proj.id).not.toBe('ranged-open');
+  // The engine prepares the hydrated document while the copy runs.
+  expect(PM.EngineDoc.prepare).toHaveBeenCalledOnce();
+  copied(succeeds);
+  await opening;
+  await Promise.resolve();
+  expect(PM.proj.id === 'ranged-open').toBe(succeeds);
+  expect(PM.EngineDoc.discardPrepared).toHaveBeenCalledTimes(succeeds ? 0 : 1);
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(!succeeds);
 });
 
 it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {

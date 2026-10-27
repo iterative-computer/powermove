@@ -471,7 +471,8 @@ export function linearKeyframeEase(): Pick<EaseKeyframe,
 export type TemporalEaseFields = Pick<EaseKeyframe,
   'inInterp' | 'outInterp' | 'inEase' | 'outEase' | 'autoBezier' | 'continuous'>;
 
-const hasNativeEase = (key: Record<string, unknown>): boolean =>
+/** A key in the native ease model (interpolation types and speed/influence on both sides). */
+export const hasNativeEase = (key: Record<string, unknown>): boolean =>
   isInterpolationType(key.inInterp) && isInterpolationType(key.outInterp)
   && isTemporalEase(key.inEase) && isTemporalEase(key.outEase);
 

@@ -104,6 +104,16 @@ struct DirectSource {
     translation: [f64; 2],
 }
 
+/// What each scene item draws from, by item index.
+struct ItemSources {
+    /// Atlas cells of coverage items.
+    cells: HashMap<usize, Vec<Cell>>,
+    /// Direct coverage sources (when the scene integrates outlines directly).
+    direct: HashMap<usize, DirectSource>,
+    /// Color glyph textures and the direct sources' views.
+    images: HashMap<usize, wgpu::TextureView>,
+}
+
 /// Coverage storage for one atlas page. Each page recorded in one encoder
 /// needs its own: queue writes before the submit would otherwise replace an
 /// earlier page's inputs.
@@ -885,19 +895,18 @@ impl TextGpu {
         })
     }
 
-    /// Renders the coverage pages of `atlas` into pool targets (pushed to
-    /// `taken`, returned after the frame is submitted).
+    /// Renders the coverage pages of `atlas` into pool targets, which the
+    /// caller returns to the pool after the frame is submitted.
     fn pages(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         pool: &mut TargetPool,
-        taken: &mut Vec<Target>,
         scene: &TextScene,
         atlas: &Atlas,
-    ) -> Result<Vec<wgpu::TextureView>, String> {
-        let mut views = Vec::with_capacity(atlas.pages.len());
+    ) -> Result<Vec<Target>, String> {
+        let mut targets = Vec::with_capacity(atlas.pages.len());
         for (page, &(w, h)) in atlas.pages.iter().enumerate() {
             let use_gpu = self.coverage != Coverage::Cpu;
             // The atlas cells keep their exact logical coordinates. Only the
@@ -978,10 +987,9 @@ impl TextGpu {
                     },
                 );
             }
-            views.push(target.view.clone());
-            taken.push(target);
+            targets.push(target);
         }
-        Ok(views)
+        Ok(targets)
     }
 
     fn source_bind(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
@@ -1018,6 +1026,15 @@ impl TextGpu {
         }
         pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
+        // Glyphs, sizes, or transforms the cache has not met (a layer first
+        // drawn, or animated) get their geometry on several threads at once.
+        self.cpu.coverage_cache().prepare(
+            scene.items.iter().flat_map(|item| match &item.content {
+                ItemContent::Coverage { paths } => paths.as_slice(),
+                _ => &[],
+            }),
+            |n, make| crate::parallel::map(n, make),
+        );
         let atlas = atlas::pack(scene, MAX_PAGE);
         // A scene uses one coverage source throughout, including when any
         // contour is too large or otherwise unsuitable for direct integration.
@@ -1044,10 +1061,13 @@ impl TextGpu {
         if !direct {
             direct_sources.clear();
         }
-        let pages = if direct {
+        let pages: Vec<wgpu::TextureView> = if direct {
             Vec::new()
         } else {
-            self.pages(device, queue, encoder, pool, taken, scene, &atlas)?
+            let targets = self.pages(device, queue, encoder, pool, scene, &atlas)?;
+            let views = targets.iter().map(|t| t.view.clone()).collect();
+            taken.extend(targets);
+            views
         };
         let (tw, th) = (plan.width(), plan.height());
         let format = text_format(precision);
@@ -1075,6 +1095,11 @@ impl TextGpu {
         for (&i, source) in &direct_sources {
             images.insert(i, source.view.clone());
         }
+        let sources = ItemSources {
+            cells,
+            direct: direct_sources,
+            images,
+        };
         let mut cleared = false;
         let mut i = 0;
         while i < scene.items.len() {
@@ -1087,9 +1112,7 @@ impl TextGpu {
                     taken,
                     plan,
                     i,
-                    &cells,
-                    &direct_sources,
-                    &images,
+                    &sources,
                     &pages,
                     &raster,
                     precision,
@@ -1104,16 +1127,7 @@ impl TextGpu {
             while i < scene.items.len() && scene.items[i].blur <= 0.0 {
                 i += 1;
             }
-            let draws = self.draws(
-                scene,
-                start..i,
-                crop,
-                (tw, th),
-                &cells,
-                &direct_sources,
-                &images,
-                working,
-            );
+            let draws = self.draws(scene, start..i, crop, (tw, th), &sources, working);
             self.pass(
                 device,
                 queue,
@@ -1121,7 +1135,7 @@ impl TextGpu {
                 &raster,
                 &draws,
                 &pages,
-                &images,
+                &sources.images,
                 precision,
                 &mut cleared,
             );
@@ -1134,7 +1148,7 @@ impl TextGpu {
                 &raster,
                 &[],
                 &pages,
-                &images,
+                &sources.images,
                 precision,
                 &mut cleared,
             );
@@ -1224,9 +1238,7 @@ impl TextGpu {
         range: std::ops::Range<usize>,
         origin: [f64; 2],
         size: (u32, u32),
-        cells: &HashMap<usize, Vec<Cell>>,
-        direct_sources: &HashMap<usize, DirectSource>,
-        images: &HashMap<usize, wgpu::TextureView>,
+        sources: &ItemSources,
         working: WorkingEncoding,
     ) -> Vec<Draw> {
         let (tw, th) = (size.0 as f32, size.1 as f32);
@@ -1246,10 +1258,10 @@ impl TextGpu {
                         (rgb[2] * a) as f32,
                         a as f32,
                     ];
-                    for c in cells.get(&i).map(Vec::as_slice).unwrap_or(&[]) {
+                    for c in sources.cells.get(&i).map(Vec::as_slice).unwrap_or(&[]) {
                         let x0 = c.device_x as f64 - origin[0];
                         let y0 = c.device_y as f64 - origin[1];
-                        let direct = direct_sources.get(&i);
+                        let direct = sources.direct.get(&i);
                         let (page, image, map, params, inv0, inv1) = if let Some(source) = direct {
                             // Split the local origin in the render target into
                             // whole pixels and a subpixel phase before f32.
@@ -1304,13 +1316,12 @@ impl TextGpu {
                                 params,
                                 inv0,
                                 inv1,
-                                ..Default::default()
                             },
                         });
                     }
                 }
                 ItemContent::Image { transform, .. } => {
-                    if !images.contains_key(&i) {
+                    if !sources.images.contains_key(&i) {
                         continue;
                     }
                     let b: Rect = item.bounds.inflate(1.0, 1.0);
@@ -1450,9 +1461,7 @@ impl TextGpu {
         taken: &mut Vec<Target>,
         plan: &TextPlan,
         index: usize,
-        cells: &HashMap<usize, Vec<Cell>>,
-        direct_sources: &HashMap<usize, DirectSource>,
-        images: &HashMap<usize, wgpu::TextureView>,
+        sources: &ItemSources,
         pages: &[wgpu::TextureView],
         raster: &Target,
         precision: Precision,
@@ -1467,7 +1476,7 @@ impl TextGpu {
         let own = match &item.content {
             ItemContent::Coverage { .. } => {
                 let mut u: Option<Rect> = None;
-                for c in cells.get(&index).map(Vec::as_slice).unwrap_or(&[]) {
+                for c in sources.cells.get(&index).map(Vec::as_slice).unwrap_or(&[]) {
                     let rc = Rect::new(
                         c.device_x as f64,
                         c.device_y as f64,
@@ -1507,14 +1516,20 @@ impl TextGpu {
             index..index + 1,
             [rx0, ry0],
             (lw, lh),
-            cells,
-            direct_sources,
-            images,
+            sources,
             working,
         );
         let mut fresh = false;
         self.pass(
-            device, queue, encoder, &a, &draws, pages, images, precision, &mut fresh,
+            device,
+            queue,
+            encoder,
+            &a,
+            &draws,
+            pages,
+            &sources.images,
+            precision,
+            &mut fresh,
         );
         let weights = gaussian_kernel(item.blur);
         let tmp = pool.take(
@@ -1531,9 +1546,13 @@ impl TextGpu {
             text_format(precision),
             pm_gpu::target::working_usage(),
         );
-        self.blur_pass(device, queue, encoder, &a, &tmp, &weights, 0, precision);
-        self.blur_pass(
-            device, queue, encoder, &tmp, &filtered, &weights, 1, precision,
+        self.blur_passes(
+            device,
+            queue,
+            encoder,
+            [(&a, &tmp), (&tmp, &filtered)],
+            &weights,
+            precision,
         );
         let (tw, th) = (plan.width() as f32, plan.height() as f32);
         let x0 = (rx0 - crop.x0).max(0.0);
@@ -1557,38 +1576,24 @@ impl TextGpu {
             raster,
             &[copy],
             std::slice::from_ref(&filtered.view),
-            images,
+            &sources.images,
             precision,
             cleared,
         );
         taken.extend([a, tmp, filtered]);
     }
 
-    fn blur_pass(
+    /// The separable Gaussian: `passes[axis]` is the (source, target) of the
+    /// horizontal (0) then the vertical (1) pass, sharing one weight buffer.
+    fn blur_passes(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        source: &Target,
-        target: &Target,
+        passes: [(&Target, &Target); 2],
         weights: &[f32],
-        axis: u32,
         precision: Precision,
     ) {
-        let (width, height) = (target.width(), target.height());
-        let uniform = BlurUniform {
-            width,
-            height,
-            radius: (weights.len() / 2) as u32,
-            axis,
-        };
-        let ub = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm text blur uniform"),
-            size: size_of::<BlurUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&ub, 0, bytes_of(&uniform));
         let wb = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm text Gaussian weights"),
             size: std::mem::size_of_val(weights) as u64,
@@ -1597,43 +1602,58 @@ impl TextGpu {
         });
         let weight_bytes: Vec<u8> = weights.iter().flat_map(|w| w.to_ne_bytes()).collect();
         queue.write_buffer(&wb, 0, &weight_bytes);
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm text Gaussian"),
-            layout: &self.blur_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ub.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wb.as_entire_binding(),
-                },
-            ],
-        });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("pm text Gaussian"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(self.blur[format_index(precision)].get());
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..4, 0..1);
+        for (axis, (source, target)) in (0u32..).zip(passes) {
+            let uniform = BlurUniform {
+                width: target.width(),
+                height: target.height(),
+                radius: (weights.len() / 2) as u32,
+                axis,
+            };
+            let ub = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pm text blur uniform"),
+                size: size_of::<BlurUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&ub, 0, bytes_of(&uniform));
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pm text Gaussian"),
+                layout: &self.blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ub.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&source.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wb.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pm text Gaussian"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(self.blur[format_index(precision)].get());
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..4, 0..1);
+        }
     }
 }
 

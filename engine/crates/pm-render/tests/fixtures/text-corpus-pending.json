@@ -9,16 +9,6 @@
     "measurement_sha256": "4f62a7d1633f90c2c04017e6963fc8a9cada6e23a0ea2cbcfd9bb940268fa3fa"
   },
   {
-    "frame": "10d131def7e27610fd9b11f47a2a6cc578d922c399b76e058c369dfcc0d169e3",
-    "owner": "L6",
-    "reason": "motion-blurred text group with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 2291 pixels over 2 CV, max 189, outside independent mask band 2291",
-      "paired isolated text passes; engine 8e7e1cf9f82a8301b02d9a4931729ad8a14fdf14862f8ec45bad1add1c22a537"
-    ],
-    "measurement_sha256": "d0ff27aa6bb92579be3229e774a300ea7531391deaf5664d70e8ac554da4c018"
-  },
-  {
     "frame": "115ce0fff9ad5ffd9df8038ec0d9402313d94cad6517ffd264cac6190d2f2f4f",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -74,16 +64,6 @@
     "measurement_sha256": "4f62a7d1633f90c2c04017e6963fc8a9cada6e23a0ea2cbcfd9bb940268fa3fa"
   },
   {
-    "frame": "33ef188f25a1063198579b5c8c074661a64b1b054fca20769725d663bf1c8162",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 24.27 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 4413 pixels over 2 CV, max 226, outside independent mask band 4413",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "12472fbb4f133e0b5a6e7a6af1d305cca7e024c5a366155807af1028b09dc4a2"
-  },
-  {
     "frame": "364630ec7f0455529971b41e81c06e05eaafad3e2ec1b4e002f74db60aca6719",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -91,26 +71,6 @@
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "4f62a7d1633f90c2c04017e6963fc8a9cada6e23a0ea2cbcfd9bb940268fa3fa"
-  },
-  {
-    "frame": "3a5f0bcd0e668cd0dfd61863ff0cb360d799d1bab6e333aa80a44657e257f9c3",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 19.92 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 4900 pixels over 2 CV, max 188, outside independent mask band 4900",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "f2c683264d070ccb1b1ab9b275795e81740c7749af2367363b5146aff009fa02"
-  },
-  {
-    "frame": "3b1818a90181bbcb79a79269b62144a0b6be972c1e6b4554244ff666e5602b84",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 98.27 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 5080 pixels over 2 CV, max 226, outside independent mask band 5080",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "1ee53c60ac53938e611377b85fcd42f05e1826a253fa170882cd2ba2fae0250a"
   },
   {
     "frame": "456bf434e8fc9fe2a3a22db307fcb789a88393c5ce8dcf7ba416d0f3466f1493",
@@ -131,29 +91,19 @@
     "measurement_sha256": "4f62a7d1633f90c2c04017e6963fc8a9cada6e23a0ea2cbcfd9bb940268fa3fa"
   },
   {
-    "frame": "4f319bb5f46b58b1d0b6f5097d06577dc4924752bd5ed33bfee9b365e5283b1b",
-    "owner": "L6",
-    "reason": "motion-blurred text group with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 2476 pixels over 2 CV, max 209, outside independent mask band 2476",
-      "paired isolated text passes; engine 1baf2c4424961974b1d0c9fd2fa4adecbf1cc2cd36730859d52d19891dea591a"
-    ],
-    "measurement_sha256": "7530f20c2a6b5f37031a4c69ce770eaf07bd236f8c2cb74f18b928aad1012def"
-  },
-  {
     "frame": "4fc45d719fc60b62d6630790c62099c2d7f5a0a9546c4d8be8a64e4a1b913b78",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 80.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 53545: background delta 81.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "text reference gap; original bar: 8454 pixels over 2 CV, max 226, outside independent mask band 6523",
+      "text reference gap; original bar: 8389 pixels over 2 CV, max 226, outside independent mask band 6449",
       "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
     ],
-    "measurement_sha256": "c9b75efdd7127d5ab90bde1ea89fede82df06819ceca8e0d4f6be8b913c27e1b"
+    "measurement_sha256": "96041fc7ebfec09679088b3715b2f40ed5f7f8249f1150db32d0faab56ffcc46"
   },
   {
     "frame": "515c13e29cac8e5fd4ff698f877486752fcb0bc1356d618dc9e05cfb720b616c",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 519692: background delta 16.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 519692: background delta 16.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 19591 pixels over 2 CV, max 176, outside independent mask band 19591",
       "paired isolated text passes; engine 32c719ddbb3ffa8662834059cc57a1f73c1928de6ed683542152d6ce8ded68b1"
@@ -173,12 +123,12 @@
   {
     "frame": "596169d5ccbfba56ea545ec35a66e8c5f75fc1240a7e5c9ef1948776a7a41f2e",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 64.73 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 53545: background delta 64.73 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 3888 pixels over 2 CV, max 226, outside independent mask band 3888",
       "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
     ],
-    "measurement_sha256": "a454fdb79ead9ea578cb5cac51134c7204829ec5ebde1561c5c5b203a819f208"
+    "measurement_sha256": "65e51c41f4c96bb863b3dbdbd1dd5079528493968a09627f9fcbf6d3d879a4d2"
   },
   {
     "frame": "5db10fbc1aa1a0d60be5664d733b6648f45bc9e71c50c7beab2072e99bffe61a",
@@ -188,16 +138,6 @@
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
     "measurement_sha256": "4f62a7d1633f90c2c04017e6963fc8a9cada6e23a0ea2cbcfd9bb940268fa3fa"
-  },
-  {
-    "frame": "61c0a17c96079d2b02ee3defde6f1418182cb5feb244feb3083ee0e0744b4280",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 35.08 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 4350 pixels over 2 CV, max 224, outside independent mask band 4350",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "2d8b8a974621962ec2efe7875d6e8909809adbb0f99ad3d715fb8fb51c484a08"
   },
   {
     "frame": "63b97c1cd2c3c9aeead67d233347f4737a346404de3fbc12cc16906dfa4174c1",
@@ -229,7 +169,7 @@
   {
     "frame": "697acd71dbec45d09d5fe611bcd3ab94dd76f69b43b24cafe0b6627d6bf636dd",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 928105: background delta 13.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 928105: background delta 13.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 15960 pixels over 2 CV, max 188, outside independent mask band 15960",
       "paired isolated text passes; engine 3465306ed2f09228fceaea3bddca5d4b2dc582382a193fa4ebea9672166c3273"
@@ -239,12 +179,12 @@
   {
     "frame": "6c18195fbb9c649c4675d8b9343837e3f33af61d3a7937052ac39551206592a3",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 91.27 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 53545: background delta 91.27 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "text reference gap; original bar: 8057 pixels over 2 CV, max 226, outside independent mask band 6317",
+      "text reference gap; original bar: 8034 pixels over 2 CV, max 226, outside independent mask band 6289",
       "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
     ],
-    "measurement_sha256": "2295ee3787a897a3da5b69f7a3e0ed267dd5e2e16c34c6115666a4c6e2550222"
+    "measurement_sha256": "bcef089aa3ec84de9802f575df13a79cc5cb9864673d6dfdbdc9d137f5b486f8"
   },
   {
     "frame": "70e0d8807abbb29640a46a6f417caff6c62db428518507b27f105279272cc314",
@@ -304,12 +244,12 @@
   {
     "frame": "83025241d00d073def7adad5fa8898edadeea7fc09aafac0f099cfe04a299d07",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 873974: background delta 13.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 873974: background delta 13.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 25298 pixels over 2 CV, max 245, outside independent mask band 25298",
       "paired isolated text passes; engine 3abfd683883c69f2e67dd30e11989d92f80b2ce0405e2e8c139a1ff4441a0b90"
     ],
-    "measurement_sha256": "56be0aaa7f73ad12d708b783a00abf11c29dc32c58106aa02e9e6d6473e8cd31"
+    "measurement_sha256": "8d0a2f08cff5699bd33a72266a41b8ed8edfe04d1cc788f6b935789b126f3357"
   },
   {
     "frame": "86e5a17e6828916e7263b6679330fc8106b015d300bd8c7fef6420e584c5e2ca",
@@ -320,15 +260,6 @@
       "paired isolated text passes; engine bb1526e4cbfa21746232ba3597c8b020236b7548661f6811fe4a0bf1ed37ac48"
     ],
     "measurement_sha256": "81b77df033f109b57508598394f6732cf49baf2623af595252043d3cffca9cf7"
-  },
-  {
-    "frame": "892b56df7888e4f0c351bfc327f157d89018bd6ee34f70acb4f3407a336e9956",
-    "owner": "L6",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.386 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "e46ff16de2f7b772e7a1bec80f4defc13235db58bfefd9316dd007b9f57d20e4"
   },
   {
     "frame": "945f8c01f904e2b42c13a4e3b7ea400f2a2eb5bdc697965b86b8fcaacd95433d",
@@ -414,16 +345,6 @@
     "measurement_sha256": "197235907d25af07c3285fd82b81bbf21a968d4fd26416f747ed1c64c1cad3ba"
   },
   {
-    "frame": "b94ab45facda28c44af173f9c7d82673670290857f2054c5357cace0d3233690",
-    "owner": "L6",
-    "reason": "motion-blurred text group with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 2194 pixels over 2 CV, max 194, outside independent mask band 2194",
-      "paired isolated text passes; engine 8e7e1cf9f82a8301b02d9a4931729ad8a14fdf14862f8ec45bad1add1c22a537"
-    ],
-    "measurement_sha256": "1883cd21283b3279595fa9229017002c6b9ea725cf9413f514fa9be73eae337c"
-  },
-  {
     "frame": "bac225d5ebc62d1237c94422cd9b1fd31bde65fd9e7ae79bf6ef1de53ffff9c1",
     "owner": "L4",
     "reason": "groups and precomps",
@@ -450,16 +371,6 @@
       "paired isolated text passes; engine 598ddbfa658eaf70a2e0c50fa12f914c28a4496bbb150a21d6d77d73b0d8c55d"
     ],
     "measurement_sha256": "342339a9335e1c39bf7178297b06860ec5847886d138f305a291fc5c6111b480"
-  },
-  {
-    "frame": "c173062cd13ef74657c05dff86c5718f2bdfe3ac25b657dd7bf4c3b23b54d3b7",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 9.92 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 3614 pixels over 2 CV, max 212, outside independent mask band 3614",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "3cfc7b1b8ef180b8e2441c95c934643c9897e54f62ab49cd3861dfbb473b81d2"
   },
   {
     "frame": "c415b014aa5767677551cb7f269ea5157fabec4664425b3babac0206e5d96e30",
@@ -511,16 +422,6 @@
     "measurement_sha256": "4f62a7d1633f90c2c04017e6963fc8a9cada6e23a0ea2cbcfd9bb940268fa3fa"
   },
   {
-    "frame": "d376a6efe6a2599fccc2cca9ce253309c068a8cfb9c105b0d3f5b5f9bb53f1f0",
-    "owner": "L6",
-    "reason": "motion-blurred text group with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 2666 pixels over 2 CV, max 208, outside independent mask band 2666",
-      "paired isolated text passes; engine 1baf2c4424961974b1d0c9fd2fa4adecbf1cc2cd36730859d52d19891dea591a"
-    ],
-    "measurement_sha256": "409511be64afe6c2cf277d2fd10cf0053e4e76a33df8a6c4caa11ab4ad9cbbb5"
-  },
-  {
     "frame": "e199e8b479b22eb7484468ee3ea9454b3fe1510b18f7289473694abace81dec8",
     "owner": "L4",
     "reason": "projected or resampled text with passing authored-isolation outline reference",
@@ -533,7 +434,7 @@
   {
     "frame": "e5308e653cf4018fb06d59e48489e36943096c5b5f0b7efd2d256687026461c0",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 90: background delta 3.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 90: background delta 3.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 24240 pixels over 2 CV, max 255, outside independent mask band 24240",
       "paired isolated text passes; engine 3eb657726fcc0f5a4d11243d114bb7a3ba8488bafa3bdec7de09b1bf48ef3ddc"
@@ -543,32 +444,12 @@
   {
     "frame": "eae15eabb767a0fe142fe02f16151796280e7821a2ea329a81ce6ca98399b8bb",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 500469: background delta 16.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 500469: background delta 16.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 21207 pixels over 2 CV, max 171, outside independent mask band 21207",
       "paired isolated text passes; engine 3945bc861139899dfd977e2cd20c7cfa799eedeb1677b705a2d7370236c3ddbc"
     ],
     "measurement_sha256": "2f2d6e15d60e52e165b5b58c720fb3ee7e8738d6b7880bd293e6c7a0f2a2a203"
-  },
-  {
-    "frame": "eaf9aeb549c09b5fc395c5a3de83dd72e2b2f9170eb5760e807448f14837457d",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 76.27 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 6217 pixels over 2 CV, max 225, outside independent mask band 6217",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "9b508000ce426aa4a9a3ca21fe83538dedfc33cdb2cca9efbaf33d7ba711d077"
-  },
-  {
-    "frame": "ebd1f42a8f75237f25304a0014fde93aaeb83a6843db4eb1959877fc4f46d68a",
-    "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 148.27 CV with passing authored-isolation outline reference",
-    "checks": [
-      "text reference gap; original bar: 5042 pixels over 2 CV, max 226, outside independent mask band 5042",
-      "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
-    ],
-    "measurement_sha256": "f2132e64d7224cb92299ed20ea07ec0234f7a6f38978bd2dac9c08006047edf8"
   },
   {
     "frame": "ec21e3261b95211c16d97e6767644cefcef2633ff1c596c3d76c5e600318bae7",
@@ -591,7 +472,7 @@
   {
     "frame": "edf964f0da5dc99997e4ed70e493d3a98872992d232463596888856d61670182",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 148247: background delta 3.00 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 148247: background delta 3.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 61715 pixels over 2 CV, max 198, outside independent mask band 61715",
       "paired isolated text passes; engine 5edb7a7ad1fa31d27675f1d77a08ba7eb498e9605b6f64c69ed0d3aa625d4e05"
@@ -629,11 +510,41 @@
   {
     "frame": "ff946b4415214cf7c4baf92306094f9163aa291450e6da733a8a29e4ea5ae3c1",
     "owner": "L4",
-    "reason": "nontext content intersects text at pixel 53545: background delta 148.27 CV with passing authored-isolation outline reference",
+    "reason": "nontext content intersects text at pixel 53545: background delta 148.27 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
       "text reference gap; original bar: 5216 pixels over 2 CV, max 226, outside independent mask band 5216",
       "paired isolated text passes; engine 1fa56bef9d99f0a50759dd96397eb0fd0e14266dfaf886d0b57bc957b7244272"
     ],
-    "measurement_sha256": "80732953ba3c07eb7edaecc45448f0eed38a7e41c51aaf9dbbb7662f2fe0cafc"
+    "measurement_sha256": "4445b42f4d438b92f75d90b6082ee149d60a78087f3e8de7a40f86e4a96ea7b4"
+  },
+  {
+    "frame": "70ccae997450d6006a2fc33e4685704aa3b21400e5f6f71bc0f28a07871713c1",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 41440: background delta 1.24 CV with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 13887 pixels over 2 CV, max 226, outside independent mask band 13887",
+      "paired isolated text passes; engine d1d9405addb4a4fa6c2a4120b046d479cebe1ffb0f69bdb155defc37d834be2e"
+    ],
+    "measurement_sha256": "3e1ce36ec09b02179149d000b83527ef3634af501fb31b81c2833d8d63f8492d"
+  },
+  {
+    "frame": "fd8aa5815ac158c609974a42ee8023266001cd1618bd3b66c94eee01c9004b20",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 30539: background delta 1.01 CV with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 19609 pixels over 2 CV, max 226, outside independent mask band 19609",
+      "paired isolated text passes; engine f3a681aac0a99d50f1ec92a78c4e36a5726de37201a0677e36753b1bbf218009"
+    ],
+    "measurement_sha256": "181f104ef02f0c9b1594e87e8e2d0d76771439766f635b60e1464baefefea3bf"
+  },
+  {
+    "frame": "0d99a9710049222679f4aaa27f88457e612a15698aa9ca64d0fae0395f85765b",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 31184: background delta 1.15 CV with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 21452 pixels over 2 CV, max 226, outside independent mask band 21452",
+      "paired isolated text passes; engine 6336a7e4287e09398ae54348f3f6e404066eab3bab8ae00e9da248d3d59636b8"
+    ],
+    "measurement_sha256": "2fdeab4ae4eaafc9822e055301f5f0ef6c9d133d6100d411eeda43fafc594463"
   }
 ]

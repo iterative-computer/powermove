@@ -64,6 +64,9 @@ struct State {
     registry: Option<u64>,
     served: u64,
     round_trips: u64,
+    /// How long render threads waited for answers (µs), and the longest.
+    waited_us: u64,
+    waited_us_max: u64,
 }
 
 /// The render threads' side of the font service.
@@ -90,6 +93,10 @@ pub struct HubStats {
     pub queued: usize,
     pub served: u64,
     pub round_trips: u64,
+    /// How long render threads waited for answers (µs), and the longest
+    /// single wait: a frame waits for the fonts it meets first.
+    pub waited_us: u64,
+    pub waited_us_max: u64,
     pub seeds: usize,
     pub seed_owners: usize,
 }
@@ -191,6 +198,8 @@ impl FontHub {
             queued: st.outbox.len(),
             served: st.served,
             round_trips: st.round_trips,
+            waited_us: st.waited_us,
+            waited_us_max: st.waited_us_max,
             seeds: st.seeds.fallback.len(),
             seed_owners: st.seeds.owners.len(),
         }
@@ -247,6 +256,9 @@ impl FontServer for FontHub {
         let mut st = self.lock();
         loop {
             if let Some(reply) = st.replies.remove(&token) {
+                let waited = started.elapsed().as_micros() as u64;
+                st.waited_us += waited;
+                st.waited_us_max = st.waited_us_max.max(waited);
                 return reply;
             }
             let fail = |st: &mut MutexGuard<'_, State>, why: String| {
@@ -314,8 +326,14 @@ mod tests {
         }));
         hub.opened();
         let h = hub.clone();
+        let asked = std::time::Instant::now();
         let t = std::thread::spawn(move || h.serve(&[query()]));
-        // The JavaScript thread's pump.
+        // The JavaScript thread's pump, a little after the request is queued
+        // (the render thread's wait has begun by then).
+        while !hub.has_requests() {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
         let mut served = 0;
         while served == 0 {
             served = hub.drain(|q| {
@@ -332,7 +350,11 @@ mod tests {
         // The reply carries the hub's generation, not the service's.
         assert_eq!(reply.generation, hub.generation());
         assert!(woken.load(Ordering::SeqCst) >= 1);
-        assert_eq!(hub.stats().served, 1);
+        let stats = hub.stats();
+        assert_eq!(stats.served, 1);
+        // The render thread's wait counts, and no longer than it lasted.
+        assert!(stats.waited_us >= 5_000 && stats.waited_us == stats.waited_us_max);
+        assert!(stats.waited_us <= asked.elapsed().as_micros() as u64);
     }
 
     #[test]

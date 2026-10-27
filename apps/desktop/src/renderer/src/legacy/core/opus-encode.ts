@@ -1,8 +1,7 @@
 /* The current exporter's Opus encoding through Chromium's WebCodecs
    AudioEncoder (moved verbatim out of audio.ts): 160 kbps, 20 ms AudioData
    chunks of planar float samples, and OpusHead with a 312-sample pre-skip
-   when the encoder gives no description. The job engine's WebCodecs encoder
-   (export-encoder/) runs the same function on the engine's mix. */
+   when the encoder gives no description. */
 
 export function opusHead(channels: any, sampleRate: any) {
   const out: any = new Uint8Array(19);

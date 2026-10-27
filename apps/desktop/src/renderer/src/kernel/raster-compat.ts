@@ -37,8 +37,7 @@
  * sent again), so the next frame asks afresh.
  */
 import type { CompatNeed } from '../../../shared/engine-protocol';
-import type { CompatAnswerOptions, CompatPrepareOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
-import { COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT } from '../engine-connection/render-transport';
+import { MAX_RASTER_EDGE, type CompatAnswerOptions, type CompatPrepareOptions, type CompatAnswerResult, type EngineRenderTransport } from '../engine-connection/render-transport';
 import { compatKey } from '../../../shared/protocol-strings';
 import type { Disposable } from './api';
 import { compositorPixels } from './raster-pixels';
@@ -102,8 +101,10 @@ export interface RasterCompatHandle {
   reset(): void;
   /** Answers one need (tests, the transport); `fresh`: never `reuse` (an export frame). */
   answer(need: CompatNeed, revision: number, options?: CompatAnswerOptions): CompatAnswerResult;
-  /** Prepare an interactive answer and all its base dependencies asynchronously. */
-  prepare(need: CompatNeed, revision: number, options?: CompatPrepareOptions): Promise<void>;
+  /** Prepare an interactive answer and all its base dependencies: the
+   *  chain runs now; null when the answer is ready on return, else a promise
+   *  that settles once its bases and readback arrived. */
+  prepare(need: CompatNeed, revision: number, options?: CompatPrepareOptions): Promise<void> | null;
   /** Where base pixels came from (diagnostics; the cadence gates log it). */
   readonly stats: RasterCompatStats;
   dispose(): void;
@@ -116,6 +117,8 @@ export interface RasterCompatStats extends RasterReadbackStats {
   syncLoads: number;
   /** Asynchronous base preparations started, and reused from the content cache. */
   asyncLoads: number;
+  /** Of those, the ones that joined an engine raster already on its way. */
+  sharedLoads: number;
   cacheHits: number;
   /** Completed pass-through answers: no base pixels were needed. */
   passThroughSkips: number;
@@ -245,6 +248,24 @@ function lazySurface(mark: Omit<LazyMark, 'touched' | 'loaded'>, load: () => any
   });
 }
 
+/**
+ * Whether a lazy base asked for whole (no crop) is, inside a viewer
+ * frame's crop window, the same pixels as the engine's raster of that
+ * window: true unless today's density cap (8,192 pixels a side) lowered
+ * the whole raster's density, which a window does not. A wrapper that
+ * drops the crop argument (a legacy `PM.raster` assignment) returns such a
+ * base for every partly visible layer; today the compositor draws it whole
+ * on the layer's quad, and only the window is ever on screen. Reads the
+ * base's geometry (not its canvas): in a preparation a base not yet
+ * prepared suspends the attempt like any base read.
+ */
+function wholeAtDensity(result: any, mark: LazyMark): boolean {
+  void result.w;
+  const surface = mark.loaded();
+  const width = Number(surface?.cv?.width), height = Number(surface?.cv?.height);
+  return width > 0 && height > 0 && Math.max(width, height) < MAX_RASTER_EDGE;
+}
+
 /** Today's quad sampling of a result (`contentQuad`): `uv` through the
  *  vertex shader, then `sourceWindow` in the bitmap's pixels (the
  *  draw-window program) — one `[ox, oy, sx, sy]` over the uploaded raster. */
@@ -267,13 +288,33 @@ const NOT_UPLOADED = (_key: string): undefined => undefined;
 
 const TRANSPARENT: CompatAnswerResult = { kind: 'raster', key: 'powermove:empty', width: 1, height: 1, format: 'rgba8Premultiplied', data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] };
 
-/** Give frame delivery and input a turn before speculative wrapper work.
- *  Native replies often arrive together; chaining their continuations as
- *  microtasks would run several wrappers before a presentation event. */
-async function preparationTurn(urgent = false): Promise<void> {
-  if (urgent) return;
-  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'background' }) => Promise<void> } }).scheduler;
-  if (scheduler?.postTask) await scheduler.postTask(() => {}, { priority: 'background' });
+/** A preparation in progress: an urgent ask for the same answer promotes it. */
+type Preparing = { layer: unknown; promise: Promise<void>; urgent: boolean; due: boolean; promote: (() => void) | null };
+
+/** Makes a preparation urgent, ending the turn it waits for. */
+function promote(entry: Preparing): void {
+  entry.urgent = true;
+  entry.promote?.();
+}
+
+/** Give frame delivery and input a turn before other wrapper work once a
+ *  base arrived. The turn is a task of its own, never `background`:
+ *  background tasks run only when no other task is queued, and a long sliced
+ *  job (a project fingerprint, for tens of seconds on a large document)
+ *  starved them, with the frame on screen waiting behind them. The frame on
+ *  screen (`urgent`) and a frame the running clock shows (`due`) go on in
+ *  the task their base arrived in: on a busy window every turn waited 40 to
+ *  150 ms (measured), and each such wait made the frame later, until
+ *  playback skipped it. An urgent ask for the same answer ends the turn. */
+async function preparationTurn(entry: Preparing): Promise<void> {
+  if (entry.urgent || entry.due) return;
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'user-visible' }) => Promise<void> } }).scheduler;
+  if (!scheduler?.postTask) return;
+  await new Promise<void>(resolve => {
+    entry.promote = resolve;
+    void scheduler.postTask(() => {}, { priority: 'user-visible' }).then(resolve, resolve);
+  });
+  entry.promote = null;
 }
 
 export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): RasterCompatHandle {
@@ -289,14 +330,16 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   // A missing base unwinds only this preparation attempt. Retry with its
   // real pixels; never hand a wrapper a placeholder it could cache.
   const suspended = Symbol('raster preparation suspended');
-  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
-  const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
-  const running = new Set<Promise<void>>();
+  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => CompatAnswerResult | Promise<CompatAnswerResult>) | null } | null = null;
+  const preparing = new Map<string, Preparing>();
   const bases = new Map<string, { surface: any; bytes: number; persistent: boolean }>();
+  /** Bases on their way by content key: preparations of the frames ahead
+   *  asking for the same pixels share one engine raster. */
+  const loading = new Map<string, { generation: number; promise: Promise<{ surface: any; revision: number } | null> }>();
   let baseBytes = 0;
-  let pending = 0, generation = 0, readyRevision: number | null = null;
+  let generation = 0, readyRevision: number | null = null;
   let serial = 0;
-  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0,
+  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, sharedLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0,
     readbacks: 0, readbackMs: 0, readbackMsMax: 0, preparations: 0, prepareMs: 0, prepareMsMax: 0,
     bitmapCaptures: 0, bitmapMs: 0, bitmapMsMax: 0, workerReplies: 0, workerMs: 0, workerMsMax: 0, workerComputeMs: 0, workerComputeMsMax: 0,
     slowPreparations: [], syncLoadSites: [] };
@@ -317,7 +360,22 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     }
     generation++;
   };
-  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); loading.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  /** The engine's base for a dependency, shared with other preparations
+   *  asking for the same content in this generation. */
+  const loadBase = (missing: Dependency): Promise<{ surface: any; revision: number } | null> => {
+    const load = () => options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+    const key = missing.content?.key;
+    if (key === undefined) return load();
+    const shared = loading.get(key);
+    if (shared && shared.generation === generation) { stats.sharedLoads++; return shared.promise; }
+    const promise = load();
+    const entry = { generation, promise };
+    loading.set(key, entry);
+    const done = () => { if (loading.get(key) === entry) loading.delete(key); };
+    promise.then(done, done);
+    return promise;
+  };
   const rememberBase = (content: BaseKey | null, surface: any) => {
     if (!content || !surface) return;
     const key = content.key;
@@ -456,7 +514,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       // The base itself, for this layer, density and window, untouched: the
       // engine draws it. A wrapper that wrote a field or took its canvas
       // (it may have drawn on it) gets its result drawn as returned.
-      if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
+      if (mark && mark.layer === layer && mark.scale === scale && !mark.touched && (mark.crop === crop || (crop && mark.crop == null && wholeAtDensity(result, mark)))) return { kind: 'native' };
       if (result == null) return TRANSPARENT;
       const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
       // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
@@ -488,110 +546,157 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         // waits for these pixels: read them here, without the worker's two
         // message hops (measured 3 ms of a 5 ms round trip under load).
         const urgent = preparation.urgent;
-        preparation.readback = async () => {
+        preparation.readback = () => {
           const began = performance.now();
-          try { return finish(urgent ? readPixels(source) : await readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs))); }
-          finally { transport?.trace?.record('override readback', revision, need.time, began); }
+          const traced = () => transport?.trace?.record('override readback', revision, need.time, began);
+          if (urgent) {
+            try { return finish(readPixels(source)); } finally { traced(); }
+          }
+          return readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs)).then(finish).finally(traced);
         };
         return null;
       }
       return finish(readPixels(source));
     },
 
-    async prepare(need: CompatNeed, revision: number, prepareOptions?: CompatPrepareOptions): Promise<void> {
-      if (!options.engineRasterAsync || !wrapped()) return;
+    prepare(need: CompatNeed, revision: number, prepareOptions?: CompatPrepareOptions): Promise<void> | null {
+      if (!options.engineRasterAsync || !wrapped()) return null;
       sampleRevision(revision);
       const layer = findLayer(PM, String(need.composition), String(need.layer));
-      if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
+      if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return null;
       const key = sampleKey(need, revision);
       // Only duplicate required viewer needs share a retained answer.
       // Async captures keep today's fresh wrapper evaluation semantics.
       if (!prepareOptions?.urgent && ready.get(key)?.retained) ready.delete(key);
-      if (ready.get(key)?.layer === layer) return;
+      if (ready.get(key)?.layer === layer) return null;
       const existing = preparing.get(key);
-      if (existing) { if (existing.layer === layer) await existing.promise; return; }
-      if (pending >= COMPAT_PREPARE_IN_FLIGHT + COMPAT_PREFETCH_IN_FLIGHT) {
-        const waitingGeneration = generation;
-        await Promise.race(running);
-        if (generation !== waitingGeneration) return;
-        return handle.prepare(need, revision, prepareOptions);
+      if (existing) {
+        if (existing.layer !== layer) return null;
+        // The frame on screen asks for what a playback preparation is
+        // already making: it goes on without waiting for its next turn.
+        if (prepareOptions?.urgent) promote(existing);
+        else void prepareOptions?.promoted?.then(() => promote(existing));
+        return existing.promise;
       }
       const epoch = generation;
-      pending++;
       const beganPreparation = performance.now();
       stats.preparations++;
       const valid = () => generation === epoch && findLayer(PM, String(need.composition), String(need.layer)) === layer && wrapped();
-      const promise = Promise.resolve().then(async () => {
-        const samples = new Map<string, any>();
-        const tainted = new WeakSet<object>();
-        try {
-          // A wrapper may ask for detached/retimed/cropped bases only after
-          // reading an earlier one (the typewriter's prefix). Discover each
-          // dependency with the actual previous pixels, then resume on a
-          // later turn. The finite bound also rejects a nonconvergent chain.
-          for (let phase = 0; phase < 64 && valid(); phase++) {
-            const queued = performance.now();
-            await preparationTurn(prepareOptions?.urgent);
-            transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
-            if (!valid()) return;
-            const attempt = { samples, tainted, urgent: !!prepareOptions?.urgent, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
-            let answer: CompatAnswerResult = null;
-            preparation = attempt;
-            const beganCpu = performance.now();
-            try { answer = handle.answer(need, revision, { fresh: true }); }
-            catch (error) { if (!attempt.missing) throw error; }
-            finally {
-              preparation = null;
-              const ms = performance.now() - beganCpu;
-              transport?.trace?.record('wrapper cpu', revision, need.time, beganCpu, phase);
-              stats.prepareCpuMs += ms; stats.prepareCpuMsMax = Math.max(stats.prepareCpuMsMax, ms);
-              if (ms > 8) { stats.slowPreparations.push({ time: Number(need.time) / TICKS_PER_SECOND, ms }); if (stats.slowPreparations.length > 20) stats.slowPreparations.shift(); }
-            }
-            const missing = attempt.missing;
-            if (!missing) {
-              if (attempt.readback) {
-                const beganReadback = performance.now();
-                stats.readbacks++;
-                try { answer = await attempt.readback(); }
-                finally {
-                  const ms = performance.now() - beganReadback;
-                  stats.readbackMs += ms; stats.readbackMsMax = Math.max(stats.readbackMsMax, ms);
-                }
-              }
-              if (!valid()) return;
-              if (answer?.kind === 'native') stats.passThroughSkips++;
-              ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: !!prepareOptions?.urgent });
-              keepReady();
-              return;
-            }
-            stats.asyncLoads++;
-            const began = performance.now();
-            const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
-            transport?.trace?.record('base dependency', revision, need.time, began);
-            const ms = performance.now() - began;
-            stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
-            if (!valid()) return;
-            samples.set(missing.key, loaded?.surface ?? null);
-            // Cached under the key read when it was asked for, only if the
-            // engine drew it at that same revision: a document edited while
-            // it was on its way keeps it for this preparation alone.
-            if (loaded && loaded.revision === missing.revision) rememberBase(missing.content, loaded.surface);
-          }
-          if (valid()) throw new Error('The raster override did not converge after 64 asynchronous base dependencies.');
-        } catch (error) {
-          log(`asynchronous raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
-          throw error;
-        }
+      const entry: Preparing = { layer, promise: null!, urgent: !!prepareOptions?.urgent, due: !!prepareOptions?.due, promote: null };
+      void prepareOptions?.promoted?.then(() => promote(entry));
+      const samples = new Map<string, any>();
+      const tainted = new WeakSet<object>();
+      const finished = () => {
+        const ms = performance.now() - beganPreparation;
+        transport?.trace?.record('override prepared', revision, need.time, beganPreparation);
+        stats.prepareMs += ms; stats.prepareMsMax = Math.max(stats.prepareMsMax, ms);
+      };
+      const store = (answer: CompatAnswerResult) => {
+        if (!valid()) return;
+        if (answer?.kind === 'native') stats.passThroughSkips++;
+        ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: entry.urgent });
+        keepReady();
+      };
+      const readBack = async (read: () => CompatAnswerResult | Promise<CompatAnswerResult>) => {
+        const beganReadback = performance.now();
+        stats.readbacks++;
+        try { return await read(); }
         finally {
-          const ms = performance.now() - beganPreparation;
-          transport?.trace?.record('override prepared', revision, need.time, beganPreparation);
-          stats.prepareMs += ms; stats.prepareMsMax = Math.max(stats.prepareMsMax, ms);
-          pending--; running.delete(promise); if (preparing.get(key)?.promise === promise) preparing.delete(key);
+          const ms = performance.now() - beganReadback;
+          stats.readbackMs += ms; stats.readbackMsMax = Math.max(stats.readbackMsMax, ms);
         }
+      };
+      /** One run of the chain with the bases known so far: the base it
+       *  still misses, the readback its result waits for, or null when the
+       *  answer is stored. An urgent answer's readback runs here. */
+      const attempt = (phase: number): { missing: Dependency } | { read: () => Promise<CompatAnswerResult> } | null => {
+        const run = { samples, tainted, urgent: entry.urgent, missing: null as Dependency | null, readback: null as (() => CompatAnswerResult | Promise<CompatAnswerResult>) | null };
+        let answer: CompatAnswerResult = null;
+        preparation = run;
+        const beganCpu = performance.now();
+        try { answer = handle.answer(need, revision, { fresh: true }); }
+        catch (error) { if (!run.missing) throw error; }
+        finally {
+          preparation = null;
+          const ms = performance.now() - beganCpu;
+          transport?.trace?.record('wrapper cpu', revision, need.time, beganCpu, phase);
+          stats.prepareCpuMs += ms; stats.prepareCpuMsMax = Math.max(stats.prepareCpuMsMax, ms);
+          if (ms > 8) { stats.slowPreparations.push({ time: Number(need.time) / TICKS_PER_SECOND, ms }); if (stats.slowPreparations.length > 20) stats.slowPreparations.shift(); }
+        }
+        if (run.missing) return { missing: run.missing };
+        const read = run.readback;
+        if (read && !entry.urgent) return { read: () => readBack(read) };
+        if (read) {
+          stats.readbacks++;
+          answer = read() as CompatAnswerResult;
+        }
+        store(answer);
+        return null;
+      };
+      // A wrapper may ask for detached/retimed/cropped bases only after
+      // reading an earlier one (the typewriter's prefix). Discover each
+      // dependency with the actual previous pixels, then resume on a later
+      // turn. The finite bound also rejects a nonconvergent chain.
+      const drive = async (first: Exclude<ReturnType<typeof attempt>, null>): Promise<void> => {
+        let step: ReturnType<typeof attempt> = first;
+        for (let phase = 1; step; phase++) {
+          if ('read' in step) {
+            const answer = await step.read();
+            store(answer);
+            return;
+          }
+          if (phase >= 64) throw new Error('The raster override did not converge after 64 asynchronous base dependencies.');
+          const missing = step.missing;
+          stats.asyncLoads++;
+          const began = performance.now();
+          const loaded = await loadBase(missing);
+          transport?.trace?.record('base dependency', revision, need.time, began);
+          const ms = performance.now() - began;
+          stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
+          if (!valid()) return;
+          samples.set(missing.key, loaded?.surface ?? null);
+          // Cached under the key read when it was asked for, only if the
+          // engine drew it at that same revision: a document edited while
+          // it was on its way keeps it for this preparation alone.
+          if (loaded && loaded.revision === missing.revision) rememberBase(missing.content, loaded.surface);
+          const queued = performance.now();
+          await preparationTurn(entry);
+          transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
+          if (!valid()) return;
+          step = attempt(phase);
+        }
+      };
+      const failed = (error: unknown) => {
+        log(`asynchronous raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      };
+      // The first run is now, in the caller's task: a frame's pass-through
+      // layers are answered together, before anything else runs, and their
+      // answers are ready when this returns null. Only a wrapper that reads
+      // a base, or a readback, continues later. Inside a run of the chain
+      // (a wrapper that asked for a capture) the first run waits a turn.
+      let later: Promise<void>;
+      if (preparation || producing) {
+        later = Promise.resolve().then(async () => {
+          await preparationTurn(entry);
+          if (!valid()) return;
+          const step = attempt(0);
+          if (step) await drive(step);
+        });
+      } else {
+        let step: ReturnType<typeof attempt>;
+        try { step = attempt(0); }
+        catch (error) { finished(); return Promise.resolve().then(() => failed(error)); }
+        if (!step) { finished(); return null; }
+        later = drive(step);
+      }
+      const promise = later.catch(failed).finally(() => {
+        finished();
+        if (preparing.get(key)?.promise === promise) preparing.delete(key);
       });
-      preparing.set(key, { layer, promise });
-      running.add(promise);
-      await promise;
+      entry.promise = promise;
+      preparing.set(key, entry);
+      return promise;
     },
 
     attach(next: EngineRenderTransport): () => void {

@@ -30,19 +30,3 @@ it('draws the profile\'s published definitions unless the caller names a set', a
   } finally { await rm(profile, { recursive: true, force: true }); }
 });
 
-it('hands pm-cli the desktop probe namespace read only', async () => {
-  const { mkdtemp, mkdir, writeFile, readFile, chmod, rm } = await import('node:fs/promises');
-  const os = await import('node:os');
-  const root = await mkdtemp(path.join(os.tmpdir(), 'pm-render-probes-'));
-  try {
-    const profile = path.join(root, 'profile'), cache = path.join(profile, 'Engine Cache', 'Shader Cache');
-    await mkdir(cache, { recursive: true });
-    await writeFile(path.join(cache, 'desktop-environment.json'), JSON.stringify({ v: 1, environment: 'desktop-electron' }));
-    const dump = path.join(root, 'env.txt'), fake = path.join(root, 'pm-cli');
-    await writeFile(fake, `#!/bin/sh\nenv > "${dump}"\n`); await chmod(fake, 0o755);
-    const env = { PATH: process.env['PATH'], POWERMOVE_PM_CLI: fake, POWERMOVE_USER_DATA: profile, POWERMOVE_ENGINE_PARITY_STORE: '' };
-    expect(await renderProject(['p.pmv', 'o.png'], '/unused', env)).toBe(0);
-    const seen = Object.fromEntries((await readFile(dump, 'utf8')).trim().split('\n').map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
-    expect(seen).toMatchObject({ POWERMOVE_ENGINE_PARITY_ENV: 'desktop-electron', POWERMOVE_ENGINE_SHADER_CACHE: cache, POWERMOVE_ENGINE_PARITY_STORE: 'read-only' });
-  } finally { await rm(root, { recursive: true, force: true }); }
-});

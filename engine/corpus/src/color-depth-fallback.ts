@@ -21,7 +21,10 @@ const suffix = depth === 32 ? 'f32' : 'u16';
 const builder = newProject('depth/fallback', { name: `Depth ${depth} fallback parity`, w: 64, h: 32, dur: 1, backgroundFill: { type: 'none', angle: 0, stops: [{ id: 'none', color: '#000000', position: 0 }] } });
 builder.root.colorDepth = depth;
 if (depth === 8) builder.root.backgroundFill = { type: 'linear', angle: 31, stops: [{id:'a', color:'#283445', position:0}, {id:'b', color:'#756174', position:100}] };
-const shader = 'void main(){fragColor=vec4(0.5001234+v_uv.x*0.1234567,0.2001234+v_uv.y*0.2345678,0.7001234,1.0);}';
+// Both programs sample a samplerCube (unbound: (0, 0, 0, 1) in WebGL), which
+// the engine's bind check refuses, so they draw through the runner (E-K6),
+// the only path that reaches it.
+const shader = 'uniform samplerCube u_runnerOnly;\nvoid main(){fragColor=vec4(0.5001234+v_uv.x*0.1234567,0.2001234+v_uv.y*0.2345678,0.7001234,texture(u_runnerOnly,vec3(0.0,0.0,1.0)).a);}';
 const layer = builder.add(builder.layer('shader', { d: { code: shader, w: 64, h: 32, uniforms: {} },
   ...(depth === 8 ? { blend: 'screen', p: { opacity: 67, rotation: 7, 'position.x': 5, 'position.y': 3, 'scale.x': 81, 'scale.y': 77 } } : {}) }));
 layer.fx.push({ id: 'depth-effect', type: 'depth.float32', on: builder.ch(true), p: {} });
@@ -30,7 +33,7 @@ try {
   await app.evaluateScript(`(()=>{${bundle};globalThis.DepthFallback=DepthFallback;return true;})()`);
   const capture = await app.evaluate(async ({ doc, depth }) => {
     const PM = (window as any).PM;
-    const fragment = PM.GLSL_PRE + '\nvoid main(){o=texture(u_tex,v_st);o.rgb=o.rgb*0.918273+vec3(0.0003123,0.0004321,0.0005678);}';
+    const fragment = PM.GLSL_PRE + '\nuniform samplerCube u_runnerOnly;\nvoid main(){o=texture(u_tex,v_st);o.rgb=o.rgb*0.918273*texture(u_runnerOnly,vec3(0.0,0.0,1.0)).a+vec3(0.0003123,0.0004321,0.0005678);}';
     const def = { id: 'depth.float32', label: 'Depth transport', group: 'Test', params: [], rawShader: true, passes: 3, frag: fragment };
     const registration = PM.Kernel.effects.register('depth-gate', def);
     try {

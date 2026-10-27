@@ -277,10 +277,6 @@ pub fn pass_key(seed: u64, size: Size) -> u64 {
 pub struct ReadFrame {
     /// Premultiplied working values, top-down, `width × height × 4`.
     pub rgba: Vec<f32>,
-    /// Owned GPU frame for a GPU-capable sink.
-    pub gpu: Option<wgpu::Texture>,
-    /// Whole-frame target held until a GPU sink has finished reading it.
-    gpu_target: Option<Box<pm_render::Frame>>,
     pub width: u32,
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
@@ -320,8 +316,6 @@ pub fn render_frame(
         gate,
         pass,
         cancel,
-        false,
-        true,
         Some(&mut crate::readback::ExportReadback::default()),
         Vec::new(),
     );
@@ -355,8 +349,6 @@ pub fn render_frame_reusing(
         gate,
         pass,
         cancel,
-        false,
-        true,
         None,
         Vec::new(),
     )
@@ -373,8 +365,6 @@ fn render_frame_output(
     gate: &dyn GpuGate,
     pass: u64,
     cancel: &AtomicBool,
-    gpu: bool,
-    readback: bool,
     staging: Option<&mut crate::readback::ExportReadback>,
     rgba: Vec<f32>,
 ) -> Result<ReadFrame, JobError> {
@@ -398,8 +388,6 @@ fn render_frame_output(
         pass,
         cancel,
         span.as_deref(),
-        gpu,
-        readback,
         staging,
         rgba,
     );
@@ -420,21 +408,17 @@ fn render_bands(
     pass: u64,
     cancel: &AtomicBool,
     span: Option<&crate::gpu_time::GpuSpan>,
-    gpu: bool,
-    readback: bool,
     mut staging: Option<&mut crate::readback::ExportReadback>,
     mut rgba: Vec<f32>,
 ) -> Result<ReadFrame, JobError> {
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
     let total_units = h.div_ceil(BAND_ROWS);
-    if readback && staging.is_some() {
+    if staging.is_some() {
         rgba.resize(w as usize * h as usize * 4, 0.0);
     } else {
         rgba.clear();
     }
-    let mut gpu_frame: Option<wgpu::Texture> = None;
-    let mut gpu_target: Option<Box<pm_render::Frame>> = None;
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -473,47 +457,6 @@ fn render_bands(
                 return Err(e.into());
             }
         };
-        if gpu && whole {
-            // The returned color target belongs to this frame; retaining it
-            // avoids a full float-texture copy while the encoder consumes it.
-            gpu_frame = Some(frame.color.texture.clone());
-        } else if gpu {
-            let target = gpu_frame.get_or_insert_with(|| {
-                renderer.device().create_texture(&wgpu::TextureDescriptor {
-                    label: Some("export GPU working frame"),
-                    size: wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: frame.color.texture.format(),
-                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                })
-            });
-            let mut copy =
-                renderer
-                    .device()
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("export GPU band"),
-                    });
-            copy.copy_texture_to_texture(
-                frame.color.texture.as_image_copy(),
-                wgpu::TexelCopyTextureInfo {
-                    origin: wgpu::Origin3d { x: 0, y, z: 0 },
-                    ..target.as_image_copy()
-                },
-                wgpu::Extent3d {
-                    width: w,
-                    height: band,
-                    depth_or_array_layers: 1,
-                },
-            );
-            renderer.queue().submit([copy.finish()]);
-        }
         let submitted = Instant::now();
         wait_idle(renderer);
         // A program ran away in this frame: its pixels are not delivered.
@@ -530,7 +473,7 @@ fn render_bands(
             .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
         let units = if whole { total_units } else { admitted };
         admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
-        if readback {
+        {
             let row = w as usize * 4;
             let at = y as usize * row;
             if let Some(staging) = staging.as_deref_mut() {
@@ -556,20 +499,11 @@ fn render_bands(
             }
         }
         failures.append(&mut frame.failures);
-        // A whole GPU target cannot return to the renderer until the sink's
-        // GPU conversion has completed. A band copy and CPU readback have
-        // completed above, so their targets can be reused immediately.
-        if gpu && whole {
-            gpu_target = Some(Box::new(frame));
-        } else {
-            renderer.recycle(frame);
-        }
+        renderer.recycle(frame);
         y += band;
     }
     Ok(ReadFrame {
         rgba,
-        gpu: gpu_frame,
-        gpu_target,
         width: w,
         height: h,
         failures,
@@ -829,19 +763,18 @@ pub struct AudioPlan {
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
-    /// The export's samples: today's `OfflineAudioContext` length
-    /// ([`legacy_audio_samples`]), not the frames' span.
+    /// The export's samples: the range's mix length
+    /// ([`export_audio_samples`]), not the frames' span.
     pub samples: i64,
     /// The range in seconds as today's `renderOffline(t0, t1)` receives it:
     /// its clips and envelopes start from `t0` (`pm_audio::today`).
     pub range: (f64, f64),
 }
 
-/// Today's export mix length (`audio.ts` `renderOffline`):
-/// `ceil((t1 − t0) × 48000)` with the range in seconds as JavaScript holds
-/// them. Range ends are ticks of seconds the sheet chose, so the division
-/// gives back the same double.
-pub fn legacy_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
+/// An export's mix length (X-K3, authored timing): `ceil((t1 − t0) × rate)`
+/// with the range in seconds. Range ends are ticks of seconds the sheet
+/// chose, so the division gives back the same double.
+pub fn export_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
     let seconds = |t: Ticks| t.get() as f64 / TICKS_PER_SECOND as f64;
     let span = (seconds(end) - seconds(start)).max(0.0);
     (span * f64::from(sample_rate)).ceil() as i64
@@ -1053,7 +986,7 @@ fn plan_export_checked(
                 // Today's export OfflineAudioContext is always stereo 48 kHz,
                 // independently of the project's playback device/rate.
                 sample_rate: 48_000,
-                samples: legacy_audio_samples(s.range.start, s.range.end, 48_000),
+                samples: export_audio_samples(s.range.start, s.range.end, 48_000),
                 range: (
                     s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
                     s.range.end.get() as f64 / TICKS_PER_SECOND as f64,
@@ -1209,12 +1142,7 @@ impl Progress {
 }
 
 enum Rendered {
-    Frame(
-        u64,
-        Vec<f32>,
-        Option<wgpu::Texture>,
-        Option<Box<pm_render::Frame>>,
-    ),
+    Frame(u64, Vec<f32>),
     Failed(JobError),
 }
 
@@ -1266,10 +1194,6 @@ where
     } = plan;
     let working = spec.working;
     let frames = spec.frames;
-    // A compatibility pass edits each frame's pixels on the CPU, so those
-    // exports read every frame back instead of handing the encoder textures.
-    let gpu_frames = sink.gpu_frames() && frame_post.is_none();
-    let sampled = crate::verify::sampled_frames(frames);
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
     let mut mixer = audio.map(|a| {
@@ -1296,10 +1220,9 @@ where
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
-    // The encoder returns pixels and completed whole GPU targets for later
-    // frames to reuse (docs/engine/perfbench.md).
-    let (back_tx, back_rx) =
-        std::sync::mpsc::channel::<(Vec<f32>, Option<Box<pm_render::Frame>>)>();
+    // The encoder returns pixels for later frames to reuse
+    // (docs/engine/perfbench.md).
+    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
         let encoder_gate = gate;
@@ -1311,10 +1234,8 @@ where
             let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
             let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
-                let (n, rgba, texture, gpu_target) = match rx.recv() {
-                    Ok(Rendered::Frame(n, rgba, texture, gpu_target)) => {
-                        (n, rgba, texture, gpu_target)
-                    }
+                let (n, rgba) = match rx.recv() {
+                    Ok(Rendered::Frame(n, rgba)) => (n, rgba),
                     Ok(Rendered::Failed(e)) => return Err(e),
                     Err(_) => return Err(JobError::Cancelled),
                 };
@@ -1327,15 +1248,10 @@ where
                     rgba: &rgba,
                 };
                 let started = profiling.then(Instant::now);
-                if let Some(texture) = texture {
-                    pipeline.push_gpu(&texture, (!rgba.is_empty()).then_some(&frame))?;
-                } else {
-                    pipeline.push_frame(&frame)?;
-                }
+                pipeline.push_frame(&frame)?;
                 video_ns += started.map_or(0, |t| t.elapsed().as_nanos());
                 let started = profiling.then(Instant::now);
                 let due = wants_preview
-                    && !rgba.is_empty()
                     && (n + 1 == frames
                         || last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_EVERY));
                 let preview = if due {
@@ -1352,9 +1268,7 @@ where
                     None
                 };
                 preview_ns += started.map_or(0, |t| t.elapsed().as_nanos());
-                // `push_gpu` has completed every source-texture GPU read.
-                // On an error above, the target is dropped instead of reused.
-                let _ = back_tx.send((rgba, gpu_target));
+                let _ = back_tx.send(rgba);
                 let started = profiling.then(Instant::now);
                 if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
@@ -1408,7 +1322,6 @@ where
         let mut staging = crate::readback::ExportReadback::default();
         let mut render_ns = 0u128;
         let render_started = Instant::now();
-        let mut last_gpu_preview = Instant::now() - PREVIEW_EVERY;
         let mut available_pixels: Vec<Vec<f32>> = Vec::new();
         for n in 0..frames {
             gate.sync_worker_qos();
@@ -1416,24 +1329,12 @@ where
                 render_error = Some(JobError::Cancelled);
                 break;
             }
-            // Three frames' pixels circulate. Keep returned buffers here so
-            // GPU frames without readback do not discard a sampled frame's
-            // allocation before the next sampled readback.
+            // Three frames' pixels circulate.
             if n >= PIXEL_BUFFERS
-                && let Ok((rgba, gpu_target)) = back_rx.recv()
+                && let Ok(rgba) = back_rx.recv()
             {
-                if let Some(frame) = gpu_target {
-                    renderer.recycle(*frame);
-                }
-                if !rgba.is_empty() {
-                    available_pixels.push(rgba);
-                }
+                available_pixels.push(rgba);
             }
-            let preview_due = wants_preview && last_gpu_preview.elapsed() >= PREVIEW_EVERY;
-            if preview_due {
-                last_gpu_preview = Instant::now();
-            }
-            let needs_readback = !gpu_frames || sampled.contains(&n) || preview_due;
             let frame_started = Instant::now();
             let rendered = render_frame_output(
                 renderer,
@@ -1445,14 +1346,8 @@ where
                 gate,
                 pass,
                 cancel,
-                gpu_frames,
-                needs_readback,
                 Some(&mut staging),
-                if needs_readback {
-                    available_pixels.pop().unwrap_or_default()
-                } else {
-                    Vec::new()
-                },
+                available_pixels.pop().unwrap_or_default(),
             )
             .and_then(|mut f| {
                 // Offline clips render absent (their names go in the report).
@@ -1494,11 +1389,11 @@ where
                         f.rgba,
                     )?,
                 };
-                Ok((rgba, f.gpu, f.gpu_target))
+                Ok(rgba)
             });
             match rendered {
-                Ok((rgba, gpu, gpu_target)) => {
-                    if tx.send(Rendered::Frame(n, rgba, gpu, gpu_target)).is_err() {
+                Ok(rgba) => {
+                    if tx.send(Rendered::Frame(n, rgba)).is_err() {
                         break;
                     }
                 }
@@ -1533,19 +1428,9 @@ where
 const PIXEL_BUFFERS: u64 = 3;
 
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
-/// FFmpeg (WebM), or the engine's PNG writer.
+/// libvpx and libopus (WebM), or the engine's PNG writer.
 pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
-    sink_for_with(plan, None)
-}
-
-/// [`sink_for`] with the host's WebCodecs encoders, which the desktop app's
-/// job engine has for the WebM exports today's exporter encodes with them.
-pub fn sink_for_with(
-    plan: &ExportPlan,
-    encoder: Option<Box<dyn crate::webcodecs::EncodeHost>>,
-) -> Result<crate::OutputSink, JobError> {
-    let level1 = crate::png_compat::has_level1_content(&plan.document);
-    let mut sink = crate::OutputSink::for_job_with(&plan.spec, level1, encoder)?;
+    let mut sink = crate::OutputSink::new(&plan.spec)?;
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }

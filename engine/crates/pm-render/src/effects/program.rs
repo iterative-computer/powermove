@@ -92,6 +92,9 @@ pub fn active(block: Option<&Block>, name: &str) -> bool {
 pub struct GpuProgram {
     vertex: crate::glsl::Stage,
     fragment: crate::glsl::Stage,
+    /// The fragment stage for RGBA16F targets ([`crate::glsl::half_store`]),
+    /// built on first use.
+    fragment_half: Option<crate::glsl::Stage>,
     layout: wgpu::PipelineLayout,
     pub fragment_layout: wgpu::BindGroupLayout,
     pub vertex_layout: wgpu::BindGroupLayout,
@@ -296,6 +299,7 @@ impl GpuProgram {
         Ok(GpuProgram {
             vertex,
             fragment,
+            fragment_half: None,
             layout,
             fragment_layout,
             vertex_layout,
@@ -319,7 +323,27 @@ impl GpuProgram {
             self.pipelines.contains_key(&format),
         );
         if !self.pipelines.contains_key(&format) {
+            // RGBA16F stores the nearest half of the program's output.
+            if format == wgpu::TextureFormat::Rgba16Float && self.fragment_half.is_none() {
+                let half = self.fragment.msl.as_deref().and_then(|msl| {
+                    crate::glsl::half_store(msl, &self.fragment.entry_point)
+                });
+                if let Some(source) = half {
+                    let stage = crate::glsl::msl_stage(
+                        device,
+                        "pm legacy fragment (nearest half)",
+                        source,
+                        &self.fragment.entry_point,
+                    )
+                    .map_err(|e| Failure::new(FailureStage::NagaValidate, e))?;
+                    self.fragment_half = Some(stage);
+                }
+            }
             let scopes = push_scopes(device);
+            let fragment = match &self.fragment_half {
+                Some(half) if format == wgpu::TextureFormat::Rgba16Float => half,
+                _ => &self.fragment,
+            };
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("pm legacy glsl"),
                 layout: Some(&self.layout),
@@ -341,8 +365,8 @@ impl GpuProgram {
                 depth_stencil: None,
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
-                    module: &self.fragment.module,
-                    entry_point: Some(&self.fragment.entry_point),
+                    module: &fragment.module,
+                    entry_point: Some(&fragment.entry_point),
                     compilation_options: Default::default(),
                     // Blending off (`gl.disable(gl.BLEND)` around every
                     // effect and transition draw).

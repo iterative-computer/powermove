@@ -64,18 +64,29 @@ function defineCompat(object: any, key: any, get: any, set: any) {
   if (descriptor?.enumerable && descriptor.value !== undefined) PM.doc?.wroteObject?.(object);
 }
 
+/* One getter and setter per field, shared by every key and resolved through
+   the key itself: closures per key were six functions and a context for each
+   of a dense project's million keys, and gave every key its own shape. */
+const keyCompat = (['_ho', '_hi', '_pt'] as const).map(name => {
+  const field = name.slice(1);
+  return [name, function (this: any) { return keyHandles.get(idOf(this))?.[field]; },
+    function (this: any, value: any) { return setKeyPatch(idOf(this), { [field]: value }); }] as const;
+});
+
+const lookupGetter = (Object.prototype as any).__lookupGetter__ as (this: object, name: string) => unknown;
+
 function installKeyCompat(key: any) {
   const id = idOf(key);
   if (!id) return;
-  const legacy: any = {};
-  for (const [name, field] of [['_ho', 'ho'], ['_hi', 'hi'], ['_pt', 'pt']] as any) {
+  let legacy: any = null;
+  for (const [name, get, set] of keyCompat) {
+    // Every prune visits every key: one already installed costs no descriptor objects.
+    if (lookupGetter.call(key, name) === get) continue;
     const descriptor = Object.getOwnPropertyDescriptor(key, name);
-    if (descriptor && descriptor.enumerable && descriptor.value != null) legacy[field] = descriptor.value;
-    defineCompat(key, name,
-      () => keyHandles.get(id)?.[field],
-      (value: any) => setKeyPatch(id, { [field]: value }));
+    if (descriptor && descriptor.enumerable && descriptor.value != null) (legacy ??= {})[name.slice(1)] = descriptor.value;
+    defineCompat(key, name, get, set);
   }
-  if (Object.keys(legacy).length) setKeyPatch(id, legacy);
+  if (legacy) setKeyPatch(id, legacy);
 }
 
 function installEffectCompat(effect: any) {
@@ -123,13 +134,17 @@ function installLayerCompat(layer: any) {
 }
 
 function collectProject(proj: any) {
-  const ids: any = { keys: new Set(), layers: new Set(), effects: new Set() };
+  // Key ids matter only to prune stored handles: a dense project has a million
+  // keys and usually no stored handles (a key's handles added during this walk
+  // belong to a key that is present).
+  const keys = keyHandles.size ? new Set() : null;
+  const ids: any = { keys, layers: new Set(), effects: new Set() };
   const visitProps = (props: any) => Object.values(props || {}).forEach((prop: any) => {
     if (!prop || !Array.isArray(prop.kf)) return;
     prop.kf.forEach((key: any) => {
       const id = idOf(key);
       if (!id) return;
-      ids.keys.add(id);
+      keys?.add(id);
       installKeyCompat(key);
     });
   });
@@ -162,7 +177,7 @@ function prune(proj: any) {
   if (activeProject && activeProject !== proj) clear();
   activeProject = proj || null;
   const ids = collectProject(proj);
-  for (const id of keyHandles.keys()) if (!ids.keys.has(id)) keyHandles.delete(id);
+  if (ids.keys) for (const id of keyHandles.keys()) if (!ids.keys.has(id)) keyHandles.delete(id);
   for (const id of reveal.keys()) if (!ids.layers.has(id)) reveal.delete(id);
   for (const id of shaderMeta.keys()) if (!ids.layers.has(id)) shaderMeta.delete(id);
   for (const id of fxOpen.keys()) if (!ids.effects.has(id)) fxOpen.delete(id);
@@ -282,6 +297,28 @@ const UIState = PM.UIState = {
   },
 };
 
-PM.bus.on('project', () => prune(PM.proj));
-PM.bus.on('layers', () => { if (PM.proj) prune(PM.proj); });
+/* Pruning walks every keyframe of the document (C1: 770k, over 100 ms), and
+   documents announce every edit. Another project is pruned at once. Within
+   one project the side tables only lose entries for what was deleted, and
+   every reader installs and syncs what it reads, so the walk waits until the
+   edits stop; an announcement after which no layer, effect or keyframe can
+   have changed (a composition setting: the evaluator's version and the layer
+   index both stand) needs none. */
+const PRUNE_SETTLE_MS = 400;
+let pruned: { project: any; evaluation: unknown; structure: unknown } | null = null;
+let pruneTimer: ReturnType<typeof setTimeout> | null = null;
+const pruneNow = () => {
+  if (pruneTimer !== null) { clearTimeout(pruneTimer); pruneTimer = null; }
+  prune(PM.proj);
+  pruned = { project: PM.proj, evaluation: PM.evaluationVersion?.(), structure: PM.ProjectIndex?.generation?.() };
+};
+const pruneChanged = () => {
+  const evaluation = PM.evaluationVersion?.(), structure = PM.ProjectIndex?.generation?.();
+  if (!pruned || pruned.project !== PM.proj || evaluation === undefined || structure === undefined) { pruneNow(); return; }
+  if (pruned.evaluation === evaluation && pruned.structure === structure) return;
+  if (pruneTimer !== null) clearTimeout(pruneTimer);
+  pruneTimer = setTimeout(() => { pruneTimer = null; if (PM.proj) pruneNow(); }, PRUNE_SETTLE_MS);
+};
+PM.bus.on('project', pruneChanged);
+PM.bus.on('layers', () => { if (PM.proj) pruneChanged(); });
 }

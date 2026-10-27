@@ -353,7 +353,7 @@ fn keyframe_tracks_match_typescript() {
         let text = s(case.get("kf").unwrap());
         let kf = Node::from_value(parse(text).unwrap(), 0);
         let color = case.get("color").unwrap().as_bool().unwrap();
-        let prepared = PreparedTrack::prepare(Some(&kf), &mut springs);
+        let prepared = PreparedTrack::prepare(Some(&kf));
         let times = fs(case.get("times").unwrap());
         let outs = case.get("out").unwrap().as_array().unwrap();
         for (t, want) in times.iter().zip(outs) {

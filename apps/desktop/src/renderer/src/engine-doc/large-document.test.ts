@@ -6,7 +6,7 @@ import { decodePatchOps } from '../../../shared/patch-binary';
 import { applyOps, type PatchOp } from '../../../shared/patch-ids';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { ConsistencyHash } from './consistency-hash';
-import { DocumentBarrier } from './barrier';
+import { anchorPath, DocumentBarrier } from './barrier';
 import { installEngineDoc } from './install';
 import { parseMode } from './flags';
 import { diffJsonOps } from './json-diff';
@@ -119,6 +119,28 @@ describe('incremental large-document synchronization', () => {
     notifyDocument(PM, 'project'); PM.doc.flush(); nested();
     expect(barrier.shadow.comps.comp.layers[0].p.x.v).toBe(456);
     console.info(JSON.stringify({ wholeDocumentDiffMs: wholeMs, runtimeNotifications73Ms: notificationsMs, bytes: batches[0]?.body.length }));
+  });
+
+  it('diffs an optional composition setting it never had as that member alone, not the whole composition', async () => {
+    const instance = await wasm();
+    const project: any = large(24, 100);
+    const barrier = new DocumentBarrier(instance, () => project);
+    barrier.resync();
+    const ops: PatchOp[][] = [];
+    barrier.subscribe(batch => { if (batch.origin !== 'load') ops.push(decodePatchOps(batch.body)); });
+    const path = ['comps', 'comp', 'audioGain'];
+    expect(anchorPath(barrier.shadow, canonicalProject({ ...project, audioGain: 2 }), path)).toEqual(path);
+    // Under a member that is not an object, the parent is replaced.
+    expect(anchorPath({ comps: { comp: 1 } }, { comps: { comp: { audioGain: 2 } } }, path)).toEqual(['comps', 'comp']);
+    project.audioGain = 2; barrier.touched([['audioGain']]); barrier.flush();
+    delete project.audioGain; barrier.touched([['audioGain']]); barrier.flush();
+    // Nothing written: a member neither side has is no operation at all.
+    barrier.touched([['shutter']]); barrier.flush();
+    expect(ops).toEqual([
+      [{ path: ['comps', 'comp', 'audioGain'], exists: true, value: 2 }],
+      [{ path: ['comps', 'comp', 'audioGain'], exists: false }],
+    ]);
+    expect(barrier.check('setting').ok).toBe(true);
   });
 
   it('keeps the viewer replay base when another consumer takes a snapshot', async () => {

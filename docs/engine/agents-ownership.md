@@ -72,7 +72,6 @@ No changes to `docs/rust-engine.md` were made by this lane.
 | `engine/crates/pm-render/src/effects/exec.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |
 | `engine/crates/pm-render/src/effects/mod.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |
 | `engine/crates/pm-render/src/renderer.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists; read `POWERMOVE_ENGINE_PARITY_STORE` and expose `read_only_shader_reference` so hidden/CLI hosts never write the desktop's probe decisions. |
-| `engine/crates/pm-render/src/effects/parity.rs` | Read-only probe store: honour persisted runner pins and native verifications, keep a foreign browser's first-use decisions in memory (`ProbeStore`, `set_read_only`), with unit tests. |
 | `engine/crates/pm-render/tests/effects_fallback.rs` | GPU test that a read-only first probe leaves no marker and the desktop still probes the program. |
 | `apps/desktop/src/renderer/src/legacy/__tests__/import-post-commit-guard.test.ts` | Test of the `raster.ts` post-commit guard change listed above. |
 | `engine/crates/pm-render/src/shader_layers/exec.rs` | Configure the shared shader reference/cache from CLI and refuse unverified native user programs when no reference exists. |

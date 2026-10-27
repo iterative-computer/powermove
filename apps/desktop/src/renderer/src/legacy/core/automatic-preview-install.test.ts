@@ -78,6 +78,19 @@ beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('automatic preview editor integration', () => {
+  it('stays off under the native engine without allocating the compatibility context', () => {
+    const h = editor();
+    const allocate = vi.fn(() => ({}));
+    delete h.PM.GL.gl;
+    Object.defineProperty(h.PM.GL, 'gl', { configurable: true, get: allocate });
+    h.PM.GL.peekContext = () => null;
+    h.PM.EngineConnection = {};
+    expect(h.options.state().blocked).toBe(true);
+    delete h.PM.EngineConnection;
+    expect(h.options.state().blocked).toBe(true);
+    expect(allocate).not.toHaveBeenCalled();
+  });
+
   it('shares the existing preview budget and exposes the actual viewport, work area and render signature', () => {
     const h = editor();
     expect(h.PM.AutomaticPreview).toBe(h.service);

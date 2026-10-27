@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 type Reply = { ok: boolean; code?: string; error?: string; value?: any; special?: boolean };
@@ -144,8 +144,11 @@ export class DocumentRecovery {
         if (request.op === 'load') {
           // IPC staging is removed as soon as commit finishes; this private
           // copy is the only recovery source and is removed on replacement.
+          // The staging file is complete and never written again, so a hard
+          // link is that copy (copying the real project's 180 MB held its
+          // ingestion up 0.6 to 0.8 s); a copy across volumes.
           const file = path.join(state.dir, randomUUID());
-          await copyFile(request.args.path, file);
+          await link(request.args.path, file).catch(() => copyFile(request.args.path, file));
           const text = request.args.source === 'text';
           const prepared: Checkpoint = { file, document: request.args.document, revision: request.args.revision, preparedRevision: request.args.revision,
             hash: text ? '' : request.args.hash, ...(text ? { sourceHash: request.args.hash } : {}) };

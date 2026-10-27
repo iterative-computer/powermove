@@ -3,7 +3,7 @@
 `engine/crates/pm-export/tests/color_depth_export.rs` uses a deterministic
 three-patch project saved with `colorDepth: 8`. Every job requests
 `Precision::Float32`, as the app's `wireSettings` does, and enables dither for
-delivery formats at 8 bits or less. The saved project depth still governs the
+8-bit PNG only (EXPORT-DITHER-1). The saved project depth still governs the
 native frame: the test checks every export plan's device target and an actual
 `Renderer::render` result for `Rgba8Unorm`. Jobs run through
 `pm-export::render::run_export`. A second scene has a half-alpha patch and a
@@ -41,7 +41,7 @@ conversion had overshot one anchor by 26 codes because it did not use the
 encoded BT.709 matrix. For VP8 with and without alpha, an additional
 dither-off depth-8/depth-16 native encoder pair preserves the prior codec
 baseline: all 110,592 decoded RGB bytes across three frames match exactly.
-Dither-on output uses the app's settings and the same 4-code anchor bound.
+App-settings output (dithered only for 8-bit PNG) keeps the same 4-code anchor bound.
 JPEG previews retain their separate 24-code lossy-image bound.
 
 For alpha video, FFprobe exposes `ALPHA_MODE=1` on VP8/VP9 WebM. The test

@@ -623,13 +623,11 @@ fn fallback_effects_match_webgl() {
         let id = case["id"].as_str().unwrap();
         let webgl = &status["cases"][id];
         let webgl_draws = webgl["compiled"].as_bool() == Some(true) && webgl["glError"].is_null();
-        // Programs the native pipeline cannot translate, and programs it
-        // translates but that are listed as drawn by WebGL's runner
-        // (`pm_render::effects::ANGLE_ONLY`).
+        // Programs the native pipeline cannot translate (E-K6).
         let needs = matches!(
             renderer.effects().status(def.kind, def.id.as_str()),
             Some(Status::NeedsFallback(_))
-        ) || renderer.effects().angle_only(def.kind, def.id.as_str());
+        );
         if !webgl_draws || !needs {
             continue;
         }

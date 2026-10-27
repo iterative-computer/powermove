@@ -920,7 +920,7 @@ impl Shape {
         let track = self.tracks[slot].get_or_init(|| {
             let plain = !node::get(p, b"expr").truthy()
                 && node::array(kf).is_some_and(|keys| !keys.is_empty());
-            plain.then(|| Arc::new(pm_eval::keyframes::PreparedTrack::prepare(kf, ev.springs())))
+            plain.then(|| Arc::new(pm_eval::keyframes::PreparedTrack::prepare(kf)))
         });
         let track = track.as_ref()?;
         // `localTime`: `T − L.from`, as `evP` reads it.

@@ -222,6 +222,7 @@ the unclipped reference over the same band centers.
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Honor the authored solid radius (SOLID-RADIUS-1); today ignores it | 224, 224, 50.888 | 0.62, 0.57, 0.121 | Three captured solid placements; interior engine error is at most 0.50 CV |
+| Exact area coverage of solid edges replaces pixel-centre rasterization (the box-filtered area coverage of the vector rows) | 81.6, 81.6, 81.6 | 0.60, 0.60, 0.500 | `pm-node/tests/compose.rs` crop far from the origin: a solid's two fractional edge columns (0.6 and 0.4 covered, 400 pixels) at 500% on a 2x display, through f16 compositing and the 8-bit display |
 
 ## Path mask coverage and feather
 
@@ -395,3 +396,26 @@ are source frames.
 
 Playback's maximum is at the clamped outer support; every output pixel is
 closer than the previous draw. No colour or geometry tolerance is widened.
+
+## Effects, shaders and export (L6)
+
+- **Reference:** the built-in effects in f64 from their GLSL (`pm_reference::effects`:
+  GL's bilinear clamp-to-edge `texture()`, the ping-pong passes); for user programs,
+  WebGL with unrounded RGBA32F intermediates (`webgl.ts --perturb-storage`); for export,
+  the engine's lossless 16-bit PNG render of the same frames.
+- **Gate:** `tests/effect_proof.rs`, `tests/shader_gate.rs` (G-E1), `tests/effects.rs`
+  `rgba16f_stores_the_nearest_half_of_a_programs_output`, and
+  `e2e/export-encoding-parity.spec.ts` (G-X1).
+- **Units:** CV unless stated; binary16 steps where noted.
+
+| Correction (standard) | Today vs reference | Engine vs reference | Cases |
+|---|---|---|---|
+| GLSL programs store the nearest half into RGBA16F (IEEE 754 round to nearest even; Metal's render-target conversion truncates) | up to 1 binary16 step low per stored pass (0.3 stores 0x34CC); 2.0 steps after 2 passes, 4.0 after 8 (G-E1, generated multi-pass blurs) | exact store of the program's f32 value (0x34CD) | every effect, transition, shader and fragment layer at 16-bit working depth |
+| User programs draw natively from the first frame (E-R1, E-R2: GLSL ES f32 semantics; no ANGLE pin) | ill-conditioned programs pinned to ANGLE forever, 24–462 ms per pinned frame, 822–874 ms first use | native in one frame; within G-E1 everywhere WebGL is stable, and at no more pixels than WebGL differs from itself where it is not | 752 gate variants, 219 of them private user programs |
+| H.264 and ProRes from the engine's float → Y′CbCr conversion (BT.709, siting type 0) into VideoToolbox; ProRes at its native 10 or 12 bits | RGBA8 over black, then FFmpeg swscale: PSNR 56.31 dB (ProRes 4444), 41.14 dB (H.264) | 74.18 dB (ProRes 4444), 43.42 dB (H.264); matched-rate H.264 Y′ 42.96 dB against Apple's 41.64 dB | `export-encoding-parity.spec.ts`, every fixture; `bars.rs` `h264_generation_psnr_at_matched_rate` |
+| WebM encoded in the engine from the same conversion, tagged 1-13-1 limited | Chromium canvas readback through WebCodecs, primaries and transfer untagged: 41.14 dB | 43.31 dB, tagged | same |
+| Lossy codecs are not dithered; only 8-bit PNG is (EXPORT-DITHER-1) | — | dithered H.264 coded the noise: 2.0 Mb/s where 7.7 kb/s sufficed, 49.81 dB against 53.41 dB on a flat field; undithered, 8.3 kb/s and equal | H.264, HEVC, VP8, VP9 exports |
+| Audio reaches the encoders as f32 (24-bit PCM keeps 24 bits; AAC from f32) | a 16-bit WAV (×32767/32768, `Math.round`) before `pcm_s24le`/AAC | the f32 mix; 16-bit PCM keeps its TPDF dither | every MOV/MP4 export with audio |
+| Integer PCM decodes with one scale both sides of zero (AES17, 1/32768) | 1/32767 above zero, 1/32768 below (a 3e-5 gain asymmetry) | symmetric | every 8- and 16-bit PCM source |
+| ProRes frame headers carry the frame-rate code (SMPTE RDD 36 `frame_rate_code`) | 0, unspecified | the movie's code (2 at 24 fps), as VideoToolbox writes it from the session's expected frame rate; aspect ratio stays unspecified in both | every ProRes export; `engine-delivery.spec.ts` |
+| WebM segment duration is the longest track's end (Matroska `Duration`) | 25/24 s for a 1 s project (one frame long) | 1.007 s: the Opus track ends its 312-sample pre-skip (6.5 ms) after the video; within one frame of the project length, as Chromium reads it | every WebM export; `engine-delivery.spec.ts` |

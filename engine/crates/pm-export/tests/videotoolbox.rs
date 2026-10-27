@@ -208,7 +208,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
     assert_eq!((r.cicp, r.full_range, r.alpha), ((1, 13, 1), false, false));
     assert_eq!(
         (r.frames, r.movie_timescale, r.media_timescale, r.duration),
-        (30, 240_000, 30_000, 30_030)
+        (30, 30_000, 30_000, 30_030)
     );
     let audio = r.audio.as_ref().unwrap();
     assert_eq!(
@@ -218,7 +218,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
             audio.timescale,
             audio.samples
         ),
-        ("in24", 2, 48_000, 48_048)
+        ("lpcm", 2, 48_000, 48_048)
     );
     let tc = r.timecode.as_ref().unwrap();
     assert_eq!(
@@ -370,7 +370,7 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
     assert_eq!((r.cicp, r.full_range), ((1, 13, 1), false));
     assert_eq!(
         (r.frames, r.movie_timescale, r.duration),
-        (45, 384_000, 23_040)
+        (45, 15_360, 23_040)
     );
     let audio = r.audio.as_ref().unwrap();
     assert_eq!(audio.codec, "mp4a");
@@ -379,10 +379,10 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
         "{} AAC samples",
         audio.samples
     );
-    // The desktop exporter's final FFmpeg audio mux places moov after mdat.
+    // MP4 for the web: the movie header first (fast start).
     let bytes = std::fs::read(&done.path).unwrap();
     let pos = |k: &[u8]| bytes.windows(4).position(|w| w == k).unwrap();
-    assert!(pos(b"mdat") < pos(b"moov"), "unexpected MP4 atom order");
+    assert!(pos(b"moov") < pos(b"mdat"), "unexpected MP4 atom order");
     if let Some(p) = probe(
         &done.path,
         "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,channel_layout,nb_read_frames",

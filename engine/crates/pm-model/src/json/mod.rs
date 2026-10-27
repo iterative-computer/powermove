@@ -24,7 +24,8 @@ pub(crate) use jsnum::array_index;
 pub use jsnum::{js_trim, number_to_js_string, string_to_number};
 pub use object_map::ObjectMap;
 pub use parse::{
-    ParseError, TreeBuilder, parse, parse_bytes, parse_bytes_with, parse_file_text, parse_with,
+    ParseError, Prebuilt, TreeBuilder, Unit, UnitScanner, parse, parse_bytes, parse_bytes_parallel,
+    parse_bytes_parallel_prebuilt, parse_bytes_with, parse_file_text, parse_unit_with, parse_with,
 };
 pub use string::JsString;
 pub use write::{to_canonical_string, write_canonical};
@@ -120,6 +121,11 @@ impl Map {
 
     pub fn into_members(self) -> ObjectMap<Value> {
         self.0
+    }
+
+    /// [`ObjectMap::from_members`].
+    pub(crate) fn from_members(members: &mut Vec<(JsString, Value)>, start: usize) -> Map {
+        Map(ObjectMap::from_members(members, start))
     }
 }
 

@@ -62,6 +62,24 @@ function timePerturbations<T>(time: unknown, at: (t: number) => T): Array<() => 
   return [() => at(time + 1e-12), () => at(time - 1e-12)];
 }
 
+/** A channel's numeric answers at one revision, by exact time (at most
+ *  {@link TimeValues.LIMIT}, oldest out first). `-0` and NaN are never kept:
+ *  a Map would merge `-0` with `0`, and NaN is no time to remember. */
+class TimeValues {
+  static readonly LIMIT = 128;
+  private readonly values = new Map<number, number>();
+  get(time: number): number | undefined {
+    return Object.is(time, -0) ? undefined : this.values.get(time);
+  }
+  set(time: number, value: number): void {
+    if (Object.is(time, -0) || time !== time) return;
+    this.values.delete(time);
+    this.values.set(time, value);
+    if (this.values.size > TimeValues.LIMIT) this.values.delete(this.values.keys().next().value!);
+  }
+  clear(): void { this.values.clear(); }
+}
+
 /** A fast-path miss (the slow path answers). */
 const MISS = Symbol('miss');
 
@@ -315,11 +333,11 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
+  private props = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; times?: TimeValues; frame?: ExpressionFrameSlot }>();
   /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
   private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
   /** Live layer → interned transform channels, valid at the current revision and scope. */
-  private channels = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
+  private channels = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown; times?: Map<string, TimeValues> }>();
   private refs = new Map<number, number>();
   private expressionFrames = new ExpressionFrames();
   /**
@@ -958,7 +976,7 @@ export class NativeApi {
    * rootComp: checked on every call, since the scope object can change
    * without the barrier seeing it.
    */
-  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; list: any[]; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
+  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; list: any[]; path?: PathPart[]; time?: number; number?: number; times?: TimeValues | Map<string, TimeValues> }, raw: any): boolean {
     const barrier = this.barrier();
     if (!barrier) return false;
     barrier.flush();
@@ -1006,6 +1024,7 @@ export class NativeApi {
       entry.revision = revision;
       entry.shape = barrier.shapeRevision;
       entry.time = undefined;
+      entry.times?.clear();
     }
     return true;
   }
@@ -1059,8 +1078,16 @@ export class NativeApi {
       const entry = this.channels.get(raw);
       const id = entry?.ids.get(key);
       if (id !== undefined && Object.prototype.hasOwnProperty.call(raw.p ?? {}, key) && this.current(entry!, raw.p?.[key])) {
+        const plain = !raw.p?.[key]?.expr;
+        const known = plain ? entry!.times?.get(key)?.get(T) : undefined;
+        if (known !== undefined && !this.wasm()?.dead) { this.stats.fastPath += 1; this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return known; }
         const value = this.fastValue(id, T, raw.p?.[key]);
         if (value !== MISS && raw.p?.[key]?.expr && !this.expressionFrames.has(id)) this.noteError(raw.p[key], this.wasm()!, id, entry!.comp);
+        if (plain && typeof value === 'number') {
+          let times = (entry!.times ??= new Map()).get(key);
+          if (!times) entry!.times.set(key, times = new TimeValues());
+          times.set(T, value);
+        }
         if (value !== MISS) { this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return value; }
       }
     }
@@ -1077,6 +1104,7 @@ export class NativeApi {
       let entry = this.channels.get(ctx.raw);
       if (!entry || entry.comp !== ctx.comp || entry.project !== this.unwrap(this.PM.proj)
         || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, list: ctx.list, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
+      if (entry.revision !== stamp.revision) entry.times?.clear();
       entry.revision = stamp.revision;
       entry.shape = this.barrier()!.shapeRevision;
       entry.cur = stamp.cur;
@@ -1089,6 +1117,11 @@ export class NativeApi {
       }
       const got = this.evById(wasm, id, T);
       this.noteError(ctx.raw.p?.[key], wasm, id, ctx.comp);
+      if ('value' in got && typeof got.value === 'number' && Object.prototype.hasOwnProperty.call(ctx.raw.p ?? {}, key) && !ctx.raw.p[key]?.expr) {
+        let times = (entry.times ??= new Map()).get(key);
+        if (!times) entry.times.set(key, times = new TimeValues());
+        times.set(T, got.value);
+      }
       return got;
     }, () => this.legacy.ev(L, key, T), () => ({ layer: L?.id, key, t: T }));
   }
@@ -1097,6 +1130,24 @@ export class NativeApi {
     if (!prop || typeof prop !== 'object') return null;
     if (!this.dual && typeof T === 'number') {
       const rawProp = this.unwrap(prop);
+      // pm-eval `ev_p`: a channel without an expression or keyframes is its
+      // stored value, at any time and for any layer. Answered here: a
+      // wrapper reading a static effect setting each frame asked the native
+      // evaluator synchronously every time.
+      const stored = rawProp?.v;
+      if (rawProp && !rawProp.expr && (rawProp.kf == null || (Array.isArray(rawProp.kf) && rawProp.kf.length === 0))
+        && (typeof stored === 'number' || typeof stored === 'string' || typeof stored === 'boolean')) {
+        // A channel that lost its expression leaves the resident runs.
+        const entry = this.props.get(rawProp);
+        if (entry && this.expressionFrames.has(entry.id)) {
+          this.expressionFrames.release(entry.id);
+          entry.frame = undefined;
+        }
+        this.clearError(rawProp);
+        this.stats.fastPath += 1;
+        this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
+        return stored;
+      }
       const entry = this.props.get(rawProp);
       if (entry && entry.key === key && entry.layer === this.unwrap(L) && this.current(entry, rawProp)) {
         if (!rawProp.expr && entry.frame) {
@@ -1113,6 +1164,16 @@ export class NativeApi {
             this.stats.calls.evP = this.stats.calls.evP! + 1;
             return entry.number;
           }
+        }
+        // A channel without an expression is a function of its keyframes:
+        // its earlier answers at this revision hold at their times too (a
+        // wrapper reading the frames before this one, a frame prepared
+        // again).
+        const known = rawProp.expr ? undefined : entry.times?.get(T);
+        if (known !== undefined && !entry.wasm.dead) {
+          this.stats.fastPath += 1;
+          this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1;
+          return known;
         }
         // A resident expression reads its frame run (see ExpressionFrames).
         // Anything but a number takes fastValue, which decodes or falls back.
@@ -1136,7 +1197,10 @@ export class NativeApi {
           if (slot) entry.frame = slot;
           else this.noteError(rawProp, entry.wasm, entry.id, entry.comp);
         }
-        if (typeof value === 'number') { entry.time = T; entry.number = value; }
+        if (typeof value === 'number') {
+          entry.time = T; entry.number = value;
+          if (!rawProp.expr) (entry.times ??= new TimeValues()).set(T, value);
+        }
         if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
       }
     }
@@ -1185,13 +1249,17 @@ export class NativeApi {
         entry = { layer: ctx.raw, layerId: ctx.raw.id, list: ctx.list, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
+      if (entry!.revision !== stamp.revision) entry!.times?.clear();
       entry!.revision = stamp.revision;
       entry!.shape = this.barrier()!.shapeRevision;
       entry!.cur = stamp.cur;
       entry!.list = ctx.list;
       const got = this.evById(wasm, entry!.id, T);
       entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
-      if ('value' in got && typeof got.value === 'number') entry!.number = got.value;
+      if ('value' in got && typeof got.value === 'number') {
+        entry!.number = got.value;
+        if (!rawProp.expr) (entry!.times ??= new TimeValues()).set(T, got.value);
+      }
       this.noteError(rawProp, wasm, entry!.id, ctx.comp);
       return got;
     }, () => this.legacy.evP(L, prop, T, key), () => ({ layer: L?.id, key, t: T }));

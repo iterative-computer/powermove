@@ -1,4 +1,6 @@
-//! WebM's Opus packet timing and metadata must match the WebCodecs exporter.
+//! WebM's Opus packet timing and metadata: the audio starts at the first
+//! frame (OpusHead's pre-skip removes libopus's lookahead), packets every
+//! 20 ms from zero, and the video carries the export's colour description.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,7 +69,7 @@ fn probe(file: &Path) -> Value {
 }
 
 #[test]
-fn opus_webm_keeps_webcodecs_packet_timing_and_untrimmed_tail() {
+fn opus_webm_starts_its_audio_with_the_first_frame() {
     let scratch = Scratch::new();
     let destination = scratch.0.join("opus.webm");
     let spec = ExportSpec {
@@ -110,22 +112,18 @@ fn opus_webm_keeps_webcodecs_packet_timing_and_untrimmed_tail() {
         job.push_audio(&pcm).unwrap();
     }
     let done = job.finish().unwrap();
-    // WebCodecs' 312-sample lookahead prompts a 51st 20 ms packet. The legacy
-    // muxer's OpusHead removes the pre-skip but has no DiscardPadding.
+    // The 312-sample lookahead prompts a 51st 20 ms packet; OpusHead's
+    // pre-skip removes the lookahead on decode.
     assert_eq!(done.report.audio.as_ref().unwrap().samples, 48_648);
 
-    // The current hand-written EBML has neither FFmpeg's mandatory Opus
-    // SeekPreRoll nor CodecDelay in its track header.
+    // OpusHead carries the pre-skip; the track has no CodecDelay, so a
+    // decoder does not remove it twice.
     let ebml = std::fs::read(&done.path).unwrap();
     let cluster = ebml
         .windows(4)
         .position(|b| b == [0x1f, 0x43, 0xb6, 0x75])
         .unwrap();
     let tracks = &ebml[..cluster];
-    assert!(
-        !tracks.windows(2).any(|b| b == [0x56, 0xbb]),
-        "unexpected SeekPreRoll"
-    );
     assert!(
         !tracks.windows(2).any(|b| b == [0x56, 0xaa]),
         "unexpected CodecDelay"
@@ -136,9 +134,11 @@ fn opus_webm_keeps_webcodecs_packet_timing_and_untrimmed_tail() {
     let audio = streams.iter().find(|s| s["codec_name"] == "opus").unwrap();
     let video = streams.iter().find(|s| s["codec_name"] == "vp9").unwrap();
     assert_eq!(audio["initial_padding"], 0);
-    assert!(video["color_primaries"].is_null());
-    assert!(video["color_transfer"].is_null());
+    // Rec.709 (QuickTime and Safari): 1-13-1, limited range.
+    assert_eq!(video["color_primaries"], "bt709");
+    assert_eq!(video["color_transfer"], "iec61966-2-1");
     assert_eq!(video["color_space"], "bt709");
+    assert_eq!(video["color_range"], "tv");
 
     let audio_index = audio["index"].as_u64().unwrap();
     let packets: Vec<&Value> = metadata["packets"]

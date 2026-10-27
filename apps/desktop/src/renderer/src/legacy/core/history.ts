@@ -222,7 +222,8 @@ export function install(PM: PMRegistry): void {
       publishProjectPatch(live, current.origin);
       // Canonical paths again for writers that rely on touch() (legacy ignores them).
       PM.touch(paths, true);
-      PM.autosave?.();
+      // A commit: the document changed (app.ts need not hash it to know).
+      PM.autosave?.('history');
       return true;
     },
     cancel() { depth = 0; pending = null; },

@@ -24,6 +24,7 @@ pub mod hash;
 pub mod ingest;
 pub mod json;
 pub mod ops;
+pub mod parallel;
 pub mod patch;
 pub mod schema;
 

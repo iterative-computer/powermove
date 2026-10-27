@@ -144,7 +144,11 @@ fn ceiling(name: &str, todays_ffmpeg: bool) -> Ceiling {
         // otherwise through ours, which rounds differently (−93 dBFS).
         // `corpus-media-audio` mixes six clips at once: today's own
         // summation order spreads it (below).
-        "corpus-media-audio" => Ceiling::Mix(if todays_ffmpeg { -145.0 } else { -90.0 }),
+        // Its 16-bit PCM clips decode with one scale both sides of zero
+        // (X-R5, quality-ledger.md), where today scaled positive samples by
+        // 1/32767: a 3.05e-5 gain (−90.3 dB below the clip's level) on half
+        // of each waveform, about −105 dBFS at its −14 dBFS mix.
+        "corpus-media-audio" => Ceiling::Mix(if todays_ffmpeg { -105.0 } else { -90.0 }),
         "embedded" if !todays_ffmpeg => Ceiling::Mix(-105.0),
         "mono" if !todays_ffmpeg => Ceiling::Mix(-150.0),
         // Today's bus sums its clips in the order of a pointer hash set

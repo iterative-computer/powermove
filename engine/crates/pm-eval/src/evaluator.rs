@@ -830,7 +830,7 @@ impl Evaluator {
             };
             let from = from.to_js().to_number();
             let kf = prop.node().and_then(|p| node::member(Some(p), "kf"));
-            return match PreparedTrack::prepare(kf, &mut self.springs) {
+            return match PreparedTrack::prepare(kf) {
                 PreparedTrack::Temporal(track) => Found::Track { from, track },
                 _ => Found::Ordinary,
             };
@@ -1772,7 +1772,7 @@ impl Evaluator {
             // The same preparation `evalKfs` makes on every call; only a
             // temporal (numeric) track is kept. Other keys read their nodes.
             let track = if keyed {
-                match PreparedTrack::prepare(kf, &mut self.springs) {
+                match PreparedTrack::prepare(kf) {
                     PreparedTrack::Temporal(track) => Some(track),
                     _ => None,
                 }
@@ -1819,7 +1819,7 @@ impl Evaluator {
             return (Plan::Const(Ok(node::get(p, b"v").to_js())), from);
         }
         let kf = node::member(Some(p), "kf");
-        match PreparedTrack::prepare(kf, &mut self.springs) {
+        match PreparedTrack::prepare(kf) {
             PreparedTrack::Null => (Plan::Const(Ok(JsValue::Null)), from),
             PreparedTrack::Temporal(track) => {
                 let first = node::array(kf)

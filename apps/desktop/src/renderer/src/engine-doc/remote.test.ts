@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { canonicalStringify } from '../../../shared/canonical-json';
+import { DOCUMENT_CHUNK_BYTES } from '../../../shared/document-kernel';
 import { ingestDocumentText, RemotePmWasm } from './remote';
 import { RealKernelBridge, realWasm } from './test-helpers/real-kernel';
 
@@ -31,6 +32,27 @@ it('constructs a prepared facade without activating or changing the published do
   expect(bridge.currentDocument).toBe('remote');
   expect(wasm.toJson()).toBe(canonicalStringify(project));
   expect(wasm.ev(wasm.intern(address('b')), 0).value).toBe(2);
+});
+
+it('streams the text in full chunks of text, never cut inside a surrogate pair', async () => {
+  const bridge = await RealKernelBridge.create();
+  // Astral characters (surrogate pairs) across every chunk boundary.
+  const text = Array.from({ length: 6_000_000 }, (_, i) => (i % 3 ? '€' : '😀') + (i % 7 ? '' : '"\\')).join('');
+  const large = { ...project, name: text, comps: { c: { ...project.comps.c, notes: [text.slice(0, 1000), 'x'] } } };
+  const chunks: Array<Uint8Array | string> = [];
+  const write = bridge.write.bind(bridge);
+  bridge.write = async (token, chunk) => { chunks.push(chunk); return write(token, chunk); };
+  await ingestDocumentText(bridge, large, large.id, 1);
+  expect(new TextDecoder().decode(bridge.lastStream!)).toBe(JSON.stringify(large));
+  expect(chunks.length).toBeGreaterThan(2);
+  for (const chunk of chunks) {
+    expect(typeof chunk).toBe('string');
+    const piece = chunk as string;
+    expect(piece.length).toBeLessThanOrEqual(DOCUMENT_CHUNK_BYTES);
+    const last = piece.charCodeAt(piece.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+  }
+  for (const chunk of chunks.slice(0, -1)) expect((chunk as string).length).toBeGreaterThan(DOCUMENT_CHUNK_BYTES - 2);
 });
 
 it('keeps prepared batch views scoped to their group and updates only the requested range', async () => {

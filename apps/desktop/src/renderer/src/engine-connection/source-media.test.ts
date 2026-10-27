@@ -323,6 +323,17 @@ describe('engine source consumers', () => {
     } finally { f.source.dispose(); }
   });
 
+  it('sends a source job only its source, never the rest of the document', async () => {
+    const f = fixture();
+    Object.assign(f.project as any, { layers: [{ id: 'L' }], comps: { c: { layers: [] } } });
+    Object.assign(f.project.assets, { other: { id: 'other', kind: 'video', w: 8, h: 8 } });
+    (f.project.assets.clip as any).poster = 'blob:old';
+    await f.source.filmstrip('clip', [2, 0], 4, 2);
+    const request = f.strip.mock.calls[0]![0] as any;
+    expect(JSON.parse(request.project)).toEqual({ id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original', rendition: false } } });
+    f.source.dispose();
+  });
+
   it('freezes the original before waiting for bindings and cancels the owning job', async () => {
     const f = fixture();
     let bound!: () => void;
@@ -451,7 +462,7 @@ describe('engine source consumers', () => {
       const monitor = f.source.monitor('clip');
       const width = vi.spyOn(monitor.surface, 'clientWidth', 'get').mockReturnValue(160);
       const height = vi.spyOn(monitor.surface, 'clientHeight', 'get').mockReturnValue(90);
-      resized([{ target: monitor.surface } as ResizeObserverEntry], {} as ResizeObserver);
+      resized([{ target: monitor.surface } as unknown as ResizeObserverEntry], {} as ResizeObserver);
       await vi.waitFor(() => expect(present).toHaveBeenCalledOnce());
       expect(monitor.paused).toBe(true);
       expect(queries.map(entry => entry.query)).toEqual(['(resolution: 1dppx)']);

@@ -226,134 +226,43 @@ Sources and provenance:
 | generated-agent | 37 prompts covering every contract feature (`tools/shaders/prompts.ts`, `CONTRACT`; the script fails when a feature has no prompt), answered by `claude --print` (Claude Code 2.1.300, `claude-opus-5-5`) with the in-app agent's own system prompt (`agentInstructions()`, the adapter's schema suffix), the API pack readable with Read/Glob/Grep, and the shader-layer runtime the Shader panel shows. The in-app harness itself needs a running Powermove with its MCP tools, which cannot run headlessly here; differences: no render_frames or validate_effect loop, the deliverable returned as JSON. Outputs with provenance in `tools/shaders/generated/` |
 | local | opt-in (`--local <project.pmv>` or an extensions folder); not run for this report |
 
-Run again 2026-10-18 on the definitions lane's tip (corpus
-`shaders-20261018-022611`; routing and errors count as failures): the same
-table, cell for cell.
+**G-E1** (gate-policy.md; replaced the app's first-use probe, E-R1). The native
+translation executes the author's formula at f32 per GLSL ES, so it is judged against
+WebGL by an f32-justified bound at every pixel: ≤ 1 CV on 8-bit codes, and above 1.0 at
+most 1.5 binary16 steps per stored pass (the engine stores the nearest half where Metal's
+WebGL truncates: one step; a sub-ulp f32 difference: half a step). A pixel may also match
+WebGL with unrounded RGBA32F intermediates (`--perturb-storage`), the higher-precision
+run. Pixels where WebGL moves past the bound against itself under a one-step change of
+its input (`--perturb-input`), parameters (`--perturb`, `--perturb -1`), coordinates
+(`--perturb-geometry`, 2⁻²⁰ on `u_m`/`u_uv`) or intermediate storage (`--perturb-storage`)
+are ill-conditioned in WebGL and are counted, not judged (grown by a pixel: an edge
+WebGL cannot place also shades its neighbours). A program whose WebGL output moves
+visibly under those runs passes when native differs at no more pixels than WebGL does
+from itself (E-R2: the size of a chaotic program's difference is not a measure).
+Compile and refusal verdicts stay exact. Programs the engine cannot translate draw
+through the runner (E-K6) and are judged the same way.
 
-Measured 2026-10-17 (M4 Max, macOS 27, wgpu 30.0.1 Metal; corpus
-`shaders-20261017-073721`, 144 cases, 522 variants), and reproduced on
-2026-10-18 after merging `feat/native-engine` at `f3bf2478` from a fresh
-run of every step (the Store fetched again: the same 4 releases; corpus
-`shaders-20261018-022611`; WebGL and perturbed WebGL captured again, the
-3 runner requests answered again): the same table, cell for cell. Run
-again on the same corpus after the runner's layer reports, the first-contact
-pipeline path, and the upload cache landed (2026-10-18): the same table.
+Measured 2026-10-25 (M4 Max, corpus `shaders-defs2`, every perturbation captured):
 
-| Group | Cases | Variants | Match WebGL | via the runner | Both refuse | WebGL-unstable | Failures |
-|---|---|---|---|---|---|---|---|
-| builtin-layers | 2 | 6 | 6 | 0 | 0 | 0 | 0 |
-| cloud-samples | 5 | 20 | 20 | 0 | 0 | 0 | 0 |
-| docs | 3 | 11 | 11 | 0 | 0 | 0 | 0 |
-| e2e | 10 | 37 | 37 | 0 | 0 | 0 | 0 |
-| generated-agent | 35 | 112 | 105 | 3 | 7 | 0 | 0 |
-| generated-s3 | 56 | 212 | 204 | 0 | 8 | 0 | 0 |
-| scenes | 2 | 8 | 8 | 0 | 0 | 0 | 0 |
-| shader-presets | 5 | 15 | 15 | 0 | 0 | 0 | 0 |
-| store | 5 | 22 | 19 | 0 | 0 | 3 | 0 |
-| unit-tests | 21 | 79 | 79 | 0 | 0 | 0 | 0 |
-| **all** | **144** | **522** | **504** | **3** | **15** | **3** | **0** |
+| Group | Variants | Within G-E1 | via the runner | Both refuse | WebGL-unstable px | Failures |
+|---|---|---|---|---|---|---|
+| builtin-layers | 6 | 6 | 0 | 0 | 9 | 0 |
+| cloud-samples | 20 | 20 | 0 | 0 | 198 | 0 |
+| docs | 11 | 11 | 0 | 0 | 0 | 0 |
+| e2e | 45 | 41 | 4 | 4 | 8,903 | 0 |
+| generated-agent | 112 | 105 | 3 | 7 | 337,521 | 0 |
+| generated-s3 | 212 | 204 | 0 | 8 | 260,541 | 0 |
+| scenes | 8 | 8 | 0 | 0 | 0 | 0 |
+| shader-presets | 15 | 15 | 0 | 0 | 27 | 0 |
+| store | 22 | 22 | 0 | 0 | 17,533 | 0 |
+| unit-tests | 82 | 82 | 0 | 0 | 0 | 0 |
+| user-setups | 219 | 216 | 0 | 3 | 421,559 | 0 |
 
-Again on 2026-10-19 with ANGLE's built-in calls and the ANGLE-only listing
-(below): store 22 of 22 match (the 4 liquid-glass 2.0.8 variants through
-the runner); all groups 507 of 522 match (7 through the runner), 15 both
-refuse, 0 WebGL-unstable, 0 failures.
-
-**No WebGL-unstable allowance** (second review, 2026-10-19). The gate no
-longer has the column: a variant that differs from WebGL fails, and when
-WebGL also moves against its own perturbed runs the failure says so (with
-the side-by-side under `PM_SHADER_GATE_DIFFS`) and points at
-`pm_render::effects::ANGLE_ONLY`, where such a program goes once proved
-(`a_difference_webgl_is_unstable_under_fails_the_gate`). Only the
-undefined-behavior probes (`known_open`, not user content) are listed
-apart. On `shaders-20261018-022611` with the rule (and `PIPELINE_REVISION`
-2, `pm_round` exact): 507 of 522 match (7 through the runner), 15 both
-refuse, 0 failures, the same as before it.
-
-**A user's own programs: a private user setup** (second review, 2026-10-19).
-`collect.ts --local <user-setups/<setup>/extensions>` adds a user's
-installed extensions (private group `local`; a local extension that does
-not load in the collector is noted, not fatal). Corpus
-`shaders-20261019-<setup>` (186 cases, 695 variants; the repository's cases
-as of the merge, the Store's 4 releases, and the user's extensions): 34 of
-38 extension folders load (three need DOM APIs at activation and register
-no GLSL there; one imports a file its folder does not hold) and register
-38 effects and 2 extension layers, 166 variants: 163 match WebGL and 3
-both refuse (one extension layer compares a `uniform bool` with a float,
-which WebGL refuses too). No program of that setup differs natively, so none is
-listed in `ANGLE_ONLY`. All groups: 677 of 695 match (11 through the
-runner), 18 both refuse, 0 failures, after two gate changes the corpus
-called for:
-- A program WebGL links but whose draw raises a GL error (the kernel test
-  fixture `void main(){}`, GL error 1282) leaves the cleared target, which
-  is what today's compositor shows; the gate compares the engine's output
-  with it instead of failing unconditionally (both transparent here). A
-  link refusal still fails when the engine draws.
-- An effect the native pipeline cannot translate (the e2e's `sampler3D`
-  effect) used to be listed as awaiting the runner and passed; it now
-  draws through the gate's runner host and is compared with WebGL (4 of 4
-  match), and any request the runner has not answered fails the gate.
-This covers his programs at the gate's synthetic inputs and parameter
-sets, not his projects' own frames.
-
-By kind: 44 shader layers, 13 extension fragment layers, 73 effects, 14
-transitions. Variants: layers at their defaults (1.25 s), at 70% of each range
-with other colors and flipped toggles (3.7 s), and with coerced values (numbers
-as strings, short colors, toggles as numbers) at 24 fps; effects also with a
-viewport crop and E-encoded inputs above 1.0; transitions at four progress
-values. Judged by section 25's Standard class on 8-bit values and on float
-values scaled by max(1, |reference|).
-
-- **Both refuse** (compile parity holds): the two deliberate S3 `linkError`
-  cases, and two agent drafts WebGL refuses too (`agent-pixel-dissolve` uses
-  `v_px`, which transitions do not declare; `glitch-blocks` names a variable
-  `active`, a reserved word). The in-app agent would see the compile error and
-  fix it; both engines render nothing. Two more agent definitions never reach
-  a renderer: the kernel's validator rejects their toggle parameters, written
-  without `type: 'toggle'` (`orb-extension`, `bars-equalizer`), in both engines.
-- **WebGL-unstable** (amendment 9; judged by review): Store
-  `mrsigma/private-extension-19` 2.0.8, the case S3 analysed: 43 to 49 pixels
-  differ by up to 99 CV, and WebGL against itself with every input texel one
-  binary16 step away from zero moves 26 to 33 pixels by up to 67 CV
-  (`webgl.ts --perturb-input`; the class is decided per variant from the
-  perturbed runs). `zellzoi/private-extension-19` 2.0.1, a separate Store
-  extension of the same name, matches. How it arises: the gate gives both
-  engines the same input texels, and the differing pixels sit in one small
-  region (the refracted highlight of the small square near the top right),
-  where the program's output changes discontinuously with its arithmetic (a
-  one-step input change moves WebGL's own output there); naga's MSL and
-  ANGLE's MSL round a few operations differently, which is enough. Metal fast
-  math is not the cause: with it off in the engine the gate moved further
-  from WebGL (48 to 53 px, and the alt variant failed too; effects.md,
-  Parity, 2026-10-19). Under the
-  earlier amendment 22 (any visible difference a blocker) this was
-  escalated to Jude with side-by-sides; the current one does not treat a
-  disagreement with ANGLE as an error (gate-policy.md, lane L6) (`PM_SHADER_GATE_DIFFS=<dir>` writes
-  the engine's output, WebGL's, and the differing pixels for every
-  WebGL-unstable variant). **Resolved 2026-10-19** (orchestrator decision
-  DEFS-2): the program is listed in `pm_render::effects::ANGLE_ONLY` and
-  draws through WebGL's runner wherever one is attached (the app's viewer
-  and exports), bit-exact against WebGL in all four variants; the gate now
-  draws it with a runner host (`<corpus>/fallback-effects`, answered by
-  `fallback-runner.ts --fallback`) and counts it as via the runner. Legacy
-  programs also compile with ANGLE's built-in calls now
-  (`docs/engine/effects.md`, "ANGLE's Metal calls"); that alone did not fix
-  this program (43, 1, 38, 46 pixels).
-- **Through the runner**: `env-cubemap-sky` (a `samplerCube`), above.
-
-App level: the v1 corpus's shader and extension projects
-(`layers/shader-*` for the five presets and the binding-quirks project,
-`layers/studio-cube`, `layers/obj-model`), captured through the app on
-2026-10-12, now compare in `tests/corpus.rs`: 27 frames, max 1 CV (Studio Cube
-99.99% exact; Scanline Bars's transparent float frames within 0 CV).
-`tests/corpus.rs` marks every non-built-in extension definition of a capture
-missing, as the capture app had only the built-ins. The whole corpus with this
-lane (newest v1, render, effects, and composite captures): 249 frames, 0
-failed, 6 listed apart (the effects lane's Posterize frames); the same on
-2026-10-18 after the merge. On 2026-10-19 (with the motion, compclose, and
-the new `effects-20261019-055047-8d8a4ce4` captures): 348 frames, 0 listed
-apart (Posterize is bit-exact now), 5 failed, all video-class frames
-outside this lane (`motion/blur-video`, `retime/speed`,
-`space25d/precomps`) and identical with this lane's changes removed.
+Six variants pass by the spread rule: the four liquid-glass 2.0.8 variants (native
+differs at 1 to 10 pixels, WebGL from itself at 40 to 49) and two of one private user
+program (40 pixels at most 3 CV; WebGL from itself at 14,900). The many unstable pixels
+of the generated groups are smooth multi-pass programs whose WebGL output moves more
+than the bound when their stored intermediates are not rounded.
 
 ## Layer reports for the Shader panel
 
@@ -398,26 +307,6 @@ class of the sweep's existing sampler probes and has its shader-layer probe in
 `pm-node/tests/shader_fallback.rs`; the unstable Store shader is not a
 pipeline failure.
 
-## Commands
-
-```sh
-bun engine/crates/pm-render/tools/shaders/builtins.ts            # rewrite builtins.json (--check)
-bun engine/crates/pm-render/tools/shaders/fetch-store.ts         # public Store → corpus folder
-bun engine/crates/pm-render/tools/shaders/generate.ts --jobs 3   # agent corpus (claude --print)
-bun engine/crates/pm-render/tools/shaders/collect.ts             # → shaders-<stamp>/
-C=~/Library/Application\ Support/Powermove\ Engine\ Corpus/shaders-<stamp>
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/effects/webgl.ts --corpus "$C"
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/effects/webgl.ts --corpus "$C" --perturb-input
-cargo test -p pm-render --test shader_gate -- --nocapture       # writes fallback requests
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/shaders/fallback-runner.ts --corpus "$C"
-cargo test -p pm-render --test shader_gate -- --nocapture       # with the runner's pixels
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-render/tools/shaders/fallback-runner.ts --fallback "$C/fallback-effects"  # ANGLE-only effects
-cargo test -p pm-render --test shader_layers
-PM_RENDER_ONLY=layers/ cargo test -p pm-render --test corpus -- --nocapture
-cargo test -p pm-node --test shader_fallback --test layer_reports
-bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
-```
-
 ## Gaps
 
 - **The in-app agent harness** did not generate the agent corpus: it needs a
@@ -428,9 +317,8 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
   all effects; no Store extension registers a
   shader layer or a fragment layer yet. Local projects (`--local`) were not
   collected for this run.
-- **WebGL-unstable class** (one Store shader): resolved by DEFS-2 (the
-  program draws through WebGL's runner, above), and the gate no longer
-  passes such a difference (above).
+- **Ill-conditioned programs** draw natively (E-R2); the gate's spread rule
+  bounds how often they differ from WebGL, not by how much.
 - **One machine, one GPU family** (M4 Max); the runner was measured in
   headless Chromium, not inside the Electron renderer (the session path is
   covered by the vitest and the pm-node test, the WebGL path by the gate).
@@ -450,55 +338,6 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
   s); an animated fallback program still plays and exports below today's
   rate (effects.md, Gaps: a full-HD fallback effect export took 7.0 s
   against today's 1.1 s).
-- **Not run:** the full pm-render suite (targeted tests only, per the machine
-  limits).
 - **Watchdog tests** (issue A2): fixed 2026-10-18 with the watchdog's
   deterministic test hook (effects.md, "The watchdog"); the pm-node test
   passed 20 of 20 runs.
-
-## Perf3: bounded asynchronous runner readback (2026-10-19)
-
-`ShaderFallbackRunner` retains its framebuffer at an unchanged size and depth
-(RGBA8, RGBA16F or RGBA32F).
-Unchanged input pixels reuse their uploaded textures after an exact byte
-comparison against an owned snapshot; an in-place change always uploads again.
-The combined texture/CPU snapshot cache is bounded to 128 MiB in binary16
-equivalent storage (at most 256 MiB physical for binary32) and 12 entries
-when idle; suspended draws lease their resources so snapshots cannot overwrite
-them. Its asynchronous path serializes GL submission and allows at most three
-pixel-pack buffers to wait for GPU fences, yielding to the browser between
-polls. A synchronous compatibility snapshot may draw between those submissions:
-each PBO already owns its read command and is copied from its own buffer after
-completion. Context replacement/disposal ends pending reads and frees the
-buffers; a read has a 10-second bound. The blocking snapshot path remains
-available.
-
-RGBA8 reads exact bytes and RGBA32F reads exact binary32 values. RGBA16F is
-read as binary16 when the implementation exposes that read pair;
-the float path converts the input view's bits without per-component allocation.
-The conversion test covers every finite binary16 value, signed zero, subnormals
-and a nonzero source byte offset. The real Electron/WebGL regression compares
-more than 100 million components from concurrent requests against the blocking
-path, with size changes and an interleaved synchronous snapshot: zero differing
-components (`e2e/shader-fallback-readback.spec.ts`, 2026-10-19, under the Electron
-lock). This is a correctness pass, not a paired export-throughput pass.
-
-The effects/transition runner is integrated in this lane as of the defs merge.
-Its input texture protocol, per-pass watchdog fences, MAX_TEXTURE_SIZE cap,
-compile waits, synchronous snapshots, and context-loss retries are preserved.
-GL submission is serialized; up to three PBO reads can finish independently.
-Per-pass fence polling yields for 1 ms rather than a whole 16 ms interval.
-The 60-frame HD export and animated-effect viewer rows remain unmeasured;
-no faster-than-today claim follows from the PBO regression.
-
-The integrated real-WebGL test also exposed a synchronous snapshot defect:
-spinning on `clientWaitSync` in the same JavaScript task never observes its
-new fence in Chromium and incorrectly disables an ordinary shader after ten
-seconds. The calling-thread path now uses `gl.finish()` as its blocking GPU
-barrier and checks elapsed time and context loss afterward. Chromium's GPU
-watchdog bounds a hung synchronous draw at the same ten-second default; async
-passes keep their yielding per-pass fences and the runner's deadline. A scripted
-regression verifies that synchronous snapshots do not poll a same-task fence.
-
-Extension identifiers in the corpus discussion are anonymized labels. The
-external corpus retains original manifests; shader hashes select runtime behavior.

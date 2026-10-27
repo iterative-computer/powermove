@@ -635,6 +635,8 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Needs sent for frames ahead of playback (`ask_ahead`).
+    pub compat_asked_ahead: u64,
     /// Frames of provisional revisions: parked until confirmed, confirmed
     /// revisions, and parked frames dropped because a later update
     /// superseded their revision (never presented).
@@ -995,6 +997,11 @@ struct View {
     /// extensions would hear `frame:rendered` for it again, which today's
     /// compositor never sends.
     compat_paused_wait: Option<i64>,
+    /// What the waiting frame (timed or paused) lacked when it was last
+    /// drawn, at the revision it drew: it is drawn again once all of them
+    /// are answered, not at each answer (every attempt plans the whole
+    /// composition again, and a frame's answers arrive one by one).
+    compat_missing: Option<(Revision, Vec<pm_protocol::snapshot::CompatNeed>)>,
     /// The compatibility needs the last render consulted, and the media
     /// time it drew (unwrapped ticks).
     compat_needs: Option<(i64, Vec<pm_protocol::snapshot::CompatNeed>)>,
@@ -1079,6 +1086,16 @@ pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
 /// way. Today's compositor shows its first frame 130 to 230 ms after Play;
 /// the bound keeps the engine's first frame within that.
 pub const PREROLL_FRAMES: i64 = 6;
+/// How far ahead of each played frame the window hears the needs it has
+/// not answered: a second of frames (longer than a wrapper that reads bases
+/// takes on a busy window), at least 12 and at most 60 (the window's
+/// furthest horizon, `COMPAT_MAX_LOOKAHEAD`).
+pub fn ask_ahead_frames(frame_ticks: i64) -> i64 {
+    if frame_ticks <= 0 {
+        return 12;
+    }
+    ((TICKS_PER_SECOND + frame_ticks - 1) / frame_ticks).clamp(12, 60)
+}
 pub const PREROLL_MAX_US: i64 = 80_000;
 
 /// A Play waiting in the native preroll.
@@ -1183,6 +1200,10 @@ struct Thread {
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
+    /// Sessions whose video preparation found the viewer's composition
+    /// missing from the document (the view state can lead the document):
+    /// the next document update prepares again.
+    media_unprepared: BTreeSet<Key>,
     /// Waveform peaks, computed off this thread.
     peaks: super::peaks::PeakWorker,
     frame_ticks: i64,
@@ -1429,6 +1450,7 @@ pub fn run(
         source_timing: BTreeMap::new(),
         source_intent: BTreeMap::new(),
         audio_prefs: BTreeMap::new(),
+        media_unprepared: BTreeSet::new(),
         peaks,
         generations,
         preview_controls: Default::default(),
@@ -1473,16 +1495,31 @@ pub fn run(
             Ok(command) => {
                 let started = now();
                 let what = command_name(&command);
+                // A paused edit's answers follow its batch: until a gap in
+                // them (at most `SETTLE_MAX_US`), the frame waits for them
+                // rather than composing without them.
+                let mut settle = thread.settles(&command).then(|| started + SETTLE_MAX_US);
                 if !objc2::rc::autoreleasepool(|_| thread.apply(command)) {
                     break;
                 }
                 thread.note_turn(what, started);
                 let drain_started = thread.config.trace.then(now);
                 let mut drained = 0;
-                while let Ok(command) = rx.try_recv() {
+                loop {
+                    let next = match (rx.try_recv(), settle) {
+                        (Ok(command), _) => Some(command),
+                        (Err(_), Some(until)) if now() < until => rx.recv_timeout(SETTLE_GAP).ok(),
+                        _ => None,
+                    };
+                    let Some(command) = next else { break };
                     drained += 1;
                     let started = now();
                     let what = command_name(&command);
+                    if thread.settles(&command) {
+                        settle = Some(started + SETTLE_MAX_US);
+                    } else if !matches!(command, Command::Compat { .. }) {
+                        settle = None;
+                    }
                     if matches!(command, Command::Shutdown)
                         || !objc2::rc::autoreleasepool(|_| thread.apply(command))
                     {
@@ -1514,6 +1551,16 @@ pub fn run(
     }
     objc2::rc::autoreleasepool(|_| thread.shutdown());
 }
+
+/// How long the render thread waits, after a paused document update of a
+/// session with compatibility producers, for the answers the window sends
+/// right behind it ([`Thread::settles`]). They leave the window together
+/// with the batch; the engine's port thread hands them over one message at
+/// a time, so a frame composed at once missed them, asked for them and was
+/// composed again (12-16 ms on the real project).
+const SETTLE_GAP: Duration = Duration::from_micros(1_500);
+/// The longest the render thread waits for those answers.
+const SETTLE_MAX_US: i64 = 8_000;
 
 /// A render-thread turn longer than this is a stall (diagnostics: the
 /// status report and a warning in the engine log).
@@ -1584,15 +1631,20 @@ impl Thread {
     }
 
     /// Compiles the frame pipelines of every viewed document once nothing
-    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]).
-    /// Pipelines are built on first use, so without this an import or the
-    /// first layer of an empty project pays for them in its frame. Once per
+    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]),
+    /// and asks for the faces its text lays out with
+    /// ([`pm_render::Renderer::prefetch_fonts`]). Both happen on first use,
+    /// so without this an import, the first layer of an empty project, or
+    /// the first seek to a text layer pays for them in its frame. Once per
     /// rest, never while anything is drawing.
     fn prewarm_at_rest(&mut self) {
         if self.busy() {
             return;
         }
         self.rest.prewarmed = true;
+        // Fonts are asked for only once main opened the font port: before,
+        // a request waits for it.
+        let fonts = self.config.fonts.as_ref().is_some_and(|f| f.open());
         let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) else {
             return;
         };
@@ -1601,6 +1653,9 @@ impl Thread {
                 && let Some(doc) = self.docs.get(key)
             {
                 composer.renderer().prewarm(doc.document());
+                if fonts {
+                    composer.renderer().prefetch_fonts(doc.document());
+                }
             }
         }
     }
@@ -1781,6 +1836,17 @@ impl Thread {
         (self.sink)(vec![Action::Log { level, message }]);
     }
 
+    /// Whether `command` is a paused document update of a session whose
+    /// frames take compatibility answers: the window sends the answers for
+    /// the frame on screen right behind it (`SETTLE_GAP`).
+    fn settles(&self, command: &Command) -> bool {
+        let Command::Document { key, .. } = command else {
+            return false;
+        };
+        self.views.get(key).is_some_and(|v| !v.clock.is_playing())
+            && self.compat_store().has_producers(*key)
+    }
+
     /// Records a render-thread event in the trace (trace builds only).
     fn trace_event(&self, what: &'static str, at: i64, us: i64, k: i64) {
         if !self.config.trace {
@@ -1804,6 +1870,65 @@ impl Thread {
 
     fn compat_store(&self) -> std::sync::MutexGuard<'_, super::compat::CompatStore> {
         self.compat.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// While playing, the window's producers hear what the frame
+    /// [`ask_ahead_frames`] after `k` will need and they have not answered
+    /// (a layer coming into view, a crop window that moved): its answers are
+    /// made before that frame is drawn, instead of the frame waiting for
+    /// them then. Only its plan is built.
+    fn ask_ahead(&mut self, key: Key, k: i64) {
+        let Some(view) = self.views.get(&key) else {
+            return;
+        };
+        let ahead = k + super::schedule::Schedule::step(&view.clock)
+            * ask_ahead_frames(view.clock.frame_ticks());
+        let media = view.clock.wrap(ahead * view.clock.frame_ticks());
+        if media < 0 || view.clock.end().is_some_and(|end| media >= end) {
+            return;
+        }
+        let (Some(gpu), Some(doc)) = (self.gpu.as_mut(), self.docs.get(&key)) else {
+            return;
+        };
+        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let Some(compat) = compat_view(&self.compat, key, revision, None) else {
+            return;
+        };
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
+        composer.renderer().set_compat_rasters(Some(compat));
+        let needs = composer.compat_missing(
+            doc.document(),
+            view.state.composition.as_str(),
+            doc.media(),
+            Ticks::new(media).unwrap_or(Ticks::ZERO),
+            &view.state,
+        );
+        composer.renderer().set_compat_rasters(None);
+        if needs.is_empty() {
+            return;
+        }
+        let fresh = self
+            .compat
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .to_ask(key, revision, needs, std::time::Instant::now());
+        for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
+            let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
+            if let Ok(bytes) = codec::encode(&envelope) {
+                (self.sink)(vec![Action::Send { port: key.0, bytes }]);
+            }
+        }
+        self.stats().compat_asked_ahead += fresh.len() as u64;
+    }
+
+    /// Whether the store answers everything the waiting frame of `key`
+    /// lacked (true when it did not say).
+    fn compat_answered(&self, key: Key) -> bool {
+        let Some((revision, needs)) = self.views.get(&key).and_then(|v| v.compat_missing.as_ref())
+        else {
+            return true;
+        };
+        self.compat_store().answers_all(key, *revision, needs)
     }
 
     fn stats(&self) -> std::sync::MutexGuard<'_, Stats> {
@@ -2695,16 +2820,24 @@ impl Thread {
                     stats.compat_answers = answers.0 as u64;
                     stats.compat_asked = answers.1 as u64;
                 }
-                // A frame waiting on the producer's answers draws now; a
-                // changed producer list, or answers the producer took back
-                // (an invalidation), redraw what is shown.
-                if let Some(view) = self.views.get_mut(&key)
-                    && applied
-                        .redraws(view.compat_blocked.is_some() || view.compat_paused_wait.is_some())
-                {
+                // A frame waiting on the producer's answers draws once it
+                // has them all; a changed producer list, or answers the
+                // producer took back (an invalidation), redraw what is shown.
+                let waiting = self
+                    .views
+                    .get(&key)
+                    .is_some_and(|v| v.compat_blocked.is_some() || v.compat_paused_wait.is_some());
+                let redraw = match applied {
+                    super::compat::Applied::Complete | super::compat::Applied::Answered => {
+                        waiting && self.compat_answered(key)
+                    }
+                    applied => applied.redraws(waiting),
+                };
+                if redraw && let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                     view.compat_blocked = None;
                     view.compat_paused_wait = None;
+                    view.compat_missing = None;
                 }
                 self.refresh_audio_ingress(key);
             }
@@ -2922,6 +3055,7 @@ impl Thread {
         self.source_timing.remove(&key);
         self.source_intent.remove(&key);
         self.audio_prefs.remove(&key);
+        self.media_unprepared.remove(&key);
         if self
             .views
             .values()
@@ -2942,7 +3076,8 @@ impl Thread {
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
     fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64, audio_forwarded: bool) {
-        let preparing = media_prepare::changes_video_sources(&update);
+        let preparing =
+            media_prepare::changes_video_sources(&update) || self.media_unprepared.contains(&key);
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         let copies = doc.copies();
@@ -3785,11 +3920,13 @@ impl Thread {
     /// A session with compatibility producers keeps its transport on this
     /// thread, whose Play may first preroll the producers' answers.
     fn ingress_enabled(&self, key: Key, link: &AudioLink) -> bool {
+        // `audible` walks the composition: the cheap conditions first (a
+        // transport command or a document update asks this every time).
         !self.config.host_clock
             && !link.failed()
-            && self.audible(key)
             && takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()))
             && !self.compat_store().has_producers(key)
+            && self.audible(key)
     }
 
     /// Whether the composition a view shows has anything to hear
@@ -3951,6 +4088,7 @@ impl Thread {
             preroll: None,
             compat_blocked: None,
             compat_paused_wait: None,
+            compat_missing: None,
             compat_needs: None,
             armed: Vec::new(),
             paused_sent: None,
@@ -4523,8 +4661,11 @@ impl Thread {
             if let Some(at) = view.paused_sent
                 && view.armed.is_empty()
                 && !view.clock.is_playing()
+                && at + ARM_IDLE_US > now
             {
-                // The start frames, once the paused frame has stayed.
+                // The start frames, once the paused frame has stayed. Past
+                // that, `arm` runs every turn; one it refused (compatibility
+                // producers, no free slot) waits for a command, never spins.
                 wake = wake.min(at + ARM_IDLE_US);
             }
             if view.awaiting.is_some() || view.clock.following() {
@@ -5006,6 +5147,13 @@ impl Thread {
                     "The new engine cannot draw this composition yet.",
                 );
             }
+            // Nothing is drawn on this route: its paused-frame timers would
+            // only wake the thread. A route back to Engine marks it dirty.
+            if let Some(view) = self.views.get_mut(&key) {
+                view.dirty = false;
+                view.compat_paused_wait = None;
+                view.paused_sent = None;
+            }
             return;
         }
         // Headless sessions follow the device and publish clock/levels and
@@ -5257,6 +5405,9 @@ impl Thread {
                     }
                     view.compat_blocked = None;
                     view.schedule.rendered(&view.clock, k);
+                    if rendered.is_some() {
+                        self.ask_ahead(key, k);
+                    }
                     if let Some(descriptor) = rendered {
                         if remote {
                             self.present_remote(key, &descriptor, shown_from);
@@ -5509,6 +5660,7 @@ impl Thread {
             match composed {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    view.compat_missing = None;
                     overlay = composed.overlay;
                     scene3d_meta = composed.scene3d_meta;
                     chrome_legend = composed.chrome_legend;
@@ -5607,6 +5759,7 @@ impl Thread {
                     // override): ask the view's renderer, and render the
                     // frame again when every answer arrived.
                     let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                    view.compat_missing = Some((revision, needs.clone()));
                     if timing.is_some() {
                         view.compat_blocked = Some(k);
                     } else if viewer_frame {
@@ -7075,6 +7228,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_window_hears_a_second_of_frames_ahead_within_its_horizon() {
+        let at = |fps: i64| ask_ahead_frames(TICKS_PER_SECOND / fps);
+        assert_eq!(at(30), 30);
+        assert_eq!(at(24), 24);
+        assert_eq!(at(120), 60);
+        assert_eq!(at(5), 12);
+        assert_eq!(ask_ahead_frames(0), 12);
+    }
+
+    #[test]
     fn wake_lateness_excludes_the_requested_wait_and_early_commands() {
         let wait = Duration::from_micros(1_000);
         assert_eq!(wake_lateness_us(10, 510, wait), 0);
@@ -7311,6 +7474,7 @@ mod tests {
             source_timing: BTreeMap::new(),
             source_intent: BTreeMap::new(),
             audio_prefs: BTreeMap::new(),
+            media_unprepared: BTreeSet::new(),
             peaks,
             frame_ticks: TICKS_PER_SECOND / 60,
             generations: Generations::default(),
@@ -7511,6 +7675,101 @@ mod tests {
         assert!(thread.audio_ingress.transport(key, play).is_some());
     }
 
+    /// A paused view whose start frames cannot arm (compatibility producers)
+    /// sleeps: its past arm time must not hold the render thread awake.
+    #[test]
+    fn a_paused_view_that_cannot_arm_sleeps() {
+        use pm_protocol::snapshot::{CompatMessage, CompatSource};
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.configure(key, headless_test_state(false), None, None);
+        thread.apply(Command::Compat {
+            key,
+            message: CompatMessage::Producers { sources: vec![CompatSource::RasterOverride] },
+        });
+        let view = thread.views.get_mut(&key).unwrap();
+        view.reported = Some(Route::Engine);
+        view.dirty = false;
+        view.sample_due = false;
+        view.requests.clear();
+        view.armed.clear();
+        view.paused_sent = Some(now() - 2 * ARM_IDLE_US);
+        thread.arm(key);
+        assert!(thread.views[&key].paused_sent.is_some(), "producers refuse the start frames");
+        assert!(thread.next_wake() >= Duration::from_millis(10), "a refused arm must not spin");
+    }
+
+    /// A paused document update of a session with producers waits for the
+    /// answers the window sends behind it; nothing else does.
+    #[test]
+    fn a_paused_edit_of_a_producing_session_settles_for_its_answers() {
+        use pm_protocol::snapshot::{CompatMessage, CompatSource};
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.configure(key, headless_test_state(false), None, None);
+        let update = || Command::Document {
+            audio_forwarded: true,
+            key,
+            update: DocumentUpdate::Patches {
+                patches: Vec::new().into(),
+                revision: Revision::new(2).unwrap(),
+            },
+            posted: 0,
+            provisional: false,
+        };
+        assert!(!thread.settles(&update()), "no producers: nothing follows the batch");
+        thread.apply(Command::Compat {
+            key,
+            message: CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        });
+        assert!(thread.settles(&update()));
+        let play = TransportCommand::Play {
+            rate: pm_protocol::common::PlaybackRate::NORMAL,
+        };
+        assert!(thread.views.get_mut(&key).unwrap().clock.apply(play, 0));
+        assert!(!thread.settles(&update()), "playing: no answers follow");
+        let pause = TransportCommand::Pause;
+        assert!(thread.views.get_mut(&key).unwrap().clock.apply(pause, 0));
+        assert!(thread.settles(&update()));
+        assert!(!thread.settles(&Command::Compat {
+            key,
+            message: CompatMessage::Producers {
+                sources: vec![CompatSource::RasterOverride],
+            },
+        }));
+        let other = (PortId(9), SessionId::new(9).unwrap());
+        assert!(!thread.settles(&Command::Document {
+            audio_forwarded: true,
+            key: other,
+            update: DocumentUpdate::Patches {
+                patches: Vec::new().into(),
+                revision: Revision::new(2).unwrap(),
+            },
+            posted: 0,
+            provisional: false,
+        }));
+    }
+
+    /// A view on a route the engine does not draw keeps no paused-frame work.
+    #[test]
+    fn a_view_the_engine_does_not_draw_sleeps() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.configure(key, headless_test_state(false), None, None);
+        thread.config.document = true;
+        let view = thread.views.get_mut(&key).unwrap();
+        view.dirty = true;
+        view.sample_due = false;
+        view.paused_sent = Some(now() - 2 * ARM_IDLE_US);
+        thread.work_view(key);
+        let view = &thread.views[&key];
+        assert!(!matches!(view.reported, Some(Route::Engine)), "no document routes nothing to the engine");
+        assert!(!view.dirty && view.paused_sent.is_none());
+        assert!(thread.next_wake() >= Duration::from_millis(10), "an undrawn view must not spin");
+    }
+
     #[test]
     fn headless_rest_retires_device_and_reuses_cpu_definitions() {
         let (mut thread, _) = preview_thread();
@@ -7683,21 +7942,12 @@ mod tests {
 
         let gpu = pm_gpu::Gpu::new("prepared definitions test").expect("a Metal device");
         let mut composer = composer(&gpu.device, &gpu.queue, &thread.config, thread.frame_cache);
-        composer
-            .renderer()
-            .effects_mut()
-            .parity
-            .configure(Some("prepared-test".into()), None);
         thread.prepared.install(&mut composer);
         assert!(thread.prepared.owners.is_empty());
         assert!(thread.prepared.base.is_none());
         let a = thread.docs[&owner_a].definitions().cloned();
         let b = thread.docs[&owner_b].definitions().cloned();
         assert!(composer.use_definitions(owner_a, a.as_ref(), &[]).is_none());
-        assert_eq!(
-            composer.renderer().effects().parity.environment(),
-            Some("prepared-test")
-        );
         composer
             .renderer()
             .effects_mut()

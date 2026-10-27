@@ -15,6 +15,9 @@ export function sections(event?: Pick<MouseEvent, 'shiftKey' | 'altKey' | 'metaK
 }
 export function tracks(PM: PM): Track[] {
   const ids = new Set<string>(PM.sel.keys), result: Track[] = [];
+  // The panel asks after every document change: with no keys selected there
+  // is no track, and no reason to read every keyframe of the composition.
+  if (!ids.size) return result;
   for (const layer of PM.curComp().layers) {
     if (layer.lock || layer.locked) continue;
     for (const item of PM.allProps(layer)) {

@@ -39,7 +39,7 @@ use std::sync::Arc;
 use pm_edit::align::{self, Mode};
 use pm_edit::anchor::{self, Kind};
 use pm_edit::split_text::{self, Mode as SplitMode};
-use pm_edit::{Edit, IdSource, comp_bounds, groups, materials, pose};
+use pm_edit::{Edit, IdSource, comp_bounds, groups, pose};
 use pm_eval::bounds::{HOST_ONLY, NoHost};
 use pm_eval::space3d::Rect;
 use pm_eval::text_geom::{MeasuredLine, TextMeasure};
@@ -422,10 +422,6 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
                     ("w".to_owned(), V::N(b.w)),
                 ])))
             })
-        }
-        "syncPeers" => {
-            let channel = get(case, "channel").unwrap().as_str().unwrap();
-            materials::synchronize_peers(&mut edit, layer(), channel).map(|_| None)
         }
         "splitText" if measured => {
             let mode = SplitMode::parse(get(case, "mode").unwrap().as_str().unwrap()).unwrap();
@@ -956,8 +952,8 @@ fn edits_match_typescript() {
                             if !ok {
                                 break;
                             }
-                            // Material peers carry keys across compositions:
-                            // either grid's drift applies.
+                            // A kernel may write other compositions: either
+                            // grid's drift applies.
                             stats.drift = drift(canonical, comp_id).max(drift(canonical, comp));
                             if ours_layers.len() != want_layers.len() {
                                 ok = false;

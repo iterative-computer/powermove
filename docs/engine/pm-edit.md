@@ -32,7 +32,6 @@ came or went.
 | `anchor` | `font-anchor.ts`, `size-anchor.ts`, `editing.ts` `runOne` | `capture_font_anchor`, `capture_size_anchor`, `anchor_reference`, `anchor_moved` (Pan Behind) |
 | `split_text` | `split-text.ts` | the layers a split by characters, words, or lines creates |
 | `comp_bounds` | `compositions.ts` `leaveAttributes` | Pre-compose › Leave all attributes: size and anchor shift |
-| `materials` | `editing.ts` `synchronizePeers`, `scene3d/materials.ts` | shared shader channel copied to every peer surface, in every composition |
 
 Pose-preserving edits are built on `Scope::world_pose_values`, `pose_values3d`,
 and `aim_values3d`, as pm-eval-layers.md recommends. `Pose2d::rotation` is a
@@ -57,8 +56,7 @@ the operations. `IdSource { base, next }` makes ids `prefix + base + n`.
 query fallbacks `{"host"}` (three.js geometry: 3D objects and model groups until
 Phase 3c), `{"fonts"}` (fonts not served yet), `{"ink"}` (glyph ink without
 outlines). Answers: `ids` (ungroup), `bounds` (groupPlacement, anchorReference),
-`moves` (align, distribute), `plans` (splitText), `w h ax ay` (leaveAttributes),
-`count` (syncPeers).
+`moves` (align, distribute), `plans` (splitText), `w h ax ay` (leaveAttributes).
 
 **Renderer.** `engine-doc/edits.ts` (`NativeEdits`, `PM.EngineDoc.edits`),
 behind the native evaluator flag (`engine-doc/flags.ts`):
@@ -69,8 +67,8 @@ behind the native evaluator flag (`engine-doc/flags.ts`):
 | `on` | the kernel's operations are applied (`doc.write`), the TypeScript edit does not run; a kernel throw is rethrown with the same class and message |
 | `audit`, `audit-proxy`, `strict` | the TypeScript edit runs and is what the document keeps; the kernel's operations applied to the shadow must give the same compositions (dual answers under `edit.<kernel>`) |
 
-Before asking, the open composition's layers (and `comps` for material peers)
-are marked written and the barrier flushes, so the mirror holds every write of
+Before asking, the open composition's layers (and `comps` when a kernel may
+write other compositions) are marked written and the barrier flushes, so the mirror holds every write of
 the transaction so far. Unanswerable requests run the TypeScript edit and are
 counted under `fallbacks` (`PM.EngineDoc.stats().edits`).
 
@@ -85,7 +83,6 @@ dual-mode reference:
 | Font and size anchors (capture, reference, Pan Behind rescale) | `font-anchor.ts`, `size-anchor.ts`, `editing.ts` `runOne` |
 | Split text | `split-text.ts` (the kernel builds the layers; insertion, hiding, grouping stay in TypeScript) |
 | Pre-compose › Leave all attributes | `compositions.ts` |
-| Shader peer synchronization | `editing.ts` `synchronizePeers` |
 
 ## Time (section 5, rule 4 with amendment 1)
 
@@ -94,9 +91,6 @@ dual-mode reference:
   grid (`IngestRate`) and written with `IngestRate::seconds_of`: `n / fps` (the
   document's own float grid) on a frame start, `ticks / TICKS` off the grid. A
   composition whose rate does not resolve keeps the legacy float arithmetic.
-- A key moved between layers (`t + from − to`, material peers) is echoed when the
-  two starts are the same instant, else shifted in ticks, across compositions with
-  different grids too.
 - An ungroup bake samples the playhead and every frame of the composition; frame
   keys land on `n / fps` exactly as today. The playhead key, when the playhead is
   off the frame grid, lands on the playhead's tick.
@@ -112,9 +106,7 @@ dual-mode reference:
   (solo off) instead of removing it. Main's new refusals (Solo, animated
   visibility, an opacity that cannot move into a single plain child) are the
   renderer's checks before it asks. Align skips a layer inside a locked group
-  (`isInspectorLayerEditable`). The material peer kernel (`syncPeers`) has no
-  caller since main removed `scene3d/materials.ts`; the vectors no longer
-  carry its cases.
+  (`isInspectorLayerEditable`).
 
 ## A camera or light reparented into a space that moves with it
 
@@ -174,7 +166,7 @@ on the first evaluation of every track.
 
 1. **Tick grid for created and moved key times.** A key time a kernel creates
    or moves off the frame grid is a sum of terms (`t + from − to` for a key
-   moved between layers or material peers, `time − from` for a baked key)
+   moved between layers, `time − from` for a baked key)
    computed in ticks: each term is rounded to the tick (half a tick at most,
    0.7 ns), and the result is written as `ticks / TICKS`. TypeScript adds the
    floats. On exact rates the two differ by up to about 1.5 ticks (observed at
@@ -249,13 +241,11 @@ All measured on 2026-10-14 and 2026-10-15 at this branch (the vectors, seeds, co
   relative error 2.8e-14, 0 mismatches. Not compared: 163 align cases on text
   (the TypeScript bounds need a real canvas font), 103 cases on 3D objects and
   model groups (host-only in Phase 1), 3 align cases whose TypeScript bounds
-  rasterize vector paths (no canvas in the harness). The corpus has no shared
-  materials; that kernel is covered by the generated sets, the pipeline test, and
-  the e2e spec.
+  rasterize vector paths (no canvas in the harness).
 - **Pipeline** (`engine-doc/edits.test.ts`, vitest with the real pm-wasm module):
   the same edit script (reparent, unparent, group, move in and out, two ungroups
-  with bakes, size anchor capture and Pan Behind, align, Leave all attributes, and
-  shader peers across two compositions) run with the flag `off`, `on`, and
+  with bakes, size anchor capture and Pan Behind, align, and Leave all
+  attributes) run with the flag `off`, `on`, and
   `audit` leaves the same document (created ids and compositions normalized);
   Undo returns to the original; `audit` records 0 `edit.*` mismatches; every
   kernel answered natively.

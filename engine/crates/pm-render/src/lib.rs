@@ -69,4 +69,5 @@ pub use renderer::{
 pub use request::{OutputKind, RenderRequest};
 pub use shader_layers::all_builtin_definitions;
 
+mod parallel;
 mod pass_facts;

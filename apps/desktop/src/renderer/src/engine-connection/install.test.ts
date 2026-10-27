@@ -102,3 +102,55 @@ describe('engine viewer home eligibility', () => {
     }
   });
 });
+
+describe('engine source media', () => {
+  it('announces a poster arriving as runtime media readiness, not a document write', () => {
+    const f = fixture('project');
+    const announced: unknown[] = [];
+    const emit = f.bus.emit;
+    Object.assign(f.bus, { emit: (name: string, change?: unknown) => { if (name === 'assets') announced.push(change); emit(name); } });
+    const handle = installEngineConnection(f.pm, f.host as never, window);
+    try {
+      // A plain `assets` announcement diffs the whole document and autosaves it.
+      ((f.pm as any).EngineSourceMedia.host as { changed(): void }).changed();
+      expect(announced).toEqual([{ runtimeOnly: true }]);
+    } finally {
+      handle?.dispose();
+    }
+  });
+});
+
+describe('a stopped engine follows the playhead', () => {
+  it('goes where the editor moved the playhead without a seek (a project opened at its saved time), and only then', () => {
+    const f = fixture('project');
+    const handle = installEngineConnection(f.pm, f.host as never, window)!;
+    try {
+      const TPS = 705_600_000;
+      const pm = f.pm as unknown as { time: number; playing: boolean };
+      let resting: number | null = 0.9 * TPS;
+      const seeks: number[] = [];
+      handle.transport.resting = () => resting;
+      handle.transport.seek = (time: number) => { seeks.push(time); resting = Math.round(time * TPS); };
+      // The project opened at 0 while the engine still rests at 0.9 s.
+      pm.time = 0;
+      pm.playing = false;
+      f.bus.emit('project');
+      expect(seeks).toEqual([0]);
+      // In step: nothing to send.
+      f.bus.emit('time');
+      f.bus.emit('comps');
+      expect(seeks).toEqual([0]);
+      // A composition switch restoring its own time.
+      pm.time = 2;
+      f.bus.emit('comps');
+      expect(seeks).toEqual([0, 2]);
+      // Playback moves the playhead from the engine's clock.
+      pm.playing = true;
+      pm.time = 3;
+      f.bus.emit('time');
+      expect(seeks).toEqual([0, 2]);
+    } finally {
+      handle.dispose();
+    }
+  });
+});

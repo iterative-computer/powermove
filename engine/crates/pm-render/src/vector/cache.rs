@@ -115,6 +115,9 @@ struct SceneOutline {
 #[derive(Default)]
 struct SceneOutlines {
     entries: HashMap<Vec<u64>, OutlineEntry>,
+    /// Outlines [`SceneOutlines::prepare`] made for the misses it was given,
+    /// until [`SceneOutlines::outline`] takes them into the cache.
+    prepared: HashMap<Vec<u64>, BezPath>,
     tick: u64,
     bytes: u64,
 }
@@ -146,7 +149,10 @@ impl SceneOutlines {
             entry.used = self.tick;
             return SceneOutline { path: Arc::clone(&entry.path), transform: placement };
         }
-        let canonical = Arc::new(item.device_outline_at_scale(scale, scratch));
+        let canonical = Arc::new(match self.prepared.remove(&key) {
+            Some(outline) => outline,
+            None => item.device_outline_at_scale(scale, scratch),
+        });
         let bytes = (key.capacity() * size_of::<u64>()
             + canonical.elements().len().max(4).next_power_of_two() * size_of::<PathEl>()
             + size_of::<Arc<BezPath>>()) as u64;
@@ -179,6 +185,42 @@ impl SceneOutlines {
         SceneOutline { path: canonical, transform: placement }
     }
 }
+
+impl SceneOutlines {
+    /// Makes the outlines `items` miss on several threads at once (a scene
+    /// new to the cache), each exactly as [`SceneOutlines::outline`] makes it
+    /// alone; `outline` takes them into the cache when it asks for each, so
+    /// the cache holds and evicts what it does without this. A few misses
+    /// are left to `outline`; what an earlier call made and `outline` never
+    /// asked for is dropped.
+    fn prepare<'a>(&mut self, items: impl IntoIterator<Item = &'a CoverageItem>) {
+        self.prepared.clear();
+        let mut missing: Vec<(Vec<u64>, &CoverageItem, f64)> = Vec::new();
+        for item in items {
+            let [a, b, c, d, _, _] = item.transform.as_coeffs();
+            let Some(scale) = upper_outline_scale([a, b, c, d]) else {
+                continue;
+            };
+            let key = outline_key(item, scale);
+            if !self.entries.contains_key(&key) && !missing.iter().any(|(k, _, _)| *k == key) {
+                missing.push((key, item, scale));
+            }
+        }
+        if missing.len() < PREPARE_IN_PARALLEL {
+            return;
+        }
+        let made = crate::parallel::map(missing.len(), |i| {
+            let (_, item, scale) = missing[i];
+            item.device_outline_at_scale(scale, &mut OutlineScratch::default())
+        });
+        for ((key, _, _), outline) in missing.into_iter().zip(made) {
+            self.prepared.insert(key, outline);
+        }
+    }
+}
+
+/// Outline misses [`SceneOutlines::prepare`] makes on several threads.
+const PREPARE_IN_PARALLEL: usize = 4;
 
 /// A power-of-two upper bound for the largest singular value of the 2x2
 /// linear transform. Padding covers rounded sums and square roots at a
@@ -775,6 +817,9 @@ impl VectorCache {
         let coverage = self
             .coverage
             .get_or_insert_with(|| AreaCoverage::new(device));
+        // Shapes new to the outline cache are outlined on several threads.
+        self.scene_outlines
+            .prepare(layout.cells.iter().map(|cell| &scene.items[cell.item]));
         let mut outlines: Vec<Option<SceneOutline>> =
             std::iter::repeat_with(|| None).take(scene.items.len()).collect();
         for cell in &layout.cells {
@@ -1084,6 +1129,39 @@ mod scene_pool_tests {
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.tick, 2);
         assert_eq!(moved.transform * &*moved.path, item.device_outline_with(&mut scratch));
+    }
+
+    /// Outlines made on several threads are the outlines `outline` makes
+    /// alone, and the cache ends as it does without preparing.
+    #[test]
+    fn prepared_outlines_are_what_outline_makes() {
+        let items: Vec<CoverageItem> = (0..10)
+            .map(|i| {
+                let mut item = scene(1.5 + i as f64 * 0.7, 2.0 + i as f64 * 0.3, 20.0 + i as f64).items.remove(0);
+                item.transform = Affine::rotate(i as f64 * 0.41) * item.transform;
+                // Overlapping contours (resolved to one nonzero boundary).
+                item.path.move_to((8.0, 8.0));
+                item.path.quad_to((40.0, 4.0), (30.0, 34.0));
+                item.path.line_to((6.0, 30.0));
+                item.path.close_path();
+                item
+            })
+            .collect();
+        let mut scratch = OutlineScratch::default();
+        let mut alone = SceneOutlines::default();
+        let want: Vec<BezPath> = items.iter().map(|item| {
+            let o = alone.outline(item, &mut scratch);
+            o.transform * &*o.path
+        }).collect();
+        let mut prepared = SceneOutlines::default();
+        prepared.prepare(items.iter().rev());
+        assert!(!prepared.prepared.is_empty());
+        for (item, want) in items.iter().zip(&want) {
+            let o = prepared.outline(item, &mut scratch);
+            assert_eq!(&(o.transform * &*o.path), want);
+        }
+        assert!(prepared.prepared.is_empty());
+        assert_eq!((prepared.entries.len(), prepared.bytes, prepared.tick), (alone.entries.len(), alone.bytes, alone.tick));
     }
 
     #[test]

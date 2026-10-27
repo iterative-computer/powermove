@@ -36,19 +36,32 @@ describe('frame events on presentation', () => {
 });
 
 describe('presented frames are emitted once per animation frame', () => {
-  it('the newest frame of an animation frame wins', () => {
+  it('a frame drawn on arrival goes at its report; the newest of the others at the next animation frame', () => {
     const frames: Array<(t: number) => void> = [];
     const emitted: number[] = [];
     const events = new PresentedEvents((frame) => emitted.push(frame.seq), (fn) => frames.push(fn));
-    events.push({ pts: 0, revision: 1, viewSeq: 1, seq: 1 }, 1);
-    events.push({ pts: 0, revision: 1, viewSeq: 1, seq: 2 }, 1);
+    const paused = (seq: number) => ({ pts: 0, revision: 1, viewSeq: 1, seq });
+    // On screen already: announced now, not a refresh later.
+    events.push(paused(1), 1);
+    expect(emitted).toEqual([1]);
     expect(frames).toHaveLength(1);
+    // Two more before the next animation frame: the newest goes there.
+    events.push(paused(2), 1);
+    events.push(paused(3), 1);
+    expect(emitted).toEqual([1]);
     frames.shift()!(0);
-    expect(emitted).toEqual([2]);
-    events.push({ pts: 0, revision: 2, viewSeq: 1, seq: 3 }, 1);
+    expect(emitted).toEqual([1, 3]);
+    // Still one per animation frame after that one.
+    events.push(paused(4), 1);
+    expect(emitted).toEqual([1, 3]);
     frames.shift()!(16);
-    expect(emitted).toEqual([2, 3]);
-    expect(events.emitted).toBe(2);
+    expect(emitted).toEqual([1, 3, 4]);
+    // An animation frame with nothing to announce: the next goes at once again.
+    frames.shift()!(33);
+    expect(frames).toHaveLength(0);
+    events.push(paused(5), 1);
+    expect(emitted).toEqual([1, 3, 4, 5]);
+    expect(events.emitted).toBe(4);
     expect(events.coalesced).toBe(1);
   });
 
@@ -114,13 +127,30 @@ describe('a paused redraw announces the frame on screen when nothing new is comi
     expect(events.redraw(now({ revision: 5 }), announce)).toBe(false);
     expect(events.redraw(now({ viewSeq: 3 }), announce)).toBe(false);
     expect(events.redraw(now({ pts: 1100 }), announce)).toBe(false);
-    // A frame waiting for its animation frame wins.
+    // A frame waiting for its animation frame wins (one went at once).
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 8 }, 1);
+    events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 9 }, 1);
     expect(events.redraw(now(), announce)).toBe(false);
     frames.shift()!(16);
     // The announcer declines when the redraw changed what the engine draws.
     expect(events.redraw(now(), () => false)).toBe(false);
     expect(events.redraws).toBe(1);
+  });
+});
+
+describe('an announcement in progress', () => {
+  it('is visible to the listeners of a presented frame and of a redraw, and only to them', () => {
+    const frames: Array<(t: number) => void> = [];
+    const seen: boolean[] = [];
+    let events!: PresentedEvents;
+    events = new PresentedEvents(() => seen.push(events.announcing), (fn) => frames.push(fn));
+    expect(events.announcing).toBe(false);
+    events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 1 }, 1);
+    frames.shift()!(0);
+    expect(events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { seen.push(events.announcing); return true; })).toBe(true);
+    expect(() => events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { throw new Error('listener'); })).toThrow('listener');
+    expect(seen).toEqual([true, true]);
+    expect(events.announcing).toBe(false);
   });
 });
 
@@ -172,6 +202,27 @@ describe('the exclusive transport ("Use New Engine" on)', () => {
     // An unsupported composition never hands the flag-on transport over.
     session = { closed: false, route: 'legacy', frames: 0, id: 5, clock: null, transport: () => {} } as never;
     expect(transport.active()).toBe(true);
+  });
+
+  it('runs what a seek\'s frame needs before the seek leaves, and rests where it was sent until the line moves', () => {
+    const order: string[] = [];
+    let sample: unknown = null;
+    const session = { closed: false, route: 'engine', frames: 1, id: 4, get clock() { return sample; }, transport: (c: { command: string }) => order.push(c.command) };
+    const transport = new EngineTransport(() => session as never, clock, {
+      beforeSeek: (time) => order.push(`answers ${time}`)
+    });
+    expect(transport.resting()).toBeNull();
+    transport.seek(2, true);
+    expect(order).toEqual(['audioScrub', `answers ${2 * 705_600_000}`, 'seek']);
+    expect(transport.resting()).toBe(2 * 705_600_000);
+    // A pause rests where the clock stopped.
+    sample = { seq: 1, epoch: 2, state: 'stopped', hostTime: 0, mediaTime: 5 * 705_600_000, rate: { num: 0, den: 1 } };
+    transport.pause();
+    expect(transport.resting()).toBe(5 * 705_600_000);
+    // A line played with the editor stopped (a cached preview) rests nowhere.
+    transport.play(5);
+    sample = { seq: 2, epoch: 3, state: 'playing', hostTime: 0, mediaTime: 5 * 705_600_000, rate: { num: 1, den: 1 } };
+    expect(transport.resting()).toBeNull();
   });
 
   it('is unchanged when not exclusive', () => {

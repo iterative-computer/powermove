@@ -10,7 +10,7 @@
 //!
 //! Color glyphs (`sbix`/`CBDT` strikes, `COLR`) report what the renderer
 //! draws, from the painter's own placement
-//! (`pm_text::render::scene::drawn_color_glyph_ink`): the strike's nonzero
+//! (`pm_text::render::ink::drawn_color_glyph_ink`): the strike's nonzero
 //! texels at the full-em size CoreText draws it at, or the COLR paint bounds
 //! (TEXT-INK-1). Typography anchoring instead keeps Blink's measurement
 //! (`MeasuredLine::anchor_ink`): Skia's glyph metrics from CoreText's
@@ -45,7 +45,7 @@ pub(crate) fn level2_ink(
 ) -> Option<[f64; 4]> {
     let skew = -libm::tan(f64::from(run.skew) * core::f64::consts::PI / 180.0);
     // Color glyphs: the level 2 painter's strike or COLR program placement.
-    if let Some(r) = pm_text::render::scene::drawn_color_glyph_ink(
+    if let Some(r) = pm_text::render::ink::drawn_color_glyph_ink(
         pm_text::render::outline::FaceRef {
             data: data.as_slice(),
             index: 0,
@@ -296,7 +296,7 @@ impl<R: FontResolver> CompatMeasure<R> {
         } else {
             0.0
         };
-        let computed = pm_text::render::scene::drawn_color_glyph_ink(
+        let computed = pm_text::render::ink::drawn_color_glyph_ink(
             pm_text::render::outline::FaceRef::of(info),
             pm_text::render::outline::Coords::User(coords),
             glyph,

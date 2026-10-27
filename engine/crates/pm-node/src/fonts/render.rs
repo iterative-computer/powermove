@@ -542,6 +542,12 @@ impl RenderFonts {
         }
     }
 
+    /// Whether main has opened the font port the render threads ask
+    /// through (an interactive renderer's): until then a request waits.
+    pub fn open(&self) -> bool {
+        self.hub.as_ref().is_some_and(|hub| hub.stats().open)
+    }
+
     /// Includes seed changes as well as registry changes.
     pub fn generation(&self) -> u64 {
         self.hub.as_ref().map_or_else(

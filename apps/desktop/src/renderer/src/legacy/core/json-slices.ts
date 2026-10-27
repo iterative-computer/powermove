@@ -3,9 +3,11 @@
  *
  * `serializeInSlices(value, emit)` emits exactly `JSON.stringify(value)` in
  * order, in pieces, yielding to the event loop between slices. Containers near
- * the root, and any large array or object, are walked here; every other value
- * is serialized by one native `JSON.stringify` call, so a slice costs a few
- * milliseconds even for documents of hundreds of megabytes. It follows the
+ * the root, any large array or object, and any container of more than a few
+ * thousand values are walked here; every other value is serialized by one
+ * native `JSON.stringify` call, and runs of a large array's elements by one
+ * call over a slice of it that shrinks while one takes long, so a slice costs
+ * a few milliseconds even for documents of hundreds of megabytes. It follows the
  * specification's SerializeJSONProperty: `toJSON(key)` with the member's own
  * key, unwrapped primitive wrappers, `undefined`/functions/symbols omitted from
  * objects and written as `null` in arrays, non-finite numbers as `null`, and a
@@ -59,11 +61,34 @@ type Frame = {
   /** Whether an object member has been written (the next one needs a comma). */
   wrote: boolean;
   depth: number;
+  /** Elements of an array serialized by one native call (see BATCH). */
+  batch: number;
 };
 
-/** Array elements serialized by one native call when no element has a `toJSON` of its own. */
+/** At most this many array elements are serialized by one native call (when
+ *  none has a `toJSON` of its own); fewer while a call takes long. */
 const BATCH = 256;
 const hooked = (value: unknown) => value !== null && typeof value === 'object' && typeof (value as any).toJSON === 'function';
+/** A container serialized by one native call has at most this many values. */
+const NATIVE_VALUES = 4096;
+/** Whether `value` holds at most `budget` values (members and elements, at any depth). */
+function small(value: any, budget: number): boolean {
+  const pending = [value];
+  while (pending.length) {
+    const item = pending.pop();
+    if (item === null || typeof item !== 'object') continue;
+    if (Array.isArray(item)) {
+      if ((budget -= item.length) < 0) return false;
+      for (let i = 0; i < item.length; i++) if (item[i] !== null && typeof item[i] === 'object') pending.push(item[i]);
+    } else {
+      for (const key in item) {
+        if (--budget < 0) return false;
+        if (item[key] !== null && typeof item[key] === 'object') pending.push(item[key]);
+      }
+    }
+  }
+  return true;
+}
 
 /** The value SerializeJSONProperty serializes for `holder[key]`, before its kind is decided. */
 function prepare(holder: any, key: string): unknown {
@@ -87,7 +112,7 @@ export async function serializeInSlices(
   pause: Pause = nextTask,
 ): Promise<void> {
   const parts: string[] = [];
-  let partChars = 0, deadline = performance.now() + SLICE_MS, steps = 0;
+  let partChars = 0, deadline = performance.now() + SLICE_MS;
   const ancestors = new Set<object>();
   const stack: Frame[] = [];
   const write = async (text: string) => {
@@ -113,10 +138,10 @@ export async function serializeInSlices(
     const length = keys ? keys.length : object.length;
     // A value whose toJSON already ran must not run another (a native
     // JSON.stringify of it would): such a value is walked here.
-    if (!hooked(object) && depth >= WALK_DEPTH && length <= WALK_MEMBERS) return JSON.stringify(object);
+    if (!hooked(object) && depth >= WALK_DEPTH && length <= WALK_MEMBERS && small(object, NATIVE_VALUES)) return JSON.stringify(object);
     if (ancestors.has(object)) throw new TypeError('Converting circular structure to JSON');
     ancestors.add(object);
-    return { holder: object, keys, index: 0, length, open: false, wrote: false, depth };
+    return { holder: object, keys, index: 0, length, open: false, wrote: false, depth, batch: BATCH };
   };
   const enter = async (result: string | Frame) => {
     if (typeof result === 'string') await write(result);
@@ -143,11 +168,20 @@ export async function serializeInSlices(
       }
     } else {
       const index = frame.index;
-      const batch = frame.depth >= WALK_DEPTH ? frame.holder.slice(index, Math.min(frame.length, index + BATCH)) : null;
-      if (batch && !batch.some(hooked)) {
+      // Only a large array is serialized a run at a time (a short one is
+      // walked because it is not small); its elements are alike, so a large
+      // first one is walked, and the run starts after it.
+      const batch = frame.depth >= WALK_DEPTH && frame.length > WALK_MEMBERS && frame.batch > 1 ? frame.holder.slice(index, Math.min(frame.length, index + frame.batch)) : null;
+      if (batch && !batch.some(hooked) && small(batch[0], NATIVE_VALUES)) {
         // Elements without a toJSON of their own serialize the same way in a
         // native call over a slice (holes and undefined as null).
-        await write(`${index > 0 ? ',' : ''}${JSON.stringify(batch).slice(1, -1)}`);
+        const began = performance.now();
+        const text = JSON.stringify(batch);
+        // Large elements: fewer at a time (one at a time is walked, as any other).
+        const took = performance.now() - began;
+        if (took > SLICE_MS / 2) frame.batch >>= 1;
+        else if (took < SLICE_MS / 16 && frame.batch < BATCH) frame.batch <<= 1;
+        await write(`${index > 0 ? ',' : ''}${text.slice(1, -1)}`);
         frame.index += batch.length;
       } else {
         frame.index++;
@@ -155,7 +189,7 @@ export async function serializeInSlices(
         await enter(visit(prepare(frame.holder, String(index)), frame.depth + 1) ?? 'null');
       }
     }
-    if (++steps % 16 === 0 && performance.now() >= deadline) {
+    if (performance.now() >= deadline) {
       await pause();
       deadline = performance.now() + SLICE_MS;
     }

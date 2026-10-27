@@ -397,40 +397,6 @@ struct FrameReuse {
 }
 
 impl Renderer {
-    /// A CLI host reading the desktop's persisted per-machine probe store.
-    /// GPU/driver and pipeline identity are the same suffix as `new` uses.
-    pub fn configure_shader_reference(
-        &mut self,
-        browser: &str,
-        directory: Option<std::path::PathBuf>,
-    ) {
-        let environment = format!(
-            "{browser}; {:?}; pipeline {}",
-            self.device.adapter_info(),
-            pm_glsl::pipeline::PIPELINE_REVISION
-        );
-        self.effects.parity.configure(Some(environment), directory);
-    }
-
-    /// Honour the configured probe directory without ever writing to it:
-    /// this renderer's runner is not the browser that directory's
-    /// decisions were made against (`effects::parity` module notes).
-    pub fn read_only_shader_reference(&mut self) {
-        self.effects.parity.set_read_only();
-    }
-
-    /// CLI hosts without an ANGLE environment must fail closed for user
-    /// programs instead of treating the absence of a parity service as proof.
-    /// A host that supplied the desktop environment retains its persisted
-    /// decisions; unknown programs still need a runner before output.
-    pub fn require_shader_reference(&mut self) {
-        if !self.effects.parity.enabled() {
-            self.effects
-                .parity
-                .configure(Some("host-without-ANGLE-reference".into()), None);
-        }
-    }
-
     /// A renderer on a device. The device needs
     /// `pm_gpu::device::required_features()`; 32-bit precision also needs
     /// `FLOAT32_FILTERABLE` and `FLOAT32_BLENDABLE` (`pm_gpu::Gpu` requests
@@ -439,21 +405,7 @@ impl Renderer {
         let pipelines = Pipelines::new(&device);
         let media = MediaCache::new(&device);
         let text_gpu = crate::text::gpu::TextGpu::new(&device);
-        let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
-        if let Some(store) =
-            crate::effects::parity::ProbeStore::from_environment(|name| std::env::var_os(name))
-        {
-            let environment = format!(
-                "{}; {:?}; pipeline {}",
-                store.browser,
-                device.adapter_info(),
-                pm_glsl::pipeline::PIPELINE_REVISION
-            );
-            if store.read_only {
-                effects.parity.set_read_only();
-            }
-            effects.parity.configure(Some(environment), store.directory);
-        }
+        let effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
         Renderer {
             text: crate::text::TextContext::default(),
             text_gpu,
@@ -622,7 +574,6 @@ impl Renderer {
         key: String,
         pixels: crate::shader_layers::FallbackPixels,
     ) {
-        self.effects.parity.answer(&key, &pixels);
         if self.effects.fallback.expects(&key) {
             self.effects.fallback.put_pixels(key, pixels);
         } else {
@@ -653,10 +604,6 @@ impl Renderer {
         failure: crate::shader_layers::FallbackFailure,
     ) -> Option<std::time::Duration> {
         let now = self.effects.watchdog.now();
-        // A probe whose WebGL reference fails for good pins its program to
-        // the runner, whose failure handling below reproduces today's
-        // outcome; a transient one is probed again when its retry is due.
-        self.effects.parity.failed(key, &failure);
         if self.effects.fallback.expects(key) {
             self.effects.fallback.put_failure(key, failure, now)
         } else if let Some(program) = self.shaders.waiting.remove(key) {
@@ -1336,6 +1283,14 @@ impl Renderer {
             .prewarm(self.device_target_format(document, &request));
     }
 
+    /// Asks the font registry for the faces `document`'s text layers lay out
+    /// with ([`crate::text::TextContext::prefetch_fonts`]): the presenter
+    /// calls this at rest, so the first seek to a text layer does not wait
+    /// for them.
+    pub fn prefetch_fonts(&mut self, document: &Document) {
+        self.text.prefetch_fonts(document);
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,
@@ -1597,6 +1552,59 @@ impl Renderer {
         };
         self.pin_fallback_results(false);
         out
+    }
+
+    /// The compatibility needs a frame of `composition` at `time` would ask
+    /// the producers for and they have not answered yet, without drawing
+    /// it: only its plan is built (the presenter tells the window what the
+    /// frames ahead of playback will need, `pm-node` `present`).
+    pub fn compat_missing(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<Vec<crate::compat::CompatNeed>, RenderError> {
+        if self.compat.is_none() {
+            return Ok(Vec::new());
+        }
+        request.validate()?;
+        let root = document
+            .root()
+            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
+        let comp = Comp::resolve(document, composition)
+            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
+        let open = capability::open_composition_id(root);
+        let project = open
+            .as_deref()
+            .and_then(|id| Comp::resolve(document, id).ok())
+            .unwrap_or_else(|| comp.clone());
+        let seconds = comp.seconds_at(time.get());
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let scale = request
+            .scale
+            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
+        let options3d = self.options3d.for_request(request);
+        self.open_channel_memo(document);
+        let (_, build) = plan::build_reusing(
+            &mut self.evaluator,
+            &comp,
+            &project,
+            seconds,
+            w,
+            h,
+            scale,
+            assets,
+            effect_host(&self.effect_host, &self.effects),
+            options3d,
+            Some(&mut self.text),
+            build_options(&comp, request, self.shaders.fallback_runner),
+            self.compat.as_deref(),
+            None,
+        );
+        self.evaluator.close_channel_memo();
+        Ok(build.compat_missing)
     }
 
     #[allow(clippy::too_many_arguments)]

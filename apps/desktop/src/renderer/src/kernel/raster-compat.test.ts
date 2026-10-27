@@ -114,6 +114,53 @@ describe('the raster override producer', () => {
     } finally { compat.dispose(); vi.unstubAllGlobals(); }
   });
 
+  it('yields non-urgent preparations an ordinary turn, and an urgent ask ends a turn that never comes', async () => {
+    // A long sliced job keeps the task queue busy: the turn never runs.
+    const postTask = vi.fn((_callback: () => void, _options: { priority: string }) => new Promise<void>(() => {}));
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'ahead' }));
+    try {
+      let promote!: () => void;
+      const promoted = new Promise<void>(resolve => { promote = resolve; });
+      let done = false;
+      const speculative = Promise.resolve(compat.prepare(need('box', 1), 4, { promoted })).then(() => { done = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(postTask).toHaveBeenCalledOnce();
+      expect(postTask.mock.calls[0]![1]).toEqual({ priority: 'user-visible' });
+      expect(done).toBe(false);
+      // The paused frame comes to need it: it goes on at once.
+      promote();
+      await speculative;
+      expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'ahead' });
+      // An urgent ask for an answer still waiting for its turn joins it, and ends the wait.
+      done = false;
+      const waiting = Promise.resolve(compat.prepare(need('box', 2), 4)).then(() => { done = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(done).toBe(false);
+      await compat.prepare(need('box', 2), 4, { urgent: true });
+      await waiting;
+      expect(compat.answer(need('box', 2), 4, { prepared: true })).toMatchObject({ key: 'ahead' });
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
+  it('continues a frame the running clock shows as soon as its base arrives, other work after a turn', async () => {
+    const postTask = vi.fn(async (_callback: () => void, _options: { priority: string }) => {});
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    // A wrapper that reads its base: the base is asynchronous.
+    services.register('raster', (...args: any[]) => { const base = original(...args); return { ...base, cv: base.cv, key: 'drawn' }; });
+    try {
+      await compat.prepare(need('title', 1), 4, { due: true });
+      expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+      expect(postTask).not.toHaveBeenCalled();
+      await compat.prepare(need('title', 2), 4);
+      expect(postTask.mock.calls.map(call => call[1].priority)).toEqual(['user-visible']);
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('reads a paused edit\'s own answer back on the window\'s thread, and other preparations on the worker', async () => {
     const readPixelsAsync = vi.fn(async (source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4) }));
     const { services, compat, readPixels, need } = setup(true, undefined, readPixelsAsync);
@@ -203,6 +250,43 @@ describe('the raster override producer', () => {
     compat.answer(need('title', 1.4), 5, { prepared: true });
     expect(engineRasterAsync).toHaveBeenCalledTimes(5);
     expect(engineRaster).not.toHaveBeenCalled();
+  });
+
+  it('shares one engine raster among the frames ahead that ask for the same base content at once', async () => {
+    const key = (layer: any, scale: number, _time: number, crop?: any) => JSON.stringify([layer.id, layer.d, scale, crop ?? null]);
+    const { services, compat, engineRasterAsync, need } = setup(true, key);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, scale: number, time: number, ...rest: any[]) => {
+      const full = original(layer, scale, time, ...rest);
+      return layer.id === 'title' ? { ...full, cv: { width: full.cv.width, height: full.cv.height }, key: `drawn:${time}` } : full;
+    });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    engineRasterAsync.mockImplementation(async (layer: any, scale: number, time: number) => {
+      await held;
+      return { surface: { cv: { width: 96, height: 48 }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: `engine:${layer.id}` }, revision: 1 };
+    });
+    // Five frames start before the first base arrives: one raster for all of them.
+    const times = [0.2, 0.25, 0.3, 0.35, 0.4];
+    const waiting = times.map(time => compat.prepare(need('title', time), 4));
+    expect(waiting.every(p => p instanceof Promise)).toBe(true);
+    release();
+    await Promise.all(waiting);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    expect(compat.stats).toMatchObject({ asyncLoads: 5, sharedLoads: 4 });
+    for (const time of times) expect(compat.answer(need('title', time), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: `drawn:${time}` });
+    // A new revision asks again.
+    await compat.prepare(need('title', 0.45), 5);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers a pass-through at once, in the caller\'s task', () => {
+    const { services, compat, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => original(...args));
+    expect(compat.prepare(need('box'), 4)).toBeNull();
+    expect(engineRasterAsync).not.toHaveBeenCalled();
+    expect(compat.answer(need('box'), 4, { prepared: true })).toEqual({ kind: 'native' });
   });
 
   it('discovers a newly read base asynchronously even after the chain passed it through', async () => {
@@ -490,6 +574,27 @@ describe('the raster override producer', () => {
     });
     compat.answer({ ...need('title', 0.5, 8), crop: window }, 3);
     expect(engineRaster).toHaveBeenLastCalledWith(text, 8, 0.5, window);
+  });
+
+  it('lets the engine draw a window of a whole base a wrapper asked for without the crop, unless density-capped', async () => {
+    // A legacy `PM.raster` assignment calls the chain without `crop`: today
+    // the compositor draws that whole raster on the quad, the window alone
+    // on screen, so the engine's raster of the window is the same pixels.
+    const { services, compat, engineRaster, engineRasterAsync, readPixels, need } = setup(true, (layer, scale, time, crop) => JSON.stringify([layer.id, scale, time, crop ?? null]));
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, scale: number, time: number) => original(layer, scale, time));
+    const window = { x: 256, y: 0, width: 512, height: 256 };
+    expect(compat.answer({ ...need('box', 0.5, 8), crop: window }, 3)).toEqual({ kind: 'native' });
+    expect(engineRaster).toHaveBeenLastCalledWith(shape, 8, 0.5, undefined);
+    // Prepared during playback: the whole base is a dependency like any other, and no readback.
+    const ahead = { ...need('box', 0.6, 8), crop: window };
+    await compat.prepare(ahead, 3);
+    expect(engineRasterAsync).toHaveBeenLastCalledWith(shape, 8, 0.6, undefined);
+    expect(compat.answer(ahead, 3, { prepared: true })).toEqual({ kind: 'native' });
+    expect(readPixels).not.toHaveBeenCalled();
+    // At 8,192 pixels a side the whole raster's density was capped: today's pixels are the result's.
+    engineRaster.mockImplementationOnce((layer: any, scale: number, time: number) => ({ cv: { width: 8192, height: 4096 }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: 'engine:box' }));
+    expect(compat.answer({ ...need('box', 0.7, 400), crop: window }, 3)).toMatchObject({ kind: 'raster', width: 8192, height: 4096 });
   });
 
   it('maps a cropped text result\'s sourceWindow onto the uploaded raster as today\'s draw-window program samples it', () => {

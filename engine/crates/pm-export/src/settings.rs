@@ -332,7 +332,8 @@ pub enum WorkingEncoding {
 /// Dither (section 17): blue-noise RPDF of ±0.5 LSB after the matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dither {
-    /// On for 8-bit outputs, off for 10-bit and above.
+    /// On for final 8-bit images (8-bit PNG); off for lossy codecs, which would
+    /// code the noise as content (EXPORT-DITHER-1), and for 10 bits and above.
     Default,
     On,
     Off,
@@ -362,9 +363,8 @@ pub enum AudioCodec {
     Pcm24,
     /// 32-bit float LPCM, the mix as it is.
     PcmF32,
-    /// AAC LC. In H.264 MP4, the bundled FFmpeg encoder with its default
-    /// bitrate and edit list (the desktop exporter's settings); otherwise
-    /// AudioToolbox at 128 kbps per channel with an edit list.
+    /// AAC LC through AudioToolbox at 128 kbps per channel, from the f32 mix,
+    /// with an edit list for its priming.
     Aac,
     /// Opus through libopus at 48 kHz (WebM), 160 kbps for the stream with
     /// Chromium WebCodecs' AudioEncoder settings (20 ms, VBR, complexity 9).
@@ -399,18 +399,6 @@ pub struct AudioSpec {
 }
 
 impl AudioSpec {
-    /// Whether the desktop exporter's final FFmpeg mux writes this audio.
-    /// Today's exporter has ProRes MOV with 24-bit PCM and H.264 MP4 with
-    /// AAC; both go through bundled FFmpeg from its 16-bit WAV. Other
-    /// combinations (HEVC, H.264 in MOV) keep AVAssetWriter's mux.
-    pub fn ffmpeg_mux(self, video: Codec, container: Container) -> bool {
-        matches!(self.codec, AudioCodec::Aac | AudioCodec::Pcm24)
-            && matches!(
-                (video, container),
-                (Codec::ProRes(_), Container::Mov) | (Codec::H264 { .. }, Container::Mp4)
-            )
-    }
-
     /// Today's audio for a container: 24-bit PCM in MOV, AAC in MP4, Opus in WebM.
     pub fn default_for(container: Container, sample_rate: u32, channels: u16) -> AudioSpec {
         let codec = match container {
@@ -610,7 +598,7 @@ impl ExportSpec {
         match self.dither {
             Dither::On => true,
             Dither::Off => false,
-            Dither::Default => self.codec.depth() <= 8,
+            Dither::Default => matches!(self.codec, Codec::Png { sixteen_bit: false }),
         }
     }
 }
@@ -691,27 +679,28 @@ mod tests {
     }
 
     #[test]
-    fn dither_defaults_on_for_8_bit_only() {
-        assert!(
-            spec(Codec::H264 {
-                bitrate_bps: 4_000_000
-            })
-            .dither_enabled()
-        );
-        assert!(
-            spec(Codec::Hevc {
+    fn dither_defaults_on_for_8_bit_png_only() {
+        for lossy in [
+            Codec::H264 {
                 bitrate_bps: 4_000_000,
-                ten_bit: false
-            })
-            .dither_enabled()
-        );
-        assert!(
-            !spec(Codec::Hevc {
+            },
+            Codec::Hevc {
                 bitrate_bps: 4_000_000,
-                ten_bit: true
-            })
-            .dither_enabled()
-        );
+                ten_bit: false,
+            },
+            Codec::Hevc {
+                bitrate_bps: 4_000_000,
+                ten_bit: true,
+            },
+            Codec::Vp9 {
+                bitrate_bps: 4_000_000,
+            },
+            Codec::Vp8 {
+                bitrate_bps: 4_000_000,
+            },
+        ] {
+            assert!(!spec(lossy).dither_enabled(), "{lossy:?}");
+        }
         assert!(spec(Codec::Png { sixteen_bit: false }).dither_enabled());
         assert!(!spec(Codec::Png { sixteen_bit: true }).dither_enabled());
         assert!(!spec(Codec::ProRes(ProResProfile::Hq)).dither_enabled());

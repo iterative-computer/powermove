@@ -27,7 +27,8 @@ overwrite policy, and file mode (agent exports use `0o600`).
 |---|---|---|---|---|
 | ProRes 422 Proxy, LT, 422, HQ | `v216` (amendment 6) | 10-bit 4..1019 (256..65216) | 64 units | off (opt-in) |
 | ProRes 4444, 4444 XQ | `y416` | 12-bit 16..4079 (256..65264); alpha full range | 16 units | off (opt-in) |
-| H.264 High | `420v` | 8-bit 1..254 | 1 code | on |
+| H.264 High | `420v` | 8-bit 1..254 | 1 code | off (opt-in; a lossy encoder codes the noise, EXPORT-DITHER-1) |
+| PNG, 8-bit | RGBA8 | 0..255 | 1 code | on |
 
 `convert.rs` is S2's prototype pass (`docs/engine/spikes/S2.md`) in
 f64 on the CPU: Rec.709 matrix, co-sited point decimation for 4:2:2, type-0 siting with

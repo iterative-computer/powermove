@@ -1,6 +1,5 @@
-/* The current exporter's WebCodecs VideoEncoder settings for WebM, shared
-   with the job engine's WebCodecs encoder (export-encoder/) so both encode
-   with the same configuration: VP9 profile 0 level 3.1 8-bit, else VP8; the
+/* The current exporter's WebCodecs VideoEncoder settings for WebM: VP9
+   profile 0 level 3.1 8-bit, else VP8; the
    quality tier's bit rate; `latencyMode: 'quality'`; microsecond timestamps
    rounded from the frame index; a forced keyframe every rounded two seconds;
    at most a dozen frames queued before the producer waits. */

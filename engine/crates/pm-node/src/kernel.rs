@@ -17,6 +17,9 @@ use pm_protocol::{
 };
 use pm_wasm::kernel::{Kernel, PreparedDocument, integer, member, text};
 
+mod preparse;
+use preparse::Preparse;
+
 const MAX_OWNERS: usize = 32;
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PERSIST_BYTES: usize = 512 * 1024 * 1024;
@@ -339,6 +342,8 @@ struct Work {
     /// from the parsed tree, instead of requiring canonical bytes.
     text: bool,
     cancelled: Arc<AtomicBool>,
+    /// The file parsed as main wrote it (`preparse`), when this is that file.
+    preparse: Option<Preparse>,
 }
 struct Completed {
     owner: u32,
@@ -364,6 +369,8 @@ struct Slot {
     pending: Option<Pending>,
     refresh: Option<Refresh>,
     persist: Option<Persist>,
+    /// The staging file main is writing, parsed as it grows.
+    preparse: Option<Preparse>,
     document_epoch: u64,
     checkpoint_batches: Option<usize>,
     checkpoint_bytes: usize,
@@ -386,7 +393,7 @@ impl Reader {
         let thread =
             pm_engine::qos::spawn_engine_thread(process, "pm-native-kernel-reader", move || {
                 while let Ok(job) = jobs.recv() {
-                    let work = match job {
+                    let mut work = match job {
                         Job::Read(work) => work,
                         Job::Persist(work) => {
                             if work.cancelled.load(Ordering::Relaxed) {
@@ -458,7 +465,7 @@ impl Reader {
                     metrics.owner.store(work.owner as usize, Ordering::Relaxed);
                     let _reading = Reading(metrics.clone());
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        read(&work, &metrics)
+                        read(&mut work, &metrics)
                     }))
                     .unwrap_or_else(|_| Err("The native document reader failed".into()));
                     if work.cancelled.load(Ordering::Relaxed) {
@@ -610,7 +617,7 @@ fn persist_to_file(
     })
 }
 
-fn read(work: &Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, String> {
+fn read(work: &mut Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, String> {
     let mut file = std::fs::File::open(&work.path).map_err(|e| {
         format!(
             "The native document file could not be opened ({})",
@@ -652,10 +659,34 @@ fn read(work: &Work, metrics: &ReaderMetrics) -> Result<PreparedDocument, String
     }
     drop(chunk);
     metrics.input(bytes.capacity());
-    if work.text && pm_model::hash::sha256_hex(&bytes) != work.hash {
+    // The stream's checksum and the parse each read every byte: side by side.
+    // Units parsed while main wrote the file are used where these bytes
+    // have their digest (preparse.rs). When what the preparse read hashes to
+    // main's hash of the stream and the file still holds it (each read's
+    // digest, checked on several threads), the file is the stream.
+    let preparsed = work
+        .preparse
+        .take()
+        .map(|preparse| preparse.finish(bytes.len() as u64));
+    let (stream, prebuilt, complete) = match preparsed {
+        Some(p) => (p.stream, p.units, p.complete),
+        None => (None, Vec::new(), false),
+    };
+    let (matches, document) = pm_model::parallel::join(
+        || {
+            work.text.then(|| {
+                stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.hash == work.hash && stream.holds(&bytes))
+                    || pm_model::hash::sha256_hex(&bytes) == work.hash
+            })
+        },
+        || PreparedDocument::parse_tree_prebuilt(&bytes, work.revision, prebuilt, complete),
+    );
+    if matches == Some(false) {
         return Err("The native document file does not match the hash of its stream".into());
     }
-    let document = PreparedDocument::parse_tree(&bytes, work.revision)?;
+    let document = document?;
     let source_bytes = bytes.len();
     drop(bytes);
     metrics.input(0);
@@ -911,6 +942,9 @@ impl NativeKernels {
             return Ok("null".into());
         }
         if op == "cancel" {
+            if let Some(slot) = self.slots.get_mut(&owner) {
+                slot.preparse = None;
+            }
             if let Some(pending) = self.slots.get_mut(&owner).and_then(|s| s.pending.take()) {
                 self.cancel_pending(pending);
             }
@@ -1175,6 +1209,34 @@ impl NativeKernels {
             return receipt
                 .ok_or_else(|| "The native document checkpoint refresh is still pending".into());
         }
+        if op == "preparse" {
+            // Main's own staging file, named as its stream begins; the page
+            // cannot send this operation (main's CALLS).
+            let path = text(args, "path")?.to_owned();
+            let revision = integer(args, "revision")?;
+            let preparse = Preparse::start(self.process, path, revision)?;
+            self.slots.entry(owner).or_default().preparse = Some(preparse);
+            return Ok("null".into());
+        }
+        if op == "preparseEnd" {
+            if let Some(slot) = self.slots.get_mut(&owner) {
+                slot.preparse = None;
+            }
+            return Ok("null".into());
+        }
+        if op == "grow" {
+            let path = text(args, "path")?;
+            let length = integer(args, "length")?;
+            if let Some(preparse) = self
+                .slots
+                .get(&owner)
+                .and_then(|slot| slot.preparse.as_ref())
+                .filter(|preparse| preparse.path == path)
+            {
+                preparse.grow(length);
+            }
+            return Ok("null".into());
+        }
         if op == "load" {
             // Do not retain unbounded obsolete trees behind a long parse.
             // Caller retries after the existing worker drains retirement.
@@ -1208,6 +1270,14 @@ impl NativeKernels {
                 .checked_add(1)
                 .ok_or("The native document generation is exhausted")?;
             let cancelled = Arc::new(AtomicBool::new(false));
+            // Main's recovery loads its own link to the staging file, so the
+            // path may differ; a unit is used only where the loaded bytes
+            // have its digest, and only at the revision its nodes carry.
+            let preparse = self
+                .slots
+                .get_mut(&owner)
+                .and_then(|slot| slot.preparse.take())
+                .filter(|preparse| preparse.revision == revision);
             self.reader.as_ref().expect("created").submit(Work {
                 owner,
                 generation,
@@ -1216,6 +1286,7 @@ impl NativeKernels {
                 hash,
                 text: source_text,
                 cancelled: cancelled.clone(),
+                preparse,
             })?;
             self.generation = generation;
             let slot = self.slots.entry(owner).or_default();
@@ -1681,6 +1752,153 @@ mod tests {
             )["ok"],
             false
         );
+    }
+
+    /// About 12 MB of layers, in JSON.stringify's member order.
+    fn large_text() -> String {
+        let layer = |i: usize| {
+            let keys: Vec<String> = (0..[3, 400, 9000][i % 3])
+                .map(|k| format!(r#"{{"v":[{k}.5,"\u00e9"],"t":{k}}}"#))
+                .collect();
+            format!(
+                r#"{{"id":"L{i}","p":{{"x":{{"k":[{}]}}}}}}"#,
+                keys.join(",")
+            )
+        };
+        let layers: Vec<String> = (0..60).map(layer).collect();
+        format!(
+            r#"{{"comps":{{"c":{{"id":"c","layers":[{}]}}}},"id":"p"}}"#,
+            layers.join(",")
+        )
+    }
+
+    #[test]
+    fn kernel_parses_a_stream_as_main_writes_it_and_loads_the_file_it_wrote() {
+        let text = large_text();
+        let canonical = pm_model::json::to_canonical_string(&pm_model::json::parse(&text).unwrap());
+        let source = pm_model::hash::sha256_hex(text.as_bytes());
+        // As main streams: the file is named, then grows chunk by chunk.
+        let stream = |k: &mut NativeKernels,
+                      e: &mut Engine,
+                      file: &CacheFile,
+                      revision: u64,
+                      bytes: &[u8]| {
+            std::fs::write(&file.0, b"").unwrap();
+            value(
+                k,
+                e,
+                1,
+                "preparse",
+                json!({"path":file.0,"revision":revision}),
+            );
+            let mut out = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file.0)
+                .unwrap();
+            for (n, chunk) in bytes.chunks(1 << 20).enumerate() {
+                out.write_all(chunk).unwrap();
+                out.flush().unwrap();
+                value(
+                    k,
+                    e,
+                    1,
+                    "grow",
+                    json!({"path":file.0,"length":((n << 20) + chunk.len())}),
+                );
+            }
+        };
+        let finish = |k: &mut NativeKernels,
+                      e: &mut Engine,
+                      file: &CacheFile,
+                      revision: u64,
+                      hash: &str| {
+            value(
+                k,
+                e,
+                1,
+                "load",
+                json!({"path":file.0,"document":"doc","revision":revision,"hash":hash,"source":"text"}),
+            );
+            poll(k, e, 1)
+        };
+        let file = CacheFile::new(b"");
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        stream(&mut k, &mut e, &file, 3, text.as_bytes());
+        let receipt = finish(&mut k, &mut e, &file, 3, &source);
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        assert_eq!(
+            receipt["value"]["hash"],
+            pm_model::hash::sha256_hex(canonical.as_bytes())
+        );
+        value(
+            &mut k,
+            &mut e,
+            1,
+            "activate",
+            json!({"revision":3,"preparedRevision":3,"hash":receipt["value"]["hash"]}),
+        );
+        assert_eq!(
+            k.slots[&1].kernel.as_ref().unwrap().engine.to_json(),
+            canonical
+        );
+
+        // The file changes after its units were parsed: the load parses what
+        // the file holds then (its bytes must still match main's hash).
+        let mut changed = text.clone().into_bytes();
+        let at = text.find("9.5").unwrap();
+        changed[at] = b'8';
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        stream(&mut k, &mut e, &file, 3, text.as_bytes());
+        std::fs::write(&file.0, &changed).unwrap();
+        let receipt = finish(
+            &mut k,
+            &mut e,
+            &file,
+            3,
+            &pm_model::hash::sha256_hex(&changed),
+        );
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        let expected = pm_model::json::to_canonical_string(
+            &pm_model::json::parse(std::str::from_utf8(&changed).unwrap()).unwrap(),
+        );
+        assert_eq!(
+            receipt["value"]["hash"],
+            pm_model::hash::sha256_hex(expected.as_bytes())
+        );
+
+        // A file changed after it was read as written is not the stream main
+        // hashed, though what was read is: refused.
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        stream(&mut k, &mut e, &file, 3, text.as_bytes());
+        std::fs::write(&file.0, &changed).unwrap();
+        let refused = finish(&mut k, &mut e, &file, 3, &source);
+        assert_eq!(refused["ok"], false, "{refused}");
+
+        // Units parsed at another revision are not used: the tree is at the load's.
+        let mut k = NativeKernels::new(EngineProcess::Interactive);
+        let mut e = engine();
+        stream(&mut k, &mut e, &file, 2, text.as_bytes());
+        let receipt = finish(&mut k, &mut e, &file, 3, &source);
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        value(
+            &mut k,
+            &mut e,
+            1,
+            "activate",
+            json!({"revision":3,"preparedRevision":3,"hash":receipt["value"]["hash"]}),
+        );
+        assert_eq!(k.slots[&1].kernel.as_ref().unwrap().engine.revision(), 3);
+        assert_eq!(
+            k.slots[&1].kernel.as_ref().unwrap().engine.to_json(),
+            canonical
+        );
+        // A cancel drops the stream's parse.
+        stream(&mut k, &mut e, &file, 4, text.as_bytes());
+        value(&mut k, &mut e, 1, "cancel", json!({}));
+        assert!(k.slots[&1].preparse.is_none());
     }
 
     #[test]

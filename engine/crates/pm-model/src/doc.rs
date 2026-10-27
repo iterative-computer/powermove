@@ -48,7 +48,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use crate::hash::canonical_digest;
+use crate::hash::canonical_digest_parallel;
 use crate::json::write::{JsonTree, View};
 use crate::json::{JsString, Map, ObjectMap, Value};
 use crate::ops::{self, Op};
@@ -123,7 +123,29 @@ impl Node {
     /// tree as `Node::from_value(parse_bytes(bytes)?, rev)` without building
     /// the intermediate `Value` (for a large document, its memory again).
     pub fn parse_bytes(bytes: &[u8], rev: u64) -> Result<Node, crate::json::ParseError> {
-        crate::json::parse_bytes_with(bytes, &mut NodeBuilder { rev })
+        crate::json::parse_bytes_parallel(bytes, &mut NodeBuilder { rev })
+    }
+
+    /// [`Node::parse_bytes`] with units parsed as the text arrived
+    /// ([`Node::parse_unit`]; see [`crate::json::parse_bytes_parallel_prebuilt`]).
+    pub fn parse_bytes_prebuilt(
+        bytes: &[u8],
+        rev: u64,
+        prebuilt: Vec<crate::json::Prebuilt<Node>>,
+        complete: bool,
+    ) -> Result<Node, crate::json::ParseError> {
+        crate::json::parse_bytes_parallel_prebuilt(
+            bytes,
+            &mut NodeBuilder { rev },
+            prebuilt,
+            complete,
+        )
+    }
+
+    /// One unit of a document's text (inside `depth` containers) at revision
+    /// `rev`, as [`Node::parse_bytes`] builds it.
+    pub fn parse_unit(text: &[u8], depth: usize, rev: u64) -> Option<Node> {
+        crate::json::parse_unit_with(text, depth, &mut NodeBuilder { rev })
     }
 
     /// The revision at which this subtree last changed.
@@ -280,6 +302,7 @@ fn same_array(old: &[Node], new: &[Value]) -> bool {
 }
 
 /// Builds [`Node`]s while parsing (`Node::parse_bytes`).
+#[derive(Clone)]
 struct NodeBuilder {
     rev: u64,
 }
@@ -316,10 +339,10 @@ impl crate::json::TreeBuilder for NodeBuilder {
             kind: NodeKind::Array(Arc::new(items)),
         }
     }
-    fn object(&mut self, members: Vec<(JsString, Node)>) -> Node {
+    fn object(&mut self, members: &mut Vec<(JsString, Node)>, start: usize) -> Node {
         Node {
             rev: self.rev,
-            kind: NodeKind::Object(Arc::new(members.into_iter().collect())),
+            kind: NodeKind::Object(Arc::new(ObjectMap::from_members(members, start))),
         }
     }
 }
@@ -539,7 +562,6 @@ impl Tree for Node {
 }
 
 impl JsonTree for Node {
-    type Child = Node;
     fn view(&self) -> View<'_, Node> {
         match self.kind() {
             NodeKind::Null => View::Null,
@@ -850,23 +872,36 @@ impl Document {
     pub fn canonical_digest(&self) -> Option<[u8; 32]> {
         *self
             .digest
-            .get_or_init(|| self.root.as_ref().map(canonical_digest))
+            .get_or_init(|| self.root.as_ref().map(canonical_digest_parallel))
     }
 }
 
-/// Per-thread input tracing, enabled only by pm-wasm. Native rendering does
-/// not pay for it. Container reads depend on their own shape; child values
-/// are separate reads. The caller must reset evaluator memos before tracing.
+/// Per-thread input tracing, enabled by pm-wasm (which the native engine
+/// links for its kernel). While no thread traces, a read costs one atomic
+/// load. Container reads depend on their own shape; child values are
+/// separate reads. The caller must reset evaluator memos before tracing.
 #[cfg(feature = "read-tracking")]
 pub mod reads {
     use super::*;
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     thread_local! { static READS: RefCell<Option<HashSet<usize>>> = const { RefCell::new(None) }; }
+    /// Threads tracing now: every node read of a build with the feature
+    /// passes here, and looks up the thread's set only while one traces.
+    static TRACING: AtomicUsize = AtomicUsize::new(0);
     pub fn begin() {
-        READS.with(|r| *r.borrow_mut() = Some(HashSet::new()));
+        READS.with(|r| {
+            if r.borrow_mut().replace(HashSet::new()).is_none() {
+                TRACING.fetch_add(1, Ordering::Relaxed);
+            }
+        });
     }
+    #[inline]
     pub(super) fn record(n: &Node) {
+        if TRACING.load(Ordering::Relaxed) == 0 {
+            return;
+        }
         READS.with(|r| {
             if let Some(set) = r.borrow_mut().as_mut() {
                 set.insert(n as *const Node as usize);
@@ -910,7 +945,11 @@ pub mod reads {
     }
     /// Stop before resolving paths, so tracing never records its own work.
     pub fn finish(index: Option<&Index>) -> Vec<Vec<PathPart>> {
-        let set = READS.with(|r| r.borrow_mut().take()).unwrap_or_default();
+        let set = READS.with(|r| r.borrow_mut().take());
+        if set.is_some() {
+            TRACING.fetch_sub(1, Ordering::Relaxed);
+        }
+        let set = set.unwrap_or_default();
         let Some(index) = index else {
             return Vec::new();
         };
@@ -926,5 +965,35 @@ pub mod reads {
                 Some(path)
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_reads_between_begin_and_finish_are_traced() {
+            let root = Node::from_value(crate::json::parse(r#"{"a":{"b":1},"c":2}"#).unwrap(), 0);
+            let index = Index::new(&root);
+            let NodeKind::Object(map) = root.kind() else {
+                unreachable!()
+            };
+            let (a, c) = (
+                map.get(b"a".as_slice()).unwrap(),
+                map.get(b"c".as_slice()).unwrap(),
+            );
+            c.kind();
+            assert_eq!(TRACING.load(Ordering::Relaxed), 0);
+            begin();
+            begin();
+            assert_eq!(TRACING.load(Ordering::Relaxed), 1);
+            a.kind();
+            let paths = finish(Some(&index));
+            assert_eq!(TRACING.load(Ordering::Relaxed), 0);
+            assert_eq!(paths, vec![vec![PathPart::from(JsString::from("a"))]]);
+            c.kind();
+            assert!(finish(Some(&index)).is_empty());
+            assert_eq!(TRACING.load(Ordering::Relaxed), 0);
+        }
     }
 }

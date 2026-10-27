@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './ui-state';
@@ -32,6 +32,39 @@ function uiStateRegistry() {
 }
 
 describe('legacy ui-state install', () => {
+  it('prunes another project at once, and within one project only after its edits settle', () => {
+    vi.useFakeTimers();
+    try {
+      const { PM, layer } = uiStateRegistry();
+      let evaluation = 0, structure = 0;
+      PM.evaluationVersion = () => evaluation;
+      PM.ProjectIndex = { generation: () => structure };
+      const removed: any = { i: 'key-b', t: 1, v: 0 };
+      layer.p.opacity.kf.push(removed);
+      PM.UIState.setKeyHandles(removed, { ho: [1, 1] });
+      PM.bus.emit('project');
+      const version = PM.UIState.timelineVersion();
+      layer.p.opacity.kf.pop();
+      // A composition setting: neither the evaluator nor the layer index moved.
+      PM.bus.emit('project'); PM.bus.emit('layers');
+      vi.runAllTimers();
+      expect(PM.UIState.timelineVersion()).toBe(version);
+      expect(PM.UIState.keyHandles.has('key-b')).toBe(true);
+      // An edit: pruned once its burst of announcements has stopped.
+      evaluation++; PM.bus.emit('layers');
+      vi.advanceTimersByTime(300);
+      structure++; PM.bus.emit('project');
+      vi.advanceTimersByTime(300);
+      expect(PM.UIState.keyHandles.has('key-b')).toBe(true);
+      vi.advanceTimersByTime(200);
+      expect(PM.UIState.keyHandles.has('key-b')).toBe(false);
+      // Another project is pruned at once.
+      PM.UIState.setKeyHandles(removed, { ho: [1, 1] });
+      PM.proj = { layers: [], comps: {} };
+      PM.bus.emit('project');
+      expect(PM.UIState.keyHandles.size).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
   it('versions timeline row changes without invalidating on read-only access or repeated values', () => {
     const { PM, layer, key } = uiStateRegistry();
     const initial = PM.UIState.timelineVersion();
@@ -90,5 +123,24 @@ describe('legacy ui-state install', () => {
 
     expect(PM.UIState.getGroupCollapsed(layer)).toBe(true);
     expect(PM.UIState.getLayerCollapsed(layer)).toBe(true);
+  });
+  it('prunes handles of removed keys, keeps present ones, and migrates stored legacy handles once', () => {
+    const { PM, layer, key } = uiStateRegistry();
+    const stored: any = { i: 'key-b', t: 1, v: 0, _ho: [1, 2] };
+    layer.p.opacity.kf.push(stored);
+    PM.UIState.prune(PM.proj);
+    expect(PM.UIState.getKeyHandles(stored)).toEqual({ ho: [1, 2] });
+    expect(JSON.stringify(stored).includes('_ho')).toBe(false);
+    key._hi = [5, 6];
+    const descriptor = Object.getOwnPropertyDescriptor(key, '_hi');
+    // A re-prune keeps the shared accessors and the present keys' handles.
+    PM.UIState.prune(PM.proj);
+    expect(Object.getOwnPropertyDescriptor(key, '_hi')).toEqual(descriptor);
+    expect(PM.UIState.getKeyHandles(key)).toEqual({ hi: [5, 6] });
+    layer.p.opacity.kf = [key];
+    PM.UIState.prune(PM.proj);
+    expect(PM.UIState.keyHandles.has('key-b')).toBe(false);
+    expect(stored._ho).toBeUndefined();
+    expect(key._hi).toEqual([5, 6]);
   });
 });

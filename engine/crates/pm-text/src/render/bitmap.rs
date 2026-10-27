@@ -336,7 +336,7 @@ fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<Bit
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "render"))]
 mod tests {
     use super::*;
 
@@ -480,7 +480,7 @@ mod tests {
             let tone = shape("👋🏽", requested);
             assert_ne!(tone, wave, "skin-tone modifier was not shaped");
             for glyph in [wave, tone] {
-                let ink = crate::render::scene::drawn_color_glyph_ink(
+                let ink = crate::render::ink::drawn_color_glyph_ink(
                     face,
                     crate::render::outline::Coords::Normalized(&[]),
                     glyph,
