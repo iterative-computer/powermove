@@ -33,7 +33,7 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
-import { askAboutOfflineMedia, offlineExportOptions, type OfflineClip } from './offline-media';
+import { askAboutOfflineMedia, missingClips, offlineExportOptions, type OfflineClip } from './offline-media';
 import { ExportDestinations } from './export-destinations';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
@@ -570,8 +570,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
    *  the composition's clips whose files main cannot find. */
   const checkOffline = async (window: BrowserWindow, sender: WebContents, referenced: OfflineClip[]): Promise<'proxies' | 'without' | null | EngineExportDestination> => {
     if (!options.resolveAsset) return null;
-    const found = await Promise.all(referenced.map(async (clip) => !!await options.resolveAsset!(clip.asset).catch(() => null)));
-    const clips = referenced.filter((_, index) => !found[index]);
+    const clips = await missingClips(referenced, (asset) => options.resolveAsset!(asset));
     if (!clips.length) return null;
     let proxies = !!options.resolveProxy;
     if (proxies) {

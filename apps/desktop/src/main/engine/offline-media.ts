@@ -8,7 +8,7 @@
  */
 import { dialog, type BrowserWindow } from 'electron';
 import type { OfflineClip } from '../../shared/offline-clips';
-export { offlineClips, referencedClips, type OfflineClip } from '../../shared/offline-clips';
+export { missingClips, offlineClips, referencedClips, type OfflineClip } from '../../shared/offline-clips';
 
 type Project = Record<string, any>;
 
