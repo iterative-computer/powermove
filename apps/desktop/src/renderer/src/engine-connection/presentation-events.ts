@@ -245,12 +245,13 @@ export class PresentedEvents {
    * engine presents a new frame only for a new revision, view or time; when
    * none is coming (`current` still matches the frame on screen) the frame
    * on screen is announced again, now, as today's redraw announces it.
-   * Returns whether it was.
+   * Returns `announced` when it was, `coming` when a new frame is on its way
+   * (it announces itself when it lands), and `none` with nothing on screen.
    */
-  redraw(current: { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number }, announce: (frame: PresentedFrameLike, quality: number) => boolean): boolean {
+  redraw(current: { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number }, announce: (frame: PresentedFrameLike, quality: number) => boolean): RedrawOutcome {
     const last = this.last;
-    const skip = (why: string) => { this.lastRedraw = why; return false; };
-    if (!last) return skip('nothing on screen');
+    const skip = (why: string, outcome: RedrawOutcome = 'coming') => { this.lastRedraw = why; return outcome; };
+    if (!last) return skip('nothing on screen', 'none');
     if (this.queue.length) return skip('a frame is on its way to the screen');
     if (current.revision === null || current.revision !== last.frame.revision) return skip(`revision ${current.revision} after ${last.frame.revision}`);
     if (current.viewSeq !== null && current.viewSeq !== last.frame.viewSeq) return skip(`view ${current.viewSeq} after ${last.frame.viewSeq}`);
@@ -260,9 +261,12 @@ export class PresentedEvents {
     if (!this.announce(() => announce(last.frame, last.quality))) return skip('the producers\' output changed');
     this.lastRedraw = 'announced';
     this.redraws++;
-    return true;
+    return 'announced';
   }
 }
+
+/** What a paused redraw request did (`PresentedEvents.redraw`). */
+export type RedrawOutcome = 'announced' | 'coming' | 'none';
 
 /** Today's `perf` fields (runtime/install-legacy.ts) from engine stats. */
 export type PerfFields = { ms: number; fps: number; draws: number; passes: number; progs: number; raster: number };

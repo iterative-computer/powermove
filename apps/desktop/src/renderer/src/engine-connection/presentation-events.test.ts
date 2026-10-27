@@ -117,23 +117,24 @@ describe('a paused redraw announces the frame on screen when nothing new is comi
     const announce = (frame: { seq: number }) => { announced.push(frame.seq); return true; };
     const now = (over: Partial<{ revision: number | null; viewSeq: number | null; pts: number | null }> = {}) => ({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100, ...over });
     // Nothing on screen yet.
-    expect(events.redraw(now(), announce)).toBe(false);
+    expect(events.redraw(now(), announce)).toBe('none');
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 7 }, 1);
     frames.shift()!(0);
-    expect(events.redraw(now(), announce)).toBe(true);
+    expect(events.redraw(now(), announce)).toBe('announced');
     expect(announced).toEqual([7]);
     // An edit (a newer revision), a view change, or another frame: the
-    // engine presents a new frame, so nothing is announced now.
-    expect(events.redraw(now({ revision: 5 }), announce)).toBe(false);
-    expect(events.redraw(now({ viewSeq: 3 }), announce)).toBe(false);
-    expect(events.redraw(now({ pts: 1100 }), announce)).toBe(false);
+    // engine presents a new frame, which announces itself, so nothing is
+    // announced now.
+    expect(events.redraw(now({ revision: 5 }), announce)).toBe('coming');
+    expect(events.redraw(now({ viewSeq: 3 }), announce)).toBe('coming');
+    expect(events.redraw(now({ pts: 1100 }), announce)).toBe('coming');
     // A frame waiting for its animation frame wins (one went at once).
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 8 }, 1);
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 9 }, 1);
-    expect(events.redraw(now(), announce)).toBe(false);
+    expect(events.redraw(now(), announce)).toBe('coming');
     frames.shift()!(16);
     // The announcer declines when the redraw changed what the engine draws.
-    expect(events.redraw(now(), () => false)).toBe(false);
+    expect(events.redraw(now(), () => false)).toBe('coming');
     expect(events.redraws).toBe(1);
   });
 });
@@ -147,7 +148,7 @@ describe('an announcement in progress', () => {
     expect(events.announcing).toBe(false);
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 1 }, 1);
     frames.shift()!(0);
-    expect(events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { seen.push(events.announcing); return true; })).toBe(true);
+    expect(events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { seen.push(events.announcing); return true; })).toBe('announced');
     expect(() => events.redraw({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100 }, () => { throw new Error('listener'); })).toThrow('listener');
     expect(seen).toEqual([true, true]);
     expect(events.announcing).toBe(false);
