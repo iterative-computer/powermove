@@ -3,6 +3,7 @@ import { cancelPreviewVideoSeek } from './video-seek';
 import { pauseVideoInstances } from './video-instances';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
 import { sourceTime } from './retiming';
+import type { DecodedVideoFrame, ExportVideoDecoders } from './export-video-decoder';
 
 type FontReadiness = {
   fonts: FontFaceSet | null;
@@ -70,6 +71,8 @@ export type FramePreparationOptions = {
   videoForCapture?: (asset: any) => HTMLVideoElement;
   /** Export owns these recovered resources across frames and releases them at completion. */
   recoveryDecoders?: Map<HTMLVideoElement, HTMLVideoElement>;
+  /** Export decodes supported clips in order instead of seeking for every frame. */
+  sequentialDecoders?: ExportVideoDecoders;
   onVideoFrame?: (canvas: HTMLCanvasElement) => void;
 };
 type VideoRequest = { key?: string; layer: any; asset: any; time: number; at: number; frame?: HTMLCanvasElement };
@@ -112,7 +115,7 @@ async function prepareVideos(requests: VideoRequest[], budget = Infinity, cancel
         }
         let video = replacement ?? original;
         try {
-          const captured = new Map<number, Map<string, HTMLCanvasElement>>();
+          const captured = new Map<number | string, Map<string, HTMLCanvasElement>>();
           let capturedSource = video.currentSrc || video.src;
           for (const request of targets) {
             if (failed) return;
@@ -121,7 +124,14 @@ async function prepareVideos(requests: VideoRequest[], budget = Infinity, cancel
             // snapshot for each requested source time, including shared clips.
             const seek = () => seekVideoFrame(video, request.at, { tolerance: exact ? .0000011 : .0005,
               signal: controller.signal, timeoutMs: capture.videoFrameTimeoutMs ?? 15_000 });
-            try {
+            // A decoded frame is the one this seek would show; null keeps seeking.
+            let decoded: DecodedVideoFrame | null = null;
+            if (capture.sequentialDecoders && !capture.videoForCapture) {
+              decoded = await capture.sequentialDecoders.frame(request.asset, request.layer.id, request.at, controller.signal);
+              if (failed) return;
+              checkCancellation();
+            }
+            if (!decoded) try {
               try { await seek(); }
               catch (error) {
                 captureAborted(controller.signal); checkCancellation();
@@ -147,7 +157,8 @@ async function prepareVideos(requests: VideoRequest[], budget = Infinity, cancel
             if (source !== capturedSource) { captured.clear(); capturedSource = source; }
             // The seek tolerance can preserve a nearby decoded time on one
             // request and perform an exact seek on a later identical request.
-            const decodedTime = video.currentTime;
+            // Decoded frames are keyed by their own start time, apart from seeks.
+            const decodedTime = decoded ? `decoded:${decoded.time}` : video.currentTime;
             let sizes = captured.get(decodedTime);
             if (!sizes) { sizes = new Map(); captured.set(decodedTime, sizes); }
             const w = request.asset.w || video.videoWidth, h = request.asset.h || video.videoHeight;
@@ -158,7 +169,7 @@ async function prepareVideos(requests: VideoRequest[], budget = Infinity, cancel
               if (!Number.isFinite(added) || bytes + added > budget) throw new Error('Video frames exceed the texture memory budget');
               bytes += added;
               canvas = document.createElement('canvas'); owned.add(canvas); capture.onVideoFrame?.(canvas); canvas.width = w; canvas.height = h;
-              canvas.getContext('2d')!.drawImage(video, 0, 0, canvas.width, canvas.height);
+              canvas.getContext('2d')!.drawImage(decoded ? decoded.frame : video, 0, 0, canvas.width, canvas.height);
               sizes.set(key, canvas);
             }
             request.frame = canvas;

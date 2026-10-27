@@ -64,6 +64,7 @@ import { readForkRebaseInfo, stageForkRebase } from '../extensions/rebase';
 import { updateFork } from '../extensions/update-fork';
 import { ExternalAgentSession, type ExternalSessionOptions } from '../agent-tools/external-session';
 import { startExternalMcp } from '../agent-tools/external-server';
+import { nativeExportProgress } from '../render-encoder';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -403,6 +404,7 @@ export function registerCodexIpc(
         storeAgent: ctx.storeAgent?.() ?? null,
         ...(ctx.agentMediaFfmpeg ? { ffmpegPath: ctx.agentMediaFfmpeg } : {}),
         exportDirectory: ctx.agentExportDirectory,
+        exportProgress: owner => nativeExportProgress(owner.id),
         capturePanel: ctx.externalMcp?.capturePanel,
         panelInput: ctx.externalMcp?.panelInput,
         orchestrate: (runId, tool, args) => orchestrator.call(runId, tool, args),

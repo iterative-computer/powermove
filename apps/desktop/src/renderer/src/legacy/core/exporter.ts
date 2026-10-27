@@ -9,6 +9,8 @@ import { AlphaReadbackRetryError } from '../gl/half-readback';
 import { installRenderQueue, wavBytes } from './render-queue';
 import { muxWebM as muxEncodedWebM } from './webm-mux';
 import { writeBlobChunks } from './blob-chunks';
+import { ExportVideoDecoders } from './export-video-decoder';
+import { createExportStats, type ExportStats } from './export-stats';
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import {
   EXPORT_FORMAT_OPTIONS,
@@ -43,8 +45,10 @@ const muxWebM = (frames: any, options: any) => muxEncodedWebM(frames, options, P
 // Keep a recovered decoder for the rest of this export, so every later frame
 // does not have to wait for the same stalled original again.
 const recoveryDecoders = new Map<HTMLVideoElement, HTMLVideoElement>();
+// A video export reads each supported clip in order instead of seeking per frame.
+let sequentialDecoders: ExportVideoDecoders | null = null;
 const prepareExportFrame: typeof prepareFrame = (pm, time, project, options) =>
-  prepareFrame(pm, time, project, { ...options, recoveryDecoders });
+  prepareFrame(pm, time, project, { ...options, recoveryDecoders, ...(sequentialDecoders ? { sequentialDecoders } : {}) });
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
 X.buildWeb = () => buildWebExport(PM);
@@ -362,6 +366,7 @@ async function run(opts: any) {
         fps: opts.fps, format: opts.format, alpha: !!opts.alpha,
         bitrateMbps: exportBitrateMbps(opts.quality), name: opts.name || p.name,
         expectsAudio: opts.audio !== false && PM.Audio.expectsOfflineMix?.(...range(opts)) === true,
+        frames: Math.max(1, Math.round((range(opts)[1] - range(opts)[0]) * opts.fps)),
       });
       if (!nativeToken) return { cancelled: true };
     } else if (bridge?.exportDestination) {
@@ -479,10 +484,12 @@ async function runPrepared(opts: any) {
   let ui: any;
   const bitrate: any = exportBitrateMbps(opts.quality) * 1e6;
   const t: any = window.performance.now();
+  const stats = createExportStats(total);
   lastOutputPath = null;
 
   try {
     PM.pause();
+    sequentialDecoders = new ExportVideoDecoders();
     ui = progressUI(total);
     const pctx = ui.prev.getContext('2d');
     if (!pctx) throw new Error('Could not create export preview');
@@ -490,7 +497,7 @@ async function runPrepared(opts: any) {
     const wantsAudio: any = opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj);
     const needsRecorderAudio: any = opts.format === 'webm' && wantsAudio && !(await PM.Audio.supportsOpus());
     if(opts.format==='prores'||(opts.format==='mp4'&&(hostBridge() as any)?.render)){
-      await exportNative({opts,W,H,t0,t1,total,ui,pctx});
+      await exportNative({opts,W,H,t0,t1,total,ui,pctx,stats});
     } else if (opts.format === 'mp4' || opts.format === 'rec' || (opts.format === 'webm' && (typeof window.VideoEncoder === 'undefined' || needsRecorderAudio))) {
       await exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     } else if (opts.format === 'png') {
@@ -503,14 +510,19 @@ async function runPrepared(opts: any) {
       const sidecars = await writeCaptionSidecars(opts, t0, t1);
       PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s${sidecars ? ` · ${sidecars} caption ${sidecars === 1 ? 'file' : 'files'}` : ''}`, 3400);
     }
+    // Where the time went, for agents (export_video) and diagnosis; see export-stats.ts.
+    X.lastStats = stats.summary(sequentialDecoders.stats); X.lastFailureStage = null;
+    window.console.info('[export] stage timings', X.lastStats);
     return {cancelled:X.cancel, ...(opts.reportPath && !X.cancel && lastOutputPath ? { path: lastOutputPath } : {})};
   } catch (e: any) {
     if (X.cancel && (e?.name === 'AbortError' || e?.name === 'EffectInputError' && /cancelled/.test(e.message))) { PM.toast('Export cancelled'); return { cancelled: true }; }
     window.console.error(e);
     const message = e instanceof Error ? e.message : String(e);
     PM.toast('Export failed: ' + message, 5000);
+    X.lastStats = stats.summary(sequentialDecoders?.stats); X.lastFailureStage = stats.stage;
     return {error:message};
   } finally {
+    sequentialDecoders?.dispose(); sequentialDecoders = null;
     // Closing completed progress must not mark a successful export as cancelled.
     const cancelled = X.cancel;
     ui?.mod.close();
@@ -591,21 +603,27 @@ function fastAlphaCapture(width: number, height: number, uncachedFrames = 0): bo
   return PM.proj.colorDepth !== 8 && (area >= 1920 * 1080 || uncachedFrames >= 12 && area >= 640 * 360);
 }
 
-async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
+async function exportNative({opts,W,H,t0,t1,total,ui,pctx,stats}:{opts:any;W:number;H:number;t0:number;t1:number;total:number;ui:any;pctx:CanvasRenderingContext2D;stats:ExportStats}) {
   const bridge = (hostBridge() as any)?.render;
   if (!bridge) throw new Error('The native encoder requires the updated desktop runtime.');
   const token = nativeToken;
   if (!token) throw new Error('Export destination is unavailable');
   const chunks = async (bytes: Uint8Array, audio = false, retain = false) => {
     const limit = 4 * 1024 * 1024;
+    const parts: Uint8Array[] = [];
     for (let at = 0; at < bytes.length; at += limit) {
       // A view of a large buffer can serialize its entire backing store through
       // Electron. Keep bounded, owned chunks; avoid copying an already-owned
       // complete frame/audio buffer that fits in one message.
-      const chunk = bytes.length <= limit && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-        ? bytes : bytes.slice(at, at + limit);
-      await bridge.write(token, chunk, audio, retain);
+      parts.push(bytes.length <= limit && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes : bytes.slice(at, at + limit));
     }
+    // Audio files and retained frames are assembled in order by the host.
+    if (audio || retain) { for (const part of parts) await bridge.write(token, part, audio, retain); return; }
+    // Every chunk is an owned copy already, and the host queues them in
+    // arrival order, so a frame's chunks need not wait on each other's round
+    // trip. The host applies encoder backpressure; callers still await all.
+    await Promise.all(parts.map(part => bridge.write(token, part, false, false)));
   };
   type ReadbackTicket = { readInto(target: Uint8Array, cancelled: () => boolean): Promise<boolean>; dispose(): void };
   type Readback = { readonly byteLength?: number; begin(time: number, options: any): ReadbackTicket | null; dispose(): void };
@@ -663,6 +681,15 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
   };
   const eligible = () => artworkEligible() && frameFontsReady(PM);
   let failedWrite = false;
+  // The progress thumbnail is 640 px wide; painting every full-size frame into
+  // it costs more than a frame of encoding at 4K. Refresh it a few times a second.
+  let previewShownAt = -Infinity;
+  const refreshPreview = (frame: number) => {
+    const now = window.performance.now();
+    if (frame + 1 < total && now - previewShownAt < 250) return false;
+    previewShownAt = now;
+    return true;
+  };
   const releaseReadback = () => {
     ticket?.dispose(); ticket = null;
     readback?.dispose(); readback = null; pixels = null; image = null;
@@ -675,22 +702,31 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
       const writing = pending;
       if (!writing) return;
       pending = null;
-      const result = await writing.result;
+      stats.stage = 'encoding';
+      const result = await stats.time('encode', writing.frame, () => writing.result);
       if (!result.ok) { failedWrite = true; throw result.error; }
       // The preview copies the shared CPU pixels before the next readback may
       // reuse them. Progress still follows the encoder's acknowledgement.
       // Alpha already passed through Canvas2D once before delivery. Reusing
       // its rounded getImageData output here would round the pixels again.
-      if (writing.image) previewContext.putImageData(writing.image, 0, 0);
-      pctx.drawImage(preview, 0, 0, ui.prev.width, ui.prev.height);
+      if (refreshPreview(writing.frame)) {
+        if (writing.image) previewContext.putImageData(writing.image, 0, 0);
+        pctx.drawImage(preview, 0, 0, ui.prev.width, ui.prev.height);
+      }
       ui.set(writing.frame + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
       await new Promise(resolve => setTimeout(resolve, 0));
     };
-    const prepareNativeFrame = async (time: number) => {
+    const prepare = (frame: number, time: number) => {
+      stats.stage = 'decoding';
+      return stats.time('decode', frame, () => prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5}));
+    };
+    const prepareNativeFrame = async (frame: number, time: number) => {
       retention.key(time); let allowed = artworkEligible();
       // A video seek can take seconds. Keep it behind the previous write so
       // an earlier error or cancellation never waits for a speculative seek.
-      if (eligibility!.hasVideo) {
+      // Clips decoding in order are a few frames ahead already, so they
+      // prepare while the previous frame is still being encoded.
+      if (eligibility!.hasVideo && !sequentialDecoders?.decoding(eligibility!.mediaLayers.filter(layer => layer.type === 'video').map(layer => layer.id))) {
         await join();
         if (X.cancel) return { stamp: null, changed: false };
         // A project or layer edit can arrive during the prior write. Source
@@ -700,13 +736,13 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
       if (X.cancel) return { stamp: null, changed: false };
       const layers = eligibility!.mediaLayers;
       if (!allowed || !layers.length) {
-        await prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5});
+        await prepare(frame, time);
         return { stamp: undefined, changed: false };
       }
       const sources = media.sources(layers);
       if (sources === null) await join();
       if (X.cancel) return { stamp: null, changed: false };
-      await prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5});
+      await prepare(frame, time);
       const changed = !!sources && !media.sameSources(sources);
       return { stamp: sources && !changed ? media.prepared(layers, time, sources) : sources === undefined ? undefined : null, changed };
     };
@@ -734,20 +770,23 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
             if (bridge.repeat) {
               // Small batches bound backpressure and keep Cancel responsive.
               while (count < retention.maxRepeat && i + count < total && retention.key(t0 + (i + count) / opts.fps) === key) count++;
-              try { await bridge.repeat(token, count); } catch (error) { failedWrite = true; throw error; }
+              stats.stage = 'encoding';
+              try { await stats.time('encode', i, () => bridge.repeat(token, count)); } catch (error) { failedWrite = true; throw error; }
             } else {
-              try { await chunks(retained); } catch (error) { failedWrite = true; throw error; }
+              stats.stage = 'encoding';
+              try { await stats.time('encode', i, () => chunks(retained!)); } catch (error) { failedWrite = true; throw error; }
             }
+            stats.repeated += count - 1;
             i += count - 1;
             ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
             await new Promise(resolve => setTimeout(resolve, 0));
             continue;
           }
-          let preparedMedia = await prepareNativeFrame(T);
+          let preparedMedia = await prepareNativeFrame(i, T);
           if (X.cancel) break;
           if (preparedMedia.changed) {
             await join(); releaseReadback();
-            preparedMedia = await prepareNativeFrame(T);
+            preparedMedia = await prepareNativeFrame(i, T);
             if (X.cancel) break;
             if (preparedMedia.changed) throw new Error('Media changed while preparing the export frame');
           }
@@ -762,13 +801,15 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
             }
             if (effectsStamp !== null && readback && (effectsStamp === undefined || exportEffects.valid(PM, effectsStamp))) {
               const quality = PM.quality, depth = PM.proj.colorDepth, motionBlur = opts.mblur !== false;
+              const renderStarted = window.performance.now();
+              stats.stage = 'rendering';
               try {
                 if (!opts.alpha) PM.quality = 1;
                 ticket = readback.begin(T, opts.alpha
                   ? { transparent: true, mblur: motionBlur, mbSamples: 20, shutter: PM.proj.shutter || .5 }
                   : { mblur: motionBlur, mbSamples: motionBlur ? 16 : 1,
                     shutter: PM.proj.shutter || .5, opaque: true, topDownOpaque: true });
-              } finally { if (!opts.alpha) PM.quality = quality; }
+              } finally { if (!opts.alpha) PM.quality = quality; stats.add('render', i, window.performance.now() - renderStarted); }
               // Rendering itself may invalidate a font or renderer cache. Stamp
               // its completed submission, then reject any later source changes.
               const project = PM.proj, capturedLayers = project.layers, version = PM.animVersion?.(), gl = PM.GL.gl;
@@ -795,7 +836,8 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
                   if (!opts.alpha) image = new ImageData(new Uint8ClampedArray(pixels.buffer), W, H);
                 }
                 let copied = false, retry = false;
-                try { copied = await ticket.readInto(pixels, () => X.cancel); }
+                stats.stage = 'rendering';
+                try { copied = await stats.time('render', i, () => ticket!.readInto(pixels!, () => X.cancel)); }
                 catch (error) {
                   if (!opts.alpha || !(error instanceof AlphaReadbackRetryError)
                       || PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw error;
@@ -824,7 +866,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
               // A source changed, the deferred reader was unavailable, or its
               // guard failed. Recapture this timestamp through the serial path.
               releaseReadback(); retained = null; lastKey = null;
-              preparedMedia = await prepareNativeFrame(T);
+              preparedMedia = await prepareNativeFrame(i, T);
               if (X.cancel) break;
               if (preparedMedia.changed) throw new Error('Media changed while preparing the export frame');
             }
@@ -834,6 +876,8 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
           if (X.cancel) break;
           // Alpha preserves Canvas2D's established rounding. Static artwork and
           // unsupported contexts keep their existing serial/repeat path.
+          stats.stage = 'rendering';
+          const renderStarted = window.performance.now();
           const captured = opts.alpha ? null : renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur });
           const cv = captured ? preview : alphaFrame(T, W, H, opts.mblur, alphaCapture,
             fastAlphaCapture(W, H, retention.key(T) === null ? total : 0));
@@ -843,11 +887,15 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
               && alphaCapture?.readback?.session) releaseAlphaReadback(alphaCapture);
           const data = captured ? captured.data : previewContext.getImageData(0, 0, W, H).data;
           const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-          try { await chunks(bytes, false, key !== null && !!bridge.repeat); }
+          stats.add('render', i, window.performance.now() - renderStarted);
+          stats.stage = 'encoding';
+          try { await stats.time('encode', i, () => chunks(bytes, false, key !== null && !!bridge.repeat)); }
           catch (error) { failedWrite = true; throw error; }
           retained = key !== null ? bytes : null; lastKey = key;
-          if (captured) previewContext.putImageData(captured, 0, 0);
-          pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
+          if (refreshPreview(i)) {
+            if (captured) previewContext.putImageData(captured, 0, 0);
+            pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
+          }
           ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
           await new Promise(resolve => setTimeout(resolve, 0));
         } catch (error) {
@@ -861,10 +909,17 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
       await join();
       if (X.cancel) return;
       if (opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj)) {
+        stats.stage = 'mixing audio';
+        const mixing = window.performance.now();
         const mix = await PM.Audio.renderOffline(t0, t1);
         if (mix) await chunks(wavBytes(mix), true);
+        stats.audioMs = window.performance.now() - mixing;
       }
+      stats.stage = 'finalizing';
+      const finishing = window.performance.now();
       const result = await bridge.finish(token);
+      stats.finalizeMs = window.performance.now() - finishing;
+      if (typeof result?.encoder === 'string') stats.encoder = result.encoder;
       nativeToken = null;
       if (result.cancelled) X.cancel = true;
       else if (!result.path) throw new Error('Could not save video');
