@@ -119,7 +119,13 @@ keeps it hidden until the engine presents a frame for the session, and:
   `viewSeq`, and overlay geometry go to `onPresented` listeners;
   `overlayInCss` converts the geometry with the DPR of the state that frame
   shows. The viewer exposes `engineFrame()` and redraws its overlay at each
-  new tag, so handles drawn from frame geometry never lead the pixels.
+  new tag, so handles drawn from frame geometry never lead the pixels. The
+  selection box, handles, anchor, and paths are drawn at the frame on
+  screen's time (`overlayTime`) and revision, not the playhead's: during a
+  scrub the playhead's frame is still on its way. A paused draw while a new
+  frame is on its way emits no `overlay` (the frame's announcement does,
+  `PresentedEvents.redraw` answering `coming`), unless none lands within
+  500 ms.
   Drawing the existing handles from engine geometry is the Viewer UI's next
   step once `pm-render` draws real layers.
 - **Popout following.** The loop runs on the animation frames of whichever
@@ -153,7 +159,13 @@ keeps it hidden until the engine presents a frame for the session, and:
   worker, and the session and pool generation carry over. Worker times
   are moved onto the page's clock (the realm that stamps arrivals, also
   for a popout). `EngineViewerService.offMainThread === false` keeps
-  presentation on the main thread (the harness's comparison).
+  presentation on the main thread (the harness's comparison). A frame
+  shown on arrival (paused, scrub, gesture) goes to the worker at the
+  page's next animation frame and is announced there, before the worker
+  draws it, so the overlay drawn for it commits in the same refresh as its
+  pixels; timed frames go at once and are announced on the worker's report
+  (their overlay lands a refresh or more after the pixels: measured 24 ms
+  p50 during playback of a 258-layer project).
 - **Gestures on raw updates.** While the engine presents, the viewer's
   drags take their moves from `pointerrawupdate` instead of the
   rAF-aligned `pointermove` (`raw-gestures.ts`), so the engine hears about

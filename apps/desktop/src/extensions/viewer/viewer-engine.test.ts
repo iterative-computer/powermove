@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { PowermoveAPI } from 'powermove';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerService } from './engine-present/presentation';
-import type { FrameDescriptor } from './engine-present/protocol';
+import { TICKS_PER_SECOND, type FrameDescriptor } from './engine-present/protocol';
 import { createViewerRuntime } from './viewer';
 
 // happy-dom has no WebGL2: a test can ask for a painter that draws nothing.
@@ -242,6 +242,75 @@ describe('viewer engine presentation hook', () => {
       expect(resize.mock.calls.length).toBe(before + 1);
       const [width, height] = resize.mock.calls.at(-1)!;
       expect(width / height).toBeCloseTo(1920 / 1080, 1);
+      runtime.dispose();
+    } finally {
+      gpu.fake = false;
+      raf.mockRestore();
+      caf.mockRestore();
+    }
+  });
+  it('draws the overlay for the frame on screen: at its time while the playhead\'s frame is on its way', async () => {
+    gpu.fake = true;
+    const rafs = new Map<number, FrameRequestCallback>();
+    let nextRaf = 1;
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => (rafs.set(nextRaf, cb), nextRaf++));
+    const caf = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => void rafs.delete(id));
+    const runFrames = (): void => {
+      const due = [...rafs.values()];
+      rafs.clear();
+      for (const cb of due) cb(performance.now());
+    };
+    try {
+      const services = new Map<string, unknown>();
+      let handlers: EngineViewerHandlers | null = null;
+      const service: EngineViewerService = {
+        source: { videoFrame: () => ({ codedWidth: 1000, codedHeight: 700, close() {} }) as unknown as VideoFrame, onSurface: () => () => {}, retire: () => 0 },
+        composition: () => 'comp-1',
+        revealFrames: 0,
+        offMainThread: false,
+        revision: () => 1,
+        open: (h) => {
+          handlers = h;
+          return { sendViewerState() {}, release() {}, close() {} };
+        },
+        onReady: () => () => {}
+      };
+      services.set(ENGINE_VIEWER_SERVICE, service);
+      const api = viewerApi(services, () => {}) as any;
+      let playhead = 1;
+      api.transport.time = () => playhead;
+      const layer = { id: 'L', type: 'solid', from: 0, dur: 10, d: { w: 100, h: 100 } };
+      api.selection.layers = () => ['L'];
+      api.model.layer = (id: string) => id === 'L' ? layer : undefined;
+      // The layer moves 100 px per second: its bounds say which time they were asked for.
+      const asked: number[] = [];
+      api.render.gl.bounds = (_l: unknown, t: number) => { asked.push(t); return { x0: 100 * t, y0: 0, x1: 100 * t + 100, y1: 100 }; };
+      api.space3d = { is3DLayer: () => false };
+      const runtime = createViewerRuntime(api) as any;
+      mount(runtime);
+      runtime.layout();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const desc: FrameDescriptor = {
+        poolIndex: 0, poolGeneration: 1, seq: 1, pts: TICKS_PER_SECOND, revision: 1, colorSpace: 'srgb', format: 'bgra8Unorm',
+        quality: { resolution: 'full', representation: 'original', draft3d: false, cached: false },
+        overlay: null, depthId: null, viewSeq: runtime.enginePresentation.state.viewSeq, duration: null
+      };
+      handlers!.message({ type: 'frame', frame: desc }, performance.now());
+      runFrames();
+      expect(runtime.enginePresentation.presenting).toBe(true);
+      expect(runtime.overlayTime()).toBe(1);
+      // A scrub step: the playhead moves on before the engine presents its frame.
+      playhead = 2.5;
+      expect(runtime.overlayTime()).toBe(1);
+      asked.length = 0;
+      runtime.requestOverlay();
+      runFrames();
+      expect(asked.length).toBeGreaterThan(0);
+      expect(new Set(asked)).toEqual(new Set([1]));
+      // The playhead's frame lands: the overlay follows it.
+      handlers!.message({ type: 'frame', frame: { ...desc, seq: 2, poolIndex: 1, pts: 2.5 * TICKS_PER_SECOND } }, performance.now());
+      runFrames();
+      expect(runtime.overlayTime()).toBe(2.5);
       runtime.dispose();
     } finally {
       gpu.fake = false;

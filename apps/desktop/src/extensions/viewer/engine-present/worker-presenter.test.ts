@@ -449,3 +449,97 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(link.releases.map((r) => r.seq).sort()).toEqual([1, 2, 3]);
   });
 });
+
+describe('a frame shown on arrival, with the page\'s animation frames', () => {
+  function withPageFrames() {
+    const pair = new Pair();
+    const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });
+    const source = new Source();
+    const link = new Link();
+    const pageRafs = new Map<number, (t: number) => void>();
+    let next = 1;
+    const presenter = host.open({
+      link, source, displayHz: 120,
+      requestFrame: (cb) => { pageRafs.set(next, cb); return next++; },
+      cancelFrame: (id) => { pageRafs.delete(id); }
+    });
+    const presented: PresentedFrame[] = [];
+    presenter.onPresented((f) => presented.push(f));
+    const pageFrame = (t: number) => { const due = [...pageRafs.values()]; pageRafs.clear(); for (const cb of due) cb(t); };
+    for (let i = 0; i < 8; i++) source.imports.add(`1:${i}`);
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8, surfaces: [] } } as never, 0);
+    return { pair, source, link, presenter, presented, pageFrame, pageRafs };
+  }
+
+  it('goes to the worker and is announced at the page\'s next animation frame, once, so the page\'s overlay for it commits with its pixels', async () => {
+    const { pair, link, presenter, presented, pageFrame } = withPageFrames();
+    presenter.receive({ type: 'frame', frame: desc(1, { pts: 3 * F, revision: 7 }) }, 5);
+    await settle();
+    // Held on the page until its animation frame.
+    expect(pair.posted.filter((m) => m.type === 'frame')).toHaveLength(0);
+    expect(presented).toEqual([]);
+    pageFrame(40);
+    // Announced in that animation frame, before the worker drew it: what the
+    // page draws for it now commits in the same refresh as the worker's canvas.
+    expect(presented.map((f) => [f.seq, f.pts, f.revision, f.rafMs, f.timed, f.width])).toEqual([[1, 3 * F, 7, 40, false, 640]]);
+    expect(pair.posted.filter((m) => m.type === 'frame')).toHaveLength(1);
+    await settle();
+    // The worker drew it as it arrived; its report is not announced again.
+    expect(pair.painter.draws).toHaveLength(1);
+    expect(pair.fromWorker.some((m) => m.type === 'presented')).toBe(true);
+    expect(presented).toHaveLength(1);
+    expect(presenter.stats.drawn).toBe(1);
+    pair.painter.finishGpu();
+    await settle();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
+  it('keeps only the newest until the page\'s animation frame; timed frames go at once', async () => {
+    const { pair, source, link, presenter, presented, pageFrame } = withPageFrames();
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    presenter.receive({ type: 'frame', frame: desc(2) }, 1);
+    // An older one arriving late is not shown over the newer.
+    presenter.receive({ type: 'frame', frame: desc(0, { poolIndex: 6 }) }, 2);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }, { poolIndex: 6, seq: 0 }]);
+    expect(source.frames.filter((f) => f.closed)).toHaveLength(2);
+    expect(presenter.stats.dropped['superseded']).toBe(2);
+    presenter.receive({ type: 'frame', frame: desc(3, { duration: F, pts: 0 }) }, 3);
+    await settle();
+    expect(pair.posted.filter((m) => m.type === 'frame').map((m) => (m as Extract<ToWorker, { type: 'frame' }>).desc.seq)).toEqual([3]);
+    pageFrame(20);
+    expect(presented.map((f) => f.seq)).toEqual([2]);
+    expect(pair.posted.filter((m) => m.type === 'frame').map((m) => (m as Extract<ToWorker, { type: 'frame' }>).desc.seq)).toEqual([3, 2]);
+  });
+
+  it('never announces a frame older than one it announced at the page\'s animation frame', async () => {
+    const { pair, presenter, presented, pageFrame } = withPageFrames();
+    presenter.receive({ type: 'frame', frame: desc(2) }, 0);
+    pageFrame(20);
+    expect(presented.map((f) => f.seq)).toEqual([2]);
+    // The worker's report of an older frame (a playback frame it drew just
+    // before this one reached it) lands after: it is not on screen once
+    // this one is, and must not take its place.
+    const stats = presenter.stats;
+    pair.late({ type: 'presented', session: 1, frame: { ...presented[0]!, seq: 1, pts: 0, timed: true }, stats });
+    pair.late({ type: 'presented', session: 1, frame: presented[0]!, stats });
+    pair.late({ type: 'presented', session: 1, frame: { ...presented[0]!, seq: 3, timed: true }, stats });
+    expect(presented.map((f) => f.seq)).toEqual([2, 3]);
+  });
+
+  it('hands a held frame back when its pool is replaced or the session ends', async () => {
+    const { pair, source, link, presenter, presented, pageFrame, pageRafs } = withPageFrames();
+    source.imports.add('2:2');
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    presenter.receive({ type: 'surfacePool', pool: { generation: 2, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8, surfaces: [] } } as never, 1);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    pageFrame(20);
+    expect(presented).toEqual([]);
+    presenter.receive({ type: 'frame', frame: desc(2, { poolGeneration: 2 }) }, 2);
+    expect(pageRafs.size).toBe(1);
+    presenter.dispose();
+    expect(pageRafs.size).toBe(0);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }, { poolIndex: 2, seq: 2 }]);
+    await settle();
+    expect(pair.posted.filter((m) => m.type === 'frame')).toHaveLength(0);
+  });
+});

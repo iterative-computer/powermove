@@ -6,12 +6,24 @@
  * is one viewer session on it and stands in for `EnginePresenter`: what
  * needs the page's main thread stays here (the preload's imports, parking a
  * descriptor until its import arrives, retiring a replaced pool's imports,
- * releases to the engine), and each descriptor goes to the worker with its
- * `VideoFrame` the moment it arrives, so a frame the engine rendered ahead
- * is already in the worker when the page's main thread stalls.
+ * releases to the engine), and each timed (playback) descriptor goes to
+ * the worker with its `VideoFrame` the moment it arrives, so a frame the
+ * engine rendered ahead is already in the worker when the page's main
+ * thread stalls.
+ *
+ * A frame shown on arrival (paused, scrub, gesture: `duration` null) goes
+ * to the worker at the page's next animation frame instead, and is
+ * announced as presented there (`onPresented`). The worker draws it as it
+ * arrives, so its canvas commits in the refresh whose page update carries
+ * what the page draws for it (the viewer's selection box and handles, the
+ * `overlay` extensions draw in), as today's frame loop draws a frame and its
+ * overlay in one animation frame. Sent at once and announced on the
+ * worker's report, the overlay landed one refresh after the pixels at best,
+ * and as many as the page's main thread was busy for at worst (measured
+ * 90 to 400 ms while scrubbing a 258-layer project).
  */
 import type { FromWorker, ToWorker, WorkerMemoryStats } from './present-worker';
-import type { FrameLink, FrameSource, Presenter, PresenterMemory, PresentedFrame, PresenterStats, TraceRecord } from './presenter';
+import { presentedFrame, type FrameLink, type FrameSource, type Presenter, type PresenterMemory, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
 import type { EngineFrameMessage, FrameDescriptor, FrameRelease, ViewerState, VsyncHint } from './protocol';
 
 /** The slice of `Worker` used here (a fake in tests). */
@@ -204,6 +216,11 @@ export type WorkerPresenterOptions = {
   onVsync?: (hint: VsyncHint) => void;
   /** The worker could not read a frame of pool `generation` (`PresenterOptions.onUnusable`). */
   onUnusable?: (generation: number, message: string) => void;
+  /** The page's animation frames (the canvas's window): frames shown on
+   *  arrival go to the worker and are announced at them. Without them, each
+   *  goes at once and is announced when the worker reports it. */
+  requestFrame?: (cb: (t: number) => void) => number;
+  cancelFrame?: (id: number) => void;
   parkTimeoutMs?: number;
   now?: () => number;
   timers?: Timers;
@@ -229,7 +246,15 @@ export class WorkerPresenter implements Presenter {
    * with the frame it just drew). Drawing and dropping: the worker's last
    * stats.
    */
-  private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0, released: 0 };
+  private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0, released: 0, superseded: 0 };
+  /** The newest frame shown on arrival, waiting for the page's animation frame. */
+  private arrival: { desc: FrameDescriptor; frame: VideoFrame; arrivedMs: number } | null = null;
+  private arrivalFrame = 0;
+  /** The newest frame announced at the page's animation frame
+   *  (`showArrival`): the worker's report of it, or of any older frame it
+   *  drew before that one reached it, is not announced (it would announce
+   *  a frame no longer on screen, after the one that is). */
+  private announcedSeq = -1;
   /**
    * Frames in the worker that it has not handed back yet, by
    * `poolIndex:seq`, with the page's own reference to each.
@@ -264,6 +289,7 @@ export class WorkerPresenter implements Presenter {
     const r = this.remote;
     const dropped = { ...(r?.dropped ?? {}) };
     if (this.local.noImport) dropped['no-import'] = (dropped['no-import'] ?? 0) + this.local.noImport;
+    if (this.local.superseded) dropped['superseded'] = (dropped['superseded'] ?? 0) + this.local.superseded;
     return {
       received: this.local.received,
       drawn: r?.drawn ?? 0,
@@ -278,7 +304,8 @@ export class WorkerPresenter implements Presenter {
   }
 
   memoryStats(): PresenterMemory {
-    return { localVideoFrames: this.inWorker.size, workerCloneUpperBound: this.inWorker.size, queuedFrames: 0, parkedDescriptors: this.parked.length, submittedFences: 0 };
+    const held = this.arrival ? 1 : 0;
+    return { localVideoFrames: this.inWorker.size + held, workerCloneUpperBound: this.inWorker.size, queuedFrames: held, parkedDescriptors: this.parked.length, submittedFences: 0 };
   }
 
   setViewerState(state: ViewerState): void {
@@ -336,6 +363,11 @@ export class WorkerPresenter implements Presenter {
         this.options.link.release({ poolIndex: p.desc.poolIndex, seq: p.desc.seq });
         return false;
       });
+      // The worker drops a frame of a replaced pool: it is never announced.
+      if (this.arrival && this.arrival.desc.poolGeneration < pool.generation) {
+        this.supersede(this.arrival.desc, this.arrival.frame);
+        this.arrival = null;
+      }
       this.options.host.post({ type: 'pool', session, pool });
       if (previous) this.options.source.retire(previous);
     } else {
@@ -362,10 +394,55 @@ export class WorkerPresenter implements Presenter {
       this.armParkTimer();
       return;
     }
-    this.send(desc, frame, arrivedMs);
+    this.deliver(desc, frame, arrivedMs);
   }
 
-  private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
+  /** A frame for the worker: a timed one at once, one shown on arrival at the page's next animation frame. */
+  private deliver(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
+    const requestFrame = this.options.requestFrame;
+    if (desc.duration !== null || !requestFrame) {
+      this.send(desc, frame, arrivedMs);
+      return;
+    }
+    // The newest wins, as in the worker's own buffer.
+    const previous = this.arrival;
+    if (previous && previous.desc.seq > desc.seq) {
+      this.supersede(desc, frame);
+      return;
+    }
+    if (previous) this.supersede(previous.desc, previous.frame);
+    this.arrival = { desc, frame, arrivedMs };
+    if (!this.arrivalFrame) this.arrivalFrame = requestFrame((t) => this.showArrival(t));
+  }
+
+  /** The page's animation frame: the frame shown on arrival goes to the worker, and is on screen with this update. */
+  private showArrival(rafMs: number): void {
+    this.arrivalFrame = 0;
+    const held = this.arrival;
+    this.arrival = null;
+    if (!held || this.disposed) return;
+    const { desc, frame, arrivedMs } = held;
+    if (this.options.host.lost) {
+      // The worker can no longer draw: the slot goes straight back.
+      this.supersede(desc, frame);
+      return;
+    }
+    const presented = presentedFrame(desc, { width: frame.codedWidth, height: frame.codedHeight }, rafMs, null, this.depthGeneration);
+    if (!this.send(desc, frame, arrivedMs)) return;
+    this.announcedSeq = desc.seq;
+    for (const listener of this.listeners) listener(presented);
+  }
+
+  /** A frame shown on arrival that a newer one replaced before it was sent: nothing reads it. */
+  private supersede(desc: FrameDescriptor, frame: VideoFrame): void {
+    frame.close();
+    this.local.superseded++;
+    this.local.released++;
+    this.options.link.release({ poolIndex: desc.poolIndex, seq: desc.seq });
+  }
+
+  /** Whether the frame went to the worker. */
+  private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): boolean {
     const k = `${desc.poolIndex}:${desc.seq}`;
     this.inWorker.get(k)?.frame.close();
     let clone: VideoFrame;
@@ -375,10 +452,11 @@ export class WorkerPresenter implements Presenter {
       // A frame that cannot be cloned (closed under us): nothing reads it.
       frame.close();
       this.releaseUndrawn(desc);
-      return;
+      return false;
     }
     this.inWorker.set(k, { release: { poolIndex: desc.poolIndex, seq: desc.seq }, frame });
     this.options.host.post({ type: 'frame', session: this.options.session, desc, frame: clone, arrivedMs }, [clone as unknown as Transferable]);
+    return true;
   }
 
   private unpark(generation: number, poolIndex: number): void {
@@ -387,7 +465,7 @@ export class WorkerPresenter implements Presenter {
     this.parked = this.parked.filter((p) => !waiting.includes(p));
     for (const { desc, since } of waiting) {
       const frame = this.options.source.videoFrame(generation, poolIndex);
-      if (frame) this.send(desc, frame, since);
+      if (frame) this.deliver(desc, frame, since);
       else this.releaseUndrawn(desc);
     }
   }
@@ -435,11 +513,13 @@ export class WorkerPresenter implements Presenter {
         this.local.released++;
         this.options.link.release(message.release);
         return;
-      case 'presented':
+      case 'presented': {
         this.remote = message.stats;
         if (this.disposed) return;
+        if (message.frame.seq <= this.announcedSeq) return;
         for (const listener of this.listeners) listener(message.frame);
         return;
+      }
       case 'done':
         if (this.disposed) return;
         for (const listener of this.doneListeners) listener(message.seq);
@@ -502,6 +582,14 @@ export class WorkerPresenter implements Presenter {
     this.disposed = true;
     if (this.parkTimer) this.timers.clear(this.parkTimer);
     this.parkTimer = 0;
+    if (this.arrivalFrame) this.options.cancelFrame?.(this.arrivalFrame);
+    this.arrivalFrame = 0;
+    if (this.arrival) {
+      this.arrival.frame.close();
+      this.local.released++;
+      this.options.link.release({ poolIndex: this.arrival.desc.poolIndex, seq: this.arrival.desc.seq });
+      this.arrival = null;
+    }
     for (const { desc } of this.parked) this.releaseUndrawn(desc);
     this.parked = [];
     this.unsubscribe();
