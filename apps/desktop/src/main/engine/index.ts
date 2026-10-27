@@ -22,7 +22,7 @@ import path from 'node:path';
 import { BrowserWindow, dialog, MessageChannelMain, Notification, powerSaveBlocker, screen, sharedTexture, shell, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
 import { extensionOf, isRenderFormat, migrateFormat, normalizeDelivery } from '../../shared/delivery';
-import { ENGINE_IPC, type EngineSnapshotReply, type EngineExportRequest, type EngineExportStart, type EngineProbeRequest, type EngineProbeResult, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
+import { ENGINE_IPC, type EngineSnapshotReply, type EngineExportDestination, type EngineExportRequest, type EngineExportStart, type EngineProbeRequest, type EngineProbeResult, type EngineQueueRequest, type EngineStatusMessage, type RenderQueueAction, type RenderQueueState, type StageDocumentRequest, type StageDocumentResult, validSheetExportOptions } from '../../shared/engine-ipc';
 import { rememberExport } from '../export-sidecar';
 import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
@@ -33,7 +33,8 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
-import { askAboutOfflineMedia, offlineClips, offlineExportOptions } from './offline-media';
+import { askAboutOfflineMedia, missingClips, offlineExportOptions, type OfflineClip } from './offline-media';
+import { ExportDestinations } from './export-destinations';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
@@ -189,6 +190,16 @@ function validProbeRequest(value: unknown): value is EngineProbeRequest {
   } catch {
     return false;
   }
+}
+
+function validDestinationRequest(value: unknown): value is { name: string; options: EngineExportRequest['options']; clips: OfflineClip[] } {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const clips = v['clips'];
+  return typeof v['name'] === 'string' && v['name'].length <= 240 && validSheetExportOptions(v['options']) &&
+    Array.isArray(clips) && clips.length <= 10_000 &&
+    clips.every((c) => typeof c === 'object' && c !== null && typeof (c as OfflineClip).asset === 'string' && (c as OfflineClip).asset.length <= 512 &&
+      typeof (c as OfflineClip).name === 'string' && (c as OfflineClip).name.length <= 1024);
 }
 
 function validExportRequest(value: unknown): value is EngineExportRequest {
@@ -555,18 +566,18 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const exportWarmth = new ExportJobWarmth(engine, log);
   const removeExportWarmthIpc = installExportJobWarmthIpc(options.ipc, exportWarmth, options.isTrustedSender);
 
-  /** The offline message before an interactive export (section 14.8).
-   *  Resolves the options to export with, or the outcome to answer. */
-  const checkOffline = async (window: BrowserWindow, sender: WebContents, project: Record<string, any>, request: EngineExportRequest): Promise<EngineExportRequest['options'] | EngineExportStart> => {
-    if (!options.resolveAsset) return request.options;
-    const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset));
-    if (!clips.length) return request.options;
+  /** The offline message before an interactive export (section 14.8), for
+   *  the composition's clips whose files main cannot find. */
+  const checkOffline = async (window: BrowserWindow, sender: WebContents, referenced: OfflineClip[]): Promise<'proxies' | 'without' | null | EngineExportDestination> => {
+    if (!options.resolveAsset) return null;
+    const clips = await missingClips(referenced, (asset) => options.resolveAsset!(asset));
+    if (!clips.length) return null;
     let proxies = !!options.resolveProxy;
     if (proxies) {
       for (const clip of clips) if (!await options.resolveProxy!(clip.asset).catch(() => null)) proxies = false;
     }
     const choice = await askAboutOfflineMedia(window, clips, proxies);
-    if (choice === 'proxies' || choice === 'without') return offlineExportOptions(request.options, choice);
+    if (choice === 'proxies' || choice === 'without') return choice;
     if (choice === 'locate') {
       const assets = clips.map((c) => c.asset);
       if (!sender.isDestroyed()) sender.send(ENGINE_IPC.locateMedia, assets);
@@ -575,33 +586,53 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     return { status: 'cancelled' };
   };
 
-  options.ipc.handle(ENGINE_IPC.exportVideo, async (event, request: unknown): Promise<EngineExportStart> => {
+  /* An export asks where it goes before anything else runs, as the current
+     exporter does: then the sheet shows its progress while the project is
+     checked and the job starts. */
+  const destinations = new ExportDestinations();
+  options.ipc.handle(ENGINE_IPC.exportDestination, async (event, request: unknown): Promise<EngineExportDestination> => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
-    if (!validExportRequest(request)) throw new Error('An export names a project and its settings.');
+    if (!validDestinationRequest(request)) throw new Error('An export destination names its settings and clips.');
     if (!agentJobs.available) return { status: 'unavailable', reason: 'The job engine is not running.' };
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Export window is unavailable');
-    return exportWarmth.during<EngineExportStart>(event.sender.id, async () => {
-      const project = JSON.parse(request.project);
-      const checked = await checkOffline(window, event.sender, project, request);
-      if ('status' in checked) return checked;
-      const format = migrateFormat(checked.format);
-      const delivery = normalizeDelivery(checked.delivery ?? {});
+    return exportWarmth.during<EngineExportDestination>(event.sender.id, async () => {
+      const offline = await checkOffline(window, event.sender, request.clips);
+      if (offline !== null && typeof offline === 'object') return offline;
+      const format = migrateFormat(request.options.format);
+      const delivery = normalizeDelivery(request.options.delivery ?? {});
       const panel = savePanel(format, delivery, request.name);
       const chosen = await dialog.showSaveDialog(window, panel.options);
       if (chosen.canceled || !chosen.filePath || window.isDestroyed()) return { status: 'cancelled' };
       const file = panel.extension === null || path.extname(chosen.filePath).toLowerCase() === `.${panel.extension}`
         ? chosen.filePath
         : `${chosen.filePath}.${panel.extension}`;
+      return { status: 'chosen', destination: destinations.add(event.sender.id, { file, format, offline }), path: file };
+    });
+  });
+
+  options.ipc.handle(ENGINE_IPC.exportVideo, async (event, request: unknown): Promise<EngineExportStart> => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!validExportRequest(request)) throw new Error('An export names a project and its settings.');
+    const chosen = destinations.take(event.sender.id, (request as { destination?: unknown }).destination, migrateFormat(request.options.format));
+    if (!chosen) throw new Error('An export starts at the destination its save panel chose.');
+    if (!agentJobs.available) {
+      // The current exporter writes the file the user just chose.
+      routeToCurrentExporter(event.sender.id, chosen.file);
+      return { status: 'unavailable', reason: 'The job engine is not running.' };
+    }
+    return exportWarmth.during<EngineExportStart>(event.sender.id, async () => {
+      const project = JSON.parse(request.project);
+      const settings = chosen.offline ? offlineExportOptions(request.options, chosen.offline) : request.options;
       try {
-        const started = await agentJobs.exportUser(event.sender.id, project, checked, file);
-        userDestinations.set(started.jobId, file);
+        const started = await agentJobs.exportUser(event.sender.id, project, settings, chosen.file);
+        userDestinations.set(started.jobId, chosen.file);
         keepAwake(started.jobId);
-        return { status: 'accepted', jobId: started.jobId, frames: started.frames, path: file };
+        return { status: 'accepted', jobId: started.jobId, frames: started.frames, path: chosen.file };
       } catch (error) {
         if (!(error instanceof AgentJobError)) throw error;
         // The current exporter writes the file the user just chose.
-        routeToCurrentExporter(event.sender.id, file);
+        routeToCurrentExporter(event.sender.id, chosen.file);
         return { status: 'unavailable', reason: error.message };
       }
     });
@@ -675,6 +706,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     // a page die with it.
     contents.on('did-finish-load', () => {
       exportWarmth.forget(id);
+      destinations.forget(id);
       // A new page starts its document revisions again.
       windowSessions.forget(id);
       snapshots?.forget(id);
@@ -686,6 +718,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     });
     window.once('closed', () => {
       exportWarmth.forget(id);
+      destinations.forget(id);
       fallbackRelay.forget(id);
       engine?.removeClient(id);
       snapshots?.forget(id);
@@ -729,6 +762,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       options.ipc.removeHandler(ENGINE_IPC.probeMedia);
       options.ipc.removeHandler(ENGINE_IPC.hostTime);
       options.ipc.removeAllListeners(ENGINE_IPC.requestPorts);
+      options.ipc.removeHandler(ENGINE_IPC.exportDestination);
       options.ipc.removeHandler(ENGINE_IPC.exportVideo);
       options.ipc.removeHandler(ENGINE_IPC.cancelExport);
       options.ipc.removeHandler(ENGINE_IPC.queueAdd);

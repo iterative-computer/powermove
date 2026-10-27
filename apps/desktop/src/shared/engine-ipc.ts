@@ -28,7 +28,12 @@ export const ENGINE_IPC = {
   stageDocument: 'engine:stage-document',
   /** renderer → main (send): the window's definition updates. */
   definitions: 'engine:definitions',
-  /** renderer → main (invoke): export from the export sheet through the job engine. */
+  /** renderer → main (invoke): an export's destination, asked first: the
+   *  offline message, then the save panel (`EngineExportDestinationRequest`
+   *  → `EngineExportDestination`). */
+  exportDestination: 'engine:export-destination',
+  /** renderer → main (invoke): export from the export sheet through the job
+   *  engine, to a destination `exportDestination` chose. */
   exportVideo: 'engine:export-video',
   /** renderer → main: a named export sheet/preflight opens or closes a warm-job hold. */
   exportSheet: 'engine:export-sheet',
@@ -176,8 +181,29 @@ export function validSheetExportOptions(value: unknown): value is SheetExportOpt
 /** A caption file written beside a delivered video (export-sidecar.ts). */
 export type CaptionSidecar = { suffix?: string; extension: 'srt' | 'vtt'; text: string };
 
+/** An export's destination, asked before anything else runs (exporter.ts):
+ *  main shows the offline message for the composition's clips it cannot
+ *  find, then the save panel. */
+export type EngineExportDestinationRequest = {
+  /** The suggested file name without extension. */
+  name: string;
+  options: SheetExportOptions;
+  /** The media the composition references (`referencedClips`). */
+  clips: import('./offline-clips').OfflineClip[];
+};
+
+/** `chosen`: `destination` names the file (and the offline choice) for
+ *  `exportVideo`, once, from this window; `cancelled`: the user cancelled the
+ *  message or the save panel; `locate`: "Locate Media…"; `unavailable`: the
+ *  job engine is not running (use the current exporter). */
+export type EngineExportDestination =
+  | { status: 'chosen'; destination: string; path: string }
+  | { status: 'cancelled' }
+  | { status: 'locate'; assets: string[] }
+  | { status: 'unavailable'; reason: string };
+
 /** The export sheet's request (exporter.ts): the project as JSON and its
- *  settings; main shows the save panel (and, first, the offline message). */
+ *  settings, to the destination `exportDestination` chose. */
 export type EngineExportRequest = {
   project: string;
   /** The suggested file name without extension. */
@@ -193,13 +219,10 @@ export type EngineQueueRequest = EngineExportRequest & {
   preset?: string;
 };
 
-/** `accepted`: the job runs and statuses follow; `cancelled`: the user
- *  cancelled the save panel; `unavailable`: the job engine is not running
- *  (use the current exporter). */
+/** `accepted`: the job runs and statuses follow; `unavailable`: the job
+ *  engine cannot take it (the current exporter writes the chosen file). */
 export type EngineExportStart =
   | { status: 'accepted'; jobId: string; frames: number; path: string }
-  | { status: 'cancelled' }
-  | { status: 'locate'; assets: string[] }
   | { status: 'unavailable'; reason: string };
 
 /** A job status for the export progress sheet. `routed`: the new engine
@@ -380,7 +403,8 @@ export interface EngineBridge {
   requestPorts(): void;
   stageDocument(request: StageDocumentRequest): Promise<StageDocumentResult>;
   pushDefinitions(update: import('./engine-protocol').DefinitionsUpdate): void;
-  exportVideo(request: EngineExportRequest): Promise<EngineExportStart>;
+  exportDestination(request: EngineExportDestinationRequest): Promise<EngineExportDestination>;
+  exportVideo(request: EngineExportRequest & { destination: string }): Promise<EngineExportStart>;
   /** Independent ids let stacked sheets and export preflight overlap safely. */
   exportSheet(sheet: string, open: boolean): void;
   /** Adds an export to the render queue (main asks for its destination). */

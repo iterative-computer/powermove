@@ -351,13 +351,15 @@ describe('export delivery', () => {
   it.each(['run', 'addToQueue'])('keeps %s preflight warm while media bindings and definitions settle', async action => {
     const { X, PM } = setup();
     const exportSheet = vi.fn();
-    const submit = vi.fn(async () => ({ status: 'cancelled' }));
+    // The queue's add is cancelled at its save panel; the run's start stops the export.
+    const submit = vi.fn(async () => { if (action === 'run') throw new Error('Stopped'); return { status: 'cancelled' }; });
     let bound!: () => void, settled!: () => void;
     PM.HostMedia = { flushBindings: vi.fn(() => new Promise<void>(resolve => { bound = resolve; })) };
     PM.EngineDefinitions = { settle: vi.fn(() => new Promise<void>(resolve => { settled = resolve; })) };
     (window as any).powermove = { nativeEngine: {
       enabledSync: () => true, exportSheet, status: async () => ({ enabled: true }),
-      onExportStatus: () => () => {}, exportVideo: submit, queueAdd: submit
+      onExportStatus: () => () => {}, exportVideo: submit, queueAdd: submit,
+      exportDestination: async () => ({ status: 'chosen', destination: 'D1', path: '/x/Film.mp4' })
     } };
     const exporting = X[action]({ ...options, format: 'h264' });
     await vi.waitFor(() => expect(PM.HostMedia.flushBindings).toHaveBeenCalledOnce());

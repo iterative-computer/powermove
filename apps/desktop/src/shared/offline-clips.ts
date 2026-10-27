@@ -39,7 +39,11 @@ export function referencedClips(project: Project, composition: string = project[
 }
 
 export async function offlineClips(project: Project, resolve: (asset: string) => Promise<unknown>): Promise<OfflineClip[]> {
-  const clips = referencedClips(project);
+  return missingClips(referencedClips(project), resolve);
+}
+
+/** The clips whose media `resolve` cannot find. */
+export async function missingClips(clips: OfflineClip[], resolve: (asset: string) => Promise<unknown>): Promise<OfflineClip[]> {
   const results = await Promise.all(clips.map(async (clip) => ({ clip, ok: await resolve(clip.asset).catch(() => null) })));
   return results.filter((r) => !r.ok).map((r) => r.clip);
 }
