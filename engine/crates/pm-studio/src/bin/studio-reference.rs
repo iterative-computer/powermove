@@ -57,7 +57,7 @@ fn reference(matte: bool) -> (Scene, serde_json::Value) {
             "kind": kind, "center": c.to_array(), "radius": 34.0, "color": m.base.to_array(), "roughness": m.roughness, "ior": m.ior,
         })).collect::<Vec<_>>(),
     });
-    let scene = Scene { objects, materials, lights: vec![light], camera, backdrop: Vec3::ZERO, environment: (Vec3::ZERO, Vec3::ZERO), exposure: 1.0, shadow_catcher: false };
+    let scene = Scene { objects, materials, lights: vec![light], camera, backdrop: Vec3::ZERO, environment: (Vec3::ZERO, Vec3::ZERO), exposure: 1.0, shadow_catcher: false, extra_lights: Vec::new(), layers: None };
     (scene, spec)
 }
 

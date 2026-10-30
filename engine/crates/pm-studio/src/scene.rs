@@ -139,6 +139,11 @@ pub struct Scene {
     pub exposure: f32,
     /// Floor at y = 0 that only catches shadows (Apple-style void).
     pub shadow_catcher: bool,
+    /// Sun, sphere and spot lights (softboxes are `lights`).
+    pub extra_lights: Vec<GpuLight>,
+    /// The layer each object belongs to (the id the per-layer output masks
+    /// by); `None`: each object is its own layer.
+    pub layers: Option<Vec<u32>>,
 }
 
 /// What the GPU reads, flattened.
@@ -185,6 +190,27 @@ pub struct GpuLight {
     pub radiance: [f32; 4],
 }
 
+/// The other light kinds, encoded as trace.wgsl reads them (and as the app's
+/// `extract.ts` writes them).
+impl GpuLight {
+    /// A distant light from `toward` (the direction to the sun), its disc
+    /// `angular_radius` radians across.
+    pub fn sun(toward: Vec3, angular_radius: f32, radiance: Vec3) -> GpuLight {
+        let d = toward.normalize();
+        GpuLight { pos: d.to4(3.0), u: [angular_radius.cos(), 0.0, 0.0, 0.0], v: [0.0; 4], radiance: radiance.to4(0.0) }
+    }
+    /// A small sphere: `radiance` is per unit area of its surface.
+    pub fn sphere(center: Vec3, radius: f32, radiance: Vec3) -> GpuLight {
+        GpuLight { pos: center.to4(1.0), u: [radius, 0.0, 0.0, 0.0], v: [0.0; 4], radiance: radiance.to4(0.0) }
+    }
+    /// A spot: `axis` points where it shines; cosines of the outer and inner cone.
+    pub fn spot(center: Vec3, radius: f32, axis: Vec3, cos_outer: f32, cos_inner: f32, radiance: Vec3) -> GpuLight {
+        // trace.wgsl compares the ray toward the light with the axis, so it is stored flipped.
+        let a = axis.normalize() * -1.0;
+        GpuLight { pos: center.to4(2.0), u: [radius, 0.0, 0.0, 0.0], v: a.to4(cos_outer), radiance: radiance.to4(cos_inner.max(cos_outer + 1e-4)) }
+    }
+}
+
 impl Scene {
     pub fn prepare(&self) -> Prepared {
         let mut corners = Vec::new();
@@ -192,6 +218,7 @@ impl Scene {
         let mut positions_raw = Vec::new();
         for (object, o) in self.objects.iter().enumerate() {
             let m = &o.mesh;
+            let layer = self.layers.as_ref().and_then(|l| l.get(object).copied()).unwrap_or(object as u32);
             for t in &m.indices {
                 let [a, b, c] = t.map(|i| i as usize);
                 corners.push([m.positions[a], m.positions[b], m.positions[c]]);
@@ -199,7 +226,7 @@ impl Scene {
                 raw.push(GpuTri {
                     n: [m.normals[a].to4(0.0), m.normals[b].to4(0.0), m.normals[c].to4(0.0)],
                     uv01: [m.uvs[a][0], m.uvs[a][1], m.uvs[b][0], m.uvs[b][1]],
-                    uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, object as f32],
+                    uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, layer as f32],
                     tangent: tangent([m.positions[a], m.positions[b], m.positions[c]], [m.uvs[a], m.uvs[b], m.uvs[c]]),
                 });
             }
@@ -237,6 +264,7 @@ impl Scene {
             .lights
             .iter()
             .map(|l| GpuLight { pos: l.center.to4(0.0), u: l.u.to4(4.0 * l.u.cross(l.v).length()), v: l.v.to4(0.0), radiance: l.radiance.to4(0.0) })
+            .chain(self.extra_lights.iter().copied())
             .collect();
         let mut sdata: Vec<[f32; 4]> = lights.iter().flat_map(|l: &GpuLight| [l.pos, l.u, l.v, l.radiance]).collect();
         // The identity instance: world→object, normal matrix (n0.w: BVH root 1), object→world.
@@ -405,7 +433,7 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         let up = v3(0.0, 1.0, 0.0);
         lights.push(Softbox::for_highlight(target + v3(-30.0, 0.0, 20.0), up, camera.position, 600.0, 700.0, 380.0, Vec3::splat(3.0)));
     }
-    Some(Scene { objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true })
+    Some(Scene { objects, materials, lights, camera, backdrop: v3(0xF6 as f32 / 255.0, 0xF5 as f32 / 255.0, 0xF8 as f32 / 255.0), environment, exposure: 1.0, shadow_catcher: true, extra_lights: Vec::new(), layers: None })
 }
 
 /// An original abstract wallpaper for the display: soft ribbons of blue and

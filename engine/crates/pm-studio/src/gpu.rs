@@ -55,6 +55,25 @@ fn rt_source() -> String {
     format!("enable wgpu_ray_query;\n{base}\n{RT_WGSL}")
 }
 
+/// Where [`Renderer::present_to`] draws one layer: premultiplied display
+/// color into `view` (a render attachment of `format`), only `layer`'s
+/// pixels (`None`: every object), the backdrop where `include_void`, rows
+/// bottom-up when `flip_y` (GL order, as the native engine's layers are).
+pub struct PresentTarget<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+    pub layer: Option<u32>,
+    pub include_void: bool,
+    pub flip_y: bool,
+}
+
+/// present.wgsl (shared with the app): one layer's pixels into a texture.
+struct Present {
+    layout: wgpu::BindGroupLayout,
+    params: wgpu::Buffer,
+    pipelines: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+}
+
 /// Pipelines and acceleration structures for hardware ray tracing.
 struct Rt {
     layout: wgpu::BindGroupLayout,
@@ -158,6 +177,7 @@ pub struct Renderer {
     pub hardware_rt: bool,
     rt: Option<Rt>,
     photons_emitted: f32,
+    present: Option<Present>,
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -213,7 +233,29 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
+        Renderer::with_device(device, queue, adapter.get_info().name, rt_ok, width, height)
+    }
 
+    /// The device and queue Studio needs (see [`Renderer::new`]); `limits`
+    /// for a host that creates its own device: at least 10 storage buffers
+    /// per stage and the adapter's largest bindings.
+    pub fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+        let have = adapter.limits();
+        wgpu::Limits {
+            max_storage_buffer_binding_size: have.max_storage_buffer_binding_size,
+            max_buffer_size: have.max_buffer_size,
+            max_storage_buffers_per_shader_stage: have.max_storage_buffers_per_shader_stage.min(12),
+            max_texture_array_layers: have.max_texture_array_layers,
+            ..wgpu::Limits::default()
+        }
+    }
+
+    /// Studio on a host's device (the native engine's): no hardware ray
+    /// tracing unless the device was created with ray queries (`rt`).
+    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue, adapter: String, rt_ok: bool, width: u32, height: u32) -> Result<Renderer, String> {
+        if device.limits().max_storage_buffers_per_shader_stage < 10 {
+            return Err("Studio needs 10 storage buffers per shader stage".into());
+        }
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("studio trace"),
             entries: &[
@@ -321,7 +363,7 @@ impl Renderer {
             ..Default::default()
         });
         let r = Renderer {
-            adapter: adapter.get_info().name,
+            adapter,
             params: buf("params", std::mem::size_of::<Params>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             post_params: (0..9).map(|_| buf("post params", std::mem::size_of::<PostParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST)).collect(),
             accum: buf("accum", pixels * 16, rw),
@@ -363,6 +405,7 @@ impl Renderer {
             hardware_rt: true,
             rt,
             photons_emitted: 0.0,
+            present: None,
         };
         Ok(r)
     }
@@ -628,7 +671,59 @@ impl Renderer {
     /// Resolve the accumulation to display RGBA8, denoising with `passes`
     /// à-trous iterations (0 for Refine/Final). Returns (pixels, ms).
     pub fn finish(&mut self, passes: u32) -> (Vec<u8>, f64) {
-        self.post(passes, true, None)
+        self.post(passes, true, None, None)
+    }
+
+    /// The void (where no object is hit): the backdrop color when `Some`
+    /// (display-referred sRGB), transparent when `None`.
+    pub fn set_void(&mut self, backdrop: Option<[f32; 3]>) {
+        self.backdrop = match backdrop {
+            Some(c) => [c[0], c[1], c[2], 1.0],
+            None => [0.0, 0.0, 0.0, 0.0],
+        };
+    }
+
+    /// Resolve and compose the accumulation (with `passes` à-trous
+    /// iterations, 0 for Refine/Final), then draw one layer into a texture
+    /// (see [`PresentTarget`]). Returns ms.
+    pub fn present_to(&mut self, passes: u32, target: PresentTarget<'_>) -> f64 {
+        self.ensure_present(target.format);
+        self.post(passes, false, None, Some(target)).1
+    }
+
+    fn ensure_present(&mut self, format: wgpu::TextureFormat) {
+        let device = &self.device;
+        let present = self.present.get_or_insert_with(|| {
+            let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            };
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("studio present"),
+                entries: &[entry(0, wgpu::BufferBindingType::Uniform), entry(1, wgpu::BufferBindingType::Storage { read_only: true }), entry(2, wgpu::BufferBindingType::Storage { read_only: true })],
+            });
+            let params = device.create_buffer(&wgpu::BufferDescriptor { label: Some("present params"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            Present { layout, params, pipelines: Default::default() }
+        });
+        if present.pipelines.contains_key(&format) {
+            return;
+        }
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("present.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/present.wgsl").into()) });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("present"), bind_group_layouts: &[Some(&present.layout)], immediate_size: 0 });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("present"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(format.into())] }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        present.pipelines.insert(format, pipeline);
     }
 
     /// Final with a learned denoiser: the resolved image, guided by first-hit
@@ -636,7 +731,7 @@ impl Renderer {
     /// f32, RGB read) before it is composed. The backdrop's shadow-catcher
     /// shading is denoised the same way. Returns (pixels, ms).
     pub fn finish_with(&mut self, denoise: &dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>) -> (Vec<u8>, f64) {
-        self.post(0, true, Some(denoise))
+        self.post(0, true, Some(denoise), None)
     }
 
     /// Linear scene radiance per pixel (RGBA f32; A is the backdrop's
@@ -674,11 +769,11 @@ impl Renderer {
     /// GPU time of resolve + denoise + compose + pack alone (what a viewer
     /// frame costs; it presents the result instead of reading it back).
     pub fn post_only(&mut self, passes: u32) -> f64 {
-        self.post(passes, false, None).1
+        self.post(passes, false, None, None).1
     }
 
     #[allow(clippy::type_complexity)]
-    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>>) -> (Vec<u8>, f64) {
+    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>>, present: Option<PresentTarget<'_>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
         let (w, h) = (self.width, self.height);
         let groups = (w.div_ceil(8), h.div_ceil(8));
@@ -743,6 +838,37 @@ impl Renderer {
         }
         run(&mut enc, &self.compose, cur, 1 - cur, 1, &mut slot);
         cur = 1 - cur;
+        if let (Some(t), Some(p)) = (present, self.present.as_ref()) {
+            let flags = u32::from(t.flip_y) | (u32::from(t.include_void) << 1);
+            self.queue.write_buffer(&p.params, 0, bytemuck::cast_slice(&[w, h, t.layer.map_or(0, |l| l + 1), flags]));
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("present"),
+                layout: &p.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: p.params.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.display[cur].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.gbuf.as_entire_binding() },
+                ],
+            });
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("studio present"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: t.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&p.pipelines[&t.format]);
+                pass.set_bind_group(0, &group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.queue.submit([enc.finish()]);
+            self.wait();
+            return (Vec::new(), start.elapsed().as_secs_f64() * 1000.0);
+        }
         run(&mut enc, &self.pack, cur, 1 - cur, 1, &mut slot);
         if !readback {
             self.queue.submit([enc.finish()]);
@@ -762,6 +888,15 @@ impl Renderer {
 
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The device Studio renders on (its own, or the host's).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 }
 
