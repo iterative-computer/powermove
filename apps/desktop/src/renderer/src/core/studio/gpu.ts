@@ -36,6 +36,9 @@ export type StudioView = {
   environment: { zenith: [number, number, number]; horizon: [number, number, number]; ground: [number, number, number] };
 };
 
+/** post.wgsl's Post: three vec4s, then two cameras of four vec4s. */
+const POST_BYTES = 48 + 128;
+
 const GPU: any = typeof navigator !== 'undefined' ? (navigator as any).gpu : undefined;
 const U = (globalThis as any).GPUBufferUsage, T = (globalThis as any).GPUTextureUsage, S = (globalThis as any).GPUShaderStage;
 
@@ -71,7 +74,7 @@ export function initStudioGpu(): Promise<any> {
 export const studioGpuReady = () => !!device;
 export const studioGpuFailure = () => failure;
 
-type Pipelines = { trace: any; resolve: any; atrous: any; compose: any; pack: any; present: any; traceLayout: any; postLayout: any; presentLayout: any; sampler: any };
+type Pipelines = { trace: any; resolve: any; atrous: any; compose: any; pack: any; temporal: any; present: any; traceLayout: any; postLayout: any; presentLayout: any; sampler: any };
 let pipelines: Pipelines | null = null;
 
 function storage(binding: number, readOnly: boolean, visibility = S.COMPUTE) {
@@ -94,7 +97,7 @@ function build(): Pipelines {
   });
   const postLayout = device.createBindGroupLayout({
     label: 'studio post',
-    entries: [uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true)],
+    entries: [uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true), storage(5, false), storage(6, false), storage(7, true), storage(8, true), storage(9, false)],
   });
   const presentLayout = device.createBindGroupLayout({
     label: 'studio present',
@@ -111,6 +114,7 @@ function build(): Pipelines {
     resolve: compute(post, postLayout, 'resolve'),
     atrous: compute(post, postLayout, 'atrous'),
     compose: compute(post, postLayout, 'compose'),
+    temporal: compute(post, postLayout, 'temporal'),
     pack: compute(post, postLayout, 'pack'),
     present: device.createRenderPipeline({
       label: 'present',
@@ -153,7 +157,9 @@ export class StudioTarget {
     const px = width * height;
     const buf = (label: string, size: number, usage = U.STORAGE | U.COPY_DST | U.COPY_SRC) => device.createBuffer({ label, size: Math.max(16, size), usage });
     this.params = buf('studio params', 176, U.UNIFORM | U.COPY_DST);
-    this.postParams = Array.from({ length: 9 }, () => buf('studio post params', 48, U.UNIFORM | U.COPY_DST));
+    this.postParams = Array.from({ length: 10 }, () => buf('studio post params', POST_BYTES, U.UNIFORM | U.COPY_DST));
+    // Live's history, swapped each frame: one read, one written.
+    this.history = [buf('history a', px * 32), buf('history b', px * 32)];
     this.accum = buf('accum', px * 16); this.bgsum = buf('bgsum', px * 16); this.gbuf = buf('gbuf', px * 16);
     this.ebuf = buf('ebuf', px * 16); this.idbuf = buf('idbuf', px * 4);
     this.display = [buf('display a', px * 16), buf('display b', px * 16)];
@@ -161,7 +167,7 @@ export class StudioTarget {
   }
 
   destroy(): void {
-    for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.idbuf, ...this.display, this.packed, ...this.sceneBuffers]) b?.destroy?.();
+    for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.idbuf, ...this.display, this.packed, ...this.history, ...this.sceneBuffers]) b?.destroy?.();
     this.mapTexture?.destroy?.();
   }
 
@@ -243,8 +249,9 @@ export class StudioTarget {
     if (!this.view) return;
     const p = build();
     this.traceGroup ??= this.groupWith(this.params);
-    // Seeds follow the sample index, so the same scene and view always give the same pixels.
-    if (reset) this.frame = 0;
+    // Stills and Final restart their seeds, so the same scene and view always give
+    // the same pixels; Live keeps counting, so frames blended over time average out.
+    if (reset && !this.live) this.frame = 0;
     let left = spp, first = true;
     // One dispatch per submission: writeBuffer and submit run in queue order,
     // so each dispatch sees its own seed and reset flag.
@@ -294,10 +301,14 @@ export class StudioTarget {
     const enc = device.createCommandEncoder();
     let slot = 0;
     const bd = this.view.backdrop;
+    const cam = this.view.camera, prev = this.prevCamera;
+    const camera = (c: StudioCamera) => [...c.position, 0, ...c.forward, 0, ...c.right, c.tanY * c.aspect, ...c.up, c.tanY];
+    const temporalOn = this.live && !!prev;
     const run = (pipe: any, src: number, dst: number, step: number) => {
-      const data = new ArrayBuffer(48);
-      new Uint32Array(data, 0, 4).set([this.width, this.height, step, 0]);
+      const data = new ArrayBuffer(POST_BYTES);
+      new Uint32Array(data, 0, 4).set([this.width, this.height, step, temporalOn ? 1 : 0]);
       new Float32Array(data, 16, 8).set([this.view!.exposure, 1.6, 0, 0, bd[0], bd[1], bd[2], this.view!.backdropOpaque ? 1 : 0]);
+      new Float32Array(data, 48, 32).set([...camera(cam), ...camera(prev ?? cam)]);
       device.queue.writeBuffer(this.postParams[slot], 0, data);
       const group = device.createBindGroup({
         layout: p.postLayout,
@@ -307,6 +318,8 @@ export class StudioTarget {
           { binding: 3, resource: { buffer: this.gbuf } }, { binding: 4, resource: { buffer: this.display[src] } },
           { binding: 5, resource: { buffer: this.display[dst] } }, { binding: 6, resource: { buffer: this.packed } },
           { binding: 7, resource: { buffer: this.ebuf } },
+          { binding: 8, resource: { buffer: this.history[this.historyIndex] } },
+          { binding: 9, resource: { buffer: this.history[1 - this.historyIndex] } },
         ],
       });
       slot++;
@@ -318,12 +331,21 @@ export class StudioTarget {
     };
     run(p.resolve, 1, 0, 1);
     let cur = 0;
+    if (this.live) {
+      // Reuse the previous frame where it saw the same surface, then denoise as usual.
+      run(p.temporal, cur, 1 - cur, 1); cur = 1 - cur;
+      this.historyIndex = 1 - this.historyIndex;
+      this.prevCamera = cam;
+    }
     for (let i = 0; i < Math.min(passes, 5); i++) { run(p.atrous, cur, 1 - cur, 1 << i); cur = 1 - cur; }
     run(p.compose, cur, 1 - cur, 1);
     this.composed = 1 - cur;
     device.queue.submit([enc.finish()]);
   }
   private composed = 0;
+  private history: any[] = [];
+  private historyIndex = 0;
+  private prevCamera: StudioCamera | null = null;
 
   /** Copy one object's pixels (or all, `objectIndex` < 0) into that layer's canvas. */
   present(key: string, objectIndex: number, includeVoid: boolean): HTMLCanvasElement {
@@ -358,6 +380,24 @@ export class StudioTarget {
     pass.end();
     device.queue.submit([enc.finish()]);
     return entry.canvas;
+  }
+
+  /** How deep Live's reuse goes: pixels with geometry, and how many carry ≥ `deep` frames of history. */
+  async historyStats(deep = 8): Promise<{ pixels: number; reused: number; meanFrames: number }> {
+    const src = this.history[this.historyIndex];
+    const size = this.width * this.height * 32;
+    const rb = device.createBuffer({ size, usage: U.MAP_READ | U.COPY_DST });
+    const enc = device.createCommandEncoder(); enc.copyBufferToBuffer(src, 0, rb, 0, size); device.queue.submit([enc.finish()]);
+    await rb.mapAsync(1);
+    const f = new Float32Array(rb.getMappedRange().slice(0));
+    rb.unmap(); rb.destroy();
+    let pixels = 0, reused = 0, frames = 0;
+    for (let i = 0; i < f.length; i += 8) {
+      if (f[i + 7]! < 0) continue;
+      pixels++; frames += f[i + 3]!;
+      if (f[i + 3]! >= deep) reused++;
+    }
+    return { pixels, reused, meanFrames: pixels ? frames / pixels : 0 };
   }
 
   /** Waits for submitted work (tests, exports). */

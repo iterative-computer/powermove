@@ -27,6 +27,8 @@ struct PostParams {
     dims: [u32; 4],
     k: [f32; 4],
     backdrop: [f32; 4],
+    /// Current and previous cameras for Live's reprojection (unused here).
+    cameras: [[f32; 4]; 8],
 }
 
 pub struct Renderer {
@@ -384,7 +386,7 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut slot = 0;
         let run = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, src: usize, dst: usize, step: u32, slot: &mut usize| {
-            let params = PostParams { dims: [w, h, step, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop };
+            let params = PostParams { dims: [w, h, step, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
             self.queue.write_buffer(&self.post_params[*slot], 0, bytemuck::bytes_of(&params));
             let group = self.post_group(*slot, src, dst);
             *slot += 1;

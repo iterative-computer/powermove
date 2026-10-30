@@ -42,3 +42,38 @@ test('Studio renders 3D layers, keeps each layer separate and can be turned off'
   expect(result.rightOnly).toBeLessThan(result.studio);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('Live reuses the previous frame while the camera moves', async ({ session }) => {
+  test.setTimeout(120_000);
+  await session.openEditor();
+  const { page } = session;
+  await page.evaluate(() => {
+    const PM = (window as any).PM, api = PM.Kernel.api('studio-temporal');
+    api.scene3d.edit({ operation: 'add_camera', id: 'cam', camera: { p: { x: 0, y: 1, z: 5, targetX: 0, targetY: 0, targetZ: 0 } } });
+    api.scene3d.edit({ operation: 'add_object', object: { id: 'ball', source: { primitive: 'sphere' }, material: { p: { color: '#C0C4CA', metalness: 1, roughness: 0.35 } } } });
+    api.scene3d.edit({ operation: 'add_light', light: { id: 'key', type: 'area', p: { x: -2, y: 3, z: 3, intensity: 6, width: 2, height: 1.2 } } });
+    PM.invalidate();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  const history = await page.evaluate(async () => {
+    const PM = (window as any).PM, cam = PM.L('cam');
+    const stats: any[] = [];
+    for (let i = 0; i < 12; i++) {
+      // A drag: the camera moves a hair each frame, so every frame is Live.
+      cam.p['position.x'].v = i * 0.002; PM.touch();
+      PM.GL.render(PM.time, { mblur: false });
+      stats.push(await PM.Studio.liveHistory());
+    }
+    // A jump to the far side: the surface now in view was never seen, so its history restarts.
+    cam.p['position.x'].v = 0; cam.p['position.z'].v = -5; PM.touch();
+    PM.GL.render(PM.time, { mblur: false });
+    return { first: stats[0], last: stats[11], jump: await PM.Studio.liveHistory() };
+  });
+  // While dragging, nearly every surface pixel reuses 8+ earlier frames.
+  expect(history.first.reused).toBe(0);
+  expect(history.last.reused / history.last.pixels).toBeGreaterThan(0.9);
+  expect(history.last.meanFrames).toBeGreaterThan(8);
+  // After a jump the history restarts where it no longer fits.
+  expect(history.jump.meanFrames).toBeLessThan(history.last.meanFrames / 2);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

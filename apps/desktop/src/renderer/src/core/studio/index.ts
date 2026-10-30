@@ -50,6 +50,7 @@ const state = (PM: any): State => {
     PM.Studio ??= {
       setEnabled: (on: boolean) => setStudioEnabled(PM, on),
       progress: () => studioProgress(PM),
+      liveHistory: async () => { for (const job of st.jobs.values()) if (job.live) return job.live.historyStats(); return null; },
       status: () => ({ enabled: st.enabled, ready: studioGpuReady(), failure: studioGpuFailure(), frames: st.frames, declined: st.declined }),
     };
     void initStudioGpu().then(ok => { if (ok) PM.invalidate?.('render'); });

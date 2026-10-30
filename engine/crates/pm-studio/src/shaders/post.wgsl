@@ -11,9 +11,22 @@
 //          display-referred, so the void stays exactly #F6F5F8).
 // pack:    display color → RGBA8.
 
-// dims: width, height, step; k: exposure, color sigma; backdrop: display rgb, w: its opacity
-// (1: the void shows the backdrop; 0: the void is transparent).
-struct Post { dims: vec4u, k: vec4f, backdrop: vec4f }
+// temporal: Live reuses the previous frame. Each pixel's world point (from
+//          its first-hit distance) is projected into the previous camera; if
+//          the history there saw the same surface (distance and normal agree)
+//          the new sample blends into it, up to 16 frames deep.
+
+// dims: width, height, step, history valid (1); k: exposure, color sigma;
+// backdrop: display rgb, w: its opacity (1: the void shows the backdrop; 0:
+// the void is transparent). Cameras: position (w: unused), forward, right
+// (w: tan(fov/2)·aspect), up (w: tan(fov/2)) — now and one frame ago.
+struct Post {
+  dims: vec4u, k: vec4f, backdrop: vec4f,
+  cur_pos: vec4f, cur_fwd: vec4f, cur_right: vec4f, cur_up: vec4f,
+  prev_pos: vec4f, prev_fwd: vec4f, prev_right: vec4f, prev_up: vec4f,
+}
+// History: accumulated linear color (w: frames) and the surface it saw (normal, distance).
+struct Hist { c: vec4f, g: vec4f }
 
 @group(0) @binding(0) var<uniform> Q: Post;
 @group(0) @binding(1) var<storage, read> accum: array<vec4f>;
@@ -23,6 +36,8 @@ struct Post { dims: vec4u, k: vec4f, backdrop: vec4f }
 @group(0) @binding(5) var<storage, read_write> dst: array<vec4f>;
 @group(0) @binding(6) var<storage, read_write> packed: array<u32>;
 @group(0) @binding(7) var<storage, read> ebuf: array<vec4f>;
+@group(0) @binding(8) var<storage, read> hist_in: array<Hist>;
+@group(0) @binding(9) var<storage, read_write> hist_out: array<Hist>;
 
 fn neutral(c0: vec3f) -> vec3f {
   var c = c0;
@@ -128,4 +143,45 @@ fn pack(@builtin(global_invocation_id) g: vec3u) {
   let c = clamp(src[i], vec4f(0.0), vec4f(1.0));
   let q = vec4u(c * 255.0 + 0.5);
   packed[i] = q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
+}
+
+@compute @workgroup_size(8, 8)
+fn temporal(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= Q.dims.x || g.y >= Q.dims.y) { return; }
+  let i = g.y * Q.dims.x + g.x;
+  let cur = src[i];
+  let geo = gbuf[i];
+  // The void (no first hit) and frames without history pass straight through.
+  if (geo.w < 0.0 || Q.dims.w == 0u) {
+    hist_out[i] = Hist(vec4f(cur.xyz, 1.0), geo);
+    dst[i] = cur;
+    return;
+  }
+  let dims = vec2f(f32(Q.dims.x), f32(Q.dims.y));
+  let ndc = (vec2f(f32(g.x), f32(g.y)) + 0.5) / dims * 2.0 - 1.0;
+  let d = normalize(Q.cur_fwd.xyz + Q.cur_right.xyz * ndc.x * Q.cur_right.w - Q.cur_up.xyz * ndc.y * Q.cur_up.w);
+  let p = Q.cur_pos.xyz + d * geo.w;
+  // Into the previous camera.
+  let v = p - Q.prev_pos.xyz;
+  let z = dot(v, Q.prev_fwd.xyz);
+  var ok = z > 1e-4;
+  var prev = vec2i(0);
+  if (ok) {
+    let pn = vec2f(dot(v, Q.prev_right.xyz) / (z * Q.prev_right.w), -dot(v, Q.prev_up.xyz) / (z * Q.prev_up.w));
+    let px = (pn * 0.5 + 0.5) * dims;
+    prev = vec2i(floor(px));
+    ok = all(prev >= vec2i(0)) && all(prev < vec2i(i32(Q.dims.x), i32(Q.dims.y)));
+  }
+  var out = vec4f(cur.xyz, 1.0);
+  if (ok) {
+    let h = hist_in[u32(prev.y) * Q.dims.x + u32(prev.x)];
+    let dist = length(v);
+    let same = h.g.w >= 0.0 && abs(h.g.w - dist) < 0.03 * dist + 1e-3 && dot(h.g.xyz, geo.xyz) > 0.9;
+    if (same) {
+      let n = min(h.c.w + 1.0, 16.0);
+      out = vec4f(mix(h.c.xyz, cur.xyz, 1.0 / n), n);
+    }
+  }
+  hist_out[i] = Hist(out, geo);
+  dst[i] = vec4f(out.xyz, cur.w);
 }
