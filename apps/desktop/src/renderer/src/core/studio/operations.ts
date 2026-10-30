@@ -87,11 +87,15 @@ export function surfaceAt(scene: THREE.Scene, camera: THREE.Camera, u: number, v
   return null;
 }
 
+/** Keyframes at composition times; layers store them relative to their own start. */
+let layerStart: (target: string) => number = () => 0;
 function keys(target: string, path: string, frames: [number, number][]): any {
-  return { type: 'replace_keyframes', target, path, keyframes: frames.map(([time, value]) => ({ time, value, ease: 'ease-in-out', hold: false })), expression: null };
+  const from = layerStart(target);
+  return { type: 'replace_keyframes', target, path, keyframes: frames.map(([time, value]) => ({ time: Math.max(0, time - from), value, ease: 'ease-in-out', hold: false })), expression: null };
 }
 
 export function studioCommands(PM: any, args: StudioEdit, edit3d: Edit3D): { commands: any[]; id?: string } {
+  layerStart = target => Number(PM.L?.(target)?.from ?? 0) || 0;
   switch (args.operation) {
     case 'apply_material': {
       const preset = MATERIAL_PRESETS.find(m => m.id === args.preset);
