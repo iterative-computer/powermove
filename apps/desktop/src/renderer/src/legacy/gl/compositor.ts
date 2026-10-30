@@ -2113,7 +2113,8 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   PM._studioFinal=!!(opt.exporting||PM.agentFrameCapture);
   // Offscreen renders that are neither the viewer nor final output (stills,
   // captures, thumbnails) get a fixed, repeatable Studio frame.
-  PM._studioStill=!PM._studioFinal&&!opt.editorViewport;
+  // An explicit fresh frame (previewReuse: false) is a still too, even through the editor's camera.
+  PM._studioStill=!PM._studioFinal&&(!opt.editorViewport||opt.previewReuse===false);
   // Motion blur renders each frame at several shutter times; Studio splits its samples across them.
   PM._studioShutterSamples=opt.mblur!==false&&opt.mbSamples>1?opt.mbSamples:1;
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
