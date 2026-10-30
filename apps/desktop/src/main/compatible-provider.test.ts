@@ -1,10 +1,10 @@
-import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, access } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readFile, rm, access, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 vi.mock('electron', () => ({ safeStorage: { isEncryptionAvailable: () => true, encryptString: (value: string) => Buffer.from('encrypted:' + value), decryptString: (value: Buffer) => value.toString().slice(10) } }));
 import { CompatibleProvider, readCompletion } from './compatible-provider';
-import { providerUrl } from '../shared/compatible-provider';
+import { presetFor, providerUrl } from '../shared/compatible-provider';
 import { restoreExtensionChangeSet } from './codex/change-history';
 import { prepareAgentWorkspace } from './codex/workspace';
 import { AGENT_SHELL_NETWORK_INSTRUCTIONS, agentResultSchema } from './codex/instructions';
@@ -325,4 +325,123 @@ it('normalizes gateway origins and complete endpoints without dropping deploymen
   expect(providerUrl('https://gateway.example/v1/')).toBe('https://gateway.example/v1');
   expect(providerUrl('https://gateway.example/team/v1/chat/completions')).toBe('https://gateway.example/team/v1');
   expect(providerUrl('https://gateway.example/team/v1')).toBe('https://gateway.example/team/v1');
+});
+
+describe('connecting the way people with API keys and local models work', () => {
+  const ok = () => Response.json({ choices: [{ message: { content: 'OK' } }] });
+  const temp = async () => { const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-provider-flow-')); directories.push(directory); return directory; };
+
+  it('accepts a bare local host as people copy it from a server log', () => {
+    expect(providerUrl('localhost:11434')).toBe('http://localhost:11434/v1');
+    expect(providerUrl('openrouter.ai/api/v1')).toBe('https://openrouter.ai/api/v1');
+    expect(presetFor('http://localhost:1234/v1/').id).toBe('lmstudio');
+    expect(presetFor('https://example.com/v1').id).toBe('other');
+  });
+
+  it('keeps a key per address, so switching to a local model and back never asks again', async () => {
+    const auth: Array<string | undefined> = [];
+    const fetcher = vi.fn(async (_url: any, options: any) => {
+      if (options.method === 'GET') return new Response(null, { status: 404 });
+      auth.push(options.headers.Authorization);
+      return ok();
+    }) as unknown as typeof fetch;
+    const provider = new CompatibleProvider(await temp(), fetcher);
+    await provider.configure({ baseUrl: 'https://openrouter.ai/api/v1', model: 'a', apiKey: 'sk-or-1', vision: false });
+    await provider.configure({ baseUrl: 'https://api.openai.com/v1', model: 'b', apiKey: 'sk-2', vision: false });
+    expect(await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'c', vision: false })).toMatchObject({ hasKey: false });
+    expect(await provider.configure({ baseUrl: 'https://openrouter.ai/api/v1', model: 'a', vision: false })).toMatchObject({ hasKey: true });
+    expect(auth).toEqual(['Bearer sk-or-1', 'Bearer sk-2', undefined, 'Bearer sk-or-1']);
+    expect((await provider.listModels({ baseUrl: 'https://api.openai.com/v1' })).hasKey).toBe(true);
+  });
+
+  it('still uses the single key older versions saved', async () => {
+    const directory = await temp();
+    await writeFile(path.join(directory, 'agent-provider.json'), JSON.stringify({ baseUrl: 'https://example.com/v1', model: 'm', vision: false, hasKey: true, secret: Buffer.from('encrypted:old-key').toString('base64') }));
+    const auth: string[] = [];
+    const provider = new CompatibleProvider(directory, vi.fn(async (_url: any, options: any) => {
+      if (options.method === 'GET') return new Response(null, { status: 404 });
+      auth.push(options.headers.Authorization); return ok();
+    }) as unknown as typeof fetch);
+    expect(await provider.status()).toMatchObject({ hasKey: true });
+    await provider.configure({ baseUrl: 'https://example.com/v1/', model: 'm', vision: false });
+    expect(auth).toEqual(['Bearer old-key']);
+  });
+
+  it('lists models before connecting, leaving out ones that cannot call tools', async () => {
+    const fetcher = vi.fn(async (url: any) => {
+      expect(String(url)).toBe('https://openrouter.ai/api/v1/models');
+      return Response.json({ data: [
+        { id: 'vision-model', architecture: { input_modalities: ['text', 'image'] }, supported_parameters: ['tools'] },
+        { id: 'chat-only', supported_parameters: ['temperature'] },
+        { id: 'plain' }
+      ] });
+    }) as unknown as typeof fetch;
+    const list = await new CompatibleProvider(await temp(), fetcher).listModels({ baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'sk-or-x' });
+    expect(list).toEqual({ models: [{ id: 'vision-model', vision: true }, { id: 'plain' }], hidden: 1, hasKey: false });
+  });
+
+  it('reads Ollama capabilities, so embedding and chat-only models are not offered', async () => {
+    const fetcher = vi.fn(async (url: any, options: any) => {
+      const target = String(url);
+      if (target.endsWith('/v1/models')) return Response.json({ data: [{ id: 'qwen3:latest' }, { id: 'nomic-embed-text:latest' }, { id: 'llava:latest' }] });
+      if (target.endsWith('/api/version')) return Response.json({ version: '0.12.0' });
+      if (target.endsWith('/api/show')) {
+        const { model } = JSON.parse(options.body);
+        return Response.json({ capabilities: model.startsWith('qwen3') ? ['completion', 'tools'] : model.startsWith('llava') ? ['completion', 'tools', 'vision'] : ['embedding'] });
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+    const list = await new CompatibleProvider(await temp(), fetcher).listModels({ baseUrl: 'http://localhost:11434/v1' });
+    expect(list.models).toEqual([{ id: 'llava:latest', vision: true }, { id: 'qwen3:latest', vision: false }]);
+    expect(list.hidden).toBe(1);
+  });
+
+  it('says what to do when a local server is not running or a cloud key is wrong', async () => {
+    const refused = vi.fn(async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+    const provider = new CompatibleProvider(await temp(), refused);
+    await expect(provider.listModels({ baseUrl: 'http://localhost:11434/v1' })).rejects.toThrow('Ollama isn’t running. Open the Ollama app');
+    await expect(provider.configure({ baseUrl: 'http://localhost:1234/v1', model: 'm', vision: false })).rejects.toThrow('LM Studio isn’t answering at localhost:1234');
+    await expect(provider.configure({ baseUrl: 'https://api.example.com/v1', model: 'm', vision: false })).rejects.toThrow('Couldn’t reach api.example.com');
+    const rejected = new CompatibleProvider(await temp(), vi.fn(async () => Response.json({ error: { message: 'Incorrect API key provided: sk-ab***yz' } }, { status: 401 })) as unknown as typeof fetch);
+    await expect(rejected.listModels({ baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-abcxyz' })).rejects.toThrow('The provider rejected the API key. Check the key in Settings.');
+  });
+
+  it('refuses a model that cannot use tools when testing the connection, with the reason', async () => {
+    const bodies: any[] = [];
+    const fetcher = vi.fn(async (_url: any, options: any) => {
+      if (options.method === 'GET') return new Response(null, { status: 404 });
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ error: { message: 'registry.ollama.ai/library/gemma2:latest does not support tools' } }, { status: 400 });
+    }) as unknown as typeof fetch;
+    await expect(new CompatibleProvider(await temp(), fetcher).configure({ baseUrl: 'http://localhost:11434/v1', model: 'gemma2', vision: false }))
+      .rejects.toThrow('gemma2 can chat but can’t use tools, so it can’t edit your project.');
+    expect(bodies[0].tools[0].function.name).toBe('powermove_check');
+    const quota = new CompatibleProvider(await temp(), vi.fn(async (_url: any, options: any) => options.method === 'GET' ? new Response(null, { status: 404 })
+      : Response.json({ error: { message: 'Insufficient credits.\nAdd more.' } }, { status: 402 })) as unknown as typeof fetch);
+    await expect(quota.configure({ baseUrl: 'https://openrouter.ai/api/v1', model: 'x', apiKey: 'k', vision: false })).rejects.toThrow('HTTP 402: Insufficient credits. Add more.');
+  });
+
+  it('warns when Ollama runs the model with too little context for the agent', async () => {
+    const context = { value: 4096 };
+    const fetcher = vi.fn(async (url: any, options: any) => {
+      const target = String(url);
+      if (target.endsWith('/api/version')) return Response.json({ version: '0.12.0' });
+      if (target.endsWith('/api/ps')) return Response.json({ models: [{ name: 'qwen3:latest', model: 'qwen3:latest', context_length: context.value }] });
+      if (options.method === 'GET') return new Response(null, { status: 404 });
+      return ok();
+    }) as unknown as typeof fetch;
+    const provider = new CompatibleProvider(await temp(), fetcher);
+    const small = await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'qwen3', vision: false });
+    expect(small.warning).toContain('only 4,096 tokens of context');
+    expect(small.warning).toContain('OLLAMA_CONTEXT_LENGTH');
+    context.value = 32768;
+    expect((await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'qwen3', vision: false })).warning).toBeUndefined();
+  });
+
+  it('finds local servers that are already running', async () => {
+    const fetcher = vi.fn(async (url: any) => String(url) === 'http://localhost:1234/v1/models'
+      ? Response.json({ data: [{ id: 'a' }, { id: 'b' }] })
+      : Promise.reject(new TypeError('fetch failed'))) as unknown as typeof fetch;
+    expect(await new CompatibleProvider(await temp(), fetcher).detectLocal()).toEqual([{ preset: 'lmstudio', baseUrl: 'http://localhost:1234/v1', models: 2 }]);
+  });
 });

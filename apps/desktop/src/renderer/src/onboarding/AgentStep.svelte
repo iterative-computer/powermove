@@ -8,7 +8,7 @@
   const options: Array<{ id: OnboardingAgentProvider; name: string; detail: string; models: Array<{ id: string; label: string }> }> = [
     { id: 'chatgpt', name: 'ChatGPT', detail: 'Uses your ChatGPT plan through Codex.', models: AGENT_MODELS.chatgpt },
     { id: 'claude', name: 'Claude', detail: 'Uses your Claude plan through Claude Code.', models: AGENT_MODELS.claude.filter(model => !/\(latest\)$/.test(model.label)) },
-    { id: 'compatible', name: 'API or local model', detail: 'Any OpenAI-compatible API, Ollama or LM Studio. Connect it in Settings.', models: [] }
+    { id: 'compatible', name: 'API or local model', detail: 'Ollama or LM Studio on this Mac, or an API key from OpenRouter, OpenAI, Anthropic or Google. Connect it in Settings.', models: [] }
   ];
   let provider = $state<OnboardingAgentProvider>('chatgpt');
   const models = $state<Record<OnboardingAgentProvider, string>>({

@@ -20,7 +20,7 @@
   const heading = $derived(checking ? 'Checking connection…' : waiting ? `Finish connecting ${providerName}`
     : local ? 'Bring your own model' : `Connect ${providerName}`);
   const body = $derived(checking ? `Checking your ${providerName} connection.`
-    : status.detail || (local ? 'Use an API, Ollama, or LM Studio. Set up your model in settings.'
+    : status.detail || (local ? 'Run a model on this Mac with Ollama or LM Studio, or use an API key from OpenRouter, OpenAI, Anthropic, Google and others.'
       : `Use your ${providerName} subscription to power the Powermove agent.`));
 </script>
 

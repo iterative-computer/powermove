@@ -47,7 +47,8 @@ export function enhanceSelect(select: HTMLSelectElement): () => void {
     if (trigger.disabled || menu) return;
     const options = Array.from(select.options)
       .filter((o) => !o.hidden)
-      .map((o) => ({ value: o.value, label: o.textContent ?? '', disabled: o.disabled }));
+      .map((o) => ({ value: o.value, label: o.textContent ?? '', disabled: o.disabled,
+        ...(o.parentElement instanceof HTMLOptGroupElement ? { group: o.parentElement.label } : {}) }));
     trigger.setAttribute('aria-expanded', 'true');
     menu = openSelectMenu({
       anchor: trigger,

@@ -8,6 +8,8 @@ export interface MenuOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** An <optgroup> label; a heading is drawn where the group changes. */
+  group?: string;
 }
 
 export interface MenuRequest {
@@ -52,7 +54,16 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
 
   const items: HTMLElement[] = [];
   let active = Math.max(0, req.options.findIndex((o) => o.value === req.value));
+  let group: string | undefined;
   for (const [i, option] of req.options.entries()) {
+    if (option.group && option.group !== group) {
+      const heading = document.createElement('div');
+      heading.className = 'pm-menu-heading';
+      heading.setAttribute('role', 'presentation');
+      heading.textContent = option.group;
+      el.append(heading);
+    }
+    group = option.group;
     const item = document.createElement('div');
     item.className = 'pm-menu-item';
     item.setAttribute('role', 'option');

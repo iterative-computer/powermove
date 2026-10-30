@@ -72,6 +72,13 @@ const bridge: PowermoveBridge = {
   compatible: {
     status: () => ipcRenderer.invoke(IPC.compatibleStatus),
     configure: input => ipcRenderer.invoke(IPC.compatibleConfigure, input),
+    models: input => ipcRenderer.invoke(IPC.compatibleModels, input),
+    detect: () => ipcRenderer.invoke(IPC.compatibleDetect),
+  },
+  agentClients: {
+    list: () => ipcRenderer.invoke(IPC.agentClientsList),
+    connect: id => ipcRenderer.invoke(IPC.agentClientsConnect, id),
+    disconnect: id => ipcRenderer.invoke(IPC.agentClientsDisconnect, id),
   },
   agentNotification: options => ipcRenderer.invoke('agent:notification', options),
   ping: () => ipcRenderer.invoke(IPC.ping) as Promise<string>,

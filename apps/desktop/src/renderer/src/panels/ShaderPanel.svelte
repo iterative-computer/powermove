@@ -125,8 +125,10 @@
     flex: 1;
   }
 
+  /* Same height as the compile button, so both clear the bar evenly. */
   .preset-select {
     max-width: 112px;
+    height: 24px !important;
   }
 
   .compile-button {

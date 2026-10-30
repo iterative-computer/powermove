@@ -64,6 +64,10 @@ import { readForkRebaseInfo, stageForkRebase } from '../extensions/rebase';
 import { updateFork } from '../extensions/update-fork';
 import { ExternalAgentSession, type ExternalSessionOptions } from '../agent-tools/external-session';
 import { startExternalMcp } from '../agent-tools/external-server';
+import { connectAgentClient, disconnectAgentClient, listAgentClients, MCP_FLAG, runCli, type AgentClientEnvironment } from '../agent-clients';
+import type { AgentClientId } from '../../shared/agent-clients';
+import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -614,6 +618,29 @@ export function registerCodexIpc(
 
   ipcMain.handle(IPC.compatibleStatus, async (event) => { requireTrusted(event, ctx); return compatible.status(); });
   ipcMain.handle(IPC.compatibleConfigure, async (event, input) => { requireTrusted(event, ctx); return compatible.configure(input); });
+  ipcMain.handle(IPC.compatibleModels, async (event, input) => { requireTrusted(event, ctx); return compatible.listModels(input); });
+  ipcMain.handle(IPC.compatibleDetect, async (event) => { requireTrusted(event, ctx); return compatible.detectLocal(); });
+
+  /* Other agent apps reach Powermove through the installed app's MCP entry.
+     A development build points them at the installed copy when there is one. */
+  const INSTALLED = '/Applications/Powermove.app/Contents/MacOS/Powermove';
+  const clientEnvironment = (): AgentClientEnvironment => ({
+    homeDir: homedir(),
+    userDataDir: ctx.userData,
+    executablePath: app.isPackaged || !existsSync(INSTALLED) ? process.execPath : INSTALLED,
+    runClaude: async args => runCli(await discoverClaudeBinary(ctx.claudeBinaryPref?.() ?? null), args, process.env)
+  });
+  const clientId = (value: unknown): AgentClientId => {
+    if (!isString(value, 40) || !/^[a-z-]+$/.test(value)) throw new IpcValidationError(IPC.agentClientsConnect, 'unknown agent app');
+    return value as AgentClientId;
+  };
+  ipcMain.handle(IPC.agentClientsList, async (event) => {
+    requireTrusted(event, ctx);
+    const env = clientEnvironment();
+    return { clients: listAgentClients(env), command: env.executablePath, args: [MCP_FLAG] };
+  });
+  ipcMain.handle(IPC.agentClientsConnect, async (event, id: unknown) => { requireTrusted(event, ctx); return connectAgentClient(clientId(id), clientEnvironment()); });
+  ipcMain.handle(IPC.agentClientsDisconnect, async (event, id: unknown) => { requireTrusted(event, ctx); await disconnectAgentClient(clientId(id), clientEnvironment()); });
 
   ipcMain.handle(IPC.codexRun, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);

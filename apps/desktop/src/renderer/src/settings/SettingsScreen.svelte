@@ -13,6 +13,7 @@
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
   import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
   import StorageSettings from './StorageSettings.svelte';
+  import AgentClientsSettings from './AgentClientsSettings.svelte';
 
   export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'storage' | 'project' | 'memory';
 
@@ -611,7 +612,7 @@
             {:else if item.id === 'accounts'}
               <header class="sg-heading">
                 <h2>Accounts</h2>
-                <p>Your Powermove account, and the models your agent works with.</p>
+                <p>Your Powermove account, the models your agent works with, and other agent apps that can use Powermove.</p>
               </header>
               <section class="sg-section">
                 <h3 class="sg-section-title">Powermove</h3>
@@ -669,6 +670,7 @@
                 <h3 class="sg-section-title">API or local model</h3>
                 <div class="sg-group" use:host={[controls?.compatible.element]}></div>
               </section>
+              <AgentClientsSettings active={shown} />
             {:else if item.id === 'transcription'}
               <header class="sg-heading">
                 <h2>Transcription</h2>

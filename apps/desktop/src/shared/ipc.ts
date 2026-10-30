@@ -106,6 +106,11 @@ export const IPC = {
   agentRuntimeUpdate: 'agent-runtime:update',
   compatibleStatus: 'compatible:status',
   compatibleConfigure: 'compatible:configure',
+  compatibleModels: 'compatible:models',
+  compatibleDetect: 'compatible:detect',
+  agentClientsList: 'agent-clients:list',
+  agentClientsConnect: 'agent-clients:connect',
+  agentClientsDisconnect: 'agent-clients:disconnect',
   consentComputer: 'consent:computer',
 
   artifactRead: 'agent:artifact:read',
@@ -727,6 +732,17 @@ export interface PowermoveBridge {
   compatible?: {
     status(): Promise<import('./compatible-provider').CompatibleProviderConfig>;
     configure(input: import('./compatible-provider').CompatibleProviderInput): Promise<import('./compatible-provider').CompatibleProviderConfig>;
+    /** The models at an address, before connecting. A blank key uses the one saved for that address. */
+    models?(input: { baseUrl: string; apiKey?: string }): Promise<import('./compatible-provider').CompatibleModelList>;
+    /** Local model servers already running on this Mac. */
+    detect?(): Promise<import('./compatible-provider').CompatibleLocalServer[]>;
+  };
+  /** Other agent apps that can drive Powermove through MCP. */
+  agentClients?: {
+    list(): Promise<import('./agent-clients').AgentClientsInfo>;
+    /** Resolves with what to do next, such as restarting the app. */
+    connect(id: import('./agent-clients').AgentClientId): Promise<string>;
+    disconnect(id: import('./agent-clients').AgentClientId): Promise<void>;
   };
   /** `question` turns the finished banner into one naming the agent's question. */
   agentNotification(options: { sound: string; preview?: boolean; question?: string }): Promise<void>;

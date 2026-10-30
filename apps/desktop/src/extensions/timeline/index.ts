@@ -57,7 +57,7 @@ const TIMELINE_STYLES = `
 ${COMP_TABS_STYLES}
 #tl-comp-tabs{padding-right:168px}
 /* Centred in the tab row; inset 4px with its radius 4px smaller than the panel's, so the curves run parallel. */
-#tl-mode{position:absolute;z-index:4;top:4px;right:4px;height:28px;display:flex;align-items:stretch;padding:2px;gap:2px;border-radius:var(--r-md);background:rgb(0 0 0 / .19)}
+#tl-mode{position:absolute;z-index:4;top:4px;right:4px;height:calc(var(--hdr-h) - 8px);display:flex;align-items:stretch;padding:2px;gap:2px;border-radius:var(--r-md);background:rgb(0 0 0 / .19)}
 #tl-mode .tl-mode-button{display:flex;align-items:center;padding:0 10px;border:0;border-radius:calc(var(--r-md) - 2px);background:none;color:var(--tx-2);font:12px/16px var(--f-ui);cursor:default}
 #tl-mode .tl-mode-button svg{display:none}
 #tl-mode .tl-mode-button:hover{color:var(--tx)}

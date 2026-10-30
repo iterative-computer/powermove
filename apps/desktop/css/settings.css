@@ -134,6 +134,9 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .settings-provider-fields>*+*{border-top:0}
 .settings-provider-fields .settings-row>.pm-select{max-width:220px}
 .settings-provider-fields [role="status"]{overflow-wrap:anywhere}
+.settings-provider-fields [hidden]{display:none!important}
+.settings-provider-pair{display:flex;align-items:center;gap:6px}
+.settings-provider-pair>.btn{flex:none;height:30px;padding:0 12px}
 
 /* ── extensions ── */
 /* Every row is a destination: a tone dot beside the name, the description on
