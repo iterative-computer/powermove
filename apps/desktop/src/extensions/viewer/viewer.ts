@@ -1588,6 +1588,16 @@ function bindStage(stage: any, inner: any): () => void {
     const point = pointerComp({ clientX, clientY });
     return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
+  // Alt+Shift+scroll over the viewer: the selected softbox grows (softer) or shrinks (crisper).
+  listen(stage,'wheel',guarded((event:any)=>{
+    if(!event.altKey || !event.shiftKey || !api.scene3d?.studio)return;
+    const id=api.selection.get().layers[0];
+    const light:any=id?api.model.layer(id):null;
+    if(light?.d?.data?.light?.type!=='area')return;
+    event.preventDefault();event.stopPropagation();
+    const result=api.scene3d.edit({operation:'soften',target:id,amount:event.deltaY<0?1.12:1/1.12},{label:'Softbox size',origin:'canvas'});
+    if(!result.ok)api.ui.toast(result.message,{error:true});
+  }),{capture:true,passive:false});
   listen(stage,'pointerdown',guarded((event:any)=>{
     // Light by pointing: Alt+Shift+click a model to put a softbox's highlight there.
     if(event.altKey && event.shiftKey && event.button===0 && api.scene3d?.studio){

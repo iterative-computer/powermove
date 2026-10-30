@@ -71,3 +71,41 @@ test('Studio finishes, light by pointing, Shots and the studio set', async ({ se
   await page.locator('#panel-inspector').screenshot({ path: info.outputPath('studio-inspector-camera.png') });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('Studio placement, auto studio, explode and softbox size', async ({ session }) => {
+  test.setTimeout(120_000);
+  await session.openEditor();
+  const result = await session.page.evaluate(() => {
+    const PM = (window as any).PM, api = PM.Kernel.api('studio-place');
+    const ok = (r: any) => { if (!r.ok) throw new Error(r.message); return r; };
+    ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'base', source: { primitive: 'box', parameters: { width: 2, height: 0.4, depth: 2 } }, p: { y: 1.3 } } }));
+    ok(api.scene3d.edit({ operation: 'add_object', object: { id: 'top', source: { primitive: 'sphere', parameters: { radius: 0.3 } }, p: { x: 3, y: 5 } } }));
+    ok(api.scene3d.edit({ operation: 'drop_to_floor', target: 'base' }));
+    ok(api.scene3d.edit({ operation: 'place_on', target: 'top', on_target: 'base' }));
+    const placed = { base: PM.L('base').p['position.y'].v, top: [PM.L('top').p['position.x'].v, PM.L('top').p['position.y'].v] };
+    ok(api.scene3d.edit({ operation: 'auto_studio' }));
+    const layers = PM.proj.layers;
+    const cams = layers.filter((l: any) => l.d?.definition === 'powermove.3d.camera');
+    const softboxes = layers.filter((l: any) => l.d?.data?.light?.type === 'area');
+    const width = softboxes[0].d.data.light.p.width.v;
+    ok(api.scene3d.edit({ operation: 'soften', target: softboxes[0].id, amount: 2 }));
+    PM.Edit.apply({ type: 'group_layers', targets: ['base', 'top'], name: 'Product' });
+    const group = PM.proj.layers.find((l: any) => l.type === 'group');
+    ok(api.scene3d.edit({ operation: 'explode', target: group.id, amount: 0.5, start: 0, duration: 2 }));
+    return {
+      placed, cameras: cams.length, catcher: cams[0]?.d.data.environment.shadowCatcher, softboxes: softboxes.length,
+      widened: PM.L(softboxes[0].id).d.data.light.p.width.v / width,
+      explodedTop: PM.L('top').p['position.y'].kf.map((k: any) => k.v),
+    };
+  });
+  expect(result.placed.base).toBeCloseTo(0.2, 3);       // box half-height rests on y = 0
+  expect(result.placed.top[0]).toBeCloseTo(0, 3);       // centred on the base
+  expect(result.placed.top[1]).toBeCloseTo(0.7, 3);     // 0.4 base + 0.3 radius
+  expect(result.cameras).toBe(1);
+  expect(result.catcher).toBe(true);
+  expect(result.softboxes).toBe(3);
+  expect(result.widened).toBeCloseTo(2, 5);
+  expect(result.explodedTop).toHaveLength(2);
+  expect(result.explodedTop[1]).toBeGreaterThan(result.explodedTop[0]); // the top part moves up and out
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
