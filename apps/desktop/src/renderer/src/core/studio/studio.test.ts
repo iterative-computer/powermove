@@ -69,7 +69,8 @@ describe('Studio scene extraction', () => {
     expect(s.lightCount).toBe(2);
     // Sun: direction toward the light, kind 3, intensity as irradiance.
     expect([...s.sdata.slice(0, 4)].map(v => Math.round(v * 1000) / 1000)).toEqual([0, 1, 0, 3]);
-    expect(s.sdata[12]).toBeCloseTo(2);
+    // Irradiance 2 spread over the 1.5° sun disc's solid angle.
+    expect(s.sdata[12]).toBeCloseTo(2 / (2 * Math.PI * (1 - Math.cos(THREE.MathUtils.degToRad(1.5)))), 0);
     // Spot: kind 2, axis stored pointing back at the light, cos outer < cos inner.
     expect(s.sdata[16 + 3]).toBe(2);
     expect(s.sdata[16 + 9]).toBeCloseTo(1);
