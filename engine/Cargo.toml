@@ -1,0 +1,22 @@
+# Studio, the new 3D system (docs/3d-studio-redesign.md). A standalone
+# workspace for now; it joins the native engine's workspace in Phase 1.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/iterative-computer/powermove"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
