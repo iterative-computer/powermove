@@ -2111,6 +2111,9 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(opt.rawOwner){const layer=proj.layers.find((l:any)=>l.id===opt.rawOwner);if(!layer||layer.threeD||['group','adjustment','audio','null'].includes(layer.type))throw new EffectInputError('Source owner processing requires a 2D content layer');const frame=renderInputSource(proj,layer,T,'effects',{...opt,ownerGrow:true});completed=true;return frame;}
   // Exports and agent frames render 3D at Studio's Final quality.
   PM._studioFinal=!!(opt.exporting||PM.agentFrameCapture);
+  // Offscreen renders that are neither the viewer nor final output (stills,
+  // captures, thumbnails) get a fixed, repeatable Studio frame.
+  PM._studioStill=!PM._studioFinal&&!opt.editorViewport;
   // Motion blur renders each frame at several shutter times; Studio splits its samples across them.
   PM._studioShutterSamples=opt.mblur!==false&&opt.mbSamples>1?opt.mbSamples:1;
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;

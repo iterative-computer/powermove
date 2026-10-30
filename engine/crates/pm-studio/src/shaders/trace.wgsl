@@ -22,7 +22,7 @@ struct Params {
   env_horizon: vec4f,  // w: floor albedo for secondary bounces
   dims: vec4u,         // width, height, frame seed, samples this dispatch
   counts: vec4u,       // lights, max bounces, reset (1 = overwrite), firefly clamp (luminance)
-  opts: vec4u,         // x: Live; y: unused; z: instance count
+  opts: vec4u,         // x: Live; y: shadows off (1); z: instance count
   ground: vec4f,       // environment radiance below the horizon; w: floor height
 }
 
@@ -572,7 +572,9 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
     pb = pdf_reflect(m, w, n, v, s.dir) * (1.0 - w.trans);
   }
   if (all(f <= vec3f(0.0))) { return vec3f(0.0); }
-  let t = transmittance(p, s.dir, s.dist);
+  // With shadows off (the environment's switch), every light reaches every surface.
+  var t = vec3f(1.0);
+  if (P.opts.y == 0u) { t = transmittance(p, s.dir, s.dist); }
   if (all(t <= vec3f(0.0))) { return vec3f(0.0); }
   let pl = s.pdf / f32(count);
   let mis = pl * pl / (pl * pl + pb * pb);

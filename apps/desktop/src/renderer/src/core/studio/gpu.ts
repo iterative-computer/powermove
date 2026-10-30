@@ -29,6 +29,8 @@ export type StudioView = {
   backdrop: [number, number, number];
   backdropOpaque: boolean;
   shadowCatcher: boolean;
+  /** The environment's shadows switch (off: lights are never blocked). */
+  shadows: boolean;
   /** Height of the shadow-catching floor (world y). */
   floorY: number;
   environment: { zenith: [number, number, number]; horizon: [number, number, number]; ground: [number, number, number] };
@@ -241,6 +243,8 @@ export class StudioTarget {
     if (!this.view) return;
     const p = build();
     this.traceGroup ??= this.groupWith(this.params);
+    // Seeds follow the sample index, so the same scene and view always give the same pixels.
+    if (reset) this.frame = 0;
     let left = spp, first = true;
     // One dispatch per submission: writeBuffer and submit run in queue order,
     // so each dispatch sees its own seed and reset flag.
@@ -250,7 +254,7 @@ export class StudioTarget {
       const u = new Uint32Array(this.base);
       u.set([this.width, this.height, this.frame, n], 28);
       u.set([this.lightCount, bounces, reset && first ? 1 : 0, clamp], 32);
-      u.set([this.live ? 1 : 0, 0, this.instanceCount, 0], 36);
+      u.set([this.live ? 1 : 0, this.view.shadows === false ? 1 : 0, this.instanceCount, 0], 36);
       device.queue.writeBuffer(this.params, 0, this.base);
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();

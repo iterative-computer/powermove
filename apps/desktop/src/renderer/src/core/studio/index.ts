@@ -19,6 +19,7 @@ import { initStudioGpu, studioGpuFailure, studioGpuReady, StudioTarget, type Stu
  */
 
 export const STUDIO_FINAL_SAMPLES = 64;
+const STUDIO_STILL_SAMPLES = 4;
 const REFINE_SAMPLES = 512;
 const REFINE_DELAY_MS = 140;
 
@@ -165,6 +166,7 @@ function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3):
     backdrop: display ? [display.r, display.g, display.b] : [0, 0, 0],
     backdropOpaque: !!background,
     shadowCatcher: catcher,
+    shadows: env?.shadows !== false,
     floorY: catcher ? bounds.min.y : 0,
     environment: { zenith: [zenith.r, zenith.g, zenith.b], horizon: [horizon.r, horizon.g, horizon.b], ground: [ground.r, ground.g, ground.b] },
   };
@@ -240,7 +242,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     job.viewKey = '';
   }
   const view = viewOf(runtime, cam, job.scene.bounds);
-  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher]);
+  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher, view.shadows]);
   const index = job.scene.objects.indexOf(objectId);
   const target = (which: 'live' | 'refine' | 'final', tw: number, th: number): StudioTarget => {
     let t = job![which];
@@ -254,17 +256,20 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     return t;
   };
 
-  if (final) {
+  if (final || PM._studioStill) {
     const t = target('final', width, height);
-    // The composition's quality setting, split across motion-blur shutter samples.
-    const goal = Math.max(4, Math.ceil(Number(runtime.raw?.environment?.samples ?? STUDIO_FINAL_SAMPLES) / Math.max(1, PM._studioShutterSamples || 1)));
-    if (job.viewKey !== `final:${viewKey}` || t.samples < goal) {
+    // Final: the composition's quality, split across motion-blur shutter samples.
+    // Stills: a fixed four samples, denoised, the same every time.
+    const still = !final;
+    const goal = still ? STUDIO_STILL_SAMPLES : Math.max(4, Math.ceil(Number(runtime.raw?.environment?.samples ?? STUDIO_FINAL_SAMPLES) / Math.max(1, PM._studioShutterSamples || 1)));
+    const tag = `${still ? 'still' : 'final'}:${viewKey}`;
+    if (job.viewKey !== tag || t.samples < goal) {
       t.setView(view);
       t.trace(goal, 8, true, 64);
-      t.resolve(0);
-      job.viewKey = `final:${viewKey}`;
+      t.resolve(still ? 3 : 0);
+      job.viewKey = tag;
     }
-    return { canvas: t.present(`${objectId}:final`, index, bottom), version: `final:${viewKey}:${t.samples}` };
+    return { canvas: t.present(`${objectId}:final`, index, bottom), version: `${job.viewKey}:${t.samples}` };
   }
 
   const refine = target('refine', width, height);

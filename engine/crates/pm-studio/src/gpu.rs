@@ -314,6 +314,10 @@ impl Renderer {
         let (w, h) = (self.width, self.height);
         // Several dispatches of at most 4 samples keep each submission short.
         let start = Instant::now();
+        // Seeds follow the sample index, so a scene and view render the same every time.
+        if reset {
+            self.frame = 0;
+        }
         let mut left = spp;
         let mut first = true;
         while left > 0 {
