@@ -551,15 +551,17 @@ not.
 | **3. Final output** | Export through Final tier, motion blur, DOF, denoise, temporal stability; live screen compositions; instances and variants | Export parity with viewer when paused; no flicker in the corpus turntables; the 2a reference film rebuilt shot for shot in Powermove |
 | **4. Hard materials** | Glass dispersion, caustics on the floor, subsurface, exploded views, CAD (STEP) import, Gaussian-splat products | Per-feature gates |
 
-## 5a. Status (2026-10-29, branch `new-3d-system`)
+## 5a. Status (2026-10-30, branch `new-3d-system`)
 
-| Phase | Built | Not yet |
+User and agent guide: `apps/desktop/docs/STUDIO.md`.
+
+| Phase | Built | Not built |
 |---|---|---|
-| 0. Prototype | `engine/crates/pm-studio`: wgpu path tracer, Live/Refine/Final, five product scenes measured on a base M5 (Live 3.6–11 ms at 1080p; Refine 64 spp 0.4–3.8 s) | A base M1 Air run; side-by-side against PBRT/Mitsuba |
-| 1. Engine core | The same WGSL runs in the app on WebGPU (`apps/desktop/src/renderer/src/core/studio`): scene extraction from the 3D runtime, a TypeScript BVH, one trace per depth set with per-layer output, Live/Refine in the viewer, Final for exports and agent frames. Lights: softbox, sphere, spot, sun. Maps: color, emissive, ORM, normal. Glass-tinted shadows. | Moving the host into the native engine (`pm-render`) and GPUI; hardware ray tracing; two-level BVH for animated scenes; temporal reprojection for Live; OIDN; meshlet LODs and KTX2 for CAD-scale imports |
-| 2. Studio UX | Finishes (eleven presets), light by pointing (`light_highlight`, Alt+Shift+click), Shots (turntable, push-in, orbit, hero tilt, rack focus as keyframes), the studio set (seamless backdrop + shadow-catching floor), lens f-stop/focus, refine indicator; all in `edit_3d` for agents | Dragging a highlight across the surface and scrolling its softness; engine-rendered swatches; exploded views; auto-studio on import; drop to floor and snap to surface |
-| 3. Final output | Per-composition Final samples (16–1024), motion blur sharing the sample budget, depth of field | **Live screen compositions** (a precomp or video as a product's screen — the reference film's most-used feature); temporal stability checks on turntables; the 2a film rebuilt as the acceptance test |
-| 4. Hard materials | Sheen, thin film, dispersion, water droplets | Caustics, subsurface, anisotropy, STEP import, Gaussian splats, hand plates |
+| 0. Prototype | `engine/crates/pm-studio`: the wgpu path tracer and its product scenes, measured on a base M5 (Live 3.6–11 ms at 1080p; Refine 64 spp 0.4–3.8 s) | A base M1 Air run (no such machine here); a side-by-side against PBRT/Mitsuba |
+| 1. Engine core | The same WGSL in the app on WebGPU: scene extraction, two-level BVH (moving a 153,600-triangle model costs 0.03 ms instead of a 438 ms rebuild), per-layer output, Live/Refine/Final, softbox/sphere/spot/sun lights, color/emissive/ORM/normal maps, glass-tinted shadows | Hosting Studio inside the native engine (`pm-render`) and GPUI — the native engine is unmerged and GPUI not yet started; hardware ray tracing (not exposed by WebGPU); temporal reprojection for Live; OIDN; meshlet LODs and KTX2 |
+| 2. Studio UX | Finishes, light by pointing (click, drag to slide, scroll to soften), Shots, studio set, auto studio (and on first import), drop to floor, place on, exploded views, lens f-stop/focus, refine indicator; every tool in `edit_3d` | Engine-rendered swatch previews |
+| 3. Final output | Per-composition Final samples, motion blur sharing the budget, depth of field, **live screens** (a composition playing on a product's display), and the acceptance film (`e2e/studio-film.spec.ts`: an original product film made and exported entirely in Powermove) | A shot-for-shot rebuild of the reference film (it needs a CAD-quality device model) |
+| 4. Hard materials | Sheen, thin film, dispersion, water droplets, brushed metal (anisotropy), subsurface (random walk) | Caustics, STEP import, Gaussian splats; hand plates use ordinary 2D compositing |
 
 ## 6. Risks and open questions
 
