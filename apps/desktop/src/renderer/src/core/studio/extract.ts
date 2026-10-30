@@ -101,8 +101,9 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       color.r, color.g, color.b, metallic,
       roughness, m.clearcoat ?? 0, m.clearcoatRoughness ?? 0.03, transmission,
       // A basic (unlit) material glows its own color.
-      basic ? color.r : emissive.r, basic ? color.g : emissive.g, basic ? color.b : emissive.b, 0,
-      m.ior ?? 1.5, m.specularIntensity ?? 1, opacity, 0,
+      // emit.w: subsurface radius; extra.w: anisotropy.
+      basic ? color.r : emissive.r, basic ? color.g : emissive.g, basic ? color.b : emissive.b, m.userData?.subsurface ?? 0,
+      m.ior ?? 1.5, m.specularIntensity ?? 1, opacity, m.userData?.anisotropy ?? 0,
       basic ? -1 : layer(m.map), screen ? screenLayer : layer(basic ? m.map : m.emissiveMap), layer(m.roughnessMap || m.metalnessMap), layer(m.normalMap),
       // Studio's material layers: sheen, thin film (nm), dispersion, droplets.
       m.sheen ?? 0, m.iridescence > 0 ? (m.iridescenceThicknessRange?.[1] ?? 400) : 0, m.userData?.studioDispersion ?? 0, m.userData?.droplets ?? 0,
@@ -163,7 +164,8 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
           for (let j = 0; j < 3; j++) { n[j * 3] = nx / l; n[j * 3 + 1] = ny / l; n[j * 3 + 2] = nz / l; }
         }
         corners.push(...p);
-        const t = m.normalMap ? tangent(p, uv) : [0, 0, 0, 0];
+        // Tangents drive normal maps and brushed (anisotropic) highlights.
+        const t = uvA ? tangent(p, uv) : [0, 0, 0, 0];
         const nn = (i: number) => n[i] ?? 0, uu = (i: number) => uv[i] ?? 0;
         shading.push(
           nn(0), nn(1), nn(2), 0, nn(3), nn(4), nn(5), 0, nn(6), nn(7), nn(8), 0,

@@ -30,7 +30,7 @@ struct Params {
 struct Tri { n0: vec4f, n1: vec4f, n2: vec4f, uv01: vec4f, uv2m: vec4f, tangent: vec4f }
 struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, right: u32, rmax: vec3f, rcount: u32 }
 // base: rgb, metallic · spec: roughness, coat, coat roughness, transmission
-// emit: rgb, unused · extra: ior, specular, opacity, unused
+// emit: rgb, subsurface radius (0: none) · extra: ior, specular, opacity, anisotropy (-1..1)
 // maps: texture-array layers for color, emissive, occlusion-roughness-metal, normal (-1: none)
 // layers: sheen, thin-film thickness (nm), dispersion, water droplets
 struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f, layers: vec4f }
@@ -66,6 +66,8 @@ const EPS: f32 = 0.004;
 const BIG: f32 = 1e30;
 
 var<private> seed: u32;
+// The shading tangent of the surface being lit (anisotropic highlights follow it).
+var<private> shade_t: vec3f;
 fn pcg(v: u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
   let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -378,7 +380,11 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let a = m.spec.x * m.spec.x;
   let f0 = f0_of(m);
   let F = thin_film(schlick(f0, vh), vh, m.layers.y);
-  let spec = F * ggx_d(nh, a) * smith_g2(nv, nl, a) / (4.0 * nv);
+  var spec = F * ggx_d(nh, a) * smith_g2(nv, nl, a) / (4.0 * nv);
+  if (m.extra.w != 0.0) {
+    let fr = aniso_frame(n);
+    spec = F * aniso_dg(fr, v, l, h, a, m.extra.w) / (4.0 * nv);
+  }
   let tr = m.spec.w * (1.0 - metallic);
   let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * (1.0 - schlick(f0, nl)) * (1.0 - schlick(f0, nv)) * nl / PI;
   let ca = m.spec.z * m.spec.z;
@@ -421,7 +427,80 @@ fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
   let nh = max(dot(n, h), 0.0);
   let a = m.spec.x * m.spec.x;
   let ca = m.spec.z * m.spec.z;
-  return w.coat * spec_pdf(nv, nh, ca) + w.spec * spec_pdf(nv, nh, a) + w.diff * nl / PI;
+  var sp = spec_pdf(nv, nh, a);
+  if (m.extra.w != 0.0) {
+    let fr = aniso_frame(n);
+    let ax = aniso_alpha(a, m.extra.w);
+    let vl = transpose(fr) * v;
+    let hl = transpose(fr) * h;
+    sp = aniso_g1(vl, ax) * aniso_d(hl, ax) / (4.0 * max(vl.z, 1e-4));
+  }
+  return w.coat * spec_pdf(nv, nh, ca) + w.spec * sp + w.diff * nl / PI;
+}
+
+// ── Subsurface random walk ──
+// Inside the object, light travels an exponential distance (mean = the
+// material's radius) between isotropic scatters, each tinted by the base
+// color, until it reaches the surface again. Returns the exit point (w = 1)
+// and leaves its outward normal in `exit_n`; w = 0 when it never leaves.
+var<private> exit_n: vec3f;
+fn random_walk(start: vec3f, dir0: vec3f, m: Material) -> vec4f {
+  var p = start;
+  var d = dir0;
+  for (var k = 0; k < 48; k++) {
+    let dist = -log(max(1.0 - rnd(), 1e-6)) * m.emit.w;
+    let h = intersect(p, d, dist, false);
+    if (h.tri >= 0) {
+      let i = u32(h.tri);
+      let p0 = pos[3u * i].xyz;
+      var ng = normalize(cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
+      if (dot(ng, d) < 0.0) { ng = -ng; }
+      exit_n = ng;
+      return vec4f(p + d * h.t, 1.0);
+    }
+    p = p + d * dist;
+    // Uniform direction on the sphere.
+    let u = rnd2();
+    let z = 1.0 - 2.0 * u.x;
+    let r = sqrt(max(0.0, 1.0 - z * z));
+    d = vec3f(r * cos(2.0 * PI * u.y), r * sin(2.0 * PI * u.y), z);
+  }
+  return vec4f(0.0);
+}
+
+// ── Anisotropic GGX (brushed metal): roughness stretched along the tangent ──
+fn aniso_frame(n: vec3f) -> mat3x3f {
+  var t = shade_t - n * dot(n, shade_t);
+  if (dot(t, t) < 1e-8) { return basis(n); }
+  t = normalize(t);
+  return mat3x3f(t, cross(n, t), n);
+}
+fn aniso_alpha(a: f32, k: f32) -> vec2f {
+  return vec2f(max(a * (1.0 + k), 0.002), max(a * (1.0 - k), 0.002));
+}
+fn aniso_d(h: vec3f, ax: vec2f) -> f32 {
+  let q = h.x * h.x / (ax.x * ax.x) + h.y * h.y / (ax.y * ax.y) + h.z * h.z;
+  return 1.0 / (PI * ax.x * ax.y * q * q);
+}
+fn aniso_lambda(v: vec3f, ax: vec2f) -> f32 {
+  let z2 = max(v.z * v.z, 1e-8);
+  return 0.5 * (-1.0 + sqrt(1.0 + (ax.x * ax.x * v.x * v.x + ax.y * ax.y * v.y * v.y) / z2));
+}
+fn aniso_g1(v: vec3f, ax: vec2f) -> f32 { return 1.0 / (1.0 + aniso_lambda(v, ax)); }
+fn aniso_dg(fr: mat3x3f, v: vec3f, l: vec3f, h: vec3f, a: f32, k: f32) -> f32 {
+  let ax = aniso_alpha(a, k);
+  let vl = transpose(fr) * v;
+  let ll = transpose(fr) * l;
+  let hl = transpose(fr) * h;
+  return aniso_d(hl, ax) / (1.0 + aniso_lambda(vl, ax) + aniso_lambda(ll, ax));
+}
+fn sample_vndf2(v: vec3f, ax: vec2f, u: vec2f) -> vec3f {
+  let vs = normalize(vec3f(v.x * ax.x, v.y * ax.y, v.z));
+  let phi = 2.0 * PI * u.x;
+  let z = (1.0 - u.y) * (1.0 + vs.z) - vs.z;
+  let st = sqrt(clamp(1.0 - z * z, 0.0, 1.0));
+  let h = vec3f(st * cos(phi), st * sin(phi), z) + vs;
+  return normalize(vec3f(h.x * ax.x, h.y * ax.y, max(h.z, 1e-6)));
 }
 
 fn cosine_dir(n: vec3f, u: vec2f) -> vec3f {
@@ -588,6 +667,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   var ng = sf.ng;
   if (dot(d, ng) > 0.0) { n = -n; ng = -ng; }
   let nv = max(dot(n, -d), 1e-4);
+  shade_t = tris[u32(h.tri)].tangent.xyz;
   return sf.m.emit.xyz + sample_lights(sf.p + ng * EPS, n, -d, sf.m, lobe_probs(sf.m, nv), false);
 }
 
@@ -694,6 +774,7 @@ fn path(px: vec2f) -> Sample {
     }
     let sf = surface(ro, rd, h);
     var m = sf.m;
+    shade_t = tris[u32(h.tri)].tangent.xyz;
     // Partly transparent surfaces: pass straight through with 1 − opacity.
     if (m.extra.z < 0.999 && rnd() >= m.extra.z) {
       ro = sf.p + rd * EPS;
@@ -768,8 +849,23 @@ fn path(px: vec2f) -> Sample {
       let tb = basis(n);
       l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.z * m.spec.z, rnd2()));
     } else if (r < (w.coat + w.spec) / wr) {
-      let tb = basis(n);
-      l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.x * m.spec.x, rnd2()));
+      if (m.extra.w != 0.0) {
+        let fr = aniso_frame(n);
+        l = reflect(-v, fr * sample_vndf2(transpose(fr) * v, aniso_alpha(m.spec.x * m.spec.x, m.extra.w), rnd2()));
+      } else {
+        let tb = basis(n);
+        l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.x * m.spec.x, rnd2()));
+      }
+    } else if (m.emit.w > 0.0) {
+      // Subsurface: a random walk inside the object; the path leaves where it exits.
+      let walk = random_walk(sf.p - ng * EPS, cosine_dir(-n, rnd2()), m);
+      if (walk.w <= 0.0) { return s; }
+      tp *= m.base.xyz;
+      ro = walk.xyz;
+      rd = cosine_dir(exit_n, rnd2());
+      ro = ro + exit_n * EPS;
+      last_pdf = max(dot(exit_n, rd), 1e-4) / PI;
+      continue;
     } else {
       l = cosine_dir(n, rnd2());
     }

@@ -54,7 +54,10 @@ export const materialSchema = z.object({
     ior: [num(1,2.6),1.5], specular: [num(0,1),1],
     // Fabric sheen, an iridescent thin film (thickness in nm), glass dispersion
     // and water droplets beading on the surface.
-    sheen: [num(0,1),0], iridescence: [num(0,1200),0], dispersion: [num(0,1),0], droplets: [num(0,1),0] }).default({} as any),
+    sheen: [num(0,1),0], iridescence: [num(0,1200),0], dispersion: [num(0,1),0], droplets: [num(0,1),0],
+    // Brushed metal (highlight stretch along the UV direction) and subsurface
+    // scattering (how far light travels inside, in scene units; 0: opaque).
+    anisotropy: [num(-1,1),0], subsurface: [num(0,1000),0] }).default({} as any),
   maps: z.object(Object.fromEntries(['color','normal','roughness','metalness','emissive','ao'].map(k => [k,z.string().min(1).max(160).optional()]))).strict().default({}),
   doubleSided: z.boolean().default(true),
   // A live screen: this composition plays on the surface as its glow (its

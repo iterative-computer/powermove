@@ -58,7 +58,9 @@ export const MATERIAL_FIELDS: FieldSpec[] = [
   { key: 'sheen', label: 'Sheen', kind: 'num', step: 0.01, min: 0, max: 1 },
   { key: 'iridescence', label: 'Thin film', kind: 'num', step: 10, min: 0, max: 1200, unit: 'nm' },
   { key: 'dispersion', label: 'Dispersion', kind: 'num', step: 0.01, min: 0, max: 1 },
-  { key: 'droplets', label: 'Water droplets', kind: 'num', step: 0.01, min: 0, max: 1 }
+  { key: 'droplets', label: 'Water droplets', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'anisotropy', label: 'Brushed', kind: 'num', step: 0.01, min: -1, max: 1 },
+  { key: 'subsurface', label: 'Subsurface', kind: 'num', step: 0.01, min: 0 }
 ];
 
 export function lightFields(type: LightType): FieldSpec[] {

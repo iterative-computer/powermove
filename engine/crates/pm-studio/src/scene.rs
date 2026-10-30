@@ -30,11 +30,15 @@ pub struct Material {
     pub dispersion: f32,
     /// Water droplets on the surface (0–1).
     pub droplets: f32,
+    /// Brushed-metal stretch of the highlight along the tangent (-1–1).
+    pub anisotropy: f32,
+    /// Subsurface mean free path in scene units (0: opaque).
+    pub subsurface: f32,
 }
 
 impl Material {
     pub fn dielectric(base: Vec3, roughness: f32) -> Self {
-        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false, sheen: 0.0, film_nm: 0.0, dispersion: 0.0, droplets: 0.0 }
+        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false, sheen: 0.0, film_nm: 0.0, dispersion: 0.0, droplets: 0.0, anisotropy: 0.0, subsurface: 0.0 }
     }
     pub fn metal(base: Vec3, roughness: f32) -> Self {
         Material { metallic: 1.0, ..Self::dielectric(base, roughness) }
@@ -194,7 +198,7 @@ impl Scene {
                     n: [m.normals[a].to4(0.0), m.normals[b].to4(0.0), m.normals[c].to4(0.0)],
                     uv01: [m.uvs[a][0], m.uvs[a][1], m.uvs[b][0], m.uvs[b][1]],
                     uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, object as f32],
-                    tangent: [0.0; 4],
+                    tangent: tangent([m.positions[a], m.positions[b], m.positions[c]], [m.uvs[a], m.uvs[b], m.uvs[c]]),
                 });
             }
         }
@@ -208,8 +212,8 @@ impl Scene {
             .map(|m| GpuMaterial {
                 base: m.base.to4(m.metallic),
                 spec: [m.roughness.max(0.002), m.coat, m.coat_roughness.max(0.002), m.transmission],
-                emit: m.emission.to4(0.0),
-                extra: [m.ior, m.specular, 1.0, 0.0],
+                emit: m.emission.to4(m.subsurface),
+                extra: [m.ior, m.specular, 1.0, m.anisotropy],
                 // The display's composition is texture layer 0.
                 maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
                 layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
@@ -226,6 +230,22 @@ impl Scene {
     pub fn triangle_count(&self) -> usize {
         self.objects.iter().map(|o| o.mesh.indices.len()).sum()
     }
+}
+
+/// A triangle's tangent (the direction of increasing u) and handedness, from its UVs.
+fn tangent(p: [Vec3; 3], uv: [[f32; 2]; 3]) -> [f32; 4] {
+    let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
+    let (d1, d2) = ([uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]], [uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]]);
+    let r = d1[0] * d2[1] - d2[0] * d1[1];
+    if r.abs() < 1e-12 {
+        return [0.0; 4];
+    }
+    let t = ((e1 * d2[1]) - (e2 * d1[1])) / r;
+    let b = ((e2 * d1[0]) - (e1 * d2[0])) / r;
+    let n = e1.cross(e2);
+    let handed = if n.cross(t).dot(b) < 0.0 { -1.0 } else { 1.0 };
+    let t = t.normalize();
+    [t.x, t.y, t.z, handed]
 }
 
 /// The finish of the tablet's aluminium.
@@ -319,11 +339,13 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
             materials.push(Material { film_nm: 520.0, ..Material::metal(srgb_hex("#C9CCD2"), 0.08) }); // 7 thin film
             materials.push(Material { dispersion: 1.0, ..Material::glass(v3(1.0, 1.0, 1.0), 0.0) }); // 8 dispersive
             materials.push(Material::glass(v3(0.92, 0.97, 1.0), 0.0)); // 9 glass
-            let objects = (0..4)
-                .map(|i| Object { mesh: mesh::sphere(v3(-120.0 + 80.0 * i as f32, 34.0, 0.0), 34.0, 96, 192), material: 6 + i })
+            materials.push(Material { anisotropy: 0.85, ..Material::metal(srgb_hex("#C4C7CC"), 0.3) }); // 10 brushed
+            materials.push(Material { subsurface: 6.0, ..Material::dielectric(srgb_hex("#F2D9B8"), 0.45) }); // 11 wax
+            let objects = (0..6)
+                .map(|i| Object { mesh: mesh::sphere(v3(-200.0 + 80.0 * i as f32, 34.0, 0.0), 34.0, 96, 192), material: 6 + i })
                 .collect();
             let target = v3(0.0, 34.0, 0.0);
-            (objects, Camera::lens(v3(0.0, 120.0, 420.0), target, 60.0, 0.0), target)
+            (objects, Camera::lens(v3(0.0, 130.0, 560.0), target, 60.0, 0.0), target)
         }
         // The water shot: droplets beading on the display glass.
         "wet" => {
