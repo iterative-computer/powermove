@@ -2,7 +2,7 @@
 //!
 //!   studio-spike --out DIR [--scene hero|edge|macro|back|chrome|all]
 //!                [--finish space-gray|starlight|blue|purple]
-//!                [--size 1920x1080] [--final-spp 256] [--frames 0] [--no-caustics]
+//!                [--size 1920x1080] [--final-spp 256] [--frames 0] [--no-caustics] [--no-rt]
 //!
 //! Writes `<scene>-live.png`, `<scene>-refine.png`, `<scene>-final.png`
 //! (and `<scene>-final-oidn.png` when built with `--features oidn`),
@@ -40,7 +40,7 @@ fn main() {
     let (sw, sh) = (1024u32, 1488u32);
     r.set_screen(&scene::screen_wallpaper(sw, sh, 0.0), sw, sh);
     live_r.set_screen(&scene::screen_wallpaper(sw, sh, 0.0), sw, sh);
-    eprintln!("adapter: {} · {}×{}", r.adapter, w, h);
+    eprintln!("adapter: {} · {}×{} · hardware ray tracing {}", r.adapter, w, h, if r.has_hardware_rt() && !args.iter().any(|a| a == "--no-rt") { "on" } else { "off" });
     let mut report = Vec::new();
 
     for name in &scenes {
@@ -52,6 +52,10 @@ fn main() {
         live_r.set_scene(&s, &prepared);
         if args.iter().any(|a| a == "--no-caustics") {
             r.caustics = false;
+        }
+        if args.iter().any(|a| a == "--no-rt") {
+            r.hardware_rt = false;
+            live_r.hardware_rt = false;
         }
 
         // Warm up (pipeline creation, first dispatch), then Live: half

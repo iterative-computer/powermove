@@ -30,6 +30,41 @@ const GRID_CELLS: u64 = 1 << 19;
 /// Photons traced per sample batch when caustics are on.
 const PHOTONS_PER_PASS: u32 = 1 << 18;
 
+/// Hardware ray tracing: the shared tracer with its `intersect` replaced by a
+/// Metal ray query against an acceleration structure built from the same
+/// triangles (one instance, so the primitive index is the triangle index).
+const RT_WGSL: &str = r#"
+@group(1) @binding(0) var tlas: acceleration_structure;
+
+fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
+  var h = Hit(tmax, -1, vec2f(0.0), 0u);
+  if (arrayLength(&pos) < 3u || P.opts.z == 0u) { return h; }
+  var rq: ray_query;
+  var flags = RAY_FLAG_FORCE_OPAQUE;
+  if (any) { flags |= RAY_FLAG_TERMINATE_ON_FIRST_HIT; }
+  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, EPS, tmax, ro, rd));
+  rayQueryProceed(&rq);
+  let x = rayQueryGetCommittedIntersection(&rq);
+  if (x.kind != RAY_QUERY_INTERSECTION_TRIANGLE) { return h; }
+  return Hit(x.t, i32(x.primitive_index + x.instance_custom_data), x.barycentrics, x.instance_index);
+}
+"#;
+
+fn rt_source() -> String {
+    let base = include_str!("shaders/trace.wgsl").replacen("fn intersect(ro: vec3f", "fn intersect_bvh(ro: vec3f", 1);
+    format!("enable wgpu_ray_query;\n{base}\n{RT_WGSL}")
+}
+
+/// Pipelines and acceleration structures for hardware ray tracing.
+struct Rt {
+    layout: wgpu::BindGroupLayout,
+    trace: wgpu::ComputePipeline,
+    photons: wgpu::ComputePipeline,
+    group: Option<wgpu::BindGroup>,
+    tlas: Option<wgpu::Tlas>,
+    blas: Option<wgpu::Blas>,
+}
+
 /// Guide images for the Final denoiser, traced with the same camera: first-hit
 /// albedo and normal per pixel, averaged over 8 jittered rays. Appended to
 /// trace.wgsl (the app never uses it) and bound as group 1.
@@ -118,6 +153,10 @@ pub struct Renderer {
     pub live: bool,
     /// Trace photons for caustics (glass or polished metal in the scene; not Live).
     pub caustics: bool,
+    /// Use hardware ray tracing when the GPU has it (Apple M3 and later
+    /// accelerate it; M1/M2 run Metal's ray queries in software).
+    pub hardware_rt: bool,
+    rt: Option<Rt>,
     photons_emitted: f32,
 }
 
@@ -148,16 +187,29 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
-        let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size,
-            max_buffer_size: adapter.limits().max_buffer_size,
+        let rt_ok = adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) && std::env::var_os("STUDIO_NO_RT").is_none();
+        let have = adapter.limits();
+        let mut limits = wgpu::Limits {
+            max_storage_buffer_binding_size: have.max_storage_buffer_binding_size,
+            max_buffer_size: have.max_buffer_size,
             max_storage_buffers_per_shader_stage: 12,
-            max_texture_array_layers: adapter.limits().max_texture_array_layers,
+            max_texture_array_layers: have.max_texture_array_layers,
             ..wgpu::Limits::default()
         };
+        if rt_ok {
+            limits.max_blas_primitive_count = have.max_blas_primitive_count;
+            limits.max_blas_geometry_count = have.max_blas_geometry_count;
+            limits.max_tlas_instance_count = have.max_tlas_instance_count;
+            limits.max_acceleration_structures_per_shader_stage = have.max_acceleration_structures_per_shader_stage.max(1);
+            limits.max_buffers_and_acceleration_structures_per_shader_stage = have.max_buffers_and_acceleration_structures_per_shader_stage;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("pm-studio"),
             required_limits: limits,
+            required_features: if rt_ok { wgpu::Features::EXPERIMENTAL_RAY_QUERY } else { wgpu::Features::empty() },
+            // SAFETY: ray queries are wgpu's experimental feature; Studio only
+            // traces opaque triangles through one instance, the tested path.
+            experimental_features: if rt_ok { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
@@ -208,6 +260,30 @@ impl Renderer {
         let atrous = pipeline(&post_src, &post_layout, "atrous");
         let pack = pipeline(&post_src, &post_layout, "pack");
         let photons = pipeline(&trace_src, &trace_layout, "photons");
+        let rt = rt_ok.then(|| {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("studio rt"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                    count: None,
+                }],
+            });
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("trace rt"), source: wgpu::ShaderSource::Wgsl(rt_source().into()) });
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("trace rt"), bind_group_layouts: &[Some(&trace_layout), Some(&layout)], immediate_size: 0 });
+            let make = |entry: &str| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pl),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            };
+            Rt { trace: make("main"), photons: make("photons"), layout, group: None, tlas: None, blas: None }
+        });
         let aov_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("studio aov"), entries: &[storage(0, false)] });
         let aov_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("aov"),
@@ -284,6 +360,8 @@ impl Renderer {
             frame: 0,
             live: false,
             caustics: false,
+            hardware_rt: true,
+            rt,
             photons_emitted: 0.0,
         };
         Ok(r)
@@ -311,9 +389,10 @@ impl Renderer {
 
     /// Upload a scene (geometry, materials, lights, camera). Resets accumulation.
     pub fn set_scene(&mut self, scene: &Scene, prepared: &Prepared) {
+        let extra = if self.rt.is_some() { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let init = |label: &str, data: &[u8]| {
             let data: Vec<u8> = if data.is_empty() { vec![0u8; 64] } else { data.to_vec() };
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE })
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &data, usage: wgpu::BufferUsages::STORAGE | extra })
         };
         self.scene_buffers = vec![
             init("tris", bytemuck::cast_slice(&prepared.tris)),
@@ -324,6 +403,7 @@ impl Renderer {
         ];
         self.light_count = prepared.lights.len() as u32;
         self.trace_group = None;
+        self.build_rt(prepared.positions.len() as u32);
         // Caustics only where something can focus light: glass or polished metal.
         self.caustics = prepared.materials.iter().any(|m| m.spec[3] * (1.0 - m.base[3]) > 0.5 || (m.base[3] > 0.5 && m.spec[0] < 0.25));
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -368,6 +448,61 @@ impl Renderer {
         // Product scenes show their backdrop; the app's layers leave the void transparent.
         self.backdrop = scene.backdrop.to4(1.0);
         self.samples = 0;
+    }
+
+    /// Whether the GPU and wgpu offer ray queries.
+    pub fn has_hardware_rt(&self) -> bool {
+        self.rt.is_some()
+    }
+
+    /// Whether traces use hardware ray tracing (the GPU has it, it is on and
+    /// the scene has geometry).
+    pub fn uses_hardware_rt(&self) -> bool {
+        self.hardware_rt && self.rt.as_ref().is_some_and(|rt| rt.group.is_some())
+    }
+
+    /// The acceleration structures over the scene's triangles (corners in
+    /// `scene_buffers[4]`, 16 bytes apart).
+    fn build_rt(&mut self, vertices: u32) {
+        let Some(rt) = self.rt.as_mut() else { return };
+        rt.group = None;
+        rt.tlas = None;
+        rt.blas = None;
+        if vertices < 3 {
+            return;
+        }
+        let size = wgpu::BlasTriangleGeometrySizeDescriptor { vertex_format: wgpu::VertexFormat::Float32x3, vertex_count: vertices, index_format: None, index_count: None, flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE };
+        let blas = self.device.create_blas(
+            &wgpu::CreateBlasDescriptor { label: Some("studio blas"), flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build },
+            wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![size.clone()] },
+        );
+        let mut tlas = self.device.create_tlas(&wgpu::CreateTlasDescriptor { label: Some("studio tlas"), max_instances: 1, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
+        tlas[0] = Some(wgpu::TlasInstance::new(&blas, [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], 0, 0xff));
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.build_acceleration_structures(
+            std::iter::once(&wgpu::BlasBuildEntry {
+                blas: &blas,
+                geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
+                    size: &size,
+                    vertex_buffer: &self.scene_buffers[4],
+                    first_vertex: 0,
+                    vertex_stride: 16,
+                    index_buffer: None,
+                    first_index: None,
+                    transform_buffer: None,
+                    transform_buffer_offset: None,
+                }]),
+            }),
+            std::iter::once(&tlas),
+        );
+        self.queue.submit([enc.finish()]);
+        rt.group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("studio rt"),
+            layout: &rt.layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: tlas.as_binding() }],
+        }));
+        rt.tlas = Some(tlas);
+        rt.blas = Some(blas);
     }
 
     fn trace_group(&mut self) -> &wgpu::BindGroup {
@@ -433,7 +568,13 @@ impl Renderer {
                 self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
                 {
                     let mut pass = enc.begin_compute_pass(&Default::default());
-                    pass.set_pipeline(&self.photons);
+                    match (self.uses_hardware_rt(), self.rt.as_ref()) {
+                        (true, Some(rt)) => {
+                            pass.set_pipeline(&rt.photons);
+                            pass.set_bind_group(1, rt.group.as_ref(), &[]);
+                        }
+                        _ => pass.set_pipeline(&self.photons),
+                    }
                     pass.set_bind_group(0, &group, &[]);
                     pass.dispatch_workgroups(PHOTONS_PER_PASS.div_ceil(64), 1, 1);
                 }
@@ -445,7 +586,13 @@ impl Renderer {
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.trace);
+                match (self.uses_hardware_rt(), self.rt.as_ref()) {
+                    (true, Some(rt)) => {
+                        pass.set_pipeline(&rt.trace);
+                        pass.set_bind_group(1, rt.group.as_ref(), &[]);
+                    }
+                    _ => pass.set_pipeline(&self.trace),
+                }
                 pass.set_bind_group(0, &group, &[]);
                 pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             }

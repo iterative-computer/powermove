@@ -38,6 +38,26 @@ cargo run --release -p pm-studio --bin studio-spike -- --out /tmp/studio --scene
 cargo run --release -p pm-studio --bin studio-spike -- --out /tmp/studio --scene edge --frames 96 --frame-spp 48
 ```
 
+### Hardware ray tracing
+
+When the GPU offers ray queries (wgpu's `EXPERIMENTAL_RAY_QUERY`, on Metal
+for Apple silicon), the tracer's `intersect` becomes a ray query against a
+Metal acceleration structure built from the same triangles; everything else
+is the shared WGSL. `--no-rt` (or `STUDIO_NO_RT=1`) uses the software BVH.
+
+M5, 1920×1080, 2026-10-30 (same build, same frames; images match within
+noise):
+
+| Scene | Triangles | Live: hardware / software | Final 256 spp: hardware / software |
+|---|---|---|---|
+| hero | 4,196 | 4.1 / 5.9 ms | 3.6 / 7.3 s |
+| chrome | 77,228 | 5.6 / 15.4 ms | 9.0 / 29.1 s |
+| materials | 221,184 | 5.2 / 13.3 ms | 7.1 / 20.3 s |
+| caustics | 110,592 | 4.9 / 11.5 ms | 5.5 / 16.8 s |
+
+The app runs on WebGPU, which has no ray queries, so it keeps the software
+BVH until browsers expose them.
+
 ### Final denoising (Open Image Denoise)
 
 With the `oidn` feature, `Renderer::finish_with` runs Intel Open Image
@@ -84,9 +104,8 @@ measured: a base M1 Air, and a side-by-side against a reference renderer.
 
 ## Known gaps (next steps)
 
-- Speed: hardware ray tracing (Metal, M3 and later), a compressed wide BVH,
-  temporal reprojection for Live, and a GPU upscaler; Final at 256 samples
-  should drop well under 2 s per 1080p frame.
+- Speed: a compressed wide BVH for the software path and a GPU upscaler;
+  Final at 256 samples should drop well under 2 s per 1080p frame.
 - Caustics come from a photon grid (`photons` in `trace.wgsl`); very sharp
   focus lines (a lens's hot spot) are softened to the grid's cell size.
 - No multiple-scattering energy compensation, specular anti-aliasing,
