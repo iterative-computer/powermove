@@ -26,6 +26,7 @@ import { cornerRadii, isUniformCircular, roundedRectPath } from './corner-geomet
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
+import { CAD_FILE, cadToGlb } from '../../core/scene3d/import-cad';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
@@ -595,7 +596,7 @@ function assetKind(file: any) {
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = mediaExtension(file.name);
   if(ext==='cube')return 'lut';
-  if (['obj','glb','gltf'].includes(ext) || ['model/obj','text/plain+obj','model/gltf-binary','model/gltf+json'].includes(mime)) return 'model';
+  if (['obj','glb','gltf','step','stp','iges','igs','brep'].includes(ext) || ['model/obj','text/plain+obj','model/gltf-binary','model/gltf+json','model/step'].includes(mime)) return 'model';
   if (isImageExtension(ext)) return 'image';
   if (isVideoExtension(ext)) return 'video';
   return null;
@@ -692,6 +693,12 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta, onStage, assertCurrent });
   if (kind === 'model') {
     if(blob.size>512*1024*1024)throw new Error('3D models must be smaller than 512 MB');
+    // CAD (STEP, IGES, BREP) is stored as the GLB OpenCascade tessellates it into.
+    if(CAD_FILE.test(name)) {
+      onStage?.('Tessellating CAD model');
+      const glb=await cadToGlb(new File([blob],name));
+      return {id,name,kind,format:'glb',blob:glb,...await loadGltf(glb),size:glb.size};
+    }
     if(/\.(glb|gltf)$/i.test(name) || /^model\/gltf/.test(blob.type)) {
       const loaded=await loadGltf(blob);
       return {id,name,kind,format:/\.gltf$/i.test(name)?'gltf':'glb',blob,...loaded,size:blob.size};

@@ -43,6 +43,12 @@ extraResources:
     to: encoder/ffmpeg
   - from: node_modules/ffmpeg-static/LICENSE
     to: encoder/LICENSE
+  # CAD import (STEP/IGES): OpenCascade via occt-import-js, LGPL-2.1. Its
+  # WebAssembly ships as a separate, replaceable file in the renderer assets.
+  - from: node_modules/occt-import-js/dist/license.occt-import-js.txt
+    to: cad/LICENSE.occt-import-js.txt
+  - from: node_modules/occt-import-js/dist/license.occt.txt
+    to: cad/LICENSE.occt.txt
   # GPU tone mapping for HDR playback proxies (src/main/media-proxy.ts).
   - from: node_modules/@powermove/macos-haptics/build/Release/powermove-hdr-proxy
     to: encoder/powermove-hdr-proxy

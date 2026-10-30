@@ -37,7 +37,12 @@ Machines without WebGPU, and orthographic cameras, use the classic renderer.
   the emission strength sets its brightness.
 - **Drop to floor** (model inspector) rests a model on the floor.
 
-## Large models
+## Large models and CAD
+
+**STEP, IGES and BREP** files import directly: OpenCascade tessellates them
+in a worker (fine enough for close-ups) into a GLB that keeps the
+assembly's parts, names and colors, so each part can take its own finish.
+A typical 18-part assembly takes under half a second.
 
 CAD assemblies import as GLB (up to 512 MB, 10 million triangles in up to
 65,536 parts) or OBJ (up to 10 million triangles). Studio prepares each
@@ -126,6 +131,11 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
   own pixels, so masks, effects and opacity stay per layer.
 - Live screens render their composition at each frame's time and update
   only their texture.
+- CAD import uses [occt-import-js](https://github.com/kovacsv/occt-import-js)
+  (OpenCascade compiled to WebAssembly, LGPL-2.1; licenses ship in the app's
+  `Resources/cad`). It loads only when a CAD file is imported and runs in a
+  worker that may compile WebAssembly and evaluate its own bindings but has
+  no network access (`src/main/security-policy.ts`).
 - Caustics (light focused through glass or off polished metal onto the
   floor or a matte surface) come from photons traced from the lights before
   each batch of samples. Refine and Final only, and only in scenes with glass

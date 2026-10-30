@@ -82,7 +82,7 @@ import { validatedArtifactPath } from './codex/artifacts';
 import { registerShellIpc } from './shell';
 import { registerRemoteMediaIpc } from './remote-media';
 import { isVisualReplyUrl, VISUAL_REPLY_CSP } from '../shared/visual-reply';
-import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSandboxCsp, sandboxFrameNavigationAllowed, sandboxHostOwner, sandboxProcessesToKill, type ContentsFrames } from './security-policy';
+import { CAD_WORKER_CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, isCadWorkerScript, extensionSandboxCsp, sandboxFrameNavigationAllowed, sandboxHostOwner, sandboxProcessesToKill, type ContentsFrames } from './security-policy';
 import { SANDBOX_DOCUMENT, isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox-origin';
 import { EXTENSION_ID } from '../shared/extensions';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
@@ -325,6 +325,7 @@ function registerAppProtocol(): void {
       const headers = responseHeaders(contentType);
       if (relativePath === SANDBOX_PATH) headers['Content-Security-Policy'] = SANDBOX_CSP;
       if (relativePath === 'visual-reply.html') headers['Content-Security-Policy'] = VISUAL_REPLY_CSP;
+      if (isCadWorkerScript(relativePath)) headers['Content-Security-Policy'] = CAD_WORKER_CONTENT_SECURITY_POLICY;
       if (relativePath.startsWith('host/') && relativePath.endsWith('.js')) headers['Access-Control-Allow-Origin'] = '*';
       if (/\.(?:woff2?|ttf|otf)$/i.test(relativePath)) headers['Access-Control-Allow-Origin'] = '*';
       return new Response(contents, { headers });
