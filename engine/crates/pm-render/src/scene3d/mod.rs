@@ -28,6 +28,7 @@ pub mod legacy;
 pub mod lights;
 pub mod model;
 pub(crate) mod metadata;
+pub mod studio;
 pub mod textures;
 
 use std::sync::Arc;

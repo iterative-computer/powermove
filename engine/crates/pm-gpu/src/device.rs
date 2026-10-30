@@ -70,6 +70,11 @@ impl Gpu {
         let adapter_limits = adapter.limits();
         let limits = wgpu::Limits {
             max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d.min(16384),
+            // Studio's path tracer (pm-studio) binds 10 storage buffers per
+            // stage and its scene buffers can be large.
+            max_storage_buffers_per_shader_stage: adapter_limits.max_storage_buffers_per_shader_stage.min(12),
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
             max_color_attachment_bytes_per_sample: adapter_limits
                 .max_color_attachment_bytes_per_sample,
             ..wgpu::Limits::default()
