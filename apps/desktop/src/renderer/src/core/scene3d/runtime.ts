@@ -102,7 +102,8 @@ export class SceneRuntime {
       if (asset?.object3d) {
         const object = cloneSkinned(asset.object3d);
         // Clones own geometry/material lifetime, never the asset store's resources.
-        object.traverse((c:any)=> { if (c.geometry) c.geometry=c.geometry.clone();
+        // Splat clones already share their data and own their sort order.
+        object.traverse((c:any)=> { if (c.userData.splat) return; if (c.geometry) c.geometry=c.geometry.clone();
           if (c.material) c.material=Array.isArray(c.material) ? c.material.map((m:any)=>m.clone()) : c.material.clone(); });
         if (asset.animations?.length) {
           const mixer = new THREE.AnimationMixer(object);
@@ -140,7 +141,8 @@ export class SceneRuntime {
     }));
     let importedVertices=0;
     for(const node of data.objects)if('assetId' in node.source)importedVertices+=assets(node.source.assetId)?.vertices || 0;
-    if(importedVertices>2_000_000)throw new Error('Imported scene exceeds two million vertices; simplify or split the models');
+    // CAD assemblies and splat captures run to tens of millions; Studio prepares large models in the background.
+    if(importedVertices>30_000_000)throw new Error('Imported scene exceeds 30 million vertices; simplify or split the models');
     for (const node of data.objects) {
       const source = signature(node.source)+':'+node.useSourceMaterials,asset='assetId' in node.source ? assets(node.source.assetId) : null;
       let object = this.objects.get(node.id);
@@ -158,6 +160,7 @@ export class SceneRuntime {
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
         c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
+        if (c.userData.splat) { c.castShadow=c.receiveShadow=false; return; }
         if (c.userData.missing || node.useSourceMaterials) return;
         if (!(c.material instanceof THREE.MeshPhysicalMaterial) || Array.isArray(c.material)) {
           for (const material of Array.isArray(c.material)?c.material:[c.material]) material.dispose();

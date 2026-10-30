@@ -54,6 +54,21 @@ Exports and agent frames wait for the model instead (about 1.8 s the first
 time for that assembly). A model too large for one GPU buffer (96 bytes a
 triangle) stays on the classic renderer.
 
+## Gaussian splats
+
+Captured scenes and products (3D Gaussian Splatting `.ply`, or `.splat`)
+import like any model and play back in real time: each splat is drawn as a
+soft ellipse, sorted far to near whenever the view changes (about 5 ms for
+a million splats). Plain colored point clouds (`.ply` with red/green/blue)
+become small round splats. Captures are y-down by convention and arrive
+turned upright, framed on their dense core (stray far-away splats are
+ignored for framing).
+
+Splats are not path traced: a splat layer is rasterized and composited with
+Studio's layers by layer order. Keep a splat layer **above** the product
+layers it surrounds; it is depth-tested against their geometry, so the
+product hides the splats behind it and the splats in front cover it.
+
 ## Light by pointing
 
 **Alt+Shift+click** a model in the viewer to put a softbox's highlight

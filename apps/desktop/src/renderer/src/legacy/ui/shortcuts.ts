@@ -183,7 +183,7 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
       from: PM.snapF(at, PM.proj.fps),
       duration: Math.max(1 / PM.proj.fps, PM.proj.dur - at),
       content: definition === LAYER3D_DEFINITIONS.object
-        ? {definition,data:{object:{source:{assetId:id},material:createObject('model').material,useSourceMaterials:a.format==='glb'||a.format==='gltf',castShadow:true,receiveShadow:true}}}
+        ? {definition,data:{object:{source:{assetId:id},material:createObject('model').material,useSourceMaterials:a.format==='glb'||a.format==='gltf'||a.format==='splat',castShadow:true,receiveShadow:true}}}
         : { definition, data: { assetId: id, objects: [{ id: 'model', assetId: id }] } },
       select: true,
     };

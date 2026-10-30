@@ -2,8 +2,8 @@ import type { EditResult, PowermoveAPI, MenuContribution } from 'powermove';
 import { PRIMITIVES, LIGHT_TYPES } from './scene-model';
 import type { Primitive, LightType } from './scene-types';
 export const MODEL_DEFINITION_ID='powermove.3d.object';
-export const MODEL_ACCEPT='.obj,.mtl,.glb,.gltf,.step,.stp,.iges,.igs,.brep,.png,.jpg,.jpeg,.webp';
-const MODEL_FILE=/\.(obj|glb|gltf|step|stp|iges|igs|brep)$/i;
+export const MODEL_ACCEPT='.obj,.mtl,.glb,.gltf,.step,.stp,.iges,.igs,.brep,.ply,.splat,.png,.jpg,.jpeg,.webp';
+const MODEL_FILE=/\.(obj|glb|gltf|step|stp|iges|igs|brep|ply|splat)$/i;
 export const is3DLayer=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition);
 const run=(api:PowermoveAPI,args:any,label:string)=>{
   const result=api.scene3d.edit(args,{label,origin:'command'});
@@ -26,7 +26,7 @@ export async function importModelIntoScene(api:PowermoveAPI,supplied?:unknown,_l
   try{
     const files=supplied instanceof File?[supplied]:Array.isArray(supplied)&&supplied.every(f=>f instanceof File)?supplied:await api.assets.pick({accept:MODEL_ACCEPT,multiple:true});
     if(!files.length)return {ok:false,message:'Import cancelled'};
-    const source=files.find(f=>MODEL_FILE.test(f.name));if(!source)throw new Error('Choose an OBJ, GLB, glTF, STEP or IGES model');
+    const source=files.find(f=>MODEL_FILE.test(f.name));if(!source)throw new Error('Choose an OBJ, GLB, glTF, STEP, IGES or Gaussian splat (PLY, .splat) model');
     const file=await api.scene3d.prepareImport(files),asset=await api.assets.import(file,{layerDefinition:MODEL_DEFINITION_ID});
     const object={source:{assetId:asset.id},name:source.name.replace(MODEL_FILE,''),useSourceMaterials:!/\.obj$/i.test(file.name)};
     // The first model in an empty composition arrives in a finished studio:

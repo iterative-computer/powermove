@@ -225,6 +225,8 @@ function schedule(PM: any): void {
  */
 export function studioLayer(PM: any, runtime: any, w: number, h: number, objectId: string, depthIds: Set<string>, bottom: boolean, camera: THREE.Camera, renderScreen?: (comp: string) => Uint8Array | null, time: number = PM.time): { canvas: HTMLCanvasElement; version: string } | null {
   if (!studioEnabled(PM)) return null;
+  // A splat layer is drawn by the splat rasterizer, composited by layer order.
+  if (hasSplats(runtime, objectId)) return null;
   const width = Math.max(2, Math.min(8192, Math.round(w))), height = Math.max(2, Math.min(8192, Math.round(h)));
   const cam = cameraOf(camera, width, height);
   const s = state(PM);
@@ -332,6 +334,19 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     return { canvas: live.present(`${objectId}:live`, index, bottom), version: `live:${viewKey}:${live.samples}` };
   }
   return { canvas: refine.present(`${objectId}:refine`, index, bottom), version: `refine:${viewKey}:${refine.samples}` };
+}
+
+const splatLayers = new WeakMap<object, { revision: unknown; ids: Set<string> }>();
+/** Whether the layer's object is a Gaussian splat capture (cached per scene revision). */
+function hasSplats(runtime: any, objectId: string): boolean {
+  let entry = splatLayers.get(runtime);
+  if (!entry || entry.revision !== runtime.revision) {
+    const ids = new Set<string>();
+    runtime.scene?.traverse((o: any) => { if (o.userData?.splat && o.userData.sceneId) ids.add(o.userData.sceneId); });
+    entry = { revision: runtime.revision, ids };
+    splatLayers.set(runtime, entry);
+  }
+  return entry.ids.has(objectId);
 }
 
 /** Forget scenes for compositions that no longer exist (memory). */

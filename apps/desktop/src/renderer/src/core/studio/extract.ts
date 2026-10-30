@@ -56,7 +56,8 @@ function meshesOf(scene: THREE.Scene, include: (id: string) => boolean): { mesh:
     if (!v) return;
     const mesh = o as THREE.Mesh;
     const id = o.userData?.sceneId;
-    if ((mesh as any).isMesh && !(mesh as any).isLine && id && include(id) && !o.userData?.missing) out.push({ mesh, id });
+    // Splats have their own rasterizer (scene3d/splats.ts); Studio traces surfaces.
+    if ((mesh as any).isMesh && !(mesh as any).isLine && id && include(id) && !o.userData?.missing && !o.userData?.splat) out.push({ mesh, id });
     for (const c of o.children) visit(c, v);
   };
   visit(scene, true);

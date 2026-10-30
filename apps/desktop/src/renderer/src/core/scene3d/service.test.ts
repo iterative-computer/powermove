@@ -165,8 +165,8 @@ describe('composition runtime reference observation', () => {
   it('keeps the last successful reference snapshot when synchronization rejects a replacement', () => {
     const PM = editor(1, { assetId: 'one' }); PM.assets.map.set('one', model(1));
     const runtime = compositionRuntime(PM), revision = runtime.revision, first = runtime.objects.get('model0');
-    const oversized = { ...model(2), vertices: 2_000_001 }; PM.assets.map.set('one', oversized);
-    expect(() => compositionRuntime(PM)).toThrow('two million vertices');
+    const oversized = { ...model(2), vertices: 30_000_001 }; PM.assets.map.set('one', oversized);
+    expect(() => compositionRuntime(PM)).toThrow('30 million vertices');
     expect(runtime.revision).toBe(revision); expect(runtime.objects.get('model0')).toBe(first);
     oversized.vertices = 24; compositionRuntime(PM);
     expect(runtime.revision).toBe(revision + 1); expect(runtime.objects.get('model0')).not.toBe(first);
