@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 // Softboxes (area lights) in the classic renderer need their lookup tables once.
 let rectAreaReady=false;
@@ -34,6 +35,11 @@ export function primitiveGeometry(source: SceneSource): THREE.BufferGeometry {
   const p = source.parameters || {},s=p.segments || 48;
   switch (source.primitive) {
     case 'box': return new THREE.BoxGeometry(p.width || 1,p.height || 1,p.depth || 1);
+    // Devices and product shells: a box with rounded edges (radius ≤ half the thinnest side).
+    case 'roundedBox': {
+      const w=p.width || 1,h=p.height || 1,d=p.depth || 1;
+      return new RoundedBoxGeometry(w,h,d,Math.min(16,p.segments ?? 6),Math.min(p.radius ?? .05,Math.min(w,h,d)/2-1e-4));
+    }
     case 'sphere': return new THREE.SphereGeometry(p.radius || .5,s,Math.max(3,Math.floor(s/2)));
     case 'plane': return new THREE.PlaneGeometry(p.width || 4,p.height || 4);
     case 'cone': return new THREE.ConeGeometry(p.radius || .5,p.height || 1,s);
@@ -165,6 +171,7 @@ export class SceneRuntime {
         material.sheen=m.sheen ?? 0;material.sheenColor.set('#FFFFFF');material.sheenRoughness=Math.max(.2,m.roughness);
         material.iridescence=(m.iridescence ?? 0)>0?1:0;material.iridescenceThicknessRange=[100,Math.max(100,m.iridescence ?? 0)];
         material.dispersion=(m.dispersion ?? 0)*5;material.userData.studioDispersion=m.dispersion ?? 0;material.userData.droplets=m.droplets ?? 0;
+        material.userData.screen=node.material.screen ?? null;
         const transparent=m.opacity<1,side=node.material.doubleSided?THREE.DoubleSide:THREE.FrontSide;
         if (transparent!==material.transparent || side!==material.side) material.needsUpdate=true;
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;

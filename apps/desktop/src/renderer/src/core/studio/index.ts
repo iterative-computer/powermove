@@ -26,7 +26,10 @@ type Job = {
   sceneKey: string;
   viewKey: string;
   scene: StudioScene;
-  maps: OffscreenCanvas[];
+  maps: (OffscreenCanvas | Uint8Array)[];
+  /** Texture layers that are live screens, and the frame they last showed. */
+  screens: { layer: number; comp: string }[];
+  screenKey: string;
   live: StudioTarget | null;
   refine: StudioTarget | null;
   final: StudioTarget | null;
@@ -167,6 +170,9 @@ function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3):
   };
 }
 
+/** What a live screen's picture depends on: the time and every project edit. */
+function screenKeyOf(PM: any, time: number): string { return `${time}:${PM.animVersion?.() ?? ''}`; }
+
 function key(parts: unknown[]): string { return parts.map(p => (Array.isArray(p) ? p.join(',') : String(p))).join('|'); }
 
 function schedule(PM: any): void {
@@ -197,7 +203,7 @@ function schedule(PM: any): void {
  * `objectId` is the layer's scene id; `depthIds` the objects sharing its
  * depth (one trace each); `bottom` whether the layer owns the backdrop.
  */
-export function studioLayer(PM: any, runtime: any, w: number, h: number, objectId: string, depthIds: Set<string>, bottom: boolean, camera: THREE.Camera): { canvas: HTMLCanvasElement; version: string } | null {
+export function studioLayer(PM: any, runtime: any, w: number, h: number, objectId: string, depthIds: Set<string>, bottom: boolean, camera: THREE.Camera, renderScreen?: (comp: string) => Uint8Array | null, time: number = PM.time): { canvas: HTMLCanvasElement; version: string } | null {
   if (!studioEnabled(PM)) return null;
   const width = Math.max(2, Math.min(8192, Math.round(w))), height = Math.max(2, Math.min(8192, Math.round(h)));
   const cam = cameraOf(camera, width, height);
@@ -211,11 +217,27 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   let job = s.jobs.get(setKey);
   if (!job || job.sceneKey !== sceneKey) {
     const scene = extractScene(runtime.scene, id => depthIds.has(id), { sky: new THREE.Color(), ground: new THREE.Color(), intensity: 0 });
-    const maps = scene.maps.map(m => mapCanvas(m.source, m.flipY));
+    const screens: { layer: number; comp: string }[] = [];
+    const maps = scene.maps.map((m, layer) => {
+      if ('screen' in m) { screens.push({ layer, comp: m.screen }); return renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4); }
+      return mapCanvas(m.source, m.flipY);
+    });
     const keepTargets = job;
-    job = { sceneKey, viewKey: '', scene, maps, live: keepTargets?.live ?? null, refine: keepTargets?.refine ?? null, final: keepTargets?.final ?? null, changedAt: performance.now(), refining: false };
+    job = { sceneKey, viewKey: '', scene, maps, screens, screenKey: screenKeyOf(PM, time), live: keepTargets?.live ?? null, refine: keepTargets?.refine ?? null, final: keepTargets?.final ?? null, changedAt: performance.now(), refining: false };
     for (const t of [job.live, job.refine, job.final]) if (t) t.setScene(scene, maps);
     s.jobs.set(setKey, job);
+  }
+  // Live screens follow time and edits to their compositions without
+  // rebuilding the 3D scene: only their texture layers are rewritten.
+  if (job.screens.length && job.screenKey !== screenKeyOf(PM, time)) {
+    job.screenKey = screenKeyOf(PM, time);
+    for (const { layer, comp } of job.screens) {
+      const pixels = renderScreen?.(comp);
+      if (!pixels) continue;
+      job.maps[layer] = pixels;
+      for (const t of [job.live, job.refine, job.final]) t?.writeMap(layer, pixels);
+    }
+    job.viewKey = '';
   }
   const view = viewOf(runtime, cam, job.scene.bounds);
   const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher]);

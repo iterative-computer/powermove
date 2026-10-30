@@ -222,7 +222,7 @@ describe('shared render graph, camera projection and picking',()=>{
     expect(((runtime.objects.get('model')!.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial).color.getHexString()).toBe('ff0000');runtime.dispose();
   });
   it('generates normals and UVs for every procedural primitive',()=>{
-    for(const primitive of ['box','sphere','plane','cylinder','cone','torus','capsule','icosahedron'] as const){const g=primitiveGeometry({primitive});expect(g.getAttribute('position').count).toBeGreaterThan(0);expect(g.getAttribute('normal').count).toBeGreaterThan(0);g.dispose();}
+    for(const primitive of ['box','roundedBox','sphere','plane','cylinder','cone','torus','capsule','icosahedron'] as const){const g=primitiveGeometry({primitive});expect(g.getAttribute('position').count).toBeGreaterThan(0);expect(g.getAttribute('normal').count).toBeGreaterThan(0);g.dispose();}
   });
   it('plays embedded model animations from their layer start and reuses geometry',()=>{
     const root=new THREE.Group(),part=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshStandardMaterial());part.name='Part';root.add(part);

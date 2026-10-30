@@ -29,7 +29,7 @@ const primitiveParams = z.object({
   detail: z.number().int().min(0).max(5).optional()
 }).strict();
 export const sourceSchema = z.union([
-  z.object({ primitive: z.enum(['box','sphere','plane','cylinder','cone','torus','capsule','icosahedron']), parameters: primitiveParams.optional() }).strict(),
+  z.object({ primitive: z.enum(['box','roundedBox','sphere','plane','cylinder','cone','torus','capsule','icosahedron']), parameters: primitiveParams.optional() }).strict(),
   z.object({ assetId: z.string().min(1).max(160) }).strict(),
   z.object({ mesh: z.object({
     positions: z.array(num()).min(9).max(300_000),
@@ -56,7 +56,10 @@ export const materialSchema = z.object({
     // and water droplets beading on the surface.
     sheen: [num(0,1),0], iridescence: [num(0,1200),0], dispersion: [num(0,1),0], droplets: [num(0,1),0] }).default({} as any),
   maps: z.object(Object.fromEntries(['color','normal','roughness','metalness','emissive','ao'].map(k => [k,z.string().min(1).max(160).optional()]))).strict().default({}),
-  doubleSided: z.boolean().default(true)
+  doubleSided: z.boolean().default(true),
+  // A live screen: this composition plays on the surface as its glow (its
+  // UVs span the composition), like a device's display.
+  screen: z.string().min(1).max(160).nullable().default(null)
 }).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
@@ -129,7 +132,7 @@ export function parseScene(raw: unknown): Scene3D {
     }
     if ('primitive' in object.source) {
       const source=object.source,s=source.parameters?.segments || 48;
-      vertices+=source.primitive==='box'?24:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
+      vertices+=source.primitive==='box'?24:source.primitive==='roundedBox'?6*(2*(source.parameters?.segments ?? 6)+1)**2:source.primitive==='plane'?4:source.primitive==='icosahedron'?60*4**(source.parameters?.detail ?? 2)
         :source.primitive==='sphere'||source.primitive==='torus'?(s+1)*(Math.max(8,Math.floor(s/2))+1):(s+1)*12;
     }
     if ('extrude' in object.source) vertices+=object.source.extrude.length*(object.source.bevel?60:12);

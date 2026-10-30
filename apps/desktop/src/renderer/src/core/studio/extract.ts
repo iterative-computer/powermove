@@ -10,7 +10,8 @@ import { buildBvh } from './bvh';
 
 export const MAP_SIZE = 1024;
 
-export type StudioMap = { source: TexImageSource; flipY: boolean };
+/** An image map, or a live screen: a composition rendered each frame. */
+export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
 
 export type StudioScene = {
   positions: Float32Array;   // 12 floats per triangle (3 × vec4), BVH order
@@ -82,7 +83,15 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     i = materialIndex.size;
     materialIndex.set(key, i);
     const color = m.color || new THREE.Color(1, 1, 1);
-    const emissive = (m.emissive || new THREE.Color(0, 0, 0)).clone().multiplyScalar(m.emissiveIntensity ?? 1);
+    const screen: string | null = m.userData?.screen ?? null;
+    // A screen glows with its composition: white emission scaled by the strength.
+    const emissive = screen ? new THREE.Color(1, 1, 1).multiplyScalar(Math.max(m.emissiveIntensity ?? 1, 0)) : (m.emissive || new THREE.Color(0, 0, 0)).clone().multiplyScalar(m.emissiveIntensity ?? 1);
+    let screenLayer = -1;
+    if (screen) {
+      const key = `screen:${screen}`;
+      screenLayer = mapIndex.get(key) ?? -1;
+      if (screenLayer < 0) { screenLayer = maps.length; maps.push({ screen }); mapIndex.set(key, screenLayer); }
+    }
     const basic = m.isMeshBasicMaterial;
     const metallic = basic ? 0 : m.metalness ?? 0;
     const roughness = basic ? 1 : m.roughness ?? 1;
@@ -94,7 +103,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       // A basic (unlit) material glows its own color.
       basic ? color.r : emissive.r, basic ? color.g : emissive.g, basic ? color.b : emissive.b, 0,
       m.ior ?? 1.5, m.specularIntensity ?? 1, opacity, 0,
-      basic ? -1 : layer(m.map), layer(basic ? m.map : m.emissiveMap), layer(m.roughnessMap || m.metalnessMap), layer(m.normalMap),
+      basic ? -1 : layer(m.map), screen ? screenLayer : layer(basic ? m.map : m.emissiveMap), layer(m.roughnessMap || m.metalnessMap), layer(m.normalMap),
       // Studio's material layers: sheen, thin film (nm), dispersion, droplets.
       m.sheen ?? 0, m.iridescence > 0 ? (m.iridescenceThicknessRange?.[1] ?? 400) : 0, m.userData?.studioDispersion ?? 0, m.userData?.droplets ?? 0,
     );

@@ -163,7 +163,7 @@ export class StudioTarget {
     this.mapTexture?.destroy?.();
   }
 
-  setScene(scene: StudioScene, maps: (HTMLCanvasElement | OffscreenCanvas)[]): void {
+  setScene(scene: StudioScene, maps: (HTMLCanvasElement | OffscreenCanvas | Uint8Array)[]): void {
     for (const b of this.sceneBuffers) b.destroy();
     const init = (label: string, data: ArrayBufferView | ArrayBuffer) => {
       const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -182,11 +182,19 @@ export class StudioTarget {
       label: 'studio maps', size: [MAP_SIZE, MAP_SIZE, layers], format: 'rgba8unorm',
       usage: T.TEXTURE_BINDING | T.COPY_DST | T.RENDER_ATTACHMENT,
     });
-    maps.forEach((source, layer) => {
-      device.queue.copyExternalImageToTexture({ source }, { texture: this.mapTexture, origin: [0, 0, layer] }, [MAP_SIZE, MAP_SIZE]);
-    });
+    maps.forEach((source, layer) => this.writeMap(layer, source));
     this.traceGroup = null;
     this.samples = 0;
+  }
+
+  /** Replace one texture layer (a live screen's new frame). */
+  writeMap(layer: number, source: HTMLCanvasElement | OffscreenCanvas | Uint8Array): void {
+    if (!this.mapTexture) return;
+    if (source instanceof Uint8Array) {
+      device.queue.writeTexture({ texture: this.mapTexture, origin: [0, 0, layer] }, source, { bytesPerRow: MAP_SIZE * 4, rowsPerImage: MAP_SIZE }, [MAP_SIZE, MAP_SIZE, 1]);
+    } else {
+      device.queue.copyExternalImageToTexture({ source }, { texture: this.mapTexture, origin: [0, 0, layer] }, [MAP_SIZE, MAP_SIZE]);
+    }
   }
 
   setView(view: StudioView): void {

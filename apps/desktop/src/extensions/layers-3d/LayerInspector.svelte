@@ -29,6 +29,7 @@
     {#if !object.useSourceMaterials}
       <Section {api} title="Material" />
       <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${finish.p.color}`} onclick={()=>studioEdit({operation:'apply_material',preset:finish.id},finish.label)}></button>{/each}</div>
+      <Row {api} label="Screen"><SelectField {api} get={()=>object.material.screen ?? ''} options={[{v:'',label:'None'},...Object.entries<any>((api.project.get() as any).comps || {}).map(([id,comp])=>({v:id,label:comp.name || 'Composition'}))]} edit={{mode:'set',label:'Screen',set:(v:unknown)=>edit('update_object',{material:{screen:v?String(v):null,...(v?{p:{emissiveIntensity:object.material.p.emissiveIntensity?.v || 1}}:{})}},'Screen')}} label="Screen" /></Row>
       {#each MATERIAL_FIELDS.filter(field=>!['emissive','emissiveIntensity'].includes(field.key) && value(object.material,field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
     {#if !object.useSourceMaterials}

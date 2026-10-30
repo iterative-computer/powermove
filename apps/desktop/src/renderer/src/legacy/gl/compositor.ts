@@ -24,6 +24,10 @@ import { sourceTime } from '../core/retiming';
 import { layer3DRole } from '../../core/scene3d/layers';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
 import { studioLayer, studioPreviewKey, studioUnsettled } from '../../core/studio';
+import { MAP_SIZE as STUDIO_MAP_SIZE } from '../../core/studio/extract';
+
+/* Live screens being rendered right now (a screen showing its own 3D layer would never end). */
+const renderingScreens = new Set<string>();
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -1264,7 +1268,29 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
         const bottom=(PM._renderComposition3DPass || compositionOrderedLayers(PM,(PM._renderComposition3D || PM.proj).layers.filter((l:any)=>l.type!=='group'),T)).filter((l:any)=>depthIds.has(l.id)).at(-1)?.id;
         // Studio traces the depth set once and hands this layer its pixels;
         // the classic renderer covers machines without WebGPU.
-        const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
+        // A live screen: render its composition at this frame's time, read back
+        // for Studio's texture array (bottom row first, as three's UVs expect).
+        const renderScreen=(compId:string):Uint8Array|null=>{
+          const sub=PM.proj.comps?.[compId];
+          if(!sub || !Array.isArray(sub.layers) || renderingScreens.has(compId))return null;
+          const target=boundFbo,size=STUDIO_MAP_SIZE;
+          renderingScreens.add(compId);pmScopePush(sub);
+          try{
+            const inner=GL.renderProject(sub,T,size,size,{transparent:true,mblur:false});
+            bind(inner);
+            const pixels=new Uint8Array(size*size*4);
+            // Working buffers are 8-bit or float by the project's color depth.
+            if(inner.colorDepth===8 || !inner.colorDepth)GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,pixels);
+            else{
+              const floats=new Float32Array(size*size*4);
+              GL.gl.readPixels(0,0,size,size,GL.gl.RGBA,GL.gl.FLOAT,floats);
+              for(let i=0;i<pixels.length;i++)pixels[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
+            }
+            free(inner);
+            return pixels;
+          }finally{pmScopePop();renderingScreens.delete(compId);bind(target);}
+        };
+        const studio=studioLayer(PM,runtime,W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera,renderScreen,T);
         if(studio){
           const tex=texFor(`studio:${L.id}`,studio.canvas,{version:studio.version});
           PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
