@@ -336,8 +336,9 @@ describe('timeline runtime', () => {
     expect(keysForBezierHandleDrag([first, paired, second], first, ['first', 'second'])).toEqual([first, paired]);
   });
 
-  it('labels every clip except audio, which shows its waveform alone', () => {
-    expect(shouldDrawClipLabel('audio')).toBe(false);
+  it('labels every clip except a captions strip, whose cues carry the text', () => {
+    expect(shouldDrawClipLabel('audio')).toBe(true);
+    expect(shouldDrawClipLabel('captions')).toBe(false);
     expect(shouldDrawClipLabel('video')).toBe(true);
     expect(shouldDrawClipLabel('image')).toBe(true);
     expect(shouldDrawClipLabel('text')).toBe(true);

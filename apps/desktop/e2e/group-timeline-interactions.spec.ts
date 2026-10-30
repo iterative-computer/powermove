@@ -76,7 +76,7 @@ test.describe('@groups timeline selection and strip editing', () => {
         const PM = (window as any).PM;
         const timeline = PM.Kernel.services.get('timeline');
         const rect = timeline.cv.getBoundingClientRect();
-        return { x: rect.left + 64, y: rect.top + timeline.ruler + timeline.row / 2 - timeline.scrollY };
+        return { x: rect.left + 87, y: rect.top + timeline.ruler + timeline.row / 2 - timeline.scrollY };
       });
       await page.mouse.click(twirl.x, twirl.y);
     };

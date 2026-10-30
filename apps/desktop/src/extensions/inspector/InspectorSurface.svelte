@@ -54,6 +54,7 @@
 
 <style>
   .insp {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     gap: 0;
@@ -226,5 +227,16 @@
     width: 24px;
     height: 24px;
     color: var(--tx-3);
+  }
+
+  /* X / Y / Z rows need about 62px a field. Below that, the fields take a
+     line of their own under the label, each with its axis letter. */
+  @container (max-width: 290px) {
+    .insp :global(.row.split:has(.pair-group > .well[data-axis])) { flex-wrap: wrap; height: auto; row-gap: 4px; padding-block: 2px; }
+    .insp :global(.row.split:has(.pair-group > .well[data-axis]) > .k) { height: 26px; }
+    .insp :global(.row.split:has(.pair-group > .well[data-axis]) > .vwrap) { flex: 0 0 100%; height: 26px; padding-left: 19px; }
+    .insp :global(.well[data-axis]::before) { content: attr(data-axis); position: absolute; left: 0; top: 0; bottom: 0; width: 18px;
+      display: grid; place-items: center; font-family: var(--f-mono); font-size: 10px; color: var(--tx-3); pointer-events: none; }
+    .insp :global(.row.split .pair-group .well[data-axis] .num) { padding-left: 18px; }
   }
 </style>

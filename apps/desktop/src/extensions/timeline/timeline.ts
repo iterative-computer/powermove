@@ -1,4 +1,7 @@
+import { addTimelineMarker, drawTimelineMarkers, markerAtTime, removeTimelineMarker, timelineMarkerHit } from './markers';
 import { revealedProperties } from './property-reveal';
+import { sectionedPropertyRows } from './property-sections';
+import { precompCarriesAudio } from './audio-presence';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
 import { temporalKeys, type KernelEvents, type PowermoveAPI, type Space3DAPI } from 'powermove';
@@ -136,6 +139,15 @@ export function propertyValueColumns(
     const left = valueX + index * (width + gap);
     return { left, right: left + width, width };
   });
+}
+
+/** After Effects timecode, hours:minutes:seconds:frames. */
+export function aeTimecode(seconds: number, fps: number): string {
+  const rate = Math.max(1, Math.round(fps || 30));
+  const total = Math.max(0, Math.round((Number(seconds) || 0) * rate));
+  const frames = total % rate, whole = Math.floor(total / rate);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${Math.floor(whole / 3600)}:${pad(Math.floor(whole / 60) % 60)}:${pad(whole % 60)}:${pad(frames)}`;
 }
 
 export function toggleTimelineDisclosure(api: PowermoveAPI, layer: any, wasCollapsed = layer.type === 'group'
@@ -543,14 +555,17 @@ export function preferGraphPoint(pointDistance: number, handleDistance: number):
 }
 
 export const timelinePanelOptions = {
-  title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
+  /* The comp tabs, ruler and column headings take about 94px; the floor keeps
+     two layer rows or a track in view, so a divider dragged all the way down
+     never leaves an empty strip. */
+  title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, min: 170, moveSlot: '#tl-head',
   library: { width: 800, height: 440 },
 } as const;
 
 /** Audio clips are read by their waveform and captions by their cue text;
     a name label only crowds them. */
 export function shouldDrawClipLabel(layerType: unknown): boolean {
-return layerType !== 'audio' && layerType !== 'captions';
+return layerType !== 'captions';
 }
 
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
@@ -566,6 +581,10 @@ const previousHead = previous?.__timelineHead || null;
 const previousWrap = previous?.__timelineWrap || null;
 if (previous?.disposeRuntime) previous.disposeRuntime();
 else if (previous?.dispose) previous.dispose();
+/** The layer list's width while its divider is dragged; saved on release. */
+let gutterDragWidth: number | null = null;
+/** The empty-composition card (syncEmptyState), created on first need. */
+let emptyState: HTMLElement | null = null;
 const h = element, clamp = api.util.clamp;
 
 const T: any = previous || {
@@ -575,7 +594,8 @@ const T: any = previous || {
   reorder: null as ReturnType<typeof layerDrop>,
   quickOffset: null as null | { total: number; perGroup: number; x: number; y: number },
   drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
-  style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
+  style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, showSwitches: true, toolbarDensity: 'compact' },
+  header: 0,
 };
 let refreshMarquee: (() => void) | null = null;
 /* Built-in extensions activate after project hydration. Restore the current
@@ -749,6 +769,8 @@ T.dispose = disposeRuntime;
 /* The work bar owns only a thin strip at the very top of the ruler; the rest
    of the ruler is a scrub surface (click anywhere to move the playhead). */
 const WORK_BAR = { top: 0, height: 5, hit: 7 };
+/** Height of the column-heading strip under the ruler in Layers mode. */
+const COLUMN_HEADER = 26;
 const WorkArea = timelineWorkArea;
 
 let attachedHead: HTMLElement | null = null;
@@ -801,15 +823,13 @@ function buildHead(head: any) {
   };
   const playBtn = btn('play', () => api.transport.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
-  const viewButton = (position: string, icon: string, title: string) =>
-    h('button.iconbtn.tl-view-button.' + position, { type: 'button', title, 'aria-label': title }, iconNode(api, icon));
-  const dope = viewButton('first', 'dopeSheet', 'Dope sheet');
-  const both = viewButton('mid', 'dopeGraph', 'Dope sheet and graph');
-  const graph = viewButton('last', 'bezier', 'Graph editor (Shift+F3)');
-  listen(dope, 'click', () => { T.graph = false; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
-  listen(both, 'click', () => { T.graph = true; T.graphCombined = true; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
-  listen(graph, 'click', () => { T.graph = true; T.graphCombined = false; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
+  /* One Graph Editor switch, as in After Effects. Whether the layer bars
+     stay beside the curves is an option in its menu. */
+  const graph = h('button.iconbtn.tl-graph-toggle', { type: 'button', title: 'Graph editor (Shift+F3)', 'aria-label': 'Graph editor (Shift+F3)' }, iconNode(api, 'dopeGraph'));
+  listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
   const graphOptions = btn('more', () => api.ui.menu(graphOptions, [
+    { label: 'Show layer bars with the graph', on: Boolean(T.graphCombined), run: () => { T.graphCombined = !T.graphCombined; invalidate('timeline'); } },
+    '-',
     { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
     { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
     { label: 'Merge selected curves', on: Boolean(T.graphMerge), disabled: (T._graph?.series?.length ?? 0) < 2,
@@ -834,33 +854,40 @@ function buildHead(head: any) {
     syncGraphControls();
   }, 'Snap clips to edges, markers and the playhead (hold Shift to invert)');
   snap.classList.add('tl-snap');
+  /* The layer list's divider continues up through this row, so its right
+     edge resizes the list just like the edge below it. */
+  const gutterGrip = h('div.tl-gutter-grip', { title: 'Drag to resize the layer list' });
+  listen(gutterGrip, 'pointerdown', (event: PointerEvent) => {
+    if (event.button !== 0 || tracksMode()) return;
+    event.stopPropagation();
+    releaseExternalFieldFocus();
+    resizeGutter(event);
+  }, undefined, headCleanups);
   let graphShown: string | undefined;
   syncGraphControls = () => {
     syncModeControls();
     const tracks = tracksMode();
     const shown = Boolean(T.graph);
     const view = shown ? (T.graphCombined ? 'both' : 'graph') : 'dope';
-    const mode = tracks ? `tracks:${T.trackSnap !== false}:${view}` : view;
-    if (graphShown === mode) return;
-    graphShown = mode;
+    const controlsState = tracks ? `tracks:${T.trackSnap !== false}:${view}` : view;
+    if (graphShown === controlsState) return;
+    graphShown = controlsState;
     /* The track timeline unfolds keyframes inside its tracks, so the dope
        sheet / graph switch applies there too; it adds Premiere's magnet. */
     snap.hidden = !tracks; snap.style.display = tracks ? '' : 'none';
+    gutterGrip.hidden = tracks;
     snap.classList.toggle('on', T.trackSnap !== false); snap.setAttribute('aria-pressed', String(T.trackSnap !== false));
-    graph.classList.toggle('on', mode === 'graph');
-    for (const [button, active] of [[dope, mode === 'dope'], [both, mode === 'both']] as const) {
-      button.classList.toggle('on', active); button.setAttribute('aria-pressed', String(active));
-    }
-    graph.setAttribute('aria-pressed', String(mode === 'graph'));
+    graph.classList.toggle('on', shown);
+    graph.setAttribute('aria-pressed', String(shown));
     graphOptions.hidden = !shown;
     graphOptions.style.display = shown ? '' : 'none';
   };
-  const graphSlot = h('div.tl-group.tl-graph-slot', graphOptions, dope, both, graph, snap);
+  const graphSlot = h('div.tl-group.tl-graph-slot', graphOptions, graph, snap);
   const transport = h('div.tl-group.tl-transport',
     playBtn,
     time,
   );
-  head.append(transport, graphSlot);
+  head.append(transport, graphSlot, gutterGrip);
   /* The old toolbar node owned the panel move handle, so replacing that node
      during an extension hot update could strand a live panel without a drag
      listener. Make the unoccupied gutter itself a stable drag surface; native
@@ -894,7 +921,7 @@ function buildHead(head: any) {
     }));
   }, undefined, headCleanups);
   const syncTime = () => {
-    const text = api.util.tc(api.transport.time(), api.project.get().fps);
+    const text = aeTimecode(api.transport.time(), api.project.get().fps);
     if (time.textContent !== text) time.textContent = text;
   };
   const syncTransport = () => {
@@ -965,7 +992,9 @@ function refreshTimelineManifest() {
   syncGraphControls();
   const raw = api.workspace.current()?.chrome?.timeline;
   const config = normalizeTimelineChrome(api, raw);
-  T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
+  /* Layers mode heads its columns in a strip under the time ruler. */
+  T.header = tracksMode() ? 0 : COLUMN_HEADER;
+  T.row = config.rowHeight; T.gut = gutterDragWidth ?? config.gutterWidth; T.ruler = config.rulerHeight + T.header;
   T.style = config;
   const head = document.querySelector<HTMLElement>('#tl-head');
   if (head) {
@@ -980,7 +1009,7 @@ function refreshTimelineManifest() {
 function syncHeadGeometry(head = document.querySelector<HTMLElement>('#tl-head')) {
   if (!head) return;
   const gutter = `${Math.round(T.gut)}px`;
-  const ruler = `${Math.round(T.ruler)}px`;
+  const ruler = `${Math.round(T.ruler - (T.header || 0))}px`;
   if (head.style.getPropertyValue('--tl-gutter') !== gutter) head.style.setProperty('--tl-gutter', gutter);
   if (head.style.getPropertyValue('--tl-ruler') !== ruler) head.style.setProperty('--tl-ruler', ruler);
 }
@@ -1073,7 +1102,7 @@ function buildRows() {
     rows.push({ kind: 'layer', L, i: sourceIndices.get(L), depth: ancestors.length });
     if (!api.uiState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
-      props.forEach((p: any) => rows.push({ kind: 'prop', L, ...p }));
+      for (const row of sectionedPropertyRows(L, props, effectLabel)) rows.push(row);
     }
   }
   T.rows = rows;
@@ -1087,6 +1116,18 @@ function buildRows() {
 }
 function visibleProps(L: any) {
   return revealedProperties(api, L, timelineProperties(api, L, space3d));
+}
+/* Precomp id → whether it carries sound; cleared on every project change. */
+const audiblePrecomps = new Map<string, boolean>();
+const effectLabel = (fx: any) => api.effects?.get?.(fx.type, fx.version ?? 1)?.label ?? fx.type;
+/* A layer row offers its chevron only when opening it would show something:
+   keyframed properties, or ones a P/S/R/T reveal asked for. Rows are rebuilt
+   on every animation revision, so the answer is cached on the row. */
+function layerDisclosable(r: any, fresh = false): boolean {
+  if (r.L.type === 'group') return true;
+  // A click asks afresh: a keyframe added a moment ago may predate the rebuild.
+  if (fresh || r.disclosable === undefined) r.disclosable = visibleProps(r.L).length > 0;
+  return r.disclosable;
 }
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
@@ -1107,7 +1148,7 @@ const inGraph = (x: number, y: number) => Boolean(T.graph && x >= T.gut && y >= 
 const tracksBottom = () => T.graph ? graphTop() : T.hgt;
 
 /* ── draw ──────────────────────────────────────────────── */
-onEvent('project:changed', () => { rowsDirty = true; invalidate('timeline'); });
+onEvent('project:changed', () => { rowsDirty = true; audiblePrecomps.clear(); syncEmptyState(); invalidate('timeline'); });
 // A time-only repaint reuses rows. Disclosure/reveal and animation revisions
 // retire them independently; older hosts retain the conservative rebuild.
 onEvent('invalidate', (what) => {
@@ -1154,8 +1195,13 @@ const refreshTheme = () => {
        dissolve into the app background instead of reading as a panel. */
     panel: css(reversed ? '--bg-panel-2' : '--bg-panel') || '#FCFCFD',
     float: css('--bg-float') || '#FFFFFF',
-    sunken: css(reversed ? '--bg-panel' : '--bg-panel-2') || '#F0F0F3',
+    sunken: css(reversed ? '--bg-panel-2' : '--bg-panel') || '#F0F0F3',
     line: css('--line') || 'rgba(15,15,20,.09)',
+    label: css('--tx-label') || css('--tx-2') || '#5D5D65',
+    rowSelected: css('--bg-row-hi') || '#EBEBEF',
+    accentText: css('--accent-tx') || '#D84E06',
+    accentWash: 'rgba(255,96,25,.12)',
+    accentIcon: document.documentElement.dataset.theme === 'dark' ? '#FF7A3D' : (css('--accent') || '#F0580A'),
   };
 };
 /* Colors are re-read on the next draw rather than inside the event: listeners
@@ -1172,13 +1218,15 @@ if (typeof MutationObserver === 'function') {
 
 /* Ink-on-paper colors for canvas chrome. Light theme uses black alpha;
    dark theme uses white alpha — resolved on every theme refresh. */
-const INK = { over:'', over2:'', grid:'', tick:'', sub:'', hi:'', lo:'', thumb:'', key:'', handle:'', inv:'' };
+const INK = { over:'', over2:'', grid:'', tick:'', sub:'', hi:'', lo:'', thumb:'', key:'', handle:'', inv:'', rule:'', strip:'', stripLine:'' };
 function refreshInk() {
   const dark = document.documentElement.dataset.theme === 'dark';
   const a = (x: any) => (dark ? 'rgba(255,255,255,' : 'rgba(15,15,20,') + x + ')';
   INK.over = a('.045'); INK.over2 = a('.06'); INK.grid = a('.05'); INK.tick = a('.13');
   INK.sub = a('.32'); INK.hi = a('.72'); INK.lo = a('.16'); INK.thumb = a('.14');
-  INK.key = dark ? '#d7d7db' : '#54545c';
+  /* Layer-row hairline, and the column-heading strip's tone and edge. */
+  INK.rule = a('.04'); INK.strip = a(dark ? '.016' : '.025'); INK.stripLine = a('.08');
+  INK.key = dark ? '#C9C4C0' : '#54545c';
   INK.handle = dark ? '#8f8f96' : '#8B8B93';
   INK.inv = dark ? '#fff' : '#1C1C1F';
 }
@@ -1301,7 +1349,7 @@ function timelineBackdropKey(): unknown[] | null {
       || T.cv.width * T.cv.height * 4 > 32 * 1024 * 1024) return null;
   const p = api.project.get();
   const key: unknown[] = [T.cv, T.ctx, T.cv.width, T.cv.height, T.w, T.hgt, T.dpr,
-    T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.dropRow,
+    T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.hoverSwitch?.row, T.hoverSwitch?.kind, T.dropRow,
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
     api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackHover?.clip, T.trackScrollY,
@@ -1337,6 +1385,7 @@ function rememberBackdrop(key: unknown[] | null) {
 
 function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
   if (!preview) refreshTimelineManifest();
+  if (!preview && !timeOnly) syncEmptyState();
   /* Re-resolve the live canvas every frame: workspace rebuilds can replace the
      panel element, and drawing into a detached canvas is the root cause of
      gutter/clip misalignment after layout changes. */
@@ -1385,12 +1434,12 @@ function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
   if (propertyLabelWidth == null) {
     // Setting a Canvas2D font can enter the browser's font/style machinery.
     // Cached playback does not measure labels, so leave that state untouched.
-    c.font = '400 11px ' + fui();
+    c.font = '400 12px ' + fui();
     propertyLabelWidth = Math.max(64, ...T.rows.filter((row: any) => row.kind === 'prop')
       .map((row: any) => Math.ceil(c.measureText(row.label).width)));
   }
   const labelWidth = propertyLabelWidth;
-  T.propertyValueX = 100 + labelWidth + 12;
+  T.propertyValueX = Math.max(163 + labelWidth + 12, T.gut - 214);
   /* Track headers carry no property columns; they keep a fixed, narrower width. */
   T.gut = tracksMode() && !preview ? TRACK_GUTTER : Math.max(T.gut, T.propertyValueX + 90);
   if (preview) {
@@ -1466,7 +1515,7 @@ function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
     else { drawClips(c, W, H); drawDropGhost(c, W, H); }
     if (!tracks) drawGutter(c, W, H);
     if (T.reorder) {
-      const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
+      const d = T.reorder, y = rowY(d.row), left = 98 + Math.min(48, d.depth * 12);
       c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
       c.strokeStyle = theme.accent; c.fillStyle = theme.accent; c.lineWidth = 2;
       if (d.mode === 'inside') {
@@ -1483,6 +1532,7 @@ function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
       c.fillStyle = '#fff'; c.fillText(label, T.gut + 18, top + 14); c.restore();
     }
     drawRuler(c, W, H);
+    drawTimelineMarkers(c, api.project.get().markers, T.gut, W, H, T.ruler, t2x, theme.tx3);
     if (!preview) rememberBackdrop(backgroundKey ? timelineBackdropKey() : null);
   }
   if (T.graph) {
@@ -1598,28 +1648,21 @@ function drawTracksBg(c: any, W: any, H: any) {
   c.fillStyle = INK.over;
   c.fillRect(T.gut, T.ruler, Math.max(0, x0 - T.gut), H - T.ruler);
   c.fillRect(x1, T.ruler, Math.max(0, W - x1), H - T.ruler);
-  /* second gridlines */
-  const step = niceStep(T.pps);
-  c.strokeStyle = INK.grid; c.lineWidth = 1;
-  c.beginPath();
-  for (let t = Math.floor(T.scrollT / step) * step; t2x(t) < W; t += step) {
-    const x = t2x(t) + .5;
-    if (x < T.gut) continue;
-    c.moveTo(x, T.ruler); c.lineTo(x, H);
-  }
-  c.stroke();
   /* row stripes + lane hairlines */
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
     const y = rowY(i);
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
-    /* Row states are alpha washes: selected > hovered. No hairlines between
-       rows; the clip bodies give the rows their structure. */
+    /* A selected layer row is one tone across the list and the tracks;
+       each layer row ends in a hairline, its property rows do not. */
     if (r.kind === 'layer' && api.selection.layers().includes(r.L.id)) {
-      c.fillStyle = INK.over; c.fillRect(T.gut, y, W - T.gut, T.row);
+      c.fillStyle = theme.rowSelected; c.fillRect(T.gut, y, W - T.gut, T.row);
     } else if (T.hoverRow === i) {
       c.fillStyle = INK.over; c.globalAlpha = .7; c.fillRect(T.gut, y, W - T.gut, T.row); c.globalAlpha = 1;
+    }
+    if (r.kind === 'layer') {
+      c.fillStyle = INK.rule; c.fillRect(T.gut, y + T.row - 1, W - T.gut, 1);
     }
     if (T.dropRow === i) {
       c.fillStyle = INK.over2; c.fillRect(T.gut, y, W - T.gut, T.row);
@@ -1639,34 +1682,62 @@ function niceStep(pps: any) {
 function drawRuler(c: any, W: any, H: any) {
   const p = api.project.get();
   c.fillStyle = theme.panel; c.fillRect(0, 0, W, T.ruler);
-  c.strokeStyle = theme.line; c.beginPath(); c.moveTo(0, T.ruler - .5); c.lineTo(W, T.ruler - .5); c.stroke();
-  c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, T.ruler); c.clip();
+  const scaleBottom = T.ruler - (T.header || 0);
+  c.fillStyle = theme.line; c.fillRect(T.gut, scaleBottom - 1, W - T.gut, 1);
+  c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, scaleBottom); c.clip();
   const step = niceStep(T.pps);
-  /* Bottom-anchored ticks — 8px major, 3px minor — with light mono labels
-     centered over the major tick, so numbers read as a scale, not a list. */
-  c.font = '300 10px ' + fmono();
-  c.fillStyle = theme.tx3; c.textBaseline = 'middle'; c.textAlign = 'center';
-  c.strokeStyle = INK.tick;
-  c.beginPath();
+  /* Light mono labels, 8px after the moment they name. */
+  c.font = '400 10px ' + fmono();
+  c.fillStyle = theme.tx3; c.textBaseline = 'middle'; c.textAlign = 'left';
   for (let t = Math.floor(T.scrollT / step) * step; t2x(t) < W; t += step) {
-    const x = t2x(t) + .5;
-    if (x >= T.gut - 1) {
-      c.moveTo(x, T.ruler - 8); c.lineTo(x, T.ruler);
-      c.fillText(fmtRuler(t, step, p.fps), x, WORK_BAR.height + 8);
-    }
-    /* minor ticks between labeled steps */
-    for (let m = 1; m < 4; m++) {
-      const mx = t2x(t + step * m / 4) + .5;
-      if (mx > T.gut && mx < W) { c.moveTo(mx, T.ruler - 3); c.lineTo(mx, T.ruler); }
-    }
+    const x = t2x(t);
+    if (x >= T.gut - 40) c.fillText(fmtRuler(t, step, p.fps), x + 8, Math.round(scaleBottom / 2) - 1);
   }
-  c.stroke();
-  c.textAlign = 'left';
-  /* Work-area brackets stay visible without drawing a line across the ruler. */
   const wa = p.work || [0, p.dur];
   const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
-  drawWorkBracket(c, x0, 0); drawWorkBracket(c, x1, 1);
+  /* The track view has no heading strip; its work area is a pair of brackets. */
+  if (!T.header) { drawWorkBracket(c, x0, 0); drawWorkBracket(c, x1, 1); }
   c.restore();
+  if (T.header) {
+    drawColumnHeader(c, scaleBottom);
+    /* In the heading strip, the work area reads as a bar, as in After Effects. */
+    c.save(); c.beginPath(); c.rect(T.gut, scaleBottom, W - T.gut, T.header); c.clip();
+    c.fillStyle = INK.stripLine;
+    const left = Math.max(T.gut, x0), right = Math.min(W, x1);
+    roundRect(c, left, scaleBottom + (T.header - 10) / 2, Math.max(0, right - left), 10, 3); c.fill();
+    c.restore();
+  }
+}
+/* The layer list's column headings: visibility, the layer, and Link Layers.
+   Right-click them for the Columns menu. */
+function drawColumnHeader(c: any, top: number) {
+  const y = top + T.header / 2;
+  c.save();
+  c.fillStyle = theme.panel; c.fillRect(0, top, T.w, T.header);
+  c.fillStyle = INK.strip; c.fillRect(0, top, T.w, T.header);
+  c.fillStyle = INK.stripLine; c.fillRect(0, top + T.header - 1, T.w, 1);
+  c.fillStyle = theme.line; c.fillRect(T.gut - 1, top, 1, T.header);
+  drawIcon(c, 'eye', gutterColumns().eye, y, 12, theme.tx3);
+  c.font = '500 11px ' + fui(); c.fillStyle = theme.label; c.textBaseline = 'middle';
+  c.fillText('Layer', 100, y);
+  c.fillText('Link Layers', T.gut - 100, y);
+  c.restore();
+}
+function columnsMenu(e: any) {
+  const style = T.style;
+  const set = (patch: Record<string, boolean>) => api.workspace.mutate((workspace: any) => {
+    workspace.chrome = workspace.chrome && typeof workspace.chrome === 'object' ? workspace.chrome : {};
+    workspace.chrome.timeline = { ...(workspace.chrome.timeline || {}), ...patch };
+  }, { inPlace: true });
+  api.ui.menu({ x: e.clientX, y: e.clientY }, [
+    { header: 'Columns' },
+    { label: 'Layer Name', on: true, disabled: true, run: () => {} },
+    { label: 'Layer Numbers', on: !!style.showLayerNumbers, run: () => set({ showLayerNumbers: !style.showLayerNumbers }) },
+    { label: 'Switches', on: style.showSwitches !== false, run: () => set({ showSwitches: style.showSwitches === false }) },
+    { label: 'Link Layers', on: true, disabled: true, run: () => {} },
+    '-',
+    { label: 'Show all After Effects columns', run: () => set({ showLayerNumbers: true, showSwitches: true }) },
+  ]);
 }
 function drawWorkBracket(c: any, x: any, idx: any) {
   const y = WORK_BAR.top, h = WORK_BAR.height, wing = 6;
@@ -1683,14 +1754,15 @@ function drawWorkBracket(c: any, x: any, idx: any) {
 }
 function fmtRuler(t: any, step: any, fps: any) {
   const sign = t < 0 ? '-' : '';
-  const magnitude = Math.abs(t);
-  if (step < 1) return sign + api.util.tc(magnitude, fps).slice(-5);
-  const seconds = Math.round(magnitude);
-  const m = Math.floor(seconds / 60), s = seconds % 60;
-  return sign + m + ':' + String(s).padStart(2, '0');
+  const rate = Math.max(1, Math.round(fps || 30));
+  const frames = Math.round(Math.abs(t) * rate);
+  const whole = Math.floor(frames / rate), frame = frames % rate;
+  if (step < 1 && frame) return sign + frame + 'f';
+  if (whole < 60) return sign + whole + 's';
+  return sign + Math.floor(whole / 60) + 'm' + String(whole % 60).padStart(2, '0') + 's';
 }
-const fui = () => '"SF Pro Text",-apple-system,BlinkMacSystemFont,sans-serif';
-const fmono = () => '"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace';
+const fui = () => '"Powermove Inter","Inter","SF Pro Text",-apple-system,BlinkMacSystemFont,sans-serif';
+const fmono = () => '"Powermove Mono","Geist Mono","SF Mono",ui-monospace,Menlo,monospace';
 
 function drawClips(c: any, W: any, H: any) {
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
@@ -1703,7 +1775,7 @@ function drawClips(c: any, W: any, H: any) {
       drawClip(c, r.L.type === 'group' ? { ...r.L, ...api.groups.span(r.L) } : r.L, y);
       if (r.L.type === 'captions') captionTrack.draw(c, r.L, y, T.row, W);
     }
-    else drawPropKeys(c, r, y);
+    else if (r.kind === 'prop') drawPropKeys(c, r, y);
   }
   c.restore();
 }
@@ -1775,27 +1847,19 @@ const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', extension:
 function drawAudioClipWaveform(c: any, L: any, { x, y, width, height, color }: any) {
   const clipLeft = Math.max(x, T.gut);
   c.save();
-  /* Waveform in the clip's bright tint. With no name label to stay clear of,
-     the bars stand on the clip floor and use the full body height. */
+  /* Waveform in the clip's bright tint, quiet enough for the name to read
+     over it. Without waveform data the bar stays plain. */
+  c.globalAlpha *= .45;
   const top = 2;
   try {
     if (api.media.audio.drawWaveform(c, L, {
-      x, y: y + top, width, height: height - top - 2, clipLeft, clipRight: T.w, color, placeholderColor: color,
+      x, y: y + top, width, height: height - top - 2, clipLeft, clipRight: T.w, color, placeholderColor: 'rgba(0,0,0,0)',
       step: 1, anchor: 1,
     })) {
       c.restore();
       return;
     }
   } catch (error) { /* Keep the timeline usable while waveform data is unavailable. */ }
-  const right = Math.min(x + width, T.w);
-  if (right > clipLeft) {
-    c.strokeStyle = color;
-    c.lineWidth = 1;
-    c.beginPath();
-    c.moveTo(clipLeft, Math.round(y + height / 2) + .5);
-    c.lineTo(right, Math.round(y + height / 2) + .5);
-    c.stroke();
-  }
   c.restore();
 }
 
@@ -1806,12 +1870,13 @@ function drawAudioClipWaveform(c: any, L: any, { x, y, width, height, color }: a
    stays a tag in the gutter. */
 const CLIP_TYPES: Record<string, { body: string; primary: string; foreground: string }> = {
   /* Muted, low-chroma bodies: enough hue to tell types apart, never loud. */
-  text:   { body: '#3A4756', primary: '#9FB3C8', foreground: '#EAF0F6' },
-  audio:  { body: '#25473C', primary: '#5FC29C', foreground: '#DDF5EA' },
+  text:   { body: '#35404D', primary: '#C8D4E2', foreground: '#DDE3E8' },
+  precomp: { body: '#324852', primary: '#A9CBD6', foreground: '#DDE3E8' },
+  audio:  { body: '#2A4A3E', primary: '#9FD8BE', foreground: '#CFEDE0' },
   video:  { body: '#2E4266', primary: '#8FB0E8', foreground: '#E2EAF8' },
   image:  { body: '#5E4A2E', primary: '#D9B57C', foreground: '#F6EFE3' },
   shape:  { body: '#5E3D36', primary: '#D99A8A', foreground: '#F7E9E5' },
-  solid:  { body: '#573A4E', primary: '#CF93B8', foreground: '#F6E6F0' },
+  solid:  { body: '#4A3B33', primary: '#C9A58E', foreground: '#DDE3E8' },
   shader: { body: '#413B60', primary: '#A99AE0', foreground: '#ECE8F8' },
   extension: { body: '#40395D', primary: '#B2A6EF', foreground: '#F0EDFF' },
   null:   { body: '#3E434B', primary: '#A2A9B3', foreground: '#EEF0F3' },
@@ -1838,37 +1903,30 @@ function clipPalette(L: any) {
 }
 
 function drawClip(c: any, L: any, y: any, rowHeight = T.row) {
-  const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
+  const tracks = tracksMode();
+  /* Track clips butt against each other: pull both ends in a pixel so a
+     cut between neighbours reads as a gap of track, not one long bar. */
+  const gap = tracks && L.dur * T.pps > 8 ? 1 : 0;
+  const x0 = t2x(L.from) + gap, x1 = t2x(L.from + L.dur) - gap;
   if (x1 < T.gut || x0 > T.w) return;
-  /* Clips fill their row with a 1px breath between neighbours. */
-  const hh = rowHeight - 2;
-  const yy = y + 1;
+  /* A flat bar, 20px tall and centred in a layer row; the track view's
+     taller lanes keep a 1px breath between neighbours. */
+  const inset = tracks ? 1 : Math.max(1, Math.round((rowHeight - 20) / 2));
+  const hh = rowHeight - inset * 2;
+  const yy = y + inset;
   const sel = api.selection.layers().includes(L.id);
-  const r = Math.min(4, T.style.clipRadius);
+  const r = Math.min(5, T.style.clipRadius);
   const w = Math.max(4, x1 - x0);
   const pal = clipPalette(L);
   const off = !evaluatedValue(L, L.on, api.transport.time(), 'l.on');
-  const dark = document.documentElement.dataset.theme === 'dark';
   c.save();
   if (off) c.globalAlpha = .5;
-  /* Tactile chip material: soft drop shadow (y3 blur4), vertical gradient
-     body, inner top highlight, hairline ring one shade under the body. */
-  c.shadowColor = dark ? 'rgba(0,0,0,.35)' : 'rgba(15,15,20,.12)';
-  c.shadowBlur = 4; c.shadowOffsetY = 2;
   /* A captions strip is the lane its cues sit on: a quieter body. */
   if (L.type === 'captions') c.globalAlpha *= .55;
   roundRect(c, x0, yy, w, hh, r);
-  const g = c.createLinearGradient(0, yy, 0, yy + hh);
-  g.addColorStop(0, mixHex(pal.body, [255, 255, 255], dark ? .06 : .04));
-  g.addColorStop(1, mixHex(pal.body, [0, 0, 0], dark ? .10 : .05));
-  c.fillStyle = g; c.fill();
-  c.shadowColor = 'transparent'; c.shadowBlur = 0; c.shadowOffsetY = 0;
+  c.fillStyle = pal.body; c.fill();
   c.save();
   c.clip();
-  /* inner top highlight — white 33% on light, a hint on dark */
-  c.strokeStyle = dark ? 'rgba(255,255,255,.10)' : 'rgba(255,255,255,.45)';
-  c.lineWidth = 1;
-  c.beginPath(); c.moveTo(x0 + r * .7, yy + 1.5); c.lineTo(x0 + w - r * .7, yy + 1.5); c.stroke();
   /* Transition windows read as wedges inside the clip instead of timeline
      handles: they communicate timing without adding another hit target. */
   c.save();
@@ -1898,23 +1956,26 @@ function drawClip(c: any, L: any, y: any, rowHeight = T.row) {
     x: x0, y: yy, width: w, height: hh, color: pal.primary,
   });
   if (shouldDrawClipLabel(L.type)) {
-    /* Name only, top-left, sticking to the viewport edge as the clip scrolls
-       off. Short rows center it. */
+    /* Name only, left, sticking to the viewport edge as the clip scrolls
+       off. Tall track lanes put it at the top. */
     c.textBaseline = 'middle';
-    const lx = Math.max(x0, T.gut) + 6;
+    const lx = Math.max(x0, T.gut) + 8;
     const maxX = x0 + w - 6;
     c.font = '400 11px ' + fui();
     c.fillStyle = pal.foreground;
     if (maxX - lx > 12) clipText(c, L.name, lx, hh >= 30 ? yy + 10 : yy + hh / 2 + .5, maxX - lx);
   }
   c.restore();
-  /* Inset ring: 1px dark seam at rest, 2px accent when selected. Clipped to
-     the body so the stroke never grows the clip. */
-  c.save();
-  roundRect(c, x0, yy, w, hh, r); c.clip();
-  c.strokeStyle = sel ? theme.accent : mixHex(pal.body, [0, 0, 0], dark ? .4 : .18);
-  c.lineWidth = sel ? 4 : 2; c.stroke();
-  c.restore();
+  if (tracks && !sel) {
+    /* An outline so neighbouring clips of the same type stay separate. */
+    roundRect(c, x0 + .5, yy + .5, w - 1, hh - 1, r);
+    c.strokeStyle = pal.ring; c.lineWidth = 1; c.stroke();
+  }
+  /* Selected: a 1px accent ring inside the bar. */
+  if (sel) {
+    roundRect(c, x0 + .5, yy + .5, w - 1, hh - 1, r);
+    c.strokeStyle = theme.accent; c.lineWidth = 1; c.stroke();
+  }
   c.restore();
 }
 
@@ -1934,33 +1995,23 @@ function drawParentWhip(c: any, x: number, cy: number, color: string) {
 
 function drawPropKeys(c: any, r: any, y: any) {
   const L = r.L, cy = y + T.row / 2;
-  c.strokeStyle = INK.grid;
-  c.beginPath(); c.moveTo(T.gut, cy); c.lineTo(T.w, cy); c.stroke();
   const kf = r.prop.kf;
   const keyRadius = T.style.keyframeSize / 2;
-  /* First/last keys are half-filled toward the animated span; interior keys
-     are solid. Tells you where a curve starts and ends at a glance. */
-  const first = kf[0]?.t, last = kf.at(-1)?.t;
+  const dark = document.documentElement.dataset.theme === 'dark';
   const localStart = T.scrollT - L.from - 8 / Math.max(.01, T.pps);
   const localEnd = x2t(T.w + 8) - L.from;
   let lo = 0, hi = kf.length;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (kf[mid].t < localStart) lo = mid + 1; else hi = mid; }
-  c.lineWidth = 1;
+  c.lineWidth = .8; c.strokeStyle = theme.panel;
   for (let index = lo; index < kf.length && kf[index].t <= localEnd; index++) {
     const k = kf[index];
     const x = t2x(L.from + k.t);
     if (x < T.gut - 6 || x > T.w + 6) continue;
-    const sel = keySelected(k);
-    const color = sel ? theme.accent : INK.key;
-    c.fillStyle = color; c.strokeStyle = color;
-    if (k.hold) { c.fillRect(x - keyRadius, cy - keyRadius, keyRadius * 2, keyRadius * 2); continue; }
-    c.beginPath(); c.moveTo(x, cy - keyRadius); c.lineTo(x + keyRadius, cy); c.lineTo(x, cy + keyRadius); c.lineTo(x - keyRadius, cy); c.closePath();
-    c.stroke();
-    const isFirst = k.t === first, isLast = k.t === last;
-    if (isFirst === isLast) { c.fill(); continue; }
-    c.beginPath(); c.moveTo(x, cy - keyRadius);
-    c.lineTo(x + (isFirst ? keyRadius : -keyRadius), cy);
-    c.lineTo(x, cy + keyRadius); c.closePath(); c.fill();
+    c.fillStyle = keySelected(k) ? (dark ? '#F2C6AE' : theme.accent) : INK.key;
+    if (k.hold) { c.fillRect(x - keyRadius + 1, cy - keyRadius + 1, keyRadius * 2 - 2, keyRadius * 2 - 2); continue; }
+    const d = keyRadius * .84;
+    c.beginPath(); c.moveTo(x, cy - d); c.lineTo(x + d, cy); c.lineTo(x, cy + d); c.lineTo(x - d, cy); c.closePath();
+    c.fill(); c.stroke();
   }
 }
 
@@ -2000,7 +2051,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
     let readout: PropertyReadout | undefined;
-    if (r.kind !== 'layer') {
+    if (r.kind === 'prop') {
       const previous = propertyReadouts.get(r);
       if (dynamicOnly && previous && !previous.dynamic) continue;
       readout = propertyReadout(r);
@@ -2008,87 +2059,107 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       propertyReadouts.set(r, readout);
     }
     if (dynamicOnly) {
+      if (r.kind === 'heading') continue;
       if (r.kind === 'layer' && !animatedTimelineFlag(r.L.on) && !animatedTimelineFlag(r.L.mblur)) continue;
       c.fillStyle = theme.panel; c.fillRect(0, y, T.gut - 1, T.row);
     }
     changed = true;
     if (r.kind === 'layer') {
       const L = r.L, sel = api.selection.layers().includes(L.id);
-      if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
+      if (sel) { c.fillStyle = theme.rowSelected; c.fillRect(0, y, T.gut, T.row); }
       else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
-      /* Quiet card: controls surface on hover/selection or when they carry
-         state (hidden or locked). Idle rows show number, tag, name. */
+      c.fillStyle = INK.rule; c.fillRect(0, y + T.row - 1, T.gut, 1);
+      const col = gutterColumns();
       const active = sel || T.hoverRow === i;
       const indent = Math.min(48, (r.depth || 0) * 12);
       const collapsed = L.type === 'group'
         ? api.uiState.getGroupCollapsed(L)
         : api.uiState.getLayerCollapsed(L);
+      const iy = y + T.row / 2;
       c.font = '400 10px ' + fmono();
       c.fillStyle = INK.lo; c.textBaseline = 'middle';
-      if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
-      /* eye / lock */
-      if (active || !evaluatedValue(L, L.on, api.transport.time(), 'l.on')) icoEye(c, 30, y + T.row / 2, evaluatedValue(L, L.on, api.transport.time(), 'l.on'));
-      if (active || L.lock) icoLock(c, 48, y + T.row / 2, L.lock);
-      /* twirl */
-      if (active || !collapsed || L.type === 'group') {
-        c.save();
-        c.translate(64 + indent, y + T.row / 2); c.rotate(collapsed ? 0 : Math.PI / 2);
-        c.strokeStyle = active ? theme.tx2 : theme.tx3; c.lineWidth = 1.4; c.beginPath();
-        c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
-        c.restore();
-      }
-      /* type icon: a swatch of the clip body with the type letter in its
-         bright tint, so the card and the clip share one material */
+      if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), col.number, iy);
+      /* Visibility always shows; an audio layer's visibility is its sound,
+         so it shows a speaker. The lock shows under the pointer or when on. */
+      const on = evaluatedValue(L, L.on, api.transport.time(), 'l.on');
+      if (L.type === 'audio') icoSpeaker(c, col.eye, iy, on);
+      else icoEye(c, col.eye, iy, on);
+      if (T.hoverRow === i || L.lock) icoLock(c, col.lock, iy, L.lock);
+      /* twirl: only where opening the layer shows keyframed properties */
+      if (layerDisclosable(r)) drawIcon(c, collapsed ? 'chev' : 'chevD', col.twirl + indent, iy, 10, theme.tx2);
+      /* type swatch: the clip body's colour with the type glyph in its tint */
       const pal = clipPalette(L);
-      const iy = y + T.row / 2;
-      c.fillStyle = pal.body; roundRect(c, 74 + indent, iy - 8, 16, 16, 3); c.fill();
-      c.strokeStyle = pal.ring; c.lineWidth = 1; c.stroke();
-      icoLayerType(c, L.type, 82 + indent, iy, pal.primary);
-      c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
-      c.fillStyle = sel ? theme.tx : theme.tx2;
+      c.fillStyle = pal.body; roundRect(c, col.swatch + indent, iy - 8, 16, 16, 4); c.fill();
+      icoLayerType(c, L.type, col.swatch + 8 + indent, iy, pal.primary);
+      c.font = (sel ? '600 ' : '500 ') + '12px ' + fui();
+      c.fillStyle = theme.tx;
       const hasParentControl = layerSupportsTransform(L.type);
-      const showParentControl = hasParentControl && (active || !!L.parent);
       const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur') ? 12 : 0);
       const audioX = embeddedAudioToggleX(L);
-      const nameRight = T.gut - (hasParentControl ? 50 : 12) - statusWidth - (audioX == null ? 0 : AUDIO_TOGGLE_WIDTH);
-      clipText(c, L.name, 96 + indent, iy, Math.max(0, nameRight - 96 - indent));
-      if (showParentControl) drawParentWhip(c, T.gut - 30, iy, L.parent ? theme.accent : theme.tx3);
-      let statusX = nameRight + 8;
+      const switches = rowSwitches(L);
+      const nameRight = col.link - switchAreaWidth(L) - 4;
+      clipText(c, L.name, col.name + indent, iy, Math.max(0, nameRight - col.name - indent));
+      /* Link Layers: the pickwhip, then the parent's name or None. */
+      if (hasParentControl) {
+        const parent = L.parent ? api.model.layer(L.parent) : null;
+        drawParentWhip(c, col.whip, iy, L.parent ? theme.accent : theme.tx3);
+        c.font = '400 11px ' + fui();
+        c.fillStyle = parent ? theme.tx2 : theme.tx4;
+        clipText(c, L.parent ? parent?.name || 'Missing layer' : 'None', col.parent, iy, T.gut - 8 - col.parent);
+      }
+      /* Switches always show, in fixed slots; an "on" switch sits on an
+         accent wash. */
+      for (const item of switches) {
+        if (item.on) { c.fillStyle = theme.accentWash; roundRect(c, item.x - 9, iy - 9, 18, 18, 4); c.fill(); }
+        const color = item.on ? theme.accentIcon
+          : T.hoverSwitch?.row === i && T.hoverSwitch.kind === item.kind ? theme.tx2
+          : theme.tx4;
+        if (item.kind === 'threeD') icoCube(c, item.x, iy, color);
+        else icoRaster(c, item.x, iy, color);
+      }
+      let statusX = nameRight - statusWidth + 6;
+      c.font = '400 10px ' + fui();
       if (L.solo) { c.fillStyle = theme.accent; c.fillText('●', statusX, iy); statusX += 12; }
       if (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur')) {
         c.fillStyle = theme.accent; c.beginPath(); c.arc(statusX, iy, 2, 0, 7); c.fill();
       }
       /* embedded soundtrack: shown on hover/selection, and always while muted */
       if (audioX != null && (active || L.d.audioMuted === true)) icoSpeaker(c, audioX, iy, L.d.audioMuted !== true);
+    } else if (r.kind === 'heading') {
+      /* Section label, as in the Properties panel, over its properties. */
+      c.font = '500 11px ' + fui();
+      c.fillStyle = theme.tx3;
+      c.letterSpacing = '0.22px';
+      clipText(c, r.label, gutterColumns().heading, y + T.row / 2, T.gut - 8 - gutterColumns().heading);
+      c.letterSpacing = '0px';
     } else {
-      const L = r.L;
+      const L = r.L, col = gutterColumns();
       const selected = api.selection.layers().includes(L.id) && trackSelected(r, api.selection.chan() ?? '');
       if (selected) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
       else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
-      c.font = '400 11px ' + fui();
-      c.fillStyle = selected ? theme.accent : theme.tx3;
-      const labelX = 100, valueX = T.propertyValueX;
-      if (r.prop.kf.length) {
-        drawKeyArrow(c, 28, y + T.row / 2, -1, readout!.previous);
-        drawKeyArrow(c, 52, y + T.row / 2, 1, readout!.next);
+      const iy = y + T.row / 2, valueX = T.propertyValueX;
+      /* The keyframe navigator shows under the pointer, left of the stopwatch. */
+      if (r.prop.kf.length && T.hoverRow === i) {
+        drawKeyArrow(c, col.propNav - 6, iy, -1, readout!.previous);
+        drawKeyArrow(c, col.propNav + 6, iy, 1, readout!.next);
       }
-      icoAnimationDiamond(c, 85, y + T.row / 2, readout!.animated, readout!.current);
-      clipText(c, r.label, labelX, y + T.row / 2, valueX - labelX - 12);
+      drawIcon(c, 'timer', col.propStopwatch, iy, 13, readout!.animated ? theme.accent : theme.tx4);
+      c.font = '400 12px ' + fui();
+      c.fillStyle = selected ? theme.accent : theme.label;
+      clipText(c, r.label, col.propLabel, iy, valueX - col.propLabel - 12);
       /* value at playhead */
       const values = readout!.values;
-      c.font = '400 10px ' + fmono();
-      c.fillStyle = theme.accent;
-      c.textAlign = 'right';
+      c.font = '400 12px ' + fmono();
+      c.fillStyle = theme.accentText;
       const actionWidth = isScaleTrack(r) ? 24 : 0;
       const columns = propertyValueColumns(valueX, T.gut, values.length, actionWidth);
       values.forEach((value, index) => {
         const column = columns[index]!;
-        const text = fittedPropertyValue(c, value, r.channels ? '%' : '', column.width);
-        c.fillText(text, column.right, y + T.row / 2);
+        const text = fittedPropertyValue(c, value, r.channels || percentProperty(r.key) ? '%' : '', column.width);
+        c.fillText(text, column.left, iy);
       });
-      if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, y + T.row / 2, !!L.scaleLinked);
-      c.textAlign = 'left';
-      if (r.prop.expr) { c.fillStyle = theme.accent; c.fillText('ƒ', 70, y + T.row / 2); }
+      if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, iy, !!L.scaleLinked);
+      if (r.prop.expr) { c.fillStyle = theme.accent; c.fillText('ƒ', col.propNav - 18, iy); }
     }
   }
   /* The media-drop slot reads as an incoming layer card: wash, type swatch
@@ -2102,11 +2173,11 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       const iy = y + T.row / 2;
       c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row);
       c.globalAlpha = .7;
-      c.fillStyle = pal.body; roundRect(c, 74, iy - 8, 16, 16, 3); c.fill();
+      c.fillStyle = pal.body; roundRect(c, 98, iy - 8, 16, 16, 4); c.fill();
       c.setLineDash([3, 2]); c.strokeStyle = pal.primary; c.lineWidth = 1; c.stroke(); c.setLineDash([]);
-      icoLayerType(c, type, 82, iy, pal.primary);
-      c.font = '400 12px ' + fui(); c.fillStyle = theme.tx2;
-      clipText(c, d.name, 96, iy, Math.max(0, T.gut - 12 - 96));
+      icoLayerType(c, type, 106, iy, pal.primary);
+      c.font = '500 12px ' + fui(); c.fillStyle = theme.tx2;
+      clipText(c, d.name, 120, iy, Math.max(0, T.gut - 12 - 120));
       c.globalAlpha = 1;
     }
   }
@@ -2145,9 +2216,7 @@ function fittedPropertyValue(c: any, value: any, unit: string, maxWidth: number)
   return text ? text + '…' : '…';
 }
 function icoAnimationDiamond(c: any, x: number, y: number, animated: boolean, current: boolean) {
-  c.save(); c.strokeStyle = animated ? theme.accent : theme.tx3; c.fillStyle = theme.accent; c.lineWidth = 1.2;
-  c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 4, y); c.lineTo(x, y + 5); c.lineTo(x - 4, y); c.closePath();
-  if (current) c.fill(); else c.stroke(); c.restore();
+  drawIcon(c, current ? 'diamondFill' : 'diamond', x, y, 11, current || animated ? theme.accent : theme.tx3);
 }
 const LAYER_TYPE_ICONS: Record<string, string> = {
   group: 'stack', text: 'type', shape: 'shape', solid: 'solid', shader: 'wand', extension: 'puzzle',
@@ -2157,7 +2226,11 @@ type IconPart = { path: Path2D; fill: boolean; stroke: boolean; width: number };
 const layerIconParts = new Map<string, IconPart[]>();
 /* Draws the app-registry (Phosphor-style) glyph for a layer type, tinted to `color`. */
 function icoLayerType(c: any, type: string | null, x: number, y: number, color: string) {
-  const name = LAYER_TYPE_ICONS[type ?? ''] ?? 'dot';
+  drawIcon(c, LAYER_TYPE_ICONS[type ?? ''] ?? 'dot', x, y, 11, color);
+}
+/* Any glyph from the app's icon registry, centred on x/y at `size` px. Every
+   timeline glyph comes from the same Phosphor set the rest of the app uses. */
+function drawIcon(c: any, name: string, x: number, y: number, size: number, color: string) {
   let parts = layerIconParts.get(name);
   if (!parts) {
     const inherited = (el: Element, attr: string) => {
@@ -2183,7 +2256,7 @@ function icoLayerType(c: any, type: string | null, x: number, y: number, color: 
     });
     layerIconParts.set(name, parts);
   }
-  const size = 11, k = size / 256;
+  const k = size / 256;
   c.save(); c.translate(x - size / 2, y - size / 2); c.scale(k, k);
   c.fillStyle = color; c.strokeStyle = color; c.lineCap = 'round'; c.lineJoin = 'round';
   for (const part of parts) {
@@ -2220,35 +2293,88 @@ function clearTimelineSelection() {
   invalidate('timeline');
 }
 function icoEye(c: any, x: any, y: any, on: any) {
-  c.strokeStyle = on ? INK.hi : INK.lo;
-  c.lineWidth = 1.1; c.beginPath();
-  c.ellipse(x, y, 5, 3.2, 0, 0, 7); c.stroke();
-  if (on) { c.fillStyle = INK.hi; c.beginPath(); c.arc(x, y, 1.5, 0, 7); c.fill(); }
+  drawIcon(c, on ? 'eye' : 'eyeoff', x, y, 12, on ? INK.hi : INK.lo);
 }
 const AUDIO_TOGGLE_WIDTH = 16;
-/** Centre of a video row's mute toggle, or null when it has no embedded audio. */
+function precompAudible(L: any): boolean {
+  const comp = L.d?.comp;
+  if (typeof comp !== 'string') return false;
+  let audible = audiblePrecomps.get(comp);
+  if (audible === undefined) audiblePrecomps.set(comp, audible = precompCarriesAudio(comp, api.project.get()?.comps));
+  return audible;
+}
+/** Centre of a row's mute toggle (a video with a soundtrack, or a precomp
+    that carries sound), or null when muting it would do nothing. */
 function embeddedAudioToggleX(L: any): number | null {
-  if (L.type !== 'video' || L.d?.embeddedAudio !== true) return null;
-  return T.gut - (layerSupportsTransform(L.type) ? 50 : 12) - AUDIO_TOGGLE_WIDTH / 2;
+  const audible = (L.type === 'video' && L.d?.embeddedAudio === true) || (L.type === 'precomp' && precompAudible(L));
+  if (!audible) return null;
+  return gutterColumns().link - (T.style?.showSwitches === false ? 0 : SWITCH_WIDTH * 2) - AUDIO_TOGGLE_WIDTH / 2;
+}
+
+/* The layer list's columns, after the prototype: visibility and lock at the
+   left, then disclosure, type swatch and name; switches, then Link Layers
+   (110px), at the right edge. Property rows put a keyframe navigator and the
+   stopwatch under the layer's swatch, and values in a column 214px from the
+   right. */
+function gutterColumns() {
+  const numbers = T.style?.showLayerNumbers ? 22 : 0;
+  const link = T.gut - 110;
+  return {
+    number: 8, eye: 18 + numbers, lock: 40 + numbers,
+    twirl: 87, swatch: 98, name: 120,
+    link, whip: link + 19.5, parent: link + 48,
+    propNav: 122, propStopwatch: 148.5, propLabel: 163, heading: 140,
+  };
+}
+const PERCENT_PROPERTY = /(^|\.)opacity$/;
+function percentProperty(key: unknown): boolean { return PERCENT_PROPERTY.test(String(key ?? '')); }
+
+/* Layer switches, After Effects style, left of Link Layers in fixed slots:
+   3D Layer, then Continuously Rasterize (pre-comps) at the edge. */
+type RowSwitch = { kind: 'raster' | 'threeD'; x: number; on: boolean; label: string };
+const SWITCH_WIDTH = 18;
+/** The space a row keeps for its switches, mute toggle and status dots:
+    108px as in the prototype, shrinking with a narrow layer list. */
+function switchAreaWidth(L: any): number {
+  const audio = embeddedAudioToggleX(L) == null ? 0 : AUDIO_TOGGLE_WIDTH;
+  const status = (L.solo ? 12 : 0) + (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur') ? 12 : 0);
+  const needed = (T.style?.showSwitches === false ? 0 : SWITCH_WIDTH * 2) + audio + status;
+  return clamp(T.gut - 386, needed, Math.max(needed, 108));
+}
+/** Models, lights and cameras are always 3D; they have no switch to flip. */
+const always3D = (L: any): boolean => L.type === 'extension' && String(L.d?.definition ?? '').startsWith('powermove.3d.');
+function rowSwitches(L: any): RowSwitch[] {
+  if (!layerSupportsTransform(L.type) || T.style?.showSwitches === false) return [];
+  const out: RowSwitch[] = [];
+  const edge = gutterColumns().link;
+  if (L.type !== 'audio' && L.type !== 'adjustment' && !always3D(L)) {
+    out.push({ kind: 'threeD', x: edge - SWITCH_WIDTH * 1.5, on: !!L.threeD, label: '3D layer' });
+  }
+  if (L.type === 'precomp') out.push({ kind: 'raster', x: edge - SWITCH_WIDTH / 2, on: !!L.continuousRaster, label: 'Continuously rasterize' });
+  return out;
+}
+function rowSwitchAt(L: any, x: number): RowSwitch | null {
+  return rowSwitches(L).find((item) => Math.abs(x - item.x) <= SWITCH_WIDTH / 2) ?? null;
+}
+function toggleRowSwitch(L: any, item: RowSwitch): void {
+  const patch = item.kind === 'threeD' ? { threeD: !item.on } : { continuousRaster: !item.on };
+  const result = api.edit.apply({ type: 'set_layer', target: L.id, patch }, { label: item.label, origin: 'timeline' });
+  if (result?.ok === false) api.ui.toast(result.message);
+  api.transport.invalidate();
+}
+/** The 3D Layer switch. */
+function icoCube(c: any, x: number, y: number, color: string) {
+  drawIcon(c, 'cube', x, y, 12, color);
+}
+/** The Continuously Rasterize switch. */
+function icoRaster(c: any, x: number, y: number, color: string) {
+  drawIcon(c, 'sun', x, y, 12, color);
 }
 function icoSpeaker(c: any, x: any, y: any, on: any) {
-  c.save();
-  c.strokeStyle = on ? INK.hi : theme.accent;
-  c.lineWidth = 1.1; c.lineJoin = 'round'; c.lineCap = 'round';
-  c.beginPath();
-  c.moveTo(x - 5, y - 1.6); c.lineTo(x - 3, y - 1.6); c.lineTo(x, y - 4); c.lineTo(x, y + 4);
-  c.lineTo(x - 3, y + 1.6); c.lineTo(x - 5, y + 1.6); c.closePath(); c.stroke();
-  c.beginPath();
-  if (on) c.arc(x + 1, y, 3, -Math.PI / 4, Math.PI / 4);
-  else { c.moveTo(x + 2, y - 2); c.lineTo(x + 6, y + 2); c.moveTo(x + 6, y - 2); c.lineTo(x + 2, y + 2); }
-  c.stroke();
-  c.restore();
+  drawIcon(c, on ? 'speaker' : 'speakerOff', x, y, 12, on ? INK.hi : theme.accent);
 }
 function icoLock(c: any, x: any, y: any, on: any) {
-  c.strokeStyle = on ? theme.accent : INK.lo;
-  c.lineWidth = 1.1;
-  c.strokeRect(x - 3.4, y - 1, 6.8, 5);
-  c.beginPath(); c.arc(x, y - 1, 2.4, Math.PI, 0); c.stroke();
+  drawIcon(c, 'lock', x, y, 11, on ? theme.accent : INK.lo);
 }
 function roundRect(c: any, x: any, y: any, w: any, hh: any, r: any) {
   r = Math.min(r, Math.abs(w) / 2, Math.abs(hh) / 2);
@@ -2298,25 +2424,13 @@ function drawPlayhead(c: any, W: any, H: any) {
     c.fillStyle = g;
     c.fillRect(reverse ? x : x - tw, T.ruler, tw, H - T.ruler);
   }
-  /* stem: a 3px panel-colored halo under the 1px accent core, so the line
-     stays legible over clips of any color */
-  const stemTop = WORK_BAR.height + 2;
-  c.beginPath(); c.moveTo(x, stemTop); c.lineTo(x, H);
-  c.strokeStyle = theme.panel; c.lineWidth = 3; c.stroke();
+  /* A 13px pentagon at the foot of the time scale over a 1px line. */
+  const headTop = T.ruler - (T.header || 0) - 13;
+  c.beginPath(); c.moveTo(x, headTop + 11); c.lineTo(x, H);
   c.strokeStyle = theme.accent; c.lineWidth = 1; c.stroke();
-  /* knob: rounded teardrop, outlined in the panel color to lift off the ruler */
-  const gw = 10, gh = 13, r = 2, gy = stemTop, gx = x - gw / 2;
   c.beginPath();
-  c.moveTo(gx + r, gy);
-  c.lineTo(gx + gw - r, gy); c.quadraticCurveTo(gx + gw, gy, gx + gw, gy + r);
-  c.lineTo(gx + gw, gy + gh - 5.5);
-  c.quadraticCurveTo(gx + gw, gy + gh - 4, gx + gw - 1.2, gy + gh - 3);
-  c.lineTo(x + 1.4, gy + gh - .4); c.quadraticCurveTo(x, gy + gh + .6, x - 1.4, gy + gh - .4);
-  c.lineTo(gx + 1.2, gy + gh - 3);
-  c.quadraticCurveTo(gx, gy + gh - 4, gx, gy + gh - 5.5);
-  c.lineTo(gx, gy + r); c.quadraticCurveTo(gx, gy, gx + r, gy);
-  c.closePath();
-  c.strokeStyle = theme.panel; c.lineWidth = 2; c.lineJoin = 'round'; c.stroke();
+  c.moveTo(x - 5.5, headTop + 1); c.lineTo(x + 5.5, headTop + 1); c.lineTo(x + 5.5, headTop + 7);
+  c.lineTo(x, headTop + 12); c.lineTo(x - 5.5, headTop + 7); c.closePath();
   c.fillStyle = theme.accent; c.fill();
   c.restore();
 }
@@ -2867,6 +2981,13 @@ function setHoverRow(index: number | null) {
 }
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  if (onGutterEdge(x, y)) { T.cv.style.cursor = 'col-resize'; T.cv.title = 'Drag to resize the layer list'; return; }
+  const marker = timelineMarkerHit(api.project.get().markers, x, y, T.gut, T.w, T.ruler, t2x);
+  if (marker) {
+    T.cv.title = `${marker.name || 'Marker'} · ${api.util.tc(marker.t, api.project.get().fps)} · Right-click to remove`;
+    T.cv.style.cursor = 'ew-resize';
+    return;
+  }
   if (tracksMode() && y < tracksBottom() - (T.graph && T.graphCombined ? 4 : 0)) {
     const workHit = x > T.gut && workAreaHit(x, y);
     const next = workHit ? { cursor: workHit.kind === 'handle' ? 'ew-resize' : 'grab', title: '' }
@@ -2918,19 +3039,34 @@ function onMove(e: any) {
       cur = nearKey ? 'pointer' : 'crosshair';
     }
   }
-  if (x < T.gut && y >= T.ruler) {
-    const row = hitRow(y)?.row;
-    if (row?.kind === 'layer' && layerSupportsTransform(row.L.type) && x >= T.gut - 40) {
-      cur = x < T.gut - 20 ? 'crosshair' : 'pointer';
+  const inGutter = x < T.gut && y >= T.ruler;
+  const hit = inGutter ? hitRow(y) : null, row = hit?.row;
+  const flip = row?.kind === 'layer' ? rowSwitchAt(row.L, x) : null;
+  const hoverSwitch = flip && hit ? { row: hit.i, kind: flip.kind } : null;
+  if (hoverSwitch?.row !== T.hoverSwitch?.row || hoverSwitch?.kind !== T.hoverSwitch?.kind) { T.hoverSwitch = hoverSwitch; invalidate('timeline'); }
+  const audioX = row?.kind === 'layer' ? embeddedAudioToggleX(row.L) : null;
+  if (inGutter) {
+    if (audioX != null && Math.abs(x - audioX) <= AUDIO_TOGGLE_WIDTH / 2) {
+      cur = 'pointer';
+      title = row.L.d?.audioMuted === true ? 'Unmute audio' : 'Mute audio';
+    } else if (row?.kind === 'layer' && row.L.type === 'audio' && Math.abs(x - gutterColumns().eye) <= 10) {
+      cur = 'pointer';
+      title = evaluatedValue(row.L, row.L.on, api.transport.time(), 'l.on') ? 'Mute audio' : 'Unmute audio';
+    } else if (flip) {
+      cur = 'pointer';
+      title = `${flip.label}: ${flip.on ? 'On' : 'Off'}`;
+    } else if (row?.kind === 'layer' && layerSupportsTransform(row.L.type) && x >= gutterColumns().link + 6) {
+      const whip = x < gutterColumns().link + 30;
+      cur = whip ? 'crosshair' : 'pointer';
       const parent = row.L.parent ? api.model.layer(row.L.parent)?.name || 'Missing layer' : 'None';
-      title = x < T.gut - 20 ? `Parent: ${parent} · Drag to a layer` : `Parent: ${parent} · Choose parent`;
-    } else if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
-      cur = adjacentKeyframe(api, x < 40 ? -1 : 1, row, space3d) != null ? 'pointer' : 'default';
+      title = whip ? `Link Layers: ${parent} · Drag to a layer` : `Link Layers: ${parent} · Choose a layer`;
+    } else if (row?.kind === 'prop' && row.prop.kf.length && Math.abs(x - gutterColumns().propNav) < 13) {
+      cur = adjacentKeyframe(api, x < gutterColumns().propNav ? -1 : 1, row, space3d) != null ? 'pointer' : 'default';
     } else if (row?.kind === 'prop' && !row.L.lock) {
       if (isScaleTrack(row) && x >= T.gut - 24) {
         cur = 'pointer';
         title = row.L.scaleLinked ? 'Unlock aspect ratio' : 'Lock aspect ratio';
-      } else if (x >= 76 && x < 96) cur = 'pointer';
+      } else if (Math.abs(x - gutterColumns().propStopwatch) <= 9) cur = 'pointer';
       else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key) === 'number') ? 'ew-resize' : 'pointer';
     }
   }
@@ -2944,6 +3080,14 @@ function workAreaHit(x: any, y: any) {
   const d0 = Math.abs(x - x0), d1 = Math.abs(x - x1);
   /* Handles get a little vertical grace; the bar itself only owns its thin
      strip so the ruler below it stays a scrub surface. */
+  if (T.header) {
+    /* Only the 10px bar itself (with a pixel of grace) drags the work area;
+       the rest of the strip scrubs, like the ruler above it. */
+    const barTop = T.ruler - T.header + (T.header - 10) / 2;
+    if (y < barTop - 1 || y > barTop + 11) return null;
+    if (Math.min(d0, d1) <= WORK_BAR.hit) return { kind: 'handle', idx: d0 <= d1 ? 0 : 1 };
+    return x > x0 && x < x1 ? { kind: 'bar' } : null;
+  }
   if (y <= WORK_BAR.height + 5 && Math.min(d0, d1) <= WORK_BAR.hit) return { kind: 'handle', idx: d0 <= d1 ? 0 : 1 };
   if (y <= WORK_BAR.height + 1 && x > x0 && x < x1) return { kind: 'bar' };
   return null;
@@ -2962,6 +3106,7 @@ function onDown(e: any) {
   if (e.button === 0) releaseExternalFieldFocus();
   const x = e.offsetX, y = e.offsetY;
   api.ui.closeMenus();
+  if (onGutterEdge(x, y)) return resizeGutter(e);
   if (y < T.ruler && x > T.gut) {
     const hit = workAreaHit(x, y);
     if (hit?.kind === 'handle') return workAreaDrag(e, hit.idx);
@@ -2984,6 +3129,7 @@ function onDown(e: any) {
   if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey });
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
+  if (r.kind === 'heading') return marquee(e, { additive: e.shiftKey || e.metaKey });
   const L = r.L;
   const span = L.type === 'group' ? api.groups.span(L) : L;
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
@@ -3381,19 +3527,97 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
   canvasCleanups.push(() => { input.onblur = null; input.remove(); });
 }
 
+/* Learn as you go: the first time a layer is opened, say how After Effects
+   users reveal one property at a time. Shown once per install. */
+const PROPERTY_KEYS_TIP = 'pm.tip.propertyKeys';
+function showPropertyKeysTip() {
+  try {
+    if (window.localStorage?.getItem(PROPERTY_KEYS_TIP)) return;
+    window.localStorage?.setItem(PROPERTY_KEYS_TIP, '1');
+  } catch { return; }
+  api.ui.toast?.('Tip: with a layer selected, press P for Position, S Scale, R Rotation, T Opacity, A Anchor Point, or U for every keyframed property.');
+}
+
+/* An empty composition offers its first layers right in the timeline, each
+   with the shortcut that makes it. Drops still reach the canvas around it. */
+function syncEmptyState() {
+  const wrap = T.cv?.parentElement as HTMLElement | null;
+  const empty = !!wrap && !tracksMode() && !(api.project.get()?.layers?.length);
+  if (!empty) { if (emptyState) emptyState.hidden = true; return; }
+  if (!emptyState || emptyState.parentElement !== wrap) {
+    emptyState?.remove();
+    emptyState = document.createElement('div');
+    emptyState.className = 'tl-empty';
+    const title = document.createElement('div');
+    title.className = 'tl-empty-title';
+    title.textContent = 'This composition is empty';
+    const actions = document.createElement('div');
+    actions.className = 'tl-empty-actions';
+    const items: Array<[string, string, string, string]> = [
+      ['type', 'Text', '⌘T', 'newText'], ['shape', 'Shape', '⇧⌘Y', 'newShape'], ['solid', 'Solid', '⌘Y', 'newSolid'],
+      ['anchor', 'Null', '⌥⇧⌘Y', 'newNull'], ['download', 'Import…', '⌘I', 'import'],
+    ];
+    for (const [icon, label, key, command] of items) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'tl-empty-button';
+      button.innerHTML = api.ui.icon(icon);
+      button.append(Object.assign(document.createElement('span'), { textContent: label }), Object.assign(document.createElement('kbd'), { textContent: key }));
+      button.addEventListener('click', () => { api.commands.run(command); });
+      actions.append(button);
+    }
+    const hint = document.createElement('div');
+    hint.className = 'tl-empty-hint';
+    hint.textContent = 'or drop media here';
+    emptyState.append(title, actions, hint);
+    wrap!.append(emptyState);
+  }
+  emptyState.hidden = false;
+  emptyState.style.top = `${T.ruler}px`;
+}
+
+/* The layer list's right edge is a divider: drag it to widen or narrow the
+   list. The width is saved with the workspace's timeline settings. */
+const GUTTER_GRIP = 4, GUTTER_MIN = 320, GUTTER_MAX = 640;
+const onGutterEdge = (x: number, y: number) => !tracksMode() && !inGraph(x, y) && Math.abs(x - T.gut) <= GUTTER_GRIP;
+function resizeGutter(e: any) {
+  const start = T.gut;
+  let width = start;
+  return beginDrag(e, {
+    cursor: 'col-resize',
+    move: (dx: number) => {
+      width = clamp(Math.round(start + dx), GUTTER_MIN, GUTTER_MAX);
+      if (width === gutterDragWidth) return;
+      gutterDragWidth = width;
+      invalidate('timeline');
+    },
+    up: () => {
+      gutterDragWidth = null;
+      if (width !== start) api.workspace.mutate((workspace: any) => {
+        workspace.chrome = workspace.chrome && typeof workspace.chrome === 'object' ? workspace.chrome : {};
+        workspace.chrome.timeline = { ...(workspace.chrome.timeline || {}), gutterWidth: width };
+      }, { inPlace: true });
+      invalidate('timeline');
+    },
+    cancel: () => { gutterDragWidth = null; invalidate('timeline'); },
+  });
+}
+
 function gutterDown(e: any, x: any, y: any) {
   const hr = hitRow(y);
   if (!hr) { if (!e.shiftKey && !e.metaKey) clearTimelineSelection(); return; }
   const r = hr.row;
+  if (r.kind === 'heading') return;
   if (r.kind !== 'layer') {
     api.selection.set({ chan: r.key });
     T.focusGraph(r.L, r.key);
     if (!api.selection.layers().includes(r.L.id)) api.selection.select(r.L.id);
     T.keySelectionActive = true; invalidate('timeline');
-    if (r.prop.kf.length && x >= 16 && x < 64) { navigateKeyframe(x < 40 ? -1 : 1, r); return; }
+    const col = gutterColumns();
+    if (r.prop.kf.length && Math.abs(x - col.propNav) < 13) { navigateKeyframe(x < col.propNav ? -1 : 1, r); return; }
     if (r.L.lock) return;
     if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(api, r.L); onMove(e); return; }
-    if (x >= 76 && x < 96) { togglePropertyAnimation(r); return; }
+    if (Math.abs(x - col.propStopwatch) <= 9) { togglePropertyAnimation(r); return; }
     if (x >= T.propertyValueX - 4) dragPropertyValue(e, r, hr.i);
     return;
   }
@@ -3409,28 +3633,35 @@ function gutterDown(e: any, x: any, y: any) {
     api.edit.apply({ type: 'set_content', target: L.id, patch: { audioMuted: !muted }, overrideLock: true }, { label: muted ? 'Unmute audio' : 'Mute audio', origin: 'timeline' });
     return;
   }
-  if (layerSupportsTransform(L.type) && x >= T.gut - 40) {
+  const flip = rowSwitchAt(L, x);
+  if (flip) { toggleRowSwitch(L, flip); return; }
+  const col = gutterColumns(), indent = Math.min(48, (r.depth || 0) * 12);
+  if (layerSupportsTransform(L.type) && x >= col.link + 6) {
     const ids = api.selection.layers().includes(L.id) ? api.selection.layers() : [L.id];
-    if (x < T.gut - 20) api.ui.beginParentPick(e, ids);
+    if (x < col.link + 30) api.ui.beginParentPick(e, ids);
     else api.ui.showParentMenu(ids, e);
     return;
   }
-  if (x < 22) { }
-  else if (x < 40) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(L, L.on, api.transport.time(), 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
-  else if (x < 58) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
-  else if (x >= 58 + Math.min(48, (r.depth || 0) * 12) && x < 74 + Math.min(48, (r.depth || 0) * 12)) {
+  if (Math.abs(x - col.eye) <= 10) {
+    const on = evaluatedValue(L, L.on, api.transport.time(), 'l.on');
+    const label = L.type === 'audio' ? (on ? 'Mute audio' : 'Unmute audio') : 'Toggle visibility';
+    api.edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !on } }, { label, origin: 'timeline' });
+    return;
+  }
+  else if (Math.abs(x - col.lock) <= 10) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
+  else if (layerDisclosable(r, true) && Math.abs(x - col.twirl - indent) <= 9) {
     const collapsed = toggleTimelineDisclosure(api, L, wasCollapsed);
     rowsDirty = true;
+    if (!collapsed && L.type !== 'group') showPropertyKeysTip();
     if (!collapsed) {
       buildRows();
-      let kids = visibleProps(L).length;
-      if (L.type === 'group') {
-        kids = 0;
-        for (let index = hr.i + 1; index < T.rows.length; index++) {
-          const child = T.rows[index];
-          if (child.kind === 'layer' && (child.depth || 0) <= (r.depth || 0)) break;
-          kids++;
-        }
+      // Everything the layer opened: property rows and their section headings,
+      // or a group's members.
+      let kids = 0;
+      for (let index = hr.i + 1; index < T.rows.length; index++) {
+        const child = T.rows[index];
+        if (child.kind === 'layer' && (L.type !== 'group' || (child.depth || 0) <= (r.depth || 0))) break;
+        kids++;
       }
       keepRowsVisible(hr.i, kids);
     }
@@ -4368,6 +4599,16 @@ function onCtx(e: any) {
   const trackRow = inTracks ? trackView.rowAt(x, y) : null;
   const hr = tracksMode() ? trackRow && { row: trackRow, i: -1 } : hitRow(y);
   const items: any[] = [];
+  if (!tracksMode() && x < T.gut && T.header && y >= T.ruler - T.header && y < T.ruler) { columnsMenu(e); return; }
+  if (x >= T.gut && y < T.ruler) {
+    const marker = timelineMarkerHit(api.project.get().markers, x, y, T.gut, T.w, T.ruler, t2x);
+    if (marker) {
+      api.ui.menu({ x: e.clientX, y: e.clientY }, [{ label: 'Remove marker', icon: 'x', run: () => removeTimelineMarker(api, marker) }]);
+      return;
+    }
+    const time = clamp(api.util.snapF(x2t(x), api.project.get().fps), 0, api.project.get().dur);
+    items.push({ label: 'Add marker here', icon: 'plus', disabled: !!markerAtTime(api, time), run: () => addTimelineMarker(api, time) }, '-');
+  }
   const graphPoint = inGraph(x, y)
     ? [...(T._graph?.points || [])]
       .map((point: any) => ({ ...point, distance: Math.hypot(x - point.x, y - point.y) }))

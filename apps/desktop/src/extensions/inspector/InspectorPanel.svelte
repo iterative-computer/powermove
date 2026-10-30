@@ -5,6 +5,7 @@
   import { provideInspectorContext } from './context';
   import CompositionSection from './CompositionSection.svelte';
   import ContentSection from './ContentSection.svelte';
+  import EffectsSection from './EffectsSection.svelte';
   import CaptionsSection from './CaptionsSection.svelte';
   import ExtensionLayerParams from './ExtensionLayerParams.svelte';
   import InspectorHeader from './InspectorHeader.svelte';
@@ -17,6 +18,7 @@
   import TransformSection from './TransformSection.svelte';
   import ContributedSections from './ContributedSections.svelte';
   import InspectorSurface from './InspectorSurface.svelte';
+  import SectionHeading from './SectionHeading.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   let { panelId, api }: PanelProps & { api: PowermoveAPI } = $props();
@@ -28,6 +30,8 @@
       inspectorSelection(api, sel.layers.map((id) => api.model.layer(id)).filter((layer): layer is NonNullable<typeof layer> => layer !== null)))
   );
   const firstLayer = $derived(selectedLayers[0]);
+  const meta = untrack(() => api.model.TYPE_META) as Record<string, { effects?: boolean }>;
+  const takesEffects = $derived(!!firstLayer && meta[firstLayer.type]?.effects !== false);
 
   $effect(() => {
     const subscription = api.events.on('fonts', () => { fontsVersion++; });
@@ -65,6 +69,10 @@
       {#if firstLayer.type !== 'audio'}
         {#if firstLayer.type === 'shader'}<ShaderUniforms layer={firstLayer} />{/if}
         {#if firstLayer.type === 'extension'}<ExtensionLayerParams layer={firstLayer} />{/if}
+        {#if takesEffects}
+          <SectionHeading title="Effects" />
+          {#key firstLayer.id}<EffectsSection layer={firstLayer} />{/key}
+        {/if}
         <ContributedSections {api} after="effects" layerIds={selectedLayers.map(layer => layer.id)} />
         <MasksSection layer={firstLayer} />
       {/if}

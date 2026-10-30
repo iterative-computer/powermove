@@ -36,7 +36,6 @@
   };
   const value=(key:string)=>(doc.tick.history,doc.tick.values,doc.proj,transport.time,inspectorRefresh.version,api.anim.evP(layer,properties[key],transport.time,prefix==='u'?path(key):key));
   const binding=(key:string):EditBinding=>({mode:'command',label:param(key).label,origin:'inspector',command:(next)=>({type:'set_property',target:layer.id,path:path(key),value:next as any,time:transport.time,preserveHandEdits:false})});
-  const changed=$derived((doc.tick.history,doc.tick.values,doc.proj,inspectorRefresh.version,[...layout.more,...layout.widgets.filter(w=>w.kind==='point'&&w.advanced).flatMap(w=>w.kind==='point'?[param(w.x),param(w.y)]:[])].some(p=>properties[p.k]&&(properties[p.k]?.kf?.length||properties[p.k]?.expr||JSON.stringify(properties[p.k]?.v)!==JSON.stringify(p.def)))));
 </script>
 
 {#snippet field(parameter:EffectParamDefinition, precise=false)}
@@ -96,11 +95,8 @@
       <div data-color-key={parameter.k}>{@render field(parameter)}</div>
     {/if}
   {/each}
-  {#if layout.more.length||extra||layout.widgets.some(w=>w.kind==='point'&&w.advanced)}
-    <Disclosure count={layout.more.length+layout.widgets.filter(w=>w.kind==='point'&&w.advanced).length+(extra?1:0)} {changed} remember={`${doc.proj.id}:${layer.id}:${prefix}`}>
-      {#each layout.widgets.filter(w=>w.kind==='point'&&w.advanced) as w}{@render widget(w)}{/each}
-      {#each layout.more as parameter (parameter.k)}{@render field(parameter,true)}{/each}
-      {#if extra}{@render extra()}{/if}
-    </Disclosure>
-  {/if}
+  <!-- Secondary settings follow the main ones directly, never folded away. -->
+  {#each layout.widgets.filter(w=>w.kind==='point'&&w.advanced) as w}{@render widget(w)}{/each}
+  {#each layout.more as parameter (parameter.k)}{@render field(parameter,true)}{/each}
+  {#if extra}{@render extra()}{/if}
 </div>

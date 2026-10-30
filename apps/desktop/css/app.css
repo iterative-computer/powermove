@@ -123,6 +123,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   height:var(--titlebar-h);flex:0 0 var(--titlebar-h);display:flex;align-items:center;gap:8px;
   padding:0 var(--pad) 0 var(--traffic-inset);
   position:relative;z-index:40;-webkit-app-region:drag;
+  /* Springs a touch past its mark, so the tools bound into the room the
+     traffic lights leave in full screen. */
+  transition:padding-left 420ms cubic-bezier(.34,1.56,.64,1);
 }
 /* After Effects' arrangement: Home and the tools lead, the document is titled
    in the middle of the window, and what you do with it trails on the right. */
@@ -133,6 +136,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .titlebar-drag-traffic{position:absolute;left:0;top:0;bottom:0;width:var(--traffic-inset);flex:none}
 /* Served to a browser there are no traffic lights to leave room for. */
 .remote-app #titlebar{--traffic-inset:var(--pad)}
+/* Full screen hides them too (the preload sets the class). */
+.window-fullscreen #titlebar{--traffic-inset:var(--pad)}
+@media (prefers-reduced-motion:reduce){#titlebar{transition:none}}
 #titlebar button,#titlebar input,#titlebar a,#titlebar [role="button"]{-webkit-app-region:no-drag}
 .project-strip-btn{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:var(--r-md);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
 .project-strip-btn:hover{background:var(--ink-1);color:var(--tx)}
@@ -500,7 +506,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 /* Paired fields (X / Y) are one joined well split by a 1px seam, so the row
    reads as a single control rather than two islands with a hole between. */
 .row.split .vwrap.pair{display:flex;gap:8px}
-.row.split .pair-group{display:grid;grid-template-columns:1fr 1fr;gap:1px;flex:1 1 0;min-width:0;height:100%;
+.row.split .pair-group{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:1px;flex:1 1 0;min-width:0;height:100%;
   border-radius:var(--r-sm);overflow:clip;background:rgb(var(--ink-rgb) / .06)}
 /* The group paints the well tint once; the two fields inside are clear so the
    pair reads the same shade as every single well instead of stacking to 12%. */
@@ -508,6 +514,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .row.split .pair-group .num:hover{background:rgb(var(--ink-rgb) / .03)}
 .row.split .pair-group .num.editing{background:transparent}
 .row.split .pair-group .well + .well{box-shadow:-1px 0 0 var(--bg-panel)}
+/* X / Y / Z: three fields share the width, so each keeps a tighter inset. */
+.row.split .pair-group .well[data-axis] .num{padding:0 6px;text-overflow:ellipsis}
 .row.split .vwrap > *{min-width:0}
 /* 4px above and below = 8px between rows, independent of the wrapper
    element each row happens to sit in. */
@@ -1217,6 +1225,19 @@ body.agent-frame-capturing #agent-popover,body.agent-frame-picking #agent-popove
 .panel-drop-preview.dock-edge{height:auto;border:1px solid color-mix(in srgb,var(--accent) 65%,transparent);border-radius:var(--r-lg);background:var(--accent-dim);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 20%,transparent),0 0 24px color-mix(in srgb,var(--accent) 16%,transparent);transform:scale(.97);transition:left var(--dur-1) var(--ease),top var(--dur-1) var(--ease),width var(--dur-1) var(--ease),height var(--dur-1) var(--ease),opacity var(--dur-1),transform var(--dur-1) var(--ease)}
 .panel-drop-preview.dock-edge.on{transform:scale(1)}
 .panel.drag-src{opacity:.38;transition:opacity var(--dur-1)}
+/* After Effects drop zones (layout/dock-zones.ts): the frame under the pointer
+   is outlined, the part the panel will take is filled, and a tab marks where
+   it joins a stack. */
+.panel-drop-frame,.panel-drop-tab{position:fixed;pointer-events:none;opacity:0;transition:opacity var(--dur-1),left var(--dur-1) var(--ease),top var(--dur-1) var(--ease),width var(--dur-1) var(--ease),height var(--dur-1) var(--ease)}
+.panel-drop-frame{z-index:279;border-radius:var(--r-lg);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--accent) 80%,transparent)}
+.panel-drop-preview.zone{height:auto;border-radius:var(--r-lg);background:color-mix(in srgb,var(--accent) 18%,transparent);box-shadow:none;transform:none}
+.panel-drop-tab{z-index:281;display:flex;align-items:center;max-width:180px;padding:0 10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  font-size:var(--fs-sm);font-weight:var(--fw-semibold);color:var(--accent-tx);background:var(--accent-dim);border-bottom:2px solid var(--accent);border-radius:var(--r-sm) var(--r-sm) 0 0}
+.panel-drop-frame.on,.panel-drop-tab.on{opacity:1}
+/* Maximize frame (the ` key, layout/maximize.ts): the panel covers the
+   workspace area; the layout beneath stays mounted. */
+.panel.maximized{position:fixed;z-index:60;flex:none!important;min-height:0!important;box-shadow:var(--shadow-float)}
+.panel.maximized > .panel-corner{display:none}
 /* ── area corners (Blender split / join / dock) ───────── */
 .panel-corner{position:absolute;z-index:26;width:11px;height:11px;cursor:crosshair;touch-action:none}
 .panel-corner[data-corner="top-left"]{left:0;top:0}

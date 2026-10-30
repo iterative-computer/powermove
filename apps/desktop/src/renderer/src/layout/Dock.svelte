@@ -3,7 +3,7 @@
   import { agentState } from '../panels/agent/agent-state.svelte';
   import GhostCard from '../panels/agent/GhostCard.svelte';
   import { ghostSlotIndex } from '../panels/agent/ui-placement-geometry';
-  import { defaultDockSize, dockSlots, markStackedPanels, type DockSpec, type PanelSpec } from './model';
+  import { defaultDockSize, dockSlots, markStackedPanels, panelMinHeight, type DockSpec, type PanelSpec } from './model';
   import { syncPanelTabs } from './panel';
   import { panelSlot } from './portal';
   import { roundedScroll } from './rounded-scroll';
@@ -24,9 +24,14 @@
     oncommit: () => void;
   } = $props();
 
+  /* The bottom dock never sits below its panels' floors: a size saved before
+     a floor was raised would otherwise let the timeline spill past the dock. */
+  const bottomFloor = $derived((void tick, dock.id !== 'bottom') ? 0 : Math.max(0, ...specs
+    .filter((spec) => !spec.collapsed)
+    .map((spec) => panelMinHeight(spec, PM.PANELS[spec.id] || {}, dock.id))));
   const dockFlex = $derived(dock.id === 'center' || dock.flex
     ? '1 1 auto'
-    : `0 0 ${dock.size || defaultDockSize(dock.id)}px`);
+    : `0 0 ${Math.max(dock.size || defaultDockSize(dock.id), bottomFloor)}px`);
 
   /* A panel the agent is still building takes its place in the dock now, so the
      surrounding panels settle into their final sizes before it arrives. */

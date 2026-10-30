@@ -96,6 +96,153 @@ export function activateTab(ws: Workspace, id: string): boolean {
   return true;
 }
 
+/* After Effects' docking model, on Powermove's columns. A dragged panel (or a
+   whole tab stack) lands one of three ways:
+   - group  → it joins another panel's tab stack and becomes the shown tab
+   - beside → it docks above or below another panel or stack
+   - dock   → it goes into a column at a point, or at the end of it
+   Side-by-side splits inside a column are left out on purpose: columns stack
+   top to bottom, and splitting a 300px column in two leaves neither half
+   usable. New columns still come from the window-edge drop strips. */
+export type PanelPlacement =
+  | { kind: 'group'; target: string; before?: string | null }
+  | { kind: 'beside'; target: string; place: 'above' | 'below' }
+  | { kind: 'dock'; dockId: string; before?: string | null };
+
+const SLOT_SIZING = ['size', 'flex', 'collapsed'] as const;
+
+function copySlotSizing(from: PanelSpec, to: PanelSpec): void {
+  for (const key of SLOT_SIZING) {
+    if (from[key]) (to as Record<string, unknown>)[key] = from[key];
+    else delete to[key];
+  }
+}
+
+function slotOf(dock: DockSpec, spec: PanelSpec): DockSlot | undefined {
+  return dockSlots(dock.panels).find((slot) => slot.specs.includes(spec));
+}
+
+/** A lone panel left with a group name would merge with any neighbour that
+ * later shares it, so a stack of one stops being a stack. */
+function tidyGroups(dock: DockSpec): void {
+  for (const slot of dockSlots(dock.panels)) {
+    if (slot.specs.length > 1) continue;
+    delete slot.specs[0]!.group;
+    delete slot.specs[0]!.active;
+  }
+}
+
+/** When a stack's shown tab leaves, the next one that stays is shown and
+ * inherits the stack's place and size. */
+function handOffStack(dock: DockSpec, leaving: PanelSpec, leavingIds: string[]): void {
+  const slot = slotOf(dock, leaving);
+  const rest = slot?.specs.filter((spec) => !leavingIds.includes(spec.id)) ?? [];
+  if (!slot || slot.active !== leaving || !rest.length) return;
+  const heir = rest[0]!;
+  for (const spec of rest) delete spec.active;
+  heir.active = true;
+  copySlotSizing(leaving, heir);
+}
+
+/** Takes panels out of the layout. A stack that loses its shown tab shows the
+ * next one, which inherits the stack's place and size. */
+function detachPanels(ws: Workspace, ids: string[]): Set<DockSpec> {
+  const touched = new Set<DockSpec>();
+  for (const id of ids) {
+    const found = findPanel(ws, id);
+    if (!found) continue;
+    handOffStack(found.dock, found.spec, ids);
+    found.dock.panels.splice(found.dock.panels.indexOf(found.spec), 1);
+    touched.add(found.dock);
+  }
+  return touched;
+}
+
+/** Moves panels to a new place, keeping a moved stack together. Returns false
+ * when the placement has nowhere to go (its target was one of the moved). */
+export function placePanels(ws: Workspace, specs: PanelSpec[], placement: PanelPlacement): boolean {
+  const ids = specs.map((spec) => spec.id);
+  if (!ids.length) return false;
+  if (placement.kind !== 'dock' && ids.includes(placement.target)) return false;
+  const live = specs.map((spec) => ({ ...(findPanel(ws, spec.id)?.spec ?? spec) }));
+  const shown = live.find((spec) => spec.active) ?? live[0]!;
+  /* An anchor that is itself moving stands for the next panel that is not. */
+  const anchorAfterMove = (dock: DockSpec, before?: string | null): PanelSpec | undefined => {
+    if (!before) return undefined;
+    const start = dock.panels.findIndex((spec) => spec.id === before);
+    return start < 0 ? undefined : dock.panels.slice(start).find((spec) => !ids.includes(spec.id));
+  };
+  let anchor: PanelSpec | undefined;
+  if (placement.kind === 'dock') {
+    const dock = ws.layout.docks.find((item) => item.id === placement.dockId);
+    anchor = dock ? anchorAfterMove(dock, placement.before) : undefined;
+  } else if (placement.kind === 'group') {
+    const target = findPanel(ws, placement.target);
+    anchor = target ? anchorAfterMove(target.dock, placement.before) : undefined;
+  }
+
+  const touched = detachPanels(ws, ids);
+  ws.hiddenPanels = (ws.hiddenPanels ?? []).filter((item) => !ids.includes(item.id));
+
+  let dock: DockSpec;
+  let index: number;
+  if (placement.kind === 'dock') {
+    dock = ensureDock(ws, placement.dockId);
+    const slot = anchor && dock.panels.includes(anchor) ? slotOf(dock, anchor) : undefined;
+    index = slot ? dock.panels.indexOf(slot.specs[0]!) : dock.panels.length;
+  } else {
+    const target = findPanel(ws, placement.target);
+    if (!target) return false;
+    dock = target.dock;
+    const slot = slotOf(dock, target.spec)!;
+    if (placement.kind === 'beside') {
+      index = dock.panels.indexOf(placement.place === 'above' ? slot.specs[0]! : slot.specs.at(-1)!) + (placement.place === 'below' ? 1 : 0);
+    } else {
+      const group = target.spec.group || uniqueGroup(ws, target.spec.id);
+      for (const member of slot.specs) member.group = group;
+      for (const member of live) {
+        member.group = group;
+        delete member.active;
+        for (const key of SLOT_SIZING) delete member[key];
+      }
+      /* The dropped panel comes to the front and takes over the stack's size. */
+      const front = live.find((spec) => spec.id === shown.id)!;
+      copySlotSizing(slot.active, front);
+      for (const member of slot.specs) delete member.active;
+      front.active = true;
+      const at = anchor && slot.specs.includes(anchor) ? anchor : null;
+      index = at ? dock.panels.indexOf(at) : dock.panels.indexOf(slot.specs.at(-1)!) + 1;
+    }
+  }
+  if (placement.kind !== 'group' && live.length === 1) {
+    delete live[0]!.group;
+    delete live[0]!.active;
+  }
+  for (const spec of live) keepPanelAtSetHeight(spec);
+  dock.panels.splice(index, 0, ...live);
+  touched.add(dock);
+  for (const item of touched) {
+    tidyGroups(item);
+    ensureDockFill(item);
+  }
+  if (dock.hidden) dock.hidden = false;
+  return true;
+}
+
+function uniqueGroup(ws: Workspace, seed: string): string {
+  const used = new Set(ws.layout.docks.flatMap((dock) => dock.panels.map((spec) => spec.group)));
+  let name = `stack-${seed}`;
+  for (let n = 2; used.has(name); n += 1) name = `stack-${seed}-${n}`;
+  return name;
+}
+
+/** The members of a panel's tab stack, or the panel alone. */
+export function stackOf(ws: Workspace, id: string): PanelSpec[] {
+  const found = findPanel(ws, id);
+  if (!found) return [];
+  return slotOf(found.dock, found.spec)?.specs ?? [found.spec];
+}
+
 export function removePanel(ws: Workspace, id: string): void {
   eachDock(ws, (dock) => {
     dock.panels = dock.panels.filter((panel) => panel.id !== id);
@@ -129,6 +276,7 @@ export function hidePanel(ws: Workspace, id: string): boolean {
     spec: { ...found.spec },
     dock: { id: found.dock.id, size: found.dock.size, flex: found.dock.flex }
   });
+  handOffStack(found.dock, found.spec, [id]);
   found.dock.panels.splice(index, 1);
   ensureDockFill(found.dock);
   return true;

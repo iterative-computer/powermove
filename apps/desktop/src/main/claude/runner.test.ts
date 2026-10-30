@@ -293,6 +293,8 @@ describe('Claude runner', () => {
       });
       await vi.waitFor(() => expect(argvs).toHaveLength(1));
       expect(argvs[0]![argvs[0]!.indexOf('--allowedTools') + 1]!.split(',')).not.toContain('Bash');
+      // Older renderers omit approval, which means Auto: the classifier answers first.
+      expect(argvs[0]![argvs[0]!.indexOf('--permission-mode') + 1]).toBe('auto');
       const bash = { command: 'cp DMSans.ttf ~/Library/Fonts/', description: 'Install DM Sans', dangerouslyDisableSandbox: true };
       line({ type: 'control_request', request_id: 'perm-bash', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: bash, tool_use_id: 'toolu_b' } });
       line({ type: 'control_request', request_id: 'perm-write', request: { subtype: 'can_use_tool', tool_name: 'Write', input: { file_path: '/Users/me/notes.txt', content: 'x' }, tool_use_id: 'toolu_w' } });
@@ -307,6 +309,25 @@ describe('Claude runner', () => {
         { type: 'control_response', response: { subtype: 'success', request_id: 'perm-write', response: { behavior: 'deny', message: 'The user declined.' } } }
       ]);
       line({ type: 'result', subtype: 'success', is_error: false, result: '{}', structured_output: { summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] } });
+      child.stdout.end();
+      child.emit('close', 0, null);
+      await expect(result).resolves.toMatchObject({ ok: true });
+    } finally { await rm(userData, { recursive: true, force: true }); }
+  });
+
+  it.each([['supervised', 'acceptEdits'], ['auto', 'auto']] as const)('runs a %s Project run in Claude %s mode', async (approval, mode) => {
+    const userData = await mkdtemp(path.join(tmpdir(), 'claude-approval-mode-'));
+    try {
+      const runner = new ClaudeRunner();
+      const child = fakeChild();
+      const argvs: string[][] = [];
+      const result = runner.run(request({ id: `claude-${approval}`, mode: 'autonomous', access: 'project', projectJSON: '{}', threadId: approval, approval }), {
+        userData, extensionsDir: path.join(userData, 'extensions'), apiPackFiles: async () => [], binary: '/fake/claude',
+        requestApproval: vi.fn<RequestApproval>(), spawnProcess: (_binary, args) => { argvs.push([...args]); return child as never; }
+      });
+      await vi.waitFor(() => expect(argvs).toHaveLength(1));
+      expect(argvs[0]![argvs[0]!.indexOf('--permission-mode') + 1]).toBe(mode);
+      child.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '{}', structured_output: { summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] } })}\n`);
       child.stdout.end();
       child.emit('close', 0, null);
       await expect(result).resolves.toMatchObject({ ok: true });

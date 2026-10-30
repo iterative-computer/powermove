@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(194);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(193);
+    expect(captured).toHaveLength(195);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(194);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
@@ -151,6 +151,7 @@ describe('keymap-default', () => {
       ['.', 'zoomIn'], [',', 'zoomOut'], ['/', 'actualSize'],
       ['shift+/', 'fitComposition'], ['shift+f3', 'graph'],
       ['cmd+shift+a', 'deselect'], ['cmd+shift+h', 'toggleLayerControls'],
+      ['`', 'maximizePanel'],
     ];
     for (const [key, command] of expected) {
       expect(KEYMAP_DEFAULT).toContainEqual(expect.objectContaining({ key, command }));

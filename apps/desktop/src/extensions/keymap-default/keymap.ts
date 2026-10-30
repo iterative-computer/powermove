@@ -129,6 +129,9 @@ for (const modifier of ['cmd', 'ctrl']) {
   bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
 }
 
+/* AE's Maximize frame: ` toggles the panel under the pointer to fill the window. */
+bind('`', 'maximizePanel');
+
 /* Timeline navigation and layer timing use AE's native muscle memory. */
 bind('j', 'prevVisibleEvent');
 bind('k', 'nextVisibleEvent');

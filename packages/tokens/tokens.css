@@ -72,7 +72,7 @@
 
   /* ── metrics ── */
   --row-h:30px;
-  --hdr-h:38px;
+  --hdr-h:32px;   /* panel headers, the viewer bar and the timeline rows share one height */
   --ctl-h:28px;   /* default control height: buttons, chips, fields inline */
   --gut:10px;
   --panel-edge-inset:10px; /* inset panel-top controls, search rows, and footer cards */

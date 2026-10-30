@@ -23,6 +23,7 @@ import {
   setPanelCollapsed,
   type Workspace
 } from './model';
+import { installMaximize, maximizedPanel, toggleMaximizedPanel } from './maximize';
 import { installPanelPopouts } from './popout';
 import { syncPanelMoveHandle } from './panel';
 import { applyPanelVisibility, preferredPanelVisibility, rememberPanelVisibility } from './panel-visibility';
@@ -172,6 +173,9 @@ export function installSvelteLayout(PM: PMRegistry): void {
     // Choosing a tab is a view state, not an edit: it never forks a built-in workspace.
     PM.WS.mutate((workspace: Workspace) => { activateTab(workspace, id); }, { inPlace: true });
   };
+  layout.toggleMaximize = (id?: string): boolean => toggleMaximizedPanel(PM, id);
+  layout.maximizedPanel = maximizedPanel;
+  installMaximize(PM);
   layout.applyTheme = (theme: Record<string, any>): void => applyTheme(PM, theme);
   layout.setCollapsed = (id: string, collapsed: boolean, emit = true) => setPanelCollapsed(PM, id, collapsed, emit);
 

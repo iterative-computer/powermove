@@ -9,7 +9,7 @@
   import { axisContentKey, type FontStyle } from 'powermove';
 
   const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
-  const { ColorField, Disclosure, FontField, NumField, Section, SelectField, ToggleField } = api.ui.controls;
+  const { ColorField, FontField, NumField, Section, SelectField, ToggleField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
   const weightLabels: Record<number, string> = {
     100: 'Thin',
@@ -39,9 +39,6 @@
   let fontStyles = $state<FontStyle[]>([]);
   const IMPORT_SOURCE = '__powermove_import_source__';
 
-  /* More reads as changed while tracking, leading or alignment is set or animated. */
-  const typeMoreChanged = $derived((doc.tick.values, doc.tick.history, doc.proj, ['tracking', 'leading', 'align', 'weight']
-    .some((key) => !!(layer.d?.[key]?.kf?.length || layer.d?.[key]?.expr))));
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
   const edit = (key: string, label: string): EditBinding =>
     contentBinding(layer.id, key, { label, origin: 'inspector' });
@@ -230,44 +227,41 @@
   </AnimatedRow>
   <AnimatedRow {layer} label="Size" path="c.size"><NumField {api} {mixed} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Color" path="c.color"><ColorField {api} {mixed} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
-  <!-- After the prototype: Text, Font, Size and Color; the rest of the
-       type settings fold under More. -->
-  <Disclosure count={3 + (!hasVariableWeight && content[axisContentKey('wght')] == null ? 1 : 0)} changed={typeMoreChanged} remember={`${doc.proj.id}:${layer.id}:type-more`}>
-    {#if !hasVariableWeight && content[axisContentKey('wght')] == null && fontStyles.length}
-      <AnimatedRow {layer} label="Style" path="c.weight">
-        <SelectField
-          {api}
-          {mixed}
+  <!-- Text, Font, Size and Color first, then the rest of the type settings. -->
+  {#if !hasVariableWeight && content[axisContentKey('wght')] == null && fontStyles.length}
+    <AnimatedRow {layer} label="Style" path="c.weight">
+      <SelectField
+        {api}
+        {mixed}
 
-          get={() => currentStyle ? styleKey(currentStyle) : null}
-          edit={styleEdit}
-          options={fontStyles.map((style) => ({ v: styleKey(style), label: style.name }))}
-          label="Style"
-          onChange={(value: unknown) => {
-            const style = fontStyles.find((candidate) => styleKey(candidate) === value);
-            if (style) api.media.fonts?.ensure?.(content.font, style.weight);
-          }}
-        />
-      </AnimatedRow>
-    {:else if !hasVariableWeight && content[axisContentKey('wght')] == null}
-      {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
-      <AnimatedRow {layer} label="Weight" path="c.weight">
-        <SelectField
-          {api}
-          {mixed}
+        get={() => currentStyle ? styleKey(currentStyle) : null}
+        edit={styleEdit}
+        options={fontStyles.map((style) => ({ v: styleKey(style), label: style.name }))}
+        label="Style"
+        onChange={(value: unknown) => {
+          const style = fontStyles.find((candidate) => styleKey(candidate) === value);
+          if (style) api.media.fonts?.ensure?.(content.font, style.weight);
+        }}
+      />
+    </AnimatedRow>
+  {:else if !hasVariableWeight && content[axisContentKey('wght')] == null}
+    {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
+    <AnimatedRow {layer} label="Weight" path="c.weight">
+      <SelectField
+        {api}
+        {mixed}
 
-          get={get('weight', 400)}
-          edit={edit('weight', 'Weight')}
-          options={weights.map((value) => ({ v: value, label: weightLabels[value] ?? String(value) }))}
-          label="Weight"
-          onChange={(value: unknown) => api.media.fonts?.ensure?.(content.font, Number(value) || 400)}
-        />
-      </AnimatedRow>
-    {/if}
-    <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {api} {mixed} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
-    <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {api} {mixed} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
-    <AnimatedRow {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
-  </Disclosure>
+        get={get('weight', 400)}
+        edit={edit('weight', 'Weight')}
+        options={weights.map((value) => ({ v: value, label: weightLabels[value] ?? String(value) }))}
+        label="Weight"
+        onChange={(value: unknown) => api.media.fonts?.ensure?.(content.font, Number(value) || 400)}
+      />
+    </AnimatedRow>
+  {/if}
+  <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {api} {mixed} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {api} {mixed} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
+  <AnimatedRow {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
   <TypeSettings {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} onStyles={(styles) => { fontStyles = styles; }} />
 {:else if (layer.type === 'solid' || layer.type === 'shape' || layer.type === 'null') && !layer.d.paths?.length}
   <AnimatedRow {layer} label="Fill" path="c.color"><ColorField {api} {mixed} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>

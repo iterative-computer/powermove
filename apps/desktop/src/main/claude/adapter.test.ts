@@ -131,6 +131,26 @@ describe('Claude CLI adapter', () => {
     expect(editor[editor.indexOf('--settings') + 1]).toBe(CLAUDE_EDITOR_SANDBOX_SETTINGS);
   });
 
+  it('lets Claude Code\'s classifier answer prompts only in Auto Project runs', () => {
+    const base = { schema, prompt: 'Build', imagePaths: [], model: null, reasoningEffort: null, sessionId: null, instructions: 'Build.', askOutsideSandbox: true } as const;
+    const mode = (argv: string[]) => argv[argv.indexOf('--permission-mode') + 1];
+    const auto = buildClaudeArgv({ ...base, access: 'project', approval: 'auto' });
+    expect(mode(auto)).toBe('auto');
+    // The classifier, not an allow rule, decides an unsandboxed retry.
+    expect(auto[auto.indexOf('--allowedTools') + 1]!.split(',')).not.toContain('Bash');
+    expect(JSON.parse(auto[auto.indexOf('--settings') + 1]!).sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: true });
+    expect(auto[auto.indexOf('--system-prompt') + 1]).toContain('automatic reviewer');
+
+    const supervised = buildClaudeArgv({ ...base, access: 'project', approval: 'supervised' });
+    expect(mode(supervised)).toBe('acceptEdits');
+    expect(supervised[supervised.indexOf('--system-prompt') + 1]).toContain('Powermove asks the user');
+    expect(mode(buildClaudeArgv({ ...base, access: 'project' }))).toBe('acceptEdits');
+    expect(mode(buildClaudeArgv({ ...base, access: 'editor', approval: 'auto' }))).toBe('default');
+    const full = buildClaudeArgv({ ...base, access: 'computer', approval: 'auto' });
+    expect(full).not.toContain('--permission-mode');
+    expect(full).toContain('--dangerously-skip-permissions');
+  });
+
   it('keeps editor runs without shell network', () => {
     const argv = buildClaudeArgv({
       schema, prompt: 'Inspect', imagePaths: [], model: null, reasoningEffort: null,

@@ -253,6 +253,11 @@
 </div>
 
 <div class="titlebar-drag" aria-hidden="true"></div>
+<!-- Both drag strips come before the title: Electron applies app regions in
+     document order, so a later drag strip would cover the title's right half
+     and swallow its hover and clicks. The title is positioned absolutely, so
+     its place in the markup doesn't move it. -->
+<div class="titlebar-drag" aria-hidden="true"></div>
 
 <div id="doc-title" class="tb-title" data-svelte-shell="title">
   {#if renaming}
@@ -289,8 +294,6 @@
     </button>
   {/if}
 </div>
-
-<div class="titlebar-drag" aria-hidden="true"></div>
 
 <div class="tb-right" id="tb-right">
   {#if !homeOpen}

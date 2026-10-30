@@ -506,6 +506,11 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   installRendererRecovery(window, dialog, () => openReadyEditors.delete(window.webContents));
   persistOpenWindows();
   window.on('focus', () => { editors.touch(window); persistOpenWindows(); });
+  // Full screen hides the traffic lights; the titlebar reclaims their room.
+  const sendFullScreen = (on: boolean): void => { window.webContents.send(IPC.windowFullScreen, on); };
+  window.on('enter-full-screen', () => sendFullScreen(true));
+  window.on('leave-full-screen', () => sendFullScreen(false));
+  window.webContents.on('did-finish-load', () => sendFullScreen(window.isFullScreen()));
   // Drained once the page has both loaded and subscribed, in either order.
   window.webContents.on('did-finish-load', drainPendingOpenFiles);
   // A reload or navigation replaces the page that was listening.

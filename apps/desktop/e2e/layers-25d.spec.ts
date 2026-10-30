@@ -62,6 +62,6 @@ test('editable 2.5D layers render perspective, depth, keyframes and survive Undo
     expect(moved.x - drag.x).toBeCloseTo(60, 0);
     expect(moved.y - drag.y).toBeCloseTo(20, 0);
     await page.evaluate(() => { const PM = (window as any).PM; PM.hist.undo(); PM.replaceProject(PM.deserialize(PM.serialize())); });
-    await expect(page.getByRole('spinbutton', { name: 'Position Z', exact: true })).toHaveValue('-80px');
+    await expect(page.getByRole('spinbutton', { name: 'Position Z', exact: true })).toHaveValue('-80');
     expect(session.diagnostics.pageErrors).toEqual([]);
 });

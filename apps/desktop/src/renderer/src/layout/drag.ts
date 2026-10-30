@@ -1,5 +1,6 @@
 import type { PMRegistry } from '../legacy/registry';
-import { dockLabel, insertPanel, removePanel, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { resolvePanelZone, type PanelZone, type ZonePanel, type ZoneRect } from './dock-zones';
+import { dockLabel, placePanels, stackOf, type DockSpec, type PanelPlacement, type PanelSpec, type Workspace } from './model';
 
 type RectTarget = { id: string; el?: HTMLElement; virtual?: boolean; rect: DOMRect; panels: Array<{ el: HTMLElement; rect: DOMRect }> };
 type PreviewTarget = { key: string };
@@ -50,10 +51,10 @@ function liveTargets(PM: PMRegistry): RectTarget[] {
     id: element.id.replace('dock-', ''),
     el: element,
     rect: element.getBoundingClientRect(),
-    panels: [...element.querySelectorAll<HTMLElement>('.panel[data-panel]')].map((panel) => ({
-      el: panel,
-      rect: panel.getBoundingClientRect()
-    }))
+    // A stack's hidden tabs have no box; only the shown one takes a place.
+    panels: [...element.querySelectorAll<HTMLElement>('.panel[data-panel]')]
+      .map((panel) => ({ el: panel, rect: panel.getBoundingClientRect() }))
+      .filter((panel) => panel.rect.height > 0)
   }));
   const bodyRect = document.getElementById('body')?.getBoundingClientRect();
   return PM.Layout.buildDockDropTargets(docks, bodyRect) as RectTarget[];
@@ -99,69 +100,172 @@ function placePreview(
   }
 }
 
+/** The shown panels under the docks, measured for the AE drop zones. */
+function zonePanels(PM: PMRegistry): ZonePanel[] {
+  const ws = PM.Layout.ws as Workspace | null;
+  const box = (rect: DOMRect): ZoneRect => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
+  return [...document.querySelectorAll<HTMLElement>(PANEL_SELECTOR)].flatMap((element) => {
+    const id = element.dataset.panel!;
+    const rect = element.getBoundingClientRect();
+    if (!rect.height || element.dataset.collapsed === '1') return [];
+    const def = PM.PANELS[id] || {};
+    const header = def.headless ? null : element.querySelector<HTMLElement>(':scope > header');
+    const tabs = header ? [...header.querySelectorAll<HTMLElement>(':scope > .ptabs > .ptab')] : [];
+    const title = header?.querySelector<HTMLElement>(':scope > .ptitle');
+    return [{
+      id,
+      stack: ws ? stackOf(ws, id).map((spec) => spec.id) : [id],
+      rect: box(rect),
+      header: header ? box(header.getBoundingClientRect()) : null,
+      tabs: (tabs.length ? tabs : title ? [title] : []).map((tab) => {
+        const tabRect = tab.getBoundingClientRect();
+        return { id: tab.dataset.tab || id, left: tabRect.left, right: tabRect.right };
+      }),
+      groupable: !def.headless && id !== 'viewer'
+    }];
+  });
+}
+
+/** Whether a placement would change anything, tried on a copy first. */
+function changesLayout(workspace: Workspace, specs: PanelSpec[], placement: PanelPlacement): boolean {
+  const probe = JSON.parse(JSON.stringify(workspace)) as Workspace;
+  const shape = (ws: Workspace) => JSON.stringify(ws.layout.docks.map((dock) => [dock.id, dock.panels.map((spec) => [spec.id, spec.group ?? null])]));
+  return placePanels(probe, specs, placement) && shape(probe) !== shape(workspace);
+}
+
 type FloatingDrag = {
   move(event: PointerEvent): void;
   finish(cancelled: boolean): void;
   dockIds?: string[];
 };
 
-export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement, floating?: FloatingDrag): void {
+/**
+ * Drag a panel by its header, or a whole tab stack by passing `stack`. Over a
+ * panel the After Effects drop zones apply (see dock-zones.ts); elsewhere in a
+ * column, or at a window edge, it docks between panels as before.
+ */
+export function beginPanelDrag(
+  PM: PMRegistry,
+  event: PointerEvent,
+  spec: PanelSpec,
+  _dock: DockSpec,
+  element: HTMLElement,
+  floating?: FloatingDrag,
+  stack?: PanelSpec[]
+): void {
+  const moving = stack && stack.length > 1 ? stack : [spec];
+  const ids = moving.map((item) => item.id);
+  const name = (id: string): string => PM.PANELS[id]?.title || id;
+  const movingName = moving.map((item) => item.title || name(item.id)).join(' + ');
   const ghost = document.createElement('div');
   ghost.className = 'panel-ghost';
   const card = document.createElement('div');
   card.className = 'panel-ghost-card';
   const label = document.createElement('span');
   label.className = 'panel-ghost-label';
-  label.textContent = PM.PANELS[spec.id]?.title || spec.id;
+  label.textContent = movingName;
   const destination = document.createElement('span');
   destination.className = 'panel-ghost-destination';
   card.append(label, destination);
   ghost.appendChild(card);
   const preview = document.createElement('div');
   preview.className = 'panel-drop-preview';
-  document.body.append(ghost, preview);
+  /* AE outlines the frame under the pointer and fills the zone the panel
+     will take; a tab marks where it joins a stack. */
+  const frameOutline = document.createElement('div');
+  frameOutline.className = 'panel-drop-frame';
+  const tabMark = document.createElement('div');
+  tabMark.className = 'panel-drop-tab';
+  tabMark.textContent = moving.length > 1 ? `${moving.length} panels` : movingName;
+  document.body.append(ghost, frameOutline, preview, tabMark);
   if (!floating) element.classList.add('drag-src');
+  /* Panels that cannot show a tab strip cannot join a stack. */
+  const canGroup = !floating && moving.every((item) => !PM.PANELS[item.id]?.headless && item.id !== 'viewer');
 
-  const fromIndex = Math.max(0, dock.panels.findIndex((panel) => panel.id === spec.id));
   let moved = false;
   let frame = 0;
   let pending: PointerEvent | null = null;
-  let dropTarget: { dockId: string; index: number } | null = null;
+  let dropTarget: { dockId: string; index: number; before: string | null } | null = null;
+  let zone: PanelZone | null = null;
   const previewTarget: PreviewTarget = { key: '' };
+
+  const showBox = (node: HTMLElement, rect: ZoneRect | null): void => {
+    node.classList.toggle('on', !!rect);
+    if (!rect) return;
+    node.style.left = `${Math.round(rect.left)}px`;
+    node.style.top = `${Math.round(rect.top)}px`;
+    node.style.width = `${Math.round(rect.right - rect.left)}px`;
+    node.style.height = `${Math.round(rect.bottom - rect.top)}px`;
+  };
 
   const render = (): void => {
     frame = 0;
     const next = pending;
     pending = null;
     if (!next) return;
-    const docks = liveTargets(PM).filter(dock => !floating?.dockIds || floating.dockIds.includes(dock.id));
-    dropTarget = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY);
-    if (floating) {
-      floating.move(next);
-      // Leave the middle of the workspace free for floating. Dock only at
-      // column edges or between panels, using the existing placement preview.
-      const target = docks.find(item => item.id === dropTarget?.dockId);
-      if (target && !target.virtual) {
-        const nearEdge = Math.min(Math.abs(next.clientX - target.rect.left), Math.abs(next.clientX - target.rect.right),
-          Math.abs(next.clientY - target.rect.top), Math.abs(next.clientY - target.rect.bottom)) <= 32;
-        const nearPanel = target.panels.some(panel => Math.min(Math.abs(next.clientY - panel.rect.top), Math.abs(next.clientY - panel.rect.bottom)) <= 24);
-        if (!nearEdge && !nearPanel) dropTarget = null;
-      }
+    zone = null;
+    dropTarget = null;
+    const panels = floating ? [] : zonePanels(PM);
+    zone = resolvePanelZone(panels, next.clientX, next.clientY, ids, canGroup);
+    const zonePanel = zone ? panels.find((item) => item.id === zone!.target) : undefined;
+    showBox(frameOutline, zonePanel?.rect ?? null);
+    tabMark.classList.toggle('on', zone?.kind === 'group');
+    if (zone?.kind === 'group' && zone.tab) {
+      tabMark.style.left = `${Math.round(zone.tab.left)}px`;
+      tabMark.style.top = `${Math.round(zone.tab.top)}px`;
+      tabMark.style.height = `${Math.round(zone.tab.height)}px`;
     }
-    if (!dropTarget) {
-      preview.classList.remove('on');
-      previewTarget.key = '';
-      destination.textContent = 'Not a drop zone';
+    if (zone) {
+      preview.classList.remove('dock-edge');
+      if (zone.kind === 'self') {
+        preview.classList.remove('on', 'zone');
+        previewTarget.key = '';
+        destination.textContent = 'Already here';
+      } else {
+        preview.classList.add('zone');
+        showBox(preview, zone.zone);
+        retargetPreview(preview, previewTarget, `zone:${zone.kind}:${zone.target}:${JSON.stringify(zone.placement)}`);
+        const placement = zone.placement;
+        destination.textContent = placement.kind === 'group'
+          ? `Tab with ${name(zone.target)}`
+          : placement.kind === 'beside' ? `${placement.place === 'above' ? 'Above' : 'Below'} ${name(zone.target)}` : '';
+      }
     } else {
-      const targetDock = docks.find((item) => item.id === dropTarget!.dockId);
-      const before = targetDock?.panels[dropTarget.index];
-      const after = dropTarget.index > 0 ? targetDock?.panels[dropTarget.index - 1] : undefined;
-      destination.textContent = before
-        ? `Above ${PM.PANELS[before.el.dataset.panel!]?.title || 'panel'}`
-        : after
-          ? `Below ${PM.PANELS[after.el.dataset.panel!]?.title || 'panel'}`
-          : `Place in ${dockLabel(dropTarget.dockId)}`;
-      placePreview(PM, preview, dropTarget, docks, previewTarget);
+      preview.classList.remove('zone');
+      preview.style.height = '';
+      const docks = liveTargets(PM).filter(dock => !floating?.dockIds || floating.dockIds.includes(dock.id));
+      const hit = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY) as { dockId: string; index: number } | null;
+      if (hit) {
+        const targetDock = docks.find((item) => item.id === hit.dockId);
+        dropTarget = { ...hit, before: targetDock?.panels[hit.index]?.el.dataset.panel ?? null };
+      }
+      if (floating) {
+        floating.move(next);
+        // Leave the middle of the workspace free for floating. Dock only at
+        // column edges or between panels, using the existing placement preview.
+        const target = docks.find(item => item.id === dropTarget?.dockId);
+        if (target && !target.virtual) {
+          const nearEdge = Math.min(Math.abs(next.clientX - target.rect.left), Math.abs(next.clientX - target.rect.right),
+            Math.abs(next.clientY - target.rect.top), Math.abs(next.clientY - target.rect.bottom)) <= 32;
+          const nearPanel = target.panels.some(panel => Math.min(Math.abs(next.clientY - panel.rect.top), Math.abs(next.clientY - panel.rect.bottom)) <= 24);
+          if (!nearEdge && !nearPanel) dropTarget = null;
+        }
+      }
+      if (!dropTarget) {
+        preview.classList.remove('on');
+        previewTarget.key = '';
+        destination.textContent = 'Not a drop zone';
+      } else {
+        const targetDock = docks.find((item) => item.id === dropTarget!.dockId);
+        const before = targetDock?.panels[dropTarget.index];
+        const after = dropTarget.index > 0 ? targetDock?.panels[dropTarget.index - 1] : undefined;
+        destination.textContent = before
+          ? `Above ${name(before.el.dataset.panel!)}`
+          : after
+            ? `Below ${name(after.el.dataset.panel!)}`
+            : `Place in ${dockLabel(dropTarget.dockId)}`;
+        placePreview(PM, preview, dropTarget, docks, previewTarget);
+      }
     }
     const x = PM.clamp(next.clientX + 12, 8, window.innerWidth - ghost.offsetWidth - 8);
     const y = PM.clamp(next.clientY + 12, 8, window.innerHeight - ghost.offsetHeight - 8);
@@ -174,8 +278,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
   const finish = (cancelled: boolean): void => {
     if (frame) window.cancelAnimationFrame(frame);
     window.removeEventListener('keydown', onKeyDown, true);
-    ghost.remove();
-    preview.remove();
+    for (const node of [ghost, preview, frameOutline, tabMark]) node.remove();
     element.classList.remove('drag-src');
     document.body.classList.remove('panel-dragging');
     if (!moved) return;
@@ -184,24 +287,34 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
       PM.toast('Move cancelled');
       return;
     }
-    if (!dropTarget) {
-      if (floating) { floating.finish(false); return; }
-      PM.toast(`Drop on a panel or dock to move ${PM.PANELS[spec.id]?.title || spec.id}`);
+    if (zone?.kind === 'self') {
+      PM.toast(`${movingName} is already here`);
       return;
     }
-    const index = PM.Layout.resolveDropIndex(dock.id, fromIndex, dropTarget.dockId, dropTarget.index);
-    if (index == null) {
-      PM.toast(`${PM.PANELS[spec.id]?.title || spec.id} is already here`);
+    const placement: PanelPlacement | null = zone
+      ? zone.placement
+      : dropTarget ? { kind: 'dock', dockId: dropTarget.dockId, before: dropTarget.before } : null;
+    if (!placement) {
+      if (floating) { floating.finish(false); return; }
+      PM.toast(`Drop on a panel or dock to move ${movingName}`);
+      return;
+    }
+    const current = (PM.WS.current ?? PM.Layout.ws) as Workspace | null;
+    if (current && !changesLayout(current, moving, placement)) {
+      PM.toast(`${movingName} is already here`);
       return;
     }
     const previous = panelRects();
     PM.WS.mutate((workspace: Workspace) => {
-      removePanel(workspace, spec.id);
-      insertPanel(workspace, spec, dropTarget!.dockId, index);
-      PM.Layout.rememberPanelOpen?.(spec.id);
+      placePanels(workspace, moving, placement);
+      for (const id of ids) PM.Layout.rememberPanelOpen?.(id);
     });
     animatePanelLayout(previous);
-    PM.toast(`Moved ${PM.PANELS[spec.id]?.title || spec.id} → ${dockLabel(dropTarget.dockId)}`);
+    PM.toast(placement.kind === 'group'
+      ? `${movingName} tabbed with ${name(placement.target)}`
+      : placement.kind === 'beside'
+        ? `Moved ${movingName} ${placement.place} ${name(placement.target)}`
+        : `Moved ${movingName} → ${dockLabel(placement.dockId)}`);
   };
   const drag = PM.drag(event, {
     cursor: 'grabbing',

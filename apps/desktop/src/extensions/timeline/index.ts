@@ -28,6 +28,8 @@ const TIMELINE_STYLES = `
 #panel-timeline>.body{position:relative;display:flex;flex-direction:column;overflow:hidden}
 #tl-head{position:absolute;z-index:3;left:0;top:0;width:var(--tl-gutter,494px);height:var(--tl-ruler,32px);display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:0 10px;background:var(--bg-panel);border-right:1px solid var(--line);overflow:hidden}
 /* The move handle shows only under the pointer; at rest the row is play, time and the graph switch. */
+#tl-head>.tl-gutter-grip{position:absolute;top:0;right:0;bottom:0;width:5px;cursor:col-resize}
+#tl-head>.tl-gutter-grip[hidden]{display:none}
 #tl-head>.panel-move-handle{opacity:0;margin-right:-4px}
 #tl-head:hover>.panel-move-handle,#tl-head>.panel-move-handle:focus-visible{opacity:.58}
 #tl-head .iconbtn{width:24px;height:24px;flex:none;background:none;border:0;border-radius:var(--r-sm);box-shadow:none;color:var(--tx-2)}

@@ -31,6 +31,7 @@
     compact = false,
     prefix,
     pairWith,
+    thirdWith,
     visual = !!property
   }: {
     layer: any;
@@ -51,6 +52,8 @@
     prefix?: string;
     /** A second channel shown in the same row, as one value pair (Position). */
     pairWith?: string;
+    /** A third channel after the pair, for X / Y / Z in one row. */
+    thirdWith?: string;
     visual?: boolean;
   } = $props();
 
@@ -71,7 +74,8 @@
   const scaleLinked = $derived((doc.tick.history, doc.tick.values, doc.proj, !!layer.scaleLinked));
   const isScale = $derived(!property && !compact && channel === 'scale.x');
   const pairChannel = $derived(isScale ? 'scale.y' : !property && !compact ? pairWith : undefined);
-  const channels = $derived(pairChannel ? [channel, pairChannel] : [channel]);
+  const thirdChannel = $derived(pairChannel ? thirdWith : undefined);
+  const channels = $derived(pairChannel ? [channel, pairChannel, ...(thirdChannel ? [thirdChannel] : [])] : [channel]);
   const properties = $derived((doc.tick.structure, doc.proj, channels.map((key) => property ?? layer.p?.[key])));
   const animated = $derived((doc.tick.history, doc.tick.values, doc.proj, properties.some((p) => (p?.kf?.length ?? 0) > 0)));
   const expression = $derived((doc.tick.history, doc.tick.values, doc.proj, properties.find((p) => p?.expr)?.expr));
@@ -109,6 +113,7 @@
     time: () => transport.time
   }));
   const pairEdit = $derived(pairWith ? channelBinding(layer.id, pairWith, { label: `${label} Y`, origin: 'inspector', time: () => transport.time }) : scaleYEdit);
+  const thirdEdit = $derived(thirdWith ? channelBinding(layer.id, thirdWith, { label: `${label} Z`, origin: 'inspector', time: () => transport.time }) : null);
 
   function refreshValues(): void {
     inspector()?.refresh();
@@ -312,9 +317,11 @@
   }
 </script>
 
-{#snippet well(fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
+{#snippet well(fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string, axis?: string)}
   {@const Field = visual && Number.isFinite(min) && Number.isFinite(max) && max! > min! ? SliderField : NumField}
-  <div class="well" data-prefix={gutter}>
+  <!-- data-axis names the field when a narrow inspector stacks X / Y / Z
+       under the label, out of reach of the section's column heading. -->
+  <div class="well" data-prefix={gutter} data-axis={axis}>
     <Field
       angle={visual && unit === '°'}
       {api}
@@ -327,7 +334,7 @@
       step={step ?? meta.step ?? 1}
       min={min ?? meta.min}
       max={max ?? meta.max}
-      unit={unit ?? meta.unit}
+      unit={thirdChannel && (unit ?? meta.unit) === 'px' ? '' : unit ?? meta.unit}
       {precision}
       link={linked}
     />
@@ -365,14 +372,9 @@
           onclick={diamondClick}>
           {@html api.ui.icon(effectControls ? 'timer' : keyAtPlayhead ? 'diamondFill' : 'diamond')}
         </button>
-      {/snippet}
-      <!-- One value per axis, X then Y, in one well. -->
-      {@render well(isScale ? 'Scale X' : pairChannel ? `${label} X` : label, edit, () => value, !!prop?.expr, pairChannel ? undefined : prefix)}
-      {#if pairChannel}
-        {@render well(isScale ? 'Scale Y' : `${label} Y`, pairEdit, () => api.anim.ev(layer, pairChannel, transport.time), !!layer.p?.[pairChannel]?.expr)}
-      {/if}
-      {#snippet action()}
         {#if isScale}
+          <!-- Sits at the end of the label column, so Scale's values line up
+               with every other row's (and with the X / Y / Z heading). -->
           <button type="button" class="kf link-axes" class:on={scaleLinked} aria-label="Lock aspect ratio" aria-pressed={scaleLinked}
             title={scaleLinked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
             onclick={() => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}>
@@ -380,6 +382,14 @@
           </button>
         {/if}
       {/snippet}
+      <!-- One value per axis, X then Y (then Z), in one well. -->
+      {@render well(isScale ? 'Scale X' : pairChannel ? `${label} X` : label, edit, () => value, !!prop?.expr, pairChannel ? undefined : prefix, thirdChannel ? 'X' : undefined)}
+      {#if pairChannel}
+        {@render well(isScale ? 'Scale Y' : `${label} Y`, pairEdit, () => api.anim.ev(layer, pairChannel, transport.time), !!layer.p?.[pairChannel]?.expr, undefined, thirdChannel ? 'Y' : undefined)}
+      {/if}
+      {#if thirdChannel && thirdEdit}
+        {@render well(`${label} Z`, thirdEdit, () => api.anim.ev(layer, thirdChannel, transport.time), !!layer.p?.[thirdChannel]?.expr, undefined, 'Z')}
+      {/if}
     </Row>
   </div>
 {/if}
@@ -387,7 +397,14 @@
 {#if runtimeError}<p role="status" style="color:var(--danger,#ef8989);font-size:11px;margin:0 8px 6px">{runtimeError}</p>{/if}
 
 <style>
+  /* The link button sits right after the label's text; the values keep the
+     same start as every other row (diamond 11 + label 78 + two 8px gaps). */
+  :global(.row.split.split:has(> .link-axes) > .k.k) { width: auto; }
+  :global(.row.split:has(> .link-axes) > .vwrap) { order: 2; flex: 0 0 calc(100% - 105px); margin-left: auto; }
   .link-axes {
+    order: 1;
+    flex: none;
+    margin-left: -4px;
     position: static;
     width: 20px;
     height: 20px;

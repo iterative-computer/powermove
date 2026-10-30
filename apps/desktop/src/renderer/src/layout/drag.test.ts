@@ -200,7 +200,8 @@ describe('drop preview retargeting', () => {
       }),
       toast: vi.fn()
     } as unknown as PMRegistry;
-    const pointer = (x: number) => ({ clientX: x, clientY: 100 }) as PointerEvent;
+    // Below the panel, in the column: over a panel the AE drop zones take over.
+    const pointer = (x: number) => ({ clientX: x, clientY: 400 }) as PointerEvent;
     const spec = { id: 'alpha' } as PanelSpec;
     const dock = { id: 'center', panels: [spec] } as DockSpec;
 

@@ -3,7 +3,7 @@ import { attachAreaCorners } from './area-drag';
 import { beginPanelDrag } from './drag';
 import { openPanelMenu } from './menu';
 import { dismissedMenu } from '../overlays/dismissal';
-import { applyPanelSize, findPanel, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { applyPanelSize, findPanel, setPanelCollapsed, stackOf, type DockSpec, type PanelSpec, type Workspace } from './model';
 import { movePreservingFocus, parkPanel, stagePanelMove } from './portal';
 import { panelFrameOf } from '../kernel/panel-frame';
 
@@ -99,6 +99,16 @@ export function syncPanelTabs(PM: PMRegistry, specs: PanelSpec[], active: PanelS
         event.stopPropagation();
         if (member !== active) PM.Layout.activateTab?.(member.id);
       });
+      /* As in After Effects, a tab drags out just that panel; the header
+         around the tabs moves the whole stack. */
+      tab.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        const found = PM.Layout.ws && findPanel(PM.Layout.ws as Workspace, member.id);
+        const shown = PM.panelInst[active.id]?.el as HTMLElement | undefined;
+        if (!found || !shown) return;
+        event.stopPropagation();
+        beginPanelDrag(PM, event, found.spec, found.dock, shown);
+      });
       return tab;
     }));
   }
@@ -183,7 +193,8 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
     const current = liveLocation();
     if (!current?.dock || !current.spec) return;
     event.stopPropagation();
-    beginPanelDrag(PM, event, current.spec, current.dock, element);
+    const stack = PM.Layout.ws ? stackOf(PM.Layout.ws as Workspace, current.spec.id) : [];
+    beginPanelDrag(PM, event, current.spec, current.dock, element, undefined, stack);
   };
   header.addEventListener('pointerdown', (event) => {
     if (dismissedMenu(event)) return;

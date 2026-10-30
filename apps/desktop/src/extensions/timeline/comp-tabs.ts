@@ -12,9 +12,9 @@ type Comps = {
 };
 
 export const COMP_TABS_STYLES = `
-#tl-comp-tabs{flex:none;height:36px;display:flex;align-items:stretch;gap:2px;padding:0 4px 0 6px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;background:var(--bg-panel);border-bottom:1px solid var(--line)}
+#tl-comp-tabs{flex:none;height:var(--hdr-h);display:flex;align-items:stretch;gap:2px;padding:0 4px 0 6px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;background:var(--bg-panel);border-bottom:1px solid var(--line)}
 #tl-comp-tabs::-webkit-scrollbar{display:none}
-#panel-timeline>.body>#tl-head{top:36px}
+#panel-timeline>.body>#tl-head{top:var(--hdr-h)}
 .tl-comp-tab{position:relative;flex:none;max-width:220px;display:flex;align-items:center;gap:8px;padding:0 10px;border:0;background:none;color:var(--tx-3);font:13px/16px var(--f-ui);cursor:default}
 .tl-comp-tab:hover{color:var(--tx-2)}
 .tl-comp-tab[aria-selected="true"]{color:var(--tx);font-weight:var(--fw-semibold)}

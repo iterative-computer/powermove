@@ -1,6 +1,6 @@
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 
-import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
+import type { AgentApproval, CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
 import { modelEffort } from '../../shared/agent-models';
 import {
@@ -45,6 +45,7 @@ const PROJECT_SANDBOX = JSON.stringify({ sandbox: PROJECT_SANDBOX_SETTINGS });
 // allowed tool would run the unsandboxed retry without asking anyone.
 const ASKING_SANDBOX = JSON.stringify({ sandbox: { ...PROJECT_SANDBOX_SETTINGS, allowUnsandboxedCommands: true } satisfies SandboxSettings });
 const ASKING_INSTRUCTIONS = 'APPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user\'s home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. Powermove asks the user to approve it; if they decline, do not retry it.';
+const AUTO_APPROVAL_INSTRUCTIONS = 'APPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user\'s home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. An automatic reviewer approves routine requests and may ask the user; if a request is declined, do not retry it.';
 
 const PROJECT_NETWORK_INSTRUCTIONS = `SHELL NETWORK\n${AGENT_SHELL_NETWORK_INSTRUCTIONS}`;
 
@@ -63,6 +64,9 @@ interface ClaudeArgvOptions {
   externalMcpServers?: UserMcpServers;
   /** Project access only: ask the person before leaving the sandbox. */
   askOutsideSandbox?: boolean;
+  /** Project access only: `auto` lets Claude Code's classifier answer
+   * permission prompts first; omitted means `supervised`. */
+  approval?: AgentApproval;
 }
 
 function promptWithImages(prompt: string, imagePaths: readonly string[]): string {
@@ -95,6 +99,7 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
   const externalTools = Object.keys(external).map(name => `mcp__${name}__*`);
   const withExternal = (tools: string): string => [tools, ...externalTools].join(',');
   const asking = options.access === 'project' && options.askOutsideSandbox === true;
+  const autoApproval = options.access === 'project' && options.approval === 'auto';
   const baseProjectTools = asking ? PROJECT_TOOLS.split(',').filter(tool => tool !== 'Bash').join(',') : PROJECT_TOOLS;
   const projectTools = options.nativeTools
     ? `${baseProjectTools},${POWERMOVE_MCP_TOOL_NAMES.join(',')}`
@@ -126,7 +131,10 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
       // dontAsk would deny AskUserQuestion before it is asked. `default` sends
       // it (and anything unlisted) to the permission prompt, which the runner
       // answers: questions go to the person, everything else is denied.
-      '--permission-mode', options.access === 'editor' ? 'default' : 'acceptEdits',
+      // `auto` keeps acceptEdits inside the workspace and lets Claude Code's
+      // classifier answer the rest (a sandbox escape, a write elsewhere);
+      // AskUserQuestion and anything it hands back still reach the runner.
+      '--permission-mode', options.access === 'editor' ? 'default' : autoApproval ? 'auto' : 'acceptEdits',
       '--settings', options.access === 'editor' ? EDITOR_SANDBOX : asking ? ASKING_SANDBOX : PROJECT_SANDBOX,
       '--tools', 'default',
       '--allowedTools', withExternal(options.access === 'editor' ? editorTools : projectTools)
@@ -136,7 +144,7 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
 
   if (options.extensionsDir) argv.push('--add-dir', options.extensionsDir);
   const network = options.access === 'project'
-    ? `\n\n${PROJECT_NETWORK_INSTRUCTIONS}${asking ? `\n\n${ASKING_INSTRUCTIONS}` : ''}`
+    ? `\n\n${PROJECT_NETWORK_INSTRUCTIONS}${asking ? `\n\n${autoApproval ? AUTO_APPROVAL_INSTRUCTIONS : ASKING_INSTRUCTIONS}` : ''}`
     : '';
   const systemPrompt = options.instructions
     ? `${options.instructions}${network}\n\nReturn the final answer only through the requested JSON schema.`

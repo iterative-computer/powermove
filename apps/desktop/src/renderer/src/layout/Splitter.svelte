@@ -40,7 +40,11 @@
   const dockBounds = (element?: HTMLElement | null): { min: number; max: number } => {
     if (mode === 'vertical') return { min: 200, max: 760 };
     const stack = element?.parentElement?.getBoundingClientRect().height || 0;
-    return { min: 120, max: Math.max(120, stack - 160) };
+    // The dock can't be shorter than its panels' floors, or they would overflow it.
+    const floor = Math.max(120, ...(afterDock?.panels ?? [])
+      .filter((spec) => !spec.collapsed)
+      .map((spec) => panelMinHeight(spec, PM.PANELS[spec.id] || {}, afterDock?.id)));
+    return { min: floor, max: Math.max(floor, stack - 160) };
   };
   const dockLength = (element: HTMLElement): number =>
     mode === 'vertical' ? element.getBoundingClientRect().width : element.getBoundingClientRect().height;

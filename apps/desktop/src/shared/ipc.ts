@@ -136,6 +136,7 @@ export const IPC = {
   windowTabDropTarget: 'window:tab-drop-target',
   windowPlaceTab: 'window:place-tab',
   windowAdoptTab: 'window:adopt-tab', // main → renderer, a tab dropped on this window's strip
+  windowFullScreen: 'window:full-screen', // main → preload, the window entered or left macOS full screen
   windowOpenProject: 'window:open-project',
   windowNew: 'window:new',
   windowClose: 'window:close',

@@ -639,7 +639,7 @@ describe('InspectorPanel', () => {
     const headings = [...target.querySelectorAll('.sec')].map((section) => section.firstChild?.textContent?.trim());
 
     expect(headings.slice(0, 4)).toEqual(['Transform', 'Path', 'Fill', 'Stroke']);
-    expect(headings).not.toContain('Effects');
+    expect(headings).toContain('Effects');
     expect(target.querySelector('[data-empty-section="Stroke"]')).not.toBeNull();
     expect(target.querySelector('[data-empty-section="Fill"]')).toBeNull();
     expect(target.querySelector('[aria-label="Edit Powermove mark vertices"]')).not.toBeNull();

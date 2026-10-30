@@ -439,6 +439,8 @@ def('zoomIn', 'Zoom in', '.', () => zoomViewer(PM, 1.25), 'View', preserveFalse)
 def('zoomOut', 'Zoom out', ',', () => zoomViewer(PM, .8), 'View', preserveFalse);
 def('actualSize', 'Actual size', '/', () => setViewerZoom(PM, 1), 'View', preserveFalse);
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
+/* After Effects' ` key: the panel under the pointer fills the workspace, and again restores it. */
+def('maximizePanel', 'Maximize panel under pointer', '`', () => PM.Layout?.toggleMaximize?.() ?? false, 'View', preserveFalse);
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => { if (!PM.ProjectsScreen?.isOpen) PM.SpatialAssistant?.open?.(); }, 'View');
 def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.isOpen ? PM.SettingsUI.close?.() : PM.SettingsUI?.open?.(), 'View');
 def('projectSettings', 'Project settings…', '⌘⇧,', () => PM.SettingsUI?.open?.('project'), 'File');

@@ -543,3 +543,10 @@ contextBridge.executeInMainWorld({
   },
   args: [bridge]
 });
+
+/* macOS full screen hides the traffic lights. The class goes on the page's
+   root, where the titlebar's CSS slides its tools into their place; the
+   preload shares the page's DOM, so no bridge call is needed. */
+ipcRenderer.on(IPC.windowFullScreen, (_event, on: unknown) => {
+  document.documentElement.classList.toggle('window-fullscreen', on === true);
+});

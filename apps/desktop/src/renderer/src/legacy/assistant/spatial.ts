@@ -404,7 +404,7 @@ void hostBridge()?.compatible?.status().then(config => {
 const AGENT_ACCESS_MODES: any = [
   { id: 'editor', label: 'Composition only', detail: 'Edit the composition. No shell, files or web.', icon: 'pen' },
   { id: 'supervised', label: 'Supervised', detail: 'Ask before anything outside the project sandbox.', icon: 'hand' },
-  { id: 'auto', label: 'Auto', detail: 'Codex approves routine actions; Claude and API models still ask.', icon: 'shieldCheck' },
+  { id: 'auto', label: 'Auto', detail: 'Codex and Claude approve routine actions; API models still ask.', icon: 'shieldCheck' },
   { id: 'full', label: 'Full access', detail: 'Run commands and edit files anywhere without prompts.', icon: 'warning', tone: 'warning' },
 ];
 function agentPermission(): string {

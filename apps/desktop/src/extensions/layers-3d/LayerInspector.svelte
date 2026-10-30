@@ -5,18 +5,12 @@
   import { MATERIAL_FIELDS, MAP_SLOTS, LIGHT_TYPES, lightFields, cameraFields, ENVIRONMENT_FIELDS } from './scene-model';
   import type { SceneUiState } from './scene-state.svelte';
   let { api,ui,layerId }:{api:PowermoveAPI;ui:SceneUiState;layerId:string}=$props();
-  const {Row,Section,ToggleField,SelectField,ColorField,Disclosure}=untrack(()=>api.ui.controls);
+  const {Row,Section,ToggleField,SelectField,ColorField}=untrack(()=>api.ui.controls);
   const layer=$derived((ui.version,api.model.layer(layerId)) as Layer|null);
   const data=$derived((ui.version,(layer?.d as any)?.data));
   const object=$derived(data?.object),light=$derived(data?.light),camera=$derived(data?.camera),environment=$derived(data?.environment);
   const value=(node:any,key:string)=>node?.p?.[key];
   const assetName=(id:string)=>(api.project.get().assets[id] as any)?.name;
-  const advancedMaterialChanged=$derived((ui.version, !!object && (
-    Object.keys(object.material.maps).length > 0 || !object.castShadow || !object.receiveShadow ||
-    String(object.material.p?.emissive?.v ?? '#000000').toUpperCase() !== '#000000' ||
-    object.material.p?.emissiveIntensity?.v !== 1 ||
-    ['emissive','emissiveIntensity'].some(key=>object.material.p?.[key]?.kf?.length || object.material.p?.[key]?.expr)
-  )));
   function edit(operation:any,patch:any,label:string){const result=api.scene3d.edit({operation,target:layerId,patch},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();}
   const structural=(operation:any,key:string,label:string):ControlEditBinding=>({mode:'set',label,set:v=>edit(operation,{[key]:v},label)});
   function map(slot:string){if(!object)return;const maps={...object.material.maps};
@@ -34,16 +28,14 @@
       <Section {api} title="Material" />
       {#each MATERIAL_FIELDS.filter(field=>!['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
-    <Disclosure label="More" remember={`material:${layerId}`} changed={advancedMaterialChanged}>
-      {#if !object.useSourceMaterials}
-        {#each MATERIAL_FIELDS.filter(field=>['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
-      {/if}
-      {#each MAP_SLOTS as slot (slot.id)}
-        <Row {api} label={slot.label}><button type="button" class="chip" onclick={(event)=>api.ui.menu(event.currentTarget as HTMLElement,map(slot.id) ?? [])}>{object.material.maps[slot.id]?assetName(object.material.maps[slot.id]) ?? 'Texture':'Choose…'}</button></Row>
-      {/each}
-      <Row {api} label="Cast shadows"><ToggleField {api} get={()=>object.castShadow} edit={structural('update_object','castShadow','Cast shadows')} label="Cast shadows" /></Row>
-      <Row {api} label="Receive shadows"><ToggleField {api} get={()=>object.receiveShadow} edit={structural('update_object','receiveShadow','Receive shadows')} label="Receive shadows" /></Row>
-    </Disclosure>
+    {#if !object.useSourceMaterials}
+      {#each MATERIAL_FIELDS.filter(field=>['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
+    {/if}
+    {#each MAP_SLOTS as slot (slot.id)}
+      <Row {api} label={slot.label}><button type="button" class="chip" onclick={(event)=>api.ui.menu(event.currentTarget as HTMLElement,map(slot.id) ?? [])}>{object.material.maps[slot.id]?assetName(object.material.maps[slot.id]) ?? 'Texture':'Choose…'}</button></Row>
+    {/each}
+    <Row {api} label="Cast shadows"><ToggleField {api} get={()=>object.castShadow} edit={structural('update_object','castShadow','Cast shadows')} label="Cast shadows" /></Row>
+    <Row {api} label="Receive shadows"><ToggleField {api} get={()=>object.receiveShadow} edit={structural('update_object','receiveShadow','Receive shadows')} label="Receive shadows" /></Row>
   {:else if light}
     <Section {api} title="Light" />
     <Row {api} label="Type"><SelectField {api} get={()=>light.type} options={LIGHT_TYPES.map(t=>({v:t.id,label:t.label}))} edit={structural('update_light','type','Light type')} label="Light type" /></Row>

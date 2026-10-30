@@ -57,9 +57,15 @@ export function roundedScroll(node: HTMLElement) {
     // Panels that left this column take their clip off with them.
     for (const panel of clipped) if (!node.contains(panel)) { unclip(panel); clipped.delete(panel); }
     for (const panel of panels) {
+      /* A panel sliding to its new place after a move (drag.ts
+         animatePanelLayout) measures where it is mid-slide. Measure again
+         once it lands, or the clip keeps cutting off what was outside. */
+      const sliding = panel.getAnimations?.() ?? [];
+      if (sliding.length) void Promise.allSettled(sliding.map((animation) => animation.finished)).then(schedule);
       const rect = panel.getBoundingClientRect();
-      const top = Math.min(rect.height, Math.max(0, bounds.top - rect.top));
-      const bottom = Math.min(rect.height - top, Math.max(0, rect.bottom - bounds.bottom));
+      // A maximized panel covers the workspace, outside its column's box.
+      const top = panel.classList.contains('maximized') ? 0 : Math.min(rect.height, Math.max(0, bounds.top - rect.top));
+      const bottom = panel.classList.contains('maximized') ? 0 : Math.min(rect.height - top, Math.max(0, rect.bottom - bounds.bottom));
       if (!top && !bottom) {
         unclip(panel);
         clipped.delete(panel);

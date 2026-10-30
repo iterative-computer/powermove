@@ -278,7 +278,9 @@ export class ClaudeRunner {
           nativeTools: options.nativeTools,
           additionalInstructions: options.additionalInstructions,
           externalMcpServers,
-          askOutsideSandbox: state.requestApproval !== null
+          askOutsideSandbox: state.requestApproval !== null,
+          // Older renderers omit approval, which meant `auto`.
+          approval: req.approval ?? 'auto'
         }), claudeUserMessage(prompt, layout.imagePaths), layout, options);
         if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
         return result;
@@ -398,7 +400,8 @@ export class ClaudeRunner {
      waits for the person. In a Project run that asks before leaving its
      sandbox, every other prompt (a command retried outside the sandbox, a
      write outside the workspace) becomes an approval card; otherwise it is
-     denied, as --print would without a prompt tool. */
+     denied, as --print would without a prompt tool. In Auto, Claude Code's
+     classifier answers most of these before they reach the runner. */
   private control(state: ActiveRun, event: Record<string, unknown>, onTrace?: (step: CodexTraceEvent) => void): void {
     const requestId = isString(event.request_id, 200) ? event.request_id : null;
     if (!requestId) return;

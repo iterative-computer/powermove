@@ -9,7 +9,6 @@
   import type { GeneratedControl, GeneratedSection } from '../core/types/workspace';
   import { EditGesture, type EditBinding } from '../controls/gesture';
   import { sel } from '../state/selection.svelte';
-  import Disclosure from '../controls/Disclosure.svelte';
   import RampField from '../controls/RampField.svelte';
   import PointField from '../controls/PointField.svelte';
   import Row from '../controls/Row.svelte';
@@ -122,7 +121,6 @@
     return [{x,y,label:x.control.label.replace(/\s*X$/i,''),advanced:secondary.has(x.key)||secondary.has(y.key)}];
   });
   const paired = new Set(pointPairs.flatMap(pair=>[pair.x.key,pair.y.key]));
-  const secondaryChanged = $derived((doc.tick.values, doc.proj, controls.filter(item=>secondary.has(item.key)).some(item=>item.get && JSON.stringify(item.get())!==JSON.stringify(defaults[String(item.control.stateKey ?? '')] ?? item.control.def))));
   function pointEdit(x: PreparedControl, y: PreparedControl): EditBinding {
     const bindings=[x.edit!,y.edit!];
     if (bindings.every(binding=>binding.mode==='command')) return {mode:'command',label:'Move position',origin:'generated-ui',command:(next:any)=>bindings.flatMap((binding:any,index)=>typeof binding.command==='function'?binding.command(next[index]):{...binding.command,value:next[index]})};
@@ -153,11 +151,7 @@
   {/if}
   {#each pointPairs.filter(pair=>!pair.advanced) as pair}{@render point(pair)}{/each}
   {#each controls.filter(item=>!secondary.has(item.key)&&!paired.has(item.key)) as prepared (prepared.key)}{@render field(prepared)}{/each}
-  {#if secondary.size}
-    <Disclosure count={secondary.size} changed={secondaryChanged} remember={`generated:${section.id}`}>
-      {#each pointPairs.filter(pair=>pair.advanced) as pair}{@render point(pair)}{/each}
-      {#each controls.filter(item=>secondary.has(item.key)&&!paired.has(item.key)) as prepared (prepared.key)}{@render field(prepared)}{/each}
-    </Disclosure>
-  {/if}
+  {#each pointPairs.filter(pair=>pair.advanced) as pair}{@render point(pair)}{/each}
+  {#each controls.filter(item=>secondary.has(item.key)&&!paired.has(item.key)) as prepared (prepared.key)}{@render field(prepared)}{/each}
   <PreviewList {preview} />
 </div>

@@ -154,17 +154,14 @@ const buttonByText = (target: ParentNode, text: string): HTMLButtonElement => {
 };
 
 describe('GeneratedPanel', () => {
-  it('groups automatic controls under More after five primary settings',()=>{
+  it('shows every automatic control without folding any under More',()=>{
     const {PM}=fakePM();
     const section={id:'automatic',title:'Settings',size:260,state:{},controls:
       Array.from({length:7},(_,index)=>({type:'slider',label:`Value ${index}`,stateKey:`value${index}`,param:`value${index}`,min:0,max:1,def:.5}))
     } as GeneratedSection;
     const target=renderPanel(PM,section);
-    const more=target.querySelector('details')!;
-    expect(more).not.toBeNull();
-    expect(more.open).toBe(false);
-    expect(more.querySelectorAll('[role="slider"]')).toHaveLength(2);
-    expect([...target.querySelectorAll('[role="slider"]')].filter(field=>!field.closest('details'))).toHaveLength(5);
+    expect(target.querySelector('details')).toBeNull();
+    expect([...target.querySelectorAll('[role="slider"]')].map(field=>field.getAttribute('aria-label'))).toEqual(Array.from({length:7},(_,index)=>`Value ${index} slider`));
   });
   it('passes separate coordinate increments to a generated point editor',()=>{
     const {PM}=fakePM();
