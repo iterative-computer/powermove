@@ -80,6 +80,9 @@ test('Studio finishes, light by pointing, Shots and the studio set', async ({ se
   await page.locator('#gl').screenshot({ path: info.outputPath('studio-viewer.png') });
   await page.evaluate(() => { const PM = (window as any).PM; PM.selectLayers(['slab']); PM.invalidate(); });
   await expect(page.locator('#panel-inspector').getByRole('group', { name: 'Finish' })).toBeVisible();
+  // Studio renders the finish swatches themselves.
+  await expect.poll(() => page.locator('#panel-inspector .finish').evaluateAll(els => els.filter(e => (e as HTMLElement).style.backgroundImage.startsWith('url(')).length), { timeout: 30_000 }).toBeGreaterThan(5);
+  await page.locator('#panel-inspector').getByRole('group', { name: 'Finish' }).screenshot({ path: info.outputPath('studio-swatches.png') });
   await page.locator('#panel-inspector').screenshot({ path: info.outputPath('studio-inspector-model.png') });
   await page.evaluate(() => { const PM = (window as any).PM; PM.selectLayers(['cam']); PM.invalidate(); });
   await expect(page.locator('#panel-inspector').getByRole('group', { name: 'Shots' })).toBeVisible();

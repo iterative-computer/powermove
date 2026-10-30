@@ -12,6 +12,9 @@
   const value=(node:any,key:string)=>node?.p?.[key];
   const assetName=(id:string)=>(api.project.get().assets[id] as any)?.name;
   const studio=untrack(()=>api.scene3d.studio);
+  // Swatches rendered by Studio replace the flat colors as they arrive.
+  let swatches=$state<Record<string,string>>({});
+  $effect(()=>{for(const finish of studio.materials)void studio.swatch(finish.id).then(url=>{if(url)swatches[finish.id]=url;});});
   function studioEdit(args:any,label:string){const result=api.scene3d.edit({target:layerId,...args},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});}
   function edit(operation:any,patch:any,label:string){const result=api.scene3d.edit({operation,target:layerId,patch},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();}
   const structural=(operation:any,key:string,label:string):ControlEditBinding=>({mode:'set',label,set:v=>edit(operation,{[key]:v},label)});
@@ -29,7 +32,7 @@
     {#if object.source.assetId}<Row {api} label="Model materials"><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Model materials" /></Row>{/if}
     {#if !object.useSourceMaterials}
       <Section {api} title="Material" />
-      <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${finish.p.color}`} onclick={()=>studioEdit({operation:'apply_material',preset:finish.id},finish.label)}></button>{/each}</div>
+      <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${finish.p.color};${swatches[finish.id]?`background-image:url(${swatches[finish.id]});background-size:cover`:''}`} onclick={()=>studioEdit({operation:'apply_material',preset:finish.id},finish.label)}></button>{/each}</div>
       <Row {api} label="Screen"><SelectField {api} get={()=>object.material.screen ?? ''} options={[{v:'',label:'None'},...Object.entries<any>((api.project.get() as any).comps || {}).map(([id,comp])=>({v:id,label:comp.name || 'Composition'}))]} edit={{mode:'set',label:'Screen',set:(v:unknown)=>edit('update_object',{material:{screen:v?String(v):null,...(v?{p:{emissiveIntensity:object.material.p.emissiveIntensity?.v || 1}}:{})}},'Screen')}} label="Screen" /></Row>
       {#each MATERIAL_FIELDS.filter(field=>!['emissive','emissiveIntensity'].includes(field.key) && value(object.material,field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}

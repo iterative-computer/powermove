@@ -396,6 +396,8 @@ export interface Scene3DAPI {
     slideHighlight(lightId: string, u: number, v: number): void;
     /** End the drag: the softbox's final placement becomes one undoable edit. */
     commitHighlight(lightId: string): void;
+    /** A finish rendered by Studio on a sphere (data URL), or null without WebGPU. */
+    swatch(presetId: string): Promise<string | null>;
   };
   /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */
   convert(layerId: string): EditResult;

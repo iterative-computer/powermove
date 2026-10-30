@@ -4,6 +4,7 @@ import { MATERIAL_PRESETS, SHOT_TYPES, surfaceAt, highlightPlacement } from '../
 /** Softboxes being dragged by light by pointing, with where each started. */
 const highlightDrags = new Map<string,{x:number;y:number;z:number;tx:number;ty:number;tz:number}>();
 import { studioProgress } from '../studio';
+import { studioSwatch } from '../studio/swatch';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
@@ -35,6 +36,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
     frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
     describe(){return compositionScene(PM,PM.time);},
     studio:{materials:MATERIAL_PRESETS,shots:SHOT_TYPES,progress:()=>studioProgress(PM),
+      swatch:(id)=>{const preset=MATERIAL_PRESETS.find(m=>m.id===id);return preset?studioSwatch(id,preset.p):Promise.resolve(null);},
       highlightAt:(u,v)=>{
         const runtime=compositionRuntime(PM,PM.time),camera=PM._renderCamera3D || runtime.camera;
         const hit=surfaceAt(runtime.scene,camera,u,v);
