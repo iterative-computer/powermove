@@ -84,4 +84,3 @@ test('retained value, speed, and merged graphs match complete paints with live c
   expect(session.diagnostics.pageErrors).toEqual([]);
   expect(session.diagnostics.console.filter(record => record.text.includes('[timeline draw]'))).toEqual([]);
 });
-

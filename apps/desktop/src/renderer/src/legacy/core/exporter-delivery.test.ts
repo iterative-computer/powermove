@@ -756,7 +756,8 @@ describe('export delivery', () => {
     });
     const result = format === 'png' ? h.X.run({ ...options, alpha: true }) : h.run();
     try {
-      await vi.waitFor(() => expect(format === 'png' ? h.download : h.write).toHaveBeenCalledOnce());
+      // A 1080p alpha frame is two IPC chunks, both in flight together.
+      await vi.waitFor(() => format === 'png' ? expect(h.download).toHaveBeenCalledOnce() : expect(h.write).toHaveBeenCalledTimes(2));
       expect(h.capture).toHaveBeenCalledOnce(); expect(h.dispose).toHaveBeenCalledOnce();
       expect(h.create).toHaveBeenCalledOnce(); expect(h.finish).not.toHaveBeenCalled();
       if (format === 'png') expect([...new Uint8Array(await h.download.mock.calls[0]![0].arrayBuffer())]).toEqual([127, 63, 31, 128]);
@@ -776,7 +777,8 @@ describe('export delivery', () => {
     h.write.mockImplementationOnce(async () => { await new Promise<void>(yes => { resolve = yes; }); });
     const result = h.run({ mblur: true });
     try {
-      await vi.waitFor(() => expect(h.write).toHaveBeenCalledOnce());
+      // A 1080p alpha frame is two IPC chunks, both in flight together.
+      await vi.waitFor(() => expect(h.write).toHaveBeenCalledTimes(2));
       expect(h.capture).toHaveBeenCalledOnce(); expect(h.dispose).not.toHaveBeenCalled();
       resolve(); expect(await result).toEqual({ cancelled: false });
       expect(h.create).toHaveBeenCalledOnce(); expect(h.capture).toHaveBeenCalledTimes(2); expect(h.dispose).toHaveBeenCalledOnce();
@@ -1705,14 +1707,16 @@ describe('export delivery', () => {
     const result = h.run({ fps: 2 }).finally(() => { settled = true; });
     try {
       await vi.waitFor(() => expect(h.begin).toHaveBeenCalledTimes(2));
-      expect(h.write).toHaveBeenCalledOnce();
+      // Both chunks travel together as owned copies, never views of the target.
+      expect(h.write).toHaveBeenCalledTimes(2);
       expect(h.targets).toHaveLength(1);
-      expect(sent[0]!.length).toBe(limit);
+      expect(sent.map(chunk => chunk.length)).toEqual([limit, frameBytes - limit]);
+      expect(h.write.mock.calls.every(call => (call[1] as Uint8Array).buffer !== h.targets[0]!.buffer)).toBe(true);
       acknowledgements[0]!.resolve();
-      await vi.waitFor(() => expect(h.write).toHaveBeenCalledTimes(2));
-      expect(sent[1]!.length).toBe(frameBytes - limit);
+      await new Promise(resolve => setTimeout(resolve, 0));
       // The next picture is queued on the GPU, but the final chunk of the
-      // preceding picture still owns every byte in the shared CPU target.
+      // preceding picture is still unacknowledged, so the shared CPU target waits.
+      expect(h.write).toHaveBeenCalledTimes(2);
       expect(h.targets).toHaveLength(1);
       expect(h.targets[0]!.every(byte => byte === 1)).toBe(true);
       expect(h.tickets[1]!.readInto).not.toHaveBeenCalled();
@@ -1722,7 +1726,7 @@ describe('export delivery', () => {
       if (outcome === 'failed') acknowledgements[1]!.reject(new Error('Final chunk failed'));
       else acknowledgements[1]!.resolve();
       expect(await result).toEqual(outcome === 'failed' ? { error: 'Final chunk failed' } : { cancelled: outcome === 'cancelled' });
-      expect(maximum).toBe(1); expect(active).toBe(0);
+      expect(maximum).toBe(2); expect(active).toBe(0);
       expect(h.maxTickets()).toBe(1); expect(h.activeTickets()).toBe(0);
       expect(h.dispose).toHaveBeenCalledOnce();
       const lengths = outcome === 'saved' ? [limit, frameBytes - limit, limit, frameBytes - limit] : [limit, frameBytes - limit];
@@ -2012,7 +2016,7 @@ describe('export delivery', () => {
     expect(slice.mock.contexts.some(view => view instanceof Uint8Array && view.buffer === bytes.buffer)).toBe(false);
   });
 
-  it('keeps large-frame IPC chunks bounded and sequential, and cancels after the in-flight frame', async () => {
+  it('keeps large-frame IPC chunks bounded and owned, and cancels after the in-flight frame', async () => {
     const { X, PM } = setup();
     PM.proj.w = 1024; PM.proj.h = 1026;
     const frameBytes = 1024 * 1026 * 4;
@@ -2022,14 +2026,16 @@ describe('export delivery', () => {
     const finish = vi.fn(), cancel = vi.fn(async () => {});
     (window as any).powermove = { render: { start: async () => 'render', write, finish, cancel } };
     const pending = X.run({ ...options, format: 'mp4' });
-    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    // One frame's chunks are sent together; the next frame waits for all of them.
+    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2));
     expect(PM.GL.renderToPixels).toHaveBeenCalledOnce();
     const first = write.mock.calls[0]![1];
     expect(first.byteLength).toBe(4 * 1024 * 1024);
     expect(first.buffer.byteLength).toBe(first.byteLength);
     X.cancel = true;
     releases.shift()!();
-    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(write).toHaveBeenCalledTimes(2);
     const second = write.mock.calls[1]![1];
     expect(second.byteLength).toBe(frameBytes - first.byteLength);
     expect(second.buffer.byteLength).toBe(second.byteLength);

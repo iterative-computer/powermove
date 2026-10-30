@@ -31,7 +31,7 @@ import { registerLogIpc } from '../main/log';
 import { registerShellIpc } from '../main/shell';
 import { registerCaptureIpc } from '../main/capture';
 import { registerRenderEncoder } from '../main/render-encoder';
-import { MediaProxyService, imageSequenceConverter, playbackConverter, previewConverter, registerMediaProxyIpc, stillImageConverter } from '../main/media-proxy';
+import { MediaProxyService, hdrProxyHelper, imageSequenceConverter, playbackConverter, previewConverter, registerMediaProxyIpc, stillImageConverter } from '../main/media-proxy';
 import { MediaPathCache, registerMediaPathIpc } from '../main/media-path-cache';
 import { registerCodexIpc } from '../main/codex';
 import { recoverAllInterruptedExtensionTransactions } from '../main/codex/change-history';
@@ -362,7 +362,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(userData, 'Attachment Cache') });
   registerLogIpc(ipcMain, ctx);
   const ffmpeg = path.join(options.appPath, 'node_modules', 'ffmpeg-static', 'ffmpeg');
-  const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(ffmpeg), imageSequenceConverter(ffmpeg), previewConverter(ffmpeg), stillImageConverter(ffmpeg));
+  const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(ffmpeg, hdrProxyHelper(options.appPath)), imageSequenceConverter(ffmpeg), previewConverter(ffmpeg), stillImageConverter(ffmpeg));
   registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
   registerRenderEncoder(ipcMain, ctx);
 

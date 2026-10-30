@@ -69,6 +69,7 @@ const lockedCases = {
   add_layer: () => ({ type: 'add_layer', id: 'allowed-layer', layerType: 'solid', name: 'Allowed layer', select: false }),
   set_scene_parameter: () => ({ type: 'set_scene_parameter', name: 'Allowed parameter', value: 42 }),
   add_marker: () => ({ type: 'add_marker', id: 'allowed-marker', time: 2, name: 'Allowed marker' }),
+  remove_marker: ({ PM }) => { PM.proj.markers = [{ t: 2, name: 'Remove me' }]; return { type: 'remove_marker', index: 0 }; },
   create_section: ({ layer }) => ({
     type: 'create_section',
     section: { id: 'allowed-section', layers: [JSON.parse(JSON.stringify(layer))], versions: [] },
@@ -91,7 +92,7 @@ const lockedCases = {
   edit_captions: ({ layer }) => ({ type: 'edit_captions', target: layer.id, op: 'delete', ids: [] }),
 };
 
-it('the locked-layer operation matrix is frozen for all 25 operations', () => {
+it('the locked-layer operation matrix is frozen for all 27 operations', () => {
   const outcomes = {
     group_layers: 'blocked', ungroup_layers: 'blocked', move_to_group: 'blocked',
     set_property: 'blocked',
@@ -111,6 +112,7 @@ it('the locked-layer operation matrix is frozen for all 25 operations', () => {
     set_transition: 'blocked',
     set_scene_parameter: 'allowed',
     add_marker: 'allowed',
+    remove_marker: 'allowed',
     create_section: 'allowed',
     update_section: 'allowed',
     transform_layers: 'blocked',

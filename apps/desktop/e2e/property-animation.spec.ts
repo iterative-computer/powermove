@@ -93,6 +93,11 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
         // An effect turns on and off from its fx badge, as in After Effects.
         : ['l.blend', 'l.mblur', `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
     }, type);
+    if (type === 'extension') {
+      const more = page.locator('[data-parameter-prefix="x"] .control-disclosure');
+      await expect(more).toBeVisible();
+      if (!await more.evaluate(element => (element as HTMLDetailsElement).open)) await more.locator('summary').click();
+    }
     for (const path of paths) {
       if (path.endsWith('.$enabled')) {
         const effectId = path.split('.')[0];

@@ -13,7 +13,8 @@ failure. Fully owned buffers that fit within the existing 4 MiB IPC limit are
 sent without an extra chunk copy. Larger frames retain separate, bounded chunks;
 small views into larger backing buffers still get copied.
 
-There is one frame in flight and one awaited chunk write at a time. Encoding
+There is one frame in flight and one awaited chunk write at a time (since
+relaxed for a frame's own chunks; see the issue #185 follow-up below). Encoding
 formats, codec parameters, frame timestamps, audio mixing, and transport remain
 unchanged. Transparent delivery retains its Canvas2D round trip because its
 premultiply/unpremultiply rounding is part of the established pixel output.
@@ -110,3 +111,63 @@ measured 616.9 → 583.2 ms at HD (5.5% lower) and 1095.4 → 1092.0 ms at 4K
 (0.3% lower). An initial 4K result was 1042.3 ms, so that larger 4K speed gain
 was not repeatable. The full-frame CPU allocation removal is deterministic;
 no additional 4K throughput improvement is claimed.
+
+## Follow-up: video clips, hardware encoding and stage timings (issue #185) — 2026-10-26
+
+A 2998×2160, 30 fps screen recording with keyframes ten seconds apart exported
+at 2.2 fps. Four costs added up, each now addressed and measured per stage:
+
+- **Seeking per frame.** Every exported frame set `<video>.currentTime`, and
+  Chromium decodes again from the previous keyframe on each seek: about 90 ms
+  per frame at that keyframe spacing (23 ms with one-second keyframes).
+  `export-video-decoder.ts` now decodes supported MP4/MOV clips (H.264, HEVC,
+  AV1, VP9) in order with WebCodecs, a few frames ahead, using the sample table
+  from `shared/mp4-samples.ts` (composition offsets and a single edit applied,
+  as FFmpeg and so `<video>` do). Each clip is checked once against its element
+  on its first colorful frame; untagged clips may use the other YUV matrix
+  (small software-decoded clips do), and a mismatch falls back to seeking.
+  Fragmented files, rotation, non-square pixels, multiple edits, WebM proxies
+  and other tagged color keep seeking. An exported clip with B-frames, an edit
+  list, sparse keyframes and a second layer sharing the clip produces
+  byte-identical frames to the seeking path (`export-sequential-decode.spec.ts`).
+  On the 4K fixture, seeking also repeated the previous frame three times in
+  300; the decoded export does not.
+- **Serial stages.** While clips decode in order, the next frame prepares and
+  renders while the previous one is encoded. Seeking clips keep waiting for the
+  encoder first. The progress thumbnail is refreshed four times a second instead
+  of painting every full-size frame.
+- **Idle encoder pipe.** Awaiting each 4 MiB `stdin.write` callback let the pipe
+  run dry between IPC messages (20.6 fps into FFmpeg instead of 37.6). The host
+  now queues writes and waits only while FFmpeg is two frames behind; write
+  errors surface on the next write or at finish. A frame's chunks are sent
+  together; audio and retained frames remain strictly sequential.
+- **Software H.264.** MP4 at 1280×720 and above uses `h264_videotoolbox` when a
+  two-frame probe at the exact size succeeds, and libx264 otherwise or when
+  `POWERMOVE_EXPORT_ENCODER=software`. VideoToolbox drops the sRGB transfer
+  tag, so an `h264_metadata` filter writes the same color description libx264
+  does (`bt709/bt709/iec61966-2-1`, limited range); decoded pixel error against
+  the source matches libx264's.
+
+Every export records stage timings (`PM.Export.lastStats`, the console, and the
+`timings` field of the agent `export_video` result): decode, render and encode
+totals with per-frame p50/p95, audio mix, finalization, the encoder used, and how
+many video frames were decoded in order versus seeked.
+
+| 10 s of the 2998×2160 fixture, with audio, Apple M5 | Time | Throughput |
+| --- | ---: | ---: |
+| Before | 135.7 s | 2.2 fps |
+| Sequential decoding, overlap and VideoToolbox | 43.8 s | 6.8 fps |
+| Plus queued encoder writes | 23.7 s | 12.6 fps |
+| Plus a frame's chunks sent together (final, two runs) | 10.8–13.1 s | 23–28 fps |
+
+Final stage medians: decode 0.3 ms, render 11.4 ms, encoder wait 1.1 ms per
+frame. Both outputs have 300 frames, 10.00 s, AAC stereo and identical color
+tags. These are single fixture runs on one machine, not a throughput guarantee.
+
+Agent exports no longer depend on one tool call lasting the whole export: after
+about 20 minutes `export_video` returns `{status: "running", jobId, progress}`
+and keeps exporting; calling it again with that `jobId` resumes waiting. The
+renderer call itself is limited only by a 12-hour job limit and renderer loss.
+Failures name their stage (decoding, rendering, encoding, mixing audio,
+finalizing).
+

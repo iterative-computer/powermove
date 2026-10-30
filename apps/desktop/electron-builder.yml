@@ -23,6 +23,7 @@ files:
   - "!**/* [2-9].*"
   - "!**/* [2-9]"
   - '!node_modules/ffmpeg-static/ffmpeg'
+  - '!node_modules/@powermove/macos-haptics/build/Release/powermove-hdr-proxy'
   # The native agent runtimes are copied once below, at the paths used by the
   # packaged binary resolvers. Keep their npm wrappers/metadata, but do not let
   # electron-builder auto-pack a second copy of either platform executable.
@@ -42,6 +43,9 @@ extraResources:
     to: encoder/ffmpeg
   - from: node_modules/ffmpeg-static/LICENSE
     to: encoder/LICENSE
+  # GPU tone mapping for HDR playback proxies (src/main/media-proxy.ts).
+  - from: node_modules/@powermove/macos-haptics/build/Release/powermove-hdr-proxy
+    to: encoder/powermove-hdr-proxy
   - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
     to: codex
     filter:

@@ -2,6 +2,8 @@ import type { InspectorService, Layer, PowermoveAPI } from 'powermove';
 
 import EffectsPanel from './EffectsPanel.svelte';
 import InspectorPanel from './InspectorPanel.svelte';
+import { showFxMenu } from './actions';
+import { inspectorSelection } from './multi-edit';
 import {
   clearEffectClipboard,
   copyEffects,

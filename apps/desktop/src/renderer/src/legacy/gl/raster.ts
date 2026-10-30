@@ -2,6 +2,7 @@ import {parseCube,MAX_CUBE_BYTES} from '../../core/cube-lut';
 import { yieldMediaWork } from '../core/media-work';
 import { webmTimestampScale } from '../../../../shared/video-timing';
 import { mp4FrameRate } from '../../../../shared/mp4-frame-rate';
+import { mp4VideoColor, videoColorTreatment } from '../../../../shared/video-color';
 import { createCloudMedia, cloudSourcePaths, readLocalMediaSource, prepareCloudImport } from '../core/cloud-media';
 import { prepareVideoPreview } from '../core/video-preview';
 import { disposeVideoInstances } from '../core/video-instances';
@@ -673,13 +674,13 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
     loaded();
   });
 }
-async function playbackProxy(file: any, name: string, onStage?: (label: string, progress?: { completed: number; total: number }) => void, assertCurrent?: () => void): Promise<any> {
+async function playbackProxy(file: any, name: string, onStage?: (label: string, progress?: { completed: number; total: number }) => void, assertCurrent?: () => void, label = 'Optimizing video for playback'): Promise<any> {
   const media = hostBridge()?.media;
   if (!media?.createPlaybackProxy) {
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
   }
-  if (onStage) onStage('Optimizing video for playback');
-  else PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000, { error: false });
+  if (onStage) onStage(label);
+  else PM.toast(`${label} · “${name}”…`, 30_000, { error: false });
   const result = await media.createPlaybackProxy(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading optimized video');
@@ -746,10 +747,25 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
         w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
       };
       const extension = mediaExtension(name);
-      const canProxy = !playbackProxyUsed && mayNeedVideoProxy(extension);
+      let canProxy = !playbackProxyUsed && mayNeedVideoProxy(extension);
       /* Chromium opens none of MKV, AVI, MPEG-TS and friends, so those skip
          straight to conversion instead of waiting out a decode failure. */
       let needsProxy = canProxy && needsVideoProxy(extension);
+      /* HDR and BT.2020 (camera log) footage plays natively, but Chromium tone
+         maps or gamut-converts it on the way to WebGL. Settle its color once in
+         the proxy; when the original path is unavailable the clip still opens. */
+      const treatment = canProxy && !needsProxy ? videoColorTreatment(await mp4VideoColor(blob)) : null;
+      if (treatment) {
+        try {
+          const converted = await playbackProxy(blob, name, onStage, assertCurrent,
+            treatment === 'tonemap' ? 'Converting HDR video' : 'Preparing log footage');
+          window.URL.revokeObjectURL(url);
+          sourceBlob = converted; url = window.URL.createObjectURL(sourceBlob);
+          playbackProxyUsed = true; playbackProxyVersion = 3; canProxy = false;
+        } catch (error) {
+          console.warn('Color conversion unavailable; using the original video.', error);
+        }
+      }
       if (!needsProxy) {
         try { await openVideo(); }
         catch (error) {
@@ -759,8 +775,11 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
       }
       /* A MOV can expose valid dimensions and advance its audio clock even when
          Chromium cannot decode a single video frame (notably Apple ProRes).
-         Probe one presented frame, then stream an alpha-preserving VP9 proxy
-         if metadata or frame decoding fails. Known proxies skip the probe on restore. */
+         Probe one presented frame, then stream a VP9 proxy (alpha preserved
+         when the source has it) if metadata or frame decoding fails. Known proxies skip the probe on restore. */
+      if (treatment && playbackProxyUsed && !await waitForPresentedVideoFrame(el)) {
+        throw new Error('The optimized video did not produce a playable frame');
+      }
       if (canProxy && (needsProxy || !await waitForPresentedVideoFrame(el))) {
         if (el) {
           try { el.pause(); } catch (e) { }

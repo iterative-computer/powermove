@@ -82,6 +82,7 @@ describe('real project files', () => {
       await files.save('one', bytes('second'));
       expect(await readFile(destination)).toEqual(bytes('second'));
       expect(await files.backups('one')).toHaveLength(1);
+      expect(await readFile((await files.backups('one'))[0]!)).toEqual(bytes('first'));
       expect(read).toHaveBeenCalled();
     } finally { read.mockRestore(); }
   });

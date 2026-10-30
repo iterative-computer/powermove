@@ -18,7 +18,7 @@ for (const alpha of [false, true]) {
     });
     const expected = await session.page.evaluate(async alpha => {
       const PM = (window as any).PM;
-      PM.pause(); PM.agentFrameCapture = true;
+      PM.pause(); PM.agentFrameCapture = false;
       const project = PM.mkProject({ name: 'Native pixel parity', w: 96, h: 64, dur: 1, fps: 6 });
       project.backgroundFill = { type: 'none', stops: [], angle: 0 };
       const shape = PM.mkLayer('shape', { d: { w: 69, h: 43, radius: 11, color: '#a34bf7' }, p: { 'position.x': 38, 'position.y': 25, opacity: 37, rotation: 17 } }, project);
@@ -99,7 +99,7 @@ test('native opaque export rejects context loss during asynchronous readback and
   }, path.join(session.userData, 'gpu-readback-recovery.mp4'));
   const reference = await session.page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.pause(); PM.agentFrameCapture = true;
+    PM.pause(); PM.agentFrameCapture = false;
     const project = PM.mkProject({ name: 'Asynchronous GPU recovery', w: 64, h: 64, fps: 4, dur: 1, bg: '#21344a' });
     const shape = PM.mkLayer('shape', { d: { w: 31, h: 43, radius: 9, color: '#dd7355' },
       p: { 'position.x': 20, 'position.y': 30, opacity: 63 } }, project);
@@ -162,7 +162,7 @@ test('profiles full native MP4 delivery at HD and 4K', async ({ session }, info)
   }, session.userData);
   const results = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
-    PM.pause(); PM.agentFrameCapture = true;
+    PM.pause(); PM.agentFrameCapture = false;
     const results: any[] = [];
     for (const [width, height, frames] of [[1920, 1080, 24], [3840, 2160, 12]]) {
       const project = PM.mkProject({ name: 'Native profile', w: width, h: height, dur: 1, fps: frames, bg: '#21344a' });
@@ -222,7 +222,7 @@ for (const alpha of [false, true]) test(`native ${alpha ? 'alpha' : 'opaque'} ex
   });
   const supported = await session.page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.pause(); PM.agentFrameCapture = true;
+    PM.pause(); PM.agentFrameCapture = false;
     PM.proj = PM.mkProject({ name: 'Native GPU recovery', w: 64, h: 64, fps: 2, dur: 1, bg: '#9b54c3' }); PM.touch();
     (window as any).__nativeGpuLoss = PM.GL.gl.getExtension('WEBGL_lose_context');
     return !!(window as any).__nativeGpuLoss;
@@ -273,7 +273,7 @@ async function readyNativeMedia(session: LaunchedApp, kind: 'image' | 'video') {
   }
   return session.page.evaluate(async ({ kind, encoded }) => {
     const PM = (window as any).PM;
-    PM.pause(); PM.agentFrameCapture = true; PM.AutomaticPreview?.cancel();
+    PM.pause(); PM.agentFrameCapture = false; PM.AutomaticPreview?.cancel();
     let blob: Blob;
     if (kind === 'image') {
       const canvas = document.createElement('canvas'); canvas.width = 96; canvas.height = 64;
@@ -440,6 +440,9 @@ for (const failure of [false, true]) test(`native video waits for an encoder ack
         }, (error: any) => { (window as any).__heldNativeResult = { unexpectedRejection: String(error) }; });
     });
     await expect.poll(() => session.app.evaluate(() => (globalThis as any).__heldNativeVideo.held)).toBe(true);
+    // A clip decoded in order (issue #185) may prepare and submit the next
+    // frame while this ACK is held; let that settle before cancelling.
+    await session.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const before = await session.page.evaluate(() => {
       const PM = (window as any).PM, media = (window as any).__readyNativeMedia;
       PM.Export.cancel = true;
@@ -453,7 +456,9 @@ for (const failure of [false, true]) test(`native video waits for an encoder ack
       return { currentTime: media.asset.el.currentTime, seeks: media.seeks, begins: media.begins.slice(), result: (window as any).__heldNativeResult };
     })).toEqual({ ...before, result: null });
     expect(before.currentTime).toBe(0);
-    expect(before.begins).toEqual([0]);
+    // Seeking clips wait for the ACK before the next frame; sequentially
+    // decoded clips prepare it without seeking, but never read back or write.
+    expect([[0], [0, .25]]).toContainEqual(before.begins);
     await session.app.evaluate(() => (globalThis as any).__releaseNativeVideo());
     const result = await session.page.evaluate(() => (window as any).__heldNativeJob);
     if (failure) expect(result.error).toContain('Synthetic held encoder write failure');

@@ -1347,7 +1347,7 @@ const Edit: any = {
     try {
       trackCommands(list);
       const executed: any = runCommands(list, meta);
-        validateInputGraphs(list);
+      validateInputGraphs(list);
       const applied: any = executed.map((item: any, index: any) => recordedCommand(item.command, list[index]));
       const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
       record(meta.label, meta.origin, applied);

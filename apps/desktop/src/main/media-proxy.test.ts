@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +8,11 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
 import { IPC } from '../shared/ipc';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
-import { MAX_PROXY_CHUNK_BYTES, MediaProxyService, imageSequenceConverter, registerMediaProxyIpc, sequenceProgressReader } from './media-proxy';
+import { execFileSync } from 'node:child_process';
+import {
+  MAX_PROXY_CHUNK_BYTES, MediaProxyService, hdrProxyHelper, imageSequenceConverter, playbackConverter, playbackProxyArgs, previewArgs,
+  probeVideoStream, registerMediaProxyIpc, sequenceProgressReader
+} from './media-proxy';
 
 const roots: string[] = [];
 
@@ -263,4 +267,116 @@ describe('still image conversion', () => {
     const unavailable = new MediaProxyService(root, async () => {});
     await expect(unavailable.createStillImage(tiff)).rejects.toThrow('unavailable');
   });
+});
+
+describe('graded footage proxies', () => {
+  const ffmpeg = path.resolve('node_modules/ffmpeg-static/ffmpeg');
+  const opaque = { index: 0, codec: 'hevc', alpha: false };
+  const option = (args: string[], name: string) => args[args.indexOf(name) + 1];
+
+  it('drops the alpha plane for opaque footage and keeps it for cutouts or unknown sources', () => {
+    expect(option(playbackProxyArgs('in.mov', 'out.webm', opaque), '-pix_fmt')).toBe('yuv420p');
+    expect(option(playbackProxyArgs('in.mov', 'out.webm', { ...opaque, codec: 'prores', alpha: true }), '-pix_fmt')).toBe('yuva420p');
+    expect(option(playbackProxyArgs('in.mov', 'out.webm', undefined), '-pix_fmt')).toBe('yuva420p');
+    expect(option(previewArgs('in.mov', 'out.webm', opaque), '-vf')).toMatch(/,format=yuv420p$/);
+    expect(previewArgs('in.webm', 'out.webm', { ...opaque, codec: 'vp9', alpha: true }).slice(4, 6)).toEqual(['-c:v', 'libvpx-vp9']);
+  });
+
+  it('tone maps HDR, preserves log code values and leaves Rec.709 untouched', () => {
+    const hdr = playbackProxyArgs('in.mov', 'out.webm', { ...opaque, color: { matrix: 'bt2020nc', primaries: 'bt2020', transfer: 'arib-std-b67' } });
+    expect(option(hdr, '-vf')).toMatch(/^zscale=t=linear:npl=203:p=bt709,.*tonemap=tonemap=mobius.*,format=yuv420p$/);
+    expect(option(hdr, '-color_trc')).toBe('bt709');
+    const cutout = playbackProxyArgs('in.mov', 'out.webm', { ...opaque, alpha: true, color: { transfer: 'smpte2084' } });
+    expect(option(cutout, '-vf')).toMatch(/format=gbrapf32le.*,format=yuva420p$/);
+    const log = playbackProxyArgs('in.mov', 'out.webm', { ...opaque, color: { matrix: 'bt2020nc', primaries: 'bt2020', transfer: 'bt709' } });
+    expect(option(log, '-vf')).toBe('zscale=m=bt709:r=tv,format=yuv420p');
+    expect(option(log, '-color_primaries')).toBe('bt709');
+    const sdr = playbackProxyArgs('in.mov', 'out.webm', { ...opaque, color: { matrix: 'bt709', primaries: 'bt709', transfer: 'bt709' } });
+    expect(sdr).not.toContain('-vf');
+    expect(sdr).not.toContain('-color_trc');
+  });
+
+  const HLG = ['-vf', 'format=gbrp,zscale=rangein=full:tin=iec61966-2-1:t=arib-std-b67:pin=bt709:p=bt2020:min=gbr:m=bt2020nc:r=tv:npl=203,format=yuv420p10le',
+    '-c:v', 'libx265', '-tag:v', 'hvc1', '-x265-params', 'log-level=error', '-color_primaries', 'bt2020', '-color_trc', 'arib-std-b67', '-colorspace', 'bt2020nc'];
+  const TONEMAP = 'zscale=t=linear:npl=203:p=bt709,format=gbrpf32le,tonemap=tonemap=mobius:param=0.9:peak=4.926:desat=0,zscale=t=bt709:m=bt709:r=tv';
+  /** Planar Y'CbCr of one frame, with chroma upsampled to full size. */
+  const ycbcr = (file: string, filter = 'null') => execFileSync(ffmpeg, ['-v', 'error', '-i', file, '-frames:v', '1',
+    '-vf', `${filter},format=yuv444p`, '-f', 'rawvideo', '-']);
+
+  it('converts real HLG footage into tagged Rec.709 at SDR white', async () => {
+    const { root } = await fixture();
+    const source = path.join(root, 'hlg.mov'), output = path.join(root, 'out.webm');
+    execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=white:s=64x36:r=30:d=0.2', ...HLG, source]);
+    expect((await probeVideoStream(ffmpeg, source))?.color).toMatchObject({ transfer: 'arib-std-b67', primaries: 'bt2020' });
+    await playbackConverter(ffmpeg)(source, output);
+    const converted = await probeVideoStream(ffmpeg, output);
+    expect(converted).toMatchObject({ codec: 'vp9', alpha: false, pixelFormat: 'yuv420p', color: { matrix: 'bt709', primaries: 'bt709', transfer: 'bt709' } });
+    const white = execFileSync(ffmpeg, ['-v', 'error', '-i', output, '-frames:v', '1', '-vf', 'scale=out_range=full,format=gray', '-f', 'rawvideo', '-']);
+    // Diffuse white lands just under SDR white instead of Chromium's dim grey.
+    expect(white[white.length >> 1]!).toBeGreaterThan(235);
+  }, 30_000);
+
+  it('hands opaque HDR footage to the GPU helper and falls back to FFmpeg when it fails', async () => {
+    const { root } = await fixture();
+    const hdr = path.join(root, 'hlg.mov'), sdr = path.join(root, 'sdr.mp4'), calls = path.join(root, 'calls');
+    execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=white:s=64x36:r=30:d=0.2', ...HLG, hdr]);
+    execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=white:s=64x36:r=30:d=0.2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', sdr]);
+    const helper = async (name: string, body: string) => {
+      const file = path.join(root, name);
+      await writeFile(file, `#!/bin/sh\necho "$1" >> "${calls}"\n${body}\n`); await chmod(file, 0o755);
+      return file;
+    };
+    const working = await helper('working', 'printf mp4 > "$2"'), broken = await helper('broken', 'printf partial > "$2"; exit 3');
+    const gpu = path.join(root, 'gpu'), fallback = path.join(root, 'fallback'), plain = path.join(root, 'plain');
+    await Promise.all([gpu, fallback, plain].map(dir => mkdir(dir)));
+    await expect(playbackConverter(ffmpeg, working)(hdr, path.join(gpu, 'playback.webm')))
+      .resolves.toEqual({ file: path.join(gpu, 'playback.mp4'), type: 'video/mp4' });
+    expect(await readdir(gpu)).toEqual(['playback.mp4']);
+
+    await expect(playbackConverter(ffmpeg, broken)(hdr, path.join(fallback, 'playback.webm'))).resolves.toBeUndefined();
+    expect(await readdir(fallback)).toEqual(['playback.webm']);
+    expect(await probeVideoStream(ffmpeg, path.join(fallback, 'playback.webm'))).toMatchObject({ codec: 'vp9', color: { transfer: 'bt709' } });
+
+    await playbackConverter(ffmpeg, working)(sdr, path.join(plain, 'playback.webm'));
+    expect(await readdir(plain)).toEqual(['playback.webm']);
+    expect((await readFile(calls, 'utf8')).trim().split('\n')).toEqual([hdr, hdr]);
+  }, 30_000);
+
+  it('serves an MP4 proxy written by the converter with its own type', async () => {
+    const { root, source } = await fixture();
+    const service = new MediaProxyService(root, async (_input, output) => {
+      const file = path.join(path.dirname(output), 'playback.mp4');
+      await writeFile(file, 'mp4');
+      return { file, type: 'video/mp4' as const };
+    });
+    const proxy = await service.create(source);
+    expect(proxy).toMatchObject({ size: 3, type: 'video/mp4' });
+    expect(Buffer.from(await service.read(proxy.token, 0, 3)).toString()).toBe('mp4');
+    await service.dispose();
+  });
+
+  const helper = hdrProxyHelper(path.resolve('.'));
+  it.skipIf(!helper)('tone maps on the GPU to the same pixels as FFmpeg, keeping sound', async () => {
+    const { root } = await fixture();
+    const source = path.join(root, 'hlg.mov'), output = path.join(root, 'playback.mp4');
+    // Saturated and neutral bars, so gamut mapping, the shoulder and chroma all count.
+    execFileSync(ffmpeg, ['-v', 'error',
+      '-f', 'lavfi', '-i', 'color=c=red:s=64x180:r=30:d=0.5[a];color=c=0xBFBFBF:s=64x180:r=30:d=0.5[b];color=c=0x20C040:s=64x180:r=30:d=0.5[c];'
+        + 'color=c=white:s=64x180:r=30:d=0.5[d];color=c=0x2050FF:s=64x180:r=30:d=0.5[e];[a][b][c][d][e]hstack=5',
+      '-f', 'lavfi', '-i', 'sine=f=440:d=0.5', ...HLG, '-c:a', 'aac', '-shortest', source]);
+    execFileSync(helper!, [source, output]);
+    expect(await probeVideoStream(ffmpeg, output)).toMatchObject({
+      codec: 'hevc', alpha: false, color: { range: 'tv', matrix: 'bt709', primaries: 'bt709', transfer: 'bt709' },
+    });
+    // Mapping a missing stream makes FFmpeg fail.
+    execFileSync(ffmpeg, ['-v', 'error', '-i', output, '-map', '0:a:0', '-f', 'null', '-']);
+    // Within the HEVC encoder's own rounding of the exact conversion.
+    const gpu = ycbcr(output), exact = ycbcr(source, TONEMAP), plane = 320 * 180;
+    for (const x of [32, 96, 160, 224, 288]) {
+      for (let channel = 0; channel < 3; channel++) {
+        const at = channel * plane + 90 * 320 + x;
+        expect(Math.abs(gpu[at]! - exact[at]!), `bar at ${x}`).toBeLessThanOrEqual(2);
+      }
+    }
+  }, 30_000);
 });

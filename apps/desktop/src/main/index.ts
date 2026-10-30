@@ -68,7 +68,7 @@ import { cloudFileState } from '@powermove/macos-haptics';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
 import { userInput } from './user-input';
-import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, stillImageConverter, registerMediaProxyIpc } from './media-proxy';
+import { MediaProxyService, hdrProxyHelper, playbackConverter, previewConverter, imageSequenceConverter, stillImageConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { registerMediaPasteIpc } from './media-paste';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
@@ -930,7 +930,8 @@ if (!hasSingleInstanceLock) {
     const proxyEncoder = app.isPackaged
       ? path.join(process.resourcesPath, 'encoder', 'ffmpeg')
       : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
-    const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
+    const hdrProxy = hdrProxyHelper(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined);
+    const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder, hdrProxy), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
     registerAppProtocol();
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
 

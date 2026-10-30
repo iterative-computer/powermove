@@ -68,6 +68,7 @@ import { connectAgentClient, disconnectAgentClient, listAgentClients, MCP_FLAG, 
 import type { AgentClientId } from '../../shared/agent-clients';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
+import { nativeExportProgress } from '../render-encoder';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -410,6 +411,7 @@ export function registerCodexIpc(
         storeAgent: ctx.storeAgent?.() ?? null,
         ...(ctx.agentMediaFfmpeg ? { ffmpegPath: ctx.agentMediaFfmpeg } : {}),
         exportDirectory: ctx.agentExportDirectory,
+        exportProgress: owner => nativeExportProgress(owner.id),
         capturePanel: ctx.externalMcp?.capturePanel,
         panelInput: ctx.externalMcp?.panelInput,
         orchestrate: (runId, tool, args) => orchestrator.call(runId, tool, args),

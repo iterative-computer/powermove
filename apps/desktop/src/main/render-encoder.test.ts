@@ -14,7 +14,7 @@ vi.mock('node:fs/promises', async importOriginal => {
  return {...actual, link: vi.fn(actual.link)};
 });
 afterEach(() => vi.restoreAllMocks());
-import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs,deliverEncodedVideo} from './render-encoder';
+import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs,deliverEncodedVideo,probeHardwareH264} from './render-encoder';
 const binary=path.resolve('node_modules/ffmpeg-static/ffmpeg');
 const renderSender = () => Object.assign(new EventEmitter(), { id: 1, isDestroyed: () => false, isCrashed: () => false });
 function videoAtoms(bytes: Buffer): string[] {
@@ -154,6 +154,86 @@ describe('native frame encoder',()=>{
  it('encodes exact fractional-rate ProRes with retained alpha',async()=>{const temp=await mkdtemp(path.join(os.tmpdir(),'pm-encoder-test-')),service=new RenderEncoder(binary,temp);let token='';try{token=await service.start({width:16,height:16,fps:24000/1001,format:'prores',alpha:true,name:'Test'},1);const bytes=new Uint8Array(16*16*4);for(let i=0;i<256;i++){bytes[i*4]=255;bytes[i*4+3]=i%16<8?255:0;}for(let i=0;i<3;i++)await service.write(token,1,bytes);const file=await service.finish(token,1);expect((await readFile(file)).length).toBeGreaterThan(1000);const {stdout}=await promisify(execFile)(binary,['-hide_banner','-loglevel','error','-i',file,'-f','rawvideo','-pix_fmt','rgba','pipe:1'],{encoding:'buffer',maxBuffer:1024*1024});expect(stdout.length).toBe(16*16*4*3);expect(stdout[3]).toBeGreaterThan(250);expect(stdout[8*4+3]).toBeLessThan(5);}finally{if(token)await service.release(token,1);await rm(temp,{recursive:true,force:true});}},30000);
 });
 
+describe('hardware H.264', () => {
+ const hd = {width:1280,height:720,fps:30,format:'mp4' as const,alpha:false,name:'Hardware',bitrateMbps:16};
+ // A flat gray ramp: every frame differs, and both encoders reproduce it closely.
+ const frame = (index: number) => Uint8Array.from({length:hd.width*hd.height*4},(_,i)=>i%4===3?255:(Math.floor(i/4)%hd.width*200/hd.width+index*3+(i%4)*20)%256);
+ async function encode(hardware: boolean) {
+  const temp = await mkdtemp(path.join(os.tmpdir(),'pm-hardware-h264-')), service = new RenderEncoder(binary,temp,async()=>hardware);
+  const token = await service.start({...hd,frames:6},1);
+  try {
+   const encoder = service.job(token,1).encoder;
+   for (let i = 0; i < 6; i++) await service.write(token,1,frame(i));
+   expect(service.progress(1)).toMatchObject({frames:6,total:6,encoder});
+   const file = await service.finish(token,1);
+   const exec = promisify(execFile);
+   const info = await exec(binary,['-hide_banner','-i',file]).catch(error => error.stderr as string);
+   const pixels = (await exec(binary,['-v','error','-i',file,'-f','rawvideo','-pix_fmt','rgba','pipe:1'],{encoding:'buffer',maxBuffer:64*1024*1024})).stdout;
+   return {encoder, info: String(info), pixels};
+  } finally { await service.release(token,1); await rm(temp,{recursive:true,force:true}); }
+ }
+
+ it('tags VideoToolbox output with the same color description libx264 writes', () => {
+  const args = encoderArgs(hd,'out.mp4','h264_videotoolbox');
+  expect(args).toEqual(expect.arrayContaining(['h264_videotoolbox','-allow_sw','0','16M','-color_trc','iec61966-2-1']));
+  expect(args[args.indexOf('-bsf:v')+1]).toContain('transfer_characteristics=13');
+  expect(encoderArgs(hd,'out.mp4')).toContain('libx264');
+ });
+
+ it('uses software for small frames and whenever hardware is unavailable or fails its probe', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(),'pm-encoder-choice-'));
+  try {
+   for (const [hardware, options, expected] of [
+    [async()=>true, {...hd,width:640,height:360}, 'libx264'],
+    [async()=>false, hd, 'libx264'],
+    [async()=>{ throw new Error('VideoToolbox unavailable'); }, hd, 'libx264'],
+    [async()=>true, {...hd,format:'prores' as const}, 'prores_ks'],
+   ] as const) {
+    const service = new RenderEncoder(binary,temp,hardware as any), token = await service.start(options,1);
+    try { expect(service.job(token,1).encoder).toBe(expected); } finally { await service.release(token,1); }
+   }
+  } finally { await rm(temp,{recursive:true,force:true}); }
+  expect(()=>validateEncoderOptions({...hd,frames:0})).toThrow('Invalid render frame count');
+ });
+
+ it.runIf(process.platform === 'darwin')('encodes with VideoToolbox when the probe passes, matching software color and tags', async () => {
+  if (!await probeHardwareH264(binary,hd.width,hd.height)) return;
+  const [software, hardware] = [await encode(false), await encode(true)];
+  expect([software.encoder, hardware.encoder]).toEqual(['libx264','h264_videotoolbox']);
+  for (const result of [software, hardware]) expect(result.info).toMatch(/yuv420p\(tv, bt709\/bt709\/iec61966-2-1/);
+  expect(hardware.pixels.length).toBe(software.pixels.length);
+  let total = 0;
+  for (let i = 0; i < software.pixels.length; i += 4) for (let c = 0; c < 3; c++) total += Math.abs(software.pixels[i+c]! - hardware.pixels[i+c]!);
+  expect(total / (software.pixels.length / 4 * 3)).toBeLessThan(3);
+ }, 30000);
+});
+
+it('acknowledges queued frames at once but waits while FFmpeg is two frames behind', async () => {
+ const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-encoder-queue-'));
+ const stalled = path.join(folder, 'ffmpeg-stalled');
+ // An encoder that never reads its input, then dies when told to.
+ await writeFile(stalled, `#!/usr/bin/env node
+process.stdin.pause();
+process.on('SIGUSR2', () => { process.stderr.write('Encoder gave up', () => process.exit(3)); });
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+ const service = new RenderEncoder(stalled, folder);
+ const token = await service.start({ width: 256, height: 256, fps: 30, format: 'mp4', alpha: false, name: 'Queue' }, 1);
+ try {
+  const frame = new Uint8Array(256 * 256 * 4);
+  await service.write(token, 1, frame);
+  await service.write(token, 1, frame);
+  let third = 'pending';
+  const waiting = service.write(token, 1, frame).then(() => { third = 'written'; }, error => { third = error.message; });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  expect(third).toBe('pending');
+  service.job(token, 1).process.kill('SIGUSR2');
+  await waiting;
+  expect(third).not.toBe('written');
+  await expect(service.write(token, 1, frame)).rejects.toThrow('Encoder gave up');
+ } finally { await service.release(token, 1); await rm(folder, { recursive: true, force: true }); }
+});
+
 it('applies the selected MP4 bitrate and rejects invalid bitrates', () => {
  const options = {width:64,height:64,fps:30,format:'mp4' as const,alpha:false,name:'Quality',bitrateMbps:4};
  expect(encoderArgs(options,'out.mp4')).toContain('4M');
@@ -196,7 +276,7 @@ it.each([false, true])('finishes real video with automatic agent delivery=%s', a
       const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Export' });
       await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
       const destination = automatic ? path.join(folder, 'Export.mp4') : output;
-      expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: destination });
+      expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: destination, encoder: 'libx264' });
       expect((await readFile(destination)).length).toBeGreaterThan(0);
       expect(native.showSaveDialog).toHaveBeenCalledTimes(automatic ? 0 : 1);
     });
@@ -231,7 +311,7 @@ it('releases the real encoder and temporary files after a renderer crash, then p
     event.sender.emit('did-finish-load');
     const fresh = await handlers.get(IPC.renderStart)(event, options);
     await handlers.get(IPC.renderWrite)(event, { token: fresh, data: new Uint8Array(16 * 16 * 4) });
-    expect(await handlers.get(IPC.renderFinish)(event, { token: fresh })).toEqual({ path: destination });
+    expect(await handlers.get(IPC.renderFinish)(event, { token: fresh })).toEqual({ path: destination, encoder: 'libx264' });
     expect((await readFile(destination)).length).toBeGreaterThan(0);
     event.sender.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
     expect((await readFile(destination)).length).toBeGreaterThan(0);

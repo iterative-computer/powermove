@@ -2433,6 +2433,7 @@ function drawPlayhead(c: any, W: any, H: any) {
   c.lineTo(x, headTop + 12); c.lineTo(x - 5.5, headTop + 7); c.closePath();
   c.fillStyle = theme.accent; c.fill();
   c.restore();
+  c.restore();
 }
 
 function formatOffsetTime(seconds: number): string {

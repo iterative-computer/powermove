@@ -106,7 +106,7 @@ main{overflow:clip}
 .stage-window{max-width:var(--col);margin:clamp(64px,9vh,96px) auto 0;padding-inline:24px;container-type:inline-size}
 @media(max-width:640px){.stage-window{padding-inline:12px}}
 /* Keep the image and its shadow in one stable layer while mobile browsers scroll. */
-.stage-window img{width:100%;height:auto;border-radius:calc(100cqw * 18 / 1782);transform:translateZ(0);backface-visibility:hidden;box-shadow:0 0 0 1px rgb(0 0 0 / .35),0 40px 80px -24px rgb(40 10 0 / .55),0 0 140px -30px rgb(255 107 26 / .45)}
+.stage-window img{width:100%;height:auto;border-radius:calc(100cqw * 18 / 1914);transform:translateZ(0);backface-visibility:hidden;box-shadow:0 0 0 1px rgb(0 0 0 / .35),0 40px 80px -24px rgb(40 10 0 / .55),0 0 140px -30px rgb(255 107 26 / .45)}
 .pill-count{opacity:.6;font-weight:400}
 
 /* ---- rows: copy beside each product graphic, on paper ---- */

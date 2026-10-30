@@ -40,6 +40,13 @@ const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
 const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
 
 const TOOL_TIMEOUT_MS = 120_000;
+/** One export_video call waits this long, then hands back a job to resume.
+ * It stays well inside MCP clients' own per-call limits (often one hour). */
+const EXPORT_WAIT_MS = 20 * 60_000;
+/** An export job's own limit. A crashed or closed renderer still fails it at once. */
+const EXPORT_JOB_LIMIT_MS = 12 * 60 * 60_000;
+type ExportProgress = { frames: number; total?: number; encoder?: string; seconds: number };
+type ExportJob = { id: string; owner: WebContents; settled: boolean; result: Promise<AgentToolResponseEvent> };
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_TEXT_CHARS = 2_000_000;
 // The session snapshot is written to the workspace, never returned to agents.
@@ -174,6 +181,10 @@ export interface PowermoveAgentToolBridgeOptions {
   mediaFontFile?: string | null;
   /** Test seam: how long one media tool call may take (defaults to CALL_BUDGET_MS). */
   mediaCallBudgetMs?: number;
+  /** How long one export_video call waits before returning a resumable job. */
+  exportWaitMs?: number;
+  /** Frames the native encoder has accepted for this window's running export. */
+  exportProgress?(owner: WebContents): ExportProgress | null;
   orchestrate?(runId: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
   capturePanel?(owner: WebContents, bounds: { x: number; y: number; width: number; height: number }): Promise<Uint8Array>;
   panelInput?(owner: WebContents, args: Record<string, unknown>, points: Array<{ x: number; y: number }>): Promise<void>;
@@ -189,6 +200,7 @@ export class PowermoveAgentToolBridge {
   private readonly onRendererResponseBound: (event: IpcMainEvent, value: unknown) => void;
   private mediaTools: AgentMediaTools | null = null;
   private readonly mediaCalls = new Map<PowermoveAgentToolSession, Set<AbortController>>();
+  private readonly exportJobs = new Map<string, ExportJob>();
 
   constructor(
     private readonly ipcMain: IpcMain,
@@ -266,6 +278,51 @@ export class PowermoveAgentToolBridge {
     return session ? await session.finish(commit) : null;
   }
 
+  /** A full-length export can outlast any single tool call, so it runs as a
+   * job. The call waits for it up to a limit, then returns the job's progress;
+   * calling export_video again with that jobId resumes waiting. The export
+   * itself never depends on a client still waiting for it. */
+  private async exportVideo(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    const { jobId, ...options } = args;
+    let job: ExportJob | undefined;
+    if (jobId !== undefined) {
+      if (typeof jobId !== 'string' || Object.keys(options).length) throw new Error('export_video with a jobId takes no other arguments.');
+      job = this.exportJobs.get(jobId);
+      if (!job || job.owner !== session.owner) throw new Error('Unknown export job. A finished job is reported once; check the export folder.');
+    } else {
+      const running = [...this.exportJobs.values()].find(item => item.owner === session.owner && !item.settled);
+      if (running) throw new Error(`An export is already running. Call export_video with {"jobId":"${running.id}"} to wait for it.`);
+      // The normal provider connection owns this session; no separate MCP setup.
+      await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
+      const created: ExportJob = { id: `export-${randomUUID()}`, owner: session.owner, settled: false,
+        result: withAgentExport(session.owner, this.options.exportDirectory, () => this.callRenderer(session, '__mcp_export_video', options)) };
+      created.result.then(() => { created.settled = true; }, () => { created.settled = true; });
+      this.exportJobs.set(created.id, created);
+      job = created;
+    }
+    const waited = Symbol('waiting');
+    let timer: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      job.result,
+      new Promise<typeof waited>(resolve => { timer = setTimeout(() => resolve(waited), this.options.exportWaitMs ?? EXPORT_WAIT_MS); timer.unref?.(); }),
+    ]).finally(() => clearTimeout(timer)).catch(error => { this.exportJobs.delete(job!.id); throw error; });
+    if (outcome !== waited) {
+      this.exportJobs.delete(job.id);
+      return outcome;
+    }
+    const progress = this.options.exportProgress?.(session.owner) ?? null;
+    const done = progress?.total ? progress.frames / progress.total : 0;
+    const remaining = progress && done > 0 && done < 1 ? Math.round(progress.seconds * (1 - done) / done) : undefined;
+    return {
+      runId: session.runId, callId: `tool-${randomUUID()}`, ok: true,
+      content: [{ type: 'text', text: JSON.stringify({
+        status: 'running', jobId: job.id,
+        ...(progress ? { progress: { frames: progress.frames, ...(progress.total ? { totalFrames: progress.total } : {}), ...(progress.encoder ? { encoder: progress.encoder } : {}), ...(remaining !== undefined ? { secondsRemaining: remaining } : {}) } } : {}),
+        next: `The export continues in Powermove. Call export_video with {"jobId":"${job.id}"} to keep waiting for its file.`,
+      }) }],
+    };
+  }
+
   async callRenderer(
     session: PowermoveAgentToolSession,
     tool: string,
@@ -292,7 +349,8 @@ export class PowermoveAgentToolBridge {
       };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const unavailable = () => fail(new Error(`Powermove renderer closed or crashed while running ${tool}. The action outcome is unknown; inspect the project before repeating edits.`));
-      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)), tool === '__mcp_export_video' || tool === '__mcp_save_project' ? 3_600_000 : this.timeoutMs);
+      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)),
+        tool === '__mcp_export_video' ? EXPORT_JOB_LIMIT_MS : tool === '__mcp_save_project' ? 3_600_000 : this.timeoutMs);
       timer.unref();
       session.owner.once('destroyed', unavailable);
       session.owner.once('render-process-gone', unavailable);
@@ -504,7 +562,8 @@ export class PowermoveAgentToolBridge {
     if (session.context === 'app' && !POWERMOVE_APP_AGENT_TOOLS.some(spec => spec.name === tool)) {
       throw new Error('This agent has no project attached. Open a project to use composition tools.');
     }
-    if (tool === 'save_project' || tool === 'export_video') {
+    if (tool === 'export_video') return this.exportVideo(session, args);
+    if (tool === 'save_project') {
       // The normal provider connection owns this session; no separate MCP setup.
       await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
       return withAgentExport(session.owner, this.options.exportDirectory, () =>

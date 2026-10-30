@@ -51,7 +51,7 @@
       <Hero />
     </section>
     <figure class="stage-window">
-      <img src="/editor-hero.png" alt="The Powermove editor in its dark theme, with media, the agent panel, canvas, timeline, properties, and effects." width="1920" height="1280" fetchpriority="high" />
+      <img src="/editor-window.png" alt="The Powermove editor with media, the canvas, a Tracks timeline with video and audio clips, and properties." width="1914" height="1080" fetchpriority="high" />
     </figure>
   </div>
 

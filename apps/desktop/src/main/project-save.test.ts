@@ -201,6 +201,9 @@ describe('incremental project transactions', () => {
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('updated');
     expect((await stat(destination)).mode & 0o777).toBe(0o400);
     expect(await files.backups('one')).toHaveLength(1);
+    const backup = (await files.backups('one'))[0]!;
+    expect(decodeProjectContainer(await readFile(backup)).document.proj.name).toBe('original');
+    expect((await stat(backup)).mode & 0o777).toBe(0o400);
     await save('updated again');
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('updated again');
   });

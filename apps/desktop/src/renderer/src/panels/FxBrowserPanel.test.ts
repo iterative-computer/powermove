@@ -184,7 +184,8 @@ describe('FxBrowserPanel', () => {
       ['mixer', 'Mixer', 300],
       ['workspaces', 'Workspaces', 200],
       ['takes', 'Takes', 180],
-      ['notes', 'Notes', 180]
+      ['notes', 'Notes', 180],
+      ['easing', 'Easing', 320]
     ]);
     for (const definition of definitions.values()) {
       expect(definition.persist).toBe(true);
