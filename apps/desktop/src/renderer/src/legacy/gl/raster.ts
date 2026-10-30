@@ -1364,7 +1364,7 @@ PM.assets = {
     restored.forEach((a: any) => {
       /* Older projects already preserve the original .svg bytes and name but
          predate the explicit vector marker. Hydrate that marker in place so
-         the editor UI and subsequent web exports also identify the asset. */
+         the editor UI also identifies the asset. */
       const meta: any = project.assets?.[a.id];
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
     });

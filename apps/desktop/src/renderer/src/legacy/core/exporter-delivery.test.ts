@@ -10,10 +10,6 @@ import { toLegacyFx } from '../../kernel/glsl';
 import { EFFECTS } from '../../../../extensions/effects-basic/effects';
 
 vi.mock('./export-preview', () => ({ animateExportPreview: () => () => {} }));
-vi.mock('../../player/export-web', () => ({
-  buildWebExport: async () => ({ bytes: new Uint8Array([1]), scene: { warnings: [] } }),
-  inspectWebExport: () => ({ errors: [], fonts: new Set() }),
-}));
 
 function element(tagAndClasses: string, ...args: any[]): HTMLElement {
   const node = document.createElement(tagAndClasses.split('.')[0]!);
@@ -365,7 +361,7 @@ describe('export delivery', () => {
     else expect(PM.Audio.expectsOfflineMix).not.toHaveBeenCalled();
   });
 
-  it.each(['still', 'web', 'json', 'png', 'webm', 'rec'])('cancels %s before export work begins', async format => {
+  it.each(['still', 'json', 'png', 'webm', 'rec'])('cancels %s before export work begins', async format => {
     const { X, PM, download } = setup();
     PM.modal = vi.fn(PM.modal);
     PM.pause = vi.fn();
@@ -384,7 +380,7 @@ describe('export delivery', () => {
     expect(X.busy).toBe(false);
   });
 
-  it.each(['still', 'web', 'png'])('delivers %s to the chosen destination and releases it', async format => {
+  it.each(['still', 'png'])('delivers %s to the chosen destination and releases it', async format => {
     const { X, download } = setup();
     const choose = vi.fn(async () => 'destination');
     const release = vi.fn(async () => {});
@@ -2646,12 +2642,5 @@ describe('export delivery', () => {
     download.mockResolvedValueOnce({ ok: false, cancelled: true });
     expect(await X.run({ ...options, format: 'still' })).toEqual({ cancelled: true });
     expect(toast).not.toHaveBeenCalledWith('Frame exported');
-  });
-
-  it('propagates native delivery cancellation for a web animation', async () => {
-    const { X, toast, download } = setup();
-    download.mockResolvedValueOnce({ ok: false, cancelled: true });
-    expect(await X.run({ format: 'web' })).toEqual({ cancelled: true });
-    expect(toast).not.toHaveBeenCalledWith('Web animation exported');
   });
 });

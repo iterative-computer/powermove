@@ -92,7 +92,7 @@ The original position channels describe the route. The bounded
 `motionPath(layerId, channel, progress, start, end)` evaluates the original
 position geometry at a travelled-distance fraction. Neither helper recursively
 runs source expressions. Controllers and geometry are saved in the project
-and work during playback, rendering and portable web export.
+and work during playback and rendering.
 
 ## Compatibility scope
 

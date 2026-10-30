@@ -1,10 +1,17 @@
 // @vitest-environment happy-dom
 import { expect, it, vi } from 'vitest';
 import { createEngine } from './player';
-import { buildWebExport } from './export-web';
 import { createSvgPlayer } from './svg-player';
+import type { WebScene } from './scene';
 
-it('preserves a corner anchor through portable SVG export and animated resizing', async () => {
+/* The scene the SVG player reads: the engine's serialized project and no packaged assets. */
+function sceneOf(PM: any): WebScene {
+  const serialized = PM.serialize();
+  const snapshot = typeof serialized === 'string' ? JSON.parse(serialized) : structuredClone(serialized);
+  return { format: 'powermove-web', version: 1, project: snapshot.proj || snapshot, assets: {}, fonts: [], effects: [], transitions: [], layerTypes: [], warnings: [] };
+}
+
+it('preserves a corner anchor through SVG playback and animated resizing', async () => {
   const PM = createEngine(null);
   PM.proj = PM.mkProject({ w: 128, h: 128, dur: 3 });
   const layer = PM.mkLayer('shape', { d: { shape: 'rect', w: 20, h: 20, radius: 0, stroke: 0,
@@ -12,7 +19,7 @@ it('preserves a corner anchor through portable SVG export and animated resizing'
     p: { 'anchor.x': -10, 'anchor.y': -10 } }, PM.proj);
   layer.d.w = PM.P(20, { kf: [PM.KF(0, 20, 'linear'), PM.KF(2, 60, 'linear')] });
   PM.proj.layers = [layer];
-  const { scene } = await buildWebExport(PM);
+  const scene = sceneOf(PM);
   expect((scene.project.layers[0] as any).d.sizeAnchorBounds).toEqual(layer.d.sizeAnchorBounds);
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   const player = await createSvgPlayer({ svg, scene });
@@ -44,7 +51,7 @@ it('draws stagger-animated text glyph by glyph and settles to rest', async () =>
   layer.d.animators = [{ id: 'a', name: 'Rise', enabled: true, mode: 'stagger', unit: 'characters', order: 'forward', direction: 'in', easing: 'linear',
     p: Object.fromEntries(Object.entries({ amount: 100, delay: 0, duration: 1, stagger: 0.5, opacity: 0, y: 20, blur: 6 }).map(([key, value]) => [key, PM.P(value)])) }];
   PM.proj.layers = [layer];
-  const { scene } = await buildWebExport(PM);
+  const scene = sceneOf(PM);
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   const player = await createSvgPlayer({ svg, scene });
   try {

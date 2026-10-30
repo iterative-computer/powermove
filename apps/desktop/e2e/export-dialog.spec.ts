@@ -86,16 +86,13 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
     await dialog.getByRole('button', { name: 'Project', exact: true }).click();
     await expect(dialog).toContainText('Keep every layer editable');
     await expect(dialog.getByRole('button', { name: 'Save project file' })).toBeVisible();
-    await dialog.getByRole('button', { name: 'Code', exact: true }).click();
-    await expect(dialog.getByRole('button', { name: 'Export code', exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Code', exact: true })).toHaveCount(0);
     await expect(dialog.getByText('Resolution', { exact: true })).toBeHidden();
     await expect(dialog.getByText('Frame rate', { exact: true })).toBeHidden();
     await expect(dialog.getByText('Transparent background')).toBeHidden();
-    await expect(dialog).toContainText('-web.zip');
-
-    await expect(dialog.getByText('Agent handoff', { exact: true })).toBeVisible();
+    await expect(dialog).toContainText('.pmv');
     await expect(dialog.getByLabel('Render preset name')).toBeHidden();
-    await page.screenshot({ path: 'e2e/test-results/export-code-dialog.png' });
+    await page.screenshot({ path: 'e2e/test-results/export-project-dialog.png' });
     await dialog.getByRole('button', { name: 'Video', exact: true }).click();
     await expect(dialog.getByLabel('Export width in pixels')).toHaveValue('1000');
     await page.screenshot({path:'/tmp/powermove-export-video.png'});

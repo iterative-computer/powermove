@@ -11,9 +11,7 @@ this package holds no runtime source of its own.
 - `@powermove/player/svg-player`: `createSvgPlayer`, an SVG drawing backend
   over the same engine, for scenes made of text, solids, shapes and groups.
 - `@powermove/player/build`: `bundlePlayerEntry(entryPath)` and `entries`, the
-  single home of the esbuild options. The desktop app's
-  `virtual:powermove-player` module (the runtime embedded into web exports)
-  calls this so both outputs are byte-identical builds.
+  single home of the esbuild options.
 
 ## Building
 
@@ -27,7 +25,6 @@ gitignored; rebuild after changing anything under the desktop player sources.
 
 ## Consumers
 
-- `apps/desktop`: imports `@powermove/player/build` from
-  `scripts/player-bundle.ts` to embed the player text into exported zips.
-- `apps/www`: animates its hero with `createSvgPlayer` and a `scene.json`
-  exported from the desktop app.
+- `apps/www`: animates its hero with `createSvgPlayer` and a checked-in
+  `scene.json`. The desktop app no longer exports web scenes, so edit that
+  file directly.

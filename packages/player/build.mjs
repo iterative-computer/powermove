@@ -1,7 +1,6 @@
 // Bundles the Powermove web player from the desktop app's sources.
-// The esbuild options here are the single source of truth: the desktop app's
-// `virtual:powermove-player` module (embedded into web exports) and this
-// package's dist/ output both go through bundlePlayerEntry.
+// The esbuild options live here; the package's dist/ output goes through
+// bundlePlayerEntry.
 import { build } from 'esbuild';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';

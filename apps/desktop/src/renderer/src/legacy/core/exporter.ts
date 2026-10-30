@@ -28,7 +28,6 @@ import {
 } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
 import { packProjectFileBlob } from './project-file';
-import { buildWebExport, inspectWebExport } from '../../player/export-web';
 import { viewerService } from './services';
 import { createSettingsSection } from '../ui/settings-section';
 import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
@@ -52,7 +51,6 @@ const prepareExportFrame: typeof prepareFrame = (pm, time, project, options) =>
   prepareFrame(pm, time, project, { ...options, recoveryDecoders, ...(sequentialDecoders ? { sequentialDecoders } : {}) });
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
-X.buildWeb = () => buildWebExport(PM);
 
 /* The project owns its delivery settings; the legacy global store only seeds
    projects saved before Settings › Project existed. */
@@ -86,12 +84,11 @@ X.dialog = () => {
     field.sync();
     return field;
   };
-  const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
-  const remembered: Record<string, string> = { code: 'web', video: 'mp4', images: 'still', project: 'json' };
+  const category = (format: string) => format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
+  const remembered: Record<string, string> = { video: 'mp4', images: 'still', project: 'json' };
   remembered[category(opts.format)] = opts.format;
 
   const destinations = [
-    ['code', 'Code', 'A live animation for apps and coding agents.'],
     ['video', 'Video', 'MP4, WebM or ProRes for delivery and editing.'],
     ['images', 'Images', 'A single frame, or every frame as a PNG sequence.'],
     ['project', 'Project', 'An editable .pmv with every layer and its media.'],
@@ -106,18 +103,13 @@ X.dialog = () => {
   const destinationNote = h('p.export-destination-note');
   body.append(choices, destinationNote);
 
-  const about = (title: string, copy: string, includes: string[], delivery?: string) => h('div.sg-group.export-about',
+  const about = (title: string, copy: string, includes: string[]) => h('div.sg-group.export-about',
     h('div.export-about-copy', h('b', title), h('p', copy),
-      h('div.export-code-includes', ...includes.map((item) => h('span', item))),
-      delivery ? h('p.export-code-delivery', delivery) : null));
-  const codeDetails = about('Put your animation in an app',
-    'Export a live animation with playback controls and editable text and colors.',
-    ['JavaScript player', 'React component', 'Agent handoff'],
-    'One ZIP with your scene, assets and generated effects. Give it to a developer or coding agent to integrate.');
+      h('div.export-about-includes', ...includes.map((item) => h('span', item)))));
   const projectDetails = about('Keep every layer editable',
     'Save a portable Powermove project with its media, effects, keyframes and composition settings.',
     ['Editable layers', 'Original media', 'Animation & effects']);
-  body.append(codeDetails, projectDetails);
+  body.append(projectDetails);
 
   const hasWC: any = typeof window.VideoEncoder !== 'undefined';
   const plan: any = () => planExport(opts, { w: p.w, h: p.h, dur: p.dur, work: p.work });
@@ -229,10 +221,9 @@ X.dialog = () => {
       button.classList.toggle('on', id === kind);
     }
     destinationNote.textContent = destinations.find(([id]) => id === kind)?.[2] ?? '';
-    codeDetails.hidden = kind !== 'code';
     projectDetails.hidden = kind !== 'project';
     body.querySelectorAll('select, [role=switch]').forEach((field: any) => field.sync?.());
-    const settingsFree = kind === 'code' || kind === 'project';
+    const settingsFree = kind === 'project';
     formatOptions.splice(0, formatOptions.length, ...allFormats.filter(o => category(o.v) === kind));
     formatField.sync?.();
     const support: any = exportFieldSupport(opts.format);
@@ -253,9 +244,7 @@ X.dialog = () => {
       if (window.document.activeElement !== hIn) hIn.value = String(est.height);
       scaleField.sync?.();
     }
-    if (opts.format === 'web') {
-      nfoMain.textContent = `${p.name || 'Untitled'}-web.zip`;
-    } else if (opts.format === 'json') {
+    if (opts.format === 'json') {
       nfoMain.textContent = `${p.name || 'Untitled'}.pmv`;
     } else if (opts.format === 'still') {
       nfoMain.textContent = `${est.width}×${est.height} · frame at ${PM.tc(PM.time, p.fps)}`;
@@ -263,10 +252,6 @@ X.dialog = () => {
       nfoMain.textContent = `${est.frames} frames · ${PM.round(est.seconds, 2)}s · ${est.width}×${est.height}`;
     }
     nfoNote.textContent = est.note;
-    if (opts.format === 'web') {
-      const report = inspectWebExport(PM);
-      nfoNote.textContent = report.errors.length ? report.errors.join(' · ') : est.note + (report.fonts.size ? ' · System fonts may need to be supplied in your app' : '');
-    }
     const pri: any = m?.el?.querySelector('.mf .btn.pri');
     if (pri) pri.textContent = exportActionLabel(opts.format);
   }
@@ -373,8 +358,7 @@ async function run(opts: any) {
       if (!nativeToken) return { cancelled: true };
     } else if (bridge?.exportDestination) {
       const base = p.name || 'powermove';
-      const name = opts.format === 'web' ? base + '-web.zip'
-        : opts.format === 'json' ? base + '.pmv'
+      const name = opts.format === 'json' ? base + '.pmv'
         : opts.format === 'still' ? `${p.name}_${PM.tc(PM.time, p.fps).replace(/:/g, '-')}.png`
         : base + (opts.format === 'mp4' ? '.mp4' : opts.format === 'png' ? '.png' : '.webm');
       destinationToken = await bridge.exportDestination.choose(name, opts.format === 'png');
@@ -432,28 +416,6 @@ async function runPrepared(opts: any) {
   const p: any = PM.proj;
   const [t0, t1]: any = range(opts);
   const W: any = Math.round(p.w * opts.scale / 2) * 2, H: any = Math.round(p.h * opts.scale / 2) * 2;
-
-  if (opts.format === 'web') {
-    try {
-      await PM.app?.importQueue;
-      const result = await buildWebExport(PM);
-      const name = (p.name || 'powermove') + '-web.zip';
-      const bridge = (hostBridge() as any);
-      if (bridge?.saveFile) {
-        const saved = await bridge.saveFile({ name, data: result.bytes, ...(destinationToken ? { destinationToken } : {}) });
-        if (!saved.ok) {
-          if (saved.cancelled) return { cancelled: true };
-          throw new Error(saved.error || 'Could not save web animation');
-        }
-      } else if (!await deliver(new Blob([result.bytes], { type: 'application/zip' }), name)) return { cancelled: true };
-      PM.toast(result.scene.warnings.length ? 'Web animation exported · see README for compatibility notes' : 'Web animation exported');
-      return { cancelled: false };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      PM.toast('Could not export web animation: ' + message, 8000);
-      return { error: message };
-    }
-  }
 
   if (opts.format === 'json') {
     try {
@@ -537,13 +499,13 @@ async function runPrepared(opts: any) {
   }
 }
 
-const isVideoExport = (format: string) => !['web', 'json', 'png', 'still'].includes(format);
+const isVideoExport = (format: string) => !['json', 'png', 'still'].includes(format);
 
 /** Subtitle files beside the exported video, one per captions layer. */
 async function writeCaptionSidecars(opts: any, t0: number, t1: number): Promise<number> {
   const format = opts.captionsSidecar;
   // Only beside a video: the choice survives switching to a still, an image
-  // sequence or a code/project export, where a subtitle file means nothing.
+  // sequence or a project export, where a subtitle file means nothing.
   if ((format !== 'srt' && format !== 'vtt') || !lastOutputPath || !isVideoExport(opts.format)) return 0;
   const bridge = (hostBridge() as any);
   const files = captionSidecars(PM.proj, format, { from: t0, to: t1 });
