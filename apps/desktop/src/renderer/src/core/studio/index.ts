@@ -234,9 +234,11 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
 
   if (final) {
     const t = target('final', width, height);
-    if (job.viewKey !== `final:${viewKey}` || t.samples < STUDIO_FINAL_SAMPLES) {
+    // The composition's quality setting, split across motion-blur shutter samples.
+    const goal = Math.max(4, Math.ceil(Number(runtime.raw?.environment?.samples ?? STUDIO_FINAL_SAMPLES) / Math.max(1, PM._studioShutterSamples || 1)));
+    if (job.viewKey !== `final:${viewKey}` || t.samples < goal) {
       t.setView(view);
-      t.trace(STUDIO_FINAL_SAMPLES, 8, true, 64);
+      t.trace(goal, 8, true, 64);
       t.resolve(0);
       job.viewKey = `final:${viewKey}`;
     }

@@ -51,7 +51,10 @@ export const materialSchema = z.object({
     // Layers Studio renders: a clear coat (lacquer, cover glass), transmission
     // (glass, liquid) with its index of refraction, and dielectric reflection.
     clearcoat: [num(0,1),0], clearcoatRoughness: [num(.002,1),.03], transmission: [num(0,1),0],
-    ior: [num(1,2.6),1.5], specular: [num(0,1),1] }).default({} as any),
+    ior: [num(1,2.6),1.5], specular: [num(0,1),1],
+    // Fabric sheen, an iridescent thin film (thickness in nm), glass dispersion
+    // and water droplets beading on the surface.
+    sheen: [num(0,1),0], iridescence: [num(0,1200),0], dispersion: [num(0,1),0], droplets: [num(0,1),0] }).default({} as any),
   maps: z.object(Object.fromEntries(['color','normal','roughness','metalness','emissive','ao'].map(k => [k,z.string().min(1).max(160).optional()]))).strict().default({}),
   doubleSided: z.boolean().default(true)
 }).strict();
@@ -83,7 +86,9 @@ export const environmentSchema = z.object({
   background: color.nullable().default(null), shadows: z.boolean().default(true),
   // A seamless studio set: the background color everywhere, with a floor at
   // the lowest model that shows only the shadows models cast on it.
-  shadowCatcher: z.boolean().default(false)
+  shadowCatcher: z.boolean().default(false),
+  // Studio's Final quality: samples per pixel for each exported frame.
+  samples: z.number().int().min(4).max(4096).default(64)
 }).strict();
 const schema = z.object({
   version: z.literal(1).default(1), objects: z.array(objectSchema).max(512).default([]),

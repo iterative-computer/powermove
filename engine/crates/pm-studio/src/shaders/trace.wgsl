@@ -32,7 +32,8 @@ struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, rig
 // base: rgb, metallic · spec: roughness, coat, coat roughness, transmission
 // emit: rgb, unused · extra: ior, specular, opacity, unused
 // maps: texture-array layers for color, emissive, occlusion-roughness-metal, normal (-1: none)
-struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f }
+// layers: sheen, thin-film thickness (nm), dispersion, water droplets
+struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f, layers: vec4f }
 // pos.w: kind (0 softbox, 1 sphere, 2 spot, 3 sun).
 // softbox: pos = centre, u/v = half extents (u.w: area); emits along u × v.
 // sphere/spot: pos = centre, u.x = radius; spot: v.xyz = axis, v.w = cos outer, radiance.w = cos inner.
@@ -376,7 +377,7 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let metallic = m.base.w;
   let a = m.spec.x * m.spec.x;
   let f0 = f0_of(m);
-  let F = schlick(f0, vh);
+  let F = thin_film(schlick(f0, vh), vh, m.layers.y);
   let spec = F * ggx_d(nh, a) * smith_g2(nv, nl, a) / (4.0 * nv);
   let tr = m.spec.w * (1.0 - metallic);
   let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * (1.0 - schlick(f0, nl)) * (1.0 - schlick(f0, nv)) * nl / PI;
@@ -384,7 +385,32 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let fc = m.spec.y * schlick1(0.04, vh);
   let coat = fc * ggx_d(nh, ca) * smith_g2(nv, nl, ca) / (4.0 * nv);
   let atten = (1.0 - m.spec.y * schlick1(0.04, nv)) * (1.0 - m.spec.y * schlick1(0.04, nl));
-  return vec3f(coat) + (spec + diff) * atten;
+  return vec3f(coat) + (spec + diff + sheen(m, nh, nl, nv)) * atten;
+}
+
+// Thin-film interference (iridescent coatings): the reflected color cycles
+// with the film's optical path, per RGB wavelength.
+fn thin_film(F: vec3f, cosv: f32, nm: f32) -> vec3f {
+  if (nm <= 0.0) { return F; }
+  let n_film = 1.38;
+  let s2 = (1.0 - cosv * cosv) / (n_film * n_film);
+  let cost = sqrt(max(0.0, 1.0 - s2));
+  let path = 2.0 * n_film * nm * cost;
+  let phase = 2.0 * PI * path / vec3f(650.0, 532.0, 460.0);
+  let interference = 0.5 + 0.5 * cos(phase);
+  return clamp(F * (0.35 + 1.3 * interference), vec3f(0.0), vec3f(1.0));
+}
+
+// Sheen (fabric, soft-touch): the "Charlie" distribution with a soft
+// visibility term, a white rim that grows at grazing angles.
+fn sheen(m: Material, nh: f32, nl: f32, nv: f32) -> vec3f {
+  if (m.layers.x <= 0.0) { return vec3f(0.0); }
+  let r = max(m.spec.x, 0.07);
+  let inv = 1.0 / r;
+  let s2 = max(1.0 - nh * nh, 0.0);
+  let d = (2.0 + inv) * pow(s2, inv * 0.5) / (2.0 * PI);
+  let vis = 1.0 / (4.0 * (nl + nv - nl * nv));
+  return vec3f(m.layers.x * d * vis * nl);
 }
 
 fn pdf_reflect(m: Material, w: Lobes, n: vec3f, v: vec3f, l: vec3f) -> f32 {
@@ -501,8 +527,43 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     let mapped = normalize(tg * tn.x + bt * tn.y + n * tn.z);
     if (dot(mapped, ng) > 0.0) { n = mapped; }
   }
+  if (m.layers.w > 0.0) { n = droplets(n, uv, m.layers.w); }
   m.spec.x = max(m.spec.x, 0.002);
   return Surface(p, n, ng, uv, m, u32(t.uv2m.w));
+}
+
+fn hash2(c: vec2f) -> vec2f {
+  let h = vec2u(pcg((bitcast<u32>(c.x) * 1597334677u) ^ pcg(bitcast<u32>(c.y))), pcg((bitcast<u32>(c.y) * 3812015801u) ^ bitcast<u32>(c.x)));
+  return vec2f(h) * (1.0 / 4294967296.0);
+}
+
+// Water droplets on a surface: beads in a jittered grid over UV space. Inside
+// a bead the normal tilts like a lens, so it bends reflections and the content
+// behind it. `amount` sets how many cells carry a bead and how large they are.
+fn droplets(n: vec3f, uv: vec2f, amount: f32) -> vec3f {
+  let scale = 36.0;
+  let q = uv * scale;
+  let cell = floor(q);
+  var best = vec3f(0.0, 0.0, 1e9); // offset xy, distance²
+  var radius = 0.0;
+  for (var j = -1; j <= 1; j++) {
+    for (var i = -1; i <= 1; i++) {
+      let c = cell + vec2f(f32(i), f32(j));
+      let h = hash2(c);
+      if (h.x > amount) { continue; }
+      let centre = c + 0.2 + 0.6 * hash2(c + 17.0);
+      let r = 0.18 + 0.32 * h.y * amount;
+      let d = q - centre;
+      let d2 = dot(d, d);
+      if (d2 < r * r && d2 < best.z) { best = vec3f(d / r, d2); radius = r; }
+    }
+  }
+  if (radius <= 0.0) { return n; }
+  // A spherical cap: the slope grows toward the bead's rim.
+  let off = best.xy;
+  let h = sqrt(max(1.0 - dot(off, off), 0.02));
+  let tb = basis(n);
+  return normalize(tb * vec3f(off.x * 0.9, off.y * 0.9, h));
 }
 
 // Radiance arriving along a mirror direction: a light, the dome, the floor
@@ -519,7 +580,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   if (tf < h.t) {
     let q = p + d * tf;
     let n = vec3f(0.0, 1.0, 0.0);
-    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0));
+    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0));
     return sample_lights(q + n * EPS, n, -d, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
   }
   let sf = surface(p, d, h);
@@ -570,6 +631,7 @@ fn path(px: vec2f) -> Sample {
   var tp = vec3f(1.0);
   var last_pdf = 0.0;   // BSDF pdf of the last bounce (0: camera or delta)
   var primary = true;   // still on the camera ray (passes through cut-outs keep it)
+  var band = -1;        // dispersion: the RGB channel this path carries (-1: all)
   let max_b = P.counts.y;
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
@@ -622,7 +684,7 @@ fn path(px: vec2f) -> Sample {
       }
       // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
-      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0));
+      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0));
       s.radiance += tp * sample_lights(p + n * EPS, n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
       tp *= P.env_horizon.w;
       ro = p + n * EPS;
@@ -674,7 +736,19 @@ fn path(px: vec2f) -> Sample {
       let a = max(m.spec.x * m.spec.x, 0.0005);
       let tb = basis(n);
       let hm = tb * sample_vndf(transpose(tb) * v, a, rnd2());
-      let eta = select(1.0 / m.extra.x, m.extra.x, front);
+      // Dispersion: blue bends more than red. The first refraction picks one
+      // channel for the rest of the path (weighted ×3 so the average holds).
+      var ior = m.extra.x;
+      if (m.layers.z > 0.0) {
+        if (band < 0) {
+          band = min(i32(rnd() * 3.0), 2);
+          var pick_w = vec3f(0.0);
+          pick_w[band] = 3.0;
+          tp *= pick_w;
+        }
+        ior += m.layers.z * 0.04 * (f32(band) - 1.0);
+      }
+      let eta = select(1.0 / ior, ior, front);
       let F = fresnel_dielectric(abs(dot(v, hm)), eta);
       if (rnd() < F) {
         rd = reflect(-v, hm);

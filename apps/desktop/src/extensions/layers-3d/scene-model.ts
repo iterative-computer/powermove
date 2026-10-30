@@ -54,7 +54,11 @@ export const MATERIAL_FIELDS: FieldSpec[] = [
   { key: 'clearcoatRoughness', label: 'Coat roughness', kind: 'num', step: 0.005, min: 0.002, max: 1 },
   { key: 'transmission', label: 'Transmission', kind: 'num', step: 0.01, min: 0, max: 1 },
   { key: 'ior', label: 'Index of refraction', kind: 'num', step: 0.01, min: 1, max: 2.6 },
-  { key: 'specular', label: 'Specular', kind: 'num', step: 0.01, min: 0, max: 1 }
+  { key: 'specular', label: 'Specular', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'sheen', label: 'Sheen', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'iridescence', label: 'Thin film', kind: 'num', step: 10, min: 0, max: 1200, unit: 'nm' },
+  { key: 'dispersion', label: 'Dispersion', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'droplets', label: 'Water droplets', kind: 'num', step: 0.01, min: 0, max: 1 }
 ];
 
 export function lightFields(type: LightType): FieldSpec[] {

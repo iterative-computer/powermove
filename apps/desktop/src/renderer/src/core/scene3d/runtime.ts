@@ -162,6 +162,9 @@ export class SceneRuntime {
         material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
         material.clearcoat=m.clearcoat ?? 0;material.clearcoatRoughness=m.clearcoatRoughness ?? .03;
         material.transmission=m.transmission ?? 0;material.ior=m.ior ?? 1.5;material.specularIntensity=m.specular ?? 1;
+        material.sheen=m.sheen ?? 0;material.sheenColor.set('#FFFFFF');material.sheenRoughness=Math.max(.2,m.roughness);
+        material.iridescence=(m.iridescence ?? 0)>0?1:0;material.iridescenceThicknessRange=[100,Math.max(100,m.iridescence ?? 0)];
+        material.dispersion=(m.dispersion ?? 0)*5;material.userData.studioDispersion=m.dispersion ?? 0;material.userData.droplets=m.droplets ?? 0;
         const transparent=m.opacity<1,side=node.material.doubleSided?THREE.DoubleSide:THREE.FrontSide;
         if (transparent!==material.transparent || side!==material.side) material.needsUpdate=true;
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;

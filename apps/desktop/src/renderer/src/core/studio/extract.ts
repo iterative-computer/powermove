@@ -16,7 +16,7 @@ export type StudioScene = {
   positions: Float32Array;   // 12 floats per triangle (3 × vec4), BVH order
   tris: Float32Array;        // 24 floats per triangle (6 × vec4), BVH order
   nodes: ArrayBuffer;        // wide BVH nodes
-  materials: Float32Array;   // 20 floats per material
+  materials: Float32Array;   // 24 floats per material
   lights: Float32Array;      // 16 floats per light
   lightCount: number;
   maps: StudioMap[];         // texture-array layers
@@ -95,6 +95,8 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       basic ? color.r : emissive.r, basic ? color.g : emissive.g, basic ? color.b : emissive.b, 0,
       m.ior ?? 1.5, m.specularIntensity ?? 1, opacity, 0,
       basic ? -1 : layer(m.map), layer(basic ? m.map : m.emissiveMap), layer(m.roughnessMap || m.metalnessMap), layer(m.normalMap),
+      // Studio's material layers: sheen, thin film (nm), dispersion, droplets.
+      m.sheen ?? 0, m.iridescence > 0 ? (m.iridescenceThicknessRange?.[1] ?? 400) : 0, m.userData?.studioDispersion ?? 0, m.userData?.droplets ?? 0,
     );
     return i;
   };
@@ -215,7 +217,7 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   void environment;
   return {
     positions, tris, nodes,
-    materials: new Float32Array(materials.length ? materials : new Array(20).fill(0)),
+    materials: new Float32Array(materials.length ? materials : new Array(24).fill(0)),
     lights: new Float32Array(lights.length ? lights : new Array(16).fill(0)),
     lightCount: lights.length / 16,
     maps, objects, triangles, bounds,

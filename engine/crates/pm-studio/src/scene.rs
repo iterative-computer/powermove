@@ -22,11 +22,19 @@ pub struct Material {
     pub emission: Vec3,
     /// Emission is multiplied by the screen composition texture.
     pub screen: bool,
+    /// Fabric-like sheen (0–1).
+    pub sheen: f32,
+    /// Thin-film coating thickness in nanometres (0: none) — iridescence.
+    pub film_nm: f32,
+    /// How much more blue bends than red in transmission (0–1).
+    pub dispersion: f32,
+    /// Water droplets on the surface (0–1).
+    pub droplets: f32,
 }
 
 impl Material {
     pub fn dielectric(base: Vec3, roughness: f32) -> Self {
-        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false }
+        Material { base, metallic: 0.0, roughness, coat: 0.0, coat_roughness: 0.03, transmission: 0.0, ior: 1.5, specular: 1.0, emission: Vec3::ZERO, screen: false, sheen: 0.0, film_nm: 0.0, dispersion: 0.0, droplets: 0.0 }
     }
     pub fn metal(base: Vec3, roughness: f32) -> Self {
         Material { metallic: 1.0, ..Self::dielectric(base, roughness) }
@@ -159,6 +167,7 @@ pub struct GpuMaterial {
     pub emit: [f32; 4],  // rgb, screen flag
     pub extra: [f32; 4], // ior, specular, opacity
     pub maps: [f32; 4],  // texture layers: color, emissive, orm, normal (-1: none)
+    pub layers: [f32; 4], // sheen, thin-film thickness (nm), dispersion, droplets
 }
 
 #[repr(C)]
@@ -203,6 +212,7 @@ impl Scene {
                 extra: [m.ior, m.specular, 1.0, 0.0],
                 // The display's composition is texture layer 0.
                 maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
+                layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
             })
             .collect();
         let lights = self
@@ -302,6 +312,28 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
             ];
             let target = v3(-10.0, 35.0, 0.0);
             (objects, Camera::lens(v3(30.0, 140.0, 430.0), target, 60.0, 0.0), target)
+        }
+        // Phase 4 materials: sheen, thin film, dispersive glass, plain glass.
+        "materials" => {
+            materials.push(Material { sheen: 1.0, ..Material::dielectric(srgb_hex("#3E4A7A"), 0.75) }); // 6 fabric
+            materials.push(Material { film_nm: 520.0, ..Material::metal(srgb_hex("#C9CCD2"), 0.08) }); // 7 thin film
+            materials.push(Material { dispersion: 1.0, ..Material::glass(v3(1.0, 1.0, 1.0), 0.0) }); // 8 dispersive
+            materials.push(Material::glass(v3(0.92, 0.97, 1.0), 0.0)); // 9 glass
+            let objects = (0..4)
+                .map(|i| Object { mesh: mesh::sphere(v3(-120.0 + 80.0 * i as f32, 34.0, 0.0), 34.0, 96, 192), material: 6 + i })
+                .collect();
+            let target = v3(0.0, 34.0, 0.0);
+            (objects, Camera::lens(v3(0.0, 120.0, 420.0), target, 60.0, 0.0), target)
+        }
+        // The water shot: droplets beading on the display glass.
+        "wet" => {
+            materials[2].droplets = 0.55;
+            materials[1].droplets = 0.55;
+            let objects = parts(0.0, 0.0, Vec3::ZERO);
+            let focus = v3(10.0, 6.3, 30.0);
+            let mut cam = Camera::lens(v3(60.0, 140.0, 210.0), v3(0.0, 4.0, 10.0), 85.0, 4.0);
+            cam.focus = Some(focus);
+            (objects, cam, focus)
         }
         _ => return None,
     };
