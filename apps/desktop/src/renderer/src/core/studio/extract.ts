@@ -233,7 +233,9 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
       const target = new THREE.Vector3().setFromMatrixPosition(o.target.matrixWorld);
       const dir = position.sub(target).normalize();
       // A soft sun (1.5°) reads as studio light rather than a hard noon.
-      lights.push(dir.x, dir.y, dir.z, 3, Math.cos(THREE.MathUtils.degToRad(1.5)), 0, 0, 0, 0, 0, 0, 0, c.r, c.g, c.b, 0);
+      // three's directional intensity is irradiance: spread it over the disc.
+      const cos = Math.cos(THREE.MathUtils.degToRad(1.5)), radiance = c.clone().multiplyScalar(1 / (2 * Math.PI * (1 - cos)));
+      lights.push(dir.x, dir.y, dir.z, 3, cos, 0, 0, 0, 0, 0, 0, 0, radiance.r, radiance.g, radiance.b, 0);
     } else if (o.isRectAreaLight) {
       const q = new THREE.Quaternion().setFromRotationMatrix(o.matrixWorld);
       const u = new THREE.Vector3(o.width / 2, 0, 0).applyQuaternion(q), v = new THREE.Vector3(0, o.height / 2, 0).applyQuaternion(q);

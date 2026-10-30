@@ -121,3 +121,34 @@ test('glass focuses light onto the studio floor (caustics)', async ({ session })
   expect(result.darker).toBeGreaterThan(40);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('a sun lights Studio as brightly as the classic renderer', async ({ session }) => {
+  test.setTimeout(120_000);
+  await session.openEditor();
+  const { page } = session;
+  const scene = (intensity: number) => page.evaluate((I: number) => {
+    const PM = (window as any).PM, api = PM.Kernel.api('studio-sun');
+    if (!PM.L('b')) {
+      api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 1, z: 4, targetX: 0, targetY: 0, targetZ: 0 } } });
+      api.scene3d.edit({ operation: 'add_object', object: { id: 'b', source: { primitive: 'box' }, material: { p: { color: '#FFFFFF', roughness: 1 } } } });
+      api.scene3d.edit({ operation: 'add_light', light: { id: 'sun', type: 'sun', p: { x: 0, y: 5, z: 5, intensity: I } } });
+    } else api.scene3d.edit({ operation: 'update_light', target: 'sun', patch: { p: { intensity: I } } });
+  }, intensity);
+  const measure = () => page.evaluate(() => {
+    const PM = (window as any).PM;
+    const mean = (px: Uint8Array) => { let s = 0, n = 0; for (let i = 0; i < px.length; i += 4) if (px[i + 3]! > 200) { s += px[i]! + px[i + 1]! + px[i + 2]!; n++; } return s / Math.max(1, n) / 3; };
+    PM.agentFrameCapture = true;
+    const studio = mean(PM.GL.renderToPixels(0, 240, 160, { transparent: true, mblur: false }));
+    PM.Studio.setEnabled(false);
+    const classic = mean(PM.GL.renderToPixels(0, 240, 160, { transparent: true, mblur: false }));
+    PM.Studio.setEnabled(true);
+    PM.agentFrameCapture = false;
+    return { studio, classic };
+  });
+  await scene(3);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  const lit = await measure();
+  // three's directional intensity is irradiance: the same box, about as bright.
+  expect(Math.abs(lit.studio - lit.classic) / lit.classic).toBeLessThan(0.2);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
