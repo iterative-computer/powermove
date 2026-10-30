@@ -18,6 +18,7 @@ struct Params {
     dims: [u32; 4],
     counts: [u32; 4],
     opts: [u32; 4],
+    ground: [f32; 4],
 }
 
 #[repr(C)]
@@ -47,6 +48,7 @@ pub struct Renderer {
     bgsum: wgpu::Buffer,
     gbuf: wgpu::Buffer,
     ebuf: wgpu::Buffer,
+    idbuf: wgpu::Buffer,
     display: [wgpu::Buffer; 2],
     packed: wgpu::Buffer,
     readback: wgpu::Buffer,
@@ -96,6 +98,7 @@ impl Renderer {
             max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size,
             max_buffer_size: adapter.limits().max_buffer_size,
             max_storage_buffers_per_shader_stage: 12,
+            max_texture_array_layers: adapter.limits().max_texture_array_layers,
             ..wgpu::Limits::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -116,7 +119,7 @@ impl Renderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
@@ -125,6 +128,7 @@ impl Renderer {
                 storage(9, false),
                 storage(10, false),
                 storage(11, true),
+                storage(12, false),
             ],
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -176,6 +180,7 @@ impl Renderer {
             bgsum: buf("bgsum", pixels * 16, rw),
             gbuf: buf("gbuf", pixels * 16, rw),
             ebuf: buf("ebuf", pixels * 16, rw),
+            idbuf: buf("idbuf", pixels * 4, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
             packed: buf("packed", pixels * 4, rw),
             readback: buf("readback", pixels * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
@@ -264,15 +269,17 @@ impl Renderer {
             dims: [self.width, self.height, 0, 1],
             counts: [self.light_count, 6, 1, 0],
             opts: [0; 4],
+            ground: (scene.environment.1 * 0.5).to4(0.0),
         };
         self.exposure = scene.exposure;
+        // Product scenes show their backdrop; the app's layers leave the void transparent.
         self.backdrop = scene.backdrop.to4(1.0);
         self.samples = 0;
     }
 
     fn trace_group(&mut self) -> &wgpu::BindGroup {
         if self.trace_group.is_none() {
-            let view = self.screen.create_view(&Default::default());
+            let view = self.screen.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
             let b = &self.scene_buffers;
             self.trace_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("trace"),
@@ -290,6 +297,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 9, resource: self.gbuf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 10, resource: self.ebuf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: b[4].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 12, resource: self.idbuf.as_entire_binding() },
                 ],
             }));
         }

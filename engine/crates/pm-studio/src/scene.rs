@@ -142,12 +142,13 @@ pub struct Prepared {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTri {
-    pub p: [[f32; 4]; 3],
     pub n: [[f32; 4]; 3],
     /// uv0.xy, uv1.xy
     pub uv01: [f32; 4],
-    /// uv2.xy, material, unused
+    /// uv2.xy, material, object
     pub uv2m: [f32; 4],
+    /// Per-triangle tangent (xyz) and handedness (w), for normal maps.
+    pub tangent: [f32; 4],
 }
 
 #[repr(C)]
@@ -156,14 +157,15 @@ pub struct GpuMaterial {
     pub base: [f32; 4],  // rgb, metallic
     pub spec: [f32; 4],  // roughness, coat, coat roughness, transmission
     pub emit: [f32; 4],  // rgb, screen flag
-    pub extra: [f32; 4], // ior
+    pub extra: [f32; 4], // ior, specular, opacity
+    pub maps: [f32; 4],  // texture layers: color, emissive, orm, normal (-1: none)
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuLight {
-    pub center: [f32; 4], // xyz, area
-    pub u: [f32; 4],
+    pub pos: [f32; 4], // softbox centre, kind 0
+    pub u: [f32; 4],   // half extent, area
     pub v: [f32; 4],
     pub radiance: [f32; 4],
 }
@@ -172,22 +174,24 @@ impl Scene {
     pub fn prepare(&self) -> Prepared {
         let mut corners = Vec::new();
         let mut raw = Vec::new();
-        for o in &self.objects {
+        let mut positions_raw = Vec::new();
+        for (object, o) in self.objects.iter().enumerate() {
             let m = &o.mesh;
             for t in &m.indices {
                 let [a, b, c] = t.map(|i| i as usize);
                 corners.push([m.positions[a], m.positions[b], m.positions[c]]);
+                positions_raw.push([m.positions[a].to4(0.0), m.positions[b].to4(0.0), m.positions[c].to4(0.0)]);
                 raw.push(GpuTri {
-                    p: [m.positions[a].to4(0.0), m.positions[b].to4(0.0), m.positions[c].to4(0.0)],
                     n: [m.normals[a].to4(0.0), m.normals[b].to4(0.0), m.normals[c].to4(0.0)],
                     uv01: [m.uvs[a][0], m.uvs[a][1], m.uvs[b][0], m.uvs[b][1]],
-                    uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, 0.0],
+                    uv2m: [m.uvs[c][0], m.uvs[c][1], o.material as f32, object as f32],
+                    tangent: [0.0; 4],
                 });
             }
         }
         let (nodes, order) = bvh::build(&corners);
         let tris: Vec<GpuTri> = order.iter().map(|&i| raw[i as usize]).collect();
-        let positions = tris.iter().flat_map(|t| t.p).collect();
+        let positions = order.iter().flat_map(|&i| positions_raw[i as usize]).collect();
         let nodes = bvh::widen(&nodes);
         let materials = self
             .materials
@@ -195,14 +199,16 @@ impl Scene {
             .map(|m| GpuMaterial {
                 base: m.base.to4(m.metallic),
                 spec: [m.roughness.max(0.002), m.coat, m.coat_roughness.max(0.002), m.transmission],
-                emit: m.emission.to4(if m.screen { 1.0 } else { 0.0 }),
-                extra: [m.ior, m.specular, 0.0, 0.0],
+                emit: m.emission.to4(0.0),
+                extra: [m.ior, m.specular, 1.0, 0.0],
+                // The display's composition is texture layer 0.
+                maps: [-1.0, if m.screen { 0.0 } else { -1.0 }, -1.0, -1.0],
             })
             .collect();
         let lights = self
             .lights
             .iter()
-            .map(|l| GpuLight { center: l.center.to4(4.0 * l.u.cross(l.v).length()), u: l.u.to4(0.0), v: l.v.to4(0.0), radiance: l.radiance.to4(0.0) })
+            .map(|l| GpuLight { pos: l.center.to4(0.0), u: l.u.to4(4.0 * l.u.cross(l.v).length()), v: l.v.to4(0.0), radiance: l.radiance.to4(0.0) })
             .collect();
         Prepared { positions, tris, nodes, materials, lights }
     }

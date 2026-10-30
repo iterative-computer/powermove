@@ -1,14 +1,20 @@
-// Studio path tracer (Phase 0). One sample per pixel per invocation of the
-// sample loop; Live runs one frame of samples and denoises, Refine and Final
-// keep accumulating.
+// Studio path tracer. Shared by the Rust engine (pm-studio) and the desktop
+// app's WebGPU host (apps/desktop/src/renderer/src/core/studio): one program,
+// one look, everywhere.
 //
-// Units are millimetres. The floor is the plane y = 0; on screen it shows the
+// One sample per pixel per iteration of the sample loop. Live runs one frame
+// of samples and denoises; Refine and Final keep accumulating.
+//
+// Units are the scene's own (millimetres in pm-studio's product scenes, scene
+// units in the app). With the shadow catcher on, the plane y = 0 shows the
 // seamless backdrop darkened only by the shadows and contact occlusion the
-// objects cast (a shadow catcher), so the void keeps its exact display color.
+// objects cast, so the void keeps its exact display color. With it off,
+// pixels that see nothing are transparent (or the backdrop color when its
+// alpha is set).
 
 struct Params {
-  cam_pos: vec4f,      // w: lens radius (mm)
-  cam_fwd: vec4f,      // w: focus distance (mm)
+  cam_pos: vec4f,      // w: lens radius
+  cam_fwd: vec4f,      // w: focus distance
   cam_right: vec4f,    // w: tan(fov/2) * aspect
   cam_up: vec4f,       // w: tan(fov/2)
   backdrop: vec4f,     // display-referred rgb; w: shadow catcher on (1)
@@ -16,32 +22,43 @@ struct Params {
   env_horizon: vec4f,  // w: floor albedo for secondary bounces
   dims: vec4u,         // width, height, frame seed, samples this dispatch
   counts: vec4u,       // lights, max bounces, reset (1 = overwrite), firefly clamp (luminance)
-  opts: vec4u,         // x: Live (cheaper floor shadows, primary-only mirror coat)
+  opts: vec4u,         // x: Live; y: environment ground color follows zenith (0) or horizon (1)
+  ground: vec4f,       // environment radiance below the horizon; w: unused
 }
 
-struct Tri { p0: vec4f, p1: vec4f, p2: vec4f, n0: vec4f, n1: vec4f, n2: vec4f, uv01: vec4f, uv2m: vec4f }
+// Per-triangle shading data in BVH order (positions live in `pos`).
+struct Tri { n0: vec4f, n1: vec4f, n2: vec4f, uv01: vec4f, uv2m: vec4f, tangent: vec4f }
 struct Node { lmin: vec3f, left: u32, lmax: vec3f, lcount: u32, rmin: vec3f, right: u32, rmax: vec3f, rcount: u32 }
-struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f }
-struct Light { center: vec4f, u: vec4f, v: vec4f, radiance: vec4f }
+// base: rgb, metallic · spec: roughness, coat, coat roughness, transmission
+// emit: rgb, unused · extra: ior, specular, opacity, unused
+// maps: texture-array layers for color, emissive, occlusion-roughness-metal, normal (-1: none)
+struct Material { base: vec4f, spec: vec4f, emit: vec4f, extra: vec4f, maps: vec4f }
+// pos.w: kind (0 softbox, 1 sphere, 2 spot, 3 sun).
+// softbox: pos = centre, u/v = half extents (u.w: area); emits along u × v.
+// sphere/spot: pos = centre, u.x = radius; spot: v.xyz = axis, v.w = cos outer, radiance.w = cos inner.
+// sun: pos = direction toward the sun, u.x = cos angular radius.
+struct Light { pos: vec4f, u: vec4f, v: vec4f, radiance: vec4f }
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> tris: array<Tri>;
 @group(0) @binding(2) var<storage, read> nodes: array<Node>;
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
 @group(0) @binding(4) var<storage, read> lights: array<Light>;
-@group(0) @binding(5) var screen_tex: texture_2d<f32>;
-@group(0) @binding(6) var screen_samp: sampler;
-// rgb: sum of scene radiance (linear); w: samples taken
+@group(0) @binding(5) var maps: texture_2d_array<f32>;
+@group(0) @binding(6) var map_samp: sampler;
+// rgb: sum of scene radiance (linear, without directly seen emission); w: samples taken
 @group(0) @binding(7) var<storage, read_write> accum: array<vec4f>;
 // rgb: sum of backdrop display color for samples that saw the void/floor; w: how many
 @group(0) @binding(8) var<storage, read_write> bgsum: array<vec4f>;
 // xyz: first-hit normal; w: first-hit distance (-1 for the void)
 @group(0) @binding(9) var<storage, read_write> gbuf: array<vec4f>;
-// rgb: sum of emission seen directly by the camera (the display's composition):
+// rgb: sum of emission seen directly by the camera (a product's screen):
 // exact per pixel, so Live denoises only what is noisy.
 @group(0) @binding(10) var<storage, read_write> ebuf: array<vec4f>;
 // Corner positions, 3 per triangle in BVH order (intersection reads only these).
 @group(0) @binding(11) var<storage, read> pos: array<vec4f>;
+// First hit's object + 1 (0: the void) — splits one trace into per-layer outputs.
+@group(0) @binding(12) var<storage, read_write> idbuf: array<u32>;
 
 const PI: f32 = 3.14159265;
 const EPS: f32 = 0.004;
@@ -99,6 +116,7 @@ fn leaf(ro: vec3f, rd: vec3f, first: u32, count: u32, h: ptr<function, Hit>, any
 
 fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
   var h = Hit(tmax, -1, vec2f(0.0));
+  if (arrayLength(&pos) < 3u) { return h; }
   let inv = 1.0 / rd;
   var stack: array<u32, 40>;
   var sp = 1;
@@ -135,8 +153,30 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
   return h;
 }
 
-fn occluded(ro: vec3f, rd: vec3f, dist: f32) -> bool {
-  return intersect(ro, rd, dist - 2.0 * EPS, true).tri >= 0;
+fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m.z)]; }
+
+// How much light gets from `ro` to a point `dist` along `rd`: opaque surfaces
+// block it; glass and partly transparent surfaces tint and dim it.
+fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
+  var o = ro;
+  var left = dist - 2.0 * EPS;
+  var t = vec3f(1.0);
+  var nearest = false;
+  for (var k = 0; k < 6; k++) {
+    let h = intersect(o, rd, left, !nearest);
+    if (h.tri < 0) { return t; }
+    let m = tri_material(h.tri);
+    let tr = m.spec.w * (1.0 - m.base.w);
+    let through = tr * 0.92 + (1.0 - m.extra.z);
+    if (through <= 0.001) { return vec3f(0.0); }
+    t *= mix(vec3f(1.0), m.base.xyz, tr) * min(through, 1.0);
+    // Continue past this surface; nearest-first from now on so none is skipped.
+    nearest = true;
+    o = o + rd * (h.t + EPS);
+    left -= h.t + EPS;
+    if (left <= 0.0) { return t; }
+  }
+  return t;
 }
 
 fn floor_t(ro: vec3f, rd: vec3f) -> f32 {
@@ -145,33 +185,118 @@ fn floor_t(ro: vec3f, rd: vec3f) -> f32 {
 }
 
 fn environment(d: vec3f) -> vec3f {
-  let k = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
-  return mix(P.env_horizon.xyz * 0.6, P.env_zenith.xyz, k) + P.env_horizon.xyz * 0.4 * exp(-abs(d.y) * 6.0);
+  if (d.y < 0.0) { return mix(P.env_horizon.xyz, P.ground.xyz, clamp(-d.y * 4.0, 0.0, 1.0)); }
+  let k = clamp(d.y, 0.0, 1.0);
+  return mix(P.env_horizon.xyz, P.env_zenith.xyz, k);
 }
 
 // ── Lights ──────────────────────────────────────────────
-fn light_normal(l: Light) -> vec3f { return normalize(cross(l.u.xyz, l.v.xyz)); }
+fn light_kind(l: Light) -> u32 { return u32(l.pos.w); }
+fn rect_normal(l: Light) -> vec3f { return normalize(cross(l.u.xyz, l.v.xyz)); }
 
-// Distance to a softbox along the ray, or BIG.
-fn hit_light(ro: vec3f, rd: vec3f, l: Light) -> f32 {
-  let n = light_normal(l);
-  let dn = dot(rd, n);
-  if (dn >= 0.0) { return BIG; } // one-sided, emits along n
-  let t = dot(l.center.xyz - ro, n) / dn;
+// 1 − cos θ of a cone whose half-angle has sin² = s2, accurate when tiny.
+fn one_minus_cos(s2: f32) -> f32 {
+  if (s2 < 1e-3) { return 0.5 * s2 + 0.125 * s2 * s2; }
+  return 1.0 - sqrt(max(0.0, 1.0 - s2));
+}
+
+fn sphere_t(ro: vec3f, rd: vec3f, c: vec3f, r: f32) -> f32 {
+  let oc = ro - c;
+  let b = dot(oc, rd);
+  let q = dot(oc, oc) - r * r;
+  let disc = b * b - q;
+  if (disc < 0.0) { return BIG; }
+  let s = sqrt(disc);
+  var t = -b - s;
+  if (t <= EPS) { t = -b + s; }
   if (t <= EPS) { return BIG; }
-  let q = ro + rd * t - l.center.xyz;
-  let uu = dot(q, l.u.xyz) / dot(l.u.xyz, l.u.xyz);
-  let vv = dot(q, l.v.xyz) / dot(l.v.xyz, l.v.xyz);
-  if (abs(uu) > 1.0 || abs(vv) > 1.0) { return BIG; }
   return t;
 }
 
-// Soft edges: falloff toward the softbox rim, like a diffusion panel.
-fn light_falloff(l: Light, p: vec3f) -> f32 {
-  let q = p - l.center.xyz;
-  let uu = abs(dot(q, l.u.xyz) / dot(l.u.xyz, l.u.xyz));
-  let vv = abs(dot(q, l.v.xyz) / dot(l.v.xyz, l.v.xyz));
-  return smoothstep(1.0, 0.82, max(uu, vv));
+// Distance to a light along the ray (softboxes, spheres and spots), or BIG.
+fn hit_light(ro: vec3f, rd: vec3f, l: Light) -> f32 {
+  let kind = light_kind(l);
+  if (kind == 0u) {
+    let n = rect_normal(l);
+    let dn = dot(rd, n);
+    if (dn >= 0.0) { return BIG; } // one-sided, emits along n
+    let t = dot(l.pos.xyz - ro, n) / dn;
+    if (t <= EPS) { return BIG; }
+    let q = ro + rd * t - l.pos.xyz;
+    let uu = dot(q, l.u.xyz) / dot(l.u.xyz, l.u.xyz);
+    let vv = dot(q, l.v.xyz) / dot(l.v.xyz, l.v.xyz);
+    if (abs(uu) > 1.0 || abs(vv) > 1.0) { return BIG; }
+    return t;
+  }
+  if (kind == 1u || kind == 2u) { return sphere_t(ro, rd, l.pos.xyz, l.u.x); }
+  return BIG;
+}
+
+// Radiance leaving a light toward `-rd` at point q.
+fn light_emit(l: Light, q: vec3f, rd: vec3f) -> vec3f {
+  let kind = light_kind(l);
+  if (kind == 0u) {
+    // Soft edges: falloff toward the softbox rim, like a diffusion panel.
+    let d = q - l.pos.xyz;
+    let uu = abs(dot(d, l.u.xyz) / dot(l.u.xyz, l.u.xyz));
+    let vv = abs(dot(d, l.v.xyz) / dot(l.v.xyz, l.v.xyz));
+    return l.radiance.xyz * smoothstep(1.0, 0.82, max(uu, vv));
+  }
+  if (kind == 2u) {
+    return l.radiance.xyz * smoothstep(l.v.w, l.radiance.w, dot(rd, l.v.xyz));
+  }
+  return l.radiance.xyz;
+}
+
+// Solid-angle pdf of sampling the direction `rd` (which reaches the light
+// at distance t) with light sampling, before dividing by the light count.
+fn light_pdf(l: Light, ro: vec3f, rd: vec3f, t: f32) -> f32 {
+  let kind = light_kind(l);
+  if (kind == 0u) {
+    let cl = max(dot(-rd, rect_normal(l)), 1e-4);
+    return t * t / (cl * l.u.w);
+  }
+  if (kind == 3u) { return 1.0 / (2.0 * PI * one_minus_cos(1.0 - l.u.x * l.u.x)); }
+  let d = l.pos.xyz - ro;
+  let s2 = min(l.u.x * l.u.x / max(dot(d, d), 1e-12), 1.0);
+  return 1.0 / (2.0 * PI * one_minus_cos(s2));
+}
+
+struct LightSample { dir: vec3f, dist: f32, radiance: vec3f, pdf: f32 }
+
+fn cone_dir(axis: vec3f, omc: f32, u: vec2f) -> vec3f {
+  let c = 1.0 - u.x * omc;
+  let s = sqrt(max(0.0, 1.0 - c * c));
+  let phi = 2.0 * PI * u.y;
+  return basis(axis) * vec3f(s * cos(phi), s * sin(phi), c);
+}
+
+fn sample_light(l: Light, p: vec3f) -> LightSample {
+  let kind = light_kind(l);
+  let u = rnd2();
+  if (kind == 0u) {
+    let q = l.pos.xyz + l.u.xyz * (u.x * 2.0 - 1.0) + l.v.xyz * (u.y * 2.0 - 1.0);
+    let d = q - p;
+    let dist2 = dot(d, d);
+    let dist = sqrt(dist2);
+    let dir = d / dist;
+    let cl = dot(-dir, rect_normal(l));
+    if (cl <= 0.0) { return LightSample(dir, dist, vec3f(0.0), 0.0); }
+    return LightSample(dir, dist, light_emit(l, q, dir), dist2 / (cl * l.u.w));
+  }
+  if (kind == 3u) {
+    let omc = one_minus_cos(1.0 - l.u.x * l.u.x);
+    let dir = cone_dir(normalize(l.pos.xyz), omc, u);
+    return LightSample(dir, BIG, l.radiance.xyz, 1.0 / (2.0 * PI * omc));
+  }
+  let d = l.pos.xyz - p;
+  let dist2 = dot(d, d);
+  let s2 = min(l.u.x * l.u.x / max(dist2, 1e-12), 1.0);
+  let omc = one_minus_cos(s2);
+  let dir = cone_dir(d * inverseSqrt(dist2), omc, u);
+  let t = sphere_t(p, dir, l.pos.xyz, l.u.x);
+  let dist = select(sqrt(dist2), t, t < BIG);
+  return LightSample(dir, dist, light_emit(l, p + dir * dist, dir), 1.0 / (2.0 * PI * omc));
 }
 
 // ── Microfacet BSDF ─────────────────────────────────────
@@ -223,14 +348,15 @@ fn sample_vndf(v: vec3f, a: f32, u: vec2f) -> vec3f {
 
 fn spec_pdf(nv: f32, nh: f32, a: f32) -> f32 { return smith_g1(nv, a) * ggx_d(nh, a) / (4.0 * nv); }
 
+fn f0_of(m: Material) -> vec3f { return mix(vec3f(0.04 * m.extra.y), m.base.xyz, m.base.w); }
+
 struct Lobes { coat: f32, spec: f32, diff: f32, trans: f32 }
 
 fn lobe_probs(m: Material, nv: f32) -> Lobes {
   let metallic = m.base.w;
   let tr = m.spec.w * (1.0 - metallic);
   let fc = m.spec.y * schlick1(0.04, nv);
-  let f0 = mix(vec3f(0.04 * m.extra.y), m.base.xyz, metallic);
-  let fs = schlick(f0, nv);
+  let fs = schlick(f0_of(m), nv);
   let under = 1.0 - fc;
   var w = Lobes(fc, under * max(dot(fs, vec3f(0.333)), 0.04), under * (1.0 - metallic) * (1.0 - tr) * dot(m.base.xyz, vec3f(0.333)) * (1.0 - fs.x), under * tr);
   let s = w.coat + w.spec + w.diff + w.trans;
@@ -248,7 +374,7 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let vh = max(dot(v, h), 0.0);
   let metallic = m.base.w;
   let a = m.spec.x * m.spec.x;
-  let f0 = mix(vec3f(0.04 * m.extra.y), m.base.xyz, metallic);
+  let f0 = f0_of(m);
   let F = schlick(f0, vh);
   let spec = F * ggx_d(nh, a) * smith_g2(nv, nl, a) / (4.0 * nv);
   let tr = m.spec.w * (1.0 - metallic);
@@ -277,36 +403,31 @@ fn cosine_dir(n: vec3f, u: vec2f) -> vec3f {
   return basis(n) * vec3f(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u.x)));
 }
 
-// One light sample with MIS against the BSDF; returns radiance × throughput factor.
+// One light sample with MIS against the BSDF.
 fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit: bool) -> vec3f {
   let count = P.counts.x;
   if (count == 0u) { return vec3f(0.0); }
   let li = min(u32(rnd() * f32(count)), count - 1u);
   let l = lights[li];
-  let u = rnd2() * 2.0 - 1.0;
-  let q = l.center.xyz + l.u.xyz * u.x + l.v.xyz * u.y;
-  let d = q - p;
-  let dist2 = dot(d, d);
-  let dist = sqrt(dist2);
-  let dir = d / dist;
-  let cl = dot(-dir, light_normal(l));
-  if (cl <= 0.0) { return vec3f(0.0); }
+  let s = sample_light(l, p);
+  if (s.pdf <= 0.0 || all(s.radiance <= vec3f(0.0))) { return vec3f(0.0); }
   var f = vec3f(0.0);
   var pb = 0.0;
   if (floor_hit) {
-    let nl = dot(n, dir);
+    let nl = dot(n, s.dir);
     if (nl <= 0.0) { return vec3f(0.0); }
     f = vec3f(P.env_horizon.w * nl / PI);
     pb = nl / PI;
   } else {
-    f = eval_reflect(m, n, v, dir);
-    pb = pdf_reflect(m, w, n, v, dir) * (1.0 - w.trans);
+    f = eval_reflect(m, n, v, s.dir);
+    pb = pdf_reflect(m, w, n, v, s.dir) * (1.0 - w.trans);
   }
   if (all(f <= vec3f(0.0))) { return vec3f(0.0); }
-  if (occluded(p, dir, dist)) { return vec3f(0.0); }
-  let pl = dist2 / (cl * l.center.w) / f32(count);
+  let t = transmittance(p, s.dir, s.dist);
+  if (all(t <= vec3f(0.0))) { return vec3f(0.0); }
+  let pl = s.pdf / f32(count);
   let mis = pl * pl / (pl * pl + pb * pb);
-  return f * l.radiance.xyz * light_falloff(l, q) * mis / pl;
+  return f * t * s.radiance * mis / pl;
 }
 
 // Shadow catcher: how much of the floor's light at `p` the objects leave.
@@ -320,16 +441,11 @@ fn catcher_ratio(p: vec3f) -> f32 {
   var last = P.counts.x;
   if (live && P.counts.x > 0u) { first = min(u32(rnd() * f32(P.counts.x)), P.counts.x - 1u); last = first + 1u; }
   for (var i = first; i < last; i++) {
-    let l = lights[i];
-    let u = rnd2() * 2.0 - 1.0;
-    let q = l.center.xyz + l.u.xyz * u.x + l.v.xyz * u.y;
-    let d = q - p;
-    let dist2 = dot(d, d);
-    let dir = d * inverseSqrt(dist2);
-    let c = max(dot(n, dir), 0.0) * max(dot(-dir, light_normal(l)), 0.0) * l.center.w / dist2;
-    let e = c * dot(l.radiance.xyz, vec3f(0.333));
+    let s = sample_light(lights[i], p);
+    if (s.pdf <= 0.0) { continue; }
+    let e = max(dot(n, s.dir), 0.0) * dot(s.radiance, vec3f(0.333)) / s.pdf;
     free += e;
-    if (e > 0.0 && !occluded(p, dir, sqrt(dist2))) { lit += e; }
+    if (e > 0.0) { lit += e * dot(transmittance(p, s.dir, s.dist), vec3f(0.333)); }
   }
   if (live) { free *= f32(P.counts.x); lit *= f32(P.counts.x); }
   // Cosine-weighted dome samples: soft contact occlusion.
@@ -344,9 +460,51 @@ fn catcher_ratio(p: vec3f) -> f32 {
   return lit / free;
 }
 
-struct Surface { p: vec3f, n: vec3f, ng: vec3f, uv: vec2f, mat: u32 }
+fn decode_srgb(c: vec3f) -> vec3f {
+  return select(pow((c + 0.055) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+}
 
-// Radiance arriving along a mirror direction: a softbox, the dome, the floor
+fn map_texel(layer: f32, uv: vec2f) -> vec4f {
+  return textureSampleLevel(maps, map_samp, fract(uv), i32(layer), 0.0);
+}
+
+struct Surface { p: vec3f, n: vec3f, ng: vec3f, uv: vec2f, m: Material, object: u32 }
+
+// The hit's position, normals and material with its texture maps applied.
+fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
+  let i = u32(h.tri);
+  let t = tris[i];
+  let w = 1.0 - h.b.x - h.b.y;
+  let p = ro + rd * h.t;
+  let p0 = pos[3u * i].xyz;
+  let ng = normalize(cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
+  var n = normalize(t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
+  if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
+  let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
+  var m = materials[u32(t.uv2m.z)];
+  if (m.maps.x >= 0.0) {
+    let c = map_texel(m.maps.x, uv);
+    m.base = vec4f(m.base.xyz * decode_srgb(c.rgb), m.base.w);
+    m.extra.z *= c.a;
+  }
+  if (m.maps.y >= 0.0) { m.emit = vec4f(m.emit.xyz * decode_srgb(map_texel(m.maps.y, uv).rgb), m.emit.w); }
+  if (m.maps.z >= 0.0) {
+    let orm = map_texel(m.maps.z, uv);
+    m.spec.x *= orm.g;
+    m.base.w *= orm.b;
+  }
+  if (m.maps.w >= 0.0 && dot(t.tangent.xyz, t.tangent.xyz) > 0.0) {
+    let tn = map_texel(m.maps.w, uv).xyz * 2.0 - 1.0;
+    let tg = normalize(t.tangent.xyz - n * dot(n, t.tangent.xyz));
+    let bt = cross(n, tg) * t.tangent.w;
+    let mapped = normalize(tg * tn.x + bt * tn.y + n * tn.z);
+    if (dot(mapped, ng) > 0.0) { n = mapped; }
+  }
+  m.spec.x = max(m.spec.x, 0.002);
+  return Surface(p, n, ng, uv, m, u32(t.uv2m.w));
+}
+
+// Radiance arriving along a mirror direction: a light, the dome, the floor
 // or another object (its emission plus one light sample).
 fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   let h = intersect(p, d, BIG, false);
@@ -354,38 +512,35 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   for (var i = 0u; i < P.counts.x; i++) {
     let l = lights[i];
     let tl = hit_light(p, d, l);
-    if (tl < h.t && tl < tf) { return l.radiance.xyz * light_falloff(l, p + d * tl); }
+    if (tl < h.t && tl < tf) { return light_emit(l, p + d * tl, d); }
   }
-  if (h.tri < 0 && tf >= BIG) { return environment(d); }
+  if (h.tri < 0 && tf >= BIG) { return environment(d) + sun_seen(d); }
   if (tf < h.t) {
     let q = p + d * tf;
     let n = vec3f(0.0, 1.0, 0.0);
-    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 0.0, 0.0));
+    let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0));
     return sample_lights(q + n * EPS, n, -d, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
   }
   let sf = surface(p, d, h);
-  let m = materials[sf.mat];
   var n = sf.n;
   var ng = sf.ng;
   if (dot(d, ng) > 0.0) { n = -n; ng = -ng; }
-  var e = m.emit.xyz;
-  if (m.emit.w > 0.5) { e *= textureSampleLevel(screen_tex, screen_samp, sf.uv, 0.0).rgb; }
   let nv = max(dot(n, -d), 1e-4);
-  return e + sample_lights(sf.p + ng * EPS, n, -d, m, lobe_probs(m, nv), false);
+  return sf.m.emit.xyz + sample_lights(sf.p + ng * EPS, n, -d, sf.m, lobe_probs(sf.m, nv), false);
 }
 
-fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
-  let t = tris[u32(h.tri)];
-  let w = 1.0 - h.b.x - h.b.y;
-  let p = ro + rd * h.t;
-  let ng = normalize(cross(t.p1.xyz - t.p0.xyz, t.p2.xyz - t.p0.xyz));
-  var n = normalize(t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
-  if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
-  let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
-  return Surface(p, n, ng, uv, u32(t.uv2m.z));
+// The sun disc as seen along an escaping ray (no MIS: used where light
+// sampling cannot reach, such as mirror reflections).
+fn sun_seen(d: vec3f) -> vec3f {
+  var e = vec3f(0.0);
+  for (var i = 0u; i < P.counts.x; i++) {
+    let l = lights[i];
+    if (light_kind(l) == 3u && dot(d, normalize(l.pos.xyz)) >= l.u.x) { e += l.radiance.xyz; }
+  }
+  return e;
 }
 
-struct Sample { radiance: vec3f, bg: vec3f, normal: vec3f, depth: f32, void_hit: f32, emit: vec3f }
+struct Sample { radiance: vec3f, bg: vec3f, normal: vec3f, depth: f32, void_hit: f32, emit: vec3f, object: u32 }
 
 fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   let dims = vec2f(f32(P.dims.x), f32(P.dims.y));
@@ -394,7 +549,8 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
   let d = normalize(fwd + P.cam_right.xyz * ndc.x * P.cam_right.w - P.cam_up.xyz * ndc.y * P.cam_up.w);
   var ro = P.cam_pos.xyz;
   var rd = d;
-  if (P.cam_pos.w > 0.0) {
+  // Live uses a pinhole: depth of field appears as the view refines.
+  if (P.cam_pos.w > 0.0 && P.opts.x == 0u) {
     let focus = ro + d * (P.cam_fwd.w / dot(d, fwd));
     let u = rnd2();
     let r = sqrt(u.x) * P.cam_pos.w;
@@ -406,51 +562,66 @@ fn camera_ray(px: vec2f) -> array<vec3f, 2> {
 }
 
 fn path(px: vec2f) -> Sample {
-  var s = Sample(vec3f(0.0), vec3f(0.0), vec3f(0.0), -1.0, 0.0, vec3f(0.0));
+  var s = Sample(vec3f(0.0), vec3f(0.0), vec3f(0.0), -1.0, 0.0, vec3f(0.0), 0u);
   let ray = camera_ray(px);
   var ro = ray[0];
   var rd = ray[1];
   var tp = vec3f(1.0);
   var last_pdf = 0.0;   // BSDF pdf of the last bounce (0: camera or delta)
-  var inside = false;
+  var primary = true;   // still on the camera ray (passes through cut-outs keep it)
   let max_b = P.counts.y;
-  for (var b = 0u; b <= max_b; b++) {
+  for (var b = 0u; b <= max_b + 2u; b++) {
+    if (b > max_b && !primary) { break; }
     let h = intersect(ro, rd, BIG, false);
     let tf = floor_t(ro, rd);
-    // Softboxes: invisible to the camera, visible in reflections.
-    if (b > 0u) {
+    // Lights: invisible to the camera, visible in reflections.
+    if (!primary) {
       for (var i = 0u; i < P.counts.x; i++) {
         let l = lights[i];
         let tl = hit_light(ro, rd, l);
         if (tl < h.t && tl < tf) {
+          let e = light_emit(l, ro + rd * tl, rd);
           var mis = 1.0;
           if (last_pdf > 0.0) {
-            let q = ro + rd * tl;
-            let cl = max(dot(-rd, light_normal(l)), 1e-4);
-            let pl = tl * tl / (cl * l.center.w) / f32(P.counts.x);
+            let pl = light_pdf(l, ro, rd, tl) / f32(P.counts.x);
             mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
-            s.radiance += tp * l.radiance.xyz * light_falloff(l, q) * mis;
-          } else {
-            s.radiance += tp * l.radiance.xyz * light_falloff(l, ro + rd * tl);
           }
+          s.radiance += tp * e * mis;
           return s;
         }
       }
     }
     if (h.tri < 0 && tf >= BIG) {
-      if (b == 0u) { s.bg = P.backdrop.xyz; s.void_hit = 1.0; } else { s.radiance += tp * environment(rd); }
+      if (primary) {
+        s.bg = P.backdrop.xyz;
+        s.void_hit = 1.0;
+      } else {
+        s.radiance += tp * environment(rd);
+        // The sun disc, weighted against light sampling.
+        for (var i = 0u; i < P.counts.x; i++) {
+          let l = lights[i];
+          if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x) {
+            var mis = 1.0;
+            if (last_pdf > 0.0) {
+              let pl = light_pdf(l, ro, rd, BIG) / f32(P.counts.x);
+              mis = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
+            }
+            s.radiance += tp * l.radiance.xyz * mis;
+          }
+        }
+      }
       return s;
     }
     if (tf < h.t) {
       let p = ro + rd * tf;
-      if (b == 0u) {
+      if (primary) {
         s.bg = P.backdrop.xyz * catcher_ratio(p);
         s.void_hit = 1.0;
         return s;
       }
-      // A matte floor in reflections: one diffuse bounce, lit by the softboxes.
+      // A matte floor in reflections: one diffuse bounce, lit by the lights.
       let n = vec3f(0.0, 1.0, 0.0);
-      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5));
+      let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0));
       s.radiance += tp * sample_lights(p + n * EPS, n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
       tp *= P.env_horizon.w;
       ro = p + n * EPS;
@@ -459,32 +630,34 @@ fn path(px: vec2f) -> Sample {
       continue;
     }
     let sf = surface(ro, rd, h);
-    var m = materials[sf.mat];
+    var m = sf.m;
+    // Partly transparent surfaces: pass straight through with 1 − opacity.
+    if (m.extra.z < 0.999 && rnd() >= m.extra.z) {
+      ro = sf.p + rd * EPS;
+      continue;
+    }
     let front = dot(rd, sf.ng) < 0.0;
     var n = sf.n;
     var ng = sf.ng;
     if (!front) { n = -n; ng = -ng; }
-    if (b == 0u) { s.normal = n; s.depth = h.t; }
+    if (primary) { s.normal = n; s.depth = h.t; s.object = sf.object + 1u; }
     let v = -rd;
-    // Emission (the display's composition, or a glowing part).
-    if (any(m.emit.xyz > vec3f(0.0))) {
-      var e = m.emit.xyz;
-      if (m.emit.w > 0.5) { e *= textureSampleLevel(screen_tex, screen_samp, sf.uv, 0.0).rgb; }
-      if (front) {
-        if (b == 0u) { s.emit += e; } else { s.radiance += tp * e; }
-      }
+    // Emission (a product's screen, or a glowing part).
+    if (any(m.emit.xyz > vec3f(0.0)) && front) {
+      if (primary) { s.emit += m.emit.xyz; } else { s.radiance += tp * m.emit.xyz; }
     }
     var nv = max(dot(n, v), 1e-4);
     let p = sf.p + ng * EPS;
     // A near-mirror coat (cover glass, lacquer) is traced on every sample
     // instead of being picked 1 time in ~16, so its reflections never
     // sparkle; the path continues through the base layer.
-    if (m.spec.y > 0.0 && m.spec.z < 0.05 && front && (b == 0u || P.opts.x == 0u)) {
+    if (m.spec.y > 0.0 && m.spec.z < 0.05 && front && (primary || P.opts.x == 0u)) {
       let fc = m.spec.y * schlick1(0.04, nv);
       s.radiance += tp * fc * mirror_radiance(p, reflect(-v, n));
       tp *= 1.0 - fc;
       m.spec.y = 0.0;
     }
+    primary = false;
     let w = lobe_probs(m, nv);
     // Direct light.
     if (w.trans < 0.999) { s.radiance += tp * sample_lights(p, n, v, m, w, false); }
@@ -499,18 +672,16 @@ fn path(px: vec2f) -> Sample {
       // Rough dielectric transmission/reflection through a sampled microfacet.
       let a = max(m.spec.x * m.spec.x, 0.0005);
       let tb = basis(n);
-      let vl = transpose(tb) * v;
-      let hm = tb * sample_vndf(vl, a, rnd2());
+      let hm = tb * sample_vndf(transpose(tb) * v, a, rnd2());
       let eta = select(1.0 / m.extra.x, m.extra.x, front);
-      let cosi = dot(v, hm);
-      let F = fresnel_dielectric(abs(cosi), select(1.0 / eta, eta, true));
+      let F = fresnel_dielectric(abs(dot(v, hm)), eta);
       if (rnd() < F) {
         rd = reflect(-v, hm);
         ro = sf.p + ng * EPS;
       } else {
         let r = refract(-v, hm, 1.0 / eta);
         if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * EPS; }
-        else { rd = r; ro = sf.p - ng * EPS; tp *= m.base.xyz; inside = !inside; }
+        else { rd = r; ro = sf.p - ng * EPS; tp *= m.base.xyz; }
       }
       last_pdf = 0.0;
       continue;
@@ -519,15 +690,11 @@ fn path(px: vec2f) -> Sample {
     let r = (pick - w.trans) / max(1.0 - w.trans, 1e-6);
     let wr = 1.0 - w.trans;
     if (r < w.coat / wr) {
-      let ca = m.spec.z * m.spec.z;
       let tb = basis(n);
-      let hm = tb * sample_vndf(transpose(tb) * v, ca, rnd2());
-      l = reflect(-v, hm);
+      l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.z * m.spec.z, rnd2()));
     } else if (r < (w.coat + w.spec) / wr) {
-      let a = m.spec.x * m.spec.x;
       let tb = basis(n);
-      let hm = tb * sample_vndf(transpose(tb) * v, a, rnd2());
-      l = reflect(-v, hm);
+      l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.x * m.spec.x, rnd2()));
     } else {
       l = cosine_dir(n, rnd2());
     }
@@ -555,18 +722,19 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var nbg = 0.0;
   var em = vec3f(0.0);
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
+  var object = 0u;
   for (var i = 0u; i < P.dims.w; i++) {
     let jitter = rnd2();
     var smp = path(vec2f(f32(gid.x), f32(gid.y)) + jitter);
     // A non-finite sample would spread through the denoiser; drop it.
     if (any(smp.radiance != smp.radiance) || any(abs(smp.radiance) > vec3f(1e20))) { smp.radiance = vec3f(0.0); }
-    // Clamp fireflies from tiny bright paths (Live and Refine only differ in count).
+    // Clamp fireflies from tiny bright paths (Live clamps harder).
     let lum = dot(smp.radiance, vec3f(0.2126, 0.7152, 0.0722));
     rad += smp.radiance * min(1.0, f32(P.counts.w) / max(lum, 1e-6));
     em += smp.emit;
     bg += smp.bg;
     nbg += smp.void_hit;
-    if (i == 0u) { nd = vec4f(smp.normal, smp.depth); }
+    if (i == 0u) { nd = vec4f(smp.normal, smp.depth); object = smp.object; }
   }
   let n = f32(P.dims.w);
   if (P.counts.z == 1u) {
@@ -574,9 +742,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     bgsum[idx] = vec4f(bg, nbg);
     gbuf[idx] = nd;
     ebuf[idx] = vec4f(em, n);
+    idbuf[idx] = object;
   } else {
-    ebuf[idx] += vec4f(em, n);
     accum[idx] += vec4f(rad, n);
     bgsum[idx] += vec4f(bg, nbg);
+    ebuf[idx] += vec4f(em, n);
   }
 }

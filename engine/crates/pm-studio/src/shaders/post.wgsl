@@ -11,7 +11,9 @@
 //          display-referred, so the void stays exactly #F6F5F8).
 // pack:    display color → RGBA8.
 
-struct Post { dims: vec4u, k: vec4f, backdrop: vec4f } // dims: width, height, step; k: exposure, color sigma
+// dims: width, height, step; k: exposure, color sigma; backdrop: display rgb, w: its opacity
+// (1: the void shows the backdrop; 0: the void is transparent).
+struct Post { dims: vec4u, k: vec4f, backdrop: vec4f }
 
 @group(0) @binding(0) var<uniform> Q: Post;
 @group(0) @binding(1) var<storage, read> accum: array<vec4f>;
@@ -67,12 +69,14 @@ fn compose(@builtin(global_invocation_id) g: vec3u) {
   let d = src[i];
   let n = max(a.w, 1.0);
   let scene_n = max(a.w - b.w, 0.0);
-  var c = Q.backdrop.xyz * d.w * (b.w / n);
+  // Premultiplied: scene color weighted by coverage, plus the backdrop.
+  let void_a = (b.w / n) * Q.backdrop.w;
+  var c = Q.backdrop.xyz * d.w * void_a;
   if (scene_n > 0.0) {
     let mean = (d.xyz + ebuf[i].xyz / scene_n) * Q.k.x;
     c += encode(clamp(neutral(mean), vec3f(0.0), vec3f(1.0))) * (scene_n / n);
   }
-  dst[i] = vec4f(c, 1.0);
+  dst[i] = vec4f(c, scene_n / n + void_a);
 }
 
 @compute @workgroup_size(8, 8)
@@ -121,7 +125,7 @@ fn atrous(@builtin(global_invocation_id) g: vec3u) {
 fn pack(@builtin(global_invocation_id) g: vec3u) {
   if (g.x >= Q.dims.x || g.y >= Q.dims.y) { return; }
   let i = g.y * Q.dims.x + g.x;
-  let c = clamp(src[i].xyz, vec3f(0.0), vec3f(1.0));
-  let q = vec3u(c * 255.0 + 0.5);
-  packed[i] = q.x | (q.y << 8u) | (q.z << 16u) | (255u << 24u);
+  let c = clamp(src[i], vec4f(0.0), vec4f(1.0));
+  let q = vec4u(c * 255.0 + 0.5);
+  packed[i] = q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
 }
