@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 
+export const MAX_MODEL_TRIANGLES=10_000_000;
+
 /** Self-contained glTF only: imports must never fetch untrusted remote dependencies. */
 export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animations:THREE.AnimationClip[];vertices:number;triangles:number}> {
-  if(blob.size>128*1024*1024)throw new Error('GLB models must be smaller than 128 MB');
+  // CAD assemblies are large; Studio prepares them in the background.
+  if(blob.size>512*1024*1024)throw new Error('GLB models must be smaller than 512 MB');
   const data=await blob.arrayBuffer();
   const bytes=new Uint8Array(data),view=new DataView(data);
   let json:any;
@@ -16,13 +19,14 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
     if(dependency.uri && !/^data:(?:application\/octet-stream|application\/gltf-buffer|image\/(?:png|jpeg|webp));base64,[a-z0-9+/=\s]+$/i.test(dependency.uri))
       throw new Error('Use a self-contained GLB with embedded textures and geometry. External glTF files are not loaded.');
   }
+  // Budgets sized for CAD assemblies: up to 10M triangles in up to 65,536 parts.
   let predictedVertices=0;
   for(const accessor of json.accessors || []) {
-    if(!Number.isSafeInteger(accessor.count)||accessor.count<0||accessor.count>1_500_000)throw new Error('Invalid or oversized glTF geometry');
+    if(!Number.isSafeInteger(accessor.count)||accessor.count<0||accessor.count>MAX_MODEL_TRIANGLES*3)throw new Error('Invalid or oversized glTF geometry');
   }
   for(const mesh of json.meshes || [])for(const primitive of mesh.primitives || [])
     predictedVertices+=json.accessors?.[primitive.attributes?.POSITION]?.count || 0;
-  if(predictedVertices>1_000_000 || (json.nodes?.length || 0)>4096)throw new Error('GLB exceeds the scene complexity budget');
+  if(predictedVertices>MAX_MODEL_TRIANGLES*3 || (json.nodes?.length || 0)>65_536)throw new Error('GLB exceeds the scene complexity budget');
   // Keep the decoder out of startup; unsafe files are rejected before loading
   // it, and valid models still use the same Three.js parser.
   const {GLTFLoader}=await import('three/addons/loaders/GLTFLoader.js');
@@ -51,7 +55,7 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
     vertices+=geometry.attributes.position?.count || 0;
     triangles+=(geometry.index?.count || geometry.attributes.position?.count || 0)/3;
   });
-  if(!vertices || triangles>500_000){disposeModel(scene);throw new Error('GLB has no supported geometry or exceeds 500,000 triangles');}
+  if(!vertices || triangles>MAX_MODEL_TRIANGLES){disposeModel(scene);throw new Error('GLB has no supported geometry or exceeds 10 million triangles');}
   const bounds=new THREE.Box3().setFromObject(scene),center=bounds.getCenter(new THREE.Vector3());
   const radius=bounds.getSize(new THREE.Vector3()).length()/2;
   if(!Number.isFinite(radius)||radius<1e-10){disposeModel(scene);throw new Error('GLB model has no measurable size');}

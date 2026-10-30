@@ -389,7 +389,7 @@ export interface Scene3DAPI {
     readonly materials: ReadonlyArray<{ id: string; label: string; p: Record<string, number | string> }>;
     readonly shots: ReadonlyArray<{ id: string; label: string }>;
     /** Samples so far toward a clean view, or null when Studio is not drawing. */
-    progress(): { samples: number; goal: number; refining: boolean } | null;
+    progress(): { samples: number; goal: number; refining: boolean; preparing?: { pending: number; total: number } } | null;
     /** Light by pointing: place a softbox whose reflection lands where the frame point (u, v in 0..1) meets a model. Returns its layer id. */
     highlightAt(u: number, v: number): string | null;
     /** While dragging: move that softbox so its highlight follows the frame point (a preview, not yet an edit). */

@@ -912,10 +912,12 @@ V.attach = (stage: HTMLElement) => {
       let shown='';
       const tick=()=>{
         const p=api.scene3d!.studio.progress();
-        const text=p?(p.samples>=p.goal?'Clean':p.refining||p.samples>0?`Refining · ${Math.round(100*p.samples/p.goal)}%`:'Live'):'';
+        // A large model's BVH builds in the background before Studio takes over.
+        const prep=p?.preparing,done=prep?prep.total-prep.pending:0;
+        const text=prep?`Preparing ${prep.total>=1e6?`${(prep.total/1e6).toFixed(1)}M`:`${Math.round(prep.total/1e3)}K`} triangles`:p?(p.samples>=p.goal?'Clean':p.refining||p.samples>0?`Refining · ${Math.round(100*p.samples/p.goal)}%`:'Live'):'';
         if(text!==shown){
           shown=text;label.textContent=text;pill.style.display=text?'flex':'none';
-          const arc=ring.lastElementChild as SVGCircleElement;arc.setAttribute('stroke-dasharray',`${p?34.6*Math.min(1,p.samples/p.goal):0} 35`);
+          const arc=ring.lastElementChild as SVGCircleElement;arc.setAttribute('stroke-dasharray',`${prep?34.6*done/Math.max(1,prep.total):p?34.6*Math.min(1,p.samples/p.goal):0} 35`);
         }
       };
       const timer=window.setInterval(tick,200);

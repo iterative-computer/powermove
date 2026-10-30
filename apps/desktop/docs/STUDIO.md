@@ -37,6 +37,18 @@ Machines without WebGPU, and orthographic cameras, use the classic renderer.
   the emission strength sets its brightness.
 - **Drop to floor** (model inspector) rests a model on the floor.
 
+## Large models
+
+CAD assemblies import as GLB (up to 512 MB, 10 million triangles in up to
+65,536 parts) or OBJ (up to 10 million triangles). Studio prepares each
+large part in the background: the viewer keeps drawing with the classic
+renderer and the corner pill reads "Preparing 1.0M triangles" until Studio
+takes over. On an M5, a 1-million-triangle, 20-part assembly is ready about
+1.1 s after it appears, and the editor never stalls more than about 150 ms.
+Exports and agent frames wait for the model instead (about 1.8 s the first
+time for that assembly). A model too large for one GPU buffer (96 bytes a
+triangle) stays on the classic renderer.
+
 ## Light by pointing
 
 **Alt+Shift+click** a model in the viewer to put a softbox's highlight

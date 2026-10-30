@@ -691,7 +691,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
   if(kind==='lut'){if(blob.size>MAX_CUBE_BYTES)throw new Error('LUT exceeds the 16 MiB file limit');const sourceText=await blob.text(),lut=parseCube(sourceText);return{id,name,kind,format:'cube',blob,lut,size:blob.size,w:lut.width,h:lut.height,dur:0};}
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta, onStage, assertCurrent });
   if (kind === 'model') {
-    if(blob.size>128*1024*1024)throw new Error('3D models must be smaller than 128 MB');
+    if(blob.size>512*1024*1024)throw new Error('3D models must be smaller than 512 MB');
     if(/\.(glb|gltf)$/i.test(name) || /^model\/gltf/.test(blob.type)) {
       const loaded=await loadGltf(blob);
       return {id,name,kind,format:/\.gltf$/i.test(name)?'gltf':'glb',blob,...loaded,size:blob.size};

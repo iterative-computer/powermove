@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { extractScene, MAP_SIZE, type StudioScene } from './extract';
-import { initStudioGpu, studioGpuFailure, studioGpuReady, studioOptions, StudioTarget, type StudioView } from './gpu';
+import { extractScene, isPending, MAP_SIZE, type StudioPending, type StudioScene } from './extract';
+import { initStudioGpu, studioGpuFailure, studioGpuReady, studioMaxBindingBytes, studioOptions, StudioTarget, type StudioView } from './gpu';
 
 /*
  * Studio in the editor: the compositor asks for one 3D layer's pixels and
@@ -36,14 +36,19 @@ type Job = {
   final: StudioTarget | null;
   changedAt: number;
   refining: boolean;
+  /** Last frame that drew it; unused jobs are dropped (their GPU memory with them). */
+  usedAt: number;
 };
 
-type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; frames: number; declined: string; revision: number };
+/** Jobs not drawn for this long are dropped. */
+const JOB_TTL_MS = 30_000;
+
+type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; frames: number; declined: string; revision: number; preparing: Map<string, StudioPending>; prunedAt: number };
 const states = new WeakMap<object, State>();
 const state = (PM: any): State => {
   let s = states.get(PM);
   if (!s) {
-    s = { jobs: new Map(), tick: null, enabled: true, frames: 0, declined: '', revision: 0 };
+    s = { jobs: new Map(), tick: null, enabled: true, frames: 0, declined: '', revision: 0, preparing: new Map(), prunedAt: 0 };
     states.set(PM, s);
     const st = s;
     // Editor-facing controls and status (the refine indicator, tests, agents).
@@ -52,7 +57,7 @@ const state = (PM: any): State => {
       setCaustics: (on: boolean) => { studioOptions.caustics = on; st.revision++; PM.invalidate?.('render'); },
       progress: () => studioProgress(PM),
       liveHistory: async () => { for (const job of st.jobs.values()) if (job.live) return job.live.historyStats(); return null; },
-      status: () => ({ enabled: st.enabled, ready: studioGpuReady(), failure: studioGpuFailure(), frames: st.frames, declined: st.declined }),
+      status: () => ({ enabled: st.enabled, ready: studioGpuReady(), failure: studioGpuFailure(), frames: st.frames, declined: st.declined, preparing: preparingOf(st) }),
     };
     void initStudioGpu().then(ok => { if (ok) PM.invalidate?.('render'); });
   }
@@ -86,9 +91,20 @@ export function studioUnsettled(PM: any): boolean {
   return false;
 }
 
-/** Viewer status for the refine indicator: samples so far and the goal. */
-export function studioProgress(PM: any): { samples: number; goal: number; refining: boolean } | null {
-  for (const job of state(PM).jobs.values()) {
+/** Large models whose BVHs are still building, summed over compositions. */
+function preparingOf(s: State): StudioPending | null {
+  if (!s.preparing.size) return null;
+  let pending = 0, total = 0;
+  for (const p of s.preparing.values()) { pending += p.pending; total += p.total; }
+  return { pending, total };
+}
+
+/** Viewer status for the refine indicator: samples so far and the goal, or a large model still being prepared. */
+export function studioProgress(PM: any): { samples: number; goal: number; refining: boolean; preparing?: StudioPending } | null {
+  const s = state(PM);
+  const preparing = preparingOf(s);
+  if (preparing) return { samples: 0, goal: REFINE_SAMPLES, refining: false, preparing };
+  for (const job of s.jobs.values()) {
     if (job.refine) return { samples: job.refine.samples, goal: REFINE_SAMPLES, refining: job.refining };
   }
   return null;
@@ -214,23 +230,46 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const s = state(PM);
   if (!cam) { s.declined = 'orthographic camera'; return null; }
   s.frames++;
+  const now = performance.now();
+  if (now - s.prunedAt > 5_000) {
+    s.prunedAt = now;
+    pruneStudio(PM, k => (s.jobs.get(k)?.usedAt ?? now) > now - JOB_TTL_MS);
+  }
   const ids = [...depthIds].sort();
   const setKey = ids.join(',');
   const sceneKey = key([runtime.revision, setKey]);
   const final = !!PM._studioFinal;
   let job = s.jobs.get(setKey);
   if (!job || job.sceneKey !== sceneKey) {
-    const scene = extractScene(runtime.scene, id => depthIds.has(id), { sky: new THREE.Color(), ground: new THREE.Color(), intensity: 0 });
+    // Exports build every BVH now; the editor builds large ones in workers
+    // and draws with the classic renderer until they are ready.
+    const env = { sky: new THREE.Color(), ground: new THREE.Color(), intensity: 0 };
+    const include = (id: string) => depthIds.has(id);
+    // Each finished build clears the status; the next frame sets it again if more are pending.
+    const onReady = () => { s.preparing.delete(setKey); s.revision++; PM.invalidate?.('render'); };
+    const extracted = final ? extractScene(runtime.scene, include, env) : extractScene(runtime.scene, include, env, { onReady });
+    if (isPending(extracted)) {
+      s.preparing.set(setKey, extracted);
+      return null;
+    }
+    s.preparing.delete(setKey);
+    const scene = extracted;
+    // Beyond one storage binding (shading data: 96 bytes a triangle) the classic renderer draws it.
+    if (scene.tris.byteLength > studioMaxBindingBytes()) {
+      s.declined = `${scene.triangles} triangles is more than this GPU can trace`;
+      return null;
+    }
     const screens: { layer: number; comp: string }[] = [];
     const maps = scene.maps.map((m, layer) => {
       if ('screen' in m) { screens.push({ layer, comp: m.screen }); return renderScreen?.(m.screen) ?? new Uint8Array(MAP_SIZE * MAP_SIZE * 4); }
       return mapCanvas(m.source, m.flipY);
     });
     const keepTargets = job;
-    job = { sceneKey, viewKey: '', scene, maps, screens, screenKey: screenKeyOf(PM, time), live: keepTargets?.live ?? null, refine: keepTargets?.refine ?? null, final: keepTargets?.final ?? null, changedAt: performance.now(), refining: false };
+    job = { sceneKey, viewKey: '', scene, maps, screens, screenKey: screenKeyOf(PM, time), live: keepTargets?.live ?? null, refine: keepTargets?.refine ?? null, final: keepTargets?.final ?? null, changedAt: performance.now(), refining: false, usedAt: 0 };
     for (const t of [job.live, job.refine, job.final]) if (t) t.setScene(scene, maps);
     s.jobs.set(setKey, job);
   }
+  job.usedAt = now;
   // Live screens follow time and edits to their compositions without
   // rebuilding the 3D scene: only their texture layers are rewritten.
   if (job.screens.length && job.screenKey !== screenKeyOf(PM, time)) {
@@ -298,6 +337,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
 /** Forget scenes for compositions that no longer exist (memory). */
 export function pruneStudio(PM: any, keep: (setKey: string) => boolean): void {
   const s = state(PM);
+  for (const k of s.preparing.keys()) if (!keep(k)) s.preparing.delete(k);
   for (const [k, job] of s.jobs) {
     if (keep(k)) continue;
     for (const t of [job.live, job.refine, job.final]) t?.destroy();

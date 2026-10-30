@@ -14,11 +14,10 @@ export interface ObjMesh {
   };
 }
 
-const MAX_SOURCE_VERTICES = 1_000_000;
-const MAX_TRIANGLES = 500_000;
-
-type V3 = [number, number, number];
-type V2 = [number, number];
+// CAD assemblies run to millions of triangles; geometry is held in typed
+// arrays (about 36 bytes a triangle while parsing).
+const MAX_SOURCE_VERTICES = 10_000_000;
+const MAX_TRIANGLES = 10_000_000;
 
 function finite(value: string, line: number): number {
   const number = Number(value);
@@ -26,14 +25,17 @@ function finite(value: string, line: number): number {
   return number;
 }
 
-function resolveIndex(raw: string | undefined, length: number, line: number, label: string): number | null {
-  if (raw == null || raw === '') return null;
+/** Resolves a 1-based (or negative, relative) OBJ index to 0-based; -1 when absent. */
+function resolveIndex(raw: string | undefined, length: number, line: number, label: string): number {
+  if (raw == null || raw === '') return -1;
   const value = Number(raw);
   if (!Number.isInteger(value) || value === 0) throw new Error(`OBJ line ${line}: invalid ${label} index`);
   const index = value > 0 ? value - 1 : length + value;
   if (index < 0 || index >= length) throw new Error(`OBJ line ${line}: ${label} index is out of range`);
   return index;
 }
+
+type V3 = [number, number, number];
 
 function faceNormal(a: V3, b: V3, c: V3): V3 {
   const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
@@ -45,6 +47,21 @@ function faceNormal(a: V3, b: V3, c: V3): V3 {
   return length > 1e-12 ? [x / length, y / length, z / length] : [0, 1, 0];
 }
 
+/** A growable typed array. */
+class Grow<A extends Float64Array | Int32Array> {
+  data: A;
+  size = 0;
+  constructor(make: (n: number) => A) { this.data = make(1024); }
+  push3(a: number, b: number, c: number): void {
+    if (this.size + 3 > this.data.length) {
+      const next = new (this.data.constructor as any)(this.data.length * 2) as A;
+      next.set(this.data);
+      this.data = next;
+    }
+    this.data[this.size++] = a; this.data[this.size++] = b; this.data[this.size++] = c;
+  }
+}
+
 /**
  * Parse the interoperable core of Wavefront OBJ: v/vt/vn plus polygonal faces,
  * including negative indices. Faces are triangulated as a fan. Material names
@@ -53,76 +70,82 @@ function faceNormal(a: V3, b: V3, c: V3): V3 {
  */
 export function parseObj(source: string): ObjMesh {
   if (typeof source !== 'string' || !source.trim()) throw new Error('OBJ file is empty');
-  const vertices: V3[] = [];
-  const normals: V3[] = [];
-  const texcoords: V2[] = [];
-  const triangles: Array<Array<{ v: number; vt: number | null; vn: number | null }>> = [];
+  const vertices = new Grow(n => new Float64Array(n));
+  const normals = new Grow(n => new Float64Array(n));
+  const texcoords = new Grow(n => new Float64Array(n));
+  // Per triangle corner: vertex, texture coordinate and normal indices (-1: none).
+  const corners = new Grow(n => new Int32Array(n));
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
+  const face: number[] = [];
 
   for (let index = 0; index < lines.length; index++) {
     const lineNumber = index + 1;
     const line = lines[index]!.split('#', 1)[0]!.trim();
-    if (!line || line.startsWith('#')) continue;
+    if (!line) continue;
     const fields = line.split(/\s+/);
-    const kind = fields.shift();
+    const kind = fields[0];
     if (kind === 'v') {
-      if (fields.length < 3) throw new Error(`OBJ line ${lineNumber}: vertex needs x, y, and z`);
-      vertices.push([finite(fields[0]!, lineNumber), finite(fields[1]!, lineNumber), finite(fields[2]!, lineNumber)]);
-      if (vertices.length > MAX_SOURCE_VERTICES) throw new Error('OBJ has too many vertices');
+      if (fields.length < 4) throw new Error(`OBJ line ${lineNumber}: vertex needs x, y, and z`);
+      vertices.push3(finite(fields[1]!, lineNumber), finite(fields[2]!, lineNumber), finite(fields[3]!, lineNumber));
+      if (vertices.size / 3 > MAX_SOURCE_VERTICES) throw new Error('OBJ has too many vertices');
     } else if (kind === 'vn') {
-      if (fields.length < 3) throw new Error(`OBJ line ${lineNumber}: normal needs x, y, and z`);
-      const raw: V3 = [finite(fields[0]!, lineNumber), finite(fields[1]!, lineNumber), finite(fields[2]!, lineNumber)];
-      const length = Math.hypot(...raw);
-      normals.push(length > 1e-12 ? [raw[0] / length, raw[1] / length, raw[2] / length] : [0, 1, 0]);
+      if (fields.length < 4) throw new Error(`OBJ line ${lineNumber}: normal needs x, y, and z`);
+      const x = finite(fields[1]!, lineNumber), y = finite(fields[2]!, lineNumber), z = finite(fields[3]!, lineNumber);
+      const length = Math.hypot(x, y, z);
+      if (length > 1e-12) normals.push3(x / length, y / length, z / length); else normals.push3(0, 1, 0);
     } else if (kind === 'vt') {
-      if (fields.length < 2) throw new Error(`OBJ line ${lineNumber}: texture coordinate needs u and v`);
-      texcoords.push([finite(fields[0]!, lineNumber), finite(fields[1]!, lineNumber)]);
+      if (fields.length < 3) throw new Error(`OBJ line ${lineNumber}: texture coordinate needs u and v`);
+      texcoords.push3(finite(fields[1]!, lineNumber), finite(fields[2]!, lineNumber), 0);
     } else if (kind === 'f') {
-      if (fields.length < 3) throw new Error(`OBJ line ${lineNumber}: face needs at least three vertices`);
-      const face = fields.map((field) => {
-        const [v, vt, vn] = field.split('/');
-        return {
-          v: resolveIndex(v, vertices.length, lineNumber, 'vertex')!,
-          vt: resolveIndex(vt, texcoords.length, lineNumber, 'texture coordinate'),
-          vn: resolveIndex(vn, normals.length, lineNumber, 'normal')
-        };
-      });
-      for (let corner = 1; corner < face.length - 1; corner++) {
-        triangles.push([face[0]!, face[corner]!, face[corner + 1]!]);
-        if (triangles.length > MAX_TRIANGLES) throw new Error('OBJ has too many triangles');
+      if (fields.length < 4) throw new Error(`OBJ line ${lineNumber}: face needs at least three vertices`);
+      face.length = 0;
+      for (let k = 1; k < fields.length; k++) {
+        const [v, vt, vn] = fields[k]!.split('/');
+        face.push(
+          resolveIndex(v, vertices.size / 3, lineNumber, 'vertex'),
+          resolveIndex(vt, texcoords.size / 3, lineNumber, 'texture coordinate'),
+          resolveIndex(vn, normals.size / 3, lineNumber, 'normal'),
+        );
+        if (face[face.length - 3] === -1) throw new Error(`OBJ line ${lineNumber}: invalid vertex index`);
+      }
+      // A fan from the first corner.
+      for (let corner = 1; corner < face.length / 3 - 1; corner++) {
+        for (const c of [0, corner, corner + 1]) corners.push3(face[c * 3]!, face[c * 3 + 1]!, face[c * 3 + 2]!);
+        if (corners.size / 9 > MAX_TRIANGLES) throw new Error('OBJ has too many triangles');
       }
     }
   }
 
-  if (!vertices.length) throw new Error('OBJ does not contain any vertices');
-  if (!triangles.length) throw new Error('OBJ does not contain any faces');
+  const vertexCount = vertices.size / 3, triangleCount = corners.size / 9;
+  if (!vertexCount) throw new Error('OBJ does not contain any vertices');
+  if (!triangleCount) throw new Error('OBJ does not contain any faces');
+  const vs = vertices.data, ns = normals.data, ts = texcoords.data, cs = corners.data;
 
   const min: V3 = [Infinity, Infinity, Infinity], max: V3 = [-Infinity, -Infinity, -Infinity];
-  for (const vertex of vertices) {
-    min[0] = Math.min(min[0], vertex[0]); min[1] = Math.min(min[1], vertex[1]); min[2] = Math.min(min[2], vertex[2]);
-    max[0] = Math.max(max[0], vertex[0]); max[1] = Math.max(max[1], vertex[1]); max[2] = Math.max(max[2], vertex[2]);
+  for (let i = 0; i < vertexCount; i++) for (let a = 0; a < 3; a++) {
+    const x = vs[i * 3 + a]!;
+    if (x < min[a]!) min[a] = x;
+    if (x > max[a]!) max[a] = x;
   }
   const center: V3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
   let radius = 0;
-  for (const vertex of vertices) radius = Math.max(radius, Math.hypot(vertex[0] - center[0], vertex[1] - center[1], vertex[2] - center[2]));
+  for (let i = 0; i < vertexCount; i++) radius = Math.max(radius, Math.hypot(vs[i * 3]! - center[0], vs[i * 3 + 1]! - center[1], vs[i * 3 + 2]! - center[2]));
   if (!(radius > 1e-12)) throw new Error('OBJ geometry has no measurable size');
 
-  const outPositions = new Float32Array(triangles.length * 9);
-  const outNormals = new Float32Array(triangles.length * 9);
-  const outTexcoords = new Float32Array(triangles.length * 6);
-  let positionAt = 0, normalAt = 0, texcoordAt = 0;
-  for (const triangle of triangles) {
-    const a = vertices[triangle[0]!.v]!, b = vertices[triangle[1]!.v]!, c = vertices[triangle[2]!.v]!;
-    const fallbackNormal = faceNormal(a, b, c);
-    for (const ref of triangle) {
-      const vertex = vertices[ref.v]!;
-      outPositions[positionAt++] = (vertex[0] - center[0]) / radius;
-      outPositions[positionAt++] = (vertex[1] - center[1]) / radius;
-      outPositions[positionAt++] = (vertex[2] - center[2]) / radius;
-      const normal = ref.vn == null ? fallbackNormal : normals[ref.vn]!;
-      outNormals[normalAt++] = normal[0]; outNormals[normalAt++] = normal[1]; outNormals[normalAt++] = normal[2];
-      const uv = ref.vt == null ? null : texcoords[ref.vt]!;
-      outTexcoords[texcoordAt++] = uv?.[0] ?? 0; outTexcoords[texcoordAt++] = uv?.[1] ?? 0;
+  const outPositions = new Float32Array(triangleCount * 9);
+  const outNormals = new Float32Array(triangleCount * 9);
+  const outTexcoords = new Float32Array(triangleCount * 6);
+  const vertex = (i: number): V3 => [vs[i * 3]!, vs[i * 3 + 1]!, vs[i * 3 + 2]!];
+  for (let t = 0; t < triangleCount; t++) {
+    const fallbackNormal = faceNormal(vertex(cs[t * 9]!), vertex(cs[t * 9 + 3]!), vertex(cs[t * 9 + 6]!));
+    for (let c = 0; c < 3; c++) {
+      const o = t * 9 + c * 3, v = cs[o]!, vt = cs[o + 1]!, vn = cs[o + 2]!;
+      for (let a = 0; a < 3; a++) {
+        outPositions[t * 9 + c * 3 + a] = (vs[v * 3 + a]! - center[a]!) / radius;
+        outNormals[t * 9 + c * 3 + a] = vn < 0 ? fallbackNormal[a]! : ns[vn * 3 + a]!;
+      }
+      outTexcoords[t * 6 + c * 2] = vt < 0 ? 0 : ts[vt * 3]!;
+      outTexcoords[t * 6 + c * 2 + 1] = vt < 0 ? 0 : ts[vt * 3 + 1]!;
     }
   }
 
@@ -130,9 +153,9 @@ export function parseObj(source: string): ObjMesh {
     positions: outPositions,
     normals: outNormals,
     texcoords: outTexcoords,
-    vertexCount: triangles.length * 3,
-    triangleCount: triangles.length,
-    sourceVertexCount: vertices.length,
+    vertexCount: triangleCount * 3,
+    triangleCount,
+    sourceVertexCount: vertexCount,
     bounds: { min, max, center, radius }
   };
 }

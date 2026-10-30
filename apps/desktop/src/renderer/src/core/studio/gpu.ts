@@ -80,6 +80,8 @@ export function initStudioGpu(): Promise<any> {
   return devicePromise;
 }
 export const studioGpuReady = () => !!device;
+/** The largest buffer one binding can hold (bytes): bounds how many triangles Studio can trace. */
+export const studioMaxBindingBytes = (): number => device?.limits?.maxStorageBufferBindingSize ?? 0;
 export const studioGpuFailure = () => failure;
 
 type Pipelines = { trace: any; photons: any; resolve: any; atrous: any; compose: any; pack: any; temporal: any; present: any; traceLayout: any; postLayout: any; presentLayout: any; sampler: any };

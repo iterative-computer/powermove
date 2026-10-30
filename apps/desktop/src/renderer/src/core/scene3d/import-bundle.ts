@@ -9,7 +9,7 @@ const leaf=(path:string)=>decodeURIComponent(path).replaceAll('\\','/').split('/
  * No sibling file is read implicitly and no URL from model source is fetched. */
 export async function prepareModelImport(files:File[]):Promise<File> {
   if(!files.length||files.length>128)throw new Error('Choose a model and its material/texture files');
-  if(files.some(f=>!(f instanceof File))||files.reduce((s,f)=>s+f.size,0)>128*1024*1024)throw new Error('Model files must be smaller than 128 MB in total');
+  if(files.some(f=>!(f instanceof File))||files.reduce((s,f)=>s+f.size,0)>512*1024*1024)throw new Error('Model files must be smaller than 512 MB in total');
   const models=files.filter(f=>/\.(obj|glb|gltf)$/i.test(f.name));
   if(models.length!==1)throw new Error('Choose one model at a time with its material and texture files');
   const model=models[0]!;
