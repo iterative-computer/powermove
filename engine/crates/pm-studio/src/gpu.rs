@@ -639,6 +639,25 @@ impl Renderer {
         self.post(0, true, Some(denoise))
     }
 
+    /// Linear scene radiance per pixel (RGBA f32; A is the backdrop's
+    /// shading), before exposure and tone mapping: for comparing against
+    /// reference renderers.
+    pub fn radiance(&mut self) -> Vec<f32> {
+        let (w, h) = (self.width, self.height);
+        let params = PostParams { dims: [w, h, 1, 0], k: [self.exposure, 1.6, 0.0, 0.0], backdrop: self.backdrop, cameras: [[0.0; 4]; 8] };
+        self.queue.write_buffer(&self.post_params[0], 0, bytemuck::bytes_of(&params));
+        let group = self.post_group(0, 1, 0);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.resolve);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        self.queue.submit([enc.finish()]);
+        self.read_f32(&self.display[0], (w * h) as u64 * 16)
+    }
+
     fn read_f32(&self, buffer: &wgpu::Buffer, bytes: u64) -> Vec<f32> {
         let rb = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("f32 readback"), size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut enc = self.device.create_command_encoder(&Default::default());

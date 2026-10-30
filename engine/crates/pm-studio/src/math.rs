@@ -38,7 +38,10 @@ impl Vec3 {
     pub fn max(self, o: Vec3) -> Vec3 {
         v3(self.x.max(o.x), self.y.max(o.y), self.z.max(o.z))
     }
-    pub fn to4(self, w: f32) -> [f32; 4] {
+    pub fn to_array(self) -> [f32; 3] {
+        [self.x, self.y, self.z]
+    }
+        pub fn to4(self, w: f32) -> [f32; 4] {
         [self.x, self.y, self.z, w]
     }
     /// Rotate about +y by `radians` (turntables).

@@ -217,7 +217,10 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
     let h = intersect(o, rd, left, !nearest);
     if (h.tri < 0) { return t; }
     let m = tri_material(h.tri);
-    let tr = m.spec.w * (1.0 - m.base.w);
+    // With caustics on, light through glass arrives as photons (bent and
+    // focused); here glass then blocks it like any solid. Live has no
+    // photons and lets it through tinted instead.
+    let tr = select(m.spec.w * (1.0 - m.base.w), 0.0, P.caustic.z > 0.5 && P.opts.x == 0u);
     let through = tr * 0.92 + (1.0 - m.extra.z);
     if (through <= 0.001) { return vec3f(0.0); }
     t *= mix(vec3f(1.0), m.base.xyz, tr) * min(through, 1.0);
@@ -400,7 +403,13 @@ fn sample_vndf(v: vec3f, a: f32, u: vec2f) -> vec3f {
 
 fn spec_pdf(nv: f32, nh: f32, a: f32) -> f32 { return smith_g1(nv, a) * ggx_d(nh, a) / (4.0 * nv); }
 
-fn f0_of(m: Material) -> vec3f { return mix(vec3f(0.04 * m.extra.y), m.base.xyz, m.base.w); }
+// Base-layer Fresnel: metal tints it (Schlick from the base color); a
+// dielectric's specular weight scales all of it, so specular 0 means no
+// reflection at any angle (OpenPBR).
+fn fresnel_base(m: Material, c: f32) -> vec3f {
+  return mix(vec3f(m.extra.y * schlick1(0.04, c)), schlick(m.base.xyz, c), m.base.w);
+}
+fn fresnel_dielectric_base(m: Material, c: f32) -> f32 { return m.extra.y * schlick1(0.04, c); }
 
 struct Lobes { coat: f32, spec: f32, diff: f32, trans: f32 }
 
@@ -408,9 +417,9 @@ fn lobe_probs(m: Material, nv: f32) -> Lobes {
   let metallic = m.base.w;
   let tr = m.spec.w * (1.0 - metallic);
   let fc = m.spec.y * schlick1(0.04, nv);
-  let fs = schlick(f0_of(m), nv);
+  let fs = fresnel_base(m, nv);
   let under = 1.0 - fc;
-  var w = Lobes(fc, under * max(dot(fs, vec3f(0.333)), 0.04), under * (1.0 - metallic) * (1.0 - tr) * dot(m.base.xyz, vec3f(0.333)) * (1.0 - fs.x), under * tr);
+  var w = Lobes(fc, under * (1.0 - tr) * max(dot(fs, vec3f(0.333)), 0.04), under * (1.0 - metallic) * (1.0 - tr) * dot(m.base.xyz, vec3f(0.333)) * (1.0 - fs.x), under * tr);
   let s = w.coat + w.spec + w.diff + w.trans;
   if (s <= 0.0) { return Lobes(0.0, 1.0, 0.0, 0.0); }
   return Lobes(w.coat / s, w.spec / s, w.diff / s, w.trans / s);
@@ -426,15 +435,17 @@ fn eval_reflect(m: Material, n: vec3f, v: vec3f, l: vec3f) -> vec3f {
   let vh = max(dot(v, h), 0.0);
   let metallic = m.base.w;
   let a = m.spec.x * m.spec.x;
-  let f0 = f0_of(m);
-  let F = thin_film(schlick(f0, vh), vh, m.layers.y);
+  let F = thin_film(fresnel_base(m, vh), vh, m.layers.y);
   var spec = F * ggx_d(nh, a) * smith_g2(nv, nl, a) / (4.0 * nv);
   if (m.extra.w != 0.0) {
     let fr = aniso_frame(n);
     spec = F * aniso_dg(fr, v, l, h, a, m.extra.w) / (4.0 * nv);
   }
   let tr = m.spec.w * (1.0 - metallic);
-  let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * (1.0 - schlick(f0, nl)) * (1.0 - schlick(f0, nv)) * nl / PI;
+  // Glass reflects through its transmission lobe (Fresnel-weighted with the
+  // refraction); here only the opaque part's specular remains.
+  spec *= 1.0 - tr;
+  let diff = m.base.xyz * (1.0 - metallic) * (1.0 - tr) * (1.0 - fresnel_dielectric_base(m, nl)) * (1.0 - fresnel_dielectric_base(m, nv)) * nl / PI;
   let ca = m.spec.z * m.spec.z;
   let fc = m.spec.y * schlick1(0.04, vh);
   let coat = fc * ggx_d(nh, ca) * smith_g2(nv, nl, ca) / (4.0 * nv);
@@ -574,7 +585,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
     pb = nl / PI;
   } else {
     f = eval_reflect(m, n, v, s.dir);
-    pb = pdf_reflect(m, w, n, v, s.dir) * (1.0 - w.trans);
+    pb = pdf_reflect(m, w, n, v, s.dir);
   }
   if (all(f <= vec3f(0.0))) { return vec3f(0.0); }
   // With shadows off (the environment's switch), every light reaches every surface.
@@ -878,6 +889,8 @@ fn path(px: vec2f) -> Sample {
     }
     let pick = rnd();
     if (pick < w.trans) {
+      // This lobe is the glass share of the surface (under any coat), chosen with probability w.trans.
+      tp *= (1.0 - m.spec.y * schlick1(0.04, nv)) * m.spec.w * (1.0 - m.base.w) / w.trans;
       // Rough dielectric transmission/reflection through a sampled microfacet.
       let a = max(m.spec.x * m.spec.x, 0.0005);
       let tb = basis(n);
@@ -942,7 +955,7 @@ fn path(px: vec2f) -> Sample {
     if (r < w.coat / wr) { chain = 0; }
     if (dot(l, ng) <= 0.0) { return s; }
     let f = eval_reflect(m, n, v, l);
-    let pdf = pdf_reflect(m, w, n, v, l) * wr;
+    let pdf = pdf_reflect(m, w, n, v, l);
     if (pdf <= 1e-8) { return s; }
     tp *= f / pdf;
     last_pdf = pdf;

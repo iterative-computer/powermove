@@ -50,13 +50,45 @@ noise):
 
 | Scene | Triangles | Live: hardware / software | Final 256 spp: hardware / software |
 |---|---|---|---|
-| hero | 4,196 | 4.1 / 5.9 ms | 3.6 / 7.3 s |
-| chrome | 77,228 | 5.6 / 15.4 ms | 9.0 / 29.1 s |
-| materials | 221,184 | 5.2 / 13.3 ms | 7.1 / 20.3 s |
-| caustics | 110,592 | 4.9 / 11.5 ms | 5.5 / 16.8 s |
+| hero | 4,196 | 4.1 / 5.9 ms | 3.5 / 7.3 s |
+| chrome | 77,228 | 5.3 / 14.0 ms | 8.2 / 22.6 s |
+| materials | 221,184 | 5.0 / 11.7 ms | 6.3 / 14.4 s |
+| caustics | 110,592 | 4.5 / 9.6 ms | 4.7 / 10.7 s |
 
 The app runs on WebGPU, which has no ray queries, so it keeps the software
 BVH until browsers expose them.
+
+### Checked against a reference renderer
+
+`studio-reference` renders a neutral scene (rough plastic, rough gold, clear
+glass and polished chrome spheres on a grey floor under one softbox) as
+linear radiance and describes it in `scene.json`; `reference/compare.py`
+renders the same scene in [Mitsuba 3](https://www.mitsuba-renderer.org)
+and compares them region by region:
+
+```sh
+cargo run --release -p pm-studio --bin studio-reference -- --out /tmp/ref --spp 1024
+pip install mitsuba numpy pillow && python crates/pm-studio/reference/compare.py /tmp/ref
+```
+
+At 1024 samples (2026-10-30), Studio ÷ Mitsuba mean luminance:
+
+| Region | Ratio |
+|---|---|
+| Gold, glass, chrome spheres | 1.008, 1.003, 1.002 |
+| Floor in front of each sphere (shadows, contact, the glass caustic) | 0.98–1.00 |
+| Whole frame | 0.998 (mean per-pixel error 1.2%) |
+| Rough plastic | 0.89 against Mitsuba's `principled`, 1.24 against `roughplastic` |
+
+Plastic depends on the layering model: Studio follows OpenPBR (specular over
+diffuse, energy split by Fresnel); Mitsuba's two models bracket it. The
+glass caustic's hot spot is softer than Mitsuba's (the photon grid's cell
+size); its total light matches.
+
+The comparison found and fixed two bugs: reflections off glass were counted
+about 25× (wrong lobe pdf for transmissive materials), and a dielectric
+with specular 0 still darkened at grazing angles (Schlick's term now scales
+with the specular weight, as in OpenPBR).
 
 ### Final denoising (Open Image Denoise)
 
@@ -100,7 +132,8 @@ to 64 samples; Final is 256 samples.
 Against the Phase 0 gate (60 fps Live at 1080p, i.e. ≤ 6 ms of GPU; Refine
 clean in ≤ 2 s): Live passes on `hero` and `edge`, misses on the others;
 Refine at 64 samples is under 2 s for three of five scenes. Not yet
-measured: a base M1 Air, and a side-by-side against a reference renderer.
+measured: a base M1 Air. The side-by-side against a reference renderer is
+above.
 
 ## Known gaps (next steps)
 

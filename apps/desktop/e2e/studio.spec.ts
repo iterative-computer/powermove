@@ -106,16 +106,18 @@ test('glass focuses light onto the studio floor (caustics)', async ({ session })
     const off = frame();
     PM.Studio.setCaustics(true);
     PM.agentFrameCapture = false;
-    let brighter = 0, sumOn = 0, sumOff = 0;
+    let brighter = 0, darker = 0;
     for (let i = 0; i < on.length; i += 4) {
       const a = on[i]! + on[i + 1]! + on[i + 2]!, b = off[i]! + off[i + 1]! + off[i + 2]!;
-      sumOn += a; sumOff += b;
       if (a > b + 45) brighter++;
+      if (a < b - 45) darker++;
     }
-    return { brighter, sumOn, sumOff };
+    return { brighter, darker };
   });
-  // A pool of focused light the plain trace never finds.
+  // A pool of focused light the plain trace never finds, inside a shadow that
+  // is now truly dark: the light the glass bends no longer also passes
+  // straight through it.
   expect(result.brighter).toBeGreaterThan(40);
-  expect(result.sumOn).toBeGreaterThan(result.sumOff);
+  expect(result.darker).toBeGreaterThan(40);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
