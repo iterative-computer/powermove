@@ -10,3 +10,5 @@ pub mod gpu;
 pub mod math;
 pub mod mesh;
 pub mod scene;
+#[cfg(feature = "oidn")]
+pub mod oidn;

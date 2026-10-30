@@ -4,7 +4,8 @@
 //!                [--finish space-gray|starlight|blue|purple]
 //!                [--size 1920x1080] [--final-spp 256] [--frames 0] [--no-caustics]
 //!
-//! Writes `<scene>-live.png`, `<scene>-refine.png`, `<scene>-final.png`,
+//! Writes `<scene>-live.png`, `<scene>-refine.png`, `<scene>-final.png`
+//! (and `<scene>-final-oidn.png` when built with `--features oidn`),
 //! optional turntable frames `<scene>-NNNN.png`, and `report.json`.
 
 use pm_studio::gpu::{Renderer, write_png};
@@ -83,6 +84,19 @@ fn main() {
         let (px, post) = r.finish(0);
         final_ms += post;
         write_png(&out.join(format!("{name}-final.png")), w, h, &px).unwrap();
+        // The same Final frame through Open Image Denoise (`--features oidn`).
+        #[cfg(feature = "oidn")]
+        let oidn_ms = {
+            let t = Instant::now();
+            let den = pm_studio::oidn::Denoiser::new().expect("Open Image Denoise");
+            let (px, _) = r.finish_with(&|c, a, n| den.run(c, a, n, 4, w as usize, h as usize));
+            write_png(&out.join(format!("{name}-final-oidn.png")), w, h, &px).unwrap();
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("{name:7} Final + Open Image Denoise {ms:6.0} ms");
+            ms
+        };
+        #[cfg(not(feature = "oidn"))]
+        let oidn_ms = 0.0;
 
         eprintln!(
             "{name:7} {:>7} tris · prep {prep_ms:6.1} ms · Live median {:5.2} ms p95 {:5.2} ms · Refine 64 spp {:6.0} ms · Final {final_spp} spp {:6.0} ms",
@@ -95,7 +109,7 @@ fn main() {
         report.push(serde_json::json!({
             "scene": name, "triangles": s.triangle_count(), "prepare_ms": prep_ms,
             "live_ms_median": live[live.len() / 2], "live_ms_p95": live[(live.len() * 95 / 100).min(live.len() - 1)],
-            "refine_64spp_ms": refine_ms, "final_spp": final_spp, "final_ms": final_ms,
+            "refine_64spp_ms": refine_ms, "final_spp": final_spp, "final_ms": final_ms, "oidn_ms": oidn_ms,
         }));
 
         // Turntable / animation frames at the Final tier with `frame_spp`.

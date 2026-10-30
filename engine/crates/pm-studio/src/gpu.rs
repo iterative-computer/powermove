@@ -30,6 +30,41 @@ const GRID_CELLS: u64 = 1 << 19;
 /// Photons traced per sample batch when caustics are on.
 const PHOTONS_PER_PASS: u32 = 1 << 18;
 
+/// Guide images for the Final denoiser, traced with the same camera: first-hit
+/// albedo and normal per pixel, averaged over 8 jittered rays. Appended to
+/// trace.wgsl (the app never uses it) and bound as group 1.
+const AOV_WGSL: &str = r#"
+@group(1) @binding(0) var<storage, read_write> aov: array<vec4f>;
+
+@compute @workgroup_size(8, 8)
+fn aovs(@builtin(global_invocation_id) gid: vec3u) {
+  let w = P.dims.x;
+  let h = P.dims.y;
+  if (gid.x >= w || gid.y >= h) { return; }
+  let idx = gid.y * w + gid.x;
+  seed = pcg(idx ^ 0x5bd1e995u);
+  var albedo = vec3f(0.0);
+  var normal = vec3f(0.0);
+  for (var k = 0; k < 8; k++) {
+    let ray = camera_ray(vec2f(f32(gid.x), f32(gid.y)) + rnd2());
+    let hit = intersect(ray[0], ray[1], BIG, false);
+    let tf = floor_t(ray[0], ray[1]);
+    if (tf < hit.t) {
+      albedo += vec3f(P.env_horizon.w);
+      normal += vec3f(0.0, 1.0, 0.0);
+    } else if (hit.tri >= 0) {
+      let sf = surface(ray[0], ray[1], hit);
+      // Glass and mirrors: white, as the denoiser expects for specular surfaces.
+      let clear = sf.m.spec.w * (1.0 - sf.m.base.w) > 0.5 || (sf.m.base.w > 0.5 && sf.m.spec.x < 0.1);
+      albedo += select(sf.m.base.xyz, vec3f(1.0), clear);
+      normal += select(sf.n, -sf.n, dot(sf.n, ray[1]) > 0.0);
+    }
+  }
+  aov[2u * idx] = vec4f(albedo / 8.0, 0.0);
+  aov[2u * idx + 1u] = vec4f(normal / 8.0, 0.0);
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PostParams {
@@ -52,6 +87,9 @@ pub struct Renderer {
     atrous: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
     photons: wgpu::ComputePipeline,
+    aovs: wgpu::ComputePipeline,
+    aov_layout: wgpu::BindGroupLayout,
+    aov: wgpu::Buffer,
     trace_layout: wgpu::BindGroupLayout,
     post_layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
@@ -170,6 +208,23 @@ impl Renderer {
         let atrous = pipeline(&post_src, &post_layout, "atrous");
         let pack = pipeline(&post_src, &post_layout, "pack");
         let photons = pipeline(&trace_src, &trace_layout, "photons");
+        let aov_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("studio aov"), entries: &[storage(0, false)] });
+        let aov_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aov"),
+            source: wgpu::ShaderSource::Wgsl(format!("{}\n{}", include_str!("shaders/trace.wgsl"), AOV_WGSL).into()),
+        });
+        let aovs = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("aovs"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("aovs"),
+                bind_group_layouts: &[Some(&trace_layout), Some(&aov_layout)],
+                immediate_size: 0,
+            })),
+            module: &aov_src,
+            entry_point: Some("aovs"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let pixels = (width * height) as u64;
         let buf = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
@@ -198,6 +253,7 @@ impl Renderer {
             gbuf: buf("gbuf", pixels * 16, rw),
             ebuf: buf("ebuf", pixels * 16, rw),
             grid: buf("photon grid", GRID_CELLS * 32, rw),
+            aov: buf("aov", pixels * 32, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
             packed: buf("packed", pixels * 4, rw),
             readback: buf("readback", pixels * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
@@ -211,6 +267,8 @@ impl Renderer {
             atrous,
             pack,
             photons,
+            aovs,
+            aov_layout,
             trace_layout,
             post_layout,
             screen,
@@ -423,16 +481,38 @@ impl Renderer {
     /// Resolve the accumulation to display RGBA8, denoising with `passes`
     /// à-trous iterations (0 for Refine/Final). Returns (pixels, ms).
     pub fn finish(&mut self, passes: u32) -> (Vec<u8>, f64) {
-        self.post(passes, true)
+        self.post(passes, true, None)
+    }
+
+    /// Final with a learned denoiser: the resolved image, guided by first-hit
+    /// albedo and normals, goes through `denoise` (color, albedo, normal; RGBA
+    /// f32, RGB read) before it is composed. The backdrop's shadow-catcher
+    /// shading is denoised the same way. Returns (pixels, ms).
+    pub fn finish_with(&mut self, denoise: &dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>) -> (Vec<u8>, f64) {
+        self.post(0, true, Some(denoise))
+    }
+
+    fn read_f32(&self, buffer: &wgpu::Buffer, bytes: u64) -> Vec<f32> {
+        let rb = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("f32 readback"), size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(buffer, 0, &rb, 0, bytes);
+        self.queue.submit([enc.finish()]);
+        let slice = rb.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.wait();
+        let out = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped readback")).to_vec();
+        rb.unmap();
+        out
     }
 
     /// GPU time of resolve + denoise + compose + pack alone (what a viewer
     /// frame costs; it presents the result instead of reading it back).
     pub fn post_only(&mut self, passes: u32) -> f64 {
-        self.post(passes, false).1
+        self.post(passes, false, None).1
     }
 
-    fn post(&mut self, passes: u32, readback: bool) -> (Vec<u8>, f64) {
+    #[allow(clippy::type_complexity)]
+    fn post(&mut self, passes: u32, readback: bool, denoise: Option<&dyn Fn(&mut [f32], &[f32], &[f32]) -> Result<(), String>>) -> (Vec<u8>, f64) {
         let start = Instant::now();
         let (w, h) = (self.width, self.height);
         let groups = (w.div_ceil(8), h.div_ceil(8));
@@ -450,6 +530,46 @@ impl Renderer {
         };
         // resolve → display[0]; à-trous ping-pongs; compose; pack.
         run(&mut enc, &self.resolve, 1, 0, 1, &mut slot);
+        if let Some(denoise) = denoise {
+            // Guides, then read back, denoise on the CPU and upload the result.
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("aov"),
+                layout: &self.aov_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.aov.as_entire_binding() }],
+            });
+            let mut p = self.base;
+            p.dims = [w, h, 0, 1];
+            p.opts = [0, 0, 1, 0];
+            p.counts = [self.light_count, 6, 1, 64];
+            self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+            let trace_group = self.trace_group.clone().expect("traced before finishing");
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.aovs);
+                pass.set_bind_group(0, &trace_group, &[]);
+                pass.set_bind_group(1, &group, &[]);
+                pass.dispatch_workgroups(groups.0, groups.1, 1);
+            }
+            self.queue.submit([std::mem::replace(&mut enc, self.device.create_command_encoder(&Default::default())).finish()]);
+            let pixels = (w * h) as usize;
+            let mut color = self.read_f32(&self.display[0], pixels as u64 * 16);
+            let aov = self.read_f32(&self.aov, pixels as u64 * 32);
+            let (mut albedo, mut normal) = (vec![0f32; pixels * 4], vec![0f32; pixels * 4]);
+            let mut shade = vec![0f32; pixels * 4];
+            for i in 0..pixels {
+                albedo[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8..i * 8 + 4]);
+                normal[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8 + 4..i * 8 + 8]);
+                shade[i * 4..i * 4 + 3].fill(color[i * 4 + 3]);
+            }
+            if let Err(e) = denoise(&mut color, &albedo, &normal).and_then(|_| denoise(&mut shade, &albedo, &normal)) {
+                eprintln!("denoise failed, keeping the noisy frame: {e}");
+            } else {
+                for i in 0..pixels {
+                    color[i * 4 + 3] = shade[i * 4];
+                }
+                self.queue.write_buffer(&self.display[0], 0, bytemuck::cast_slice(&color));
+            }
+        }
         let mut cur = 0;
         for i in 0..passes.min(5) {
             run(&mut enc, &self.atrous, cur, 1 - cur, 1 << i, &mut slot);

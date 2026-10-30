@@ -28,7 +28,7 @@ GPU path tracer serving every quality tier, measured on product scenes.
 |---|---|
 | Live | Half resolution, 1 sample, 2 bounces, cheaper floor shadows; edge-aware à-trous denoise of the noisy part only (direct screen emission is exact) |
 | Refine | Accumulates 1-sample slices while nothing changes |
-| Final | Fixed samples per frame, 8 bounces |
+| Final | Fixed samples per frame, 8 bounces; optionally denoised by Open Image Denoise |
 
 ## Run
 
@@ -38,9 +38,28 @@ cargo run --release -p pm-studio --bin studio-spike -- --out /tmp/studio --scene
 cargo run --release -p pm-studio --bin studio-spike -- --out /tmp/studio --scene edge --frames 96 --frame-spp 48
 ```
 
+### Final denoising (Open Image Denoise)
+
+With the `oidn` feature, `Renderer::finish_with` runs Intel Open Image
+Denoise (Apache-2.0) on Final frames, guided by first-hit albedo and normal
+images traced with the same camera. The backdrop's shadow shading is
+denoised too; the screen's emission is added afterwards, so it stays exact.
+
+```sh
+brew install open-image-denoise     # or set OIDN_DIR to an OIDN 2.x install
+cargo run --release -p pm-studio --features oidn --bin studio-spike -- --out /tmp/studio --scene hero --final-spp 16
+```
+
+This writes `<scene>-final-oidn.png` beside `<scene>-final.png`. At 960×540
+on an M5, 16 samples plus denoising (≈ 0.25 s) is cleaner than 256 samples
+without it.
+
 Scenes: `hero` (flat lay with stylus), `edge` (thin silhouette turning to
 face the camera), `macro` (shallow focus across the display corner), `back`
-(camera bump, lit by a painted highlight), `chrome` (reflection stress test).
+(camera bump, lit by a painted highlight), `chrome` (reflection stress test),
+`materials` (sheen, thin film, dispersion, glass, brushed metal, wax),
+`caustics` (glass and gold under one hard light; `--no-caustics` to compare),
+`wet` (droplets on the display).
 The tablet and wallpaper are original procedural designs. `mesh::load_obj`
 reads OBJ; a `.usdz` converts to OBJ with macOS ModelIO.
 
