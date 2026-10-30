@@ -149,6 +149,8 @@ pub struct Prepared {
     pub nodes: Vec<bvh::WideNode>,
     pub materials: Vec<GpuMaterial>,
     pub lights: Vec<GpuLight>,
+    /// Lights then instances, as trace.wgsl's scene data reads them.
+    pub sdata: Vec<[f32; 4]>,
 }
 
 #[repr(C)]
@@ -205,7 +207,19 @@ impl Scene {
         let (nodes, order) = bvh::build(&corners);
         let tris: Vec<GpuTri> = order.iter().map(|&i| raw[i as usize]).collect();
         let positions = order.iter().flat_map(|&i| positions_raw[i as usize]).collect();
-        let nodes = bvh::widen(&nodes);
+        // Two levels, as the app builds them: a top-level node (0) over one
+        // identity instance whose own BVH starts at node 1.
+        let blas = bvh::widen(&nodes);
+        let (lo, hi) = corners.iter().flatten().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), &p| (a.min(p), b.max(p)));
+        let mut nodes = vec![bvh::WideNode {
+            lmin: [lo.x, lo.y, lo.z], left: 0, lmax: [hi.x, hi.y, hi.z], lcount: 1,
+            rmin: [f32::MAX; 3], right: 0, rmax: [f32::MIN; 3], rcount: u32::MAX,
+        }];
+        nodes.extend(blas.into_iter().map(|mut n| {
+            if n.lcount == 0 { n.left += 1; }
+            if n.rcount == 0 { n.right += 1; }
+            n
+        }));
         let materials = self
             .materials
             .iter()
@@ -219,12 +233,17 @@ impl Scene {
                 layers: [m.sheen, m.film_nm, m.dispersion, m.droplets],
             })
             .collect();
-        let lights = self
+        let lights: Vec<GpuLight> = self
             .lights
             .iter()
             .map(|l| GpuLight { pos: l.center.to4(0.0), u: l.u.to4(4.0 * l.u.cross(l.v).length()), v: l.v.to4(0.0), radiance: l.radiance.to4(0.0) })
             .collect();
-        Prepared { positions, tris, nodes, materials, lights }
+        let mut sdata: Vec<[f32; 4]> = lights.iter().flat_map(|l: &GpuLight| [l.pos, l.u, l.v, l.radiance]).collect();
+        // The identity instance: world→object, normal matrix (n0.w: BVH root 1), object→world.
+        sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        sdata.extend([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        sdata.extend([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]);
+        Prepared { positions, tris, nodes, materials, lights, sdata }
     }
 
     pub fn triangle_count(&self) -> usize {

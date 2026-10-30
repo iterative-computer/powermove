@@ -68,13 +68,36 @@ describe('Studio scene extraction', () => {
     const s = extractScene(scene, () => true, env);
     expect(s.lightCount).toBe(2);
     // Sun: direction toward the light, kind 3, intensity as irradiance.
-    expect([...s.lights.slice(0, 4)].map(v => Math.round(v * 1000) / 1000)).toEqual([0, 1, 0, 3]);
-    expect(s.lights[12]).toBeCloseTo(2);
+    expect([...s.sdata.slice(0, 4)].map(v => Math.round(v * 1000) / 1000)).toEqual([0, 1, 0, 3]);
+    expect(s.sdata[12]).toBeCloseTo(2);
     // Spot: kind 2, axis stored pointing back at the light, cos outer < cos inner.
-    expect(s.lights[16 + 3]).toBe(2);
-    expect(s.lights[16 + 9]).toBeCloseTo(1);
-    expect(s.lights[16 + 11]).toBeCloseTo(Math.cos(Math.PI / 6));
-    expect(s.lights[16 + 15]).toBeGreaterThan(s.lights[16 + 11]!);
+    expect(s.sdata[16 + 3]).toBe(2);
+    expect(s.sdata[16 + 9]).toBeCloseTo(1);
+    expect(s.sdata[16 + 11]).toBeCloseTo(Math.cos(Math.PI / 6));
+    expect(s.sdata[16 + 15]).toBeGreaterThan(s.sdata[16 + 11]!);
+  });
+
+  it('keeps each mesh BVH while models move, and stores world-to-model transforms', () => {
+    const scene = new THREE.Scene();
+    const box = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial()); box.userData.sceneId = 'box';
+    scene.add(box);
+    const first = extractScene(scene, () => true, env);
+    box.position.set(5, 2, -3); box.rotation.y = 0.7;
+    const moved = extractScene(scene, () => true, env);
+    expect(moved.geometryKey).toBe(first.geometryKey);
+    expect(moved.positions).toBe(first.positions);        // the same cached geometry
+    expect(moved.instanceCount).toBe(1);
+    expect(moved.bounds.getCenter(new THREE.Vector3()).x).toBeCloseTo(5);
+    // Instance 0 (after the lights, none here): world→object rows map the box centre to its origin.
+    const o = moved.lightCount * 16, row = (r: number) => [...moved.sdata.slice(o + r * 4, o + r * 4 + 4)];
+    const world = new THREE.Vector3(5, 2, -3);
+    const local = [0, 1, 2].map(r => { const [a, b, c, d] = row(r); return a! * world.x + b! * world.y + c! * world.z + d!; });
+    for (const v of local) expect(v).toBeCloseTo(0, 5);
+    // n0.w holds the instance's BVH root, just after the top level.
+    expect(moved.sdata[o + 15]).toBe(moved.tlasNodes.byteLength / 64);
+    // Editing the geometry makes a new key.
+    box.geometry.getAttribute('position').needsUpdate = true;
+    expect(extractScene(scene, () => true, env).geometryKey).not.toBe(first.geometryKey);
   });
 
   it('skips hidden and fully transparent objects', () => {

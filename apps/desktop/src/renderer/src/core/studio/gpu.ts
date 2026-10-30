@@ -164,28 +164,49 @@ export class StudioTarget {
   }
 
   setScene(scene: StudioScene, maps: (HTMLCanvasElement | OffscreenCanvas | Uint8Array)[]): void {
-    for (const b of this.sceneBuffers) b.destroy();
+    const bytesOf = (data: ArrayBufferView | ArrayBuffer) => data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     const init = (label: string, data: ArrayBufferView | ArrayBuffer) => {
-      const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      const bytes = bytesOf(data);
       const b = device.createBuffer({ label, size: Math.max(64, Math.ceil(bytes.byteLength / 4) * 4), usage: U.STORAGE | U.COPY_DST });
       device.queue.writeBuffer(b, 0, bytes);
       return b;
     };
-    this.sceneBuffers = [
-      init('tris', scene.tris), init('nodes', scene.nodes), init('materials', scene.materials),
-      init('lights', scene.lights), init('positions', scene.triangles ? scene.positions : new Float32Array(4)),
-    ];
+    const sameGeometry = this.geometryKey === scene.geometryKey && this.sceneBuffers.length === 5;
+    if (sameGeometry) {
+      // Only things moved: rewrite the top level in place; materials and scene data are small.
+      device.queue.writeBuffer(this.sceneBuffers[1], 0, bytesOf(scene.tlasNodes));
+      this.sceneBuffers[2].destroy(); this.sceneBuffers[2] = init('materials', scene.materials);
+      this.sceneBuffers[3].destroy(); this.sceneBuffers[3] = init('scene data', scene.sdata);
+    } else {
+      for (const b of this.sceneBuffers) b.destroy();
+      const nodes = new Uint8Array(scene.tlasNodes.byteLength + scene.blasNodes.byteLength);
+      nodes.set(new Uint8Array(scene.tlasNodes), 0);
+      nodes.set(new Uint8Array(scene.blasNodes), scene.tlasNodes.byteLength);
+      this.sceneBuffers = [
+        init('tris', scene.tris), init('nodes', nodes), init('materials', scene.materials),
+        init('scene data', scene.sdata), init('positions', scene.triangles ? scene.positions : new Float32Array(4)),
+      ];
+      this.geometryKey = scene.geometryKey;
+    }
     this.lightCount = scene.lightCount;
-    this.mapTexture?.destroy?.();
+    this.instanceCount = scene.instanceCount;
     const layers = Math.max(1, maps.length);
-    this.mapTexture = device.createTexture({
-      label: 'studio maps', size: [MAP_SIZE, MAP_SIZE, layers], format: 'rgba8unorm',
-      usage: T.TEXTURE_BINDING | T.COPY_DST | T.RENDER_ATTACHMENT,
-    });
+    if (!this.mapTexture || this.mapLayers !== layers) {
+      this.mapTexture?.destroy?.();
+      this.mapTexture = device.createTexture({
+        label: 'studio maps', size: [MAP_SIZE, MAP_SIZE, layers], format: 'rgba8unorm',
+        usage: T.TEXTURE_BINDING | T.COPY_DST | T.RENDER_ATTACHMENT,
+      });
+      this.mapLayers = layers;
+    }
+    // Maps change with the scene (a live screen's frame, a new texture): always write them.
     maps.forEach((source, layer) => this.writeMap(layer, source));
     this.traceGroup = null;
     this.samples = 0;
   }
+  private geometryKey = '';
+  private instanceCount = 0;
+  private mapLayers = 0;
 
   /** Replace one texture layer (a live screen's new frame). */
   writeMap(layer: number, source: HTMLCanvasElement | OffscreenCanvas | Uint8Array): void {
@@ -229,7 +250,7 @@ export class StudioTarget {
       const u = new Uint32Array(this.base);
       u.set([this.width, this.height, this.frame, n], 28);
       u.set([this.lightCount, bounces, reset && first ? 1 : 0, clamp], 32);
-      u.set([this.live ? 1 : 0, 0, 0, 0], 36);
+      u.set([this.live ? 1 : 0, 0, this.instanceCount, 0], 36);
       device.queue.writeBuffer(this.params, 0, this.base);
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();

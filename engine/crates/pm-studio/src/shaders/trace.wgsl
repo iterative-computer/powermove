@@ -22,7 +22,7 @@ struct Params {
   env_horizon: vec4f,  // w: floor albedo for secondary bounces
   dims: vec4u,         // width, height, frame seed, samples this dispatch
   counts: vec4u,       // lights, max bounces, reset (1 = overwrite), firefly clamp (luminance)
-  opts: vec4u,         // x: Live; y: environment ground color follows zenith (0) or horizon (1)
+  opts: vec4u,         // x: Live; y: unused; z: instance count
   ground: vec4f,       // environment radiance below the horizon; w: floor height
 }
 
@@ -44,7 +44,25 @@ struct Light { pos: vec4f, u: vec4f, v: vec4f, radiance: vec4f }
 @group(0) @binding(1) var<storage, read> tris: array<Tri>;
 @group(0) @binding(2) var<storage, read> nodes: array<Node>;
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
-@group(0) @binding(4) var<storage, read> lights: array<Light>;
+// Scene data: the lights (4 vec4 each), then the instances (9 vec4 each, in
+// top-level BVH order): rows of world→object (xyz linear, w translation),
+// rows of the normal matrix (n0.w: the instance's BVH root node), rows of the
+// object→world linear part (for tangents).
+@group(0) @binding(4) var<storage, read> sdata: array<vec4f>;
+fn light_at(i: u32) -> Light { let o = 4u * i; return Light(sdata[o], sdata[o + 1u], sdata[o + 2u], sdata[o + 3u]); }
+fn inst_base(i: u32) -> u32 { return 4u * P.counts.x + 9u * i; }
+fn to_object(i: u32, p: vec3f, w: f32) -> vec3f {
+  let o = inst_base(i);
+  return vec3f(dot(sdata[o].xyz, p), dot(sdata[o + 1u].xyz, p), dot(sdata[o + 2u].xyz, p)) + w * vec3f(sdata[o].w, sdata[o + 1u].w, sdata[o + 2u].w);
+}
+fn normal_to_world(i: u32, n: vec3f) -> vec3f {
+  let o = inst_base(i) + 3u;
+  return normalize(vec3f(dot(sdata[o].xyz, n), dot(sdata[o + 1u].xyz, n), dot(sdata[o + 2u].xyz, n)));
+}
+fn vector_to_world(i: u32, v: vec3f) -> vec3f {
+  let o = inst_base(i) + 6u;
+  return vec3f(dot(sdata[o].xyz, v), dot(sdata[o + 1u].xyz, v), dot(sdata[o + 2u].xyz, v));
+}
 @group(0) @binding(5) var maps: texture_2d_array<f32>;
 @group(0) @binding(6) var map_samp: sampler;
 // rgb: sum of scene radiance (linear, without directly seen emission); w: samples taken
@@ -76,7 +94,7 @@ fn pcg(v: u32) -> u32 {
 fn rnd() -> f32 { seed = pcg(seed); return f32(seed) * (1.0 / 4294967296.0); }
 fn rnd2() -> vec2f { return vec2f(rnd(), rnd()); }
 
-struct Hit { t: f32, tri: i32, b: vec2f }
+struct Hit { t: f32, tri: i32, b: vec2f, inst: u32 }
 
 fn hit_tri(ro: vec3f, rd: vec3f, i: u32, best: f32) -> vec3f {
   let p0 = pos[3u * i].xyz;
@@ -110,47 +128,72 @@ fn leaf(ro: vec3f, rd: vec3f, first: u32, count: u32, h: ptr<function, Hit>, any
   for (var k = 0u; k < count; k++) {
     let r = hit_tri(ro, rd, first + k, (*h).t);
     if (r.x < (*h).t) {
-      *h = Hit(r.x, i32(first + k), r.yz);
+      *h = Hit(r.x, i32(first + k), r.yz, (*h).inst);
       if (any) { return true; }
     }
   }
   return false;
 }
 
-fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
-  var h = Hit(tmax, -1, vec2f(0.0));
-  if (arrayLength(&pos) < 3u) { return h; }
+// One model's BVH (its own space), from `root`.
+fn intersect_blas(ro: vec3f, rd: vec3f, root: u32, h: ptr<function, Hit>, any: bool) -> bool {
   let inv = 1.0 / rd;
   var stack: array<u32, 40>;
   var sp = 1;
-  stack[0] = 0u;
+  stack[0] = root;
   while (sp > 0) {
     sp -= 1;
     let n = nodes[stack[sp]];
     var tl = BIG;
     var tr = BIG;
-    if (n.lcount != 0xffffffffu) { tl = box_t(ro, inv, n.lmin, n.lmax, h.t); }
-    if (n.rcount != 0xffffffffu) { tr = box_t(ro, inv, n.rmin, n.rmax, h.t); }
+    if (n.lcount != 0xffffffffu) { tl = box_t(ro, inv, n.lmin, n.lmax, (*h).t); }
+    if (n.rcount != 0xffffffffu) { tr = box_t(ro, inv, n.rmin, n.rmax, (*h).t); }
     // Leaves are intersected at once; interior children are pushed far-first.
     if (tl < BIG && n.lcount > 0u) {
-      if (leaf(ro, rd, n.left, n.lcount, &h, any)) { return h; }
+      if (leaf(ro, rd, n.left, n.lcount, h, any)) { return true; }
       tl = BIG;
     }
     if (tr < BIG && n.rcount > 0u) {
-      if (leaf(ro, rd, n.right, n.rcount, &h, any)) { return h; }
+      if (leaf(ro, rd, n.right, n.rcount, h, any)) { return true; }
       tr = BIG;
     }
     if (tl < BIG && tr < BIG) {
-      if (tl < tr) {
-        stack[sp] = n.right; stack[sp + 1] = n.left;
-      } else {
-        stack[sp] = n.left; stack[sp + 1] = n.right;
-      }
+      if (tl < tr) { stack[sp] = n.right; stack[sp + 1] = n.left; } else { stack[sp] = n.left; stack[sp + 1] = n.right; }
       sp += 2;
-    } else if (tl < BIG) {
-      stack[sp] = n.left; sp += 1;
-    } else if (tr < BIG) {
-      stack[sp] = n.right; sp += 1;
+    } else if (tl < BIG) { stack[sp] = n.left; sp += 1; } else if (tr < BIG) { stack[sp] = n.right; sp += 1; }
+  }
+  return false;
+}
+
+// Two levels: the top-level BVH (node 0) over the instances' world bounds;
+// each instance's ray is moved into its model's space (t is unchanged
+// because the direction is not renormalised) and walks that model's BVH.
+fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
+  var h = Hit(tmax, -1, vec2f(0.0), 0u);
+  if (arrayLength(&pos) < 3u || P.opts.z == 0u) { return h; }
+  let inv = 1.0 / rd;
+  var stack: array<u32, 24>;
+  var sp = 1;
+  stack[0] = 0u;
+  while (sp > 0) {
+    sp -= 1;
+    let n = nodes[stack[sp]];
+    for (var side = 0u; side < 2u; side++) {
+      let mn = select(n.rmin, n.lmin, side == 0u);
+      let mx = select(n.rmax, n.lmax, side == 0u);
+      let count = select(n.rcount, n.lcount, side == 0u);
+      let index = select(n.right, n.left, side == 0u);
+      if (count == 0xffffffffu || box_t(ro, inv, mn, mx, h.t) >= BIG) { continue; }
+      if (count == 0u) { stack[sp] = index; sp += 1; continue; }
+      for (var k = 0u; k < count; k++) {
+        let i = index + k;
+        let oro = to_object(i, ro, 1.0);
+        let ord = to_object(i, rd, 0.0);
+        var hi = Hit(h.t, -1, vec2f(0.0), i);
+        let done = intersect_blas(oro, ord, u32(sdata[inst_base(i) + 3u].w), &hi, any);
+        if (hi.tri >= 0) { h = hi; }
+        if (done) { return h; }
+      }
     }
   }
   return h;
@@ -453,7 +496,7 @@ fn random_walk(start: vec3f, dir0: vec3f, m: Material) -> vec4f {
     if (h.tri >= 0) {
       let i = u32(h.tri);
       let p0 = pos[3u * i].xyz;
-      var ng = normalize(cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
+      var ng = normal_to_world(h.inst, cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
       if (dot(ng, d) < 0.0) { ng = -ng; }
       exit_n = ng;
       return vec4f(p + d * h.t, 1.0);
@@ -514,7 +557,7 @@ fn sample_lights(p: vec3f, n: vec3f, v: vec3f, m: Material, w: Lobes, floor_hit:
   let count = P.counts.x;
   if (count == 0u) { return vec3f(0.0); }
   let li = min(u32(rnd() * f32(count)), count - 1u);
-  let l = lights[li];
+  let l = light_at(li);
   let s = sample_light(l, p);
   if (s.pdf <= 0.0 || all(s.radiance <= vec3f(0.0))) { return vec3f(0.0); }
   var f = vec3f(0.0);
@@ -547,7 +590,7 @@ fn catcher_ratio(p: vec3f) -> f32 {
   var last = P.counts.x;
   if (live && P.counts.x > 0u) { first = min(u32(rnd() * f32(P.counts.x)), P.counts.x - 1u); last = first + 1u; }
   for (var i = first; i < last; i++) {
-    let s = sample_light(lights[i], p);
+    let s = sample_light(light_at(i), p);
     if (s.pdf <= 0.0) { continue; }
     let e = max(dot(n, s.dir), 0.0) * dot(s.radiance, vec3f(0.333)) / s.pdf;
     free += e;
@@ -583,8 +626,9 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
   let w = 1.0 - h.b.x - h.b.y;
   let p = ro + rd * h.t;
   let p0 = pos[3u * i].xyz;
-  let ng = normalize(cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
-  var n = normalize(t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
+  // Geometry is stored in its model's space; normals go to world space.
+  let ng = normal_to_world(h.inst, cross(pos[3u * i + 1u].xyz - p0, pos[3u * i + 2u].xyz - p0));
+  var n = normal_to_world(h.inst, t.n0.xyz * w + t.n1.xyz * h.b.x + t.n2.xyz * h.b.y);
   if (dot(n, ng) < 0.0) { n = -n; } // normals and winding may disagree
   let uv = t.uv01.xy * w + t.uv01.zw * h.b.x + t.uv2m.xy * h.b.y;
   var m = materials[u32(t.uv2m.z)];
@@ -599,9 +643,10 @@ fn surface(ro: vec3f, rd: vec3f, h: Hit) -> Surface {
     m.spec.x *= orm.g;
     m.base.w *= orm.b;
   }
-  if (m.maps.w >= 0.0 && dot(t.tangent.xyz, t.tangent.xyz) > 0.0) {
+  let tangent = vector_to_world(h.inst, t.tangent.xyz);
+  if (m.maps.w >= 0.0 && dot(tangent, tangent) > 0.0) {
     let tn = map_texel(m.maps.w, uv).xyz * 2.0 - 1.0;
-    let tg = normalize(t.tangent.xyz - n * dot(n, t.tangent.xyz));
+    let tg = normalize(tangent - n * dot(n, tangent));
     let bt = cross(n, tg) * t.tangent.w;
     let mapped = normalize(tg * tn.x + bt * tn.y + n * tn.z);
     if (dot(mapped, ng) > 0.0) { n = mapped; }
@@ -651,7 +696,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   let h = intersect(p, d, BIG, false);
   let tf = floor_t(p, d);
   for (var i = 0u; i < P.counts.x; i++) {
-    let l = lights[i];
+    let l = light_at(i);
     let tl = hit_light(p, d, l);
     if (tl < h.t && tl < tf) { return light_emit(l, p + d * tl, d); }
   }
@@ -667,7 +712,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
   var ng = sf.ng;
   if (dot(d, ng) > 0.0) { n = -n; ng = -ng; }
   let nv = max(dot(n, -d), 1e-4);
-  shade_t = tris[u32(h.tri)].tangent.xyz;
+  shade_t = vector_to_world(h.inst, tris[u32(h.tri)].tangent.xyz);
   return sf.m.emit.xyz + sample_lights(sf.p + ng * EPS, n, -d, sf.m, lobe_probs(sf.m, nv), false);
 }
 
@@ -676,7 +721,7 @@ fn mirror_radiance(p: vec3f, d: vec3f) -> vec3f {
 fn sun_seen(d: vec3f) -> vec3f {
   var e = vec3f(0.0);
   for (var i = 0u; i < P.counts.x; i++) {
-    let l = lights[i];
+    let l = light_at(i);
     if (light_kind(l) == 3u && dot(d, normalize(l.pos.xyz)) >= l.u.x) { e += l.radiance.xyz; }
   }
   return e;
@@ -720,7 +765,7 @@ fn path(px: vec2f) -> Sample {
     // Lights: invisible to the camera, visible in reflections.
     if (!primary) {
       for (var i = 0u; i < P.counts.x; i++) {
-        let l = lights[i];
+        let l = light_at(i);
         let tl = hit_light(ro, rd, l);
         if (tl < h.t && tl < tf) {
           let e = light_emit(l, ro + rd * tl, rd);
@@ -742,7 +787,7 @@ fn path(px: vec2f) -> Sample {
         s.radiance += tp * environment(rd);
         // The sun disc, weighted against light sampling.
         for (var i = 0u; i < P.counts.x; i++) {
-          let l = lights[i];
+          let l = light_at(i);
           if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x) {
             var mis = 1.0;
             if (last_pdf > 0.0) {
@@ -774,7 +819,7 @@ fn path(px: vec2f) -> Sample {
     }
     let sf = surface(ro, rd, h);
     var m = sf.m;
-    shade_t = tris[u32(h.tri)].tangent.xyz;
+    shade_t = vector_to_world(h.inst, tris[u32(h.tri)].tangent.xyz);
     // Partly transparent surfaces: pass straight through with 1 − opacity.
     if (m.extra.z < 0.999 && rnd() >= m.extra.z) {
       ro = sf.p + rd * EPS;

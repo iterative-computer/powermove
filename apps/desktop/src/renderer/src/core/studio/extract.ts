@@ -4,8 +4,9 @@ import { buildBvh } from './bvh';
 /*
  * Turns the three.js graph the scene runtime already maintains (primitives,
  * lathes, extrusions, OBJ/glTF imports, their materials and maps, lights and
- * the camera) into the flat buffers trace.wgsl reads. Geometry is baked to
- * world space; one BVH covers every object of a depth set.
+ * the camera) into the flat buffers trace.wgsl reads. Each mesh keeps a BVH
+ * in its own space; a small top-level BVH over their world bounds is rebuilt
+ * when anything moves (two-level ray tracing).
  */
 
 export const MAP_SIZE = 1024;
@@ -14,11 +15,17 @@ export const MAP_SIZE = 1024;
 export type StudioMap = { source: TexImageSource; flipY: boolean } | { screen: string };
 
 export type StudioScene = {
-  positions: Float32Array;   // 12 floats per triangle (3 × vec4), BVH order
-  tris: Float32Array;        // 24 floats per triangle (6 × vec4), BVH order
-  nodes: ArrayBuffer;        // wide BVH nodes
+  positions: Float32Array;   // 12 floats per triangle (3 × vec4), model space, per-mesh BVH order
+  tris: Float32Array;        // 24 floats per triangle (6 × vec4)
+  /** Wide nodes: the top level (tlasNodes, fixed capacity) then every mesh's own BVH. */
+  tlasNodes: ArrayBuffer;
+  blasNodes: ArrayBuffer;
+  /** Identifies positions/tris/blasNodes: equal keys mean only the top level and instances moved. */
+  geometryKey: string;
+  /** Lights (16 floats each) then instances (36 floats each), as trace.wgsl's scene data. */
+  sdata: Float32Array;
+  instanceCount: number;
   materials: Float32Array;   // 24 floats per material
-  lights: Float32Array;      // 16 floats per light
   lightCount: number;
   maps: StudioMap[];         // texture-array layers
   /** Scene object id (layer id) of each object index the tracer reports. */
@@ -60,8 +67,6 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
   const materialIndex = new Map<string, number>();
   const maps: StudioMap[] = [];
   const mapIndex = new Map<any, number>();
-  const corners: number[] = [];
-  const shading: number[] = [];
   const bounds = new THREE.Box3();
 
   const layer = (texture: THREE.Texture | null | undefined): number => {
@@ -127,71 +132,72 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     return [at(t, 0) / len, at(t, 1) / len, at(t, 2) / len, handed];
   };
 
+  // One BVH per mesh, in its own space, reused until its geometry or material
+  // assignment changes; only the top level is rebuilt when things move.
+  const blases: Blas[] = [];
+  const instances: { blas: Blas; world: THREE.Matrix4 }[] = [];
   for (const { mesh, id } of meshes) {
     const g = mesh.geometry as THREE.BufferGeometry;
     const posAttr = g.getAttribute('position');
     if (!posAttr) continue;
     let oi = objectIndex.get(id);
     if (oi === undefined) { oi = objects.length; objects.push(id); objectIndex.set(id, oi); }
-    const nrm = g.getAttribute('normal'), uvA = g.getAttribute('uv');
-    const index = g.getIndex();
-    const world = mesh.matrixWorld;
-    const normalMatrix = new THREE.Matrix3().getNormalMatrix(world);
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    const groups = Array.isArray(mesh.material) && g.groups.length ? g.groups : [{ start: 0, count: index ? index.count : posAttr.count, materialIndex: 0 }];
-    for (const group of groups) {
-      const m: any = mats[group.materialIndex ?? 0];
-      if (!m || m.visible === false || (m.opacity ?? 1) <= 0) continue;
-      const mi = material(m);
-      const end = Math.min(group.start + group.count, index ? index.count : posAttr.count);
-      for (let k = group.start; k + 2 < end; k += 3) {
-        const vi = [0, 1, 2].map(j => (index ? index.getX(k + j) : k + j));
-        const p: number[] = [], n: number[] = [], uv: number[] = [];
-        for (const v of vi) {
-          tmp.fromBufferAttribute(posAttr as any, v).applyMatrix4(world);
-          p.push(tmp.x, tmp.y, tmp.z);
-          bounds.expandByPoint(tmp);
-          if (nrm) tmpN.fromBufferAttribute(nrm as any, v).applyMatrix3(normalMatrix).normalize();
-          else tmpN.set(0, 0, 0);
-          n.push(tmpN.x, tmpN.y, tmpN.z);
-          uv.push(uvA ? uvA.getX(v) : 0, uvA ? uvA.getY(v) : 0);
-        }
-        if (!nrm) {
-          // Faceted normals.
-          const v = (i: number) => p[i] ?? 0;
-          const ax = v(3) - v(0), ay = v(4) - v(1), az = v(5) - v(2), bx = v(6) - v(0), by = v(7) - v(1), bz = v(8) - v(2);
-          const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx, l = Math.hypot(nx, ny, nz) || 1;
-          for (let j = 0; j < 3; j++) { n[j * 3] = nx / l; n[j * 3 + 1] = ny / l; n[j * 3 + 2] = nz / l; }
-        }
-        corners.push(...p);
-        // Tangents drive normal maps and brushed (anisotropic) highlights.
-        const t = uvA ? tangent(p, uv) : [0, 0, 0, 0];
-        const nn = (i: number) => n[i] ?? 0, uu = (i: number) => uv[i] ?? 0;
-        shading.push(
-          nn(0), nn(1), nn(2), 0, nn(3), nn(4), nn(5), 0, nn(6), nn(7), nn(8), 0,
-          uu(0), uu(1), uu(2), uu(3),
-          uu(4), uu(5), mi, oi,
-          ...t,
-        );
-      }
+    const mi = mats.map((m: any) => (!m || m.visible === false || (m.opacity ?? 1) <= 0 ? -1 : material(m)));
+    const key = blasKey(g, mi, oi);
+    let blas = blasCache.get(mesh);
+    if (!blas || blas.key !== key) {
+      blas = buildBlas(mesh, g, mi, oi, key, tangent);
+      blasCache.set(mesh, blas);
     }
+    if (!blas.triangles) continue;
+    blases.push(blas);
+    instances.push({ blas, world: mesh.matrixWorld.clone() });
+    bounds.union(blas.bounds.clone().applyMatrix4(mesh.matrixWorld));
+  }
+  // Geometry in layout order (stable across frames while meshes do not change).
+  const unique = [...new Set(blases)];
+  const geometryKey = unique.map(b => b.key).join('|');
+  const tlasCapacity = Math.max(1, instances.length + 1);
+  let geometry = geometryCache.get(geometryKey);
+  if (!geometry) {
+    const triangles = unique.reduce((n, b) => n + b.triangles, 0);
+    const nodeCount = unique.reduce((n, b) => n + b.nodes.byteLength / 64, 0);
+    const positions = new Float32Array(Math.max(1, triangles) * 12);
+    const tris = new Float32Array(Math.max(1, triangles) * 24);
+    const blasNodes = new ArrayBuffer(Math.max(1, nodeCount) * 64);
+    const nf = new Float32Array(blasNodes), nu = new Uint32Array(blasNodes);
+    const roots = new Map<Blas, number>();
+    let triOffset = 0, nodeOffset = 0;
+    for (const b of unique) {
+      positions.set(b.positions, triOffset * 12);
+      tris.set(b.tris, triOffset * 24);
+      const src = new Uint32Array(b.nodes), count = b.nodes.byteLength / 64;
+      nu.set(src, nodeOffset * 16);
+      // Re-base child links: interior → absolute node (after the top level), leaf → absolute triangle.
+      for (let n = 0; n < count; n++) for (const side of [0, 8]) {
+        const o = (nodeOffset + n) * 16 + side, c = nu[o + 7]!;
+        if (c === 0xffffffff) continue;
+        nu[o + 3] = c === 0 ? nu[o + 3]! + tlasCapacity + nodeOffset : nu[o + 3]! + triOffset;
+      }
+      roots.set(b, tlasCapacity + nodeOffset);
+      triOffset += b.triangles; nodeOffset += count;
+    }
+    void nf;
+    geometry = { positions, tris, blasNodes, roots, triangles, tlasCapacity };
+    geometryCache.clear();
+    geometryCache.set(geometryKey, geometry);
   }
 
-  const triangles = corners.length / 9;
-  const cornerArray = new Float32Array(corners);
-  const { nodes, order } = triangles ? buildBvh(cornerArray) : { nodes: new ArrayBuffer(64), order: new Uint32Array(0) };
-  const positions = new Float32Array(Math.max(1, triangles) * 12);
-  const tris = new Float32Array(Math.max(1, triangles) * 24);
-  for (let i = 0; i < triangles; i++) {
-    const t = order[i]!;
-    for (let c = 0; c < 3; c++) {
-      positions[i * 12 + c * 4] = cornerArray[t * 9 + c * 3]!;
-      positions[i * 12 + c * 4 + 1] = cornerArray[t * 9 + c * 3 + 1]!;
-      positions[i * 12 + c * 4 + 2] = cornerArray[t * 9 + c * 3 + 2]!;
-    }
-    tris.set(shading.slice(t * 24, t * 24 + 24), i * 24);
-  }
-  if (!triangles) positions.fill(0);
+  // Top level over the instances' world bounds (a box as a degenerate triangle).
+  const instanceBoxes = new Float32Array(instances.length * 9);
+  instances.forEach(({ blas, world }, i) => {
+    const b = blas.bounds.clone().applyMatrix4(world);
+    instanceBoxes.set([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z, b.min.x, b.min.y, b.min.z], i * 9);
+  });
+  const top = instances.length ? buildBvh(instanceBoxes) : { nodes: new ArrayBuffer(64), order: new Uint32Array(0) };
+  const tlasNodes = new ArrayBuffer(geometry.tlasCapacity * 64);
+  new Uint8Array(tlasNodes).set(new Uint8Array(top.nodes).subarray(0, Math.min(top.nodes.byteLength, tlasNodes.byteLength)));
 
   // Lights.
   const lights: number[] = [];
@@ -225,12 +231,100 @@ export function extractScene(scene: THREE.Scene, include: (id: string) => boolea
     }
   });
 
+  // Scene data: lights, then instances in top-level order (9 vec4 each).
+  const sdata = new Float32Array(Math.max(4, lights.length + instances.length * 36));
+  sdata.set(lights, 0);
+  const nm = new THREE.Matrix3(), inv = new THREE.Matrix4();
+  for (let k = 0; k < instances.length; k++) {
+    const { blas, world } = instances[top.order[k]!]!;
+    const o = lights.length + k * 36, w = world.elements, iv = inv.copy(world).invert().elements, n = nm.getNormalMatrix(world).elements;
+    for (let r = 0; r < 3; r++) {
+      sdata.set([iv[r]!, iv[4 + r]!, iv[8 + r]!, iv[12 + r]!], o + r * 4);
+      sdata.set([n[r]!, n[3 + r]!, n[6 + r]!, 0], o + 12 + r * 4);
+      sdata.set([w[r]!, w[4 + r]!, w[8 + r]!, 0], o + 24 + r * 4);
+    }
+    sdata[o + 15] = geometry.roots.get(blas)!;
+  }
+
   void environment;
   return {
-    positions, tris, nodes,
+    positions: geometry.positions, tris: geometry.tris, blasNodes: geometry.blasNodes, tlasNodes, geometryKey,
+    sdata, instanceCount: instances.length,
     materials: new Float32Array(materials.length ? materials : new Array(24).fill(0)),
-    lights: new Float32Array(lights.length ? lights : new Array(16).fill(0)),
     lightCount: lights.length / 16,
-    maps, objects, triangles, bounds,
+    maps, objects, triangles: geometry.triangles, bounds,
   };
+}
+
+type Blas = { key: string; positions: Float32Array; tris: Float32Array; nodes: ArrayBuffer; bounds: THREE.Box3; triangles: number };
+const blasCache = new WeakMap<THREE.Object3D, Blas>();
+const geometryCache = new Map<string, { positions: Float32Array; tris: Float32Array; blasNodes: ArrayBuffer; roots: Map<Blas, number>; triangles: number; tlasCapacity: number }>();
+const versions = new WeakMap<object, number>();
+let nextVersion = 1;
+/** A stable identity for attribute contents (three bumps `.version` on edits). */
+function idOf(o: any): string {
+  if (!o) return '-';
+  let v = versions.get(o);
+  if (!v) { v = nextVersion++; versions.set(o, v); }
+  return `${v}.${o.version ?? 0}`;
+}
+function blasKey(g: THREE.BufferGeometry, materials: number[], object: number): string {
+  return [g.uuid, idOf(g.getAttribute('position')), idOf(g.getAttribute('normal')), idOf(g.getAttribute('uv')), idOf(g.getIndex()), materials.join(','), object, g.groups.map(x => `${x.start}:${x.count}:${x.materialIndex}`).join(';')].join('/');
+}
+
+function buildBlas(mesh: THREE.Mesh, g: THREE.BufferGeometry, mi: number[], oi: number, key: string, tangent: (p: number[], uv: number[]) => number[]): Blas {
+  const posAttr = g.getAttribute('position'), nrm = g.getAttribute('normal'), uvA = g.getAttribute('uv');
+  const index = g.getIndex();
+  const groups = Array.isArray(mesh.material) && g.groups.length ? g.groups : [{ start: 0, count: index ? index.count : posAttr.count, materialIndex: 0 }];
+  const corners: number[] = [], shading: number[] = [];
+  const bounds = new THREE.Box3();
+  for (const group of groups) {
+    const m = mi[group.materialIndex ?? 0] ?? -1;
+    if (m < 0) continue;
+    const end = Math.min(group.start + group.count, index ? index.count : posAttr.count);
+    for (let k = group.start; k + 2 < end; k += 3) {
+      const vi = [0, 1, 2].map(j => (index ? index.getX(k + j) : k + j));
+      const p: number[] = [], n: number[] = [], uv: number[] = [];
+      for (const v of vi) {
+        tmp.fromBufferAttribute(posAttr as any, v);
+        p.push(tmp.x, tmp.y, tmp.z);
+        bounds.expandByPoint(tmp);
+        if (nrm) tmpN.fromBufferAttribute(nrm as any, v).normalize(); else tmpN.set(0, 0, 0);
+        n.push(tmpN.x, tmpN.y, tmpN.z);
+        uv.push(uvA ? uvA.getX(v) : 0, uvA ? uvA.getY(v) : 0);
+      }
+      if (!nrm) {
+        // Faceted normals.
+        const v = (i: number) => p[i] ?? 0;
+        const ax = v(3) - v(0), ay = v(4) - v(1), az = v(5) - v(2), bx = v(6) - v(0), by = v(7) - v(1), bz = v(8) - v(2);
+        const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx, l = Math.hypot(nx, ny, nz) || 1;
+        for (let j = 0; j < 3; j++) { n[j * 3] = nx / l; n[j * 3 + 1] = ny / l; n[j * 3 + 2] = nz / l; }
+      }
+      corners.push(...p);
+      // Tangents drive normal maps and brushed (anisotropic) highlights.
+      const t = uvA ? tangent(p, uv) : [0, 0, 0, 0];
+      const nn = (i: number) => n[i] ?? 0, uu = (i: number) => uv[i] ?? 0;
+      shading.push(
+        nn(0), nn(1), nn(2), 0, nn(3), nn(4), nn(5), 0, nn(6), nn(7), nn(8), 0,
+        uu(0), uu(1), uu(2), uu(3),
+        uu(4), uu(5), m, oi,
+        ...t,
+      );
+    }
+  }
+  const triangles = corners.length / 9;
+  const cornerArray = new Float32Array(corners);
+  const { nodes, order } = triangles ? buildBvh(cornerArray) : { nodes: new ArrayBuffer(64), order: new Uint32Array(0) };
+  const positions = new Float32Array(Math.max(1, triangles) * 12);
+  const tris = new Float32Array(Math.max(1, triangles) * 24);
+  for (let i = 0; i < triangles; i++) {
+    const t = order[i]!;
+    for (let c = 0; c < 3; c++) {
+      positions[i * 12 + c * 4] = cornerArray[t * 9 + c * 3]!;
+      positions[i * 12 + c * 4 + 1] = cornerArray[t * 9 + c * 3 + 1]!;
+      positions[i * 12 + c * 4 + 2] = cornerArray[t * 9 + c * 3 + 2]!;
+    }
+    tris.set(shading.slice(t * 24, t * 24 + 24), i * 24);
+  }
+  return { key, positions: positions.subarray(0, triangles * 12), tris: tris.subarray(0, triangles * 24), nodes, bounds, triangles };
 }

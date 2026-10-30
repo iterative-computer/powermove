@@ -240,7 +240,7 @@ impl Renderer {
             init("tris", bytemuck::cast_slice(&prepared.tris)),
             init("nodes", bytemuck::cast_slice(&prepared.nodes)),
             init("materials", bytemuck::cast_slice(&prepared.materials)),
-            init("lights", bytemuck::cast_slice(&prepared.lights)),
+            init("scene data", bytemuck::cast_slice(&prepared.sdata)),
             init("positions", bytemuck::cast_slice(&prepared.positions)),
         ];
         self.light_count = prepared.lights.len() as u32;
@@ -322,7 +322,7 @@ impl Renderer {
             let mut p = self.base;
             p.dims = [w, h, self.frame, n];
             p.counts = [self.light_count, bounces, if reset && first { 1 } else { 0 }, clamp];
-            p.opts = [u32::from(self.live), 0, 0, 0];
+            p.opts = [u32::from(self.live), 0, 1, 0];
             self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             let group = self.trace_group().clone();
             let mut enc = self.device.create_command_encoder(&Default::default());
