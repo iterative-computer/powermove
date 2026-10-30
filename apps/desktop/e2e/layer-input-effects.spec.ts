@@ -3,7 +3,6 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createServer } from 'node:http';
 
 test.beforeEach(async({session})=>{await session.openEditor();await session.page.evaluate(()=>{
  const PM=(window as any).PM;PM.pause();PM.agentFrameCapture=true;PM.quality=1;PM.AutomaticPreview?.cancel();
@@ -111,22 +110,6 @@ test('hidden referenced video is prepared for reverse seeks and native export us
   expect(r.result).toEqual({cancelled:false});expect(delivered.started).toBe(1);expect(delivered.finished).toBe(true);expect(delivered.chunks.flat()).toEqual(r.expected);expect(r.optimized).toBe(0);expect(r.missing.error).toContain('missing input layer');
   for(const sample of r.samples){expect(sample.prepared).toBe(true);expect(Math.abs(sample.pixel[0]-(sample.time===0?224:160))).toBeLessThan(5);expect(sample.pixel.slice(1)).toEqual([0,0,255]);}expect(session.diagnostics.pageErrors).toEqual([]);
  }finally{await rm(root,{recursive:true,force:true});}
-});
-
-test('portable player packages static references and matches the editor for both layer effects',async({session})=>{
- test.setTimeout(60_000);
- const exported=await session.page.evaluate(async()=>{const PM=(window as any).PM,s=(window as any).__inputs,{owner,map}=s.scene(8);map.d.color='#808080';map.p['scale.x'].kf=[PM.KF(0,100),PM.KF(1,200)];
-  const matte=s.effect(owner,map,'setMatte',{channel:0,stretch:false});const displacement=PM.mkEffect('displacementMap',undefined,owner);displacement.inputs.map={layerId:map.id,stage:'source'};displacement.p.maxHorizontal.v=4;displacement.p.vertical.v=8;owner.fx.push(displacement);PM.touch();
-  const result=await PM.Export.buildWeb(),frames:number[][]=[];for(const time of [0,.5,1]){await PM.prepareFrame(time);frames.push([...PM.GL.renderToPixels(time,64,64,{transparent:true,mblur:false})]);}
-  return{files:[...result.files].map(([name,bytes]:any)=>[name,[...bytes]]),frames,inputs:result.scene.project.layers[0].fx.map((f:any)=>f.inputs),effects:result.scene.effects.map((f:any)=>f.id)};
- });expect(exported.effects).toEqual(expect.arrayContaining(['setMatte','displacementMap']));expect(exported.inputs.every((i:any)=>i.map.stage==='source')).toBe(true);
- const files=new Map<string,Buffer>(exported.files.map(([name,bytes]:any)=>[name,Buffer.from(bytes)]));
- const server=createServer((request,response)=>{const name=request.url==='/'?'index.html':request.url!.slice(1),data=files.get(name);response.statusCode=data?200:404;response.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.json')?'application/json':'text/html');response.end(data||'Not found');});
- await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
- try{const pending=session.app.waitForEvent('window');await session.app.evaluate(({BrowserWindow},url)=>{const window=new BrowserWindow({show:false,width:800,height:600,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true}});(globalThis as any).__inputPortableWindow=window;void window.loadURL(url);},`http://127.0.0.1:${(server.address() as any).port}`);const page=await pending,errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));await page.waitForLoadState('domcontentloaded');
-  const frames=await page.evaluate(async()=>{const {createPlayer}=await import(/* @vite-ignore */location.origin+'/player.js'),canvas=document.createElement('canvas');canvas.style.width=`${64/devicePixelRatio}px`;canvas.style.height=`${64/devicePixelRatio}px`;document.body.append(canvas);const player=await createPlayer({canvas,scene:'./scene.json',transparent:true,audio:false}),frames:number[][]=[];try{for(const time of [0,.5,1]){await player.seek(time);const gl=canvas.getContext('webgl2')!,p=new Uint8Array(64*64*4);gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,p);frames.push([...p]);}}finally{player.destroy();}return frames;});
-  for(let i=0;i<frames.length;i++){const max=Math.max(...frames[i]!.map((v,j)=>Math.abs(v-exported.frames[i]![j]!)));expect(max).toBeLessThanOrEqual(1);}expect(errors).toEqual([]);
- }finally{await session.app.evaluate(()=>{(globalThis as any).__inputPortableWindow?.destroy();delete (globalThis as any).__inputPortableWindow;});await new Promise<void>(resolve=>server.close(()=>resolve()));}expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
 test('native export sees stage, source and provider changes after each held encoder acknowledgement',async({session})=>{

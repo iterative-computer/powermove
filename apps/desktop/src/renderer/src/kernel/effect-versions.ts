@@ -6,7 +6,7 @@ export function effectVersion(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
-/** Definitions keep historical revisions as data, shared by native and web export. */
+/** Definitions keep historical revisions as data, so older projects resolve the revision they were made with. */
 export function resolveEffectDefinition(definition: EffectDefinition | undefined, requested?: number): EffectDefinition | undefined {
   if (!definition) return undefined;
   if (requested === undefined) return definition;

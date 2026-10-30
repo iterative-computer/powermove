@@ -102,8 +102,8 @@ the argument returns the latest catalog definition.
 
 New instances persist the current version. Unversioned saved source migrates to
 version 1, preserving the old units, defaults, shader and parameter animation.
-The renderer, Inspector, timeline metadata, high-zoom eligibility, clipboard and
-portable web export resolve that same version. A newer unavailable revision stays
+The renderer, Inspector, timeline metadata, high-zoom eligibility and clipboard
+resolve that same version. A newer unavailable revision stays
 missing with its data intact, rather than being rendered through an older shader.
 Current and historical programs have separate GPU keys and all revisions are
 invalidated when their provider reloads. Portable export bundles historical
@@ -303,8 +303,7 @@ sampling, not arbitrary temporal effects or optical-flow frame synthesis.
   Static export accepts the stationary built-ins and checks linked time uniforms;
   `grain` and `displace` stay per-frame. A new effect without reviewed eligibility
   should remain on the general export path.
-- Portable web export embeds effect definitions and the common player renderer.
-  Changes must preserve native-preview/native-export/web-player behavior.
+- Changes must preserve native-preview/native-export behavior.
 - Built-in `effects-basic` is 1.12.0 and viewer is 1.0.17 after this batch.
   Inspector is 1.7.0 for typed layer/stage controls; timeline retains 1.1.7.
   Refresh their `.builtin-versions.json` entries after verification.

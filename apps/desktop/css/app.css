@@ -207,20 +207,19 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .export-form .sg-group{margin:0 -14px}
 /* Destination: four quiet words on one hairline track; the chosen one is
    the raised float surface, nothing coloured. */
-.export-destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;margin:0 -14px;padding:3px;border:0;border-radius:var(--r-md);background:var(--sg-row)}
+.export-destinations{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px;margin:0 -14px;padding:3px;border:0;border-radius:var(--r-md);background:var(--sg-row)}
 .export-destination{height:28px;min-width:0;padding:0 8px;border:0;border-radius:calc(var(--r-md) - 3px);background:transparent;color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;transition:color var(--dur-1),background var(--dur-1)}
 .export-destination:hover{color:var(--tx)}
 .export-destination.on,.export-destination[aria-pressed=true]{background:var(--bg-float);color:var(--tx)}
 .export-destination:focus-visible{outline:0;box-shadow:0 0 0 1px var(--sg-edge-focus)}
 .export-destination-note{margin:-12px 0 0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);min-height:16px}
-/* Code and Project have no settings; one card explains the file instead. */
+/* Project has no settings; one card explains the file instead. */
 .export-about{padding:14px}
 .export-about-copy{display:flex;flex-direction:column;gap:6px}
 .export-about-copy>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
 .export-about-copy>p{margin:0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
-.export-code-includes{display:flex;flex-wrap:wrap;gap:0 6px;margin:2px 0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-2)}
-.export-code-includes span+span::before{content:'·';margin-right:6px;color:var(--tx-4)}
-.export-about-copy .export-code-delivery{color:var(--tx-4)}
+.export-about-includes{display:flex;flex-wrap:wrap;gap:0 6px;margin:2px 0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-2)}
+.export-about-includes span+span::before{content:'·';margin-right:6px;color:var(--tx-4)}
 /* Rows are the Settings rows; controls are the Settings controls. */
 .export-form .sg-group>.settings-row{min-height:52px}
 /* The card's 1px edge would push row titles a pixel past the text column. */

@@ -1,5 +1,3 @@
-import { createServer } from 'node:http';
-import { chromium } from 'playwright';
 import { expect,test } from './helpers/app';
 
 test('3D groups rotate with one gizmo and preserve their members and Undo',async({session})=>{
@@ -199,38 +197,6 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
   }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
-
-test('portable export preserves imported glTF materials and matches the editor',async({session})=>{
-  await session.openEditor();const exported=await session.page.evaluate(async()=>{
-    const PM=(window as any).PM,api=PM.Kernel.api('scene-export-test'),position=new Float32Array([-1,-1,0,1,-1,0,0,1,0]);
-    const bytes=new Uint8Array(position.buffer);let binary='';for(const b of bytes)binary+=String.fromCharCode(b);
-    const source={asset:{version:'2.0'},scene:0,scenes:[{nodes:[0]}],nodes:[{mesh:0}],meshes:[{primitives:[{attributes:{POSITION:0},material:0}]}],
-      materials:[{pbrMetallicRoughness:{baseColorFactor:[.1,.8,.2,1],metallicFactor:0,roughnessFactor:.5},doubleSided:true}],
-      buffers:[{byteLength:bytes.length,uri:'data:application/octet-stream;base64,'+btoa(binary)}],bufferViews:[{buffer:0,byteOffset:0,byteLength:bytes.length}],
-      accessors:[{bufferView:0,componentType:5126,count:3,type:'VEC3',min:[-1,-1,0],max:[1,1,0]}]};
-    const asset=await PM.assets.add(new File([JSON.stringify(source)],'embedded.gltf',{type:'model/gltf+json'}),{silent:true});
-    PM.proj.w=320;PM.proj.h=180;PM.setTime(0);
-    api.scene3d.edit({operation:'create',scene:{objects:[{id:'model',source:{assetId:asset.id},useSourceMaterials:true}],lights:[{id:'sun',type:'sun'}],camera:{p:{x:0,y:0,z:4}}}});
-    PM.proj.w=320;PM.proj.h=180;PM.touch();PM.GL.resize(320,180);
-    const result=await PM.Export.buildWeb();PM.GL.render(0,{exporting:true,mblur:false});
-    const pixels=new Uint8Array(320*180*4),gl=PM.GL.gl;gl.readPixels(0,0,320,180,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
-    return {files:[...result.files].map(([name,data]:any)=>[name,[...data]]),pixels:[...pixels]};
-  });
-  const files=new Map<string,Buffer>(exported.files.map(([name,data]:any)=>[name,Buffer.from(data)]));
-  const server=createServer((req,res)=>{const name=req.url==='/'?'index.html':req.url!.slice(1),data=files.get(name);res.statusCode=data?200:404;
-    res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.json')?'application/json':name.endsWith('.gltf')?'model/gltf+json':'text/html');res.end(data||'Not found');});
-  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const browser=await chromium.launch({headless:true});
-  try{const page=await browser.newPage();await page.goto(`http://127.0.0.1:${(server.address() as any).port}`);
-    const actual=await page.evaluate(async()=>{const {createPlayer}=await import(/* @vite-ignore */ location.origin+'/player.js');
-      const canvas=document.createElement('canvas');canvas.style.width='320px';canvas.style.height='180px';document.body.append(canvas);
-      const player=await createPlayer({canvas,scene:'./scene.json',audio:false});await player.seek(0);
-      const gl=canvas.getContext('webgl2')!,pixels=new Uint8Array(320*180*4);gl.readPixels(0,0,320,180,gl.RGBA,gl.UNSIGNED_BYTE,pixels);player.destroy();return [...pixels];});
-    expect(actual.reduce((sum,v,i)=>sum+Math.abs(v-exported.pixels[i]!),0)/actual.length).toBeLessThan(1);
-    expect(exported.pixels[(90*320+160)*4+1]).toBeGreaterThan(exported.pixels[(90*320+160)*4]);
-  }finally{await browser.close();await new Promise<void>(r=>server.close(()=>r()));}
-  expect(session.diagnostics.pageErrors).toEqual([]);
-});
-
 
 test('OBJ material bundles retain UV textures as a durable GLB',async({session})=>{
   await session.openEditor();

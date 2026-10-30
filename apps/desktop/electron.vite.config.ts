@@ -2,7 +2,6 @@ import { defineConfig } from 'electron-vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'node:path';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { playerBundlePlugin } from './scripts/player-bundle';
 
 export default defineConfig({
   // A sandboxed preload must be CommonJS; pin the format so a future
@@ -39,7 +38,7 @@ export default defineConfig({
        those module requests need a wildcard. Production serves everything
        from app:// and never uses this server. */
     server: { cors: { origin: '*' } },
-    plugins: [svelte(), playerBundlePlugin(), {
+    plugins: [svelte(), {
       name: 'extension-sandbox-document',
       closeBundle() {
         const source = path.resolve(__dirname, 'out/renderer/sandbox/ext-sandbox.html');

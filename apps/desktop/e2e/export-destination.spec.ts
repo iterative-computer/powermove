@@ -25,12 +25,12 @@ test('every export asks for its destination before rendering or showing progress
     dialog.showSaveDialog = async () => { await capture(); return { canceled: true, filePath: '' }; };
     dialog.showOpenDialog = async () => { await capture(); return { canceled: true, filePaths: [] }; };
   });
-  for (const format of ['mp4', 'prores', 'webm', 'rec', 'png', 'still', 'web', 'json']) {
+  for (const format of ['mp4', 'prores', 'webm', 'rec', 'png', 'still', 'json']) {
     expect(await session.page.evaluate(format => (window as any).PM.Export.run({ format, audio: false }), format)).toEqual({ cancelled: true });
     expect(await session.page.evaluate(() => (window as any).PM.Export.busy)).toBe(false);
   }
   expect(await session.app.evaluate(() => (globalThis as any).__exportPrompts)).toEqual(
-    Array.from({ length: 8 }, () => ({ frames: 0, progress: false, busy: true })),
+    Array.from({ length: 7 }, () => ({ frames: 0, progress: false, busy: true })),
   );
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -16,8 +16,8 @@
     },
     {
       id: 'export', label: 'Take it beyond the editor',
-      lead: 'A finished video. Or a live animation.',
-      text: 'Render a clip to share, or export a JavaScript player or React component with playback controls and editable text and colors.',
+      lead: 'A finished video. Or the whole project.',
+      text: 'Render MP4, WebM or ProRes with sound, a still or a PNG sequence, or save an editable project with every layer and its media.',
     },
   ];
 

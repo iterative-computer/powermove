@@ -20,7 +20,6 @@
   "references": [{ "path": "../cloud/tsconfig.types.json" }],
   "include": [
     "electron.vite.config.ts",
-    "scripts/player-bundle.ts",
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
     "src/server/**/*.ts",

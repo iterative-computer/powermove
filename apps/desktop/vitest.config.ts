@@ -1,7 +1,6 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
-import { playerBundlePlugin } from './scripts/player-bundle';
 
 // The legacy suite under tests/ runs with `node --test` (npm test); vitest only
 // owns the new TypeScript modules under src/. The svelte plugin compiles
@@ -9,7 +8,7 @@ import { playerBundlePlugin } from './scripts/player-bundle';
 export default defineConfig({
   // Keep Vite's test cache in this checkout; node_modules may be a read-only symlink.
   cacheDir: path.resolve(__dirname, '.vite'),
-  plugins: [svelte({ hot: false }), playerBundlePlugin()],
+  plugins: [svelte({ hot: false })],
   resolve: { conditions: ['browser'], alias: { powermove: path.resolve(__dirname, 'src/renderer/src/kernel/api.ts') } },
   test: {
     // The animation suite measures real frame-evaluation time. Concurrent test
