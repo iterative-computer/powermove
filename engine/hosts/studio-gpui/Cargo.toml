@@ -1,0 +1,28 @@
+# Studio in a GPUI window: the native host prototype for the GPUI rewrite.
+# Its own workspace, so building pm-studio never builds GPUI.
+[workspace]
+
+[package]
+name = "studio-gpui"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+pm-studio = { path = "../../crates/pm-studio" }
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "runtime_shaders"] }
+image = { version = "0.25.1", default-features = false }
+smallvec = "1.6"
+async-channel = "2.5"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+debug = "line-tables-only"
