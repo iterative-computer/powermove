@@ -47,7 +47,11 @@ export const sourceSchema = z.union([
 ]);
 export const materialSchema = z.object({
   p: p({ color: [color,'#C7C4FF'], roughness: [num(.02,1),.4], metalness: [num(0,1),.1],
-    emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1] }).default({} as any),
+    emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1],
+    // Layers Studio renders: a clear coat (lacquer, cover glass), transmission
+    // (glass, liquid) with its index of refraction, and dielectric reflection.
+    clearcoat: [num(0,1),0], clearcoatRoughness: [num(.002,1),.03], transmission: [num(0,1),0],
+    ior: [num(1,2.6),1.5], specular: [num(0,1),1] }).default({} as any),
   maps: z.object(Object.fromEntries(['color','normal','roughness','metalness','emissive','ao'].map(k => [k,z.string().min(1).max(160).optional()]))).strict().default({}),
   doubleSided: z.boolean().default(true)
 }).strict();
@@ -58,20 +62,28 @@ export const objectSchema = z.object({
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
-  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot']).default('sun'),
+  id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot','area']).default('sun'),
   p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
     color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,100000),0], decay:[num(0,4),2],
-    angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true] }).default({} as any),
+    angle:[num(1,89),45], penumbra:[num(0,1),.4], visible:[z.boolean(),true],
+    // Area lights are softboxes: width × height facing their target. Larger is softer.
+    width:[num(.001,100000),2], height:[num(.001,100000),1.2] }).default({} as any),
   castShadow: z.boolean().default(true)
 }).strict();
 export const cameraSchema = z.object({
   projection: z.enum(['perspective','orthographic']).default('perspective'),
   p: p({ x:[num(),3], y:[num(),2], z:[num(),6], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
-    fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000] }).default({} as any)
+    fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000],
+    // A physical lens for Studio: f-number (0: everything sharp) and the
+    // distance in focus (0: the aim point).
+    fStop:[num(0,64),0], focusDistance:[num(0,100000),0] }).default({} as any)
 }).strict();
 export const environmentSchema = z.object({
   p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1] }).default({} as any),
-  background: color.nullable().default(null), shadows: z.boolean().default(true)
+  background: color.nullable().default(null), shadows: z.boolean().default(true),
+  // A seamless studio set: the background color everywhere, with a floor at
+  // the lowest model that shows only the shadows models cast on it.
+  shadowCatcher: z.boolean().default(false)
 }).strict();
 const schema = z.object({
   version: z.literal(1).default(1), objects: z.array(objectSchema).max(512).default([]),

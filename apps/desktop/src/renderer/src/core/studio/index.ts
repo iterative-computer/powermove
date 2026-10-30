@@ -122,14 +122,30 @@ function cameraOf(camera: THREE.Camera, w: number, h: number): StudioView['camer
   };
 }
 
-function viewOf(runtime: any, camera: StudioView['camera']): StudioView {
+/** The studio backdrop when a set is on and no background color was chosen. */
+export const STUDIO_BACKDROP = '#F6F5F8';
+
+function viewOf(runtime: any, camera: StudioView['camera'], bounds: THREE.Box3): StudioView {
   const raw = runtime.raw;
   const env = raw?.environment;
-  const value = (key: string, fallback: any) => {
-    const prop = env?.p?.[key];
+  const channel = (node: any, prefix: string, key: string, fallback: any) => {
+    const prop = node?.p?.[key];
     if (!prop) return fallback;
-    try { return runtime.evaluation(prop, `environment.${key}`) ?? prop.v; } catch { return prop.v; }
+    try { return runtime.evaluation(prop, `${prefix}.${key}`) ?? prop.v; } catch { return prop.v; }
   };
+  const value = (key: string, fallback: any) => channel(env, 'environment', key, fallback);
+  // The lens: an f-number opens the aperture; focus defaults to the aim point.
+  const fStop = Number(channel(raw?.camera, 'camera', 'fStop', 0));
+  const focus = Number(channel(raw?.camera, 'camera', 'focusDistance', 0));
+  const fov = Number(channel(raw?.camera, 'camera', 'fov', 45));
+  if (fStop > 0) {
+    // Focal length from the field of view on a 24 mm-tall sensor, in scene units
+    // scaled like the scene (1 unit ≈ 100 mm at product scale).
+    const focalMm = 12 / Math.tan(THREE.MathUtils.degToRad(fov) / 2);
+    camera.lensRadius = (focalMm / (2 * fStop)) / 100;
+  }
+  const target = raw?.camera ? new THREE.Vector3(Number(channel(raw.camera, 'camera', 'targetX', 0)), Number(channel(raw.camera, 'camera', 'targetY', 0)), Number(channel(raw.camera, 'camera', 'targetZ', 0))) : null;
+  camera.focus = focus > 0 ? focus : target ? target.distanceTo(new THREE.Vector3(...camera.position)) : 1;
   const ambient = Number(value('ambient', 0.4));
   const sky = new THREE.Color(value('ambientColor', '#ffffff'));
   // three's hemisphere light lights a diffuse surface with albedo × color ×
@@ -137,14 +153,16 @@ function viewOf(runtime: any, camera: StudioView['camera']): StudioView {
   const zenith = sky.clone().multiplyScalar(ambient);
   const ground = zenith.clone().multiplyScalar(0.35);
   const horizon = zenith.clone().lerp(ground, 0.5);
-  const background = env?.background ? new THREE.Color(env.background) : null;
+  const catcher = !!env?.shadowCatcher && !bounds.isEmpty();
+  const background = env?.background ? new THREE.Color(env.background) : catcher ? new THREE.Color(STUDIO_BACKDROP) : null;
   const display = background ? background.clone().convertLinearToSRGB() : null;
   return {
     camera,
     exposure: Number(value('exposure', 1)),
     backdrop: display ? [display.r, display.g, display.b] : [0, 0, 0],
     backdropOpaque: !!background,
-    shadowCatcher: false,
+    shadowCatcher: catcher,
+    floorY: catcher ? bounds.min.y : 0,
     environment: { zenith: [zenith.r, zenith.g, zenith.b], horizon: [horizon.r, horizon.g, horizon.b], ground: [ground.r, ground.g, ground.b] },
   };
 }
@@ -189,8 +207,6 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   const ids = [...depthIds].sort();
   const setKey = ids.join(',');
   const sceneKey = key([runtime.revision, setKey]);
-  const view = viewOf(runtime, cam);
-  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, view.exposure, view.backdrop, view.backdropOpaque]);
   const final = !!PM._studioFinal;
   let job = s.jobs.get(setKey);
   if (!job || job.sceneKey !== sceneKey) {
@@ -201,6 +217,8 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     for (const t of [job.live, job.refine, job.final]) if (t) t.setScene(scene, maps);
     s.jobs.set(setKey, job);
   }
+  const view = viewOf(runtime, cam, job.scene.bounds);
+  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher]);
   const index = job.scene.objects.indexOf(objectId);
   const target = (which: 'live' | 'refine' | 'final', tw: number, th: number): StudioTarget => {
     let t = job![which];

@@ -1,3 +1,5 @@
+import { MATERIAL_PRESETS, SHOT_TYPES, surfaceAt } from '../studio/operations';
+import { studioProgress } from '../studio';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
@@ -28,5 +30,14 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),
     frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
     describe(){return compositionScene(PM,PM.time);},
+    studio:{materials:MATERIAL_PRESETS,shots:SHOT_TYPES,progress:()=>studioProgress(PM),
+      highlightAt:(u,v)=>{
+        const runtime=compositionRuntime(PM,PM.time),camera=PM._renderCamera3D || runtime.camera;
+        const hit=surfaceAt(runtime.scene,camera,u,v);
+        if(!hit)return false;
+        const result=editScene(PM,{operation:'light_highlight',at:hit.point,normal:hit.normal},{origin:'canvas',label:'Light by pointing'});
+        if(!result.ok)PM.toast?.(result.message,{error:true});
+        return !!result.ok;
+      }},
     selection,select};
 }

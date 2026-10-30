@@ -23,7 +23,7 @@ struct Params {
   dims: vec4u,         // width, height, frame seed, samples this dispatch
   counts: vec4u,       // lights, max bounces, reset (1 = overwrite), firefly clamp (luminance)
   opts: vec4u,         // x: Live; y: environment ground color follows zenith (0) or horizon (1)
-  ground: vec4f,       // environment radiance below the horizon; w: unused
+  ground: vec4f,       // environment radiance below the horizon; w: floor height
 }
 
 // Per-triangle shading data in BVH order (positions live in `pos`).
@@ -180,8 +180,9 @@ fn transmittance(ro: vec3f, rd: vec3f, dist: f32) -> vec3f {
 }
 
 fn floor_t(ro: vec3f, rd: vec3f) -> f32 {
-  if (P.backdrop.w < 0.5 || rd.y >= -1e-6 || ro.y <= 0.0) { return BIG; }
-  return -ro.y / rd.y;
+  let y = ro.y - P.ground.w;
+  if (P.backdrop.w < 0.5 || rd.y >= -1e-6 || y <= 0.0) { return BIG; }
+  return -y / rd.y;
 }
 
 fn environment(d: vec3f) -> vec3f {

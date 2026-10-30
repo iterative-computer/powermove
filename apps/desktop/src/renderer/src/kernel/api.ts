@@ -384,6 +384,15 @@ export interface Scene3DAPI {
   createGizmo(element:HTMLElement):Scene3DGizmo;
   /** Pack selected OBJ/MTL/texture files into a durable GLB, or return a standalone model. */
   prepareImport(files: File[]): Promise<File>;
+  /** Studio, the path-traced renderer: finishes, shot types and refine status. */
+  readonly studio: {
+    readonly materials: ReadonlyArray<{ id: string; label: string; p: Record<string, number | string> }>;
+    readonly shots: ReadonlyArray<{ id: string; label: string }>;
+    /** Samples so far toward a clean view, or null when Studio is not drawing. */
+    progress(): { samples: number; goal: number; refining: boolean } | null;
+    /** Light by pointing: place a softbox whose reflection lands where the frame point (u, v in 0..1) meets a model. */
+    highlightAt(u: number, v: number): boolean;
+  };
   /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */
   convert(layerId: string): EditResult;
   createScene(): Scene3D;

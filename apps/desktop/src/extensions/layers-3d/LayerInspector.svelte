@@ -11,6 +11,8 @@
   const object=$derived(data?.object),light=$derived(data?.light),camera=$derived(data?.camera),environment=$derived(data?.environment);
   const value=(node:any,key:string)=>node?.p?.[key];
   const assetName=(id:string)=>(api.project.get().assets[id] as any)?.name;
+  const studio=untrack(()=>api.scene3d.studio);
+  function studioEdit(args:any,label:string){const result=api.scene3d.edit({target:layerId,...args},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});}
   function edit(operation:any,patch:any,label:string){const result=api.scene3d.edit({operation,target:layerId,patch},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();}
   const structural=(operation:any,key:string,label:string):ControlEditBinding=>({mode:'set',label,set:v=>edit(operation,{[key]:v},label)});
   function map(slot:string){if(!object)return;const maps={...object.material.maps};
@@ -26,10 +28,11 @@
     {#if object.source.assetId}<Row {api} label="Model materials"><ToggleField {api} get={()=>object.useSourceMaterials} edit={structural('update_object','useSourceMaterials','Model materials')} label="Model materials" /></Row>{/if}
     {#if !object.useSourceMaterials}
       <Section {api} title="Material" />
-      {#each MATERIAL_FIELDS.filter(field=>!['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
+      <div class="shelf" role="group" aria-label="Finish">{#each studio.materials as finish (finish.id)}<button type="button" class="finish" title={finish.label} aria-label={finish.label} style={`--swatch:${finish.p.color}`} onclick={()=>studioEdit({operation:'apply_material',preset:finish.id},finish.label)}></button>{/each}</div>
+      {#each MATERIAL_FIELDS.filter(field=>!['emissive','emissiveIntensity'].includes(field.key) && value(object.material,field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
     {#if !object.useSourceMaterials}
-      {#each MATERIAL_FIELDS.filter(field=>['emissive','emissiveIntensity'].includes(field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
+      {#each MATERIAL_FIELDS.filter(field=>['emissive','emissiveIntensity'].includes(field.key) && value(object.material,field.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`m.${field.key}`} channel={value(object.material,field.key)} />{/each}
     {/if}
     {#each MAP_SLOTS as slot (slot.id)}
       <Row {api} label={slot.label}><button type="button" class="chip" onclick={(event)=>api.ui.menu(event.currentTarget as HTMLElement,map(slot.id) ?? [])}>{object.material.maps[slot.id]?assetName(object.material.maps[slot.id]) ?? 'Texture':'Choose…'}</button></Row>
@@ -39,15 +42,28 @@
   {:else if light}
     <Section {api} title="Light" />
     <Row {api} label="Type"><SelectField {api} get={()=>light.type} options={LIGHT_TYPES.map(t=>({v:t.id,label:t.label}))} edit={structural('update_light','type','Light type')} label="Light type" /></Row>
-    {#each lightFields(light.type).filter(f=>!['x','y','z'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`light.${field.key}`} channel={value(light,field.key)} />{/each}
+    {#each lightFields(light.type).filter(f=>!['x','y','z'].includes(f.key) && value(light,f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`light.${field.key}`} channel={value(light,field.key)} />{/each}
     <Row {api} label="Cast shadows"><ToggleField {api} get={()=>light.castShadow} edit={structural('update_light','castShadow','Cast shadows')} label="Cast shadows" /></Row>
   {:else if camera}
     <Section {api} title="Camera" />
     <Row {api} label="Projection"><SelectField {api} get={()=>camera.projection} options={[{v:'perspective',label:'Perspective'},{v:'orthographic',label:'Orthographic'}]} edit={structural('set_camera','projection','Camera projection')} label="Projection" /></Row>
-    {#each cameraFields(camera.projection).filter(f=>!['x','y','z'].includes(f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />{/each}
+    {#each cameraFields(camera.projection).filter(f=>!['x','y','z'].includes(f.key) && value(camera,f.key)) as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`camera.${field.key}`} channel={value(camera,field.key)} />{/each}
+    <Section {api} title="Shot" />
+    <div class="shots" role="group" aria-label="Shots">{#each studio.shots as shot (shot.id)}<button type="button" class="chip" onclick={()=>studioEdit({operation:'shot',shot:shot.id,duration:4},shot.label)}>{shot.label}</button>{/each}</div>
+    <Row {api} label="Studio set"><ToggleField {api} get={()=>!!environment.shadowCatcher} edit={{mode:'set',label:'Studio set',set:(v:unknown)=>studioEdit({operation:'set_studio',on:!!v},'Studio set')}} label="Studio set" /></Row>
     <Section {api} title="Environment" />
     {#each ENVIRONMENT_FIELDS as field (field.key)}<SceneField {api} {ui} {layer} {field} path={`environment.${field.key}`} channel={value(environment,field.key)} />{/each}
     <Row {api} label="Shadows"><ToggleField {api} get={()=>environment.shadows} edit={structural('set_environment','shadows','Shadows')} label="Shadows" /></Row>
     <Row {api} label="Background"><ToggleField {api} get={()=>!!environment.background} edit={{mode:'set',label:'Background',set:(v:unknown)=>edit('set_environment',{background:v?'#161616':null},'Background')}} label="Background" />{#if environment.background}<ColorField {api} get={()=>environment.background} edit={structural('set_environment','background','Background color')} label="Background color" />{/if}</Row>
   {/if}
 {/if}
+
+<style>
+  /* Finishes are content, so they show their color; the selection ring follows the theme.
+     The shelf and the shot buttons span the panel under their section title. */
+  .shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(22px,1fr));gap:6px;padding:2px var(--panel-edge-inset,10px) 8px}
+  .shots{display:flex;flex-wrap:wrap;gap:6px;padding:2px var(--panel-edge-inset,10px) 8px}
+  .finish{aspect-ratio:1;width:100%;padding:0;border:0;border-radius:var(--r-sm,6px);background:var(--swatch);box-shadow:inset 0 0 0 .5px var(--line-strong);cursor:pointer}
+  .finish:hover{box-shadow:inset 0 0 0 .5px var(--line-strong),0 0 0 2px var(--bg-panel),0 0 0 3px var(--accent)}
+  .finish:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+</style>

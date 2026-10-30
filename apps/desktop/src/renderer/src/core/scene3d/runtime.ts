@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+
+// Softboxes (area lights) in the classic renderer need their lookup tables once.
+let rectAreaReady=false;
+const rectArea=()=>{if(!rectAreaReady){RectAreaLightUniformsLib.init();rectAreaReady=true;}};
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
 
 export type SceneEvaluator = (property: any,path: string) => any;
@@ -111,7 +116,7 @@ export class SceneRuntime {
       const placeholder = new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshBasicMaterial({color:0xff6600,wireframe:true}));
       placeholder.userData.missing = true; return placeholder;
     }
-    return new THREE.Mesh(primitiveGeometry(node.source),new THREE.MeshStandardMaterial());
+    return new THREE.Mesh(primitiveGeometry(node.source),new THREE.MeshPhysicalMaterial());
   }
 
   sync(raw: Scene3D,assets: SceneAssetGetter = this.getter,evaluate: SceneEvaluator = this.evaluation,time = 0,alreadyValidated=false,animationTime?:(id:string)=>number): void {
@@ -148,13 +153,15 @@ export class SceneRuntime {
         if (!c.isMesh) return;
         c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
         if (c.userData.missing || node.useSourceMaterials) return;
-        if (!(c.material instanceof THREE.MeshStandardMaterial) || Array.isArray(c.material)) {
+        if (!(c.material instanceof THREE.MeshPhysicalMaterial) || Array.isArray(c.material)) {
           for (const material of Array.isArray(c.material)?c.material:[c.material]) material.dispose();
-          c.material=new THREE.MeshStandardMaterial();
+          c.material=new THREE.MeshPhysicalMaterial();
         }
-        const material=c.material as THREE.MeshStandardMaterial;
+        const material=c.material as THREE.MeshPhysicalMaterial;
         material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
         material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
+        material.clearcoat=m.clearcoat ?? 0;material.clearcoatRoughness=m.clearcoatRoughness ?? .03;
+        material.transmission=m.transmission ?? 0;material.ior=m.ior ?? 1.5;material.specularIntensity=m.specular ?? 1;
         const transparent=m.opacity<1,side=node.material.doubleSided?THREE.DoubleSide:THREE.FrontSide;
         if (transparent!==material.transparent || side!==material.side) material.needsUpdate=true;
         material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
@@ -176,7 +183,8 @@ export class SceneRuntime {
       let object=this.objects.get(node.id) as THREE.Light|undefined;
       if (!object || object.userData.lightType!==node.type) {
         if (object) this.remove(node.id,object);
-        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():new THREE.PointLight();
+        if(node.type==='area')rectArea();
+        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():node.type==='area'?new THREE.RectAreaLight():new THREE.PointLight();
         object.userData.lightType=node.type;object.userData.sceneId=node.id;this.objects.set(node.id,object);this.scene.add(object);
         if ('target' in object) this.scene.add((object as THREE.DirectionalLight).target);
       }
@@ -186,6 +194,7 @@ export class SceneRuntime {
       const light=object as any;
       light.castShadow=node.castShadow && data.environment.shadows && shadowLights++<4;
       if (light.target) light.target.position.set(v.targetX,v.targetY,v.targetZ);
+      if (light.isRectAreaLight) { light.width=v.width;light.height=v.height;light.lookAt(v.targetX,v.targetY,v.targetZ); }
       if ('distance' in light) { light.distance=v.distance;light.decay=v.decay; }
       if ('angle' in light) { light.angle=radians(v.angle);light.penumbra=v.penumbra; }
       if (light.shadow) {

@@ -29,6 +29,8 @@ export type StudioView = {
   backdrop: [number, number, number];
   backdropOpaque: boolean;
   shadowCatcher: boolean;
+  /** Height of the shadow-catching floor (world y). */
+  floorY: number;
   environment: { zenith: [number, number, number]; horizon: [number, number, number]; ground: [number, number, number] };
 };
 
@@ -201,7 +203,7 @@ export class StudioTarget {
     u.set([this.width, this.height, 0, 1], 28);
     u.set([this.lightCount, 6, 1, 64], 32);
     u.set([0, 0, 0, 0], 36);
-    f.set([...view.environment.ground, 0], 40);
+    f.set([...view.environment.ground, view.floorY], 40);
     this.samples = 0;
   }
 

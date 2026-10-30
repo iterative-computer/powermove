@@ -19,7 +19,8 @@ export const PRIMITIVES: ReadonlyArray<{ id: Primitive; label: string }> = [
 export const LIGHT_TYPES: ReadonlyArray<{ id: LightType; label: string }> = [
   { id: 'sun', label: 'Sun' },
   { id: 'point', label: 'Point' },
-  { id: 'spot', label: 'Spot' }
+  { id: 'spot', label: 'Spot' },
+  { id: 'area', label: 'Softbox' }
 ];
 
 export const MAP_SLOTS: ReadonlyArray<{ id: MapSlot; label: string }> = [
@@ -48,7 +49,12 @@ export const MATERIAL_FIELDS: FieldSpec[] = [
   { key: 'metalness', label: 'Metalness', kind: 'num', step: 0.01, min: 0, max: 1 },
   { key: 'emissive', label: 'Emission', kind: 'color' },
   { key: 'emissiveIntensity', label: 'Emission strength', kind: 'num', step: 0.05, min: 0 },
-  { key: 'opacity', label: 'Opacity', kind: 'num', step: 0.01, min: 0, max: 1 }
+  { key: 'opacity', label: 'Opacity', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'clearcoat', label: 'Clear coat', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'clearcoatRoughness', label: 'Coat roughness', kind: 'num', step: 0.005, min: 0.002, max: 1 },
+  { key: 'transmission', label: 'Transmission', kind: 'num', step: 0.01, min: 0, max: 1 },
+  { key: 'ior', label: 'Index of refraction', kind: 'num', step: 0.01, min: 1, max: 2.6 },
+  { key: 'specular', label: 'Specular', kind: 'num', step: 0.01, min: 0, max: 1 }
 ];
 
 export function lightFields(type: LightType): FieldSpec[] {
@@ -58,7 +64,13 @@ export function lightFields(type: LightType): FieldSpec[] {
     ...xyz('', 'Position', 0.01)
   ];
   if (type !== 'point') fields.push(...xyz('target', 'Target', 0.01));
-  if (type !== 'sun') {
+  if (type === 'area') {
+    fields.push(
+      { key: 'width', label: 'Width', kind: 'num', step: 0.05, min: 0.001 },
+      { key: 'height', label: 'Height', kind: 'num', step: 0.05, min: 0.001 }
+    );
+  }
+  if (type !== 'sun' && type !== 'area') {
     fields.push(
       { key: 'distance', label: 'Range', kind: 'num', step: 0.1, min: 0 },
       { key: 'decay', label: 'Falloff', kind: 'num', step: 0.05, min: 0 }
@@ -81,7 +93,9 @@ export function cameraFields(projection: 'perspective' | 'orthographic'): FieldS
       ? { key: 'fov', label: 'Field of view', kind: 'num', step: 0.5, min: 1, max: 150, unit: '°' }
       : { key: 'zoom', label: 'Zoom', kind: 'num', step: 0.01, min: 0.01 },
     { key: 'near', label: 'Clip start', kind: 'num', step: 0.01, min: 0.001 },
-    { key: 'far', label: 'Clip end', kind: 'num', step: 1, min: 0.01 }
+    { key: 'far', label: 'Clip end', kind: 'num', step: 1, min: 0.01 },
+    { key: 'fStop', label: 'f-stop', kind: 'num', step: 0.1, min: 0, max: 64 },
+    { key: 'focusDistance', label: 'Focus', kind: 'num', step: 0.01, min: 0 }
   ];
 }
 

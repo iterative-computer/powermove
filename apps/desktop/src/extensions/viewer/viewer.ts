@@ -902,6 +902,26 @@ V.attach = (stage: HTMLElement) => {
     preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
 
+    // Studio's refine indicator: shows while a 3D view is still sharpening.
+    if(api.scene3d?.studio && !V.studioPill){
+      const pill=document.createElement('div');pill.id='studio-refine';pill.setAttribute('role','status');
+      pill.style.cssText='position:absolute;right:10px;bottom:10px;z-index:6;display:none;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:var(--r-pill);background:var(--bg-float);box-shadow:var(--shadow-float);color:var(--tx-2);font-size:var(--fs-sm);pointer-events:none';
+      const ring=document.createElementNS('http://www.w3.org/2000/svg','svg');ring.setAttribute('width','14');ring.setAttribute('height','14');ring.setAttribute('viewBox','0 0 14 14');
+      ring.innerHTML='<circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--ink-3)" stroke-width="2"/><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" transform="rotate(-90 7 7)" stroke-dasharray="0 35"/>';
+      const label=document.createElement('span');pill.append(ring,label);V.stage.append(pill);V.studioPill=pill;
+      let shown='';
+      const tick=()=>{
+        const p=api.scene3d!.studio.progress();
+        const text=p?(p.samples>=p.goal?'Clean':p.refining||p.samples>0?`Refining · ${Math.round(100*p.samples/p.goal)}%`:'Live'):'';
+        if(text!==shown){
+          shown=text;label.textContent=text;pill.style.display=text?'flex':'none';
+          const arc=ring.lastElementChild as SVGCircleElement;arc.setAttribute('stroke-dasharray',`${p?34.6*Math.min(1,p.samples/p.goal):0} 35`);
+        }
+      };
+      const timer=window.setInterval(tick,200);
+      V.studioPillOff=()=>{window.clearInterval(timer);pill.remove();V.studioPill=undefined;};
+    }
+
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
 
     if (!api.render.gl.context) api.render.gl.init(gl);
@@ -1569,6 +1589,11 @@ function bindStage(stage: any, inner: any): () => void {
     return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
   listen(stage,'pointerdown',guarded((event:any)=>{
+    // Light by pointing: Alt+Shift+click a model to put a softbox's highlight there.
+    if(event.altKey && event.shiftKey && event.button===0 && api.scene3d?.studio){
+      const comp=api.model.curComp(),point=pointerComp(event);
+      if(api.scene3d.studio.highlightAt(point.x/comp.w,point.y/comp.h)){event.preventDefault();event.stopPropagation();return;}
+    }
     if(sceneGizmo?.active())return;
     if(sceneNavigation?.pointerDown(event))return;
     if(sceneGizmo?.pointerDown(event))return;
