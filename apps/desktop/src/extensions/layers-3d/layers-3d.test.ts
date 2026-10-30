@@ -32,12 +32,23 @@ describe('3D layer UI and commands',()=>{
     expect(api.selection.select).toHaveBeenCalledWith(['created']);
   });
   it('packs OBJ/MTL/textures and imports exactly one model layer',async()=>{
-    const {api}=harness(),obj=new File(['v 0 0 0'],'model.obj'),mtl=new File(['newmtl paint'],'model.mtl'),packed=new File(['packed'],'model.glb');
+    const {api,layers}=harness(),obj=new File(['v 0 0 0'],'model.obj'),mtl=new File(['newmtl paint'],'model.mtl'),packed=new File(['packed'],'model.glb');
+    layers.push({id:'cam',d:{definition:'powermove.3d.camera'}}); // a composition already set up
     api.scene3d.prepareImport.mockResolvedValue(packed);
     const result=await importModelIntoScene(api,[obj,mtl]);expect(result.ok).toBe(true);
     expect(api.scene3d.prepareImport).toHaveBeenCalledWith([obj,mtl]);
     expect(api.assets.import).toHaveBeenCalledWith(packed,{layerDefinition:'powermove.3d.object'});
     expect(api.scene3d.edit).toHaveBeenCalledTimes(1);expect(api.scene3d.edit.mock.calls[0][0]).toMatchObject({operation:'add_object',object:{source:{assetId:'asset'},useSourceMaterials:true}});
+  });
+  it('imports the first model into a finished studio in one Undo',async()=>{
+    const {api}=harness(),glb=new File(['glb'],'bottle.glb');
+    api.scene3d.prepareImport.mockResolvedValue(glb);
+    const result=await importModelIntoScene(api,[glb]);expect(result.ok).toBe(true);
+    expect(api.scene3d.edit.mock.calls.map((c:any)=>c[0].operation)).toEqual(['add_object','drop_to_floor','auto_studio']);
+    expect(api.scene3d.edit.mock.calls[1][0]).toMatchObject({target:'created'});
+    expect(api.edit.begin).toHaveBeenCalledWith('Import bottle.glb',{origin:'command'});
+    expect(api.edit.commit).toHaveBeenCalledWith('Import bottle.glb');
+    expect(api.edit.cancel).not.toHaveBeenCalled();
   });
   it('cancels a failed multi-layer operation without changing selection',()=>{
     const {api,layers}=harness();layers.push({id:'a',d:{definition:'powermove.3d.object'}},{id:'b',d:{definition:'powermove.3d.light'}});
