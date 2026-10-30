@@ -25,8 +25,16 @@ struct Post {
   cur_pos: vec4f, cur_fwd: vec4f, cur_right: vec4f, cur_up: vec4f,
   prev_pos: vec4f, prev_fwd: vec4f, prev_right: vec4f, prev_up: vec4f,
 }
-// History: accumulated linear color (w: frames) and the surface it saw (normal, distance).
+// History: accumulated linear color (w: frames) and the surface it saw (as gbuf).
 struct Hist { c: vec4f, g: vec4f }
+
+// gbuf: first-hit normal (octahedral xy), object + 1 (z), distance (w; -1: the void).
+fn oct_decode(e: vec2f) -> vec3f {
+  var n = vec3f(e, 1.0 - abs(e.x) - abs(e.y));
+  if (n.z < 0.0) { n = vec3f((1.0 - abs(n.yx)) * select(vec2f(-1.0), vec2f(1.0), n.xy >= vec2f(0.0)), n.z); }
+  let l = length(n);
+  return select(n / l, vec3f(0.0), l < 1e-6);
+}
 
 @group(0) @binding(0) var<uniform> Q: Post;
 @group(0) @binding(1) var<storage, read> accum: array<vec4f>;
@@ -103,6 +111,7 @@ fn atrous(@builtin(global_invocation_id) g: vec3u) {
   let i = g.y * Q.dims.x + g.x;
   let c0 = src[i];
   let g0 = gbuf[i];
+  let n0 = oct_decode(g0.xy);
   let kern = array<f32, 5>(1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
   var sum = vec4f(0.0);
   var wsum = 0.0;
@@ -118,7 +127,7 @@ fn atrous(@builtin(global_invocation_id) g: vec3u) {
       // Never blend the void with the product.
       if ((g0.w < 0.0) != (gq.w < 0.0)) { continue; }
       if (g0.w >= 0.0) {
-        wt *= pow(max(dot(g0.xyz, gq.xyz), 0.0), 32.0);
+        wt *= pow(max(dot(n0, oct_decode(gq.xy)), 0.0), 32.0);
         wt *= exp(-abs(g0.w - gq.w) / (0.02 * g0.w + 0.5));
       }
       // Product: edge-stop on relative luminance, loosely (1-sample noise is
@@ -176,7 +185,7 @@ fn temporal(@builtin(global_invocation_id) g: vec3u) {
   if (ok) {
     let h = hist_in[u32(prev.y) * Q.dims.x + u32(prev.x)];
     let dist = length(v);
-    let same = h.g.w >= 0.0 && abs(h.g.w - dist) < 0.03 * dist + 1e-3 && dot(h.g.xyz, geo.xyz) > 0.9;
+    let same = h.g.w >= 0.0 && abs(h.g.w - dist) < 0.03 * dist + 1e-3 && h.g.z == geo.z && dot(oct_decode(h.g.xy), oct_decode(geo.xy)) > 0.9;
     if (same) {
       let n = min(h.c.w + 1.0, 16.0);
       out = vec4f(mix(h.c.xyz, cur.xyz, 1.0 / n), n);

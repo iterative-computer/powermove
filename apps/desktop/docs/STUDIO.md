@@ -75,6 +75,9 @@ Beyond color, roughness, metalness, emission and opacity, materials have:
 | Brushed | highlights stretched along the surface (anisotropy, −1 to 1) |
 | Subsurface | how far light travels inside (wax, soap, skin, jade), in scene units |
 
+Glass and polished metal also **focus light**: a glass on the studio floor
+casts a bright pool inside its shadow (caustics), in Refine and Final.
+
 Lights: sun, point, spot and **softbox** (area: width × height facing its
 target; larger is softer). Cameras have an **f-stop** (0 keeps everything
 sharp) and **focus** distance (0 focuses on the aim point).
@@ -111,3 +114,7 @@ shells. Verify with `render_frames`: agent frames always use the Final tier.
   own pixels, so masks, effects and opacity stay per layer.
 - Live screens render their composition at each frame's time and update
   only their texture.
+- Caustics (light focused through glass or off polished metal onto the
+  floor or a matte surface) come from photons traced from the lights before
+  each batch of samples. Refine and Final only, and only in scenes with glass
+  or polished metal.

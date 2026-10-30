@@ -447,6 +447,28 @@ Reflections get up to 2 ms of Live's 6 ms budget on a base machine. When
 that is too little, the frame-budget governor lowers reflection resolution
 first and never drops the rays entirely.
 
+### 4.3b Caustics
+
+Light focused by glass or a polished part (a bright pool inside a glass's
+shadow, a ring of light off a watch case) is nearly invisible to camera paths:
+they would have to hit a small light through a curved surface by chance.
+Studio traces it from the other end:
+
+1. Before each batch of samples, a `photons` pass shoots photons from the
+   lights (softboxes by area, spheres and spots by solid angle, the sun over
+   the scene's bounds). A photon is kept only if it passes through glass or
+   bounces off polished metal and then lands on a matte surface or the
+   studio floor.
+2. Landing photons add their flux to a hashed grid at two cell sizes. Cells
+   keep a key, so two cells that hash alike never share light.
+3. Matte hits and the shadow catcher read the grid: the fine cells where
+   enough photons landed, the coarse cells where light is sparse.
+4. Camera paths that would find the same light (matte, then glass, then a
+   light) stop counting it, so nothing is lit twice.
+
+Caustics run in Refine and Final only, and only when the scene has glass or
+polished metal. They add about 20% to Final time in those scenes.
+
 ### 4.4 Why it can be fast: the product-shot assumptions
 
 These assumptions only hold because the scene is a bounded studio stage
@@ -558,16 +580,17 @@ User and agent guide: `apps/desktop/docs/STUDIO.md`.
 | Phase | Built | Not built |
 |---|---|---|
 | 0. Prototype | `engine/crates/pm-studio`: the wgpu path tracer and its product scenes, measured on a base M5 (Live 3.6–11 ms at 1080p; Refine 64 spp 0.4–3.8 s) | A base M1 Air run (no such machine here); a side-by-side against PBRT/Mitsuba |
-| 1. Engine core | The same WGSL in the app on WebGPU: scene extraction, two-level BVH (moving a 153,600-triangle model costs 0.03 ms instead of a 438 ms rebuild), per-layer output, Live/Refine/Final, softbox/sphere/spot/sun lights, color/emissive/ORM/normal maps, glass-tinted shadows | Hosting Studio inside the native engine (`pm-render`) and GPUI — the native engine is unmerged and GPUI not yet started; hardware ray tracing (not exposed by WebGPU); temporal reprojection for Live; OIDN; meshlet LODs and KTX2 |
-| 2. Studio UX | Finishes, light by pointing (click, drag to slide, scroll to soften), Shots, studio set, auto studio (and on first import), drop to floor, place on, exploded views, lens f-stop/focus, refine indicator; every tool in `edit_3d` | Engine-rendered swatch previews |
+| 1. Engine core | The same WGSL in the app on WebGPU: scene extraction, two-level BVH (moving a 153,600-triangle model costs 0.03 ms instead of a 438 ms rebuild), per-layer output, Live/Refine/Final, softbox/sphere/spot/sun lights, color/emissive/ORM/normal maps, glass-tinted shadows, temporal reprojection for Live (16 frames deep while dragging) | Hosting Studio inside the native engine (`pm-render`) and GPUI — the native engine is unmerged and GPUI not yet started; hardware ray tracing (not exposed by WebGPU); OIDN; meshlet LODs and KTX2 |
+| 2. Studio UX | Finishes, light by pointing (click, drag to slide, scroll to soften), Shots, studio set, auto studio (and on first import), drop to floor, place on, exploded views, lens f-stop/focus, refine indicator, finish swatches rendered by Studio; every tool in `edit_3d` | — |
 | 3. Final output | Per-composition Final samples, motion blur sharing the budget, depth of field, **live screens** (a composition playing on a product's display), and the acceptance film (`e2e/studio-film.spec.ts`: an original product film made and exported entirely in Powermove) | A shot-for-shot rebuild of the reference film (it needs a CAD-quality device model) |
-| 4. Hard materials | Sheen, thin film, dispersion, water droplets, brushed metal (anisotropy), subsurface (random walk) | Caustics, STEP import, Gaussian splats; hand plates use ordinary 2D compositing |
+| 4. Hard materials | Sheen, thin film, dispersion, water droplets, brushed metal (anisotropy), subsurface (random walk), **caustics** (photons through glass and off polished metal, Refine/Final) | STEP import, Gaussian splats; hand plates use ordinary 2D compositing |
 
 ## 6. Risks and open questions
 
-- **Caustics and stacked glass** stay the slowest case. Light focused through
-  glass onto the floor is costly even for offline renderers. Plan: Refine and
-  Final only, with a guided or photon-cache path in Phase 4.
+- **Caustics and stacked glass** stay the slowest case. Built as a photon
+  grid (section 4.3b): Refine and Final only, about 20% more
+  Final time in scenes with glass or polished metal and none otherwise. The
+  grid trades sharpness for smoothness where photons are sparse.
 - **Denoised animation can shimmer.** Final needs enough samples or temporal
   denoising. Measure it on the corpus turntables early.
 - **Only one GPU backend is turned on today.** `pm-gpu` enables wgpu's Metal

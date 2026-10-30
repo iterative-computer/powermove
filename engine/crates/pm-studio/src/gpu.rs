@@ -19,7 +19,16 @@ struct Params {
     counts: [u32; 4],
     opts: [u32; 4],
     ground: [f32; 4],
+    /// Caustics: cell size, photons emitted so far, on (1), photons this pass.
+    caustic: [f32; 4],
+    /// Scene centre and radius (where sun photons aim).
+    bounds: [f32; 4],
 }
+
+/// Hashed photon grid slots (8 words each); must match trace.wgsl.
+const GRID_CELLS: u64 = 1 << 19;
+/// Photons traced per sample batch when caustics are on.
+const PHOTONS_PER_PASS: u32 = 1 << 18;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -42,6 +51,7 @@ pub struct Renderer {
     compose: wgpu::ComputePipeline,
     atrous: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
+    photons: wgpu::ComputePipeline,
     trace_layout: wgpu::BindGroupLayout,
     post_layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
@@ -50,7 +60,7 @@ pub struct Renderer {
     bgsum: wgpu::Buffer,
     gbuf: wgpu::Buffer,
     ebuf: wgpu::Buffer,
-    idbuf: wgpu::Buffer,
+    grid: wgpu::Buffer,
     display: [wgpu::Buffer; 2],
     packed: wgpu::Buffer,
     readback: wgpu::Buffer,
@@ -62,11 +72,15 @@ pub struct Renderer {
     base: Params,
     exposure: f32,
     backdrop: [f32; 4],
+    bounds: [f32; 4],
     /// Samples accumulated since the last reset.
     pub samples: u32,
     frame: u32,
     /// Live tier: cheaper floor shadows and primary-only mirror coats.
     pub live: bool,
+    /// Trace photons for caustics (glass or polished metal in the scene; not Live).
+    pub caustics: bool,
+    photons_emitted: f32,
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -155,6 +169,7 @@ impl Renderer {
         let compose = pipeline(&post_src, &post_layout, "compose");
         let atrous = pipeline(&post_src, &post_layout, "atrous");
         let pack = pipeline(&post_src, &post_layout, "pack");
+        let photons = pipeline(&trace_src, &trace_layout, "photons");
 
         let pixels = (width * height) as u64;
         let buf = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
@@ -182,7 +197,7 @@ impl Renderer {
             bgsum: buf("bgsum", pixels * 16, rw),
             gbuf: buf("gbuf", pixels * 16, rw),
             ebuf: buf("ebuf", pixels * 16, rw),
-            idbuf: buf("idbuf", pixels * 4, rw),
+            grid: buf("photon grid", GRID_CELLS * 32, rw),
             display: [buf("display a", pixels * 16, rw), buf("display b", pixels * 16, rw)],
             packed: buf("packed", pixels * 4, rw),
             readback: buf("readback", pixels * 4, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
@@ -195,6 +210,7 @@ impl Renderer {
             compose,
             atrous,
             pack,
+            photons,
             trace_layout,
             post_layout,
             screen,
@@ -205,9 +221,12 @@ impl Renderer {
             base: bytemuck::Zeroable::zeroed(),
             exposure: 1.0,
             backdrop: [1.0; 4],
+            bounds: [0.0, 0.0, 0.0, 1.0],
             samples: 0,
             frame: 0,
             live: false,
+            caustics: false,
+            photons_emitted: 0.0,
         };
         Ok(r)
     }
@@ -247,6 +266,18 @@ impl Renderer {
         ];
         self.light_count = prepared.lights.len() as u32;
         self.trace_group = None;
+        // Caustics only where something can focus light: glass or polished metal.
+        self.caustics = prepared.materials.iter().any(|m| m.spec[3] * (1.0 - m.base[3]) > 0.5 || (m.base[3] > 0.5 && m.spec[0] < 0.25));
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &prepared.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let centre = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+        let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-3) * 0.5;
+        self.bounds = [centre[0], centre[1], centre[2], radius];
         self.set_camera(scene);
     }
 
@@ -272,6 +303,8 @@ impl Renderer {
             counts: [self.light_count, 6, 1, 0],
             opts: [0; 4],
             ground: (scene.environment.1 * 0.5).to4(0.0),
+            caustic: [0.0; 4],
+            bounds: self.bounds,
         };
         self.exposure = scene.exposure;
         // Product scenes show their backdrop; the app's layers leave the void transparent.
@@ -299,7 +332,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 9, resource: self.gbuf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 10, resource: self.ebuf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: b[4].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 12, resource: self.idbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 12, resource: self.grid.as_entire_binding() },
                 ],
             }));
         }
@@ -319,7 +352,9 @@ impl Renderer {
         // Seeds follow the sample index, so a scene and view render the same every time.
         if reset {
             self.frame = 0;
+            self.photons_emitted = 0.0;
         }
+        let photons = self.caustics && !self.live && self.light_count > 0;
         let mut left = spp;
         let mut first = true;
         while left > 0 {
@@ -329,9 +364,27 @@ impl Renderer {
             p.dims = [w, h, self.frame, n];
             p.counts = [self.light_count, bounces, if reset && first { 1 } else { 0 }, clamp];
             p.opts = [u32::from(self.live), 0, 1, 0];
-            self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             let group = self.trace_group().clone();
             let mut enc = self.device.create_command_encoder(&Default::default());
+            if photons {
+                // Photons first, so this batch's camera paths see them.
+                if reset && first {
+                    enc.clear_buffer(&self.grid, 0, None);
+                }
+                p.caustic = [self.bounds[3] / 160.0, self.photons_emitted, 1.0, PHOTONS_PER_PASS as f32];
+                self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+                {
+                    let mut pass = enc.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(&self.photons);
+                    pass.set_bind_group(0, &group, &[]);
+                    pass.dispatch_workgroups(PHOTONS_PER_PASS.div_ceil(64), 1, 1);
+                }
+                self.queue.submit([enc.finish()]);
+                enc = self.device.create_command_encoder(&Default::default());
+                self.photons_emitted += PHOTONS_PER_PASS as f32;
+                p.caustic[1] = self.photons_emitted;
+            }
+            self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 pass.set_pipeline(&self.trace);

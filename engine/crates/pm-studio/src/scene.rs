@@ -366,6 +366,19 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
             let target = v3(0.0, 34.0, 0.0);
             (objects, Camera::lens(v3(0.0, 130.0, 560.0), target, 60.0, 0.0), target)
         }
+        // Caustics: glass and a mirror under one small, hard light.
+        "caustics" => {
+            materials.push(Material::glass(v3(1.0, 1.0, 1.0), 0.0)); // 6
+            materials.push(Material { dispersion: 1.0, ..Material::glass(v3(1.0, 1.0, 1.0), 0.0) }); // 7
+            materials.push(Material::metal(srgb_hex("#E8C27A"), 0.03)); // 8 polished gold
+            let objects = vec![
+                Object { mesh: mesh::sphere(v3(-90.0, 40.0, 0.0), 40.0, 96, 192), material: 6 },
+                Object { mesh: mesh::sphere(v3(10.0, 40.0, 20.0), 40.0, 96, 192), material: 7 },
+                Object { mesh: mesh::sphere(v3(105.0, 30.0, -10.0), 30.0, 96, 192), material: 8 },
+            ];
+            let target = v3(0.0, 30.0, 0.0);
+            (objects, Camera::lens(v3(0.0, 260.0, 470.0), v3(0.0, 0.0, 30.0), 60.0, 0.0), target)
+        }
         // The water shot: droplets beading on the display glass.
         "wet" => {
             materials[2].droplets = 0.55;
@@ -379,6 +392,14 @@ pub fn preset(name: &str, finish: &str, t: f32) -> Option<Scene> {
         _ => return None,
     };
     let (mut lights, environment) = studio(target);
+    // Caustics: one small key light low on the left and back, so focused
+    // light falls on the floor toward the camera; a dim overhead fill.
+    if name == "caustics" {
+        lights = vec![
+            Softbox::aimed(target, -145.0, 35.0, 700.0, 36.0, 36.0, Vec3::splat(900.0)),
+            Softbox::aimed(target, 0.0, 89.0, 950.0, 1500.0, 1500.0, Vec3::splat(0.35)),
+        ];
+    }
     // The back: a highlight painted onto the aluminium beside the camera bump.
     if name == "back" {
         let up = v3(0.0, 1.0, 0.0);

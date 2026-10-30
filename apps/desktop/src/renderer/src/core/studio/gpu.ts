@@ -38,6 +38,14 @@ export type StudioView = {
 
 /** post.wgsl's Post: three vec4s, then two cameras of four vec4s. */
 const POST_BYTES = 48 + 128;
+/** trace.wgsl's Params: 13 vec4. */
+const PARAMS_BYTES = 208;
+/** Photon grid slots (8 words each); must match trace.wgsl's GRID_CELLS. */
+const GRID_SLOTS = 1 << 19;
+/** Photons traced per sample batch when a scene has caustics. */
+const PHOTONS_PER_PASS = 1 << 17;
+/** Global switches (tests compare a render with and without caustics). */
+export const studioOptions = { caustics: true };
 
 const GPU: any = typeof navigator !== 'undefined' ? (navigator as any).gpu : undefined;
 const U = (globalThis as any).GPUBufferUsage, T = (globalThis as any).GPUTextureUsage, S = (globalThis as any).GPUShaderStage;
@@ -74,7 +82,7 @@ export function initStudioGpu(): Promise<any> {
 export const studioGpuReady = () => !!device;
 export const studioGpuFailure = () => failure;
 
-type Pipelines = { trace: any; resolve: any; atrous: any; compose: any; pack: any; temporal: any; present: any; traceLayout: any; postLayout: any; presentLayout: any; sampler: any };
+type Pipelines = { trace: any; photons: any; resolve: any; atrous: any; compose: any; pack: any; temporal: any; present: any; traceLayout: any; postLayout: any; presentLayout: any; sampler: any };
 let pipelines: Pipelines | null = null;
 
 function storage(binding: number, readOnly: boolean, visibility = S.COMPUTE) {
@@ -111,6 +119,7 @@ function build(): Pipelines {
   });
   pipelines = {
     trace: compute(trace, traceLayout, 'main'),
+    photons: compute(trace, traceLayout, 'photons'),
     resolve: compute(post, postLayout, 'resolve'),
     atrous: compute(post, postLayout, 'atrous'),
     compose: compute(post, postLayout, 'compose'),
@@ -138,14 +147,19 @@ export class StudioTarget {
   private params: any;
   private postParams: any[];
   private presentParams = new Map<string, any>();
-  private accum: any; private bgsum: any; private gbuf: any; private ebuf: any; private idbuf: any;
+  private accum: any; private bgsum: any; private gbuf: any; private ebuf: any;
+  /** Caustic photons: allocated the first time a scene can focus light. */
+  private grid: any; private gridSize = 0;
+  private caustics = false;
+  private photonsEmitted = 0;
+  private bounds: [number, number, number, number] = [0, 0, 0, 1];
   private display: any[];
   private packed: any;
   private sceneBuffers: any[] = [];
   private mapTexture: any = null;
   private traceGroup: any = null;
   private lightCount = 0;
-  private base = new ArrayBuffer(176);
+  private base = new ArrayBuffer(PARAMS_BYTES);
   private canvases = new Map<string, { canvas: HTMLCanvasElement; context: any }>();
   view: StudioView | null = null;
   live = false;
@@ -156,18 +170,18 @@ export class StudioTarget {
     void p;
     const px = width * height;
     const buf = (label: string, size: number, usage = U.STORAGE | U.COPY_DST | U.COPY_SRC) => device.createBuffer({ label, size: Math.max(16, size), usage });
-    this.params = buf('studio params', 176, U.UNIFORM | U.COPY_DST);
+    this.params = buf('studio params', PARAMS_BYTES, U.UNIFORM | U.COPY_DST);
     this.postParams = Array.from({ length: 10 }, () => buf('studio post params', POST_BYTES, U.UNIFORM | U.COPY_DST));
     // Live's history, swapped each frame: one read, one written.
     this.history = [buf('history a', px * 32), buf('history b', px * 32)];
     this.accum = buf('accum', px * 16); this.bgsum = buf('bgsum', px * 16); this.gbuf = buf('gbuf', px * 16);
-    this.ebuf = buf('ebuf', px * 16); this.idbuf = buf('idbuf', px * 4);
+    this.ebuf = buf('ebuf', px * 16); this.grid = buf('photon grid', 32); this.gridSize = 32;
     this.display = [buf('display a', px * 16), buf('display b', px * 16)];
     this.packed = buf('packed', px * 4);
   }
 
   destroy(): void {
-    for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.idbuf, ...this.display, this.packed, ...this.history, ...this.sceneBuffers]) b?.destroy?.();
+    for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.grid, ...this.display, this.packed, ...this.history, ...this.sceneBuffers]) b?.destroy?.();
     this.mapTexture?.destroy?.();
   }
 
@@ -198,6 +212,16 @@ export class StudioTarget {
     }
     this.lightCount = scene.lightCount;
     this.instanceCount = scene.instanceCount;
+    // Caustics only where something can focus light: glass or polished metal.
+    const m = scene.materials;
+    this.caustics = false;
+    for (let i = 0; i + 24 <= m.length; i += 24) {
+      if (m[i + 7]! * (1 - m[i + 3]!) > 0.5 || (m[i + 3]! > 0.5 && m[i + 4]! < 0.25)) { this.caustics = true; break; }
+    }
+    if (!scene.bounds.isEmpty()) {
+      const { min: lo, max: hi } = scene.bounds;
+      this.bounds = [(lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2, Math.max(1e-3, Math.hypot(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z) / 2)];
+    }
     const layers = Math.max(1, maps.length);
     if (!this.mapTexture || this.mapLayers !== layers) {
       this.mapTexture?.destroy?.();
@@ -241,6 +265,8 @@ export class StudioTarget {
     u.set([this.lightCount, 6, 1, 64], 32);
     u.set([0, 0, 0, 0], 36);
     f.set([...view.environment.ground, view.floorY], 40);
+    f.set([0, 0, 0, 0], 44);
+    f.set(this.bounds, 48);
     this.samples = 0;
   }
 
@@ -252,6 +278,15 @@ export class StudioTarget {
     // Stills and Final restart their seeds, so the same scene and view always give
     // the same pixels; Live keeps counting, so frames blended over time average out.
     if (reset && !this.live) this.frame = 0;
+    if (reset) this.photonsEmitted = 0;
+    // Caustics: photons from the lights through glass and mirrors (Refine, Final, stills).
+    const photons = studioOptions.caustics && this.caustics && !this.live && this.lightCount > 0;
+    if (photons && this.gridSize < GRID_SLOTS * 32) {
+      this.grid.destroy();
+      this.grid = device.createBuffer({ label: 'photon grid', size: GRID_SLOTS * 32, usage: U.STORAGE | U.COPY_DST });
+      this.gridSize = GRID_SLOTS * 32;
+      this.traceGroup = this.groupWith(this.params);
+    }
     let left = spp, first = true;
     // One dispatch per submission: writeBuffer and submit run in queue order,
     // so each dispatch sees its own seed and reset flag.
@@ -262,6 +297,24 @@ export class StudioTarget {
       u.set([this.width, this.height, this.frame, n], 28);
       u.set([this.lightCount, bounces, reset && first ? 1 : 0, clamp], 32);
       u.set([this.live ? 1 : 0, this.view.shadows === false ? 1 : 0, this.instanceCount, 0], 36);
+      const f = new Float32Array(this.base);
+      f.set([this.bounds[3] / 160, this.photonsEmitted, 0, 0], 44);
+      f.set(this.bounds, 48);
+      if (photons) {
+        // Photons first, in their own submission, so this batch's camera paths see them.
+        const pe = device.createCommandEncoder();
+        if (reset && first) pe.clearBuffer(this.grid);
+        f.set([this.bounds[3] / 160, this.photonsEmitted, 1, PHOTONS_PER_PASS], 44);
+        device.queue.writeBuffer(this.params, 0, this.base);
+        const pp = pe.beginComputePass();
+        pp.setPipeline(p.photons);
+        pp.setBindGroup(0, this.traceGroup);
+        pp.dispatchWorkgroups(Math.ceil(PHOTONS_PER_PASS / 64));
+        pp.end();
+        device.queue.submit([pe.finish()]);
+        this.photonsEmitted += PHOTONS_PER_PASS;
+        f[45] = this.photonsEmitted;
+      }
       device.queue.writeBuffer(this.params, 0, this.base);
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
@@ -289,7 +342,7 @@ export class StudioTarget {
         { binding: 6, resource: p.sampler },
         { binding: 7, resource: { buffer: this.accum } }, { binding: 8, resource: { buffer: this.bgsum } },
         { binding: 9, resource: { buffer: this.gbuf } }, { binding: 10, resource: { buffer: this.ebuf } },
-        { binding: 11, resource: { buffer: b[4] } }, { binding: 12, resource: { buffer: this.idbuf } },
+        { binding: 11, resource: { buffer: b[4] } }, { binding: 12, resource: { buffer: this.grid } },
       ],
     });
   }
@@ -367,7 +420,7 @@ export class StudioTarget {
       entries: [
         { binding: 0, resource: { buffer: params } },
         { binding: 1, resource: { buffer: this.display[this.composed] } },
-        { binding: 2, resource: { buffer: this.idbuf } },
+        { binding: 2, resource: { buffer: this.gbuf } },
       ],
     });
     const enc = device.createCommandEncoder();

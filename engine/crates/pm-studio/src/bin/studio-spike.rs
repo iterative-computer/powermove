@@ -2,7 +2,7 @@
 //!
 //!   studio-spike --out DIR [--scene hero|edge|macro|back|chrome|all]
 //!                [--finish space-gray|starlight|blue|purple]
-//!                [--size 1920x1080] [--final-spp 256] [--frames 0]
+//!                [--size 1920x1080] [--final-spp 256] [--frames 0] [--no-caustics]
 //!
 //! Writes `<scene>-live.png`, `<scene>-refine.png`, `<scene>-final.png`,
 //! optional turntable frames `<scene>-NNNN.png`, and `report.json`.
@@ -49,6 +49,9 @@ fn main() {
         let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
         r.set_scene(&s, &prepared);
         live_r.set_scene(&s, &prepared);
+        if args.iter().any(|a| a == "--no-caustics") {
+            r.caustics = false;
+        }
 
         // Warm up (pipeline creation, first dispatch), then Live: half
         // resolution, 1 spp, 3 bounces, denoised. Timed without readback.

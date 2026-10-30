@@ -24,6 +24,8 @@ struct Params {
   counts: vec4u,       // lights, max bounces, reset (1 = overwrite), firefly clamp (luminance)
   opts: vec4u,         // x: Live; y: shadows off (1); z: instance count
   ground: vec4f,       // environment radiance below the horizon; w: floor height
+  caustic: vec4f,      // x: grid cell size, y: photons emitted so far, z: caustics on (1), w: photons this pass
+  bounds: vec4f,       // scene centre (xyz) and radius, for sun photons
 }
 
 // Per-triangle shading data in BVH order (positions live in `pos`).
@@ -69,15 +71,18 @@ fn vector_to_world(i: u32, v: vec3f) -> vec3f {
 @group(0) @binding(7) var<storage, read_write> accum: array<vec4f>;
 // rgb: sum of backdrop display color for samples that saw the void/floor; w: how many
 @group(0) @binding(8) var<storage, read_write> bgsum: array<vec4f>;
-// xyz: first-hit normal; w: first-hit distance (-1 for the void)
+// xy: first-hit normal (octahedral), z: first-hit object + 1 (0: the void),
+// w: first-hit distance (-1 for the void)
 @group(0) @binding(9) var<storage, read_write> gbuf: array<vec4f>;
 // rgb: sum of emission seen directly by the camera (a product's screen):
 // exact per pixel, so Live denoises only what is noisy.
 @group(0) @binding(10) var<storage, read_write> ebuf: array<vec4f>;
 // Corner positions, 3 per triangle in BVH order (intersection reads only these).
 @group(0) @binding(11) var<storage, read> pos: array<vec4f>;
-// First hit's object + 1 (0: the void) — splits one trace into per-layer outputs.
-@group(0) @binding(12) var<storage, read_write> idbuf: array<u32>;
+// Caustics: a hashed photon grid at two cell sizes, 8 words per slot: flux
+// (rgb, f32 bits), the cell's key, the photon count.
+@group(0) @binding(12) var<storage, read_write> grid: array<atomic<u32>>;
+const GRID_CELLS: u32 = 524288u;
 
 const PI: f32 = 3.14159265;
 const EPS: f32 = 0.004;
@@ -608,6 +613,8 @@ fn catcher_ratio(p: vec3f) -> f32 {
     if (intersect(p, dir, 4000.0, true).tri < 0) { lit += e; }
   }
   if (free <= 0.0) { return 1.0; }
+  // Focused light on the studio floor brightens it past the backdrop.
+  if (P.caustic.z > 0.5 && P.opts.x == 0u) { lit += dot(caustic_at(p), vec3f(0.333)); }
   return lit / free;
 }
 
@@ -759,6 +766,10 @@ fn path(px: vec2f) -> Sample {
   var last_pdf = 0.0;   // BSDF pdf of the last bounce (0: camera or delta)
   var primary = true;   // still on the camera ray (passes through cut-outs keep it)
   var band = -1;        // dispersion: the RGB channel this path carries (-1: all)
+  // Caustics: 1 after a matte bounce, 2 once glass or a mirror follows it.
+  // Photons already deliver that light, so the path must not count it twice.
+  var chain = 0;
+  let photons_on = P.caustic.z > 0.5 && P.opts.x == 0u;
   let max_b = P.counts.y;
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
@@ -770,6 +781,7 @@ fn path(px: vec2f) -> Sample {
         let l = light_at(i);
         let tl = hit_light(ro, rd, l);
         if (tl < h.t && tl < tf) {
+          if (chain == 2) { return s; }
           let e = light_emit(l, ro + rd * tl, rd);
           var mis = 1.0;
           if (last_pdf > 0.0) {
@@ -790,7 +802,7 @@ fn path(px: vec2f) -> Sample {
         // The sun disc, weighted against light sampling.
         for (var i = 0u; i < P.counts.x; i++) {
           let l = light_at(i);
-          if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x) {
+          if (light_kind(l) == 3u && dot(rd, normalize(l.pos.xyz)) >= l.u.x && chain != 2) {
             var mis = 1.0;
             if (last_pdf > 0.0) {
               let pl = light_pdf(l, ro, rd, BIG) / f32(P.counts.x);
@@ -813,9 +825,11 @@ fn path(px: vec2f) -> Sample {
       let n = vec3f(0.0, 1.0, 0.0);
       let dummy = Material(vec4f(0.0), vec4f(1.0, 0.0, 1.0, 0.0), vec4f(0.0), vec4f(1.5, 1.0, 1.0, 0.0), vec4f(-1.0), vec4f(0.0));
       s.radiance += tp * sample_lights(p + n * EPS, n, -rd, dummy, Lobes(0.0, 0.0, 1.0, 0.0), true);
+      if (photons_on) { s.radiance += tp * P.env_horizon.w / PI * caustic_at(p); }
       tp *= P.env_horizon.w;
       ro = p + n * EPS;
       rd = cosine_dir(n, rnd2());
+      chain = select(0, 1, photons_on);
       last_pdf = dot(n, rd) / PI;
       continue;
     }
@@ -852,6 +866,10 @@ fn path(px: vec2f) -> Sample {
     let w = lobe_probs(m, nv);
     // Direct light.
     if (w.trans < 0.999) { s.radiance += tp * sample_lights(p, n, v, m, w, false); }
+    // Caustics: light focused onto this surface by glass or mirrors.
+    if (photons_on && w.diff > 0.0) {
+      s.radiance += tp * m.base.xyz * (1.0 - m.base.w) * (1.0 - m.spec.w) / PI * caustic_at(sf.p);
+    }
     // Russian roulette after the third bounce.
     if (b >= 3u) {
       let q = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 0.95);
@@ -886,6 +904,7 @@ fn path(px: vec2f) -> Sample {
         if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * EPS; }
         else { rd = r; ro = sf.p - ng * EPS; tp *= m.base.xyz; }
       }
+      if (chain > 0) { chain = 2; }
       last_pdf = 0.0;
       continue;
     }
@@ -903,10 +922,13 @@ fn path(px: vec2f) -> Sample {
         let tb = basis(n);
         l = reflect(-v, tb * sample_vndf(transpose(tb) * v, m.spec.x * m.spec.x, rnd2()));
       }
+      // Polished metal continues a caustic chain; anything else ends it.
+      if (chain > 0 && m.base.w > 0.5 && m.spec.x < 0.25) { chain = 2; } else { chain = 0; }
     } else if (m.emit.w > 0.0) {
       // Subsurface: a random walk inside the object; the path leaves where it exits.
       let walk = random_walk(sf.p - ng * EPS, cosine_dir(-n, rnd2()), m);
       if (walk.w <= 0.0) { return s; }
+      chain = 0;
       tp *= m.base.xyz;
       ro = walk.xyz;
       rd = cosine_dir(exit_n, rnd2());
@@ -915,7 +937,9 @@ fn path(px: vec2f) -> Sample {
       continue;
     } else {
       l = cosine_dir(n, rnd2());
+      chain = select(0, 1, photons_on);
     }
+    if (r < w.coat / wr) { chain = 0; }
     if (dot(l, ng) <= 0.0) { return s; }
     let f = eval_reflect(m, n, v, l);
     let pdf = pdf_reflect(m, w, n, v, l) * wr;
@@ -958,12 +982,183 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (P.counts.z == 1u) {
     accum[idx] = vec4f(rad, n);
     bgsum[idx] = vec4f(bg, nbg);
-    gbuf[idx] = nd;
+    gbuf[idx] = vec4f(oct_encode(nd.xyz), f32(object), nd.w);
     ebuf[idx] = vec4f(em, n);
-    idbuf[idx] = object;
   } else {
     accum[idx] += vec4f(rad, n);
     bgsum[idx] += vec4f(bg, nbg);
     ebuf[idx] += vec4f(em, n);
+  }
+}
+
+// ── Normals packed in two floats (octahedral) ──
+fn oct_encode(n: vec3f) -> vec2f {
+  if (dot(n, n) < 1e-12) { return vec2f(0.0); }
+  let a = n / (abs(n.x) + abs(n.y) + abs(n.z));
+  if (a.z >= 0.0) { return a.xy; }
+  return (1.0 - abs(a.yx)) * select(vec2f(-1.0), vec2f(1.0), a.xy >= vec2f(0.0));
+}
+
+// ── Caustics: photons from the lights through glass and mirrors ──
+// Level 0: fine cells for sharp caustics; level 1: 4× larger, for sparse light.
+fn cell_size(level: i32) -> f32 { return P.caustic.x * select(1.0, 4.0, level == 1); }
+fn cell_of(p: vec3f, level: i32) -> vec3i { return vec3i(floor(p / cell_size(level))); }
+fn cell_hash(c: vec3i, level: i32) -> u32 {
+  return pcg((bitcast<u32>(c.x) * 73856093u) ^ pcg((bitcast<u32>(c.y) * 19349663u) ^ pcg(bitcast<u32>(c.z) * 83492791u + u32(level))));
+}
+// The cell's slot: cells that hash to the same slot probe onward instead of
+// sharing light. `claim` takes a free slot.
+fn cell_slot(c: vec3i, level: i32, claim: bool) -> i32 {
+  let h = cell_hash(c, level);
+  let key = pcg(h ^ 0x9e3779b9u) | 1u;
+  for (var k = 0u; k < 12u; k++) {
+    let i = ((h + k * k) % GRID_CELLS) * 8u;
+    let cur = atomicLoad(&grid[i + 3u]);
+    if (cur == key) { return i32(i); }
+    if (cur == 0u) {
+      if (!claim) { return -1; }
+      let r = atomicCompareExchangeWeak(&grid[i + 3u], 0u, key);
+      if (r.exchanged || r.old_value == key) { return i32(i); }
+    }
+  }
+  return -1;
+}
+fn add_f32(i: u32, v: f32) {
+  var old = atomicLoad(&grid[i]);
+  loop {
+    let next = bitcast<u32>(bitcast<f32>(old) + v);
+    let r = atomicCompareExchangeWeak(&grid[i], old, next);
+    if (r.exchanged) { break; }
+    old = r.old_value;
+  }
+}
+fn deposit(p: vec3f, flux: vec3f) {
+  for (var level = 0; level < 2; level++) {
+    let s = cell_slot(cell_of(p, level), level, true);
+    if (s < 0) { continue; }
+    let i = u32(s);
+    add_f32(i, flux.x); add_f32(i + 1u, flux.y); add_f32(i + 2u, flux.z);
+    atomicAdd(&grid[i + 4u], 1u);
+  }
+}
+// Irradiance at `p` from one level: a tent filter over the 27 cells around
+// it. w: photons found.
+fn gather(p: vec3f, level: i32) -> vec4f {
+  let size = cell_size(level);
+  let c = cell_of(p, level);
+  var sum = vec3f(0.0);
+  var wsum = 0.0;
+  var count = 0.0;
+  for (var z = -1; z <= 1; z++) { for (var y = -1; y <= 1; y++) { for (var x = -1; x <= 1; x++) {
+    let cc = c + vec3i(x, y, z);
+    let centre = (vec3f(cc) + 0.5) * size;
+    let w = max(0.0, 1.0 - length(centre - p) / (1.8 * size));
+    wsum += w;
+    if (w <= 0.0) { continue; }
+    let s = cell_slot(cc, level, false);
+    if (s < 0) { continue; }
+    let i = u32(s);
+    sum += w * vec3f(bitcast<f32>(atomicLoad(&grid[i])), bitcast<f32>(atomicLoad(&grid[i + 1u])), bitcast<f32>(atomicLoad(&grid[i + 2u])));
+    count += f32(atomicLoad(&grid[i + 4u]));
+  } } }
+  // Flux per photon emitted, over the area one cell covers.
+  return vec4f(sum / max(wsum, 1e-6) / (P.caustic.y * size * size), count);
+}
+// Caustic irradiance at `p`: the fine level where photons are dense enough
+// to be smooth, blending to the coarse level where they are sparse.
+fn caustic_at(p: vec3f) -> vec3f {
+  if (P.caustic.y <= 0.0) { return vec3f(0.0); }
+  let fine = gather(p, 0);
+  if (fine.w >= 96.0) { return fine.xyz; }
+  let coarse = gather(p, 1);
+  if (coarse.w < 8.0) { return vec3f(0.0); }
+  return mix(coarse.xyz, fine.xyz, fine.w / 96.0);
+}
+
+// One photon per invocation. Only paths that pass through glass or bounce off
+// polished metal and then land on a matte surface (or the studio floor) are
+// kept: those are the caustics a camera path rarely finds.
+@compute @workgroup_size(64)
+fn photons(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= u32(P.caustic.w) || P.counts.x == 0u) { return; }
+  seed = pcg(gid.x ^ pcg(u32(P.caustic.y) * 7919u + P.dims.z * 104729u + 17u));
+  let count = P.counts.x;
+  let li = min(u32(rnd() * f32(count)), count - 1u);
+  let l = light_at(li);
+  let kind = light_kind(l);
+  var ro = vec3f(0.0);
+  var rd = vec3f(0.0, -1.0, 0.0);
+  var flux = vec3f(0.0);
+  let u = rnd2();
+  if (kind == 0u) {
+    ro = l.pos.xyz + l.u.xyz * (u.x * 2.0 - 1.0) + l.v.xyz * (u.y * 2.0 - 1.0);
+    rd = cosine_dir(rect_normal(l), rnd2());
+    flux = l.radiance.xyz * l.u.w * PI;
+  } else if (kind == 3u) {
+    let dir = normalize(l.pos.xyz);
+    let tb = basis(dir);
+    let r = sqrt(u.x) * P.bounds.w;
+    let a = 2.0 * PI * u.y;
+    ro = P.bounds.xyz + dir * P.bounds.w * 2.0 + tb * vec3f(r * cos(a), r * sin(a), 0.0);
+    rd = -dir;
+    flux = l.radiance.xyz * 2.0 * PI * one_minus_cos(1.0 - l.u.x * l.u.x) * PI * P.bounds.w * P.bounds.w;
+  } else {
+    let z = 1.0 - 2.0 * u.x;
+    let rr = sqrt(max(0.0, 1.0 - z * z));
+    rd = vec3f(rr * cos(2.0 * PI * u.y), rr * sin(2.0 * PI * u.y), z);
+    ro = l.pos.xyz + rd * (l.u.x * 1.01);
+    let intensity = l.radiance.xyz * PI * l.u.x * l.u.x;
+    flux = intensity * 4.0 * PI * light_emit(l, ro, -rd) / max(l.radiance.xyz, vec3f(1e-12));
+  }
+  flux *= f32(count);
+  var specular = 0;
+  var band = -1;
+  for (var b = 0; b < 8; b++) {
+    let h = intersect(ro, rd, BIG, false);
+    let tf = floor_t(ro, rd);
+    if (tf < h.t) {
+      if (specular > 0) { deposit(ro + rd * tf, flux); }
+      return;
+    }
+    if (h.tri < 0) { return; }
+    let sf = surface(ro, rd, h);
+    let m = sf.m;
+    let front = dot(rd, sf.ng) < 0.0;
+    var n = sf.n;
+    var ng = sf.ng;
+    if (!front) { n = -n; ng = -ng; }
+    let v = -rd;
+    let tr = m.spec.w * (1.0 - m.base.w);
+    if (tr > 0.5) {
+      // Glass: refract or reflect through a sampled microfacet, as camera paths do.
+      let a = max(m.spec.x * m.spec.x, 0.0005);
+      let tb = basis(n);
+      let hm = tb * sample_vndf(transpose(tb) * v, a, rnd2());
+      var ior = m.extra.x;
+      if (m.layers.z > 0.0) {
+        if (band < 0) { band = min(i32(rnd() * 3.0), 2); var pw = vec3f(0.0); pw[band] = 3.0; flux *= pw; }
+        ior += m.layers.z * 0.04 * (f32(band) - 1.0);
+      }
+      let eta = select(1.0 / ior, ior, front);
+      let F = fresnel_dielectric(abs(dot(v, hm)), eta);
+      if (rnd() < F) {
+        rd = reflect(-v, hm); ro = sf.p + ng * EPS;
+      } else {
+        let r = refract(-v, hm, 1.0 / eta);
+        if (dot(r, r) < 0.5) { rd = reflect(-v, hm); ro = sf.p + ng * EPS; }
+        else { rd = r; ro = sf.p - ng * EPS; flux *= m.base.xyz; }
+      }
+      specular++;
+    } else if (m.base.w > 0.5 && m.spec.x < 0.25) {
+      // Polished metal: a near-mirror bounce tinted by the metal.
+      let tb = basis(n);
+      rd = reflect(-v, tb * sample_vndf(transpose(tb) * v, max(m.spec.x * m.spec.x, 0.0005), rnd2()));
+      ro = sf.p + ng * EPS;
+      flux *= m.base.xyz;
+      specular++;
+    } else {
+      if (specular > 0) { deposit(sf.p, flux); }
+      return;
+    }
   }
 }

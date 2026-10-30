@@ -77,3 +77,45 @@ test('Live reuses the previous frame while the camera moves', async ({ session }
   expect(history.jump.meanFrames).toBeLessThan(history.last.meanFrames / 2);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('glass focuses light onto the studio floor (caustics)', async ({ session }) => {
+  test.setTimeout(120_000);
+  await session.openEditor();
+  const { page } = session;
+  const edits = await page.evaluate(() => {
+    const PM = (window as any).PM, api = PM.Kernel.api('studio-caustics');
+    const results = [
+      api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 2.6, z: 4.2, targetX: 0, targetY: 0.2, targetZ: 0.4 } } }),
+      api.scene3d.edit({ operation: 'add_object', object: { id: 'ball', source: { primitive: 'sphere' }, p: { y: 0.5 } } }),
+      api.scene3d.edit({ operation: 'apply_material', target: 'ball', preset: 'glass' }),
+      // A small, hard light behind the ball: its focused light lands in front.
+      api.scene3d.edit({ operation: 'add_light', light: { id: 'key', type: 'area', p: { x: -1.2, y: 2.2, z: -2.4, targetX: 0, targetY: 0.5, targetZ: 0, intensity: 400, width: 0.15, height: 0.15 } } }),
+      api.scene3d.edit({ operation: 'set_studio', on: true }),
+    ];
+    PM.invalidate();
+    return results.map((r: any) => r.ok);
+  });
+  expect(edits.every(Boolean)).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  const result = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const frame = () => PM.GL.renderToPixels(0, 240, 160, { transparent: false, mblur: false });
+    PM.agentFrameCapture = true;
+    const on = frame();
+    PM.Studio.setCaustics(false);
+    const off = frame();
+    PM.Studio.setCaustics(true);
+    PM.agentFrameCapture = false;
+    let brighter = 0, sumOn = 0, sumOff = 0;
+    for (let i = 0; i < on.length; i += 4) {
+      const a = on[i]! + on[i + 1]! + on[i + 2]!, b = off[i]! + off[i + 1]! + off[i + 2]!;
+      sumOn += a; sumOff += b;
+      if (a > b + 45) brighter++;
+    }
+    return { brighter, sumOn, sumOff };
+  });
+  // A pool of focused light the plain trace never finds.
+  expect(result.brighter).toBeGreaterThan(40);
+  expect(result.sumOn).toBeGreaterThan(result.sumOff);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

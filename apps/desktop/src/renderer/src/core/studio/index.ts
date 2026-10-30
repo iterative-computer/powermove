@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { extractScene, MAP_SIZE, type StudioScene } from './extract';
-import { initStudioGpu, studioGpuFailure, studioGpuReady, StudioTarget, type StudioView } from './gpu';
+import { initStudioGpu, studioGpuFailure, studioGpuReady, studioOptions, StudioTarget, type StudioView } from './gpu';
 
 /*
  * Studio in the editor: the compositor asks for one 3D layer's pixels and
@@ -49,6 +49,7 @@ const state = (PM: any): State => {
     // Editor-facing controls and status (the refine indicator, tests, agents).
     PM.Studio ??= {
       setEnabled: (on: boolean) => setStudioEnabled(PM, on),
+      setCaustics: (on: boolean) => { studioOptions.caustics = on; st.revision++; PM.invalidate?.('render'); },
       progress: () => studioProgress(PM),
       liveHistory: async () => { for (const job of st.jobs.values()) if (job.live) return job.live.historyStats(); return null; },
       status: () => ({ enabled: st.enabled, ready: studioGpuReady(), failure: studioGpuFailure(), frames: st.frames, declined: st.declined }),
@@ -243,7 +244,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     job.viewKey = '';
   }
   const view = viewOf(runtime, cam, job.scene.bounds);
-  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher, view.shadows]);
+  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher, view.shadows, studioOptions.caustics]);
   const index = job.scene.objects.indexOf(objectId);
   const target = (which: 'live' | 'refine' | 'final', tw: number, th: number): StudioTarget => {
     let t = job![which];

@@ -68,8 +68,8 @@ measured: a base M1 Air, and a side-by-side against a reference renderer.
 - Speed: hardware ray tracing (Metal, M3 and later), a compressed wide BVH,
   temporal reprojection for Live, and a GPU upscaler; Final at 256 samples
   should drop well under 2 s per 1080p frame.
-- Glass casts opaque shadows (no caustics); dispersion, subsurface, sheen,
-  anisotropy and thin film are not in the material yet.
+- Caustics come from a photon grid (`photons` in `trace.wgsl`); very sharp
+  focus lines (a lens's hot spot) are softened to the grid's cell size.
 - No multiple-scattering energy compensation, specular anti-aliasing,
   motion blur or OIDN denoising for Final.
 - Not wired into the editor: the viewer bridge, layers, the Studio UI and
