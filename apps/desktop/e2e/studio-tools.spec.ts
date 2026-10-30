@@ -57,6 +57,22 @@ test('Studio finishes, light by pointing, Shots and the studio set', async ({ se
   await page.keyboard.up('Shift'); await page.keyboard.up('Alt');
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers.filter((l: any) => l.d?.definition === 'powermove.3d.light').length)).toBe(lightsBefore + 1);
 
+  // Alt+Shift+drag slides the new softbox's highlight; release commits one move.
+  const dragStart = await page.evaluate(() => { const PM = (window as any).PM; return { history: PM.hist.list().length, count: PM.proj.layers.filter((l: any) => l.d?.data?.light?.type === 'area').length }; });
+  await page.keyboard.down('Alt'); await page.keyboard.down('Shift');
+  await page.mouse.move(box.x + box.width * 0.42, box.y + box.height * 0.56);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.52, box.y + box.height * 0.6, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up('Shift'); await page.keyboard.up('Alt');
+  const dragged = await page.evaluate(() => {
+    const PM = (window as any).PM, area = PM.proj.layers.filter((l: any) => l.d?.data?.light?.type === 'area'), light = area.at(-1);
+    return { history: PM.hist.list().length, count: area.length, target: [light.d.data.light.p.targetX.v, light.d.data.light.p.targetZ.v] };
+  });
+  expect(dragged.count).toBe(dragStart.count + 1);
+  expect(dragged.history).toBe(dragStart.history + 2); // place, then one move
+  expect(Math.abs(dragged.target[0]) + Math.abs(dragged.target[1])).toBeGreaterThan(0);
+
   // The refine indicator appears and the view settles.
   await expect(page.locator('#studio-refine')).toBeVisible({ timeout: 15_000 });
   await page.waitForTimeout(9000);

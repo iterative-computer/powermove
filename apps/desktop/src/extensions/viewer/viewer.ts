@@ -1601,8 +1601,16 @@ function bindStage(stage: any, inner: any): () => void {
   listen(stage,'pointerdown',guarded((event:any)=>{
     // Light by pointing: Alt+Shift+click a model to put a softbox's highlight there.
     if(event.altKey && event.shiftKey && event.button===0 && api.scene3d?.studio){
-      const comp=api.model.curComp(),point=pointerComp(event);
-      if(api.scene3d.studio.highlightAt(point.x/comp.w,point.y/comp.h)){event.preventDefault();event.stopPropagation();return;}
+      const studio=api.scene3d.studio,comp=api.model.curComp(),point=pointerComp(event);
+      const light=studio.highlightAt(point.x/comp.w,point.y/comp.h);
+      if(light){
+        event.preventDefault();event.stopPropagation();
+        // Keep dragging to slide the highlight across the surface; release commits it.
+        const move=(e:PointerEvent)=>{const q=pointerComp(e);studio.slideHighlight(light,q.x/comp.w,q.y/comp.h);};
+        const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);studio.commitHighlight(light);};
+        window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+        return;
+      }
     }
     if(sceneGizmo?.active())return;
     if(sceneNavigation?.pointerDown(event))return;
