@@ -42,7 +42,7 @@ const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = 
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'solo', 'blend',
-  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'threeD', 'scaleLinked', 'effectSpace',
+  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'effectSpace',
   'continuousRaster',
 ]);
 let live: any = null;
@@ -597,6 +597,7 @@ function setLayer(command: any) {
     for(const fx of layer.fx??[]){const def=PM.effectDef(fx);if(def&&!fx.missing&&fx.on!==false&&(!def.sourceProcessing||def.backdrop))throw new Error(`${def.label} does not support source owner processing`);}
   }
   if (patch.scaleLinked != null) layer.scaleLinked = !!patch.scaleLinked;
+  if (patch.separateDimensions != null) layer.separateDimensions = !!patch.separateDimensions;
   PM.touch();
   return { id: layer.id, keys: Object.keys(patch) };
 }

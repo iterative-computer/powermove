@@ -306,6 +306,9 @@
         <Icon {PM} name="more" />
       </button>
     </div>
+    <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
+      <Icon {PM} name="grid" />
+    </button>
   {/if}
   <div class="tb-project-controls" inert={!!pending}>
     <TaskPill {PM} />

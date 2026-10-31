@@ -6,7 +6,7 @@ export interface PropertySection { id: string; label: string; rank: number }
 export function propertySection(layer: any, row: { key: string; group?: string }, effectLabel: (fx: any) => string): PropertySection {
   const key = String(row.key);
   if (key.startsWith('c.')) return { id: 'content', label: 'Content', rank: 0 };
-  if (row.group === 'Transform' || key === 'scale') return { id: 'transform', label: 'Transform', rank: 1 };
+  if (row.group === 'Transform' || key === 'scale' || key === 'position') return { id: 'transform', label: 'Transform', rank: 1 };
   if (key.startsWith('u.') || key.startsWith('x.')) return { id: 'parameters', label: row.group || 'Parameters', rank: 2 };
   const effects: any[] = Array.isArray(layer?.fx) ? layer.fx : [];
   const index = effects.findIndex((fx: any) => key.startsWith(fx.id + '.'));

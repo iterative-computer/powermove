@@ -9,7 +9,6 @@
   import { expressionDiagnostic, EXPRESSION_NAMES } from 'powermove';
   import type { ChannelDefinition, EditCommand, MenuContribution } from 'powermove';
   import { inspectorContext, type EditBinding } from './context';
-  import { inEffectControls } from './effect-controls';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector, timeline } = inspectorContext();
   const { NumField, SliderField, Row } = api.ui.controls;
@@ -57,7 +56,6 @@
     visual?: boolean;
   } = $props();
 
-  const effectControls = inEffectControls();
   const instance = `channel-${++instanceSequence}`;
   const prop = $derived((doc.tick.structure, doc.proj, property ?? layer.p?.[channel]));
   const value = $derived((
@@ -73,6 +71,8 @@
   const runtimeError=$derived((void value,transport.time,doc.tick.values,prop?.expr ? api.anim.expressionErrors?.get(prop) : null));
   const scaleLinked = $derived((doc.tick.history, doc.tick.values, doc.proj, !!layer.scaleLinked));
   const isScale = $derived(!property && !compact && channel === 'scale.x');
+  /* Position carries After Effects' Separate Dimensions switch (timeline rows). */
+  const isPosition = $derived(!property && !compact && channel === 'position.x');
   const pairChannel = $derived(isScale ? 'scale.y' : !property && !compact ? pairWith : undefined);
   const thirdChannel = $derived(pairChannel ? thirdWith : undefined);
   const channels = $derived(pairChannel ? [channel, pairChannel, ...(thirdChannel ? [thirdChannel] : [])] : [channel]);
@@ -84,6 +84,16 @@
     doc.proj,
     transport.time,
     properties.every((p) => !!(p && api.anim.hasKeyAt(layer, p, transport.time)))
+  ));
+  /* Grouped rows (Position X / Y / Z, Scale, …) also key each axis on its own. */
+  const axisKeys = $derived((
+    doc.tick.history, doc.tick.values,
+    doc.proj,
+    transport.time,
+    new Map(channels.length > 1 ? channels.map((key, index) => {
+      const p = properties[index];
+      return [key, { animated: (p?.kf?.length ?? 0) > 0, atKey: !!(p && api.anim.hasKeyAt(layer, p, transport.time)) }];
+    }) : [])
   ));
   const meta = $derived((api.model.CH[channel] ?? {}) as ChannelDefinition);
   const edit = $derived.by((): EditBinding => {
@@ -145,6 +155,16 @@
 
   function diamondClick(event: MouseEvent): void {
     toggleKey(event);
+  }
+
+  function toggleAxisKey(event: MouseEvent, axisChannel: string, axisLabel: string): void {
+    event.stopPropagation();
+    if (!isInspectorLayerEditable(api, layer)) return;
+    const atKey = axisKeys.get(axisChannel)?.atKey;
+    const result = toggleSelectionKey(api, layer, [axisChannel], transport.time, `${atKey ? 'Remove keyframe for' : 'Add keyframe for'} ${axisLabel}`);
+    if (result?.ok === false) { api.ui.toast?.(result.message); return; }
+    timeline()?.reveal(layer, [axisChannel]);
+    refreshValues();
   }
 
   function addKeyframe(): void {
@@ -296,6 +316,10 @@
       { label: 'Add keyframe at playhead', icon: 'diamond', disabled: locked, run: addKeyframe },
       animated ? { label: 'Remove animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in graph editor', icon: 'graph', run: showGraphEditor },
+      isPosition ? {
+        label: 'Separate Dimensions', on: layer.separateDimensions !== false, disabled: locked,
+        run: () => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { separateDimensions: layer.separateDimensions === false } }, { label: layer.separateDimensions === false ? 'Separate Dimensions' : 'Join Dimensions', origin: 'inspector' })
+      } : null,
       '-',
       { header: 'Easing for all keys' },
       ...easing.map((name) => ({
@@ -317,11 +341,22 @@
   }
 </script>
 
-{#snippet well(fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string, axis?: string)}
+{#snippet well(fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string, axis?: string, axisChannel?: string)}
   {@const Field = visual && Number.isFinite(min) && Number.isFinite(max) && max! > min! ? SliderField : NumField}
+  {@const axisKey = axisChannel ? axisKeys.get(axisChannel) : undefined}
   <!-- data-axis names the field when a narrow inspector stacks X / Y / Z
        under the label, out of reach of the section's column heading. -->
-  <div class="well" data-prefix={gutter} data-axis={axis}>
+  <div class="well" class:axis-keyed={!!axisKey} data-prefix={gutter} data-axis={axis}>
+    {#if axisChannel && axisKey}
+      <!-- One axis's own key; the row's diamond keys every axis together. -->
+      <button type="button" class="stopwatch axis-key" class:on={axisKey.animated} class:at-key={axisKey.atKey}
+        aria-label={`${axisKey.atKey ? 'Remove keyframe for' : 'Add keyframe for'} ${fieldLabel}`}
+        aria-pressed={axisKey.atKey} title={axisKey.atKey ? `Remove ${fieldLabel} keyframe` : `Add ${fieldLabel} keyframe`}
+        data-axis-channel={axisChannel}
+        onclick={(event) => toggleAxisKey(event, axisChannel, fieldLabel)}>
+        {@html api.ui.icon(axisKey.atKey ? 'diamondFill' : 'diamond')}
+      </button>
+    {/if}
     <Field
       angle={visual && unit === '°'}
       {api}
@@ -370,7 +405,7 @@
           aria-label={`${keyAtPlayhead ? 'Remove keyframe for' : 'Add keyframe for'} ${label}`}
           aria-pressed={keyAtPlayhead} title={keyAtPlayhead ? 'Remove keyframe' : 'Add keyframe'}
           onclick={diamondClick}>
-          {@html api.ui.icon(effectControls ? 'timer' : keyAtPlayhead ? 'diamondFill' : 'diamond')}
+          {@html api.ui.icon(keyAtPlayhead ? 'diamondFill' : 'diamond')}
         </button>
         {#if isScale}
           <!-- Sits at the end of the label column, so Scale's values line up
@@ -383,12 +418,12 @@
         {/if}
       {/snippet}
       <!-- One value per axis, X then Y (then Z), in one well. -->
-      {@render well(isScale ? 'Scale X' : pairChannel ? `${label} X` : label, edit, () => value, !!prop?.expr, pairChannel ? undefined : prefix, thirdChannel ? 'X' : undefined)}
+      {@render well(isScale ? 'Scale X' : pairChannel ? `${label} X` : label, edit, () => value, !!prop?.expr, pairChannel ? undefined : prefix, thirdChannel ? 'X' : undefined, pairChannel ? channel : undefined)}
       {#if pairChannel}
-        {@render well(isScale ? 'Scale Y' : `${label} Y`, pairEdit, () => api.anim.ev(layer, pairChannel, transport.time), !!layer.p?.[pairChannel]?.expr, undefined, thirdChannel ? 'Y' : undefined)}
+        {@render well(isScale ? 'Scale Y' : `${label} Y`, pairEdit, () => api.anim.ev(layer, pairChannel, transport.time), !!layer.p?.[pairChannel]?.expr, undefined, thirdChannel ? 'Y' : undefined, pairChannel)}
       {/if}
       {#if thirdChannel && thirdEdit}
-        {@render well(`${label} Z`, thirdEdit, () => api.anim.ev(layer, thirdChannel, transport.time), !!layer.p?.[thirdChannel]?.expr, undefined, 'Z')}
+        {@render well(`${label} Z`, thirdEdit, () => api.anim.ev(layer, thirdChannel, transport.time), !!layer.p?.[thirdChannel]?.expr, undefined, 'Z', thirdChannel)}
       {/if}
     </Row>
   </div>

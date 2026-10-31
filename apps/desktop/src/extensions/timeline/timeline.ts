@@ -15,7 +15,7 @@ import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './ap
 import { createTrackView, normalizeTimelineMode, TIMELINE_MODES, TRACK_GUTTER, type TimelineMode } from './track-view';
 import { createCaptionTrack } from './caption-track';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
-import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
+import { dimensionsSeparated, expandScaleKeyIds, isPositionPath, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
   bezierHandleAtPoint,
   keysForBezierHandleDrag,
@@ -2148,12 +2148,13 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       if (selected) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
       else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
       const iy = y + T.row / 2, valueX = T.propertyValueX;
-      /* The keyframe navigator shows under the pointer, left of the stopwatch. */
+      /* The keyframe navigator shows under the pointer, left of the diamond. */
       if (r.prop.kf.length && T.hoverRow === i) {
         drawKeyArrow(c, col.propNav - 6, iy, -1, readout!.previous);
         drawKeyArrow(c, col.propNav + 6, iy, 1, readout!.next);
       }
-      drawIcon(c, 'timer', col.propStopwatch, iy, 13, readout!.animated ? theme.accent : theme.tx4);
+      /* Keyframe diamond: outlined when animated, filled on a key at the playhead. */
+      icoAnimationDiamond(c, col.propStopwatch, iy, readout!.animated, readout!.current);
       c.font = '400 12px ' + fui();
       c.fillStyle = selected ? theme.accent : theme.label;
       clipText(c, r.label, col.propLabel, iy, valueX - col.propLabel - 12);
@@ -2165,7 +2166,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       const columns = propertyValueColumns(valueX, T.gut, values.length, actionWidth);
       values.forEach((value, index) => {
         const column = columns[index]!;
-        const text = fittedPropertyValue(c, value, r.channels || percentProperty(r.key) ? '%' : '', column.width);
+        const text = fittedPropertyValue(c, value, isScaleTrack(r) || percentProperty(r.key) ? '%' : '', column.width);
         c.fillText(text, column.left, iy);
       });
       if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, iy, !!L.scaleLinked);
@@ -3376,9 +3377,32 @@ function isScaleTrack(row: any) {
   return row?.key === 'scale' && trackChannels(row).length === 2;
 }
 
-function scaleValueIndex(x: number) {
-  const columns = propertyValueColumns(T.propertyValueX, T.gut, 2, 24);
-  return x < (columns[0]!.right + columns[1]!.left) / 2 ? 0 : 1;
+/** The value column under x on a row that shows several axes (Scale, or a
+ * Position whose dimensions are joined). */
+function axisValueIndex(row: any, x: number) {
+  const count = trackChannels(row).length;
+  if (count < 2) return 0;
+  const columns = propertyValueColumns(T.propertyValueX, T.gut, count, isScaleTrack(row) ? 24 : 0);
+  const index = columns.findIndex((column, i) => i === columns.length - 1 || x < (column.right + columns[i + 1]!.left) / 2);
+  return Math.max(0, index);
+}
+
+/** After Effects' Separate Dimensions: Position as one row or one per axis. */
+function separateDimensionsItem(row: any) {
+  if (!isPositionPath(row.key)) return null;
+  const selected = api.selection.layers();
+  const layers = (selected.includes(row.L.id) ? selected.map(id => api.model.layer(id)) : [row.L])
+    .filter((layer: any) => layer && !layer.lock);
+  const separated = dimensionsSeparated(row.L);
+  return {
+    label: 'Separate Dimensions', on: separated, disabled: !layers.length,
+    run: () => {
+      api.edit.apply(layers.map((layer: any) => ({ type: 'set_layer', target: layer.id, patch: { separateDimensions: !separated } })),
+        { label: separated ? 'Join Dimensions' : 'Separate Dimensions', origin: 'timeline' });
+      for (const layer of layers) T.reveal(layer, ['position.x', 'position.y', 'position.z']);
+      rowsDirty = true; invalidate();
+    }
+  };
 }
 
 function scaleValueCommand(row: any, index: number, time: number) {
@@ -3426,7 +3450,7 @@ function applySelectedValueKeys(keys: Array<Array<{ key: any; start: number }>>,
 function dragPropertyValue(event: any, row: any, rowIndex: number, field?: PropertyValueField) {
   if (row.L.lock || api.groups.ancestors(row.L).some((group: any) => group.lock)) return;
   const time = api.transport.time();
-  const scaleIndex = field?.index ?? (isScaleTrack(row) ? scaleValueIndex(event.offsetX) : 0);
+  const scaleIndex = field?.index ?? axisValueIndex(row, event.offsetX);
   const channels = (target: any) => trackChannels(target).map(axis => ({ ...axis, value: api.anim.evP(target.L, axis.prop, time, axis.key), meta: propertyMetadata(api, target.L, axis.key) }));
   if (!channels(row).every(axis => typeof axis.value === 'number')) {
     editPropertyValue(row, rowIndex, scaleIndex, field); return;
@@ -3438,7 +3462,9 @@ function dragPropertyValue(event: any, row: any, rowIndex: number, field?: Prope
     if (!axes.every(axis => typeof axis.value === 'number')) return [];
     const keyed = selectedValueKeys(target, trackChannels(target), time);
     const scaleCommand = !keyed && isScaleTrack(target) ? scaleValueCommand(target, scaleIndex, time) : null;
-    return [{ target, axes: scaleCommand || (keyed && isScaleTrack(target)) ? [axes[scaleIndex]!] : axes, scaleCommand, keyed }];
+    // Scale's linked edit and a joined Position's column each drive one axis.
+    const single = scaleCommand || (keyed && isScaleTrack(target)) || (!isScaleTrack(target) && axes.length > 1);
+    return [{ target, axes: single ? [axes[scaleIndex] ?? axes[0]!] : axes, scaleCommand, keyed }];
   });
   const keyedEdit = targets.some(item => item.keyed);
   const label = targets.length > 1 ? `Adjust ${row.label} on ${targets.length} layers` : `Adjust ${row.label}`;
@@ -3474,11 +3500,13 @@ function dragPropertyValue(event: any, row: any, rowIndex: number, field?: Prope
 function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: PropertyValueField) {
   if (row.L.lock || api.groups.ancestors(row.L).some((group: any) => group.lock)) return;
   const scale = isScaleTrack(row);
-  const axes = scale ? [trackChannels(row)[scaleIndex]!] : trackChannels(row);
+  const all = trackChannels(row), grouped = all.length > 1;
+  const axisIndex = Math.min(scaleIndex, all.length - 1);
+  const axes = grouped ? [all[axisIndex]!] : all;
   const values = axes.map(axis => api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key));
   const time = api.transport.time();
-  const scaleCommand = scale ? scaleValueCommand(row, scaleIndex, time) : null;
-  const column = field ?? (scale ? propertyValueColumns(T.propertyValueX, T.gut, 2, 24)[scaleIndex]! : null);
+  const scaleCommand = scale ? scaleValueCommand(row, axisIndex, time) : null;
+  const column = field ?? (grouped ? propertyValueColumns(T.propertyValueX, T.gut, all.length, scale ? 24 : 0)[axisIndex]! : null);
   const choices: Record<string, readonly string[]> = {
     'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
     'c.fit': ['cover', 'contain', 'stretch']
@@ -3486,7 +3514,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
   const isColor = !options && typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0]);
-  const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': scale ? `Scale ${scaleIndex === 0 ? 'X' : 'Y'}` : row.label,
+  const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': grouped ? `${row.label} ${'XYZ'[axisIndex]}` : row.label,
     style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${field?.top ?? rowY(rowIndex) + 3}px`,
       width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${field?.height ?? T.row - 6}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
@@ -3511,7 +3539,6 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: P
       const next = values.map((value, index) => typeof value === 'number' ? Number(parts[index] ?? parts[0]) : typeof value === 'boolean' ? parts[index] === 'true' : parts[index]);
       const keyed = next.every(value => typeof value === 'number' && Number.isFinite(value)) ? selectedValueKeys(row, trackChannels(row), time) : null;
       if (keyed) {
-        const all = trackChannels(row);
         api.history.do(`Edit ${row.label}`, () => axes.forEach((axis, index) => applySelectedValueKeys(keyed, all.findIndex(item => item.key === axis.key), values[index] as number, next[index] as number, scale && !!row.L.scaleLinked)));
         api.transport.invalidate();
       } else if (next.every(value => typeof value !== 'number' || Number.isFinite(value))) api.edit.apply(scaleCommand ? scaleCommand(Number(next[0])) : axes.map((axis, index) => ({
@@ -4447,7 +4474,7 @@ function onDbl(e: any) {
   }
   if (x < T.gut && y > T.ruler) {
     const hr = hitRow(y);
-    if (hr?.row.kind === 'prop' && x >= T.propertyValueX - 4) { editPropertyValue(hr.row, hr.i); return; }
+    if (hr?.row.kind === 'prop' && x >= T.propertyValueX - 4) { editPropertyValue(hr.row, hr.i, axisValueIndex(hr.row, x)); return; }
     /* AE: double-clicking a precomp layer opens its source composition. */
     if (hr && hr.row.kind === 'layer' && hr.row.L.type === 'precomp' && hr.row.L.d?.comp) { api.commands.run('openComposition', hr.row.L.d.comp); return; }
     if (hr && hr.row.kind === 'layer' && x > 90) renameLayer(hr.row.L, hr.i);
@@ -4641,6 +4668,8 @@ function onCtx(e: any) {
       items.push({ label: 'Paste keyframes here', run: () => api.commands.run('pasteKeyframes', { layer: r.L.id, path: r.key, time: x2t(x) }) });
       items.push({ label: 'Clear all keyframes', icon: 'x', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
     }
+    const separate = separateDimensionsItem(r);
+    if (separate) items.push('-', separate);
   } else if (!inGraph(x, y) && hr && hr.row.kind === 'layer') {
     api.ui.showLayerMenu(hr.row.L, e, 'timeline');
     return;

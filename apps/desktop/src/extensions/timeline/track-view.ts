@@ -642,7 +642,7 @@ export function createTrackView(host: TrackViewHost) {
       const columns = valueColumns(row);
       values.forEach((value, index) => {
         const column = columns[index]!;
-        c.fillText(host.fitValue(c, value, row.channels ? '%' : '', column.width), column.right, cy);
+        c.fillText(host.fitValue(c, value, isScale(row) ? '%' : '', column.width), column.right, cy);
       });
       if (isScale(row)) host.drawScaleLink(c, T.gut - 12, cy, !!row.L.scaleLinked);
       c.textAlign = 'left';

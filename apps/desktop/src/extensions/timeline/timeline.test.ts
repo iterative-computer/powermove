@@ -205,6 +205,33 @@ describe('timeline runtime', () => {
     expect(JSON.stringify(layer.p)).toBe(before);
   });
 
+  it('shows Position per axis by default and as one row when its dimensions are joined', () => {
+    const harness = fakePowermoveAPI(vi);
+    const key = (i: string, t: number, v: number) => ({ i, t, v, eo: [0, 0], ei: [1, 1], hold: false });
+    const layer: any = { id: 'card', threeD: true, p: {
+      'position.x': { v: 0, expr: null, kf: [key('x0', 0, 10), key('x2', 2, 40)] },
+      'position.y': { v: 0, expr: null, kf: [key('y0', 0, 20)] },
+      'position.z': { v: 0, expr: null, kf: [] },
+      opacity: { v: 100, expr: null, kf: [] },
+    } };
+    harness.state.project.layers = [layer];
+    const before = JSON.stringify(layer.p);
+    expect(timelineProperties(harness.api, layer).map(row => row.key)).toEqual(['position.x', 'position.y', 'position.z', 'opacity']);
+    expect(expandScaleKeyIds(harness.api, ['x0'])).toEqual(['x0']);
+
+    layer.separateDimensions = false;
+    const rows = timelineProperties(harness.api, layer);
+    expect(rows.map(row => row.key)).toEqual(['position', 'opacity']);
+    const position = rows[0];
+    expect(position.label).toBe('Position');
+    expect(position.channels.map((axis: any) => axis.key)).toEqual(['position.x', 'position.y', 'position.z']);
+    expect(position.prop.kf.map((k: any) => k.t)).toEqual([0, 2]);
+    expect(position.prop.kf[0].members.map((member: any) => member.key.v)).toEqual([10, 20]);
+    // A joined Position key selects every axis's key at that time.
+    expect(expandScaleKeyIds(harness.api, ['x0']).sort()).toEqual(['x0', 'y0']);
+    expect(JSON.stringify(layer.p)).toBe(before);
+  });
+
   it.each([-120, 120])('moves incoming and outgoing Bézier handles with the pointer on a %s-pixel slope', (height) => {
     const begin: [number, number] = [100, 180];
     const end: [number, number] = [300, 180 + height];

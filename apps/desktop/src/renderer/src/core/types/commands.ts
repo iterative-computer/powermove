@@ -128,6 +128,8 @@ export interface LayerPatch {
   color?: string;
   collapsed?: boolean;
   scaleLinked?: boolean;
+  /** Position's axes are separate properties (default) or one joined property. */
+  separateDimensions?: boolean;
   threeD?: boolean;
   /** Pre-comps only: render the nested composition at its displayed size. */
   continuousRaster?: boolean;
