@@ -883,10 +883,13 @@ V.attach = (stage: HTMLElement) => {
     if(api.scene3d){
       gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';
       gizmoToolbarHost.style.cssText='position:absolute;right:8px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
-      zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
-      // The light tool's panel, under the toolbar on the right.
+      // In the panel's bottom strip, at its right end (viewer-chrome places it).
+      const foot=zoomHost.querySelector<HTMLElement>('#viewer-foot');
+      (foot ?? zoomHost).append(gizmoToolbarHost);V.gizmoToolbarHost=gizmoToolbarHost;
+      gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
+      // The light tool's panel opens upward from the toolbar, clear of the refine pill.
       lightPanelHost=document.createElement('div');lightPanelHost.id='light-panel';
-      lightPanelHost.style.cssText='position:absolute;right:8px;top:44px;z-index:6';
+      lightPanelHost.style.cssText='position:absolute;right:8px;bottom:calc(var(--hdr-h) + 44px);z-index:6';
       zoomHost.append(lightPanelHost);lightPanelOff=mountLightPanel(api,lightPanelHost);
     }
 

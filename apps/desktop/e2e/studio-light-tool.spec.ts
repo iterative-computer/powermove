@@ -20,7 +20,7 @@ test('the light tool adds, aims and tunes a light; Fast preview switches rendere
   const shot = async (name: string) => {
     if (!process.env.PM_SHOTS) return;
     const box = await page.locator('#composition-3d-controls').evaluate(el => el.closest('.panel')?.getBoundingClientRect().toJSON() ?? null);
-    await page.screenshot({ path: `${process.env.PM_SHOTS}/${name}.png`, clip: box ? { x: box.x, y: box.y, width: box.width, height: Math.min(box.height, 520) } : undefined });
+    await page.screenshot({ path: `${process.env.PM_SHOTS}/${name}.png`, clip: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : undefined });
   };
   const values = () => page.evaluate(() => [...document.querySelectorAll('#light-panel .lp-row:not([hidden]) .lp-val')].map(e => e.textContent).join(' | '));
   await shot('after-1-default');

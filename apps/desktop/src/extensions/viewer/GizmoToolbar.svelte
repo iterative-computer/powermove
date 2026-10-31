@@ -51,11 +51,11 @@
 
 <div class="bar" role="toolbar" aria-label="3D view">
   <div class="group" role="radiogroup" aria-label="Look through">
-    <button class:on={view==='camera'} role="radio" aria-checked={view==='camera'} title="Camera — see exactly what the shot renders" onclick={()=>scene.setView('camera')}>
-      <span class="ic">{@html icon('cam')}</span>Camera
+    <button class:on={view==='camera'} role="radio" aria-checked={view==='camera'} aria-label="Camera" title="Camera — see exactly what the shot renders" onclick={()=>scene.setView('camera')}>
+      <span class="ic">{@html icon('cam')}</span><span class="lbl">Camera</span>
     </button>
-    <button class:on={view==='editor'} role="radio" aria-checked={view==='editor'} title="Free view — look around the scene without changing the shot" onclick={()=>scene.setView('editor')}>
-      <span class="ic">{@html icon('cube')}</span>Free view
+    <button class:on={view==='editor'} role="radio" aria-checked={view==='editor'} aria-label="Free view" title="Free view — look around the scene without changing the shot" onclick={()=>scene.setView('editor')}>
+      <span class="ic">{@html icon('cube')}</span><span class="lbl">Free view</span>
     </button>
   </div>
 
@@ -72,9 +72,9 @@
   </div>
 
   {#if transforming}
-    <button class="chip" title={space==='world'?'Handles line up with the scene (up is up). Click to line them up with the object instead':'Handles line up with the object, however it is turned. Click to line them up with the scene instead'}
+    <button class="chip" aria-label={space==='world'?'Scene axes':'Object axes'} title={space==='world'?'Handles line up with the scene (up is up). Click to line them up with the object instead':'Handles line up with the object, however it is turned. Click to line them up with the scene instead'}
       onclick={()=>scene.setSpace(space==='world'?'local':'world')}>
-      <span class="ic">{@html icon(space==='world'?'globe':'cube')}</span>{space==='world'?'Scene axes':'Object axes'}
+      <span class="ic">{@html icon(space==='world'?'globe':'cube')}</span><span class="lbl">{space==='world'?'Scene axes':'Object axes'}</span>
     </button>
   {/if}
 
@@ -83,11 +83,11 @@
   </button>
 
   <div class="group" role="radiogroup" aria-label="Preview">
-    <button class:on={preview==='fast'} role="radio" aria-checked={preview==='fast'} title="Fast — real-time preview that keeps up while you work. Exports always render at full quality" onclick={()=>scene.studio.setPreview('fast')}>
-      <span class="ic">{@html icon('lightning')}</span>Fast
+    <button class:on={preview==='fast'} role="radio" aria-checked={preview==='fast'} aria-label="Fast" title="Fast — real-time preview that keeps up while you work. Exports always render at full quality" onclick={()=>scene.studio.setPreview('fast')}>
+      <span class="ic">{@html icon('lightning')}</span><span class="lbl">Fast</span>
     </button>
-    <button class:on={preview==='quality'} role="radio" aria-checked={preview==='quality'} title="Quality — path-traced, as the export will look: true reflections, soft shadows and glass. Sharpens when you stop" onclick={()=>scene.studio.setPreview('quality')}>
-      <span class="ic">{@html icon('sparkle')}</span>Quality
+    <button class:on={preview==='quality'} role="radio" aria-checked={preview==='quality'} aria-label="Quality" title="Quality — path-traced, as the export will look: true reflections, soft shadows and glass. Sharpens when you stop" onclick={()=>scene.studio.setPreview('quality')}>
+      <span class="ic">{@html icon('sparkle')}</span><span class="lbl">Quality</span>
     </button>
   </div>
 </div>
@@ -104,5 +104,7 @@
   button.plain.icon-only { width: var(--ctl-h); }
   .ic { display: inline-flex; width: 14px; height: 14px; }
   .ic :global(svg) { width: 14px; height: 14px; }
+  /* A narrow viewer keeps the icons (each has its tooltip and name). */
+  @container viewer-foot (max-width: 860px) { .lbl { display: none; } button:not(.icon-only) { padding: 0 7px; } }
   .sep { width: 1px; height: 14px; margin: 0 3px; background: var(--ink-3); }
 </style>

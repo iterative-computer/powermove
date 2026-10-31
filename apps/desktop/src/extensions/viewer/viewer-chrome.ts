@@ -1,7 +1,8 @@
 import type { PowermoveAPI } from 'powermove';
 
 /* The Composition panel's chrome: the view controls (zoom and preview
-   quality) along the bottom. Open compositions are tabs in the Timeline. */
+   quality) along the bottom, and the 3D toolbar at its right end. Open
+   compositions are tabs in the Timeline. */
 type Comps = {
   get(id: string): { id: string; name: string } | null;
   open(id: string): boolean;
@@ -18,10 +19,11 @@ export const VIEWER_CHROME_STYLES = `
   #panel-viewer:hover .panel-move-handle,#panel-viewer .panel-move-handle:focus-visible{opacity:.62}
   /* The strip's controls sit 6px in, the panel's corner radius minus theirs,
      so their corners run parallel to the panel's. */
-  #viewer-foot{flex:none;height:var(--hdr-h);display:flex;align-items:center;gap:6px;padding:0 6px;border-top:1px solid var(--line)}
+  #viewer-foot{container:viewer-foot/inline-size;flex:none;height:var(--hdr-h);display:flex;align-items:center;gap:6px;padding:0 6px;border-top:1px solid var(--line)}
   #viewer-foot > :not(select){position:relative!important;inset:auto!important}
   #viewer-foot > .pm-select{width:auto!important;height:24px!important;gap:6px;padding:0 8px!important;border-radius:calc(var(--r-lg) - 6px)!important;background:var(--bg-field)!important;color:var(--tx-value)!important;font:11px/14px var(--f-ui)!important}
   #viewer-foot > #composition-zoom-trigger{font-family:var(--f-mono)!important}
+  #viewer-foot > #composition-3d-controls{margin-left:auto}
   #viewer-foot > .pm-select .pm-select-chevron{position:static;width:8px;height:8px;margin:0;color:var(--tx-3)}
   #viewer-flowchart{position:absolute;z-index:30;min-width:200px;max-width:320px;padding:8px;border-radius:var(--r-lg);background:var(--bg-float);box-shadow:var(--shadow-lift);font:var(--fs-sm) var(--f-ui);color:var(--tx-2)}
   #viewer-flowchart h4{margin:2px 4px 6px;color:var(--tx-4);font-size:var(--fs-xs);font-weight:var(--fw-medium);text-transform:uppercase;letter-spacing:.06em}
@@ -51,6 +53,9 @@ export function mountViewerChrome(api: PowermoveAPI, body: HTMLElement, runtime:
       return trigger ? [trigger, select] : [select];
     };
     foot.replaceChildren(...[zoom, quality].filter((item): item is HTMLElement => !!item).flatMap(withTrigger));
+    // The 3D toolbar (shown only for compositions with 3D layers) at the right end.
+    const toolbar = runtime.gizmoToolbarHost as HTMLElement | undefined;
+    if (toolbar) foot.append(toolbar);
     document.getElementById('preview-controls')?.remove();
   };
   body.append(foot);
@@ -101,5 +106,6 @@ export function mountViewerChrome(api: PowermoveAPI, body: HTMLElement, runtime:
   };
   runtime.toggleFlowchart = toggleChart;
 
+  runtime.placeChrome = place;
   return () => { closeChart(); foot.remove(); };
 }
