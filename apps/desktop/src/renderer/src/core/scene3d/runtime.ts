@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 // Softboxes (area lights) in the classic renderer need their lookup tables once.
 let rectAreaReady=false;
@@ -12,6 +13,30 @@ export type SceneEvaluator = (property: any,path: string) => any;
 export type SceneAssetGetter = (id: string) => any;
 const radians = THREE.MathUtils.degToRad;
 let outputRenderer:THREE.WebGLRenderer|null=null;
+/*
+ * The studio set in the real-time renderer (the viewer's Fast preview, and
+ * machines without WebGPU): Studio's backdrop color, a neutral studio room to
+ * reflect (metal is otherwise black), and a soft contact shadow under the
+ * models on the set's floor (area lights cast no real-time shadows). None of
+ * it carries a scene id, so picking and Studio's own trace never see it.
+ */
+const STUDIO_SET_BACKDROP='#F6F5F8';
+let studioRoom:THREE.Texture|null=null;
+const studioRoomFor=(renderer:THREE.WebGLRenderer)=>{
+  if(!studioRoom){const pmrem=new THREE.PMREMGenerator(renderer);studioRoom=pmrem.fromScene(new RoomEnvironment(),.04).texture;pmrem.dispose();}
+  return studioRoom;
+};
+let contactTexture:THREE.Texture|null=null;
+const contactShadowTexture=()=>{
+  if(!contactTexture){
+    const c=document.createElement('canvas');c.width=c.height=256;const g=c.getContext('2d')!;
+    const r=g.createRadialGradient(128,128,0,128,128,128);
+    r.addColorStop(0,'rgba(0,0,0,.42)');r.addColorStop(.45,'rgba(0,0,0,.2)');r.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle=r;g.fillRect(0,0,256,256);
+    contactTexture=new THREE.CanvasTexture(c);contactTexture.colorSpace=THREE.SRGBColorSpace;
+  }
+  return contactTexture;
+};
 let outputDepth:{owner:SceneRuntime;key:string}|null=null;
 const outputOwners=new Set<SceneRuntime>();
 const sourceSignatures=new WeakMap<object,string>();
@@ -78,6 +103,8 @@ export class SceneRuntime {
   warnings: string[] = [];
   revision = 0;
 
+  /** The studio set's contact shadow (see STUDIO_SET_BACKDROP). */
+  private floor:THREE.Mesh|null=null;
   constructor() { this.scene.add(this.ambient); }
 
   private texture(id: string|undefined,colorSpace: boolean): THREE.Texture|null {
@@ -206,7 +233,8 @@ export class SceneRuntime {
       object.name=node.name;object.position.set(v.x,v.y,v.z);object.color.set(v.color);object.intensity=v.intensity;
       object.visible=v.visible!==false;
       const light=object as any;
-      light.castShadow=node.castShadow && data.environment.shadows && shadowLights++<4;
+      // Softboxes (area lights) cast no real-time shadows.
+      light.castShadow=!!light.shadow && node.castShadow && data.environment.shadows && shadowLights++<4;
       if (light.target) light.target.position.set(v.targetX,v.targetY,v.targetZ);
       if (light.isRectAreaLight) { light.width=v.width;light.height=v.height;light.lookAt(v.targetX,v.targetY,v.targetZ); }
       if ('distance' in light) { light.distance=v.distance;light.decay=v.decay; }
@@ -227,11 +255,30 @@ export class SceneRuntime {
     const environment=values(data.environment.p,'environment');
     this.ambient.color.set(environment.ambientColor);this.ambient.groundColor.set(environment.ambientColor).multiplyScalar(.35);
     this.ambient.intensity=environment.ambient;
-    this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
+    const studioSet=!!data.environment.shadowCatcher;
+    this.scene.background=data.environment.background?new THREE.Color(data.environment.background):studioSet?new THREE.Color(STUDIO_SET_BACKDROP):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
     const textureKeys=new Set(data.objects.flatMap(o=>Object.entries(o.material.maps).map(([slot,id])=>`${id}:${slot==='color'||slot==='emissive'}`)));
     for(const [key,entry] of this.textures)if(!textureKeys.has(key)){entry.texture.dispose();this.textures.delete(key);}
+  }
+
+  /** Room reflections and the contact shadow while the studio set is on. */
+  private updateStudioSet(): void {
+    const on=!!this.raw?.environment?.shadowCatcher && !!this.renderer;
+    this.scene.environment=on?studioRoomFor(this.renderer!):null;
+    this.scene.environmentIntensity=.45;
+    const box=on?this.worldBounds():new THREE.Box3();
+    if(!on || box.isEmpty()){if(this.floor)this.floor.visible=false;return;}
+    if(!this.floor){
+      this.floor=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({map:contactShadowTexture(),transparent:true,depthWrite:false,toneMapped:false}));
+      this.floor.rotation.x=-Math.PI/2;this.floor.renderOrder=-1;this.scene.add(this.floor);
+    }
+    const size=box.getSize(new THREE.Vector3()),centre=box.getCenter(new THREE.Vector3());
+    this.floor.visible=true;
+    this.floor.position.set(centre.x,box.min.y+1e-3,centre.z);
+    this.floor.scale.set(size.x*1.7+size.y*.6,size.z*1.7+size.y*.6,1);
+    this.floor.updateMatrixWorld(true);
   }
 
   resizeCamera(w:number,h:number,camera=this.camera): void {
@@ -257,6 +304,7 @@ export class SceneRuntime {
     this.renderer.toneMappingExposure=e?this.evaluation(e.p.exposure,'environment.exposure'):1;
     this.renderer.shadowMap.enabled=e?.shadows!==false;
     this.renderer.setClearColor(0,0);
+    this.updateStudioSet();
     if(!objectId){outputDepth=null;this.renderer.render(this.scene,camera);}
     else {
       // A shared depth prepass lets ordinary timeline layers keep their own effects,
@@ -268,6 +316,8 @@ export class SceneRuntime {
       const visit=(phase:'depth'|'color')=>{
         this.scene.traverse((child:any)=>{
           if(!child.isMesh)return;
+          // The set's contact shadow belongs to the layer that owns the backdrop.
+          if(child===this.floor){child.visible=phase==='color' && background;return;}
           const id=child.userData.sceneId;
           for(const material of Array.isArray(child.material)?child.material:[child.material]){
             if(!saved.has(material))saved.set(material,{colorWrite:material.colorWrite,depthWrite:material.depthWrite,visible:material.visible});

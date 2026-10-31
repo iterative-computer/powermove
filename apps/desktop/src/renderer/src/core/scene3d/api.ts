@@ -3,7 +3,7 @@ import { MATERIAL_PRESETS, SHOT_TYPES, surfaceAt, highlightPlacement } from '../
 
 /** Softboxes being dragged by light by pointing, with where each started. */
 const highlightDrags = new Map<string,{x:number;y:number;z:number;tx:number;ty:number;tz:number}>();
-import { studioProgress } from '../studio';
+import { studioProgress, studioPreview, setStudioPreview, onStudioPreview } from '../studio';
 import { studioSwatch } from '../studio/swatch';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
@@ -14,6 +14,7 @@ import { prepareModelImport } from './import-bundle';
 import { compositionScene,layer3DRole,isModelGroup } from './layers';
 import { editScene } from './operations';
 import type { Scene3DAPI } from '../../kernel/api';
+import { getLightTool, setLightTool, onLightTool, lightToolOf, lightInfo } from './light-tool';
 import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
 
 export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:{layerId:string|null;ids:string[]})=>void):Scene3DAPI {
@@ -30,12 +31,27 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
   return {getMode:getGizmoMode,setMode:setGizmoMode,getSpace:getGizmoSpace,setSpace:setGizmoSpace,onGizmoChange:listener=>({dispose:onGizmoState(listener)}),createGizmo:element=>createSceneGizmo(PM,element,time=>compositionRuntime(PM,time)),createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
-    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>setNavigationMode(PM,mode),
+    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>{if(mode!=='select')setLightTool(PM,{on:false});setNavigationMode(PM,mode);},
     onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
     createNavigation:element=>(navigation=createSceneNavigation(PM,element)),
     frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
     describe(){return compositionScene(PM,PM.time);},
+    lights:(()=>{
+      const tool=()=>lightToolOf(PM),selected=()=>(PM.sel?.layers || []).find((id:string)=>PM.L?.(id)?.d?.data?.light) ?? null;
+      return {
+        getTool:()=>getLightTool(PM),setTool:patch=>{if(patch.on)setNavigationMode(PM,'select');setLightTool(PM,patch);},onToolChange:listener=>({dispose:onLightTool(PM,listener)}),
+        selected,info:()=>lightInfo(PM,selected()),surface:(u,v)=>tool().surface(u,v),
+        begin:(u,v)=>{
+          const s=getLightTool(PM),id=tool().begin(selected(),u,v,s.aim,s.kind,s.adding);
+          if(id && s.adding)setLightTool(PM,{adding:false});
+          return id;
+        },
+        move:(u,v)=>tool().move(u,v),end:()=>tool().end(),cancel:()=>tool().cancel(),active:()=>tool().active(),
+        set:(what,value)=>{const id=selected();return id?tool().set(id,what,value):null;},commit:()=>tool().commit(),
+      };
+    })(),
     studio:{materials:MATERIAL_PRESETS,shots:SHOT_TYPES,progress:()=>studioProgress(PM),
+      getPreview:()=>studioPreview(PM),setPreview:q=>setStudioPreview(PM,q),onPreviewChange:listener=>({dispose:onStudioPreview(PM,listener)}),
       swatch:(id)=>{const preset=MATERIAL_PRESETS.find(m=>m.id===id);return preset?studioSwatch(id,preset.p):Promise.resolve(null);},
       highlightAt:(u,v)=>{
         const runtime=compositionRuntime(PM,PM.time),camera=PM._renderCamera3D || runtime.camera;

@@ -20,6 +20,8 @@ export const STATIC_KEYS = [
   'previewMemoryMiB',
   'storageSettings',
   'previewResolution',
+  // The viewer's 3D preview: 'fast' (real-time) or 'quality' (Studio).
+  'studioPreview',
   'projectTrash',
   'takes',
   'workspaces',

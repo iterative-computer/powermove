@@ -43,12 +43,17 @@ type Job = {
 /** Jobs not drawn for this long are dropped. */
 const JOB_TTL_MS = 30_000;
 
-type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; frames: number; declined: string; revision: number; preparing: Map<string, StudioPending>; prunedAt: number };
+/** How the viewer draws 3D: the real-time renderer (fast) or Studio's path tracer (quality). Exports always use Studio. */
+export type StudioPreview = 'fast' | 'quality';
+const PREVIEW_KEY = 'studioPreview';
+
+type State = { jobs: Map<string, Job>; tick: number | null; enabled: boolean; preview: StudioPreview; previewListeners: Set<(q: StudioPreview) => void>; frames: number; declined: string; revision: number; preparing: Map<string, StudioPending>; prunedAt: number };
 const states = new WeakMap<object, State>();
 const state = (PM: any): State => {
   let s = states.get(PM);
   if (!s) {
-    s = { jobs: new Map(), tick: null, enabled: true, frames: 0, declined: '', revision: 0, preparing: new Map(), prunedAt: 0 };
+    const saved = PM.store?.get?.(PREVIEW_KEY, 'quality');
+    s = { jobs: new Map(), tick: null, enabled: true, preview: saved === 'fast' ? 'fast' : 'quality', previewListeners: new Set(), frames: 0, declined: '', revision: 0, preparing: new Map(), prunedAt: 0 };
     states.set(PM, s);
     const st = s;
     // Editor-facing controls and status (the refine indicator, tests, agents).
@@ -56,6 +61,8 @@ const state = (PM: any): State => {
       setEnabled: (on: boolean) => setStudioEnabled(PM, on),
       setCaustics: (on: boolean) => { studioOptions.caustics = on; st.revision++; PM.invalidate?.('render'); },
       setDenoise: (on: boolean) => { studioOptions.denoise = on; st.revision++; PM.invalidate?.('render'); },
+      getPreview: () => st.preview,
+      setPreview: (q: StudioPreview) => setStudioPreview(PM, q),
       progress: () => studioProgress(PM),
       liveHistory: async () => { for (const job of st.jobs.values()) if (job.live) return job.live.historyStats(); return null; },
       status: () => ({ enabled: st.enabled, ready: studioGpuReady(), failure: studioGpuFailure(), frames: st.frames, declined: st.declined, preparing: preparingOf(st) }),
@@ -78,16 +85,39 @@ export function setStudioEnabled(PM: any, on: boolean): void {
   PM.invalidate?.('render');
 }
 
+export function studioPreview(PM: any): StudioPreview {
+  return state(PM).preview;
+}
+
+/** Switch the viewer between the real-time renderer and Studio (remembered). */
+export function setStudioPreview(PM: any, q: StudioPreview): void {
+  const s = state(PM);
+  if (s.preview === q) return;
+  s.preview = q;
+  s.revision++;
+  PM.store?.set?.(PREVIEW_KEY, q);
+  // Fast mode frees Studio's targets; they rebuild on returning to quality.
+  if (q === 'fast') pruneStudio(PM, () => false);
+  for (const listener of s.previewListeners) listener(q);
+  PM.invalidate?.('render');
+}
+
+export function onStudioPreview(PM: any, listener: (q: StudioPreview) => void): () => void {
+  const s = state(PM);
+  s.previewListeners.add(listener);
+  return () => s.previewListeners.delete(listener);
+}
+
 /** Part of the viewer's preview-cache key: which renderer drew 3D layers. */
 export function studioPreviewKey(PM: any): string {
   const s = states.get(PM);
-  return s ? `${s.enabled && studioGpuReady()}:${s.revision}` : 'off';
+  return s ? `${s.enabled && studioGpuReady()}:${s.preview}:${s.revision}` : 'off';
 }
 
 /** While Studio is still sharpening a view, the viewer must not reuse cached frames. */
 export function studioUnsettled(PM: any): boolean {
   const s = states.get(PM);
-  if (!s || !s.enabled || !studioGpuReady()) return false;
+  if (!s || !s.enabled || !studioGpuReady() || s.preview === 'fast') return false;
   for (const job of s.jobs.values()) if (job.refine && job.refine.samples < REFINE_SAMPLES) return true;
   return false;
 }
@@ -103,6 +133,7 @@ function preparingOf(s: State): StudioPending | null {
 /** Viewer status for the refine indicator: samples so far and the goal, or a large model still being prepared. */
 export function studioProgress(PM: any): { samples: number; goal: number; refining: boolean; preparing?: StudioPending } | null {
   const s = state(PM);
+  if (s.preview === 'fast') return null;
   const preparing = preparingOf(s);
   if (preparing) return { samples: 0, goal: REFINE_SAMPLES, refining: false, preparing };
   for (const job of s.jobs.values()) {
@@ -226,6 +257,9 @@ function schedule(PM: any): void {
  */
 export function studioLayer(PM: any, runtime: any, w: number, h: number, objectId: string, depthIds: Set<string>, bottom: boolean, camera: THREE.Camera, renderScreen?: (comp: string) => Uint8Array | null, time: number = PM.time): { canvas: HTMLCanvasElement; version: string } | null {
   if (!studioEnabled(PM)) return null;
+  // Fast preview: the viewer draws 3D with the real-time renderer; exports,
+  // agent frames and stills still trace.
+  if (state(PM).preview === 'fast' && !PM._studioFinal && !PM._studioStill) return null;
   // A splat layer is drawn by the splat rasterizer, composited by layer order.
   if (hasSplats(runtime, objectId)) return null;
   const width = Math.max(2, Math.min(8192, Math.round(w))), height = Math.max(2, Math.min(8192, Math.round(h)));

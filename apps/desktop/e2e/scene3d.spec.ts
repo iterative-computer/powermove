@@ -13,7 +13,7 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
   });
   expect(initial.groupedPixels).toEqual(initial.pixels);
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
-  await page.getByRole('tab',{name:'Rotate',exact:true}).click();
+  await page.getByRole('radio',{name:'Rotate',exact:true}).click();
   const handle=await page.evaluate(()=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),canvas=document.querySelector('#gl')!.getBoundingClientRect(),cx=canvas.left+canvas.width/2,cy=canvas.top+canvas.height/2;
     for(let y=cy-3;y<cy+8;y+=2)for(let x=cx+35;x<cx+130;x+=2)
@@ -69,21 +69,21 @@ test('editor orbit, pan, dolly and framing preserve the render camera, project a
     let hash=2166136261;for(const value of pixels)hash=Math.imul(hash^value,16777619);return hash;
   });
   const original=await sample();
-  const view=page.getByRole('combobox',{name:'3D view',exact:true});await expect(view).toBeVisible();
-  const tool=async(name:string,mode:string)=>{await view.click();await page.getByRole('option',{name,exact:true}).click();
+  // The toolbar's view tools: Orbit, Pan and Zoom; Frame is its own button.
+  const tool=async(name:string,mode:string)=>{await page.getByRole('radio',{name,exact:true}).click();
     await expect.poll(()=>page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.getNavigationMode())).toBe(mode);};
   await tool('Orbit','orbit');
   const box=await page.locator('#stage').boundingBox(),point={x:box!.x+box!.width*.7,y:box!.y+box!.height*.6};
   const drag=async(dx:number,dy:number)=>{await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+dx,point.y+dy,{steps:8});await page.mouse.up();};
-  await drag(65,-30);await expect(page.getByRole('tab',{name:'Editor',exact:true})).toHaveAttribute('aria-selected','true');
+  await drag(65,-30);await expect(page.getByRole('radio',{name:'Free view',exact:true})).toHaveAttribute('aria-checked','true');
   await expect.poll(sample).not.toBe(original);const orbited=await sample();
   await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+45,point.y,{steps:5});await page.keyboard.press('Escape');await page.mouse.up();
   expect(await sample()).toBe(orbited);
   await tool('Pan','pan');await drag(40,25);await expect.poll(sample).not.toBe(orbited);const panned=await sample();
   await page.mouse.wheel(0,100);await expect.poll(sample).not.toBe(panned);const dollied=await sample();
-  await view.click();await page.getByRole('option',{name:'Frame selection',exact:true}).click();await expect.poll(sample).not.toBe(dollied);
+  await page.getByRole('button',{name:'Frame',exact:true}).click();await expect.poll(sample).not.toBe(dollied);
   await drag(30,0);const beforeFrame=await sample();await page.keyboard.press('f');await expect.poll(sample).not.toBe(beforeFrame);
-  await page.getByRole('tab',{name:'Move',exact:true}).click();
+  await page.getByRole('radio',{name:'Move',exact:true}).click();
   const aligned=await page.evaluate(()=>{
     const PM=(window as any).PM,b=PM.GL.bounds(PM.L('model'),0),viewer=PM.Kernel.services.get('viewer'),canvas=document.querySelector('#gl')!.getBoundingClientRect();
     const picked=PM.GL.pick((b.x0+b.x1)/2,(b.y0+b.y1)/2,0)?.id;
@@ -100,7 +100,7 @@ test('editor orbit, pan, dolly and framing preserve the render camera, project a
   await page.evaluate(()=>(window as any).PM.hist.undo());
   const unchanged=await page.evaluate(()=>{const PM=(window as any).PM;return {layers:JSON.stringify(PM.proj.layers),pixels:[...PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})]};});
   expect(unchanged.layers).toBe(initial.layers);expect(unchanged.pixels).toEqual(initial.pixels);
-  await page.getByRole('tab',{name:'Camera',exact:true}).click();await expect.poll(sample).toBe(original);
+  await page.getByRole('radio',{name:'Camera',exact:true}).click();await expect.poll(sample).toBe(original);
   expect(await page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.getNavigationMode())).toBe('select');
   await page.mouse.move(point.x,point.y);await page.mouse.wheel(0,80);
   expect(await page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.getView())).toBe('camera');
@@ -149,7 +149,7 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
     const target=imported.data.result.id;PM.selectLayers([target]);PM.invalidate();return {target,count:PM.hist.list().length};
   });
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
-  await expect(page.getByRole('tab',{name:'Move',exact:true})).toBeVisible();
+  await expect(page.getByRole('radio',{name:'Move',exact:true})).toBeVisible();
   const findHandle=(axis:string)=>page.evaluate((axis)=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),stage=document.querySelector('#stage')!,rect=stage.getBoundingClientRect();
     const canvas=document.querySelector('#gl')!.getBoundingClientRect(),cx=canvas.left+canvas.width/2,cy=canvas.top+canvas.height/2;
@@ -164,23 +164,23 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
   expect(await page.evaluate(()=>(window as any).PM.hist.list().length)).toBe(initial.count+1);
   await page.evaluate(()=>(window as any).PM.hist.undo());expect(await position()).toBe(0);
   await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.x+50,handle.y,{steps:5});await page.keyboard.press('Escape');await page.mouse.up();expect(await position()).toBe(0);
-  await page.getByRole('tab',{name:'Rotate',exact:true}).click();
+  await page.getByRole('radio',{name:'Rotate',exact:true}).click();
   const rotate=await findHandle('Z');await page.mouse.move(rotate.x,rotate.y);await page.mouse.down();await page.mouse.move(rotate.cx,rotate.cy+80,{steps:8});await page.mouse.up();
   expect(Math.abs(await page.evaluate(id=>(window as any).PM.L(id).p.rotation.v,initial.target))).toBeGreaterThan(10);
   await page.evaluate(()=>(window as any).PM.hist.undo());
-  await page.getByRole('tab',{name:'Scale',exact:true}).click();
+  await page.getByRole('radio',{name:'Scale',exact:true}).click();
   const scale=await findHandle('X');await page.mouse.move(scale.x,scale.y);await page.mouse.down();await page.mouse.move(scale.x+35,scale.y,{steps:8});await page.mouse.up();
   expect(await page.evaluate(id=>(window as any).PM.L(id).p['scale.x'].v,initial.target)).toBeGreaterThan(100);
   await page.evaluate(()=>(window as any).PM.hist.undo());
   expect(await page.evaluate(id=>(window as any).PM.L(id).p['scale.x'].v,initial.target)).toBe(100);
-  await page.getByRole('tab',{name:'Move',exact:true}).click();
+  await page.getByRole('radio',{name:'Move',exact:true}).click();
   await page.keyboard.down('Control');await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.x+90,handle.y,{steps:8});await page.mouse.up();await page.keyboard.up('Control');
   expect(await position()).not.toBe(0);expect(await position()).toBeCloseTo(Math.round(await position()),6);await page.evaluate(()=>(window as any).PM.hist.undo());
   await page.evaluate(()=>{const PM=(window as any).PM;PM.Kernel.services.get('viewer').setZoom(1);PM.invalidate();});
   const zoomed=await findHandle('X');await page.mouse.move(zoomed.x,zoomed.y);await page.mouse.down();await page.mouse.move(zoomed.x+30,zoomed.y,{steps:5});await page.mouse.up();expect(await position()).not.toBe(0);await page.evaluate(()=>(window as any).PM.hist.undo());
   await page.evaluate(()=>(window as any).PM.Kernel.services.get('viewer').returnToComposition());
 
-  await page.getByRole('tab',{name:'Local',exact:true}).click();
+  await page.getByRole('button',{name:'Scene axes',exact:true}).click();
   expect(await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.getSpace())).toBe('local');
   expect(await page.evaluate(()=>(window as any).PM.GL.renderToPixels(0,160,90,{transparent:true})[3])).toBe(0);
   const repeated=await page.evaluate(()=>{

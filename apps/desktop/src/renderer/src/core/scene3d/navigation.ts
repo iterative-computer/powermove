@@ -62,6 +62,8 @@ export function frameComposition(PM:any,selected=true):void {
     if(selected&&!ids.has(id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
     box.expandByObject(object);
   }
+  // Nothing selected (or nothing framable in it): frame everything.
+  if(box.isEmpty() && selected)return frameComposition(PM,false);
   if(box.isEmpty())return;
   const start=viewportPose(PM);
   applyViewportPose(PM,frameView(start,box,viewportCamera(PM,world.camera)));

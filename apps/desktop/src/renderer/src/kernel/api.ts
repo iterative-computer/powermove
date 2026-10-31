@@ -376,6 +376,33 @@ export interface Scene3DAPI {
     dispose():void;
   };
   frame(selected?:boolean):void;
+  /**
+   * The light tool: point at a model to put light there (after Light Wrangler).
+   * reflect: the light's highlight lands where you point; direct: the light faces
+   * that surface; orbit: dragging circles the light around its target. With no
+   * light selected, or while `adding`, pointing adds one of `kind`.
+   */
+  readonly lights: {
+    getTool(): { on: boolean; aim: 'reflect' | 'direct' | 'orbit'; kind: 'area' | 'spot' | 'point' | 'sun'; adding: boolean };
+    setTool(patch: Partial<{ on: boolean; aim: 'reflect' | 'direct' | 'orbit'; kind: 'area' | 'spot' | 'point' | 'sun'; adding: boolean }>): void;
+    onToolChange(listener: (state: { on: boolean; aim: 'reflect' | 'direct' | 'orbit'; kind: 'area' | 'spot' | 'point' | 'sun'; adding: boolean }) => void): Disposable;
+    /** The selected light layer, if any. */
+    selected(): string | null;
+    info(): { id: string; name: string; type: 'area' | 'spot' | 'point' | 'sun'; power: number; size: number | null; distance: number; spread: number | null } | null;
+    /** Whether a model surface lies under the frame point (u, v in 0..1). */
+    surface(u: number, v: number): boolean;
+    /** Start pointing at (u, v); returns the light being aimed (possibly new), or null. */
+    begin(u: number, v: number): string | null;
+    move(u: number, v: number): void;
+    /** Release: the move becomes one undoable edit. */
+    end(): void;
+    cancel(): void;
+    active(): boolean;
+    /** End a value drag: the change becomes one undoable edit. */
+    commit(): void;
+    /** Set the selected light's power, size, distance (power follows, so brightness on the product holds) or spotlight spread, live. */
+    set(what: 'power' | 'size' | 'distance' | 'spread', value: number): { id: string; name: string; type: 'area' | 'spot' | 'point' | 'sun'; power: number; size: number | null; distance: number; spread: number | null } | null;
+  };
   getMode(): 'translate'|'rotate'|'scale';
   setMode(mode:'translate'|'rotate'|'scale'):void;
   getSpace():'world'|'local';
@@ -388,6 +415,10 @@ export interface Scene3DAPI {
   readonly studio: {
     readonly materials: ReadonlyArray<{ id: string; label: string; p: Record<string, number | string> }>;
     readonly shots: ReadonlyArray<{ id: string; label: string }>;
+    /** How the viewer draws 3D: 'fast' (real-time, every frame) or 'quality' (Studio's path tracer). Exports always render at quality. */
+    getPreview(): 'fast' | 'quality';
+    setPreview(quality: 'fast' | 'quality'): void;
+    onPreviewChange(listener: (quality: 'fast' | 'quality') => void): Disposable;
     /** Samples so far toward a clean view, or null when Studio is not drawing. */
     progress(): { samples: number; goal: number; refining: boolean; preparing?: { pending: number; total: number } } | null;
     /** Light by pointing: place a softbox whose reflection lands where the frame point (u, v in 0..1) meets a model. Returns its layer id. */

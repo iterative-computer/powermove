@@ -7,6 +7,24 @@ physically right. The design and roadmap are in `docs/3d-studio-redesign.md`.
 
 ## What you see
 
+The viewer's toolbar, for a composition with 3D layers, left to right:
+
+- **Camera / Free view:** look through the shot's camera, or around the scene
+  without changing the shot.
+- **Tools:** Move, Rotate and Scale the selection; Orbit, Pan and Zoom the
+  view; Light (below). Each says in its tooltip what a drag does. Move,
+  Rotate and Scale add a **Scene axes / Object axes** switch: whether the
+  handles line up with the scene or with the object, however it is turned.
+- **Frame:** fit the selection, or everything when nothing is selected
+  (F, Home).
+- **Fast / Quality:** how the viewer draws 3D. Fast uses the real-time
+  renderer, with the studio set's backdrop, reflections and a soft contact
+  shadow under the models, so it keeps up at any size. Quality is Studio, as
+  below. Exports and agent frames always render at Studio's Final quality.
+  The choice is remembered.
+
+In Quality:
+
 - **Live** while you drag, scrub or play: half resolution, one sample per
   pixel, denoised. Depth of field is off while things move.
 - **Refine** when nothing has changed for a moment: the view sharpens a few
@@ -24,7 +42,8 @@ physically right. The design and roadmap are in `docs/3d-studio-redesign.md`.
   measured noise, which smooths light, screens, shallow-focus blur and the
   floor's shadows while edges, paint and the backdrop stay exact.
 
-Machines without WebGPU, and orthographic cameras, use the classic renderer.
+Machines without WebGPU, and orthographic cameras, use the real-time
+renderer (as Fast does).
 
 ## Building a product shot
 
@@ -76,14 +95,23 @@ Studio's layers by layer order. Keep a splat layer **above** the product
 layers it surrounds; it is depth-tested against their geometry, so the
 product hides the splats behind it and the splats in front cover it.
 
-## Light by pointing
+## The light tool
 
-**Alt+Shift+click** a model in the viewer to put a softbox's highlight
-exactly there: Studio mirrors the camera's view about the surface and places
-the softbox where its reflection lands. **Keep dragging** to slide the
-highlight across the surface; release commits it as one Undo.
-**Alt+Shift+scroll** over the viewer makes the selected softbox larger
-(softer highlight) or smaller (crisper).
+Put light where you point (after Light Wrangler for Blender). Choose
+**Light** in the toolbar; its panel opens under it.
+
+- **Reflect:** click a model and the selected light moves so its highlight
+  lands exactly there (Studio mirrors the camera's view about the surface).
+- **Direct:** the light faces the spot you click, lighting it straight on.
+- **Orbit:** drag to circle the light around what it points at.
+- **Add** (with Softbox, Spotlight, Bulb or Sun): the next click adds that
+  light there. With no light selected, a click adds one too.
+- Keep dragging to slide the light; release commits the move as one Undo.
+- The panel's **Brightness, Size, Distance** and a spotlight's **Spread**
+  sliders move the light live; releasing is one Undo. Distance keeps the
+  light on the product as bright (power follows the square of the distance).
+- **Esc** leaves the tool. Alt+Shift+click still puts a softbox's highlight
+  under the pointer from any tool.
 
 ## Shots
 
