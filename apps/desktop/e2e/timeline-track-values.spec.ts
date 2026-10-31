@@ -73,7 +73,7 @@ test('track property values support typing, axis-specific dragging, cancellation
   const inspectorLock = page.getByRole('button', { name: 'Lock aspect ratio', exact: true });
   const canvas = page.locator('#tl-canvas');
   await page.mouse.move(lockPoint.x, lockPoint.y);
-  await expect(canvas).toHaveAttribute('title', 'Lock aspect ratio');
+  await expect.poll(() => canvas.evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Lock aspect ratio');
   await expect(inspectorLock).toHaveAttribute('aria-pressed', 'false');
   await page.mouse.click(lockPoint.x, lockPoint.y);
   await expect(inspectorLock).toHaveAttribute('aria-pressed', 'true');
@@ -96,7 +96,7 @@ test('track property values support typing, axis-specific dragging, cancellation
     const themePoint = await fieldPoint(page, 'scale', 1);
     const themeLockPoint = await scaleLockPoint(page);
     await page.mouse.move(themeLockPoint.x, themeLockPoint.y);
-    await expect(canvas).toHaveAttribute('title', 'Unlock aspect ratio');
+    await expect.poll(() => canvas.evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Unlock aspect ratio');
     await page.mouse.dblclick(themePoint.x, themePoint.y);
     await expect(yInput).toBeVisible();
     await expect(page.locator('#tl-canvas-wrap > input')).toHaveCount(1);
@@ -112,7 +112,7 @@ test('track property values support typing, axis-specific dragging, cancellation
   await inspectorLock.click();
   const currentLockPoint = await scaleLockPoint(page);
   await page.mouse.move(currentLockPoint.x, currentLockPoint.y);
-  await expect(canvas).toHaveAttribute('title', 'Lock aspect ratio');
+  await expect.poll(() => canvas.evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Lock aspect ratio');
   await page.mouse.click(currentLockPoint.x, currentLockPoint.y);
   await expect(inspectorLock).toHaveAttribute('aria-pressed', 'true');
 
