@@ -2007,9 +2007,19 @@ function drawPropKeys(c: any, r: any, y: any) {
     const k = kf[index];
     const x = t2x(L.from + k.t);
     if (x < T.gut - 6 || x > T.w + 6) continue;
-    c.fillStyle = keySelected(k) ? (dark ? '#F2C6AE' : theme.accent) : INK.key;
-    if (k.hold) { c.fillRect(x - keyRadius + 1, cy - keyRadius + 1, keyRadius * 2 - 2, keyRadius * 2 - 2); continue; }
-    const d = keyRadius * .84;
+    /* Selected keys must read at a glance against unselected ones: the
+       saturated accent, a size step up, and a soft accent halo behind. */
+    const selected = keySelected(k);
+    const accent = dark ? theme.accentIcon : theme.accent;
+    const d = keyRadius * (selected ? 1.12 : .84);
+    if (selected) {
+      const h = d + 2.5;
+      c.fillStyle = rgba(accent, dark ? .32 : .22);
+      if (k.hold) c.fillRect(x - h + 1, cy - h + 1, h * 2 - 2, h * 2 - 2);
+      else { c.beginPath(); c.moveTo(x, cy - h); c.lineTo(x + h, cy); c.lineTo(x, cy + h); c.lineTo(x - h, cy); c.closePath(); c.fill(); }
+    }
+    c.fillStyle = selected ? accent : INK.key;
+    if (k.hold) { const s = selected ? d : keyRadius - 1; c.fillRect(x - s, cy - s, s * 2, s * 2); continue; }
     c.beginPath(); c.moveTo(x, cy - d); c.lineTo(x + d, cy); c.lineTo(x, cy + d); c.lineTo(x - d, cy); c.closePath();
     c.fill(); c.stroke();
   }

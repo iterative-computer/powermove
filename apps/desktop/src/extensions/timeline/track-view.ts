@@ -501,7 +501,14 @@ export function createTrackView(host: TrackViewHost) {
     for (const k of kf) {
       const x = host.t2x(layer.from + k.t);
       if (x < T.gut - 6 || x > W + 6) continue;
-      const color = host.keySelected(k) ? theme.accent : ink.key;
+      const selected = host.keySelected(k);
+      const color = selected ? theme.accent : ink.key;
+      if (selected) {
+        const h = r + 3;
+        c.fillStyle = host.rgba(theme.accent, .28);
+        if (k.hold) c.fillRect(x - h + 1, cy - h + 1, h * 2 - 2, h * 2 - 2);
+        else { c.beginPath(); c.moveTo(x, cy - h); c.lineTo(x + h, cy); c.lineTo(x, cy + h); c.lineTo(x - h, cy); c.closePath(); c.fill(); }
+      }
       c.fillStyle = color; c.strokeStyle = color;
       if (k.hold) { c.fillRect(x - r, cy - r, r * 2, r * 2); continue; }
       c.beginPath(); c.moveTo(x, cy - r); c.lineTo(x + r, cy); c.lineTo(x, cy + r); c.lineTo(x - r, cy); c.closePath();
