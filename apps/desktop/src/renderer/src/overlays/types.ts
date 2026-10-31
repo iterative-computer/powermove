@@ -72,6 +72,8 @@ export type MenuOptions = {
   x?: number;
   y?: number;
   right?: boolean;
+  /** Called when the menu goes away without a choice. */
+  onClose?: () => void;
 };
 
 export type ModalAction = {

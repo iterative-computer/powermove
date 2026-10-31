@@ -148,7 +148,6 @@ export const IPC = {
 
   themeSet: 'theme:set',
   hapticAlignment: 'haptic:alignment',
-  menuPopup: 'menu:popup',
   log: 'log',
   openExternal: 'shell:open-external',
   /** An extension's `ui.openExternal`, after the host's own policy: https only, re-checked here. */
@@ -643,6 +642,7 @@ export type MenuCommand =
   | 'contextCopy'
   | 'contextPaste'
   | 'contextSelectAll'
+  | 'contextDelete'
   | 'duplicate'
   | 'split'
   | 'toggleVisibility'
@@ -661,7 +661,7 @@ export type MenuCommand =
   | 'nextTab'
   | 'previousTab'
   | 'moveTabToNewWindow';
-export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll';
+export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'delete' | 'selectAll';
 
 export interface RemoteRunRecord {
   id: string;
@@ -690,36 +690,6 @@ export interface ExtensionForkResult {
 export interface PowermoveExtensionsBridge extends ExtensionsBridge {
   fork(req: ExtensionForkRequest): Promise<ExtensionForkResult>;
 }
-
-/** One row of a native context menu. Headers become disabled labels; NSMenu has no section titles. */
-export type NativeMenuItem =
-  | { type: 'separator' }
-  | {
-      type: 'submenu';
-      id: string;
-      label: string;
-      enabled?: boolean;
-      icon?: string;
-      items: NativeMenuItem[];
-    }
-  | {
-      type: 'normal' | 'checkbox' | 'header';
-      id: string;
-      label: string;
-      enabled?: boolean;
-      checked?: boolean;
-      /** Electron accelerator string, shown as the key equivalent. */
-      accelerator?: string;
-      /** PNG data URL, 32×32 (2× of the 16pt slot), black on transparent; shown as a template image. */
-      icon?: string;
-    };
-
-export type NativeMenuRequest = {
-  items: NativeMenuItem[];
-  /** Window-relative CSS pixels; omitted means "at the pointer". */
-  x?: number;
-  y?: number;
-};
 
 /** A remote file main downloaded for `assets.importUrl`, held until released. `type` and `kind` come from its bytes, not the server. */
 export interface RemoteMediaInfo { token: string; size: number; name: string; type: string; kind: 'image' | 'video' | 'audio' }
@@ -940,10 +910,6 @@ export interface PowermoveBridge {
   setTheme(theme: ThemeSource): void;
   haptic: {
     alignment(): void;
-  };
-  /** Native NSMenu context menus. Resolves with the chosen item id, or null when dismissed. */
-  menu?: {
-    popup(request: NativeMenuRequest): Promise<string | null>;
   };
   log(level: LogLevel, text: string): void;
   openExternal(url: string): Promise<void>;

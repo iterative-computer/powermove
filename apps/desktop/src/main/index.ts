@@ -5,6 +5,7 @@ import { registerClaudeDesktopMcp } from './claude-desktop-mcp';
 import { installUpdates } from './updates';
 import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
+import { installSystemAccent } from './system-accent';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
 import { registerExportSidecar } from './export-sidecar';
@@ -61,7 +62,6 @@ import { registerLogIpc } from './log';
 import { installRendererRecovery, isRendererUnavailable, recoverRenderer } from './renderer-recovery';
 import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
-import { registerContextMenuIpc } from './context-menu';
 import { registerCloudMediaIpc } from './cloud-media';
 import { MediaPathCache, registerMediaPathIpc } from './media-path-cache';
 import { cloudFileState } from '@powermove/macos-haptics';
@@ -538,6 +538,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
     });
   });
   installTextContextMenu(window.webContents);
+  installSystemAccent(window.webContents);
 
   let closing = false, closePrepared = false;
   window.on('close', event => {
@@ -1125,7 +1126,6 @@ if (!hasSingleInstanceLock) {
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerFontsIpc(ipcMain, ctx);
-    registerContextMenuIpc(ipcMain, ctx);
     registerConfirmIpc(ipcMain, ctx);
     registerClipboardIpc(ipcMain, ctx);
     registerCloudMediaIpc(ipcMain, ctx);

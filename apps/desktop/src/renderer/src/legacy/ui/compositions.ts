@@ -22,7 +22,8 @@ export function compositionSettingsDialog(PM: PMRegistry, id?: string | null): v
     title: existing ? 'Composition Settings' : 'New Composition', body: form.element, width: 420,
     actions: [
       { label: 'Cancel' },
-      { label: 'OK', pri: true, run: () => {
+      /* A button that names what it does, as the HIG asks of dialogs. */
+      { label: existing ? 'Apply' : 'Create', pri: true, run: () => {
         if (PM.projectLoading || PM.proj.id !== projectId) {
           throw new Error('The project has changed or is still opening. Close this dialog and try again.');
         }
@@ -106,7 +107,7 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
     title: 'Pre-compose', body, width: 440,
     actions: [
       { label: 'Cancel' },
-      { label: 'OK', pri: true, run: () => {
+      { label: 'Pre-compose', pri: true, run: () => {
         if (PM.projectLoading || PM.proj.id !== projectId || PM.Comps.active() !== compositionId) {
           throw new Error('The project or composition has changed. Close this dialog and try again.');
         }

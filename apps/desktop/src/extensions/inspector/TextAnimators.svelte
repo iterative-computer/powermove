@@ -83,10 +83,10 @@
     const group = (id: string) => ANIMATOR_PRESETS.filter((preset) => preset.group === id)
       .map((preset) => ({ label: preset.label, disabled: locked, run: () => addPreset(preset) }));
     return [
-      { header: 'Animate in' }, ...group('in'), '-',
+      { header: 'Animate In' }, ...group('in'), '-',
       { header: 'Loop' }, ...group('loop'), '-',
       { header: 'Custom' }, ...group('custom'), '-',
-      { label: 'Style selected text', icon: 'type', disabled: locked, run: styleSelection }
+      { label: 'Style Selected Text', icon: 'type', disabled: locked, run: styleSelection }
     ];
   }
 
@@ -112,8 +112,8 @@
       { label: 'Duplicate', icon: 'copy', disabled: locked, run: () => mutate('Duplicate text animator', () => {
         list.splice(index + 1, 0, { ...JSON.parse(JSON.stringify(animator)), id: api.util.uid('ta'), name: animator.name + ' copy' });
       }) },
-      { label: 'Move up', disabled: locked || index <= 0, run: () => move(index - 1) },
-      { label: 'Move down', disabled: locked || index >= list.length - 1, run: () => move(index + 1) },
+      { label: 'Move Up', disabled: locked || index <= 0, run: () => move(index - 1) },
+      { label: 'Move Down', disabled: locked || index >= list.length - 1, run: () => move(index + 1) },
       '-',
       { label: 'Remove', icon: 'trash', disabled: locked, run: () => mutate('Remove text animator', () => {
         layer.d.animators = list.filter((candidate: any) => candidate !== animator);

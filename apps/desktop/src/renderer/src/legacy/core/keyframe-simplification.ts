@@ -95,12 +95,12 @@ export function noticeDenseKeyframes(PM: PMRegistry, before: KeySnapshot = new M
     action: { label: 'Simplify', run: () => {
       if (!pending) return;
       pending = false;
-      if (PM.Edit.isLive?.()) { PM.toast('Finish the current edit, then choose Simplify Keyframes from the layer menu.', 4000, { error: false }); return; }
+      if (PM.Edit.isLive?.()) { PM.toast('Finish the current edit first. Nothing was simplified.', 4000, { error: false }); return; }
       if (PM.proj.id !== projectId || (PM.agentProjectBoundary || 0) !== boundary
         || refs.some((ref, index) => {
           const layer = simplificationLayer(PM, ref.layerId), prop = layer && PM.findProp(layer, ref.path);
           return JSON.stringify(signatures(prop)) !== JSON.stringify(expected[index]);
-        })) { PM.toast('The animation has changed. Choose Simplify Keyframes from the layer menu.', 4000, { error: false }); return; }
+        })) { PM.toast('The animation has changed since this edit, so nothing was simplified.', 4000, { error: false }); return; }
       const result = PM.Edit.apply({ type: 'simplify_keyframes', scope: 'properties', properties: refs },
         { label: 'Simplify Keyframes', origin: 'interface' });
       PM.toast(result.ok ? `${result.data.results[0].data.keysBefore.toLocaleString()} → ${result.data.results[0].data.keysAfter.toLocaleString()} keyframes` : result.message, 4000, { error: !result.ok });

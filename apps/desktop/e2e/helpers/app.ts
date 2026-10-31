@@ -246,62 +246,44 @@ export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: La
 
 export { expect };
 
-/** Exercise the native menu IPC without showing an AppKit popup in hidden tests. */
-export async function chooseNativeMenu(session: LaunchedApp, label: string | readonly string[], trigger: () => Promise<unknown>): Promise<string[]> {
-  await session.app.evaluate(({ Menu }, label) => {
-    const state = { original: Menu.prototype.popup, result: 'waiting', labels: [] as string[], choices: Array.isArray(label) ? [...label] : [label] };
-    (globalThis as any).__testNativeMenu = state;
-    Menu.prototype.popup = function (options) {
-      // A chosen row with a submenu consumes the next label from that submenu.
-      let menu = this;
-      let choice = state.choices.shift();
-      let item = menu.items.find(item => item.label === choice && item.enabled);
-      state.labels = menu.items.map(item => item.label);
-      while (item?.submenu && state.choices.length) {
-        menu = item.submenu!;
-        choice = state.choices.shift();
-        state.labels = menu.items.map(item => item.label);
-        item = menu.items.find(item => item.label === choice && item.enabled);
-      }
-      if (!state.choices.length) Menu.prototype.popup = state.original;
-      state.result = item ? (state.choices.length ? 'waiting' : 'selected') : `Missing enabled native menu item: ${choice}; got ${menu.items.map(item => item.label).join(', ')}`;
-      item?.click(item, options?.window, {} as any);
-      options?.callback?.();
-    };
-  }, label);
-  try {
-    await trigger();
-    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenu.result)).toBe('selected');
-    return await session.app.evaluate(() => (globalThis as any).__testNativeMenu.labels);
-  } finally {
-    await session.app.evaluate(({ Menu }) => {
-      const state = (globalThis as any).__testNativeMenu;
-      if (state) Menu.prototype.popup = state.original;
-      delete (globalThis as any).__testNativeMenu;
-    });
-  }
+const MENU_PANEL = '[data-svelte-overlay-menu] .menu-panel';
+
+/** Labels of the menu panel at `level`, in order, separators left out. */
+async function menuLabels(page: Page, level: number): Promise<{ label: string; enabled: boolean }[]> {
+  const panel = page.locator(`${MENU_PANEL}[data-level="${level}"]`);
+  await panel.waitFor({ state: 'visible' });
+  return panel.locator('.di').evaluateAll(rows => rows.map(row => ({
+    label: (row.querySelector('.label')?.textContent ?? '').trim(),
+    enabled: row.getAttribute('aria-disabled') !== 'true'
+  })));
 }
 
-/** Inspect native menu labels and enabled states without opening an AppKit popup or running an action. */
+/** Choose a row of a Powermove menu (overlays/Menu.svelte). Each label after
+ * the first is chosen from the submenu the previous one opens. Resolves with
+ * the labels of the last menu level shown. (The name predates Powermove
+ * drawing its own menus; it no longer involves AppKit.) */
+export async function chooseNativeMenu(session: LaunchedApp, label: string | readonly string[], trigger: () => Promise<unknown>): Promise<string[]> {
+  const choices = Array.isArray(label) ? [...label] : [label as string];
+  await trigger();
+  const page = session.page;
+  let shown: { label: string; enabled: boolean }[] = [];
+  for (const [level, choice] of choices.entries()) {
+    shown = await menuLabels(page, level);
+    const index = shown.findIndex(row => row.label === choice && row.enabled);
+    if (index < 0) throw new Error(`Missing enabled menu item: ${choice}; got ${shown.map(row => row.label).join(', ')}`);
+    await page.locator(`${MENU_PANEL}[data-level="${level}"] .di`).nth(index).click();
+  }
+  await expect(page.locator(MENU_PANEL)).toHaveCount(0);
+  return shown.map(row => row.label);
+}
+
+/** Read a Powermove menu's rows and whether each can run, then dismiss it without running anything. */
 export async function inspectNativeMenu(session: LaunchedApp, trigger: () => Promise<unknown>): Promise<{ label: string; enabled: boolean }[]> {
-  await session.app.evaluate(({ Menu }) => {
-    const state = { original: Menu.prototype.popup, items: null as { label: string; enabled: boolean }[] | null };
-    (globalThis as any).__testNativeMenuInspection = state;
-    Menu.prototype.popup = function (options) {
-      Menu.prototype.popup = state.original;
-      state.items = this.items.filter(item => item.type !== 'separator').map(item => ({ label: item.label, enabled: item.enabled }));
-      options?.callback?.();
-    };
-  });
+  await trigger();
+  const page = session.page;
   try {
-    await trigger();
-    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenuInspection.items)).not.toBeNull();
-    return await session.app.evaluate(() => (globalThis as any).__testNativeMenuInspection.items);
+    return await menuLabels(page, 0);
   } finally {
-    await session.app.evaluate(({ Menu }) => {
-      const state = (globalThis as any).__testNativeMenuInspection;
-      if (state) Menu.prototype.popup = state.original;
-      delete (globalThis as any).__testNativeMenuInspection;
-    });
+    await page.evaluate(() => (window as any).PM?.closeMenus?.());
   }
 }

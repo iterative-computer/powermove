@@ -10,7 +10,7 @@ test('a panel opens in a native window, keeps edits, and returns to the layout',
   await expect(library).toBeHidden();
   const notes = page.locator('#body #panel-notes').getByRole('textbox', { name: 'Project notes', exact: true });
   await notes.fill('Before pop-out');
-  await chooseNativeMenu(session, 'Pop out to window', () => page.locator('#panel-notes > header').click({ button: 'right' }));
+  await chooseNativeMenu(session, 'Open in New Window', () => page.locator('#panel-notes > header').click({ button: 'right' }));
   await expect.poll(() => app.windows().length).toBe(2);
   const child = app.windows().find(window => window !== page)!;
   await expect(child).toHaveTitle('Notes — Powermove');

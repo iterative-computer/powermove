@@ -37,8 +37,9 @@ export default function activate(api:PowermoveAPI):void {
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&is3DLayer(api.model.layer(layerIds[0]!)),
     build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(LayerInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
   // A submenu at the pointer, rather than a second menu opened elsewhere.
-  api.menus.contribute('timeline:context',()=>[{label:'Add 3D layer',icon:'cube',submenu:addMenuItems(api)}]);
-  api.menus.contribute('viewer:context',()=>[{label:'Add 3D layer',icon:'cube',submenu:addMenuItems(api)}]);
+  // Background menus only: a layer's own menu keeps to that layer.
+  api.menus.contribute('timeline:context',(ctx:any)=>ctx?.kind==='layer'?[]:[{label:'Add 3D Layer',icon:'cube',submenu:addMenuItems(api)}]);
+  api.menus.contribute('viewer:context',(ctx:any)=>ctx?.kind==='layer'?[]:[{label:'Add 3D Layer',icon:'cube',submenu:addMenuItems(api)}]);
   api.palette.registerProvider(query=>{
     const entries=[...commands,...PRIMITIVES.map(p=>({id:`3d.add-object.${p.id}`,label:`Add 3D ${p.label}`,run:()=>addPrimitive(api,p.id)})),...LIGHT_TYPES.map(l=>({id:`3d.add-light.${l.id}`,label:`Add ${l.label} Light`,run:()=>addLight(api,l.id)}))];
     return entries.filter(e=>!query.trim() || e.label.toLowerCase().includes(query.toLowerCase())).map(e=>({...e,category:'Layer'}));

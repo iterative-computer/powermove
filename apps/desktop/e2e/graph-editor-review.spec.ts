@@ -50,7 +50,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   expect(samples.cold).toBeGreaterThan(100);
   expect(samples.warm).toBeLessThan(samples.cold / 4);
   const options = page.getByRole('button', { name: 'Graph options', exact: true });
-  await chooseNativeMenu(session, 'Speed graph', () => options.click());
+  await chooseNativeMenu(session, 'Speed Graph', () => options.click());
   await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').graphType)).toBe('speed');
   await page.screenshot({ path: info.outputPath('speed-graph.png') });
   const canvas = await page.locator('#tl-canvas').boundingBox();
@@ -58,7 +58,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   await page.mouse.move(canvas!.x + gutter + 100, canvas!.y + 160);
   await page.mouse.wheel(0, 150);
   await expect.poll(() => page.evaluate(() => Boolean((window as any).PM.Kernel.services.get('timeline').graphViewBounds))).toBe(true);
-  await chooseNativeMenu(session, 'Fit selected curves', () => options.click());
+  await chooseNativeMenu(session, 'Fit Selected Curves', () => options.click());
   await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').graphViewBounds)).toBeNull();
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const before = await page.evaluate(() => (window as any).PM.proj.layers[0].p['scale.x'].kf.map((key: any) => ({ t: key.t, v: key.v, speed: key.outEase.speed })));
@@ -74,7 +74,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   expect(after.map((key: any) => key.speed)).not.toEqual(before.map((key: any) => key.speed));
   await page.keyboard.press('Meta+z');
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].p['scale.x'].kf.map((key: any) => ({ t: key.t, v: key.v, speed: key.outEase.speed })))).toEqual(before);
-  await chooseNativeMenu(session, 'Value graph', () => options.click());
+  await chooseNativeMenu(session, 'Value Graph', () => options.click());
   await page.screenshot({ path: info.outputPath('value-graph-fitted.png') });
   console.log('GRAPH_SAMPLES', samples);
   expect(await viewerPixel()).toEqual(initialPixel);

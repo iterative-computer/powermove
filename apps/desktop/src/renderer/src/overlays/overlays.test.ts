@@ -125,7 +125,7 @@ describe('installSvelteOverlays', () => {
     expect(PM.commands.palette.run).toBe(legacy.paletteCommand);
   });
 
-  it('renders menu actions, separators, and reachable disabled items, then restores focus', () => {
+  it('renders menu actions, separators, and unavailable items, then restores focus', () => {
     vi.useFakeTimers();
     const trigger = document.querySelector<HTMLButtonElement>('#trigger')!;
     trigger.focus();
@@ -147,15 +147,17 @@ describe('installSvelteOverlays', () => {
     expect(menu.querySelector('.sep[role="separator"]')).toBeTruthy();
     expect(items[0]?.classList.contains('on')).toBe(true);
     expect(items[0]?.querySelector('.menu-icon svg')?.getAttribute('data-icon')).toBe('hand');
-    expect(items[1]?.querySelector('.menu-icon')).toBeNull();
+    // The icon column is shared by the panel; a row without an icon leaves it empty.
+    expect(items[1]?.querySelector('.menu-icon svg')).toBeNull();
     expect(items[1]?.getAttribute('aria-disabled')).toBe('true');
     // Pointer-opened: focus parks on the menu, no row is painted; arrows enter the list.
     expect(document.activeElement).toBe(menu);
 
     menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
     expect(document.activeElement).toBe(items[0]);
+    // Unavailable rows are skipped by the keyboard and ignore clicks, as in AppKit.
     menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
-    expect(document.activeElement).toBe(items[1]);
+    expect(document.activeElement).toBe(items[0]);
     items[1]?.click();
     expect(disabled).not.toHaveBeenCalled();
     expect(menu.isConnected).toBe(true);

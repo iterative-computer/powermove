@@ -162,20 +162,20 @@
   }
   function targets(run: (s: Sections) => void) {
     return [
-      { label: 'All sections', run: () => run(ALL_SECTIONS) },
+      { label: 'All Sections', run: () => run(ALL_SECTIONS) },
       ...[1, 2, 4, 3, 6, 5, 7].map(mask => ({ label: ['Incoming', 'Middle', 'Outgoing'].filter((_, i) => mask & (1 << i)).join(' + '),
         run: () => run({ incoming: !!(mask & 1), middle: !!(mask & 2), outgoing: !!(mask & 4) }) })) ];
   }
   function presetMenu(event: MouseEvent, preset: Preset) {
     event.preventDefault(); event.stopPropagation();
     menuAt(event, [
-      { label: 'Apply easing to…', run: () => menuAt(event, targets(s => { setCurve(preset.curve,false,undefined,true); run(() => apply(preset.curve, s)); })) },
-      { label: 'Load into graph', run: () => setCurve(preset.curve,false,undefined,true) }, '-',
+      { label: 'Apply Easing To…', run: () => menuAt(event, targets(s => { setCurve(preset.curve,false,undefined,true); run(() => apply(preset.curve, s)); })) },
+      { label: 'Load into Graph', run: () => setCurve(preset.curve,false,undefined,true) }, '-',
       { label: 'Rename…', run: () => prompt('Rename preset', preset.name, name => updatePreset(preset.id, { name })) },
       { label: 'Color…', run: () => colorPreset(preset) },
       { label: 'Duplicate', run: () => { const copy = { ...clone(preset), id: uid(), name: `${preset.name} copy`.slice(0, 100) }; persist({ ...library, groups: library.groups.map(g => g.id === group.id ? { ...g, presets: [...g.presets, copy] } : g) }); } },
-      { label: 'Move to group…', run: () => menuAt(event, library.groups.map(g => ({ label: g.name, run: () => persist(movePreset(library, preset.id, g.id)) }))) },
-      { label: 'Export preset…', run: () => void exportLibrary([{ ...group, presets: [preset] }]) },
+      { label: 'Move to Group…', run: () => menuAt(event, library.groups.map(g => ({ label: g.name, run: () => persist(movePreset(library, preset.id, g.id)) }))) },
+      { label: 'Export Preset…', run: () => void exportLibrary([{ ...group, presets: [preset] }]) },
       { label: 'Delete', run: () => persist({ ...library, groups: library.groups.map(g => ({ ...g, presets: g.presets.filter(p => p.id !== preset.id) })) }) }
     ]);
   }
@@ -184,13 +184,13 @@
     presetColor = preset.color || '#ff6b1a';
     const body = document.createElement('div'); body.className = 'field';
     const picker = mount(ColorField, { target: body, props: { api, label: 'Preset color', get: () => presetColor, edit: local('Preset color',v => presetColor = String(v)) } });
-    PM.modal({ title: 'Preset color', body, onClose: () => void unmount(picker), actions: [{ label: 'Cancel' }, { label: 'Use native color', run: () => updatePreset(preset.id, { color: '' }) }, { label: 'Save', pri: true, run: () => updatePreset(preset.id, { color: presetColor }) }] });
+    PM.modal({ title: 'Preset color', body, onClose: () => void unmount(picker), actions: [{ label: 'Cancel' }, { label: 'Use Native Color', run: () => updatePreset(preset.id, { color: '' }) }, { label: 'Save', pri: true, run: () => updatePreset(preset.id, { color: presetColor }) }] });
   }
   function groupMenu(event: MouseEvent, g: Group) {
     event.preventDefault(); event.stopPropagation();
-    menuAt(event, [{ label: 'Rename group…', run: () => prompt('Rename group', g.name, name => persist({ ...library, groups: library.groups.map(v => v.id === g.id ? { ...v, name } : v) })) },
-      { label: 'Export group…', run: () => void exportLibrary([g]) },
-      { label: 'Delete group', disabled: library.groups.length === 1, run: () => { const groups = library.groups.filter(v => v.id !== g.id); if (groups.length) persist({ ...library, groups, active: groups[0]!.id }); } }]);
+    menuAt(event, [{ label: 'Rename Group…', run: () => prompt('Rename group', g.name, name => persist({ ...library, groups: library.groups.map(v => v.id === g.id ? { ...v, name } : v) })) },
+      { label: 'Export Group…', run: () => void exportLibrary([g]) },
+      { label: 'Delete Group', disabled: library.groups.length === 1, run: () => { const groups = library.groups.filter(v => v.id !== g.id); if (groups.length) persist({ ...library, groups, active: groups[0]!.id }); } }]);
   }
   function pathTool(clean = false) {
     run(() => {
@@ -207,26 +207,26 @@
   }
   function more(event: MouseEvent) {
     PM.menu(event.currentTarget, [
-      { label: 'Load selected curve', run: () => run(() => { const ts = tracks(PM); if (ts.length !== 1) throw new Error('Select keys from one property, or use Copy to choose a curve'); setCurve(loadCurve(ts[0]!),false,undefined,true); }) },
-      { label: 'Overshoot expression', run: () => run(() => edit(expressionCommands(tracks(PM), 'overshoot'), 'Add overshoot expression')) },
-      { label: 'Bounce expression', run: () => run(() => edit(expressionCommands(tracks(PM), 'bounce'), 'Add bounce expression')) },
-      { label: 'Remove expressions', run: () => run(() => edit(tracks(PM).map(t => ({ type: 'set_expression', target: t.layerId, path: t.path, expression: null })), 'Remove expressions')) }, '-',
-      { label: 'Linear interpolation', run: () => run(() => edit(interpolate(tracks(PM), 'linear'), 'Linear interpolation')) },
-      { label: 'Continuous interpolation', run: () => run(() => edit(interpolate(tracks(PM), 'continuous'), 'Continuous interpolation')) },
-      { label: 'Auto Bezier interpolation', run: () => run(() => edit(interpolate(tracks(PM), 'auto'), 'Auto Bezier interpolation')) },
-      { label: 'Clean motion path', run: () => pathTool(true) },
-      { label: 'Create position controller', run: () => pathTool() }, '-',
-      { label: 'Import presets…', run: () => fileInput.click() },
-      { label: 'Import preset folder…', run: () => importFolder.click() },
-      { label: 'Export library…', run: () => void exportLibrary() },
-      { label: 'Panel settings', on: settings, run: () => settings = !settings }
+      { label: 'Load Selected Curve', run: () => run(() => { const ts = tracks(PM); if (ts.length !== 1) throw new Error('Select keys from one property, or use Copy to choose a curve'); setCurve(loadCurve(ts[0]!),false,undefined,true); }) },
+      { label: 'Add Overshoot Expression', run: () => run(() => edit(expressionCommands(tracks(PM), 'overshoot'), 'Add overshoot expression')) },
+      { label: 'Add Bounce Expression', run: () => run(() => edit(expressionCommands(tracks(PM), 'bounce'), 'Add bounce expression')) },
+      { label: 'Remove Expressions', run: () => run(() => edit(tracks(PM).map(t => ({ type: 'set_expression', target: t.layerId, path: t.path, expression: null })), 'Remove expressions')) }, '-',
+      { label: 'Linear Interpolation', run: () => run(() => edit(interpolate(tracks(PM), 'linear'), 'Linear interpolation')) },
+      { label: 'Continuous Interpolation', run: () => run(() => edit(interpolate(tracks(PM), 'continuous'), 'Continuous interpolation')) },
+      { label: 'Auto Bezier Interpolation', run: () => run(() => edit(interpolate(tracks(PM), 'auto'), 'Auto Bezier interpolation')) },
+      { label: 'Clean Motion Path', run: () => pathTool(true) },
+      { label: 'Create Position Controller', run: () => pathTool() }, '-',
+      { label: 'Import Presets…', run: () => fileInput.click() },
+      { label: 'Import Preset Folder…', run: () => importFolder.click() },
+      { label: 'Export Library…', run: () => void exportLibrary() },
+      { label: 'Panel Settings', on: settings, run: () => settings = !settings }
     ]);
   }
   function copyMenu(event: MouseEvent) {
     event.preventDefault(); menuAt(event, [
-      { label: 'Copy keyframes', run: () => copy() },
-      { label: 'Duplicate at playhead', run: () => run(() => edit(duplicate(tracks(PM), PM.time, keyId), 'Duplicate keyframes')) },
-      { label: 'Mirror at playhead', run: () => run(() => edit(duplicate(tracks(PM), PM.time, keyId, true), 'Mirror keyframes')) }
+      { label: 'Copy Keyframes', run: () => copy() },
+      { label: 'Duplicate at Playhead', run: () => run(() => edit(duplicate(tracks(PM), PM.time, keyId), 'Duplicate keyframes')) },
+      { label: 'Mirror at Playhead', run: () => run(() => edit(duplicate(tracks(PM), PM.time, keyId, true), 'Mirror keyframes')) }
     ]);
   }
   function coordinate(index: number, side: 'in' | 'out', axis: 't' | 'v', value?: number) {
@@ -279,7 +279,7 @@
     {#if prefs.view === 'toggle'}<button class="iconbtn" title="Toggle graph and library" aria-label="Toggle graph and library" onclick={() => preference('tab',prefs.tab === 'graph' ? 'library' : 'graph')}><Icon {PM} name="panel" /></button>{/if}
   </div>
   {#if prefs.view === 'both' || prefs.tab === 'graph'}
-    <div class="graph-wrap" role="group" aria-label="Curve editor" oncontextmenu={e => { e.preventDefault(); menuAt(e,[{label:'Reset curve',run:() => setCurve(cubic())},{label:'Mirror curve',run:() => setCurve(mirror(curve))},{label:'Save preset…',run:savePreset},{label:'Input coordinates',on:coordinates,run:() => coordinates=!coordinates}]); }}><CurveEditor {curve} onChange={change} /></div>
+    <div class="graph-wrap" role="group" aria-label="Curve editor" oncontextmenu={e => { e.preventDefault(); menuAt(e,[{label:'Reset Curve',run:() => setCurve(cubic())},{label:'Mirror Curve',run:() => setCurve(mirror(curve))},{label:'Save Preset…',run:savePreset},{label:'Input Coordinates',on:coordinates,run:() => coordinates=!coordinates}]); }}><CurveEditor {curve} onChange={change} /></div>
     <div class="easing-toolbar graph-tools" role="toolbar" aria-label="Graph tools">
       <button class="iconbtn" title="Undo curve" aria-label="Undo curve" disabled={!undo.length} onclick={() => graphUndo()}><Icon {PM} name="undo" /></button>
       <button class="iconbtn" title="Redo curve" aria-label="Redo curve" disabled={!redo.length} onclick={() => graphUndo(true)}><Icon {PM} name="redo" /></button>
@@ -311,7 +311,7 @@
       {/each}
       <button class="iconbtn" title="New preset group" aria-label="New preset group" onclick={addGroup}><Icon {PM} name="plus" /></button>
     </div>
-    <div class="preset-library" role="group" aria-label="Easing presets" oncontextmenu={e => { e.preventDefault(); menuAt(e,[{label:'Import presets…',run:() => fileInput.click()},{label:'Export library…',run:() => void exportLibrary()},{label:'Panel settings',run:() => settings = true}]); }} style={`--preset-columns:${prefs.columns || 'auto-fill'};--preset-size:${prefs.size}px;`}>
+    <div class="preset-library" role="group" aria-label="Easing presets" oncontextmenu={e => { e.preventDefault(); menuAt(e,[{label:'Import Presets…',run:() => fileInput.click()},{label:'Export Library…',run:() => void exportLibrary()},{label:'Panel Settings',run:() => settings = true}]); }} style={`--preset-columns:${prefs.columns || 'auto-fill'};--preset-size:${prefs.size}px;`}>
       {#each [false,true] as multi}
         <div class="preset-grid" class:multi role="group" aria-label={multi?'Multi-keyframe presets':'Standard presets'} style={`grid-template-columns:${prefs.columns ? `repeat(${prefs.columns},minmax(0,1fr))` : `repeat(auto-fill,minmax(${prefs.size}px,1fr))`};`}>
           {#each group.presets.filter(p => (p.curve.points.length > 2) === multi) as preset (preset.id)}
@@ -330,7 +330,7 @@
   {/if}
   {#if settings}
     <div class="easing-fields">
-      <Row {api} label="Layout"><SelectField {api} get={() => prefs.view} label="Panel layout" options={[{v:'both',label:'Graph + library'},{v:'toggle',label:'Toggle views'}]} edit={local('Layout',v => preference('view',v))} /></Row>
+      <Row {api} label="Layout"><SelectField {api} get={() => prefs.view} label="Panel layout" options={[{v:'both',label:'Graph + Library'},{v:'toggle',label:'Toggle Views'}]} edit={local('Layout',v => preference('view',v))} /></Row>
       <Row {api} label="Columns"><NumField {api} get={() => prefs.columns} min={0} max={12} step={1} label="Columns (0 = automatic)" edit={local('Columns',v => preference('columns',Number(v)))} /></Row>
       <Row {api} label="Preset size"><SelectField {api} get={() => prefs.size} options={[32,44,56,72].map(v=>({v,label:`${v} px`}))} edit={local('Preset size',v => preference('size',Number(v)))} /></Row>
       <Row {api} label="Labels"><SelectField {api} get={() => prefs.labels} options={['none','name','influence']} edit={local('Labels',v => preference('labels',v))} /></Row>

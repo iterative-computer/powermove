@@ -8,14 +8,17 @@ describe('native text edit IPC', () => {
     let listener: ((event: any, value: unknown) => void) | undefined;
     const ipcMain = { on: vi.fn((_channel, value) => { listener = value; }) };
     const sender = {
-      paste: vi.fn(), cut: vi.fn(), copy: vi.fn(), undo: vi.fn(), redo: vi.fn(), selectAll: vi.fn(),
+      paste: vi.fn(), cut: vi.fn(), copy: vi.fn(), undo: vi.fn(), redo: vi.fn(), selectAll: vi.fn(), delete: vi.fn(), reload: vi.fn(),
     };
     registerNativeEditIpc(ipcMain as never, { isTrustedSenderContents: () => true });
     expect(ipcMain.on).toHaveBeenCalledWith(IPC.nativeEdit, expect.any(Function));
 
     listener?.({ sender }, 'paste');
     listener?.({ sender }, 'delete');
+    listener?.({ sender }, 'reload');
     expect(sender.paste).toHaveBeenCalledOnce();
+    expect(sender.delete).toHaveBeenCalledOnce();
+    expect(sender.reload).not.toHaveBeenCalled();
     expect(sender.cut).not.toHaveBeenCalled();
   });
 

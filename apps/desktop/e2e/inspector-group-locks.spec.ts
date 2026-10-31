@@ -65,20 +65,18 @@ test('inspector context menus protect nested group locks and allow normal edits 
   const row = page.locator('[data-channel="opacity"]');
   await expect(row).toBeVisible();
   const menu = await inspectNativeMenu(session, () => row.click({ button: 'right' }));
-  for (const label of ['Add keyframe at playhead', 'Remove animation', 'power', 'Add expression…', 'Reset']) {
-    expect(menu.find(item => item.label === label), label).toMatchObject({ enabled: false });
-  }
-  expect(menu.find(item => item.label === 'Show in graph editor')).toMatchObject({ enabled: true });
+  // A contextual menu hides what can't run (macOS HIG), so a locked layer offers only viewing.
+  expect(menu).toEqual([{ label: 'Show in Graph Editor', enabled: true }]);
   const source = () => page.evaluate(id => JSON.stringify((window as any).PM.L(id).p.opacity), fixture.layer);
   expect(await source()).toBe(fixture.keys);
 
   expect(await page.evaluate(id => (window as any).PM.Edit.apply({ type: 'set_layer', target: id,
     patch: { locked: false } }, { origin: 'inspector' }).ok, fixture.group)).toBe(true);
-  await chooseNativeMenu(session, 'Add keyframe at playhead', () => row.click({ button: 'right' }));
+  await chooseNativeMenu(session, 'Add Keyframe at Playhead', () => row.click({ button: 'right' }));
   await expect.poll(() => page.evaluate(id => (window as any).PM.L(id).p.opacity.kf.length, fixture.layer)).toBe(3);
   expect(await page.evaluate(() => (window as any).PM.hist.undo())).toBe(true);
   await expect.poll(source).toBe(fixture.keys);
-  await chooseNativeMenu(session, 'power', () => row.click({ button: 'right' }));
+  await chooseNativeMenu(session, 'Power', () => row.click({ button: 'right' }));
   await expect.poll(source).not.toBe(fixture.keys);
   expect(await page.evaluate(() => (window as any).PM.hist.undo())).toBe(true);
   await expect.poll(source).toBe(fixture.keys);

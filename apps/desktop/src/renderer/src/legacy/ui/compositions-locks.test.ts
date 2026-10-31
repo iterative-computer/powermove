@@ -24,7 +24,7 @@ function editor(type = 'shape') {
   const toast = vi.spyOn(PM, 'toast');
   const open = () => { PM.cmd('precompose'); flushSync(); };
   const confirm = () => {
-    const button = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(item => item.textContent === 'OK');
+    const button = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(item => item.textContent === 'Pre-compose');
     expect(button).toBeDefined(); button!.click(); flushSync();
   };
   const state = () => JSON.stringify({ project: PM.proj, selection: PM.sel, history: PM.hist.list() });

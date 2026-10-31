@@ -3,22 +3,12 @@ import { flushSync, mount, unmount } from 'svelte';
 import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
 import { consumeMenuTriggerPress, markMenuDismissal } from './dismissal';
-import { canRenderNatively, iconRasterizer, planNativeMenu } from './native-menu';
-import { bridge } from '../kernel/bridge';
-import type { PowermoveBridge } from '../../../shared/ipc';
+import { contextMenuItems, tidyMenu } from './menu-rules';
+import { prefersReducedMotion } from '../controls/menu-blink';
 
-type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement };
+type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement; contains(node: Node | null): boolean };
 
 const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Fn']);
-
-function nativeMenuBridge(): NonNullable<PowermoveBridge['menu']> | null {
-  try {
-    const menu = bridge()?.menu;
-    return menu && typeof menu.popup === 'function' ? menu : null;
-  } catch {
-    return null;
-  }
-}
 
 function focusTarget(anchor: HTMLElement): HTMLElement | null {
   const active = document.activeElement;
@@ -35,6 +25,7 @@ export class MenuController {
   /* Bumped by every open and close: a menu whose items are still arriving
      opens only if nothing opened or closed menus since it was asked for. */
   private generation = 0;
+  private dismissed: (() => void) | null = null;
 
   constructor(private readonly PM: OverlayPM) {}
 
@@ -69,27 +60,18 @@ export class MenuController {
       return document.createElement('div');
     }
     this.removeForeignMenus();
-    this.trigger = focusTarget(anchor);
     const rect = anchor.getBoundingClientRect();
     const cursorOrigin = options.x != null || options.y != null;
-    /* Every menu is a real NSMenu when the desktop bridge is present, so
-       pointer menus and button dropdowns share one design. Anchored menus pop
-       from the anchor's bottom-left, as NSPopUpButton does. Only curve pickers
-       stay in the DOM: they draw bezier previews. */
-    const native = nativeMenuBridge();
-    if (native && canRenderNatively(items)) {
-      const x = options.x ?? rect.left;
-      const y = options.y ?? rect.bottom + 4;
-      /* Icons rasterize once per name and are cached, so the await is a
-         microtask after the first menu. */
-      void planNativeMenu(items, iconRasterizer(this.PM.ICONS as Record<string, string> | undefined))
-        .then((plan) => native.popup({ items: plan.items, x, y })
-          .then((id) => { if (id != null) plan.actions.get(id)?.run?.(); }))
-        .catch(() => undefined);
-      return document.createElement('div');
-    }
+    /* A menu at the pointer is a contextual menu: the HIG hides what can't run
+       there and leaves key equivalents to the menu bar. */
+    items = cursorOrigin ? contextMenuItems(items) : tidyMenu(items);
+    if (!items.some((item) => item !== '-' && !('header' in item))) return document.createElement('div');
+    this.trigger = focusTarget(anchor);
+    /* Pointer menus and button menus share one design, Powermove's own
+       (Menu.svelte). Anchored menus pop from the anchor's bottom-left, as
+       NSPopUpButton does. */
     const x = options.x ?? (options.right ? rect.right : rect.left);
-    const y = options.y ?? rect.bottom + 5;
+    const y = options.y ?? rect.bottom + 4;
     let instance: MenuInstance;
     instance = mount(Menu, {
       target: document.body,
@@ -101,23 +83,17 @@ export class MenuController {
         cursorOrigin,
         label: this.menuLabel(items),
         onrun: (item: MenuAction) => {
-          /* Without the native bridge a submenu opens in place, with a way back. */
-          if (item.submenu) {
-            const parent = items;
-            this.open(anchor, [
-              { label: '‹ Back', run: () => this.open(anchor, parent, options) },
-              { header: item.label },
-              ...item.submenu
-            ], options);
-            return;
-          }
+          const ghost = this.ghost();
+          this.dismissed = null;
           this.close(true);
+          if (ghost) document.body.append(ghost);
           item.run?.();
         },
         onclose: (restoreFocus = true) => this.close(restoreFocus)
       }
     }) as MenuInstance;
     this.instance = instance;
+    this.dismissed = options.onClose ?? null;
     flushSync();
     this.menu = instance.element();
     if (options.right && options.x == null) {
@@ -125,7 +101,7 @@ export class MenuController {
       this.menu.style.left = `${this.clamp(rect.right - width, 6, window.innerWidth - width - 6)}px`;
     }
     this.outside = (event: PointerEvent) => {
-      if (!this.menu || this.menu.contains(event.target as Node)) return;
+      if (!this.menu || this.instance?.contains(event.target as Node) || this.menu.contains(event.target as Node)) return;
       markMenuDismissal(event);
       if (!cursorOrigin) consumeMenuTriggerPress(event, anchor);
       this.close(true);
@@ -139,6 +115,8 @@ export class MenuController {
 
   close(restoreFocus = false): void {
     this.generation += 1;
+    const dismissed = this.dismissed;
+    this.dismissed = null;
     window.clearTimeout(this.outsideTimer);
     if (this.outside) document.removeEventListener('pointerdown', this.outside, true);
     const registeredOutside = this.PM._menuOutside as ((event: PointerEvent) => void) | null | undefined;
@@ -159,6 +137,23 @@ export class MenuController {
     const trigger = this.trigger;
     this.trigger = null;
     if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+    dismissed?.();
+  }
+
+  /** A still copy of the open menu that blinks its chosen row and fades,
+      the way an AppKit menu acknowledges a pick; the command never waits on it. */
+  private ghost(): HTMLElement | null {
+    const host = this.menu?.parentElement;
+    if (!host || prefersReducedMotion()) return null;
+    const ghost = host.cloneNode(true) as HTMLElement;
+    ghost.className = 'menu-ghost';
+    ghost.removeAttribute('data-svelte-overlay-menu');
+    ghost.setAttribute('aria-hidden', 'true');
+    ghost.querySelectorAll('[role]').forEach((element) => element.removeAttribute('role'));
+    ghost.querySelectorAll('.drop').forEach((element) => element.classList.remove('drop'));
+    ghost.addEventListener('animationend', (event) => { if (event.target === ghost) ghost.remove(); });
+    window.setTimeout(() => ghost.remove(), 600);
+    return ghost;
   }
 
   private removeForeignMenus(): void {

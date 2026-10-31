@@ -340,6 +340,7 @@ def('contextPaste', 'Paste', null, () => {
   if (typeof document !== 'undefined' && typeof ClipboardEvent !== 'undefined') return false;
   return PM.cmd('pasteLayers');
 }, 'Edit', { ...hidden, preserveFalse: true });
+def('contextDelete', 'Delete', null, () => activeTextField() ? nativeEdit('delete') : readingText() ? false : PM.cmd('delete'), 'Edit', hidden);
 def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : PM.cmd('selectAll'); }, 'Edit', hidden);
 def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
 def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View', preserveFalse);

@@ -784,7 +784,7 @@ describe('InspectorPanel', () => {
     expect(diamond.getAttribute('aria-pressed')).toBe('false');
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
     const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: (e?: any) => void }>;
-    items.find((item) => item.label === 'Remove animation')!.run!(new MouseEvent('click'));
+    items.find((item) => item.label === 'Remove Animation')!.run!(new MouseEvent('click'));
     expect(candidate.p['scale.x']!.kf).toHaveLength(0);
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
   });
@@ -857,15 +857,15 @@ describe('InspectorPanel', () => {
     channelRow('A', 'scale.x').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
     const items = menu.mock.calls[0]![1] as Array<{ label?: string; run?: () => void }>;
     expect(labelledSpinbutton('Scale Y').classList.contains('link')).toBe(true);
-    items.find((item) => item.label === 'Remove expression')!.run!();
+    items.find((item) => item.label === 'Remove Expression')!.run!();
     expect(apply).toHaveBeenCalledWith([
       { type: 'set_expression', target: 'A', path: 'scale.x', expression: null },
       { type: 'set_expression', target: 'A', path: 'scale.y', expression: null }
     ], { label: 'Remove expression', origin: 'inspector' });
-    items.find((item) => item.label === 'Add keyframe at playhead')!.run!();
+    items.find((item) => item.label === 'Add Keyframe at Playhead')!.run!();
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
-    items.find((item) => item.label === 'Show in graph editor')!.run!();
+    items.find((item) => item.label === 'Show in Graph Editor')!.run!();
     expect(runtime.TL.reveal).toHaveBeenLastCalledWith(candidate, ['scale.x', 'scale.y']);
     items.find((item) => item.label === 'Reset')!.run!();
     expect(apply).toHaveBeenCalledWith([

@@ -79,7 +79,8 @@ describe('application menu', () => {
       'Composition',
       'Layer',
       'View',
-      'Window'
+      'Window',
+      'Help'
     ]);
     // After Effects: ⌘N makes a composition, ⌥⌘N a project.
     expect(submenu(topLevel(template, 'Composition')).map((item) => [item.label ?? item.type, item.accelerator, item.id])).toEqual([
@@ -107,6 +108,7 @@ describe('application menu', () => {
       'services',
       'hide',
       'hideOthers',
+      'unhide',
       'quit'
     ]);
     expect(appItems.find((item) => item.role === 'hide')?.accelerator).toBe('Command+H');
@@ -177,14 +179,16 @@ describe('application menu', () => {
       'newProject', 'open', 'closeTab', 'save', 'saveAs', 'import', 'importSequence', 'importFolder', 'export', 'contextUndo', 'contextRedo',
     ]);
     expect(editItems.filter((item) => item.role)).toEqual([]);
-    const contextCommands = editItems.slice(3, 7);
+    const contextCommands = editItems.slice(3, 8);
     expect(contextCommands.map((item) => [item.label, item.accelerator, item.id])).toEqual([
       ['Cut', 'CommandOrControl+X', 'contextCut'],
       ['Copy', 'CommandOrControl+C', 'contextCopy'],
       ['Paste', 'CommandOrControl+V', 'contextPaste'],
+      // AppKit's Edit menu order; ⌫ stays the renderer's, so Delete shows no key.
+      ['Delete', undefined, 'contextDelete'],
       ['Select All', 'CommandOrControl+A', 'contextSelectAll']
     ]);
-    expect(contextCommands.every((item) => item.registerAccelerator === false)).toBe(true);
+    expect(contextCommands.filter((item) => item.accelerator).every((item) => item.registerAccelerator === false)).toBe(true);
     const editorCommands = editItems.filter((item) => item.click && item !== undo && item !== redo && !contextCommands.includes(item));
     expect(editorCommands.map((item) => [item.label, item.accelerator])).toEqual([
       ['Duplicate Layers', 'CommandOrControl+D'],
@@ -232,8 +236,8 @@ describe('application menu', () => {
         item.click?.({} as never, undefined, {} as never);
       }
     }
-    // Both File and Window carry New Window, the way macOS document apps do.
-    expect(windows.newWindow).toHaveBeenCalledTimes(2);
+    // New Window lives in File only; the HIG's Window menu arranges windows, it doesn't make them.
+    expect(windows.newWindow).toHaveBeenCalledTimes(1);
     expect(windows.closeWindow).toHaveBeenCalledTimes(1);
 
     const unwired = submenu(topLevel(appMenuTemplate(() => undefined), 'File'));

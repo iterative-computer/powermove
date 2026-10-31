@@ -250,7 +250,7 @@ describe('AssetsPanel', () => {
     const items = (PM.menu.mock.calls[0]![1] as any[]).filter((item) => item && typeof item === 'object' && item.label);
     const labels = items.map((item) => item.label);
     expect(labels).toContain('Locate File…');
-    expect(labels).not.toContain('Add to timeline');
+    expect(labels).not.toContain('Add to Timeline');
   });
 
   it('selects video cards with the same state used by audio cards', () => {
@@ -302,7 +302,7 @@ describe('AssetsPanel', () => {
     rows()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, metaKey: true }));
     flushSync();
     rows()[0]!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
-    expect(PM.menu.mock.calls[0][1][1].label).toBe('Delete selected media…');
+    expect(PM.menu.mock.calls[0][1][1].label).toBe('Delete Selected Media…');
     const button = rows()[0]!.querySelector<HTMLButtonElement>('.asset-delete')!;
     button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
     button.click();
@@ -471,7 +471,7 @@ describe('AssetsPanel', () => {
     expect(anchor).toBe(row);
     expect(position).toEqual({ x: 37, y: 49 });
     expect(items.filter((item: any) => item?.label).map((item: any) => item.label)).toEqual([
-      'Add to timeline', 'New Comp from Selection', 'Replace File…', 'Reveal in Finder', 'Delete media…'
+      'Add to Timeline', 'New Comp from Selection', 'Replace File…', 'Reveal in Finder', 'Delete Media…'
     ]);
 
     items.find((item: any) => item?.label === 'Replace File…').run();

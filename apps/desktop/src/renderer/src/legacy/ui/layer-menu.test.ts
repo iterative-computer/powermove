@@ -33,7 +33,8 @@ it('opens at once with synchronous contributions for the right-clicked layer', (
   PM.showLayerMenu(layers[1], { clientX: 4, clientY: 5 });
   const items = PM.menu.mock.calls.at(-1)[1] as MenuContribution[];
   expect(Array.isArray(items)).toBe(true);
-  expect(labels(items).slice(-2)).toEqual(['-', 'Tag B']);
+  // Contributed rows sit in their own group above Delete, which stays last.
+  expect(labels(items).slice(-4)).toEqual(['-', 'Tag B', '-', 'Delete']);
   expect(PM.menu).toHaveBeenLastCalledWith(document.body, items, { x: 4, y: 5 });
 });
 
@@ -53,8 +54,8 @@ it('asks asynchronous contributors afresh per layer, so layer B never gets the i
   const second = await PM.menu.mock.calls.at(-1)[1] as MenuContribution[];
 
   // The first open is not empty, and each open shows only its own layer.
-  expect(labels(first).slice(-3)).toEqual(['-', 'Tag A', 'Here A']);
-  expect(labels(second).slice(-3)).toEqual(['-', 'Tag B', 'Here B']);
+  expect(labels(first).slice(-5)).toEqual(['-', 'Tag A', 'Here A', '-', 'Delete']);
+  expect(labels(second).slice(-5)).toEqual(['-', 'Tag B', 'Here B', '-', 'Delete']);
   expect(asked).toEqual(['A', 'B']);
   const tag = second.find(item => item !== '-' && 'label' in item && item.label === 'Tag B');
   (tag as { run(): void }).run();

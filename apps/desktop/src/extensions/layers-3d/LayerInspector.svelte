@@ -14,7 +14,7 @@
   function edit(operation:any,patch:any,label:string){const result=api.scene3d.edit({operation,target:layerId,patch},{label,origin:'inspector'});if(!result.ok)api.ui.toast(result.message,{error:true});api.transport.invalidate();}
   const structural=(operation:any,key:string,label:string):ControlEditBinding=>({mode:'set',label,set:v=>edit(operation,{[key]:v},label)});
   function map(slot:string){if(!object)return;const maps={...object.material.maps};
-    const items:any[]=[{label:'Choose image…',icon:'image',run:async()=>{const [file]=await api.assets.pick({accept:'image/*'});if(!file)return;const asset=await api.assets.import(file);edit('update_object',{useSourceMaterials:false,material:{maps:{...maps,[slot]:asset.id}}},'Set texture');}}];
+    const items:any[]=[{label:'Choose Image…',icon:'image',run:async()=>{const [file]=await api.assets.pick({accept:'image/*'});if(!file)return;const asset=await api.assets.import(file);edit('update_object',{useSourceMaterials:false,material:{maps:{...maps,[slot]:asset.id}}},'Set texture');}}];
     if(maps[slot])items.push({label:'Remove',icon:'x',run:()=>{delete maps[slot];edit('update_object',{material:{maps}},'Remove texture');}});
     return items;
   }

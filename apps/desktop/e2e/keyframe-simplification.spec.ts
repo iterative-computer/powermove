@@ -1,4 +1,4 @@
-import { expect, test, chooseNativeMenu } from './helpers/app';
+import { expect, test } from './helpers/app';
 import { connectMcpHost } from '../src/main/agent-tools/mcp-client.mjs';
 
 for (const theme of ['light', 'dark']) {
@@ -45,7 +45,7 @@ for (const theme of ['light', 'dark']) {
   });
 }
 
-test('native layer menu simplifies only selected layers and agents can request a summary', async ({ session }) => {
+test('simplifying selected layers leaves the others, and agents can request a summary', async ({ session }) => {
   await session.openEditor();
   const ids = await session.page.evaluate(() => {
     const PM = (window as any).PM;
@@ -55,9 +55,10 @@ test('native layer menu simplifies only selected layers and agents can request a
     PM.selectLayers(layers[0].id); PM.hist.clear(); PM.touch();
     return layers.map(layer => layer.id);
   });
-  await chooseNativeMenu(session, 'Simplify Keyframes', () => session.page.evaluate(id => {
-    const PM = (window as any).PM; PM.showLayerMenu(PM.L(id), { clientX: 250, clientY: 250 });
-  }, ids[0]));
+  // The layer menu no longer offers it; the command is the same one the dense-keyframe prompt runs.
+  await session.page.evaluate(id => {
+    (window as any).PM.Edit.apply({ type: 'simplify_keyframes', scope: 'layers', targets: [id] }, { label: 'Simplify Keyframes', origin: 'interface' });
+  }, ids[0]);
   const counts = () => session.page.evaluate(ids => ids.map(id => (window as any).PM.L(id).p.opacity.kf.length), ids);
   await expect.poll(counts).toEqual([2, 300]);
   await session.page.evaluate(() => (window as any).PM.hist.undo());

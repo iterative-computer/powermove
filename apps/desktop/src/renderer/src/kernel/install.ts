@@ -966,8 +966,9 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     children: (id: string) => PM.Comps?.children?.(id) ?? [],
   });
   /* New ▸, as in After Effects: every kind of layer, the camera and lights
-     included, and a composition. It closes the empty-canvas, empty-timeline
-     and layer context menus. Camera and Light come from the 3D extension. */
+     included, and a composition. It closes the empty-canvas and empty-timeline
+     context menus; a layer's menu keeps to that layer, as the HIG asks of
+     contextual menus. Camera and Light come from the 3D extension. */
   const newItems = (): MenuContribution[] => {
     const has = (id: string): boolean => !!kernel.commands.get(id);
     return [
@@ -984,7 +985,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     ];
   };
   for (const location of ['viewer:context', 'timeline:context'] as const) {
-    kernel.contributeMenu('core', location, () => [{ label: 'New', icon: 'plus', submenu: newItems() }]);
+    kernel.contributeMenu('core', location, (ctx) => (ctx?.kind === 'layer' ? [] : [{ label: 'New', icon: 'plus', submenu: newItems() }]));
   }
   return installed;
 }

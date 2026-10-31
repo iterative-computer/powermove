@@ -42,6 +42,52 @@ export function textEditMenuItems(contents: WebContents, params: ContextMenuPara
     { type: 'separator' }, item('Select All', 'selectAll', flags.canSelectAll)
   ];
 }
+/** A row of the text menu as the renderer draws it (overlays/text-menu.ts). */
+export type TextMenuRow = '-' | { id: string; label: string; enabled: boolean };
+
+/** Spelling suggestions lead the menu, as they do in AppKit's text menu. */
+export function spellingMenuItems(contents: WebContents, params: ContextMenuParams): MenuItemConstructorOptions[] {
+  const word = params.misspelledWord;
+  if (!params.isEditable || !word) return [];
+  const suggestions = (params.dictionarySuggestions ?? []).slice(0, 5);
+  return [
+    ...(suggestions.length
+      ? suggestions.map((suggestion): MenuItemConstructorOptions => ({ label: suggestion, click: () => { if (!contents.isDestroyed()) contents.replaceMisspelling(suggestion); } }))
+      : [{ label: 'No Guesses Found', enabled: false }]),
+    { label: 'Learn Spelling', click: () => { if (!contents.isDestroyed()) contents.session.addWordToSpellCheckerDictionary(word); } },
+    { type: 'separator' }
+  ];
+}
+
+/** Template rows → serializable rows plus the click handler for each id. */
+export function textMenuRows(items: MenuItemConstructorOptions[]): { rows: TextMenuRow[]; handlers: Map<string, () => void> } {
+  const rows: TextMenuRow[] = [];
+  const handlers = new Map<string, () => void>();
+  items.forEach((item, index) => {
+    if (item.type === 'separator') { rows.push('-'); return; }
+    const id = `t${index}`;
+    rows.push({ id, label: item.label ?? '', enabled: item.enabled !== false });
+    if (item.click) handlers.set(id, () => (item.click as () => void)());
+  });
+  return { rows, handlers };
+}
+
+/** Sentinel for a page that has no Powermove menu to show, such as a page still loading. */
+const NO_RENDERER_MENU = '__native__';
+
+/** Ask the page to draw the text menu in Powermove's own menu design.
+    Resolves with the chosen row id, null when dismissed, or NO_RENDERER_MENU. */
+async function rendererTextMenu(contents: WebContents, params: ContextMenuParams, rows: TextMenuRow[]): Promise<string | null> {
+  const request = JSON.stringify({ x: params.x, y: params.y, items: rows });
+  try {
+    const chosen = await contents.mainFrame.executeJavaScript(
+      `typeof globalThis.__pmTextMenu === 'function' ? globalThis.__pmTextMenu(${request}) : ${JSON.stringify(NO_RENDERER_MENU)}`, true);
+    return typeof chosen === 'string' ? chosen : null;
+  } catch {
+    return NO_RENDERER_MENU;
+  }
+}
+
 export function installTextContextMenu(contents: WebContents): void {
   contents.on('context-menu', async (_event, params) => {
     // The inline composer owns DOM history to preserve attachment bytes. Native
@@ -66,8 +112,18 @@ export function installTextContextMenu(contents: WebContents): void {
       } catch { /* A closing frame has no custom editing history to invoke. */ }
     }
     if (contents.isDestroyed()) return;
-    const items = textEditMenuItems(contents, params, process.platform, history);
-    if (items.length) Menu.buildFromTemplate(items).popup({
+    const items = [...spellingMenuItems(contents, params), ...textEditMenuItems(contents, params, process.platform, history)];
+    if (!items.length) return;
+    /* Powermove draws this menu itself, like every other menu in the app. A
+       page without the menu (still loading, or not an editor) gets AppKit's. */
+    const { rows, handlers } = textMenuRows(items);
+    const chosen = await rendererTextMenu(contents, params, rows);
+    if (chosen !== NO_RENDERER_MENU) {
+      if (chosen != null && !contents.isDestroyed()) handlers.get(chosen)?.();
+      return;
+    }
+    if (contents.isDestroyed()) return;
+    Menu.buildFromTemplate(items).popup({
       window: BrowserWindow.fromWebContents(contents) ?? undefined,
       // Enables OS-provided text services (including macOS Writing Tools).
       // https://www.electronjs.org/docs/latest/tutorial/context-menu

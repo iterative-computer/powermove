@@ -27,7 +27,7 @@ test('native timeline markers support ruler menus, Undo/Redo and save/reopen', a
     }, mode);
     const time = mode === 'layers' ? 2 : 4;
     const at = await point(time);
-    await chooseNativeMenu(session, 'Add marker here', () => page.mouse.click(at.x, at.y, { button: 'right' }));
+    await chooseNativeMenu(session, 'Add Marker Here', () => page.mouse.click(at.x, at.y, { button: 'right' }));
     await expect.poll(async () => (await markers()).map((marker: any) => marker.t)).toContain(time);
     expect(await page.evaluate(() => (window as any).PM.time)).toBe(3);
     await page.keyboard.press('Meta+z');
@@ -51,7 +51,7 @@ test('native timeline markers support ruler menus, Undo/Redo and save/reopen', a
     const box = timeline.cv.getBoundingClientRect();
     return { x: box.x + timeline.gut + 2 * timeline.pps, y: box.y + timeline.ruler - 6 };
   });
-  await chooseNativeMenu(session, 'Remove marker', () => reopened.mouse.click(at.x, at.y, { button: 'right' }));
+  await chooseNativeMenu(session, 'Remove Marker', () => reopened.mouse.click(at.x, at.y, { button: 'right' }));
   expect(await reopened.evaluate(() => (window as any).PM.proj.markers.map((marker: any) => marker.t))).toEqual([4]);
   await reopened.keyboard.press('Meta+z');
   expect(await reopened.evaluate(() => (window as any).PM.proj.markers.map((marker: any) => marker.t))).toEqual([2, 4]);

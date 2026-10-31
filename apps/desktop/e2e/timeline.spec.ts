@@ -114,8 +114,9 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   const point = await scaleKeyPoint(page, 3);
   await page.mouse.click(point.x, point.y, { button: 'right' });
   const grid = page.locator('[role="menu"].curve-grid');
-  for (const name of ['Linear', 'Ease in', 'Ease out', 'Easy ease']) {
-    await expect(grid.getByRole('menuitem', { name, exact: true })).toBeVisible();
+  // Curve tiles are checkable rows: the curve the keys already use carries the check.
+  for (const name of ['Linear', 'Ease In', 'Ease Out', 'Easy Ease']) {
+    await expect(grid.getByRole('menuitemcheckbox', { name, exact: true })).toBeVisible();
   }
   await expect(grid.locator('.curve-line')).toHaveCount(await grid.locator('.curve-option').count());
   const boxes = await grid.locator('.curve-option').evaluateAll(elements => elements.map(el => {
@@ -125,7 +126,7 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   expect(boxes[4]!.y).toBeGreaterThan(boxes[0]!.y);
   expect(boxes[4]!.x).toBe(boxes[0]!.x);
   await testInfo.attach('easing-grid', { body: await grid.screenshot(), contentType: 'image/png' });
-  await grid.getByRole('menuitem', { name: 'Ease out', exact: true }).click();
+  await grid.getByRole('menuitemcheckbox', { name: 'Ease Out', exact: true }).click();
   await expect(grid).toHaveCount(0);
   await expect.poll(() => page.evaluate((id) => {
     const L = (window as any).PM.L(id);

@@ -35,7 +35,7 @@ for (const theme of ['light','dark']) {
     await panel.getByRole('button',{name:'New preset group',exact:true}).click();
     await dialog.getByRole('textbox',{name:'New preset group'}).fill('Favorites');await dialog.getByRole('button',{name:'Save',exact:true}).click();
     await expect(panel.getByRole('tab',{name:'Favorites'})).toBeVisible();
-    await chooseNativeMenu(session,'Panel settings',()=>panel.getByRole('button',{name:'More easing tools'}).click());
+    await chooseNativeMenu(session,'Panel Settings',()=>panel.getByRole('button',{name:'More easing tools'}).click());
     await expect(panel.getByText('Layout',{exact:true})).toBeVisible();
     const overflow=await panel.evaluate(el=>({scroll:el.scrollWidth,client:el.clientWidth}));expect(overflow.scroll).toBeLessThanOrEqual(overflow.client+1);
     expect(session.diagnostics.pageErrors).toEqual([]);
@@ -64,9 +64,9 @@ test('graph editing auto-applies as one undoable gesture and imports extended pr
   await expect(panel.getByRole('button',{name:'Apply Imported spring',exact:true})).toBeVisible();
   await panel.getByRole('button',{name:'Apply Imported spring',exact:true}).click();
   const keys=await session.page.evaluate(id=>(window as any).PM.L(id).p['position.x'].kf,id);expect(keys).toHaveLength(3);expect(keys[1].v).toBeCloseTo(130);
-  await chooseNativeMenu(session,'Panel settings',()=>panel.getByRole('button',{name:'More easing tools'}).click());
+  await chooseNativeMenu(session,'Panel Settings',()=>panel.getByRole('button',{name:'More easing tools'}).click());
   await panel.getByRole('combobox',{name:'Layout',exact:true}).click();
-  await session.page.getByRole('option',{name:'Toggle views',exact:true}).click();
+  await session.page.getByRole('option',{name:'Toggle Views',exact:true}).click();
   await expect(panel.getByRole('button',{name:'Toggle graph and library'})).toBeVisible();
   await panel.getByRole('button',{name:'Toggle graph and library'}).click();await expect(graph).toHaveCount(0);
   await expect(panel.getByRole('button',{name:'Apply Imported spring',exact:true})).toBeVisible();
@@ -85,7 +85,7 @@ test('vector presets and curved path cleanup work through the native panel and p
   });
   const panel=session.page.locator('#panel-easing');await expect(panel).toBeVisible();
   const before=await session.page.evaluate(id=>JSON.stringify((window as any).PM.L(id).p['position.y'].kf),id);
-  await chooseNativeMenu(session,'Clean motion path',()=>panel.getByRole('button',{name:'More easing tools'}).click());
+  await chooseNativeMenu(session,'Clean Motion Path',()=>panel.getByRole('button',{name:'More easing tools'}).click());
   const curve=await session.page.evaluate(id=>{
     const PM=(window as any).PM,layer=PM.L(id);
     return {keys:JSON.stringify(layer.p['position.y'].kf),samples:Array.from({length:61},(_,i)=>[PM.ev(layer,'position.x',i/30),PM.ev(layer,'position.y',i/30)]),expr:layer.p['position.y'].expr};

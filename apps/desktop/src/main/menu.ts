@@ -2,12 +2,15 @@ import {
   app,
   BrowserWindow,
   Menu,
+  shell,
   type BrowserWindow as BrowserWindowType,
   type Input,
   type MenuItemConstructorOptions
 } from 'electron';
 
 import { IPC, type MenuCommand } from '../shared/ipc';
+
+const HELP_URL = 'https://trypowermove.com';
 
 const RENDERER_MENU_CHORDS = new Set([
   'KeyZ', 'shift+KeyZ',
@@ -94,6 +97,7 @@ export function appMenuTemplate(
         { type: 'separator' },
         { role: 'hide', accelerator: 'Command+H' },
         { role: 'hideOthers', accelerator: 'Command+Alt+H' },
+        { role: 'unhide' },
         { type: 'separator' },
         { role: 'quit', accelerator: 'Command+Q' }
       ]
@@ -140,6 +144,9 @@ export function appMenuTemplate(
         commandItem('Cut', 'CommandOrControl+X', 'contextCut', send, false),
         commandItem('Copy', 'CommandOrControl+C', 'contextCopy', send, false),
         commandItem('Paste', 'CommandOrControl+V', 'contextPaste', send, false),
+        /* AppKit's Edit menu: Delete sits between Paste and Select All. Its
+           key is the renderer's (⌫ also deletes layers), so none is shown. */
+        { id: 'contextDelete', label: 'Delete', click: () => send('contextDelete') },
         commandItem('Select All', 'CommandOrControl+A', 'contextSelectAll', send, false),
         { type: 'separator' },
         commandItem('Duplicate Layers', 'CommandOrControl+D', 'duplicate', send, false),
@@ -198,14 +205,16 @@ export function appMenuTemplate(
           click: () => send('moveTabToNewWindow')
         },
         { type: 'separator' },
-        {
-          id: 'windowNewWindow',
-          label: 'New Window',
-          enabled: !!windows,
-          click: () => windows?.newWindow()
-        },
-        { type: 'separator' },
         { role: 'front' }
+      ]
+    },
+    {
+      /* Last in the menu bar, as the HIG asks; with role "help" macOS adds
+         its menu-search field at the top. */
+      label: 'Help',
+      role: 'help',
+      submenu: [
+        { id: 'help', label: `${app.name} Help`, click: () => { void shell.openExternal(HELP_URL).catch(() => undefined); } }
       ]
     }
   ];

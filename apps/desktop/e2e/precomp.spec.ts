@@ -57,16 +57,17 @@ test.describe('@groups editable timeline groups', () => {
       return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
     });
     const canvasItems = await chooseNativeMenu(session, 'Lock', () => page.mouse.click(coords.x,coords.y,{button:'right'}));
-    expect(canvasItems).toContain('Group layers');
+    expect(canvasItems).toContain('Group Layers');
     expect(canvasItems.join(' ')).not.toContain('Shy layer');
     expect(canvasItems.join(' ')).not.toContain('Motion blur');
     await chooseNativeMenu(session, 'Unlock', () => page.mouse.click(coords.x,coords.y,{button:'right'}));
     expect(await page.evaluate(()=>(window as any).PM.firstSel().lock)).toBe(false);
     await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.L?.name==='Menu card');});
     const row=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return {x:r.left+110,y:r.top+timeline.ruler+timeline.row/2-timeline.scrollY};});
-    const timelineItems = await chooseNativeMenu(session, 'Group layers', () => page.mouse.click(row.x,row.y,{button:'right'}));
-    expect(timelineItems).toContain('Import Captions…');
-    expect(timelineItems.filter(item => item !== 'Import Captions…')).toEqual(canvasItems);
+    const timelineItems = await chooseNativeMenu(session, 'Group Layers', () => page.mouse.click(row.x,row.y,{button:'right'}));
+    // A layer's menu keeps to the layer: background actions like Import Captions stay in the empty-area menu.
+    expect(timelineItems).not.toContain('Import Captions…');
+    expect(timelineItems).toEqual(canvasItems);
     await page.waitForFunction(()=>(window as any).PM.firstSel()?.type==='group');
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

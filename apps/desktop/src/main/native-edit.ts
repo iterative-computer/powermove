@@ -3,7 +3,7 @@ import type { IpcMain, WebContents } from 'electron';
 import { IPC, type NativeEditAction } from '../shared/ipc';
 
 const ACTIONS = new Set<NativeEditAction>([
-  'undo', 'redo', 'cut', 'copy', 'paste', 'selectAll',
+  'undo', 'redo', 'cut', 'copy', 'paste', 'delete', 'selectAll',
 ]);
 
 export function registerNativeEditIpc(

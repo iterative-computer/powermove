@@ -42,7 +42,7 @@ describe('panel context menu contributions', () => {
     const { open, PM } = harness();
     PM.PANELS.extra = { id: 'extra', title: 'Extra' };
     PM.PANELS.timeline = { id: 'timeline', title: 'Timeline', headless: true };
-    const add = open().find((item) => item !== '-' && 'label' in item && item.label === 'Add panel as tab') as { submenu: Array<{ label: string; run(): void }> };
+    const add = open().find((item) => item !== '-' && 'label' in item && item.label === 'Add Panel as Tab') as { submenu: Array<{ label: string; run(): void }> };
     expect(add.submenu.map((item) => item.label)).toEqual(['Extra']);
     add.submenu[0]!.run();
     expect(PM.Layout.ws.layout.docks[0].panels.map((panel: any) => [panel.id, panel.group, !!panel.active]))
@@ -56,9 +56,9 @@ describe('panel context menu contributions', () => {
     ];
     PM.Layout.toggleMaximize = vi.fn();
     const items = open().filter((item) => item !== '-' && 'label' in item) as Array<{ label: string; run?: () => unknown }>;
-    items.find((item) => item.label === 'Maximize panel')!.run!();
+    items.find((item) => item.label === 'Maximize Panel')!.run!();
     expect(PM.Layout.toggleMaximize).toHaveBeenCalledWith('notes');
-    items.find((item) => item.label === 'Close other panels in group')!.run!();
+    items.find((item) => item.label === 'Close Other Panels in Group')!.run!();
     expect(PM.Layout.closePanel).toHaveBeenCalledWith(PM.Layout.ws, 'other');
     expect(PM.Layout.closePanel).not.toHaveBeenCalledWith(PM.Layout.ws, 'notes');
   });
@@ -71,18 +71,19 @@ describe('panel context menu contributions', () => {
     expect(menu).toHaveBeenCalledWith(trigger, expect.any(Array), { x: 70, y: 24 });
   });
 
-  it('only shows the essential built-in panel actions with native icons', () => {
+  it('only shows the essential built-in panel actions, with icons on the first group', () => {
     const { open, PM } = harness();
 
     expect(open().map((item) => item === '-' ? item : 'header' in item ? item.header : item.label))
-      .toEqual(['Notes', 'Maximize panel', 'Pop out to window', 'Close panel']);
+      .toEqual(['Maximize Panel', 'Open in New Window', '-', 'Close Panel']);
+    // The tab already names the panel, so no title; closing is a group of its own, without icons.
     expect(open()).toMatchObject([
-      { header: 'Notes' },
-      { label: 'Maximize panel', icon: 'frame', kb: '`' },
-      { label: 'Pop out to window', icon: 'export' },
-      { label: 'Close panel', icon: 'x' }
+      { label: 'Maximize Panel', icon: 'frame', kb: '`' },
+      { label: 'Open in New Window', icon: 'export' },
+      '-',
+      { label: 'Close Panel' }
     ]);
-    const close = open().find((item) => item !== '-' && 'label' in item && item.label === 'Close panel');
+    const close = open().find((item) => item !== '-' && 'label' in item && item.label === 'Close Panel');
     if (close && close !== '-' && 'run' in close) close.run?.();
     expect(PM.Layout.closePanel).toHaveBeenCalledWith(PM.Layout.ws, 'notes');
   });
@@ -139,11 +140,11 @@ describe('panel context menu contributions', () => {
     ]);
   });
 
-  it('does not offer Close panel for the viewer', () => {
+  it('does not offer Close Panel for the viewer', () => {
     const { open } = harness('viewer');
     const items = open();
 
-    expect(items).toMatchObject([{ header: 'Viewer' }, { label: 'Maximize panel' }]);
-    expect(items).not.toContainEqual(expect.objectContaining({ label: 'Close panel' }));
+    expect(items).toMatchObject([{ label: 'Maximize Panel' }]);
+    expect(items).not.toContainEqual(expect.objectContaining({ label: 'Close Panel' }));
   });
 });

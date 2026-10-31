@@ -183,8 +183,8 @@
     if (!selectedAssetIds.includes(asset.id)) selectAsset(asset.id, event.currentTarget as HTMLElement);
     if (selectedAssets.length > 1) {
       PM.menu(event.currentTarget, [
-        { header: `${selectedAssets.length} media files` },
-        { label: 'Delete selected media…', run: () => requestDelete() },
+        { header: `${selectedAssets.length} Media Files` },
+        { label: 'Delete Selected Media…', run: () => requestDelete() },
       ], { x: event.clientX, y: event.clientY });
       return;
     }
@@ -193,16 +193,16 @@
     const offline = isOffline(asset);
     PM.menu(event.currentTarget, [
       { header: asset.name },
-      ...(offline && PM.assets.cloud?.get(asset.id) ? [{ label: 'Download from cloud', run: () => PM.assets.cloud.download(asset.id) }] : []),
+      ...(offline && PM.assets.cloud?.get(asset.id) ? [{ label: 'Download from Cloud', run: () => PM.assets.cloud.download(asset.id) }] : []),
       ...(offline||asset.kind==='lut' ? [] : [
-        { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
+        { label: 'Add to Timeline', run: () => PM.cmd('addFromAsset', asset.id) },
         ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
       { label: offline ? 'Locate File…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
       '-',
-      { label: 'Delete media…', run: () => requestDelete(asset) },
+      { label: 'Delete Media…', run: () => requestDelete(asset) },
     ], { x: event.clientX, y: event.clientY });
     status = `Actions for ${asset.name}`;
   }
@@ -724,7 +724,7 @@
       { label: 'Import Folder Into…', run: () => PM.pickFolder({ folder: folder.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ folders: [folder.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       '-',
-      { label: 'Delete folder', run: () => removeFolder(folder) },
+      { label: 'Delete Folder', run: () => removeFolder(folder) },
     ], { x: event.clientX, y: event.clientY });
   }
 
@@ -836,12 +836,12 @@
       { header: comp.name },
       { label: 'New Composition…', kb: '⌘N', run: () => PM.cmd('newComposition') },
       { label: 'Open in Timeline', disabled: comp.open, run: () => openComp(comp) },
-      { label: 'Add to timeline', disabled: !nestable, run: () => nestComp(comp) },
+      { label: 'Add to Timeline', disabled: !nestable, run: () => nestComp(comp) },
       '-',
       { label: 'Composition Settings…', run: () => PM.cmd('compositionSettings', comp.id) },
       { label: 'Duplicate', run: () => { const id = PM.cmd('duplicateComposition', comp.id); if (id) selectedCompId = id; } },
       '-',
-      { label: 'Delete composition…', disabled: comps.length <= 1, run: () => PM.cmd('deleteComposition', comp.id) },
+      { label: 'Delete Composition…', disabled: comps.length <= 1, run: () => PM.cmd('deleteComposition', comp.id) },
     ], { x: event.clientX, y: event.clientY });
   }
 

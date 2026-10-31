@@ -22,11 +22,14 @@ test('right-click menus create a composition and preserve the current project on
   }, destination);
   expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   const dialog = page.getByRole('dialog', { name: 'New Composition', exact: true });
+  // Empty timeline space, below the layer rows: a row would open that layer's menu.
+  const emptyTimeline = { x: 20, y: (await page.locator('#tl-canvas').boundingBox())!.height - 16 };
 
-  for (const selector of ['.tl-comp-tab[aria-selected="true"]', '#stage-inner', '#tl-canvas', '.asset-card.is-comp']) {
-    // The canvas and timeline offer it under New ▸.
-    await chooseNativeMenu(session, ['#stage-inner', '#tl-canvas'].includes(selector) ? ['New', 'Composition…'] : 'New Composition…', () =>
-      page.locator(selector).click({ button: 'right', position: { x: 20, y: selector === '#tl-canvas' ? 60 : 20 } }));
+  /* The empty timeline offers it under New ▸. (The canvas here is covered by
+     the original layer, and a layer's menu keeps to that layer.) */
+  for (const selector of ['.tl-comp-tab[aria-selected="true"]', '#tl-canvas', '.asset-card.is-comp']) {
+    await chooseNativeMenu(session, selector === '#tl-canvas' ? ['New', 'Composition…'] : 'New Composition…', () =>
+      page.locator(selector).click({ button: 'right', position: selector === '#tl-canvas' ? emptyTimeline : { x: 20, y: 20 } }));
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(dialog).toHaveCount(0);
@@ -35,10 +38,10 @@ test('right-click menus create a composition and preserve the current project on
   }
 
   await chooseNativeMenu(session, ['New', 'Composition…'], () =>
-    page.locator('#tl-canvas').click({ button: 'right', position: { x: 20, y: 60 } }));
+    page.locator('#tl-canvas').click({ button: 'right', position: emptyTimeline }));
   await dialog.getByLabel('Composition Name', { exact: true }).fill('Composition from context menu');
   await dialog.locator('select[aria-label="Resolution preset"]').selectOption('1080x1080');
-  await dialog.getByRole('button', { name: 'OK', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.compName))
     .toBe('Composition from context menu');

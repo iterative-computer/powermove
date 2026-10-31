@@ -39,70 +39,75 @@ export function installLayerMenu(PM: PMRegistry): void {
     const apply = (commands: any, label: string) => PM.Edit.apply(commands, { label, origin: editOrigin });
     const patch = (value: any, label: string) => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: value })), label);
     const open = (items: any[] | Promise<any[]>) => PM.menu(document.body, items, { x: event.clientX, y: event.clientY });
-    const items: any[] = [
-      { header: selected.length > 1 ? `${selected.length} layers` : layer.name },
+    const toggleAll = (key: string) => selected.every((item: any) => item[key]);
+    /* Contextual-menu order, per the macOS HIG: the most-used edits first, then
+       where the layer sits, then its switches, and Delete last on its own.
+       A title only when it clarifies what the commands act on: a count of the
+       selected layers. Shortcuts live in the menu bar; rows that can't run
+       here are hidden by the menu itself. */
+    const items: any[] = [];
+    if (selected.length > 1) items.push({ header: `${selected.length} Layers` });
+    items.push(
       { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
-      { label: 'Group layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
-      { label: 'Simplify Keyframes', disabled: !editable, run: () => {
-        const result = apply({ type: 'simplify_keyframes', scope: 'layers', targets: selected.map((item: any) => item.id) }, 'Simplify Keyframes');
-        const data = result.data?.results?.[0]?.data;
-        PM.toast(result.ok ? `${data.keysBefore.toLocaleString()} → ${data.keysAfter.toLocaleString()} keyframes` : result.message, 4000, { error: !result.ok });
-      } },
-      { label: 'Pre-compose…', icon: 'layers', kb: '⇧⌘C', disabled: !editable, run: () => PM.cmd('precompose') },
-    ];
-    /* Un-precompose: the pre-comp becomes a group of its layers. A refusal
-       says why instead of greying the row out without a reason. */
-    if (selected.length === 1 && layer.type === 'precomp') items.push({ label: 'Release Pre-comp', icon: 'stack', disabled: !editable, run: () => PM.cmd('releasePrecomp', layer.id) });
+      { label: 'Group Layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
+    );
+    if (selected.some((item: any) => item.type === 'group')) items.push({ label: 'Ungroup Layers', icon: 'layers', kb: '⇧⌘G', disabled: !editable, run: () => PM.cmd('ungroupLayers') });
+    items.push({ label: 'Pre-compose…', icon: 'frame', kb: '⇧⌘C', disabled: !editable, run: () => PM.cmd('precompose') });
+    /* Un-precompose: the pre-comp becomes a group of its layers. */
+    if (selected.length === 1 && layer.type === 'precomp') items.push({ label: 'Release Pre-comp', icon: 'layers', disabled: !editable, run: () => PM.cmd('releasePrecomp', layer.id) });
+    if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split Text into Layers', icon: 'type', disabled: !editable, submenu:
+      ([['By Word', 'words'], ['By Character', 'characters'], ['By Line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) })) });
     if (selected.length === 2) {
       const matteLayers = selected.slice().sort((a: any, b: any) => PM.proj.layers.indexOf(a) - PM.proj.layers.indexOf(b));
       const canMatte = matteLayers[0] && matteLayers[1]
         && !['audio', 'null', 'adjustment', 'group'].includes(matteLayers[1].type)
         && validMatteSource(PM.proj.layers, matteLayers[0], matteLayers[1].id);
-      items.push({ label: 'Use bottom layer as mask', icon: 'mask', disabled: !editable || !canMatte,
+      items.push({ label: 'Use Bottom Layer as Mask', icon: 'mask', disabled: !editable || !canMatte,
         run: () => applySelectedLayerMatte(PM, selected, editOrigin) });
     }
-    if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split text into layers', icon: 'type', disabled: !editable, submenu:
-      ([['By word', 'words'], ['By character', 'characters'], ['By line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) })) });
+
     items.push('-');
-    if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D layer', icon: 'cube', on: selected.every((item: any) => item.threeD), disabled: !editable, run: () => patch({threeD: !selected.every((item: any) => item.threeD)}, '3D layer') });
-    if (selected.every((item: any) => item.type === 'precomp')) items.push({ label: 'Continuously rasterize', icon: 'sun', on: selected.every((item: any) => item.continuousRaster), disabled: !editable,
-      run: () => patch({ continuousRaster: !selected.every((item: any) => item.continuousRaster) }, 'Continuously rasterize') });
-    if (selected.some((item: any) => item.type === 'group')) items.push({ label: 'Ungroup layers', icon: 'layers', kb: '⌘⇧G', disabled: !editable, run: () => PM.cmd('ungroupLayers') });
     const groups = PM.proj.layers.filter((item: any) => item.type === 'group' && !item.lock && !PM.expandGroups(PM.sel.layers).includes(item.id));
-    if (groups.length || selected.some((item: any) => item.group)) items.push({ label: 'Move to group', icon: 'stack', disabled: !editable, submenu: [
-      { label: 'Outside groups', run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: null }, 'Move out of group') },
+    if (groups.length || selected.some((item: any) => item.group)) items.push({ label: 'Move to Group', icon: 'enter', disabled: !editable, submenu: [
+      { label: 'Outside Groups', run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: null }, 'Move out of group') },
       ...groups.map((group: any) => ({ label: group.name, run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: group.id }, 'Move to group') }))
     ] });
     if (selected.every((item: any) => PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Link Layers', icon: 'link', disabled: !editable, submenu: parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin) });
     if (selected.every((item: any) => item.type !== 'group')) {
       const inside = selected.every((item: any) => PM.time > item.from && PM.time < item.from + item.dur);
       items.push({ label: 'Timing', icon: 'clock', disabled: !editable, submenu: [
-        { label: 'Split at playhead', icon: 'scissors', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
-        { label: 'Trim in to playhead', disabled: !inside, run: () => apply(selected.flatMap((item: any) => [
+        { label: 'Split at Playhead', kb: '⇧⌘D', disabled: !inside, run: () => PM.cmd('split') },
+        { label: 'Trim In to Playhead', disabled: !inside, run: () => apply(selected.flatMap((item: any) => [
           { type: 'set_layer', target: item.id, patch: { from: PM.time, duration: item.dur - (PM.time - item.from) } },
           ...((patch => patch ? [{ type: 'set_content', target: item.id, patch }] : [])(PM.MediaTiming.startPatch(item, PM.time)))
         ]), 'Trim in') },
-        { label: 'Trim out to playhead', disabled: !inside, run: () => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: { duration: PM.time - item.from } })), 'Trim out') },
-        { label: 'Fit to composition', run: () => patch({ from: 0, duration: PM.proj.dur }, 'Fit duration') },
+        { label: 'Trim Out to Playhead', disabled: !inside, run: () => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: { duration: PM.time - item.from } })), 'Trim out') },
+        { label: 'Fit to Composition', run: () => patch({ from: 0, duration: PM.proj.dur }, 'Fit duration') },
       ] });
     }
     if (selected.length === 1 && layer.type === 'video' && layer.d?.embeddedAudio === true) {
       const muted = layer.d.audioMuted === true;
-      items.push({ label: muted ? 'Unmute audio' : 'Mute audio', icon: 'speaker', disabled: !editable, run: () => apply({ type: 'set_content', target: layer.id, patch: { audioMuted: !muted } }, muted ? 'Unmute audio' : 'Mute audio') });
-      items.push({ label: 'Separate audio', icon: 'speaker', disabled: !editable, run: () => PM.cmd('separateAudio', layer.id) });
+      items.push({ label: muted ? 'Unmute Audio' : 'Mute Audio', icon: muted ? 'speaker' : 'speakerOff', disabled: !editable, run: () => apply({ type: 'set_content', target: layer.id, patch: { audioMuted: !muted } }, muted ? 'Unmute audio' : 'Mute audio') });
+      items.push({ label: 'Separate Audio', icon: 'waveform', disabled: !editable, run: () => PM.cmd('separateAudio', layer.id) });
     }
+
+    const visible = evaluatedValue(PM, layer, layer.on, PM.time, 'l.on');
     items.push('-',
-      { label: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') ? 'Hide' : 'Show', icon: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') ? 'eyeoff' : 'eye', disabled: !editable, run: () => patch({ visible: !evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') }, 'Visibility') },
+      { label: visible ? 'Hide' : 'Show', icon: visible ? 'eyeoff' : 'eye', disabled: !editable, run: () => patch({ visible: !visible }, 'Visibility') },
       { label: layer.solo ? 'Unsolo' : 'Solo', icon: 'headphones', disabled: !editable, run: () => patch({ solo: !layer.solo }, 'Solo layers') },
-      { label: lockedGroup ? 'Unlock group' : layer.lock ? 'Unlock' : 'Lock', icon: 'lock', run: () => lockedGroup ? apply({type:'set_layer',target:lockedGroup.id,patch:{locked:false}}, 'Unlock group') : patch({ locked: !layer.lock }, 'Lock layers') },
-      '-', { label: 'Delete', icon: 'trash', kb: '⌫', disabled: !editable, run: () => PM.cmd('delete') });
+      { label: lockedGroup ? 'Unlock Group' : layer.lock ? 'Unlock' : 'Lock', icon: 'lock', run: () => lockedGroup ? apply({type:'set_layer',target:lockedGroup.id,patch:{locked:false}}, 'Unlock group') : patch({ locked: !layer.lock }, 'Lock layers') });
+    if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D Layer', icon: 'cube', on: toggleAll('threeD'), disabled: !editable, run: () => patch({threeD: !toggleAll('threeD')}, '3D layer') });
+    if (selected.every((item: any) => item.type === 'precomp')) items.push({ label: 'Continuously Rasterize', icon: 'sun', on: toggleAll('continuousRaster'), disabled: !editable,
+      run: () => patch({ continuousRaster: !toggleAll('continuousRaster') }, 'Continuously rasterize') });
+    items.push('-', { label: 'Delete', icon: 'trash', kb: '⌫', disabled: !editable, run: () => PM.cmd('delete') });
     /* Each open asks its contributors afresh, with this layer. Sandboxed ones
        answer over a port, within the kernel's deadline. */
     const contributions = [PM.Kernel?.gatherMenu?.('layer:context', { layerId: layer.id }) || [],
       PM.Kernel?.gatherMenu?.(`${origin}:context`, { kind: 'layer', layerId: layer.id, time: PM.time }) || []];
+    /* Contributed rows form their own group, above Delete so it stays last. */
     const withContributions = (lists: any[][]) => {
       const contributed = lists.flat();
-      return contributed.length ? [...items, '-', ...contributed] : items;
+      return contributed.length ? [...items.slice(0, -2), '-', ...contributed, ...items.slice(-2)] : items;
     };
     open(contributions.every(Array.isArray) ? withContributions(contributions) : Promise.all(contributions).then(withContributions));
   };

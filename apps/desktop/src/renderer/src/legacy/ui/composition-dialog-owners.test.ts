@@ -26,7 +26,7 @@ function editor() {
   const toast = vi.spyOn(PM, 'toast');
   const state = () => JSON.stringify({ project: PM.proj, selection: PM.sel, history: PM.hist.list(), loading: PM.projectLoading ?? null });
   const confirm = () => {
-    [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(item => item.textContent === 'OK')!.click();
+    [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(item => ['Apply', 'Create', 'Pre-compose'].includes(item.textContent ?? ''))!.click();
     flushSync();
   };
   const renameForm = () => { document.querySelector<HTMLInputElement>('[aria-label="Composition Name"]')!.value = 'Edited composition'; };

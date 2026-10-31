@@ -828,13 +828,13 @@ function buildHead(head: any) {
   const graph = h('button.iconbtn.tl-graph-toggle', { type: 'button', title: 'Graph editor (Shift+F3)', 'aria-label': 'Graph editor (Shift+F3)' }, iconNode(api, 'dopeGraph'));
   listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
   const graphOptions = btn('more', () => api.ui.menu(graphOptions, [
-    { label: 'Show layer bars with the graph', on: Boolean(T.graphCombined), run: () => { T.graphCombined = !T.graphCombined; invalidate('timeline'); } },
+    { label: 'Show Layer Bars with Graph', on: Boolean(T.graphCombined), run: () => { T.graphCombined = !T.graphCombined; invalidate('timeline'); } },
     '-',
-    { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
-    { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
-    { label: 'Merge selected curves', on: Boolean(T.graphMerge), disabled: (T._graph?.series?.length ?? 0) < 2,
+    { label: 'Value Graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
+    { label: 'Speed Graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
+    { label: 'Merge Selected Curves', on: Boolean(T.graphMerge), disabled: (T._graph?.series?.length ?? 0) < 2,
       run: () => { T.graphMerge = !T.graphMerge; T.graphViewBounds = null; invalidate('timeline'); } },
-    { label: 'Fit selected curves', disabled: !T._graph, run: () => {
+    { label: 'Fit Selected Curves', disabled: !T._graph, run: () => {
       /* Merged curves draw no per-key points, so fall back to the selected
          series' keys: "fit" still has something to frame. */
       const points = T._graph?.points || [];
@@ -1736,7 +1736,7 @@ function columnsMenu(e: any) {
     { label: 'Switches', on: style.showSwitches !== false, run: () => set({ showSwitches: style.showSwitches === false }) },
     { label: 'Link Layers', on: true, disabled: true, run: () => {} },
     '-',
-    { label: 'Show all After Effects columns', run: () => set({ showLayerNumbers: true, showSwitches: true }) },
+    { label: 'Show All After Effects Columns', run: () => set({ showLayerNumbers: true, showSwitches: true }) },
   ]);
 }
 function drawWorkBracket(c: any, x: any, idx: any) {
@@ -4554,12 +4554,12 @@ function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
   entries.forEach((entry:any)=>temporalKeys(entry.prop.kf));
   const keys = entries.map((entry: any) => entry.key);
   const multiple = keys.length > 1;
-  items.push({ header: multiple ? `${keys.length} keyframes` : 'Keyframe' });
+  items.push({ header: multiple ? `${keys.length} Keyframes` : 'Keyframe' });
   items.push({label:'Edit Value…',run:()=>editKeyframeValues(entries)},
-    {label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale keyframes…',run:()=>scaleGraphDialog(api,entries)});
+    {label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale Keyframes…',run:()=>scaleGraphDialog(api,entries)});
   const labels: Record<string, string> = {
-    linear: 'Linear', swish: 'Swish', power: 'Power', easeIn: 'Ease in', easeOut: 'Ease out', easeInOut: 'Easy ease',
-    expoOut: 'Exponential out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide',
+    linear: 'Linear', swish: 'Swish', power: 'Power', easeIn: 'Ease In', easeOut: 'Ease Out', easeInOut: 'Easy Ease',
+    expoOut: 'Exponential Out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide',
   };
   ['linear', 'easeIn', 'easeOut', 'easeInOut', 'swish', 'power', 'expoOut', 'backOut', 'snap', 'glide'].forEach((name: any) =>
     items.push({
@@ -4569,20 +4569,20 @@ function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
     }));
   const allHold = keys.every((target: any) => target.hold);
   items.push({
-    label: allHold ? 'Remove hold' : multiple ? 'Hold keyframes' : 'Toggle hold',
+    label: allHold ? 'Remove Hold' : multiple ? 'Hold Keyframes' : 'Toggle Hold',
     run: () => api.history.do(multiple ? 'Hold keyframes' : 'Hold', () => {
       keys.forEach((target: any) => { target.hold = !allHold; });
       api.anim.touch();
     }),
   });
   items.push('-', {
-    label: multiple ? `Copy ${keys.length} keyframes` : 'Copy keyframe',
+    label: multiple ? `Copy ${keys.length} Keyframes` : 'Copy Keyframe',
     run: () => {
       api.selection.set({ keys: expandScaleKeyIds(api, keys) });
       api.commands.run('copyKeyframes');
     },
   }, {
-    label: multiple ? `Delete ${keys.length} keyframes` : 'Delete keyframe',
+    label: multiple ? `Delete ${keys.length} Keyframes` : 'Delete Keyframe',
     run: () => api.history.do(multiple ? 'Delete keyframes' : 'Delete keyframe', () => {
       const values = new Map<any, any>();
       for (const layer of api.project.get().layers) for (const { key, prop } of api.anim.allProps(layer)) {
@@ -4614,11 +4614,11 @@ function onCtx(e: any) {
   if (x >= T.gut && y < T.ruler) {
     const marker = timelineMarkerHit(api.project.get().markers, x, y, T.gut, T.w, T.ruler, t2x);
     if (marker) {
-      api.ui.menu({ x: e.clientX, y: e.clientY }, [{ label: 'Remove marker', icon: 'x', run: () => removeTimelineMarker(api, marker) }]);
+      api.ui.menu({ x: e.clientX, y: e.clientY }, [{ label: 'Remove Marker', icon: 'x', run: () => removeTimelineMarker(api, marker) }]);
       return;
     }
     const time = clamp(api.util.snapF(x2t(x), api.project.get().fps), 0, api.project.get().dur);
-    items.push({ label: 'Add marker here', icon: 'plus', disabled: !!markerAtTime(api, time), run: () => addTimelineMarker(api, time) }, '-');
+    items.push({ label: 'Add Marker Here', icon: 'plus', disabled: !!markerAtTime(api, time), run: () => addTimelineMarker(api, time) }, '-');
   }
   const graphPoint = inGraph(x, y)
     ? [...(T._graph?.points || [])]
@@ -4634,23 +4634,23 @@ function onCtx(e: any) {
       const members = key.members ?? [{ key, prop: r.prop }];
       pushKeyframeMenu(items, members);
     } else {
-      items.push({ label: 'Add keyframe here', icon: 'diamond', run: () => api.history.do('Add keyframe', () => {
+      items.push({ label: 'Add Keyframe Here', icon: 'diamond', run: () => api.history.do('Add keyframe', () => {
         const values = trackChannels(r).map(axis => ({ ...axis, value: api.anim.evP(r.L, axis.prop, x2t(x), axis.key) }));
         values.forEach(axis => api.anim.setKeyOn(axis.prop, x2t(x) - r.L.from, axis.value, 'linear', api.project.get().fps));
       }) });
-      items.push({ label: 'Paste keyframes here', run: () => api.commands.run('pasteKeyframes', { layer: r.L.id, path: r.key, time: x2t(x) }) });
-      items.push({ label: 'Clear all keyframes', icon: 'x', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
+      items.push({ label: 'Paste Keyframes Here', run: () => api.commands.run('pasteKeyframes', { layer: r.L.id, path: r.key, time: x2t(x) }) });
+      items.push({ label: 'Clear All Keyframes', icon: 'x', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
     }
   } else if (!inGraph(x, y) && hr && hr.row.kind === 'layer') {
     api.ui.showLayerMenu(hr.row.L, e, 'timeline');
     return;
   } else if (!inGraph(x, y)) {
-    items.push({ label: 'Set work area start', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Set work area end', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Reset work area', icon: 'undo', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) },
+    items.push({ label: 'Set Work Area Start', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Set Work Area End', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Reset Work Area', icon: 'undo', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) },
       '-', tracksMode()
-        ? { label: 'Switch to Layer timeline', icon: 'layers', run: () => setMode('layers') }
-        : { label: 'Switch to Track timeline', icon: 'film', run: () => setMode('tracks') });
+        ? { label: 'Switch to Layer Timeline', icon: 'layers', run: () => setMode('layers') }
+        : { label: 'Switch to Track Timeline', icon: 'film', run: () => setMode('tracks') });
   }
   /* Extension contributions land at the end, so the positions a user has
      learned for the built-in rows never move. `layer:context` only fires over a

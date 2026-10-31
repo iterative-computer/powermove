@@ -228,7 +228,7 @@ export function installCaptions(PM: PMRegistry): void {
     const work = PM.proj?.work;
     if (work && work[1] > work[0] && (work[0] > 0 || work[1] < PM.proj.dur)) {
       section.body.append(settingsRow('Range', 'Times in the file start from the beginning of the range.',
-        field('Range', [{ v: 'all', label: 'Whole composition' }, { v: 'work', label: 'Work area' }], () => state.range, value => { state.range = value as 'all' | 'work'; })).element);
+        field('Range', [{ v: 'all', label: 'Whole Composition' }, { v: 'work', label: 'Work Area' }], () => state.range, value => { state.range = value as 'all' | 'work'; })).element);
     }
     body.append(section.element);
     return new Promise(resolve => {
@@ -413,6 +413,6 @@ export function installCaptions(PM: PMRegistry): void {
       if (target?.type === 'captions') return ['-', { label: 'Add Caption at Playhead', icon: 'captions', run: () => addCaption() }, { label: 'Export Captions…', run: () => void exportFile(target.id) }];
       return [];
     });
-    kernel.contributeMenu(OWNER, 'timeline:context', () => [{ label: 'Import Captions…', icon: 'captions', run: () => void importFile() }]);
+    kernel.contributeMenu(OWNER, 'timeline:context', (ctx: any) => (ctx?.kind === 'layer' ? [] : [{ label: 'Import Captions…', icon: 'captions', run: () => void importFile() }]));
   }
 }

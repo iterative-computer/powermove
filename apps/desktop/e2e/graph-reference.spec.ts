@@ -47,7 +47,7 @@ test('reference graph supports combined editing, persistent handles, and group s
   await graph.click(); await expect(graph).toHaveAttribute('aria-pressed', 'false');
   await page.evaluate(() => { (window as any).PM.Kernel.services.get('timeline').graphCombined = false; });
   await graph.click(); await expect(graph).toHaveAttribute('aria-pressed', 'true');
-  await chooseNativeMenu(session, 'Fit selected curves', () => page.getByRole('button', { name: 'Graph options', exact: true }).click());
+  await chooseNativeMenu(session, 'Fit Selected Curves', () => page.getByRole('button', { name: 'Graph options', exact: true }).click());
   // Clear selection: the curves and curved-key tangents stay available.
   await page.evaluate(() => { const PM = (window as any).PM; PM.sel.keys = []; PM.bus.emit('sel'); PM.invalidate(); });
   await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline')._graph?.points.length)).toBe(9);

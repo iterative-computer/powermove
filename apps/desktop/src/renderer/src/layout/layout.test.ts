@@ -247,7 +247,7 @@ describe('Svelte DockLayout panel pool', () => {
     expect(panel.querySelector(domContract.panel.moveHandle)).not.toBeNull();
   });
 
-  it('routes the panel options button and header right-click to the native menu bridge', () => {
+  it('routes the panel options button and header right-click to the menu', () => {
     register(PM, 'alpha');
     register(PM, 'viewer', { headless: true, hideMoveHandle: true });
     register(PM, 'beta');
@@ -264,9 +264,8 @@ describe('Svelte DockLayout panel pool', () => {
     expect(anchor).toBe(trigger);
     // Anchored menus open from the button's bottom-left corner.
     expect(position).toEqual({ x: 30, y: 30 });
-    expect(items[0]).toEqual({ header: 'Alpha' });
-    expect(items.slice(1).map((item: any) => item.label)).toEqual(['Maximize panel', 'Add panel as tab', 'Pop out to window', 'Close panel']);
-    expect(items.slice(1).map((item: any) => item.icon)).toEqual(['frame', 'plus', 'export', 'x']);
+    expect(items.map((item: any) => item === '-' ? item : item.label)).toEqual(['Maximize Panel', 'Add Panel as Tab', 'Open in New Window', '-', 'Close Panel']);
+    expect(items.map((item: any) => item === '-' ? item : item.icon)).toEqual(['frame', 'plus', 'export', '-', undefined]);
     // No HTML menu is ever built for panels.
     expect(document.querySelector('.drop')).toBeNull();
 

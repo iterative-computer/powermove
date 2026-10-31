@@ -36,16 +36,16 @@ export function openPanelMenu(
       && !stack.some((member) => member.id === item.id) && PM.Popout?.isOpen?.(item.id) !== true)
     .sort((a, b) => String(a.title).localeCompare(String(b.title)));
   const items = (contributed: MenuContribution[]): MenuContribution[] => [
-    { header: def.title },
-    /* After Effects' panel menu: maximize, undock, close, close the rest of the stack. */
+    /* After Effects' panel menu: maximize, undock, close, close the rest of the
+       stack. No title: the tab that was clicked already names the panel. */
     {
-      label: maximized && stack.some((member) => member.id === maximized) ? 'Restore panel size' : 'Maximize panel',
+      label: maximized && stack.some((member) => member.id === maximized) ? 'Restore Panel Size' : 'Maximize Panel',
       icon: 'frame',
       kb: '`',
       run: () => PM.Layout.toggleMaximize?.(spec.id)
     },
     ...(addable.length ? [{
-      label: 'Add panel as tab',
+      label: 'Add Panel as Tab',
       icon: 'plus',
       submenu: addable.map((item) => ({
         label: String(item.title || item.id),
@@ -56,17 +56,18 @@ export function openPanelMenu(
       }))
     }] : []),
     ...(canPopoutPanel(spec.id) ? [{
-      label: 'Pop out to window',
+      label: 'Open in New Window',
       icon: 'export',
       run: () => PM.Popout?.open?.(spec.id)
     }] : []),
+    /* Closing is its own group, at the end, without icons. */
+    ...(spec.id !== 'viewer' || others.length ? ['-' as const] : []),
     ...(spec.id === 'viewer' ? [] : [{
-      label: 'Close panel',
-      icon: 'x',
+      label: 'Close Panel',
       run: () => PM.WS.mutate((workspace: Workspace) => PM.Layout.closePanel(workspace, spec.id))
     }]),
     ...(others.length ? [{
-      label: 'Close other panels in group',
+      label: 'Close Other Panels in Group',
       run: () => PM.WS.mutate((workspace: Workspace) => {
         for (const member of others) PM.Layout.closePanel(workspace, member.id);
       })

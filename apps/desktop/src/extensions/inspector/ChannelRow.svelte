@@ -290,23 +290,23 @@
     if (!allowContextMenu || !prop) return;
     event.preventDefault();
     const locked = !isInspectorLayerEditable(api, layer);
-    const easing = ['power', 'linear', 'easeInOut', 'expoOut', 'backOut', 'glide', 'snap'];
+    const easing: Array<[string, string]> = [['power', 'Power'], ['linear', 'Linear'], ['easeInOut', 'Ease In and Out'], ['expoOut', 'Exponential Out'], ['backOut', 'Back Out'], ['glide', 'Glide'], ['snap', 'Snap']];
     const items: Array<MenuContribution | null> = [
       { header: label },
-      { label: 'Add keyframe at playhead', icon: 'diamond', disabled: locked, run: addKeyframe },
-      animated ? { label: 'Remove animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
-      { label: 'Show in graph editor', icon: 'graph', run: showGraphEditor },
+      { label: 'Add Keyframe at Playhead', icon: 'diamond', disabled: locked, run: addKeyframe },
+      animated ? { label: 'Remove Animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
+      { label: 'Show in Graph Editor', icon: 'graph', run: showGraphEditor },
       '-',
-      { header: 'Easing for all keys' },
-      ...easing.map((name) => ({
-        label: name,
+      { header: 'Easing for All Keys' },
+      ...easing.map(([name, title]) => ({
+        label: title,
         disabled: locked || !animated,
         run: () => applyKeyframeEase(name)
       })),
       '-',
-      { label: expression ? 'Edit expression…' : 'Add expression…', icon: 'code', disabled: locked, run: editExpression },
+      { label: expression ? 'Edit Expression…' : 'Add Expression…', icon: 'code', disabled: locked, run: editExpression },
       expression ? {
-        label: 'Remove expression',
+        label: 'Remove Expression',
         icon: 'x',
         disabled: locked,
         run: () => applyExpression(null, 'Remove expression')
