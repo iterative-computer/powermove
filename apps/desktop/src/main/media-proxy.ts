@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -46,7 +46,7 @@ type ProxyEntry = {
 type Convert = (source: string, output: string) => Promise<void>;
 /** A playback converter may write an MP4 beside `output` instead of WebM. */
 type PlaybackOutput = { file: string; type: 'video/mp4' };
-type ConvertPlayback = (source: string, output: string) => Promise<void | PlaybackOutput>;
+type ConvertPlayback = (source: string, output: string, signal?: AbortSignal) => Promise<void | PlaybackOutput>;
 
 /** The first video stream as FFmpeg reads it. Probing never blocks a
  * conversion: without an answer, encoding keeps its alpha-preserving defaults. */
@@ -119,20 +119,23 @@ export function hdrProxyHelper(appPath: string, resourcesPath?: string): string 
    same curve, several times faster. Alpha needs VP9, and any failure of the
    helper falls back to FFmpeg. */
 export function playbackConverter(binary: string, hdrProxy?: string): ConvertPlayback {
-  return async (source, output) => {
+  return async (source, output, signal) => {
+    // FFmpeg ignores SIGTERM mid-encode; a cancelled conversion must stop now.
+    const cancel = signal ? { signal, killSignal: 'SIGKILL' as const } : {};
     const stream = await probeVideoStream(binary, source);
     if (hdrProxy && stream && !stream.alpha && videoColorTreatment(stream.color) === 'tonemap') {
       const file = path.join(path.dirname(output), 'playback.mp4');
       try {
-        await execFileAsync(hdrProxy, [source, file], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+        await execFileAsync(hdrProxy, [source, file], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024, ...cancel });
         return { file, type: 'video/mp4' };
       } catch (error) {
-        console.warn('GPU HDR conversion failed; converting with FFmpeg.', error);
         await rm(file, { force: true });
+        signal?.throwIfAborted();
+        console.warn('GPU HDR conversion failed; converting with FFmpeg.', error);
       }
     }
     await execFileAsync(binary, playbackProxyArgs(source, output, stream),
-      { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+      { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024, ...cancel });
   };
 }
 
@@ -233,6 +236,9 @@ export class MediaProxyService {
   readonly #entries = new Map<string, ProxyEntry>();
   readonly #releases = new Map<string, Promise<void>>();
   readonly #releaseListeners = new Set<(token: string) => void>();
+  /** One conversion per unchanged source. Reopening a project while its
+   * clips are still converting joins that work instead of starting more. */
+  readonly #conversions = new Map<string, { waiters: number; controller: AbortController; done: Promise<{ directory: string; file: string; size: number; type: 'video/webm' | 'video/mp4' }> }>();
   #disposed = false;
 
   constructor(
@@ -329,7 +335,7 @@ export class MediaProxyService {
     finally { delete entry.finish; }
   }
 
-  async create(sourcePath: string): Promise<{ token: string; size: number; type: 'video/webm' | 'video/mp4' }> {
+  async create(sourcePath: string, signal?: AbortSignal): Promise<{ token: string; size: number; type: 'video/webm' | 'video/mp4' }> {
     if (!path.isAbsolute(sourcePath) || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
       throw new Error('This video container is not one Powermove can convert');
     }
@@ -339,18 +345,52 @@ export class MediaProxyService {
       throw new Error('The selected video file is not readable');
     }
 
-    const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-media-proxy-'));
-    const output = path.join(directory, 'playback.webm');
+    signal?.throwIfAborted();
+    const key = `${resolved}\0${source.size}\0${source.mtimeMs}`;
+    let conversion = this.#conversions.get(key);
+    if (!conversion) {
+      const controller = new AbortController();
+      const done = (async () => {
+        const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-media-proxy-'));
+        const output = path.join(directory, 'playback.webm');
+        try {
+          const written = await this.convert(resolved, output, controller.signal);
+          const file = written && path.dirname(written.file) === directory ? written.file : output;
+          const converted = await stat(file);
+          if (!converted.isFile() || converted.size <= 0) throw new Error('The playback proxy was empty');
+          return { directory, file, size: converted.size, type: written && file === written.file ? written.type : 'video/webm' as const };
+        } catch (error) {
+          await rm(directory, { recursive: true, force: true });
+          throw error;
+        }
+      })();
+      conversion = { waiters: 0, controller, done };
+      this.#conversions.set(key, conversion);
+    }
+    const current = conversion;
+    current.waiters++;
+    let directory: string | undefined;
     try {
-      const written = await this.convert(resolved, output);
-      const file = written && path.dirname(written.file) === directory ? written.file : output;
-      const converted = await stat(file);
-      if (!converted.isFile() || converted.size <= 0) throw new Error('The playback proxy was empty');
-      const token = this.#add({ directory, file, size: converted.size });
-      return { token, size: converted.size, type: written && file === written.file ? written.type : 'video/webm' };
+      // A caller whose window has gone stops waiting; the last one cancels the work.
+      const shared = await (signal ? Promise.race([current.done, new Promise<never>((_, reject) => {
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      })]) : current.done);
+      // Each token owns its directory, so releasing one never removes another's file.
+      directory = await mkdtemp(path.join(this.tempRoot, 'powermove-media-proxy-'));
+      const file = path.join(directory, path.basename(shared.file));
+      await link(shared.file, file).catch(() => copyFile(shared.file, file));
+      const token = this.#add({ directory, file, size: shared.size });
+      return { token, size: shared.size, type: shared.type };
     } catch (error) {
-      await rm(directory, { recursive: true, force: true });
+      if (directory) await rm(directory, { recursive: true, force: true });
       throw error;
+    } finally {
+      if (--current.waiters === 0) {
+        if (this.#conversions.get(key) === current) this.#conversions.delete(key);
+        current.controller.abort();
+        await current.done.then(shared => rm(shared.directory, { recursive: true, force: true }), () => undefined);
+      }
     }
   }
 
@@ -535,6 +575,8 @@ export class MediaProxyService {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
+    // Conversions are child processes; quitting must not leave them running.
+    for (const conversion of this.#conversions.values()) conversion.controller.abort();
     const tokens = [...this.#entries.keys()];
     await Promise.all([...this.#releases.values(), ...tokens.map(token => this.release(token))]);
     this.#releaseListeners.clear();
@@ -593,23 +635,47 @@ export function registerMediaProxyIpc(
     owner.tokens.add(token); tokens.set(token, owner);
     return token;
   };
+  // Every in-flight request from one window shares a single pair of listeners.
+  // Reopening a project while its clips convert must not stack one per request.
+  const requestWatchers = new WeakMap<IpcMainInvokeEvent['sender'], { pending: Set<() => void>; lost: () => void }>();
+  const watchRequest = (sender: IpcMainInvokeEvent['sender'], gone: () => void): (() => void) => {
+    let watcher = requestWatchers.get(sender);
+    if (!watcher) {
+      const pending = new Set<() => void>();
+      const created = { pending, lost: () => { for (const notify of [...pending]) notify(); } };
+      requestWatchers.set(sender, created);
+      sender.on('render-process-gone', created.lost);
+      sender.on('destroyed', created.lost);
+      watcher = created;
+    }
+    const current = watcher;
+    current.pending.add(gone);
+    return () => {
+      current.pending.delete(gone);
+      if (current.pending.size || requestWatchers.get(sender) !== current) return;
+      requestWatchers.delete(sender);
+      sender.removeListener('render-process-gone', current.lost);
+      sender.removeListener('destroyed', current.lost);
+    };
+  };
   const createOwned = async <T extends { token: string }>(event: IpcMainInvokeEvent,
-    create: (isCurrent: () => boolean) => Promise<T>): Promise<T> => {
+    create: (isCurrent: () => boolean, signal: AbortSignal) => Promise<T>): Promise<T> => {
     // A recovered WebContents is the same object, but its old request cannot
     // deliver tokens or progress to the replacement renderer.
     let rendererGone = false;
-    const gone = () => { rendererGone = true; };
+    const cancel = new AbortController();
+    const gone = () => { rendererGone = true; cancel.abort(new Error('The media renderer has closed or crashed')); };
     const isCurrent = () => !rendererGone && !isRendererUnavailable(event.sender);
-    event.sender.once('render-process-gone', gone);
+    const unwatch = watchRequest(event.sender, gone);
     try {
-      const result = await create(isCurrent);
+      const result = await create(isCurrent, cancel.signal);
       if (!isCurrent()) {
         await service.release(result.token);
         throw new Error('The media renderer has closed or crashed');
       }
       await own(event, result.token);
       return result;
-    } finally { event.sender.removeListener('render-process-gone', gone); }
+    } finally { unwatch(); }
   };
   ipcMain.handle(IPC.mediaPreviewBegin, async (event, size: number) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -629,7 +695,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const request = proxyRequest(value);
     try {
-      const proxy = await createOwned(event, () => service.create(request.sourcePath));
+      const proxy = await createOwned(event, (_isCurrent, signal) => service.create(request.sourcePath, signal));
       return {
         ok: true,
         token: proxy.token,

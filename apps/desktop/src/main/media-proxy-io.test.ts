@@ -39,7 +39,7 @@ async function fixture(preview?: (source: string, output: string) => Promise<voi
   roots.push(root);
   const source = path.join(root, 'clip.mov');
   await writeFile(source, Uint8Array.from({ length: 32 }, (_, index) => index + 1));
-  const service = new MediaProxyService(root, copyFile, undefined, preview);
+  const service = new MediaProxyService(root, (input: string, output: string) => copyFile(input, output), undefined, preview);
   services.push(service);
   return { root, source, service };
 }
@@ -318,7 +318,7 @@ it('does not adopt an old renderer conversion that finishes after the same windo
 it('does not send cancelled animation progress into the replacement renderer', async () => {
   const { root } = await fixture();
   const gate = deferred(), started = deferred();
-  const service = new MediaProxyService(root, copyFile, async (_pattern, _fps, _count, output, onProgress) => {
+  const service = new MediaProxyService(root, (input: string, output: string) => copyFile(input, output), async (_pattern, _fps, _count, output, onProgress) => {
     onProgress?.(0); started.resolve(); await gate.promise;
     onProgress?.(1); await writeFile(output, 'animation');
   });
@@ -400,7 +400,7 @@ it('keeps cleanup visible to disposal reentered from a release observer', async 
 it('keeps animation conversion files alive during cancellation and then removes them', async () => {
   const { root } = await fixture();
   const gate = deferred(), started = deferred();
-  const service = new MediaProxyService(root, copyFile, async (pattern, _fps, _count, output) => {
+  const service = new MediaProxyService(root, (input: string, output: string) => copyFile(input, output), async (pattern, _fps, _count, output) => {
     started.resolve(); await gate.promise;
     expect(await readFile(pattern.replace('%08d', '00000000'), 'utf8')).toBe('frame');
     await writeFile(output, 'animation');
@@ -451,4 +451,27 @@ it('does not adopt a token released between service creation and its IPC reply',
   await rejected;
   expect(bridge.sender.listenerCount('destroyed')).toBe(0);
   expect(await readdir(root)).toEqual(['clip.mov']);
+});
+
+it('keeps one window listener for many waiting conversions and cancels them all on crash', async () => {
+  const { root, source } = await fixture();
+  const other = path.join(root, 'other.mov');
+  await copyFile(source, other);
+  const signals: AbortSignal[] = [];
+  const service = new MediaProxyService(root, (_input: string, _output: string, signal?: AbortSignal) => new Promise<void>((_, reject) => {
+    signals.push(signal!);
+    signal!.addEventListener('abort', () => reject(new Error('killed')), { once: true });
+  }));
+  services.push(service);
+  const bridge = ipc(service);
+  const requests = [source, source, other].map(sourcePath => bridge.call(IPC.mediaProxyCreate, { sourcePath, name: 'clip.mov' }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(signals).toHaveLength(2);
+  expect(bridge.sender.listenerCount('render-process-gone')).toBe(1);
+  expect(bridge.sender.listenerCount('destroyed')).toBe(1);
+  bridge.crash();
+  for (const result of await Promise.all(requests)) expect(result).toMatchObject({ ok: false });
+  expect(signals.every(signal => signal.aborted)).toBe(true);
+  expect(bridge.sender.listenerCount('render-process-gone')).toBe(0);
+  expect(bridge.sender.listenerCount('destroyed')).toBe(0);
 });

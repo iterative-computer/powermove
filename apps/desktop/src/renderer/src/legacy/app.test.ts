@@ -581,6 +581,18 @@ describe('legacy app install', () => {
     expect(toasts.some(message => message.includes('local recovery could not be updated'))).toBe(true);
   });
 
+  it('does not report a recovery failure when a newer checkpoint supersedes the save', async () => {
+    const { PM, toasts } = appRegistry();
+    PM.store.setSnapshotAsync = vi.fn(async () => false);
+    PM.Projects.recoverAsync = vi.fn(async () => false);
+    const saveFile = vi.fn(async () => ({ ok: true, path: '/tmp/Superseded.pmv' }));
+    installBridgeForTests({ saveFile } as any);
+    PM.proj.name = 'Edited while saving'; PM.autosave();
+    expect(await PM.saveProject()).toBe(true);
+    expect(PM.Projects.recoverAsync).toHaveBeenCalled();
+    expect(toasts.some(message => message.includes('local recovery could not be updated'))).toBe(false);
+  });
+
   it('keeps pointer-move notifications inside a drag out of autosave and commits one edit', () => {
     const { PM } = appRegistry(); installHistory(PM); PM.touch = vi.fn();
     const before = PM.app.saveTimer;

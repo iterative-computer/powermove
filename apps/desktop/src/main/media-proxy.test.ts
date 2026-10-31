@@ -43,6 +43,56 @@ describe('media playback proxies', () => {
     await expect(service.read(proxy.token, 0, 1)).rejects.toThrow('expired');
   });
 
+  it('shares one in-flight conversion per unchanged source and gives each caller its own file', async () => {
+    const { root, source } = await fixture();
+    let conversions = 0, finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const service = new MediaProxyService(root, async (input, output) => { conversions++; await gate; await copyFile(input, output); });
+    const first = service.create(source), second = service.create(source);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    finish();
+    const [a, b] = await Promise.all([first, second]);
+    expect(conversions).toBe(1);
+    expect(a.token).not.toBe(b.token);
+    await service.release(a.token);
+    expect([...await service.read(b.token, 0, 3)]).toEqual([1, 2, 3]);
+    await service.release(b.token);
+    // Finished work is not cached: a later open converts the current file again.
+    await writeFile(source, Uint8Array.from([9, 8, 7]));
+    const later = await service.create(source);
+    expect(conversions).toBe(2);
+    expect([...await service.read(later.token, 0, 3)]).toEqual([9, 8, 7]);
+    await service.release(later.token);
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-media-proxy-'))).toEqual([]);
+  });
+
+  it('cancels a conversion once every caller has gone, and on dispose', async () => {
+    const { root, source } = await fixture();
+    const signals: AbortSignal[] = [];
+    const convert = (_input: string, _output: string, signal?: AbortSignal) => new Promise<void>((_, reject) => {
+      signals.push(signal!);
+      signal!.addEventListener('abort', () => reject(new Error('killed')), { once: true });
+    });
+    const service = new MediaProxyService(root, convert);
+    const one = new AbortController(), two = new AbortController();
+    const first = service.create(source, one.signal), second = service.create(source, two.signal);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(signals).toHaveLength(1);
+    one.abort(new Error('window closed'));
+    await expect(first).rejects.toThrow('window closed');
+    expect(signals[0]!.aborted).toBe(false);
+    two.abort(new Error('window closed'));
+    await expect(second).rejects.toThrow('window closed');
+    expect(signals[0]!.aborted).toBe(true);
+
+    const pending = service.create(source);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await service.dispose();
+    await expect(pending).rejects.toThrow('killed');
+    expect(signals[1]!.aborted).toBe(true);
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-media-proxy-'))).toEqual([]);
+  });
+
   it('rejects untrusted and malformed IPC requests before touching media', async () => {
     const { root } = await fixture();
     const service = new MediaProxyService(root, async () => undefined);

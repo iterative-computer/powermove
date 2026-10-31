@@ -23,6 +23,15 @@ it('links originals without uploading their contents and keeps pasted media as o
   expect(host.chunk).toHaveBeenCalled();
 });
 
+it('stores the provided bytes when the original moved or changed, so projects still open', async () => {
+  const { store, host } = setup();
+  host.link.mockRejectedValue(new Error('The selected source file changed. Import it again.'));
+  expect(await store.put('clip', new Blob(['video'], { type: 'video/mp4' }), { sourcePath: '/media/changed.mp4' }, 'saved-revision')).toBe(true);
+  expect(host.begin).toHaveBeenCalledWith(expect.objectContaining({ key: 'clip', size: 5, revision: 'saved-revision' }));
+  expect(host.chunk).toHaveBeenCalled();
+  expect(host.finish).toHaveBeenCalledWith('upload');
+});
+
 it('keeps links out of ordinary saves but still reads the bytes for portable exports', async () => {
   const { store, host } = setup();
   const asset = { id: 'clip', sourcePath: '/media/video.mp4' };

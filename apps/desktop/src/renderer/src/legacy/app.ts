@@ -882,9 +882,9 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id, signal, bac
         rememberFile(projectId, state);
         if (projectId === PM.proj.id) {
           const recoveryProject = PM.proj, recoveryGeneration = saveGeneration;
-          if (!await captureProjectSessionAsync(() => PM.proj === recoveryProject && saveGeneration === recoveryGeneration)) {
-            throw new Error('Local recovery changed while saving');
-          }
+          // False means a newer autosave, flush or tab switch took over the
+          // checkpoint. Only a thrown write error means recovery failed.
+          await captureProjectSessionAsync(() => PM.proj === recoveryProject && saveGeneration === recoveryGeneration);
         }
         await PM.store.flush?.();
       } catch (error) {

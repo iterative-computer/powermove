@@ -74,8 +74,16 @@ export function attachLibraryMedia(host: LibraryMediaBridge, legacy: LegacyMedia
       if (!key || !blob) return false;
       try {
         if (meta.sourcePath && host.link) {
-          await host.link({ key, sourcePath: meta.sourcePath, size: blob.size, type: blob.type || meta.type || 'application/octet-stream', revision: savedRevision });
-        } else await put(key, blob, savedRevision);
+          try {
+            await host.link({ key, sourcePath: meta.sourcePath, size: blob.size, type: blob.type || meta.type || 'application/octet-stream', revision: savedRevision });
+            return true;
+          } catch (error) {
+            // A project file carries its own copy. A moved or edited original
+            // must not stop it opening, so keep those bytes instead.
+            console.info('[media-library] Original unavailable; keeping a copy.', error);
+          }
+        }
+        await put(key, blob, savedRevision);
         return true;
       }
       catch (error) { console.warn('[media-library] Import was not saved.', error); return false; }
