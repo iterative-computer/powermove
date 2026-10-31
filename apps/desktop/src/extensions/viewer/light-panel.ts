@@ -16,9 +16,9 @@ type What = 'power' | 'size' | 'distance' | 'spread';
 type Row = { what: What; label: string; tip: string; min: number; max: number; log: boolean; unit: string; show: (i: Info) => boolean; value: (i: Info) => number };
 
 const AIMS = [
-  { id: 'reflect', label: 'Reflect', tip: 'Reflect — the light moves so its highlight lands where you click' },
-  { id: 'direct', label: 'Direct', tip: 'Direct — the light faces the spot you click, lighting it straight on' },
-  { id: 'orbit', label: 'Orbit', tip: 'Orbit — drag to circle the light around what it points at' },
+  { id: 'reflect', label: 'Reflect', tip: 'Reflect — The highlight lands where you click' },
+  { id: 'direct', label: 'Direct', tip: 'Direct — The light faces where you click' },
+  { id: 'orbit', label: 'Orbit', tip: 'Orbit — Drag to circle the light around its target' },
 ] as const;
 const KINDS = [{ id: 'area', label: 'Softbox' }, { id: 'spot', label: 'Spotlight' }, { id: 'point', label: 'Bulb' }, { id: 'sun', label: 'Sun' }] as const;
 const KIND: Record<string, string> = { area: 'Softbox', spot: 'Spotlight', point: 'Bulb', sun: 'Sun' };
@@ -83,7 +83,7 @@ export function mountLightPanel(api: PowermoveAPI, host: HTMLElement): () => voi
   });
   // Add, and what it adds.
   const add = h('div', { className: 'lp-seg' });
-  const addButton = h('button', { textContent: '+ Add', title: 'Add a light: then click a model to put it there', onclick: () => lights.setTool({ adding: !lights.getTool().adding }) });
+  const addButton = h('button', { textContent: '+ Add', title: 'Add light — Then click a model to put it there', onclick: () => lights.setTool({ adding: !lights.getTool().adding }) });
   const kind = h('select', { title: 'The kind of light Add puts in' });
   kind.setAttribute('aria-label', 'Kind of light to add');
   for (const k of KINDS) kind.append(h('option', { value: k.id, textContent: k.label }));

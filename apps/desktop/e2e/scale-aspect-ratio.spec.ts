@@ -21,10 +21,10 @@ test('aspect ratio lock stays in sync and preserves proportions in both panels',
   const lock = page.getByRole('button', { name: 'Lock aspect ratio', exact: true });
   await expect(lock.locator('[data-icon="aspectRatio"][data-icon-set="phosphor"]')).toHaveCount(1);
   await expect(lock).toHaveAttribute('aria-pressed', 'false');
-  await expect(lock).toHaveAttribute('title', 'Lock aspect ratio');
+  await expect.poll(() => lock.evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Lock aspect ratio');
   await lock.click();
   await expect(lock).toHaveAttribute('aria-pressed', 'true');
-  await expect(lock).toHaveAttribute('title', 'Unlock aspect ratio');
+  await expect.poll(() => lock.evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Unlock aspect ratio');
 
   const coordinates = () => page.evaluate(() => {
     const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline');
@@ -62,10 +62,10 @@ test('aspect ratio lock stays in sync and preserves proportions in both panels',
 
   const point = await coordinates();
   await page.mouse.move(point.lock, point.y);
-  await expect(page.locator('#tl-canvas-wrap canvas')).toHaveAttribute('title', 'Unlock aspect ratio');
+  await expect.poll(() => page.locator('#tl-canvas-wrap canvas').evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Unlock aspect ratio');
   await page.mouse.click(point.lock, point.y);
   await expect(lock).toHaveAttribute('aria-pressed', 'false');
-  await expect(page.locator('#tl-canvas')).toHaveAttribute('title', 'Lock aspect ratio');
+  await expect.poll(() => page.locator('#tl-canvas').evaluate(el => el.getAttribute('title') ?? el.getAttribute('data-tip-title'))).toBe('Lock aspect ratio');
   await typeScale('Y', '80');
   expect(await values()).toEqual([240, 80]);
   await page.screenshot({ path: info.outputPath('aspect-ratio-unlocked.png') });

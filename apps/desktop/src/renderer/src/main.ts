@@ -12,8 +12,11 @@ import '../../../css/transcription.css';
 import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
 import { installPointerFocus } from './controls/pointer-focus';
+import { installTooltips } from './controls/tooltips';
 
 installPointerFocus();
+// Every `title` in the app shows as our own tooltip (controls/tooltips.ts).
+installTooltips();
 
 // Served by `powermove serve`, the browser has no preload: the bridge has to be
 // in the kernel's capture before the engines read the store during their
