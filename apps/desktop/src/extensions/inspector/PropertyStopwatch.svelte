@@ -2,12 +2,10 @@
   import { toggleSelectionKey } from './selection-animation';
   import { inspectorContext } from './context';
   import { inspectorRefresh } from './refresh.svelte.js';
-  import { inEffectControls } from './effect-controls';
   const { api, doc, transport, timeline } = inspectorContext();
   let { layer, path, label, fallback }: {
     layer: any; path: string; label: string; fallback?: unknown;
   } = $props();
-  const effectControls = inEffectControls();
   const property = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, doc.tick.structure, doc.proj, api.anim.findProp?.(layer, path)));
   const animated = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, doc.proj, !!property?.kf?.length));
   const current = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, transport.time, !!property && !!api.anim.hasKeyAt(layer, property, transport.time)));
@@ -31,5 +29,5 @@
   aria-label={`${current ? 'Remove keyframe for' : 'Add keyframe for'} ${label}`} aria-pressed={current}
   title={current ? 'Remove keyframe' : 'Add keyframe'}
   data-property-path={path} onclick={toggle}>
-  {@html api.ui.icon(effectControls ? 'timer' : current ? 'diamondFill' : 'diamond')}
+  {@html api.ui.icon(current ? 'diamondFill' : 'diamond')}
 </button>

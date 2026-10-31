@@ -307,6 +307,8 @@ interface LayerBase<T extends LayerType, D extends object> {
   solo?: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;
+  /** Position's axes are separate properties unless this is false (After Effects' Separate Dimensions). */
+  separateDimensions?: boolean;
   threeD?: boolean;
   /** Pre-comps only: render the nested composition at the size it is shown,
    * so scaling it up stays sharp (After Effects' Continuously Rasterize). */

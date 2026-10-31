@@ -65,7 +65,7 @@ const BLEND_MODES = new Set([
 ]);
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'solo', 'effectSpace', 'continuousRaster'
+  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'solo', 'effectSpace', 'continuousRaster'
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
@@ -439,7 +439,7 @@ function parseLayerPatch(value: unknown): LayerPatch | ValidationError {
     if (number instanceof ValidationError) return number;
     out[key] = number;
   }
-  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'threeD', 'scaleLinked', 'solo', 'continuousRaster'] as const) {
+  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'threeD', 'scaleLinked', 'separateDimensions', 'solo', 'continuousRaster'] as const) {
     if (patch[key] != null) out[key] = Boolean(patch[key]);
   }
   for (const key of ['name', 'color'] as const) if (patch[key] != null) out[key] = stringified(patch[key]);

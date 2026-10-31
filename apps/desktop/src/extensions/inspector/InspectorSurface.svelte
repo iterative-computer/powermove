@@ -91,6 +91,17 @@
   .insp :global(.row.split .pair-group) { height: 26px; border-radius: 6px; background: var(--bg-field); }
   .insp :global(.row.split .pair-group .num) { background: transparent; }
   .insp :global(.row.split:has(> .stopwatch.on) .num) { color: var(--accent-tx); }
+  /* Grouped rows: each axis carries its own diamond at the start of its
+     field, and only the axes that are animated take the accent. */
+  .insp :global(.row.split .pair-group .well.axis-keyed .num) { padding-left: 20px; }
+  .insp :global(.row.split .pair-group .well:has(> .axis-key:not(.on)) .num) { color: var(--tx-value); }
+  .insp :global(.row.split .pair-group .well:has(> .axis-key.on) .num) { color: var(--accent-tx); }
+  .insp :global(.stopwatch.axis-key) { position: absolute; z-index: 1; left: 3px; top: 0; bottom: 0; width: 16px; height: auto; }
+  .insp :global(.stopwatch.axis-key svg) { width: 9px; height: 9px; stroke-width: 1.5; }
+  .insp :global(.stopwatch.axis-key.at-key svg) { fill: currentColor; }
+  .insp :global(.stopwatch.axis-key:hover) { background: none; color: var(--tx-2); }
+  .insp :global(.stopwatch.axis-key.on:hover) { color: var(--accent); }
+  .insp :global(.stopwatch.axis-key:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
   .insp :global(.row.split .color-field .sw) { width: 14px; height: 14px; border-radius: 4px; }
   /* Tall rows (the text field) keep their label and stopwatch on the same
      28px band as every single-line row, so the diamond and the title stay
@@ -243,5 +254,7 @@
     .insp :global(.well[data-axis]::before) { content: attr(data-axis); position: absolute; left: 0; top: 0; bottom: 0; width: 18px;
       display: grid; place-items: center; font-family: var(--f-mono); font-size: 10px; color: var(--tx-3); pointer-events: none; }
     .insp :global(.row.split .pair-group .well[data-axis] .num) { padding-left: 18px; }
+    .insp :global(.well.axis-keyed[data-axis]::before) { left: 16px; width: 12px; }
+    .insp :global(.row.split .pair-group .well.axis-keyed[data-axis] .num) { padding-left: 30px; }
   }
 </style>
