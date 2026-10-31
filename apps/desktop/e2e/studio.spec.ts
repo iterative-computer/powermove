@@ -122,6 +122,58 @@ test('glass focuses light onto the studio floor (caustics)', async ({ session })
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
+test('Final denoises by its guides, keeps edges and renders the same frame the same', async ({ session }) => {
+  test.setTimeout(120_000);
+  await session.openEditor();
+  const { page } = session;
+  const edits = await page.evaluate(() => {
+    const PM = (window as any).PM, api = PM.Kernel.api('studio-denoise');
+    const results = [
+      // Shallow focus on a matte sphere over the studio floor: light, lens blur and shadow are all noisy.
+      api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 0.9, z: 3.2, targetX: 0, targetY: 0.5, targetZ: 0, fStop: 2 } } }),
+      api.scene3d.edit({ operation: 'add_object', object: { id: 'ball', source: { primitive: 'sphere' }, p: { y: 0.5 }, material: { p: { color: '#B8BCC4', roughness: 0.6 } } } }),
+      api.scene3d.edit({ operation: 'add_object', object: { id: 'far', source: { primitive: 'box' }, p: { x: 1.4, y: 0.4, z: -2.5 }, material: { p: { color: '#D2361F', roughness: 0.4 } } } }),
+      api.scene3d.edit({ operation: 'auto_studio' }),
+      api.scene3d.edit({ operation: 'set_environment', patch: { samples: 16 } }),
+    ];
+    PM.invalidate();
+    return results.map((r: any) => r.ok);
+  });
+  expect(edits.every(Boolean)).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Studio?.status().ready), { timeout: 30_000 }).toBe(true);
+  const result = await page.evaluate(() => {
+    const PM = (window as any).PM, W = 320, H = 200;
+    const frame = (t: number) => PM.GL.renderToPixels(t, W, H, { transparent: false, mblur: false });
+    // Grain: mean |pixel − mean of its 4 neighbours| (luma).
+    const grain = (px: Uint8Array) => {
+      const l = (x: number, y: number) => { const i = (y * W + x) * 4; return 0.2126 * px[i]! + 0.7152 * px[i + 1]! + 0.0722 * px[i + 2]!; };
+      let sum = 0, n = 0;
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        sum += Math.abs(l(x, y) - (l(x - 1, y) + l(x + 1, y) + l(x, y - 1) + l(x, y + 1)) / 4); n++;
+      }
+      return sum / n;
+    };
+    PM.agentFrameCapture = true;
+    PM.Studio.setDenoise(false);
+    const raw = frame(0);
+    PM.Studio.setDenoise(true);
+    const denoised = frame(0);
+    PM.Studio.setDenoise(false); PM.Studio.setDenoise(true);
+    const again = frame(0);
+    PM.agentFrameCapture = false;
+    let same = true;
+    for (let i = 0; i < denoised.length; i++) if (denoised[i] !== again[i]) { same = false; break; }
+    // The backdrop stays exactly the backdrop where nothing is near it.
+    const corner = [...denoised.subarray((10 * W + 10) * 4, (10 * W + 10) * 4 + 3)];
+    return { raw: grain(raw), denoised: grain(denoised), same, corner };
+  });
+  expect(result.denoised).toBeLessThan(result.raw * 0.5);
+  expect(result.same).toBe(true);
+  expect(result.corner).toEqual([246, 245, 248]);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+  console.log(`grain ${result.raw.toFixed(2)} → ${result.denoised.toFixed(2)}; corner ${result.corner}`);
+});
+
 test('a sun lights Studio as brightly as the classic renderer', async ({ session }) => {
   test.setTimeout(120_000);
   await session.openEditor();

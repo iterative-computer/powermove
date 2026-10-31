@@ -1,6 +1,8 @@
 import traceSource from '../../../../../../../engine/crates/pm-studio/src/shaders/trace.wgsl?raw';
 import postSource from '../../../../../../../engine/crates/pm-studio/src/shaders/post.wgsl?raw';
 import presentSource from '../../../../../../../engine/crates/pm-studio/src/shaders/present.wgsl?raw';
+import aovSource from '../../../../../../../engine/crates/pm-studio/src/shaders/aov.wgsl?raw';
+import denoiseSource from '../../../../../../../engine/crates/pm-studio/src/shaders/denoise.wgsl?raw';
 import { MAP_SIZE, type StudioScene } from './extract';
 
 /*
@@ -38,14 +40,19 @@ export type StudioView = {
 
 /** post.wgsl's Post: three vec4s, then two cameras of four vec4s. */
 const POST_BYTES = 48 + 128;
+/** denoise.wgsl's Den: dims, k. */
+const DENOISE_BYTES = 32;
+/** Final's denoiser: à-trous passes (steps 1…16) and how many standard deviations its edges allow. */
+const DENOISE_PASSES = 5;
+const DENOISE_SIGMA = 4;
 /** trace.wgsl's Params: 13 vec4. */
 const PARAMS_BYTES = 208;
 /** Photon grid slots (8 words each); must match trace.wgsl's GRID_CELLS. */
 const GRID_SLOTS = 1 << 19;
 /** Photons traced per sample batch when a scene has caustics. */
 const PHOTONS_PER_PASS = 1 << 17;
-/** Global switches (tests compare a render with and without caustics). */
-export const studioOptions = { caustics: true };
+/** Global switches (tests compare a render with and without caustics, or Final's denoiser). */
+export const studioOptions = { caustics: true, denoise: true };
 
 const GPU: any = typeof navigator !== 'undefined' ? (navigator as any).gpu : undefined;
 const U = (globalThis as any).GPUBufferUsage, T = (globalThis as any).GPUTextureUsage, S = (globalThis as any).GPUShaderStage;
@@ -140,6 +147,38 @@ function build(): Pipelines {
   return pipelines;
 }
 
+type DenoisePipelines = { aovs: any; demod: any; step: any; finish: any; aovLayout: any; layout: any };
+let denoisePipelines: DenoisePipelines | null = null;
+
+/** Final's denoiser (built the first time a Final or still frame needs it). */
+function buildDenoise(): DenoisePipelines {
+  if (denoisePipelines) return denoisePipelines;
+  // The denoiser's guides read only the scene (a pipeline may bind 10 storage buffers; the trace uses all of them).
+  const aovLayout = device.createBindGroupLayout({
+    label: 'studio aov',
+    entries: [
+      uniform(0), storage(1, true), storage(2, true), storage(3, true), storage(4, true),
+      { binding: 5, visibility: S.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 6, visibility: S.COMPUTE, sampler: { type: 'filtering' } },
+      storage(11, true), storage(13, false),
+    ],
+  });
+  const layout = device.createBindGroupLayout({
+    label: 'studio denoise',
+    entries: [uniform(0), storage(2, true), storage(3, true), storage(4, false), storage(5, true), storage(6, false), storage(7, true), storage(8, true), storage(9, true)],
+  });
+  const aov = device.createShaderModule({ label: 'aov.wgsl', code: `${traceSource}\n@group(0) @binding(13) var<storage, read_write> aov: array<vec4f>;\n${aovSource}` });
+  const denoise = device.createShaderModule({ label: 'denoise.wgsl', code: denoiseSource });
+  const compute = (module: any, l: any, entryPoint: string) => device.createComputePipeline({
+    label: entryPoint, layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module, entryPoint },
+  });
+  denoisePipelines = {
+    aovs: compute(aov, aovLayout, 'aovs'), demod: compute(denoise, layout, 'demod'),
+    step: compute(denoise, layout, 'atrous_step'), finish: compute(denoise, layout, 'finish'), aovLayout, layout,
+  };
+  return denoisePipelines;
+}
+
 /** One render target size: the accumulation, denoise and per-layer canvases. */
 export class StudioTarget {
   readonly width: number;
@@ -183,7 +222,7 @@ export class StudioTarget {
   }
 
   destroy(): void {
-    for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.grid, ...this.display, this.packed, ...this.history, ...this.sceneBuffers]) b?.destroy?.();
+    for (const b of [this.params, ...this.postParams, ...this.presentParams.values(), this.accum, this.bgsum, this.gbuf, this.ebuf, this.grid, ...this.display, this.packed, ...this.history, ...this.sceneBuffers, ...this.denoiseBuffers()]) b?.destroy?.();
     this.mapTexture?.destroy?.();
   }
 
@@ -272,14 +311,18 @@ export class StudioTarget {
     this.samples = 0;
   }
 
-  /** Queue `spp` samples (`reset` starts over). Returns without waiting. */
-  trace(spp: number, bounces: number, reset: boolean, clamp: number): void {
+  /**
+   * Queue `spp` samples (`reset` starts over). Returns without waiting.
+   * `salt` seeds Stills and Final: the same salt (a frame's time) always gives
+   * the same pixels, and each frame of a film gets its own noise instead of
+   * one pattern stuck to the screen.
+   */
+  trace(spp: number, bounces: number, reset: boolean, clamp: number, salt = 0): void {
     if (!this.view) return;
     const p = build();
     this.traceGroup ??= this.groupWith(this.params);
-    // Stills and Final restart their seeds, so the same scene and view always give
-    // the same pixels; Live keeps counting, so frames blended over time average out.
-    if (reset && !this.live) this.frame = 0;
+    // Live keeps counting, so frames blended over time average out.
+    if (reset && !this.live) this.frame = Math.imul(salt >>> 0, 4099) >>> 0;
     if (reset) this.photonsEmitted = 0;
     // Caustics: photons from the lights through glass and mirrors (Refine, Final, stills).
     const photons = studioOptions.caustics && this.caustics && !this.live && this.lightCount > 0;
@@ -349,8 +392,12 @@ export class StudioTarget {
     });
   }
 
-  /** Resolve, denoise (`passes`) and compose into the display buffer. */
-  resolve(passes: number): void {
+  /**
+   * Resolve, denoise and compose into the display buffer: `passes` of Live's
+   * filter, or with `guided` Final's (guides traced first, then filtered by
+   * each pixel's own noise).
+   */
+  resolve(passes: number, guided = false): void {
     if (!this.view) return;
     const p = build();
     const enc = device.createCommandEncoder();
@@ -359,6 +406,8 @@ export class StudioTarget {
     const cam = this.view.camera, prev = this.prevCamera;
     const camera = (c: StudioCamera) => [...c.position, 0, ...c.forward, 0, ...c.right, c.tanY * c.aspect, ...c.up, c.tanY];
     const temporalOn = this.live && !!prev;
+    // Final's denoiser hands compose its own coverage (see denoise.wgsl's finish).
+    let sums = [this.accum, this.bgsum, this.ebuf];
     const run = (pipe: any, src: number, dst: number, step: number) => {
       const data = new ArrayBuffer(POST_BYTES);
       new Uint32Array(data, 0, 4).set([this.width, this.height, step, temporalOn ? 1 : 0]);
@@ -369,10 +418,10 @@ export class StudioTarget {
         layout: p.postLayout,
         entries: [
           { binding: 0, resource: { buffer: this.postParams[slot] } },
-          { binding: 1, resource: { buffer: this.accum } }, { binding: 2, resource: { buffer: this.bgsum } },
+          { binding: 1, resource: { buffer: sums[0] } }, { binding: 2, resource: { buffer: sums[1] } },
           { binding: 3, resource: { buffer: this.gbuf } }, { binding: 4, resource: { buffer: this.display[src] } },
           { binding: 5, resource: { buffer: this.display[dst] } }, { binding: 6, resource: { buffer: this.packed } },
-          { binding: 7, resource: { buffer: this.ebuf } },
+          { binding: 7, resource: { buffer: sums[2] } },
           { binding: 8, resource: { buffer: this.history[this.historyIndex] } },
           { binding: 9, resource: { buffer: this.history[1 - this.historyIndex] } },
         ],
@@ -386,6 +435,11 @@ export class StudioTarget {
     };
     run(p.resolve, 1, 0, 1);
     let cur = 0;
+    if (guided) {
+      const out = this.denoise(enc);
+      cur = out.display;
+      sums = [this.ones, out.coverage, this.ones];
+    }
     if (this.live) {
       // Reuse the previous frame where it saw the same surface, then denoise as usual.
       run(p.temporal, cur, 1 - cur, 1); cur = 1 - cur;
@@ -398,6 +452,76 @@ export class StudioTarget {
     device.queue.submit([enc.finish()]);
   }
   private composed = 0;
+  private aov: any = null;
+  private side: any[] = [];
+  /** (0, 0, 0, 1) per pixel: compose's sample count and emission once the denoiser has folded them in. */
+  private ones: any = null;
+  private denoiseParams: any[] = [];
+  private denoiseBuffers(): any[] { return [this.aov, this.ones, ...this.side, ...this.denoiseParams]; }
+
+  /**
+   * Final's denoiser, from the resolved display[0]. Returns the display buffer
+   * holding the denoised light and shading, and the bgsum stand-in carrying its coverage.
+   */
+  private denoise(enc: any): { display: number; coverage: any } {
+    const d = buildDenoise(), p = build(), px = this.width * this.height;
+    if (!this.aov) {
+      const buf = (label: string, size: number, usage = U.STORAGE) => device.createBuffer({ label, size, usage });
+      this.aov = buf('denoise guides', px * 32);
+      this.side = [buf('denoise side a', px * 16), buf('denoise side b', px * 16)];
+      this.ones = device.createBuffer({ label: 'denoise ones', size: px * 16, usage: U.STORAGE, mappedAtCreation: true });
+      const ones = new Float32Array(this.ones.getMappedRange());
+      for (let i = 3; i < ones.length; i += 4) ones[i] = 1;
+      this.ones.unmap();
+      this.denoiseParams = Array.from({ length: DENOISE_PASSES + 2 }, () => buf('denoise params', DENOISE_BYTES, U.UNIFORM | U.COPY_DST));
+    }
+    const b = this.sceneBuffers, groups = [Math.ceil(this.width / 8), Math.ceil(this.height / 8)] as const;
+    const cam = this.view!.camera;
+    // Guides with the trace's own camera and seed (its params are still bound).
+    const guides = enc.beginComputePass();
+    guides.setPipeline(d.aovs);
+    guides.setBindGroup(0, device.createBindGroup({
+      layout: d.aovLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.params } },
+        { binding: 1, resource: { buffer: b[0] } }, { binding: 2, resource: { buffer: b[1] } },
+        { binding: 3, resource: { buffer: b[2] } }, { binding: 4, resource: { buffer: b[3] } },
+        { binding: 5, resource: this.mapTexture.createView({ dimension: '2d-array' }) },
+        { binding: 6, resource: p.sampler },
+        { binding: 11, resource: { buffer: b[4] } }, { binding: 13, resource: { buffer: this.aov } },
+      ],
+    }));
+    guides.dispatchWorkgroups(...groups);
+    guides.end();
+    let slot = 0;
+    const run = (pipe: any, src: number, dst: number, vin: number, vout: number, step: number) => {
+      const params = this.denoiseParams[slot++];
+      const data = new ArrayBuffer(DENOISE_BYTES);
+      new Uint32Array(data, 0, 4).set([this.width, this.height, step, 0]);
+      new Float32Array(data, 16, 4).set([DENOISE_SIGMA, cam.lensRadius, 0, 0]);
+      device.queue.writeBuffer(params, 0, data);
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipe);
+      pass.setBindGroup(0, device.createBindGroup({
+        layout: d.layout,
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 2, resource: { buffer: this.aov } },
+          { binding: 3, resource: { buffer: this.display[src] } }, { binding: 4, resource: { buffer: this.display[dst] } },
+          { binding: 5, resource: { buffer: this.side[vin] } }, { binding: 6, resource: { buffer: this.side[vout] } },
+          { binding: 7, resource: { buffer: this.accum } }, { binding: 8, resource: { buffer: this.bgsum } },
+          { binding: 9, resource: { buffer: this.ebuf } },
+        ],
+      }));
+      pass.dispatchWorkgroups(...groups);
+      pass.end();
+    };
+    run(d.demod, 0, 1, 1, 0, 1);
+    let cur = 1, v = 0;
+    for (let i = 0; i < DENOISE_PASSES; i++) { run(d.step, cur, 1 - cur, v, 1 - v, 1 << i); cur = 1 - cur; v = 1 - v; }
+    run(d.finish, cur, 1 - cur, v, 1 - v, 1);
+    return { display: 1 - cur, coverage: this.side[1 - v] };
+  }
   private history: any[] = [];
   private historyIndex = 0;
   private prevCamera: StudioCamera | null = null;

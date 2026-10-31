@@ -15,7 +15,14 @@ physically right. The design and roadmap are in `docs/3d-studio-redesign.md`.
 - **Final** for exports and agent captures: a fixed number of samples per
   frame, set per composition on the camera (Final quality: Draft 16,
   Standard 64, High 256, Best 1024). Motion blur divides those samples
-  across its shutter samples, so blurred exports cost no more.
+  across its shutter samples, so blurred exports cost no more. Each frame is
+  seeded by its time: re-rendering a frame gives the same pixels, and each
+  frame (and each shutter sample) gets its own noise, so grain never sits on
+  the screen while the picture moves under it. Final and stills are then
+  denoised (`denoise.wgsl`): an edge-avoiding filter guided by the surfaces'
+  albedo, normals, distance and coverage (`aov.wgsl`) and by each pixel's own
+  measured noise, which smooths light, screens, shallow-focus blur and the
+  floor's shadows while edges, paint and the backdrop stay exact.
 
 Machines without WebGPU, and orthographic cameras, use the classic renderer.
 

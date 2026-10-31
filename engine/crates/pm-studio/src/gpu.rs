@@ -84,40 +84,9 @@ struct Rt {
     blas: Option<wgpu::Blas>,
 }
 
-/// Guide images for the Final denoiser, traced with the same camera: first-hit
-/// albedo and normal per pixel, averaged over 8 jittered rays. Appended to
-/// trace.wgsl (the app never uses it) and bound as group 1.
-const AOV_WGSL: &str = r#"
-@group(1) @binding(0) var<storage, read_write> aov: array<vec4f>;
-
-@compute @workgroup_size(8, 8)
-fn aovs(@builtin(global_invocation_id) gid: vec3u) {
-  let w = P.dims.x;
-  let h = P.dims.y;
-  if (gid.x >= w || gid.y >= h) { return; }
-  let idx = gid.y * w + gid.x;
-  seed = pcg(idx ^ 0x5bd1e995u);
-  var albedo = vec3f(0.0);
-  var normal = vec3f(0.0);
-  for (var k = 0; k < 8; k++) {
-    let ray = camera_ray(vec2f(f32(gid.x), f32(gid.y)) + rnd2());
-    let hit = intersect(ray[0], ray[1], BIG, false);
-    let tf = floor_t(ray[0], ray[1]);
-    if (tf < hit.t) {
-      albedo += vec3f(P.env_horizon.w);
-      normal += vec3f(0.0, 1.0, 0.0);
-    } else if (hit.tri >= 0) {
-      let sf = surface(ray[0], ray[1], hit);
-      // Glass and mirrors: white, as the denoiser expects for specular surfaces.
-      let clear = sf.m.spec.w * (1.0 - sf.m.base.w) > 0.5 || (sf.m.base.w > 0.5 && sf.m.spec.x < 0.1);
-      albedo += select(sf.m.base.xyz, vec3f(1.0), clear);
-      normal += select(sf.n, -sf.n, dot(sf.n, ray[1]) > 0.0);
-    }
-  }
-  aov[2u * idx] = vec4f(albedo / 8.0, 0.0);
-  aov[2u * idx + 1u] = vec4f(normal / 8.0, 0.0);
-}
-"#;
+/// Guide images for the Final denoiser (aov.wgsl), bound as group 1 here;
+/// the app binds them in group 0 beside the scene.
+const AOV_WGSL: &str = concat!("@group(1) @binding(0) var<storage, read_write> aov: array<vec4f>;\n", include_str!("shaders/aov.wgsl"));
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -818,7 +787,10 @@ impl Renderer {
             let (mut albedo, mut normal) = (vec![0f32; pixels * 4], vec![0f32; pixels * 4]);
             let mut shade = vec![0f32; pixels * 4];
             for i in 0..pixels {
-                albedo[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8..i * 8 + 4]);
+                // The product's albedo × its share of the pixel (aov.wgsl).
+                for c in 0..3 {
+                    albedo[i * 4 + c] = aov[i * 8 + c] * aov[i * 8 + 3];
+                }
                 normal[i * 4..i * 4 + 4].copy_from_slice(&aov[i * 8 + 4..i * 8 + 8]);
                 shade[i * 4..i * 4 + 3].fill(color[i * 4 + 3]);
             }

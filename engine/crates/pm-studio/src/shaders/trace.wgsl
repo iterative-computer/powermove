@@ -75,7 +75,8 @@ fn vector_to_world(i: u32, v: vec3f) -> vec3f {
 // w: first-hit distance (-1 for the void)
 @group(0) @binding(9) var<storage, read_write> gbuf: array<vec4f>;
 // rgb: sum of emission seen directly by the camera (a product's screen):
-// exact per pixel, so Live denoises only what is noisy.
+// exact per pixel, so Live denoises only what is noisy. a: Σ luminance² of
+// each sample's radiance + emission (their noise, for Final's denoiser).
 @group(0) @binding(10) var<storage, read_write> ebuf: array<vec4f>;
 // Corner positions, 3 per triangle in BVH order (intersection reads only these).
 @group(0) @binding(11) var<storage, read> pos: array<vec4f>;
@@ -976,6 +977,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   var bg = vec3f(0.0);
   var nbg = 0.0;
   var em = vec3f(0.0);
+  // Σ luminance² (radiance + emission) of the samples: each pixel's noise, for Final's denoiser.
+  var l2 = 0.0;
   var nd = vec4f(0.0, 0.0, 0.0, -1.0);
   var object = 0u;
   for (var i = 0u; i < P.dims.w; i++) {
@@ -986,6 +989,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // Clamp fireflies from tiny bright paths (Live clamps harder).
     let lum = dot(smp.radiance, vec3f(0.2126, 0.7152, 0.0722));
     rad += smp.radiance * min(1.0, f32(P.counts.w) / max(lum, 1e-6));
+    let x = min(lum, f32(P.counts.w)) + dot(smp.emit, vec3f(0.2126, 0.7152, 0.0722));
+    l2 += x * x;
     em += smp.emit;
     bg += smp.bg;
     nbg += smp.void_hit;
@@ -996,11 +1001,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     accum[idx] = vec4f(rad, n);
     bgsum[idx] = vec4f(bg, nbg);
     gbuf[idx] = vec4f(oct_encode(nd.xyz), f32(object), nd.w);
-    ebuf[idx] = vec4f(em, n);
+    ebuf[idx] = vec4f(em, l2);
   } else {
     accum[idx] += vec4f(rad, n);
     bgsum[idx] += vec4f(bg, nbg);
-    ebuf[idx] += vec4f(em, n);
+    ebuf[idx] += vec4f(em, l2);
   }
 }
 

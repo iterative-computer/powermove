@@ -55,6 +55,7 @@ const state = (PM: any): State => {
     PM.Studio ??= {
       setEnabled: (on: boolean) => setStudioEnabled(PM, on),
       setCaustics: (on: boolean) => { studioOptions.caustics = on; st.revision++; PM.invalidate?.('render'); },
+      setDenoise: (on: boolean) => { studioOptions.denoise = on; st.revision++; PM.invalidate?.('render'); },
       progress: () => studioProgress(PM),
       liveHistory: async () => { for (const job of st.jobs.values()) if (job.live) return job.live.historyStats(); return null; },
       status: () => ({ enabled: st.enabled, ready: studioGpuReady(), failure: studioGpuFailure(), frames: st.frames, declined: st.declined, preparing: preparingOf(st) }),
@@ -285,7 +286,7 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
     job.viewKey = '';
   }
   const view = viewOf(runtime, cam, job.scene.bounds);
-  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher, view.shadows, studioOptions.caustics]);
+  const viewKey = key([sceneKey, width, height, cam.position, cam.forward, cam.up, cam.tanY, cam.lensRadius, cam.focus, view.exposure, view.backdrop, view.backdropOpaque, view.shadowCatcher, view.shadows, studioOptions.caustics, studioOptions.denoise]);
   const index = job.scene.objects.indexOf(objectId);
   const target = (which: 'live' | 'refine' | 'final', tw: number, th: number): StudioTarget => {
     let t = job![which];
@@ -302,14 +303,15 @@ export function studioLayer(PM: any, runtime: any, w: number, h: number, objectI
   if (final || PM._studioStill) {
     const t = target('final', width, height);
     // Final: the composition's quality, split across motion-blur shutter samples.
-    // Stills: a fixed four samples, denoised, the same every time.
+    // Stills: a fixed four samples. Both denoised by their guides, and seeded
+    // by time: the same frame always renders the same, each frame differently.
     const still = !final;
     const goal = still ? STUDIO_STILL_SAMPLES : Math.max(4, Math.ceil(Number(runtime.raw?.environment?.samples ?? STUDIO_FINAL_SAMPLES) / Math.max(1, PM._studioShutterSamples || 1)));
     const tag = `${still ? 'still' : 'final'}:${viewKey}`;
     if (job.viewKey !== tag || t.samples < goal) {
       t.setView(view);
-      t.trace(goal, 8, true, 64);
-      t.resolve(still ? 3 : 0);
+      t.trace(goal, 8, true, 64, Math.round(time * 9600));
+      t.resolve(0, studioOptions.denoise);
       job.viewKey = tag;
     }
     return { canvas: t.present(`${objectId}:final`, index, bottom), version: `${job.viewKey}:${t.samples}` };
