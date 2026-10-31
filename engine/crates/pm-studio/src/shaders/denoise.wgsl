@@ -44,6 +44,8 @@ fn lum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
 // mixture of materials in each pixel, and a division that varies pixel by
 // pixel (or fades with focus) splits pixels from their neighbours, so light is
 // filtered as it is.
+// A lens with an aperture (k.y: its radius): coverage is noisy and filtered.
+fn shallow() -> bool { return D.k.y > 0.0; }
 fn albedo(i: u32) -> vec3f { return select(max(aov[2u * i].xyz, vec3f(0.02)), vec3f(1.0), D.k.y > 0.0); }
 // The share of the guide rays that hit the product.
 fn hits(i: u32) -> f32 { return aov[2u * i].w; }
@@ -85,9 +87,13 @@ fn demod(@builtin(global_invocation_id) g: vec3u) {
   let e = ebuf[i];
   let n = max(a.w, 1.0);
   let al = albedo(i);
-  // Light and emission over all samples (the void's count as none): premultiplied.
-  let p = (a.xyz + e.xyz) / n;
-  dst[i] = vec4f(p / al, (a.w - bgsum[i].w) / n);
+  // Light and emission. Under shallow focus, over all samples (the void's count
+  // as none) and so premultiplied by coverage, which is as noisy as the light
+  // there and is filtered with it. In focus, coverage is exact (only edges are
+  // partial): light is the mean of the product's samples and coverage is kept.
+  let scene = max(a.w - bgsum[i].w, 0.0);
+  let p = select((a.xyz + e.xyz) / max(scene, 1.0), (a.xyz + e.xyz) / n, shallow());
+  dst[i] = vec4f(p / al, scene / n);
   // The variance of the mean of the samples' luminance.
   let mean = lum(p);
   let l = max(lum(al), 0.02);
@@ -171,7 +177,7 @@ fn atrous_step(@builtin(global_invocation_id) g: vec3u) {
     }
   }
   // The pixel itself always counts toward its color; not always toward shading.
-  dst[i] = sum / wsum;
+  dst[i] = select(vec4f((sum / wsum).xyz, c0.w), sum / wsum, shallow());
   var out = vec4f(var_c / (wsum * wsum), s0.yzw);
   if (ssum > 1e-12) { out = vec4f(out.x, var_s / (ssum * ssum), shade / ssum, 0.0); }
   side_out[i] = out;
@@ -183,7 +189,7 @@ fn finish(@builtin(global_invocation_id) g: vec3u) {
   let i = g.y * D.dims.x + g.x;
   let c = src[i];
   let cover = clamp(c.w, 0.0, 1.0);
-  let light = select(vec3f(0.0), c.xyz * albedo(i) / cover, cover > 1e-4);
+  let light = select(c.xyz * albedo(i), select(vec3f(0.0), c.xyz * albedo(i) / cover, cover > 1e-4), shallow());
   dst[i] = vec4f(light, side_in[i].z);
   side_out[i] = vec4f(0.0, 0.0, 0.0, 1.0 - cover);
 }
