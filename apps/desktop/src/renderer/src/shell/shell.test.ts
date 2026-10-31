@@ -120,8 +120,9 @@ describe('Svelte shell', () => {
 
     flushSync(() => target.querySelector<HTMLButtonElement>('.tb-title-btn')!.click());
     const items = PM.menu.mock.calls.at(-1)![1] as Array<any>;
-    expect(items.filter((item) => typeof item === 'object').map((item) => item.label)).toEqual([
-      'Second', 'First', 'Rename Project…', 'Close Project', 'Close Other Projects', 'Move to New Window', 'New Project', 'All Projects…'
+    // Switch, start or find another, act on this one, close last.
+    expect(items.map((item) => item === '-' ? item : item.header ?? item.label)).toEqual([
+      'Open Projects', 'Second', 'First', '-', 'New Project', 'All Projects…', '-', 'Rename Project…', 'Move to New Window', '-', 'Close Project', 'Close Other Projects'
     ]);
     // The project on screen is ticked; the other is a click away.
     expect(items.find((item: any) => item?.label === 'First').on).toBe(true);

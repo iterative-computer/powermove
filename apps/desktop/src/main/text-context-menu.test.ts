@@ -71,12 +71,11 @@ describe('native text context menus', () => {
     expect(target.showDefinitionForSelection).not.toHaveBeenCalled();
   });
 
-  it('falls back to the AppKit menu, tied to its frame, when the page has no menu of its own', async () => {
+  it('shows the AppKit menu tied to its frame, for native text services', async () => {
     const target = contents();
     const popup = vi.fn();
     vi.mocked(Menu.buildFromTemplate).mockReturnValue({ popup } as any);
     vi.mocked(BrowserWindow.fromWebContents).mockReturnValue({ id: 1 } as any);
-    (target as any).mainFrame = { executeJavaScript: vi.fn().mockResolvedValue('__native__') };
     installTextContextMenu(target);
     const handler = vi.mocked(target.on).mock.calls[0]![1] as Function;
     const frame = { routingId: 42 } as any;
@@ -84,21 +83,6 @@ describe('native text context menus', () => {
     expect(popup).toHaveBeenCalledWith({ window: { id: 1 }, frame });
     await handler({}, params({ isEditable: false, selectionText: '' }));
     expect(popup).toHaveBeenCalledOnce();
-  });
-
-  it('draws the menu in the page and runs the row it returns', async () => {
-    const target = contents();
-    const executeJavaScript = vi.fn().mockImplementation(async (source: string) => {
-      const request = JSON.parse(source.slice(source.indexOf('__pmTextMenu(') + '__pmTextMenu('.length, source.lastIndexOf(') :')));
-      return request.items.find((row: any) => row !== '-' && row.label === 'Copy').id;
-    });
-    (target as any).mainFrame = { executeJavaScript };
-    installTextContextMenu(target);
-    const handler = vi.mocked(target.on).mock.calls[0]![1] as Function;
-    await handler({}, params({ x: 12, y: 34 }));
-    expect(executeJavaScript.mock.calls[0]![0]).toContain('"x":12,"y":34');
-    expect(target.copy).toHaveBeenCalledOnce();
-    expect(Menu.buildFromTemplate).not.toHaveBeenCalled();
   });
 
   it('leads with spelling suggestions for a misspelled word', () => {

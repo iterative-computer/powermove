@@ -2,7 +2,6 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import type { PMRegistry } from '../legacy/registry';
 import { MenuController } from './Menu';
-import { installTextMenu } from './text-menu';
 import { confirm as nativeConfirm, type ConfirmOptions } from './confirm';
 import { ModalController } from './modal';
 import { PaletteController } from './palette';
@@ -22,7 +21,6 @@ type InstalledOverlays = {
   toasts: ToastInstance;
   ghost: { host: HTMLElement; component: ReturnType<typeof mount> };
   menu: MenuController;
-  disposeTextMenu: () => void;
   modal: ModalController;
   palette: PaletteController;
   previous: OverlayMembers;
@@ -101,8 +99,7 @@ export function installSvelteOverlays(PM: PMRegistry): void {
     palette: openPalette,
     paletteCommand: openPalette
   };
-  const disposeTextMenu = installTextMenu((anchor, items, options) => menu.open(anchor, items, options));
-  installed = { PM, target, toasts, ghost, menu, disposeTextMenu, modal, palette, previous, members, attributes };
+  installed = { PM, target, toasts, ghost, menu, modal, palette, previous, members, attributes };
   PM.toast = members.toast;
   /* Keyed notices (fork updates) need to retract without counting as a user dismissal. */
   PM.dismissToast = (key: string): void => { removeTask(key); toasts.dismissKey(key); };
@@ -118,7 +115,6 @@ export function installSvelteOverlays(PM: PMRegistry): void {
 async function dispose(current: InstalledOverlays): Promise<void> {
   if (installed === current) installed = null;
   current.menu.close(false);
-  current.disposeTextMenu();
   current.modal.closeAll();
   current.palette.close();
   current.toasts.clear();

@@ -1,41 +1,14 @@
 import type { MenuAction, MenuItem } from './types';
 
-/* ── Human Interface Guidelines ─────────────────────────── */
+/* ── menu structure ─────────────────────────────────────── */
 
 const isAction = (item: MenuItem): item is MenuAction => item !== '-' && !('header' in item);
 
-/** "Cut, Copy, and Paste … may appear unavailable" in a macOS context menu;
-    everything else that can't run there is hidden. */
-const EDIT_COMMANDS = new Set(['Cut', 'Copy', 'Paste']);
-
 /**
- * A contextual menu, per the macOS HIG: only what applies right now
- * ("Hide unavailable menu items, don't dim them"), and no key equivalents
- * ("Show keyboard shortcuts in your app's main menus, not in context menus").
- * Submenus left with nothing to run go too.
- */
-export function contextMenuItems(items: MenuItem[]): MenuItem[] {
-  const out: MenuItem[] = [];
-  for (const item of items) {
-    if (!isAction(item)) { out.push(item); continue; }
-    if (item.disabled && !EDIT_COMMANDS.has(item.label)) continue;
-    const { kb: _kb, ...rest } = item;
-    if (item.submenu) {
-      const submenu = tidyMenu(contextMenuItems(item.submenu));
-      if (!submenu.some(isAction)) continue;
-      out.push({ ...rest, submenu });
-      continue;
-    }
-    out.push(rest);
-  }
-  return tidyMenu(out);
-}
-
-/**
- * Structure every menu the way AppKit draws its own: separators only between
- * groups, a section title only above rows it names, and "a uniform visual
- * treatment across menu items in the same group" — icons on every row of a
- * group or on none of them.
+ * Structure every menu: separators only between groups, a section title only
+ * above rows it names, and no icon repeated within one menu: when two rows
+ * share an icon (Set Work Area Start and End), only the first keeps it, so
+ * each icon still points at one action.
  */
 export function tidyMenu(items: MenuItem[]): MenuItem[] {
   const groups: MenuItem[][] = [[]];
@@ -44,6 +17,7 @@ export function tidyMenu(items: MenuItem[]): MenuItem[] {
     groups.at(-1)!.push(item);
   }
   const out: MenuItem[] = [];
+  const seen = new Set<string>();
   for (const group of groups) {
     /* A header opens a section; a header with no rows under it is dropped. */
     const kept = group.filter((item, index) => {
@@ -51,14 +25,16 @@ export function tidyMenu(items: MenuItem[]): MenuItem[] {
       const next = group[index + 1];
       return next !== undefined && isAction(next);
     });
-    const actions = kept.filter(isAction);
-    if (!actions.length) continue;
-    const iconed = actions.filter((item) => item.icon).length;
-    const uniform = iconed === 0 || iconed === actions.length
-      ? kept
-      : kept.map((item) => (isAction(item) && item.icon ? { ...item, icon: undefined } : item));
+    if (!kept.some(isAction)) continue;
     if (out.length) out.push('-');
-    out.push(...uniform);
+    for (const raw of kept) {
+      /* Each submenu is a menu of its own, tidied the same way. */
+      const item = isAction(raw) && raw.submenu ? { ...raw, submenu: tidyMenu(raw.submenu) } : raw;
+      if (!isAction(item) || !item.icon) { out.push(item); continue; }
+      if (seen.has(item.icon)) { out.push({ ...item, icon: undefined }); continue; }
+      seen.add(item.icon);
+      out.push(item);
+    }
   }
   return out;
 }

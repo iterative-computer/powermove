@@ -827,27 +827,7 @@ function buildHead(head: any) {
      stay beside the curves is an option in its menu. */
   const graph = h('button.iconbtn.tl-graph-toggle', { type: 'button', title: 'Graph editor (Shift+F3)', 'aria-label': 'Graph editor (Shift+F3)' }, iconNode(api, 'dopeGraph'));
   listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
-  const graphOptions = btn('more', () => api.ui.menu(graphOptions, [
-    { label: 'Show Layer Bars with Graph', on: Boolean(T.graphCombined), run: () => { T.graphCombined = !T.graphCombined; invalidate('timeline'); } },
-    '-',
-    { label: 'Value Graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
-    { label: 'Speed Graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
-    { label: 'Merge Selected Curves', on: Boolean(T.graphMerge), disabled: (T._graph?.series?.length ?? 0) < 2,
-      run: () => { T.graphMerge = !T.graphMerge; T.graphViewBounds = null; invalidate('timeline'); } },
-    { label: 'Fit Selected Curves', disabled: !T._graph, run: () => {
-      /* Merged curves draw no per-key points, so fall back to the selected
-         series' keys: "fit" still has something to frame. */
-      const points = T._graph?.points || [];
-      const times = points.length
-        ? points.map((point: any) => point.axis.L.from + point.key.t)
-        : (T._graph?.series ?? []).flatMap((axis: any) => axis.prop.kf.map((key: any) => axis.L.from + key.t));
-      if (!times.length) return;
-      const first = Math.min(...times), last = Math.max(...times);
-      T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
-      T.scrollT = Math.max(minimumScrollTime(), first - 24 / T.pps);
-      T.graphViewBounds = null; invalidate('timeline');
-    } },
-  ]), 'Graph options');
+  const graphOptions = btn('more', () => api.ui.menu(graphOptions, graphMenuItems()), 'Graph options');
   const snap = btn('magnet', () => {
     T.trackSnap = !T.trackSnap;
     api.storage.set('trackSnap', T.trackSnap);
@@ -4549,14 +4529,43 @@ function editKeyframeValues(clickedEntries: any[]) {
   });
 }
 
+/** The Graph Editor's own menu: which graph, framing, then layout. The options
+    button and a right-click on empty graph space both open it. */
+function graphMenuItems(): any[] {
+  return [
+    { label: 'Value Graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
+    { label: 'Speed Graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
+    '-',
+    { label: 'Fit Selected Curves', disabled: !T._graph, run: () => {
+      /* Merged curves draw no per-key points, so fall back to the selected
+         series' keys: "fit" still has something to frame. */
+      const points = T._graph?.points || [];
+      const times = points.length
+        ? points.map((point: any) => point.axis.L.from + point.key.t)
+        : (T._graph?.series ?? []).flatMap((axis: any) => axis.prop.kf.map((key: any) => axis.L.from + key.t));
+      if (!times.length) return;
+      const first = Math.min(...times), last = Math.max(...times);
+      T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
+      T.scrollT = Math.max(minimumScrollTime(), first - 24 / T.pps);
+      T.graphViewBounds = null; invalidate('timeline');
+    } },
+    { label: 'Merge Selected Curves', on: Boolean(T.graphMerge), disabled: (T._graph?.series?.length ?? 0) < 2,
+      run: () => { T.graphMerge = !T.graphMerge; T.graphViewBounds = null; invalidate('timeline'); } },
+    '-',
+    { label: 'Show Layer Bars with Graph', on: Boolean(T.graphCombined), run: () => { T.graphCombined = !T.graphCombined; invalidate('timeline'); } },
+  ];
+}
+
 function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
   const entries = keyframeContextEntries(clickedEntries, api.selection.keys(), selectedKeyEntries());
   entries.forEach((entry:any)=>temporalKeys(entry.prop.kf));
   const keys = entries.map((entry: any) => entry.key);
   const multiple = keys.length > 1;
+  /* Edit the keys, then how they ease, then copy or delete them. */
   items.push({ header: multiple ? `${keys.length} Keyframes` : 'Keyframe' });
   items.push({label:'Edit Value…',run:()=>editKeyframeValues(entries)},
-    {label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale Keyframes…',run:()=>scaleGraphDialog(api,entries)});
+    {label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale Keyframes…',run:()=>scaleGraphDialog(api,entries)},
+    '-', { header: 'Easing' });
   const labels: Record<string, string> = {
     linear: 'Linear', swish: 'Swish', power: 'Power', easeIn: 'Ease In', easeOut: 'Ease Out', easeInOut: 'Easy Ease',
     expoOut: 'Exponential Out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide',
@@ -4569,7 +4578,7 @@ function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
     }));
   const allHold = keys.every((target: any) => target.hold);
   items.push({
-    label: allHold ? 'Remove Hold' : multiple ? 'Hold Keyframes' : 'Toggle Hold',
+    label: multiple ? 'Hold Keyframes' : 'Hold Keyframe', on: allHold,
     run: () => api.history.do(multiple ? 'Hold keyframes' : 'Hold', () => {
       keys.forEach((target: any) => { target.hold = !allHold; });
       api.anim.touch();
@@ -4620,6 +4629,11 @@ function onCtx(e: any) {
     const time = clamp(api.util.snapF(x2t(x), api.project.get().fps), 0, api.project.get().dur);
     items.push({ label: 'Add Marker Here', icon: 'plus', disabled: !!markerAtTime(api, time), run: () => addTimelineMarker(api, time) }, '-');
   }
+  /* In the lanes and the ruler, work-area edits act where you clicked, like
+     Add Marker Here; over the layer column they use the playhead. */
+  const inLanes = x >= T.gut;
+  const at = inLanes ? clamp(api.util.snapF(x2t(x), api.project.get().fps), 0, api.project.get().dur) : api.transport.time();
+  const where = inLanes ? 'Here' : 'at Playhead';
   const graphPoint = inGraph(x, y)
     ? [...(T._graph?.points || [])]
       .map((point: any) => ({ ...point, distance: Math.hypot(x - point.x, y - point.y) }))
@@ -4638,24 +4652,28 @@ function onCtx(e: any) {
         const values = trackChannels(r).map(axis => ({ ...axis, value: api.anim.evP(r.L, axis.prop, x2t(x), axis.key) }));
         values.forEach(axis => api.anim.setKeyOn(axis.prop, x2t(x) - r.L.from, axis.value, 'linear', api.project.get().fps));
       }) });
-      items.push({ label: 'Paste Keyframes Here', run: () => api.commands.run('pasteKeyframes', { layer: r.L.id, path: r.key, time: x2t(x) }) });
+      items.push({ label: 'Paste Keyframes Here', run: () => api.commands.run('pasteKeyframes', { layer: r.L.id, path: r.key, time: x2t(x) }) }, '-');
       items.push({ label: 'Clear All Keyframes', icon: 'x', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
     }
   } else if (!inGraph(x, y) && hr && hr.row.kind === 'layer') {
     api.ui.showLayerMenu(hr.row.L, e, 'timeline');
     return;
   } else if (!inGraph(x, y)) {
-    items.push({ label: 'Set Work Area Start', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Set Work Area End', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
+    const fps = api.project.get().fps;
+    items.push({ label: `Start Work Area ${where}`, icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(at, api.project.get().work[1] - 1 / fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: `End Work Area ${where}`, run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(at, api.project.get().work[0] + 1 / fps)] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Reset Work Area', icon: 'undo', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) },
       '-', tracksMode()
         ? { label: 'Switch to Layer Timeline', icon: 'layers', run: () => setMode('layers') }
         : { label: 'Switch to Track Timeline', icon: 'film', run: () => setMode('tracks') });
+  } else if (graphPoint == null || graphPoint.distance >= 8) {
+    /* Empty graph space: the Graph Editor's own options. */
+    items.push(...graphMenuItems());
   }
   /* Extension contributions land at the end, so the positions a user has
      learned for the built-in rows never move. `layer:context` only fires over a
      layer row; `timeline:context` fires for every row kind. */
-  const rowKind = graphPoint?.distance < 8 ? 'keyframe' : inGraph(x, y) ? 'graph' : hr ? hr.row.kind : 'empty';
+  const rowKind = graphPoint?.distance < 8 ? 'keyframe' : inGraph(x, y) ? 'graph' : y < T.ruler ? 'ruler' : hr ? hr.row.kind : 'empty';
   const layerId = graphPoint?.distance < 8
     ? T._graph?.target?.L?.id ?? null
     : hr && hr.row.kind === 'layer' ? hr.row.L.id : null;
@@ -4663,7 +4681,11 @@ function onCtx(e: any) {
     layerId ? api.menus.gather('layer:context', { layerId }) : [],
     api.menus.gather('timeline:context', { kind: rowKind, layerId, time: x2t(x) }),
   ]).then(lists => lists.flat());
-  api.ui.menu({ x: e.clientX, y: e.clientY }, contributed.then(extra => extra.length ? [...items, '-' as any, ...extra] : items));
+  /* On empty timeline space, making things (New ▸ and friends) comes first;
+     everywhere else contributions follow the built-in rows. */
+  const createFirst = rowKind === 'empty';
+  api.ui.menu({ x: e.clientX, y: e.clientY }, contributed.then(extra => !extra.length ? items
+    : createFirst ? [...extra, '-' as any, ...items] : [...items, '-' as any, ...extra]));
 }
 
 /* ── edge navigation ───────────────────────────────────── */
@@ -4678,6 +4700,17 @@ function edges() {
 function nextEdge() { const e = edges(); return e.find((t: any) => t > api.transport.time() + 1e-4) ?? api.project.get().dur; }
 function prevEdge() { const e = edges(); return [...e].reverse().find((t: any) => t < api.transport.time() - 1e-4) ?? 0; }
 T.nextEdge = nextEdge; T.prevEdge = prevEdge;
+/** Rename in place when the layer's row is on screen in the Layers timeline;
+    false otherwise, so the caller can fall back to a dialog. */
+T.renameLayer = (L: any): boolean => {
+  if (tracksMode() || !Array.isArray(T.rows)) return false;
+  const index = T.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === L.id);
+  if (index < 0) return false;
+  const y = rowY(index);
+  if (y < T.ruler || y + T.row > T.hgt) return false;
+  renameLayer(L, index);
+  return true;
+};
 T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, api.project.get().dur), 4, 4000); invalidate('timeline'); };
 T.reveal = (L: any, keys: any) => {
   api.uiState.setLayerCollapsed(L, false);

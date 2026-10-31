@@ -129,23 +129,26 @@
     return { destroy: () => window.cancelAnimationFrame(frame) };
   }
 
-  /* Open projects, then what you can do with the one on screen. */
+  /* Switch between open projects, start or find another, act on the one on
+     screen, and close last. */
   function projectMenu(event?: MouseEvent): void {
     event?.preventDefault();
     event?.stopPropagation();
     if (!titleButton || !titleId) return;
     const items: Array<Record<string, unknown> | string> = [
+      { header: 'Open Projects' },
       ...openIds.map((id) => ({ label: nameFor(id), on: id === titleId && !homeOpen, run: () => activate(id) })),
       '-',
-      { label: 'Rename Project…', kb: 'F2', disabled: opening, run: beginRename },
-      { label: 'Close Project', kb: '⌘W', run: () => close(titleId) },
-      { label: 'Close Other Projects', disabled: openIds.length < 2, run: () => void PM.Tabs?.closeOthers?.(titleId) }
+      { label: 'New Project', kb: '⌥⌘N', run: () => PM.newProject?.() },
+      { label: 'All Projects…', kb: '⌘P', run: showProjects },
+      '-',
+      { label: 'Rename Project…', kb: 'F2', disabled: opening, run: beginRename }
     ];
     if (multiWindow) items.push({ label: 'Move to New Window', disabled: openIds.length < 2, run: () => void PM.Tabs?.moveToNewWindow?.(titleId) });
     items.push(
       '-',
-      { label: 'New Project', kb: '⌥⌘N', run: () => PM.newProject?.() },
-      { label: 'All Projects…', kb: '⌘P', run: showProjects }
+      { label: 'Close Project', kb: '⌘W', run: () => close(titleId) },
+      { label: 'Close Other Projects', disabled: openIds.length < 2, run: () => void PM.Tabs?.closeOthers?.(titleId) }
     );
     if (event?.type === 'contextmenu') PM.menu(titleButton, items, { x: event.clientX, y: event.clientY });
     else PM.menu(titleButton, items);

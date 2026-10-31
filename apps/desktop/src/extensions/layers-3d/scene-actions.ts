@@ -39,9 +39,12 @@ function batch(api:PowermoveAPI,ids:string[],operation:'remove'|'duplicate',labe
     const result=api.edit.commit(label);if(!result.ok)throw new Error(result.message);api.selection.select(operation==='duplicate'?copies:[]);return true;
   }catch(error){api.edit.cancel();api.ui.toast(error instanceof Error?error.message:String(error),{error:true});return false;}
 }
+/** Add 3D Layer ▸: shapes, then a model from disk, then lights and the camera.
+    Plain rows: one icon repeated on every shape would say nothing. */
 export const addMenuItems=(api:PowermoveAPI,_layerId?:unknown):MenuContribution[]=>[
-  ...PRIMITIVES.map(p=>({label:p.label,icon:'cube',run:()=>addPrimitive(api,p.id)})),
-  {label:'Import 3D model…',icon:'download',run:()=>importModelIntoScene(api)},'-',
-  ...LIGHT_TYPES.map(l=>({label:`${l.label} light`,icon:'sun',run:()=>addLight(api,l.id)})),
-  {label:'Camera',icon:'cam',run:()=>addCamera(api)}
+  ...PRIMITIVES.map(p=>({label:p.label,run:()=>addPrimitive(api,p.id)})),
+  '-',
+  {label:'Import 3D Model…',run:()=>importModelIntoScene(api)},'-',
+  ...LIGHT_TYPES.map(l=>({label:`${l.label} Light`,run:()=>addLight(api,l.id)})),
+  {label:'Camera',run:()=>addCamera(api)}
 ];

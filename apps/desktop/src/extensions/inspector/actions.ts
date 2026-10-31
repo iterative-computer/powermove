@@ -2,12 +2,13 @@ import type { Layer, MenuContribution, PowermoveAPI } from 'powermove';
 
 export function showNewLayerMenu(api: PowermoveAPI, anchor: HTMLElement): void {
   api.ui.menu(anchor, [
+    /* Same rows, order and names as New ▸ and Layer ▸ New. */
     { header: 'New Layer' },
     { label: 'Text', kb: '⌘T', run: () => api.commands.run('newText') },
-    { label: 'Shape', kb: '⌘⇧Y', run: () => api.commands.run('newShape') },
     { label: 'Solid', kb: '⌘Y', run: () => api.commands.run('newSolid') },
+    { label: 'Shape Layer', kb: '⌘⇧Y', run: () => api.commands.run('newShape') },
+    { label: 'Null Object', kb: '⌘⌥⇧Y', run: () => api.commands.run('newNull') },
     { label: 'Adjustment Layer', kb: '⌘⌥Y', run: () => api.commands.run('newAdjustment') },
-    { label: 'Null', run: () => api.commands.run('newNull') },
     '-',
     { label: 'Import Media…', kb: '⌘I', run: () => api.commands.run('import') }
   ]);
@@ -29,12 +30,14 @@ export function showFxMenu(api: PowermoveAPI, anchor: HTMLElement, selected?: La
     groups.set(group, entries);
   }
 
+  /* One submenu per category, as Effect ▸ in After Effects, rather than one
+     long list. */
   const items: MenuContribution[] = [];
   for (const [group, entries] of groups) {
-    items.push({ header: group });
+    const submenu: MenuContribution[] = [];
     for (const [key, definition] of entries) {
       if (!definition) continue;
-      items.push({
+      submenu.push({
         label: definition.label,
         run: () => {
           api.edit.apply(
@@ -45,6 +48,7 @@ export function showFxMenu(api: PowermoveAPI, anchor: HTMLElement, selected?: La
         }
       });
     }
+    if (submenu.length) items.push({ label: group, submenu });
   }
   api.ui.menu(anchor, items);
 }

@@ -296,13 +296,12 @@
       { label: 'Add Keyframe at Playhead', icon: 'diamond', disabled: locked, run: addKeyframe },
       animated ? { label: 'Remove Animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in Graph Editor', icon: 'graph', run: showGraphEditor },
-      '-',
-      { header: 'Easing for All Keys' },
-      ...easing.map(([name, title]) => ({
+      /* Easing only means something once the property has keyframes. */
+      ...(animated ? ['-' as const, { header: 'Easing for All Keys' }, ...easing.map(([name, title]) => ({
         label: title,
-        disabled: locked || !animated,
+        disabled: locked,
         run: () => applyKeyframeEase(name)
-      })),
+      }))] : []),
       '-',
       { label: expression ? 'Edit Expression…' : 'Add Expression…', icon: 'code', disabled: locked, run: editExpression },
       expression ? {

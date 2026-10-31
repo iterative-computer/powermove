@@ -65,8 +65,10 @@ test('inspector context menus protect nested group locks and allow normal edits 
   const row = page.locator('[data-channel="opacity"]');
   await expect(row).toBeVisible();
   const menu = await inspectNativeMenu(session, () => row.click({ button: 'right' }));
-  // A contextual menu hides what can't run (macOS HIG), so a locked layer offers only viewing.
-  expect(menu).toEqual([{ label: 'Show in Graph Editor', enabled: true }]);
+  for (const label of ['Add Keyframe at Playhead', 'Remove Animation', 'Power', 'Add Expression…', 'Reset']) {
+    expect(menu.find(item => item.label === label), label).toMatchObject({ enabled: false });
+  }
+  expect(menu.find(item => item.label === 'Show in Graph Editor')).toMatchObject({ enabled: true });
   const source = () => page.evaluate(id => JSON.stringify((window as any).PM.L(id).p.opacity), fixture.layer);
   expect(await source()).toBe(fixture.keys);
 

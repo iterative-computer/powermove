@@ -78,8 +78,7 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
   const menu = await inspectNativeMenu(session, () => page.evaluate(() => {
     const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200});
   }));
-  // Locked: the row is hidden rather than dimmed, as macOS contextual menus do.
-  expect(menu.map(item => item.label)).not.toContain('Split Text into Layers');
+  expect(menu).toContainEqual({ label: 'Split Text into Layers', enabled: false });
   const before = await page.evaluate(() => {
     const PM = (window as any).PM, layer = PM.proj.layers[0]; layer.lock = false; layer.d.text = '';
     return JSON.stringify(PM.proj);

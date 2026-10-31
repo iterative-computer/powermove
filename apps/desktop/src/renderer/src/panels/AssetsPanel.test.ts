@@ -471,7 +471,7 @@ describe('AssetsPanel', () => {
     expect(anchor).toBe(row);
     expect(position).toEqual({ x: 37, y: 49 });
     expect(items.filter((item: any) => item?.label).map((item: any) => item.label)).toEqual([
-      'Add to Timeline', 'New Comp from Selection', 'Replace File…', 'Reveal in Finder', 'Delete Media…'
+      'Add to Timeline', 'New Composition from Media', 'Replace File…', 'Reveal in Finder', 'Delete Media…'
     ]);
 
     items.find((item: any) => item?.label === 'Replace File…').run();

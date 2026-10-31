@@ -28,6 +28,25 @@ export function parentMenuItems(PM: PMRegistry, ids: string[], origin = 'timelin
   ];
 }
 
+/** Rename in the timeline row when it's on screen, otherwise in a small dialog. */
+function renameLayerPrompt(PM: PMRegistry, layer: any, origin: string): void {
+  if (PM.Kernel?.services?.get?.('timeline')?.renameLayer?.(layer)) return;
+  const input = document.createElement('input');
+  input.value = layer.name;
+  input.setAttribute('aria-label', 'Layer name');
+  const field = document.createElement('div');
+  field.className = 'field';
+  field.append(input);
+  PM.modal?.({ title: 'Rename Layer', body: field, width: 400, actions: [
+    { label: 'Cancel' },
+    { label: 'Rename', pri: true, run: () => {
+      const name = input.value.trim();
+      if (name && name !== layer.name) PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { name } }, { label: 'Rename layer', origin });
+    } },
+  ] });
+  window.setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+
 export function installLayerMenu(PM: PMRegistry): void {
   PM.showParentMenu = (ids: string[], event: {clientX: number; clientY: number}) => PM.menu(document.body, [{header:'Link Layers'}, ...parentMenuItems(PM, ids)], {x:event.clientX,y:event.clientY});
   PM.showLayerMenu = (layer: any, event: { clientX: number; clientY: number }, origin = 'timeline') => {
@@ -40,13 +59,12 @@ export function installLayerMenu(PM: PMRegistry): void {
     const patch = (value: any, label: string) => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: value })), label);
     const open = (items: any[] | Promise<any[]>) => PM.menu(document.body, items, { x: event.clientX, y: event.clientY });
     const toggleAll = (key: string) => selected.every((item: any) => item[key]);
-    /* Contextual-menu order, per the macOS HIG: the most-used edits first, then
-       where the layer sits, then its switches, and Delete last on its own.
-       A title only when it clarifies what the commands act on: a count of the
-       selected layers. Shortcuts live in the menu bar; rows that can't run
-       here are hidden by the menu itself. */
+    /* The most-used edits first, then where the layer sits, then its switches,
+       and Delete last on its own. A title only for a multiple selection, to
+       say how many layers the commands act on. */
     const items: any[] = [];
     if (selected.length > 1) items.push({ header: `${selected.length} Layers` });
+    if (selected.length === 1) items.push({ label: 'Rename…', disabled: !editable, run: () => renameLayerPrompt(PM, layer, editOrigin) });
     items.push(
       { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
       { label: 'Group Layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },

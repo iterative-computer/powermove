@@ -3,7 +3,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
 import { consumeMenuTriggerPress, markMenuDismissal } from './dismissal';
-import { contextMenuItems, tidyMenu } from './menu-rules';
+import { tidyMenu } from './menu-rules';
 import { prefersReducedMotion } from '../controls/menu-blink';
 
 type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement; contains(node: Node | null): boolean };
@@ -25,7 +25,6 @@ export class MenuController {
   /* Bumped by every open and close: a menu whose items are still arriving
      opens only if nothing opened or closed menus since it was asked for. */
   private generation = 0;
-  private dismissed: (() => void) | null = null;
 
   constructor(private readonly PM: OverlayPM) {}
 
@@ -62,9 +61,7 @@ export class MenuController {
     this.removeForeignMenus();
     const rect = anchor.getBoundingClientRect();
     const cursorOrigin = options.x != null || options.y != null;
-    /* A menu at the pointer is a contextual menu: the HIG hides what can't run
-       there and leaves key equivalents to the menu bar. */
-    items = cursorOrigin ? contextMenuItems(items) : tidyMenu(items);
+    items = tidyMenu(items);
     if (!items.some((item) => item !== '-' && !('header' in item))) return document.createElement('div');
     this.trigger = focusTarget(anchor);
     /* Pointer menus and button menus share one design, Powermove's own
@@ -84,7 +81,6 @@ export class MenuController {
         label: this.menuLabel(items),
         onrun: (item: MenuAction) => {
           const ghost = this.ghost();
-          this.dismissed = null;
           this.close(true);
           if (ghost) document.body.append(ghost);
           item.run?.();
@@ -93,7 +89,6 @@ export class MenuController {
       }
     }) as MenuInstance;
     this.instance = instance;
-    this.dismissed = options.onClose ?? null;
     flushSync();
     this.menu = instance.element();
     if (options.right && options.x == null) {
@@ -115,8 +110,6 @@ export class MenuController {
 
   close(restoreFocus = false): void {
     this.generation += 1;
-    const dismissed = this.dismissed;
-    this.dismissed = null;
     window.clearTimeout(this.outsideTimer);
     if (this.outside) document.removeEventListener('pointerdown', this.outside, true);
     const registeredOutside = this.PM._menuOutside as ((event: PointerEvent) => void) | null | undefined;
@@ -137,7 +130,6 @@ export class MenuController {
     const trigger = this.trigger;
     this.trigger = null;
     if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
-    dismissed?.();
   }
 
   /** A still copy of the open menu that blinks its chosen row and fades,

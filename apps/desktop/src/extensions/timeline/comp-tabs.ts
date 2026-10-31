@@ -80,8 +80,9 @@ export function mountCompTabs(api: PowermoveAPI, host: HTMLElement): () => void 
         event.preventDefault();
         api.ui.menu(tab, [
           { header: comp.name },
-          { label: 'New Composition…', kb: '⌘N', run: () => { api.commands.run('newComposition'); } },
           { label: 'Composition Settings…', run: () => { api.commands.run('compositionSettings', comp.id); } },
+          '-',
+          { label: 'New Composition…', kb: '⌘N', run: () => { api.commands.run('newComposition'); } },
           ...(closable ? ['-' as const, { label: 'Close', run: () => { model.close(comp.id); render(); } }] : []),
         ]);
       });

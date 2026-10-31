@@ -27,7 +27,7 @@ test('right-click menus create a composition and preserve the current project on
 
   /* The empty timeline offers it under New ▸. (The canvas here is covered by
      the original layer, and a layer's menu keeps to that layer.) */
-  for (const selector of ['.tl-comp-tab[aria-selected="true"]', '#tl-canvas', '.asset-card.is-comp']) {
+  for (const selector of ['.tl-comp-tab[aria-selected="true"]', '#tl-canvas']) {
     await chooseNativeMenu(session, selector === '#tl-canvas' ? ['New', 'Composition…'] : 'New Composition…', () =>
       page.locator(selector).click({ button: 'right', position: selector === '#tl-canvas' ? emptyTimeline : { x: 20, y: 20 } }));
     await expect(dialog).toBeVisible();

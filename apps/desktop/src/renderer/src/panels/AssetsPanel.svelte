@@ -194,13 +194,15 @@
     PM.menu(event.currentTarget, [
       { header: asset.name },
       ...(offline && PM.assets.cloud?.get(asset.id) ? [{ label: 'Download from Cloud', run: () => PM.assets.cloud.download(asset.id) }] : []),
+      /* Use it, then manage the file, then delete it. */
       ...(offline||asset.kind==='lut' ? [] : [
         { label: 'Add to Timeline', run: () => PM.cmd('addFromAsset', asset.id) },
-        ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
+        ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Composition from Media', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
+      '-',
       { label: offline ? 'Locate File…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
-      ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
+      ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       '-',
       { label: 'Delete Media…', run: () => requestDelete(asset) },
     ], { x: event.clientX, y: event.clientY });
@@ -720,6 +722,7 @@
       { header: folder.name },
       { label: 'Open', run: () => openFolder(folder.id) },
       { label: 'Rename', run: () => { renamingFolderId = folder.id; } },
+      '-',
       { label: 'New Folder Inside', run: () => newFolder(folder.id) },
       { label: 'Import Folder Into…', run: () => PM.pickFolder({ folder: folder.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ folders: [folder.id] }, crumbs.at(-2)?.id ?? null) }] : []),
@@ -834,7 +837,6 @@
     const nestable = PM.Comps.canNest(comp.id);
     PM.menu(event.currentTarget, [
       { header: comp.name },
-      { label: 'New Composition…', kb: '⌘N', run: () => PM.cmd('newComposition') },
       { label: 'Open in Timeline', disabled: comp.open, run: () => openComp(comp) },
       { label: 'Add to Timeline', disabled: !nestable, run: () => nestComp(comp) },
       '-',

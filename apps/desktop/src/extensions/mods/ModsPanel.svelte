@@ -77,7 +77,7 @@
       { label: 'Reload', run: () => void run(() => api.extensions.reload(record.id), `Could not reload ${nameOf(record)}.`) }
     ];
     if (record.scope === 'user' && record.manifest?.vars?.length) {
-      items.push({ label: record.health.state === 'needs-setup' ? 'Set up…' : 'Variables…', run: () => setUp(record) });
+      items.push({ label: record.health.state === 'needs-setup' ? 'Set Up…' : 'Variables…', run: () => setUp(record) });
     }
     if (record.scope !== 'builtin') {
       items.push({

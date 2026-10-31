@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { contextMenuItems, tidyMenu } from './menu-rules';
+import { tidyMenu } from './menu-rules';
 
 describe('tidyMenu', () => {
   it('keeps separators only between groups and drops titles with nothing under them', () => {
@@ -9,28 +9,9 @@ describe('tidyMenu', () => {
     ]);
   });
 
-  it('gives a group icons on every row or on none', () => {
-    expect(tidyMenu([{ label: 'Copy', icon: 'copy' }, { label: 'Odd' }, '-', { label: 'Lock', icon: 'lock' }, { label: 'Hide', icon: 'eye' }])).toEqual([
-      { label: 'Copy', icon: undefined }, { label: 'Odd' }, '-', { label: 'Lock', icon: 'lock' }, { label: 'Hide', icon: 'eye' }
+  it('keeps an icon only on the first row that uses it', () => {
+    expect(tidyMenu([{ label: 'Start', icon: 'frame' }, { label: 'End', icon: 'frame' }, { label: 'Odd' }, '-', { label: 'Lock', icon: 'lock' }, { label: 'Frame', icon: 'frame' }])).toEqual([
+      { label: 'Start', icon: 'frame' }, { label: 'End', icon: undefined }, { label: 'Odd' }, '-', { label: 'Lock', icon: 'lock' }, { label: 'Frame', icon: undefined }
     ]);
-  });
-});
-
-describe('contextMenuItems', () => {
-  it('hides unavailable rows, except Cut, Copy and Paste, and drops shortcuts', () => {
-    expect(contextMenuItems([
-      { label: 'Duplicate', kb: '⌘D' },
-      { label: 'Simplify', disabled: true },
-      { label: 'Paste', disabled: true, kb: '⌘V' },
-      '-',
-      { label: 'Delete', disabled: true }
-    ])).toEqual([{ label: 'Duplicate' }, { label: 'Paste', disabled: true }]);
-  });
-
-  it('drops submenus left with nothing to run', () => {
-    expect(contextMenuItems([
-      { label: 'Timing', submenu: [{ label: 'Split', disabled: true }] },
-      { label: 'Move', submenu: [{ header: 'Groups' }, { label: 'Hero', kb: '⌘1' }, { label: 'Off', disabled: true }] }
-    ])).toEqual([{ label: 'Move', submenu: [{ header: 'Groups' }, { label: 'Hero' }] }]);
   });
 });

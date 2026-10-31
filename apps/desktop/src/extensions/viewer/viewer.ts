@@ -1559,7 +1559,17 @@ function bindStage(stage: any, inner: any): () => void {
     const layer = api.render.gl.pick(point.x, point.y, api.transport.time(), { includeLocked: true });
     if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
     else {
-      api.ui.menu({ x: event.clientX, y: event.clientY }, api.menus.gather('viewer:context', { layerId: null, time: api.transport.time() }));
+      /* Empty canvas: make something first (New ▸, from contributions), then
+         act on the whole composition, then the view. */
+      const composition = [
+        { label: 'Paste', run: () => api.commands.run('pasteLayers') },
+        { label: 'Select All Layers', disabled: !api.project.get().layers.length, run: () => api.commands.run('selectAll') },
+        '-',
+        { label: 'Fit Composition in View', run: () => api.commands.run('fitComposition') },
+        { label: 'Composition Settings…', run: () => api.commands.run('compositionSettings') },
+      ] as any[];
+      const withComposition = (extra: any[]) => (extra.length ? [...extra, '-', ...composition] : composition);
+      api.ui.menu({ x: event.clientX, y: event.clientY }, Promise.resolve(api.menus.gather('viewer:context', { layerId: null, time: api.transport.time() })).then(withComposition));
     }
   }), capture);
   V.layerAtPoint = (clientX: number, clientY: number) => {

@@ -112,6 +112,7 @@
       { label: 'Duplicate', icon: 'copy', disabled: locked, run: () => mutate('Duplicate text animator', () => {
         list.splice(index + 1, 0, { ...JSON.parse(JSON.stringify(animator)), id: api.util.uid('ta'), name: animator.name + ' copy' });
       }) },
+      '-',
       { label: 'Move Up', disabled: locked || index <= 0, run: () => move(index - 1) },
       { label: 'Move Down', disabled: locked || index >= list.length - 1, run: () => move(index + 1) },
       '-',

@@ -413,6 +413,6 @@ export function installCaptions(PM: PMRegistry): void {
       if (target?.type === 'captions') return ['-', { label: 'Add Caption at Playhead', icon: 'captions', run: () => addCaption() }, { label: 'Export Captions…', run: () => void exportFile(target.id) }];
       return [];
     });
-    kernel.contributeMenu(OWNER, 'timeline:context', (ctx: any) => (ctx?.kind === 'layer' ? [] : [{ label: 'Import Captions…', icon: 'captions', run: () => void importFile() }]));
+    kernel.contributeMenu(OWNER, 'timeline:context', (ctx: any) => (ctx?.kind && ctx.kind !== 'empty' ? [] : [{ label: 'Import Captions…', icon: 'captions', run: () => void importFile() }]));
   }
 }
