@@ -62,18 +62,18 @@ describe('inspector context menu locks', () => {
   it.each(['layer', 'nested group'] as const)('cannot add a key through a %s lock', lock => {
     const { layer, choose } = fixture(lock);
     const before = JSON.stringify(layer.p.opacity);
-    choose('Add keyframe at playhead');
+    choose('Add Keyframe at Playhead');
     expect(JSON.stringify(layer.p.opacity)).toBe(before);
   });
 
   it.each(['layer', 'nested group'] as const)('cannot replace easing through a %s lock', lock => {
     const { layer, choose } = fixture(lock);
     const before = JSON.stringify(layer.p.opacity);
-    choose('power');
+    choose('Power');
     expect(JSON.stringify(layer.p.opacity)).toBe(before);
   });
 
-  it.each(['Add keyframe at playhead', 'power'])('rechecks a group lock changed after the menu opened for %s', action => {
+  it.each(['Add Keyframe at Playhead', 'Power'])('rechecks a group lock changed after the menu opened for %s', action => {
     const { layer, outer, choose } = fixture('none');
     const before = JSON.stringify(layer.p.opacity);
     outer.lock = true;
@@ -83,15 +83,15 @@ describe('inspector context menu locks', () => {
 
   it('disables editing choices for protected layers while keeping graph inspection available', () => {
     const { items } = fixture('nested group');
-    for (const item of items.filter(item => item.run && item.label !== 'Show in graph editor')) {
+    for (const item of items.filter(item => item.run && item.label !== 'Show in Graph Editor')) {
       expect(item.disabled, item.label).toBe(true);
     }
-    expect(items.find(item => item.label === 'Show in graph editor').disabled).not.toBe(true);
+    expect(items.find(item => item.label === 'Show in Graph Editor').disabled).not.toBe(true);
   });
 
   it('still adds a key to an unlocked layer and supports one-step Undo', () => {
     const { PM, layer, choose } = fixture('none');
-    choose('Add keyframe at playhead');
+    choose('Add Keyframe at Playhead');
     expect(layer.p.opacity.kf).toHaveLength(3);
     expect(PM.hist.undo()).toBe(true);
     expect(PM.L(layer.id).p.opacity.kf).toHaveLength(2);
@@ -100,7 +100,7 @@ describe('inspector context menu locks', () => {
   it('still changes easing on an unlocked layer and supports one-step Undo', () => {
     const { PM, layer, choose } = fixture('none');
     const before = JSON.stringify(layer.p.opacity);
-    choose('power');
+    choose('Power');
     expect(JSON.stringify(layer.p.opacity)).not.toBe(before);
     expect(PM.hist.undo()).toBe(true);
     expect(JSON.stringify(PM.L(layer.id).p.opacity)).toBe(before);
