@@ -30,17 +30,57 @@ thread_local! {
     static ROUTES:RefCell<HashMap<isize,async_channel::Sender<Command>>>=RefCell::new(HashMap::new());
     static MENU_TARGET:RefCell<Option<Retained<Target>>>=const{RefCell::new(None)};
     static REPLAYING:Cell<bool>=const{Cell::new(false)};
+    /// Latest shell state per editor window number, read by menus and the palette.
+    static MENU_STATES:RefCell<HashMap<isize,MenuState>>=RefCell::new(HashMap::new());
+    /// AppKit window number → session window id.
+    static WINDOW_IDS:RefCell<HashMap<isize,u64>>=RefCell::new(HashMap::new());
+    /// Menu delegates must outlive their menus (NSMenu.delegate is weak).
+    static MENU_DELEGATES:RefCell<Vec<Retained<MenuDelegate>>>=const{RefCell::new(Vec::new())};
 }
-fn active_send(command: Command) {
+/// Snapshot of an editor window's shell state for menus, toolbar and palette.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MenuState {
+    pub open: Vec<String>,
+    pub saved: Vec<String>,
+    pub workspace: String,
+    pub sidebar: bool,
+    pub inspector: bool,
+    pub tool: String,
+}
+/// The editor window commands should go to: the key window, else the main window
+/// (a key palette/field-menu child panel is not an editor window).
+fn editor_window_number() -> Option<isize> {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
-    if let Some(w) = app.keyWindow().or_else(|| app.mainWindow()) {
+    ROUTES.with(|r| {
+        let r = r.borrow();
+        [app.keyWindow(), app.mainWindow()]
+            .into_iter()
+            .flatten()
+            .map(|w| w.windowNumber())
+            .find(|n| r.contains_key(n))
+    })
+}
+fn active_send(command: Command) {
+    if let Some(n) = editor_window_number() {
         ROUTES.with(|r| {
-            if let Some(tx) = r.borrow().get(&w.windowNumber()) {
+            if let Some(tx) = r.borrow().get(&n) {
                 let _ = tx.try_send(command);
             }
         });
     }
+}
+/// Frame of the current editor window (key, else main), for cascading new windows.
+pub fn editor_frame() -> Option<[f64; 4]> {
+    let mtm = MainThreadMarker::new().unwrap();
+    let w = NSApplication::sharedApplication(mtm).windowWithWindowNumber(editor_window_number()?)?;
+    let f = w.frame();
+    Some([f.origin.x, f.origin.y, f.size.width, f.size.height])
+}
+fn active_state() -> MenuState {
+    editor_window_number()
+        .and_then(|n| MENU_STATES.with(|m| m.borrow().get(&n).cloned()))
+        .unwrap_or_default()
 }
 pub fn settings() -> Accessibility {
     let w = NSWorkspace::sharedWorkspace();
@@ -124,10 +164,14 @@ pub fn contents(v: &NSView) -> Retained<NSView> {
         }
     }
 }
+/// Menu, location and view for a deferred context-menu pop-up.
+type PendingMenu = (Retained<NSMenu>, NSPoint, Retained<NSView>);
 struct TargetState {
     replays: RefCell<HashMap<usize, u64>>,
-    commands: Vec<String>,
+    commands: Vec<(String, Vec<serde_json::Value>)>,
     sender: Option<async_channel::Sender<Command>>,
+    /// A context menu to pop up on the next run-loop turn (outside GPUI's event dispatch).
+    pending_menu: RefCell<Option<PendingMenu>>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -140,7 +184,7 @@ define_class!(
         #[unsafe(method(act:))]
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
-            if let Some(name) = self.ivars().commands.get(tag as usize) {
+            if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
                 if name == "settings" {
                     let app = NSApplication::sharedApplication(self.mtm());
                     if let Some(w) = app.keyWindow() && w.title().to_string() == "Settings" {
@@ -148,13 +192,44 @@ define_class!(
                         return;
                     }
                 }
-                let cmd = Command { name: name.clone(), args: vec![], token: None };
-                if let Some(tx) = &self.ivars().sender {
-                    let _ = tx.try_send(cmd);
-                } else {
-                    active_send(cmd);
+                self.send(Command { name: name.clone(), args: args.clone(), token: None });
+            }
+        }
+        /// Dynamic menu rows carry their command in `representedObject`.
+        #[unsafe(method(actNamed:))]
+        fn act_named(&self, sender: &NSMenuItem) {
+            let name: Option<Retained<NSString>> = unsafe {
+                sender.representedObject().map(|o| Retained::cast_unchecked(o))
+            };
+            if let Some(name) = name {
+                self.send(Command { name: name.to_string(), args: vec![], token: None });
+            }
+        }
+        #[unsafe(method(showPendingMenu:))]
+        fn show_pending_menu(&self, _: Option<&AnyObject>) {
+            if let Some((menu, at, view)) = self.ivars().pending_menu.borrow_mut().take() {
+                let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&view));
+            }
+        }
+        #[unsafe(method(validateMenuItem:))]
+        fn validate(&self, item: &NSMenuItem) -> bool {
+            // Dynamic rows (representedObject) set their own state when rebuilt.
+            let state = active_state();
+            let tag = item.tag() as usize;
+            let fixed = item.representedObject().is_none();
+            if let Some((name, _)) = self.ivars().commands.get(tag).filter(|_| fixed) {
+                // HIG: toggles read as the action they perform.
+                match name.as_str() {
+                    "toggleSidebar" => item.setTitle(&NSString::from_str(
+                        if state.sidebar { "Hide Sidebar" } else { "Show Sidebar" })),
+                    "toggleInspector" => item.setTitle(&NSString::from_str(
+                        if state.inspector { "Hide Inspector" } else { "Show Inspector" })),
+                    n if n.starts_with("tool") => item.setState(if *n == state.tool {
+                        NSControlStateValueOn } else { NSControlStateValueOff }),
+                    _ => {}
                 }
             }
+            true
         }
 
         #[unsafe(method(replayEvent:))]
@@ -175,7 +250,7 @@ define_class!(
 impl Target {
     fn new(
         mtm: MainThreadMarker,
-        commands: Vec<String>,
+        commands: Vec<(String, Vec<serde_json::Value>)>,
         sender: Option<async_channel::Sender<Command>>,
     ) -> Retained<Self> {
         unsafe {
@@ -183,10 +258,147 @@ impl Target {
                 super(Self::alloc(mtm).set_ivars(TargetState {
                     replays: RefCell::new(HashMap::new()),
                     commands,
-                    sender
+                    sender,
+                    pending_menu: RefCell::new(None),
                 })),
                 init
             ]
+        }
+    }
+    fn send(&self, cmd: Command) {
+        if let Some(tx) = &self.ivars().sender {
+            let _ = tx.try_send(cmd);
+        } else {
+            active_send(cmd);
+        }
+    }
+}
+/// `SEL *` out-parameter of `menuHasKeyEquivalent:forEvent:target:action:`
+/// (objc2's `Sel` has no `RefEncode`, so `*mut Sel` cannot be declared directly).
+#[repr(transparent)]
+struct SelOut(*mut std::ffi::c_void);
+unsafe impl objc2::encode::Encode for SelOut {
+    const ENCODING: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Sel);
+}
+/// Kinds of menus with a delegate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuKind {
+    /// Shortcuts are displayed but never matched (resolver-only W1 chords).
+    DisplayOnly,
+    Panels,
+    Layouts,
+    Workspaces,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMShellMenuDelegate"]
+    #[ivars = MenuKind]
+    struct MenuDelegate;
+    unsafe impl NSObjectProtocol for MenuDelegate {}
+    unsafe impl NSMenuDelegate for MenuDelegate {
+        /// Returning NO stops AppKit from matching this menu's key equivalents.
+        /// The shell's ordered resolver is the only key path for these chords,
+        /// so a declined key replays to the focused control instead of a menu.
+        #[unsafe(method(menuHasKeyEquivalent:forEvent:target:action:))]
+        fn has_key_equivalent(
+            &self,
+            _: &NSMenu,
+            _: &NSEvent,
+            _: *mut *mut AnyObject,
+            _: SelOut,
+        ) -> bool {
+            false
+        }
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn needs_update(&self, menu: &NSMenu) {
+            rebuild_menu(menu, *self.ivars());
+        }
+    }
+);
+impl MenuDelegate {
+    fn new(mtm: MainThreadMarker, kind: MenuKind) -> Retained<Self> {
+        unsafe { msg_send![super(Self::alloc(mtm).set_ivars(kind)), init] }
+    }
+}
+fn named_item(mtm: MainThreadMarker, label: &str, command: &str) -> Retained<NSMenuItem> {
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(label),
+            Some(sel!(actNamed:)),
+            &NSString::from_str(""),
+        )
+    };
+    unsafe {
+        item.setRepresentedObject(Some(&NSString::from_str(command)));
+    }
+    MENU_TARGET.with(|t| {
+        if let Some(t) = &*t.borrow() {
+            unsafe { item.setTarget(Some(t)) };
+        }
+    });
+    item
+}
+fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let state = active_state();
+    match kind {
+        MenuKind::DisplayOnly => {}
+        MenuKind::Workspaces => {
+            for (i, (id, _)) in crate::layout::PRESETS.iter().enumerate() {
+                if let Some(item) = menu.itemAtIndex(i as isize) {
+                    item.setState(if *id == state.workspace {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                }
+            }
+        }
+        MenuKind::Panels => {
+            menu.removeAllItems();
+            for id in crate::layout::PANELS {
+                let item = named_item(
+                    mtm,
+                    crate::layout::panel_title(id),
+                    &format!("panel:toggle:{id}"),
+                );
+                item.setState(if state.open.iter().any(|o| o == id) {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                menu.addItem(&item);
+            }
+        }
+        MenuKind::Layouts => {
+            menu.removeAllItems();
+            for name in &state.saved {
+                menu.addItem(&named_item(mtm, name, &format!("layout:apply:{name}")));
+            }
+            if !state.saved.is_empty() {
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            menu.addItem(&named_item(mtm, "Save Layout…", "layout:save"));
+            let delete = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str("Delete Layout"),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            let names = NSMenu::new(mtm);
+            for name in &state.saved {
+                names.addItem(&named_item(mtm, name, &format!("layout:delete:{name}")));
+            }
+            delete.setSubmenu(Some(&names));
+            delete.setEnabled(!state.saved.is_empty());
+            menu.addItem(&delete);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            menu.addItem(&named_item(mtm, "Reset Workspace", "layout:reset"));
         }
     }
 }
@@ -284,7 +496,10 @@ impl ToolbarDelegate {
         }
         if name == "title" {
             let title = NSTextField::labelWithString(&NSString::from_str("Untitled"), mtm);
-            title.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
+            title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                t.typography.title as f64,
+                unsafe { NSFontWeightSemibold },
+            )));
             let edited = NSTextField::labelWithString(&NSString::from_str("Edited"), mtm);
             edited.setFont(Some(&NSFont::systemFontOfSize(t.typography.minimum as f64)));
             edited.setTextColor(Some(&native_color(t.colors.muted)));
@@ -351,6 +566,11 @@ impl ToolbarDelegate {
             }
         };
         b.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
+        if name == "toggleSidebar" || name == "toggleInspector" {
+            // Shows whether the dock is open, like the mockup's highlighted Inspector.
+            b.setButtonType(NSButtonType::PushOnPushOff);
+            b.setState(NSControlStateValueOn);
+        }
         b.setToolTip(Some(&NSString::from_str(label)));
         b.setAccessibilityLabel(Some(&NSString::from_str(label)));
         b.setBezelStyle(
@@ -377,6 +597,13 @@ impl ToolbarDelegate {
     }
 }
 
+/// Native viewer slot placement published in one composition frame.
+#[derive(Clone, Copy, PartialEq)]
+struct SlotGeometry {
+    frame: NSRect,
+    layer: NSRect,
+    scale: f64,
+}
 pub struct Host {
     pub window: Retained<NSWindow>,
     pub gpui: Retained<NSView>,
@@ -386,6 +613,8 @@ pub struct Host {
     pub splitter_focus: bool,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>)>,
+    /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
+    last_geometry: Option<Option<SlotGeometry>>,
     _toolbar: Retained<NSToolbar>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
@@ -399,6 +628,55 @@ pub struct Host {
     pub tokens: Tokens,
     pub palette: Rc<RefCell<Popup>>,
     pub fields: Rc<RefCell<Popup>>,
+    base_choices: Vec<Choice>,
+    menu_state: RefCell<Option<MenuState>>,
+}
+/// Static palette rows: every menu command (including display-only menus and
+/// tools) plus workspace presets. Dynamic rows are added when it opens.
+fn base_choices() -> Vec<Choice> {
+    let mut seen = std::collections::HashSet::new();
+    menu::menus()
+        .into_iter()
+        .flat_map(|(_, i)| i)
+        .chain(menu::tools())
+        .filter(|i| {
+            !i.command.is_empty()
+                && i.role.is_none()
+                && i.args.is_empty()
+                && !menu::SUBMENUS.contains(&i.command.as_str())
+        })
+        .filter(|i| seen.insert(i.command.clone()))
+        .map(|i| Choice {
+            label: i.label,
+            command: i.command,
+        })
+        .chain(crate::layout::PRESETS.iter().map(|(id, name)| Choice {
+            label: format!("Workspace: {name}"),
+            command: format!("workspace:{id}"),
+        }))
+        .collect()
+}
+/// command → shortcut glyphs, preferring menu accelerators, then the first
+/// non-Control W1 chord (the Control aliases are the same command).
+fn shortcut_glyphs() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for i in menu::menus()
+        .into_iter()
+        .flat_map(|(_, i)| i)
+        .chain(menu::tools())
+    {
+        if !i.chord.is_empty() && i.args.is_empty() {
+            map.entry(i.command.clone())
+                .or_insert_with(|| menu::glyphs(&i.chord));
+        }
+    }
+    for b in crate::keyboard::shipped() {
+        if b.args.is_empty() && !b.chord.starts_with("ctrl+") {
+            map.entry(b.command.clone())
+                .or_insert_with(|| menu::glyphs(&b.chord));
+        }
+    }
+    map
 }
 impl Host {
     pub fn install(
@@ -421,11 +699,9 @@ impl Host {
         window.setDocumentEdited(true);
         window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
         window.setTabbingMode(NSWindowTabbingMode::Preferred);
-        window.setRestorable(true);
-        if std::env::var_os("PM_NATIVE_SHELL_STATE").is_none() {
-            window.setFrameAutosaveName(&NSString::from_str("PowermoveNative.Editor"));
-            window.setFrameUsingName(&NSString::from_str("PowermoveNative.Editor"));
-        }
+        // Frames, tabs and workspaces restore from the shell session (multiple
+        // windows); AppKit's autosave name is one-per-window and would collide.
+        window.setRestorable(false);
         window.setMinSize(NSSize::new(
             t.metrics.min_width as f64,
             t.metrics.min_height as f64,
@@ -438,7 +714,7 @@ impl Host {
         });
         let target = Target::new(
             mtm,
-            TOOLBAR.iter().map(|s| s.to_string()).collect(),
+            TOOLBAR.iter().map(|s| (s.to_string(), vec![])).collect(),
             Some(tx.clone()),
         );
         let delegate = ToolbarDelegate::new(mtm, target.clone(), t.clone());
@@ -474,20 +750,9 @@ impl Host {
             l.setBackgroundColor(Some(&native_color(t.colors.viewer).CGColor()));
         }
         content.addSubview_positioned_relativeTo(&viewer, NSWindowOrderingMode::Below, Some(&gpui));
-        let choices = menu::menus()
-            .into_iter()
-            .flat_map(|(_, i)| i)
-            .filter(|i| !i.command.is_empty() && i.role.is_none() && i.command != "workspaces")
-            .map(|i| Choice {
-                label: i.label,
-                command: i.command,
-            })
-            .chain(crate::layout::PRESETS.iter().map(|(id, name)| Choice {
-                label: format!("Workspace: {name}"),
-                command: format!("workspace:{id}"),
-            }))
-            .collect();
-        let palette = Popup::new(&window, &t, Surface::Palette, choices, tx.clone());
+        let choices = base_choices();
+        let palette = Popup::new(&window, &t, Surface::Palette, choices.clone(), tx.clone());
+        palette.borrow_mut().shortcuts = shortcut_glyphs();
         let fields = Popup::new(
             &window,
             &t,
@@ -510,6 +775,7 @@ impl Host {
             splitter_focus: false,
             layer,
             viewer_transform: None,
+            last_geometry: None,
             _toolbar: toolbar,
             _delegate: delegate,
             _target: target,
@@ -523,15 +789,18 @@ impl Host {
             tokens: t,
             palette,
             fields,
+            base_choices: choices,
+            menu_state: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
         let hit_rect = host.borrow().viewer_rect.clone();
-        let reg = gpui_macos::composition::register(
+        let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
-                if let Some(h) = weak.upgrade() {
-                    h.borrow_mut().present();
-                }
+                weak.upgrade()
+                    .map_or(gpui_macos::composition::SlotChange::Unchanged, |h| {
+                        h.borrow_mut().present()
+                    })
             }),
             Rc::new(move |p| {
                 !hit_rect
@@ -800,6 +1069,10 @@ impl Host {
                 let _: () = msg_send![&*root,addSublayer:self.layer.as_ptr() as *mut AnyObject];
             }
         }
+        if self.viewer_transform != Some((dimensions, zoom)) {
+            // Re-place the content layer on the next composition frame.
+            self.last_geometry = None;
+        }
         self.viewer_transform = Some((dimensions, zoom));
     }
     pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
@@ -819,11 +1092,12 @@ impl Host {
         (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height).max(0.)
             as f32
     }
-    fn present(&mut self) {
+    /// P-120: returns `Moved` only when the viewer slot's frame, layer frame,
+    /// drawable size or visibility changed, so GPUI blocks on the composition
+    /// transaction only on those frames.
+    fn present(&mut self) -> gpui_macos::composition::SlotChange {
         let h = self.content.bounds().size.height;
-        if let Some(r) = self.viewer_rect.get() {
-            self.viewer.setHidden(false);
-            self.viewer.setFrame(rect(r, h));
+        let geometry = self.viewer_rect.get().map(|r| {
             let scale = self.window.backingScaleFactor();
             let (width, height) = if let Some((dimensions, zoom)) = self.viewer_transform {
                 let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
@@ -834,18 +1108,33 @@ impl Host {
             } else {
                 (r.w as f64, r.h as f64)
             };
-            unsafe {
-                let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:NSRect::new(
-                    NSPoint::new((r.w as f64-width)/2., (r.h as f64-height)/2.), NSSize::new(width,height))];
+            SlotGeometry {
+                frame: rect(r, h),
+                layer: NSRect::new(
+                    NSPoint::new((r.w as f64 - width) / 2., (r.h as f64 - height) / 2.),
+                    NSSize::new(width, height),
+                ),
+                scale,
             }
-            self.layer.set_contents_scale(scale);
-            self.layer
-                .set_drawable_size(core_graphics::geometry::CGSize::new(
-                    width * scale,
-                    height * scale,
-                ));
-        } else {
-            self.viewer.setHidden(true);
+        });
+        let moved = self.last_geometry != Some(geometry);
+        if moved {
+            if let Some(g) = geometry {
+                self.viewer.setHidden(false);
+                self.viewer.setFrame(g.frame);
+                unsafe {
+                    let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:g.layer];
+                }
+                self.layer.set_contents_scale(g.scale);
+                self.layer
+                    .set_drawable_size(core_graphics::geometry::CGSize::new(
+                        g.layer.size.width * g.scale,
+                        g.layer.size.height * g.scale,
+                    ));
+            } else {
+                self.viewer.setHidden(true);
+            }
+            self.last_geometry = Some(geometry);
         }
         gpui_macos::composition::publish_accessibility(
             &self.gpui,
@@ -854,6 +1143,244 @@ impl Host {
                 gpui_macos::composition::AccessibilityItem::Native(self.viewer.clone()),
             ],
         );
+        moved.into()
+    }
+    pub fn frame(&self) -> [f64; 4] {
+        let f = self.window.frame();
+        [f.origin.x, f.origin.y, f.size.width, f.size.height]
+    }
+    pub fn is_fullscreen(&self) -> bool {
+        self.window
+            .styleMask()
+            .contains(NSWindowStyleMask::FullScreen)
+    }
+    pub fn is_key(&self) -> bool {
+        self.window.isKeyWindow()
+    }
+    pub fn set_window_id(&self, id: u64) {
+        WINDOW_IDS.with(|m| m.borrow_mut().insert(self.window.windowNumber(), id));
+    }
+    /// Session id of the first window in this window's native tab group, if this
+    /// window is a non-leading tab.
+    pub fn tab_leader(&self) -> Option<u64> {
+        let tabs = self.window.tabbedWindows()?;
+        let first = tabs.to_vec().into_iter().next()?;
+        if first.windowNumber() == self.window.windowNumber() {
+            return None;
+        }
+        WINDOW_IDS.with(|m| m.borrow().get(&first.windowNumber()).copied())
+    }
+    /// Restores a saved frame, kept on screen.
+    pub fn apply_frame(&self, frame: [f64; 4], fullscreen: bool) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let screens: Vec<[f64; 4]> = NSScreen::screens(mtm)
+            .to_vec()
+            .iter()
+            .map(|s| {
+                let v = s.visibleFrame();
+                [v.origin.x, v.origin.y, v.size.width, v.size.height]
+            })
+            .collect();
+        let f = crate::session::constrain_to_screens(crate::session::sane_frame(frame), &screens);
+        self.window.setFrame_display(
+            NSRect::new(NSPoint::new(f[0], f[1]), NSSize::new(f[2], f[3])),
+            true,
+        );
+        if fullscreen && !self.is_fullscreen() {
+            unsafe {
+                let _: () = msg_send![&*self.window,performSelector:sel!(toggleFullScreen:),withObject:std::ptr::null::<AnyObject>(),afterDelay:0.0f64];
+            }
+        }
+    }
+    /// New windows cascade from `from` (the current key editor window).
+    pub fn cascade_from(&self, from: [f64; 4]) {
+        let top_left = NSPoint::new(from[0], from[1] + from[3]);
+        let next = self.window.cascadeTopLeftFromPoint(top_left);
+        self.window.cascadeTopLeftFromPoint(next);
+    }
+    /// Joins the native tab group of the window with session id `leader`.
+    pub fn join_tabs(&self, leader: u64) -> bool {
+        let mtm = MainThreadMarker::new().unwrap();
+        let number = WINDOW_IDS.with(|m| {
+            m.borrow()
+                .iter()
+                .find(|(_, id)| **id == leader)
+                .map(|(n, _)| *n)
+        });
+        let Some(number) = number else { return false };
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(lead) = app.windowWithWindowNumber(number) else {
+            return false;
+        };
+        if lead.windowNumber() == self.window.windowNumber() {
+            return false;
+        }
+        lead.addTabbedWindow_ordered(&self.window, NSWindowOrderingMode::Above);
+        // A joined tab must be visible as a tab (AppKit can leave the bar hidden
+        // for unified-compact toolbars). Never hide a bar the user opened.
+        unsafe {
+            let group: *mut AnyObject = msg_send![&*lead, tabGroup];
+            if !group.is_null() {
+                let visible: bool = msg_send![group, isTabBarVisible];
+                if !visible {
+                    let _: () = msg_send![&*lead, toggleTabBar: std::ptr::null::<AnyObject>()];
+                }
+            }
+        }
+        true
+    }
+    /// Publishes the window's shell state to menus/palette and syncs toolbar toggles.
+    pub fn publish_menu_state(&self, state: &MenuState) {
+        if self.menu_state.borrow().as_ref() == Some(state) {
+            return;
+        }
+        MENU_STATES.with(|m| {
+            m.borrow_mut()
+                .insert(self.window.windowNumber(), state.clone())
+        });
+        for item in self._toolbar.items().to_vec() {
+            let id = item.itemIdentifier().to_string();
+            let on = match id.as_str() {
+                "toggleSidebar" => state.sidebar,
+                "toggleInspector" => state.inspector,
+                _ => continue,
+            };
+            let value = if on {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            };
+            if let Some(v) = item.view() {
+                unsafe {
+                    let _: () = msg_send![&*v, setState: value];
+                }
+            }
+        }
+        *self.menu_state.borrow_mut() = Some(state.clone());
+    }
+    /// Selects the toolbar tool for a `tool*` command (keyboard/menu/palette).
+    pub fn select_tool(&self, command: &str) {
+        let Some(index) = TOOLS.iter().position(|(c, _, _)| *c == command) else {
+            return;
+        };
+        for item in self._toolbar.items().to_vec() {
+            if item.itemIdentifier().to_string() == "tools"
+                && let Some(v) = item.view()
+            {
+                unsafe {
+                    let _: () = msg_send![&*v,setSelectedSegment:index as isize];
+                }
+            }
+        }
+    }
+    /// Opens the command palette with this window's dynamic rows.
+    pub fn open_palette(&mut self, state: &MenuState) {
+        let mut choices = self.base_choices.clone();
+        for id in crate::layout::PANELS {
+            let open = state.open.iter().any(|o| o == id);
+            if open && id == "viewer" {
+                continue;
+            }
+            choices.push(Choice {
+                label: format!(
+                    "{} {}",
+                    if open { "Hide" } else { "Show" },
+                    crate::layout::panel_title(id)
+                ),
+                command: format!("panel:toggle:{id}"),
+            });
+        }
+        for name in &state.saved {
+            choices.push(Choice {
+                label: format!("Layout: {name}"),
+                command: format!("layout:apply:{name}"),
+            });
+        }
+        choices.push(Choice {
+            label: "Save Layout…".into(),
+            command: "layout:save".into(),
+        });
+        choices.push(Choice {
+            label: "Reset Workspace".into(),
+            command: "layout:reset".into(),
+        });
+        if self.fields.borrow().model.open {
+            self.fields.borrow_mut().hide();
+        }
+        let mut p = self.palette.borrow_mut();
+        if !p.model.open {
+            p.model.choices = choices;
+        }
+        p.toggle();
+    }
+    /// Native context menu at a GPUI point. Empty labels are separators.
+    /// Shown on the next run-loop turn so menu tracking never nests inside
+    /// GPUI's event dispatch.
+    pub fn context_menu(&self, items: &[(String, String)], x: f32, y: f32) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        for (label, command) in items {
+            if label.is_empty() {
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+                continue;
+            }
+            let item = named_item(mtm, label, command);
+            unsafe { item.setTarget(Some(&self._target)) };
+            menu.addItem(&item);
+        }
+        let h = self.gpui.bounds().size.height;
+        let at = if self.gpui.isFlipped() {
+            NSPoint::new(x as f64, y as f64)
+        } else {
+            NSPoint::new(x as f64, h - y as f64)
+        };
+        *self._target.ivars().pending_menu.borrow_mut() = Some((menu, at, self.gpui.clone()));
+        unsafe {
+            let _: () = msg_send![&*self._target,performSelector:sel!(showPendingMenu:),withObject:std::ptr::null::<AnyObject>(),afterDelay:0.0f64];
+        }
+    }
+    /// Asks for a saved-layout name in a sheet; Save sends `layout:save:<name>`.
+    pub fn prompt_layout_name(&self, workspace: &str) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("Save Layout"));
+        alert.setInformativeText(&NSString::from_str(
+            "Saved layouts are available in every project from Window ▸ Layouts.",
+        ));
+        alert.addButtonWithTitle(&NSString::from_str("Save"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let field = NSTextField::initWithFrame(
+            NSTextField::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(240., 24.)),
+        );
+        let preset = crate::layout::PRESETS
+            .iter()
+            .find(|p| p.0 == workspace)
+            .map_or("Custom", |p| p.1);
+        field.setPlaceholderString(Some(&NSString::from_str(&format!("{preset} Layout"))));
+        field.setAccessibilityLabel(Some(&NSString::from_str("Layout Name")));
+        alert.setAccessoryView(Some(&field));
+        alert.window().setInitialFirstResponder(Some(&field));
+        let sender = self.sender.clone();
+        let read = field.clone();
+        let handler = block2::RcBlock::new(move |response: NSModalResponse| {
+            if response == NSAlertFirstButtonReturn {
+                let mut name = read.stringValue().to_string();
+                if name.trim().is_empty() {
+                    name = read
+                        .placeholderString()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                }
+                let _ = sender.try_send(Command {
+                    name: format!("layout:save:{name}"),
+                    args: vec![],
+                    token: None,
+                });
+            }
+        });
+        alert.beginSheetModalForWindow_completionHandler(&self.window, Some(&handler));
     }
     pub fn popup(&mut self, field: bool) {
         let other = if field { &self.palette } else { &self.fields };
@@ -931,6 +1458,8 @@ impl Drop for Host {
         ROUTES.with(|r| {
             r.borrow_mut().remove(&self.window.windowNumber());
         });
+        MENU_STATES.with(|m| m.borrow_mut().remove(&self.window.windowNumber()));
+        WINDOW_IDS.with(|m| m.borrow_mut().remove(&self.window.windowNumber()));
         self.registration.take();
         self.viewer.removeFromSuperview();
     }
@@ -1029,6 +1558,10 @@ pub struct Popup {
     body: Retained<NSView>,
     spring: Option<(std::time::Instant, crate::transient::Spring)>,
     rows: Vec<Retained<NSButton>>,
+    /// Right-aligned shortcut labels for the visible rows.
+    hints: Vec<Retained<NSTextField>>,
+    /// command → shortcut glyphs shown beside palette rows.
+    shortcuts: HashMap<String, String>,
     glider: Retained<NSBox>,
     target: Option<Retained<PopupTarget>>,
     model: Picker,
@@ -1100,6 +1633,8 @@ impl Popup {
             body,
             spring: None,
             rows: vec![],
+            hints: vec![],
+            shortcuts: HashMap::new(),
             glider,
             target: None,
             model: Picker {
@@ -1146,6 +1681,9 @@ impl Popup {
         for row in self.rows.drain(..) {
             row.removeFromSuperview();
         }
+        for hint in self.hints.drain(..) {
+            hint.removeFromSuperview();
+        }
         let m = self.tokens.metrics;
         let size = self.window.frame().size;
         let visible =
@@ -1188,6 +1726,23 @@ impl Popup {
                 self.glider.setFrame(r);
             }
             self.body.addSubview(&b);
+            if let Some(glyphs) = self.shortcuts.get(&c.command) {
+                let hint = NSTextField::labelWithString(&NSString::from_str(glyphs), mtm);
+                hint.setFont(Some(&NSFont::systemFontOfSize(
+                    self.tokens.typography.body as f64,
+                )));
+                hint.setTextColor(Some(&native_color(self.tokens.colors.muted)));
+                hint.setAlignment(NSTextAlignment::Right);
+                let inset = m.menu_inset as f64 * 2.;
+                let hr = NSRect::new(
+                    NSPoint::new(r.origin.x + r.size.width * 0.55, r.origin.y + 2.),
+                    NSSize::new(r.size.width * 0.45 - inset, r.size.height - 4.),
+                );
+                hint.setFrame(hr);
+                b.setAccessibilityHelp(Some(&NSString::from_str(glyphs)));
+                self.body.addSubview(&hint);
+                self.hints.push(hint);
+            }
             self.rows.push(b);
         }
     }
@@ -1328,22 +1883,53 @@ pub fn install_menus() {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
     let root = NSMenu::new(mtm);
-    let mut commands = vec![];
-    for (_, items) in menu::menus() {
+    let mut commands: Vec<(String, Vec<serde_json::Value>)> = vec![];
+    let menus = menu::menus();
+    for (_, items) in &menus {
         for item in items {
-            commands.push(item.command);
+            commands.push((item.command.clone(), item.args.clone()));
         }
     }
+    let tools_start = commands.len();
+    commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
+    let workspaces_start = commands.len();
     commands.extend(
         crate::layout::PRESETS
             .iter()
-            .map(|(id, _)| format!("workspace:{id}")),
+            .map(|(id, _)| (format!("workspace:{id}"), vec![])),
     );
     let target = Target::new(mtm, commands, None);
+    // Dynamic rows look the target up through MENU_TARGET.
+    MENU_TARGET.with(|t| *t.borrow_mut() = Some(target.clone()));
+    let delegate = |menu: &NSMenu, kind: MenuKind| {
+        let d = MenuDelegate::new(mtm, kind);
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*d)));
+        MENU_DELEGATES.with(|v| v.borrow_mut().push(d));
+    };
+    let row = |label: &str, chord: &str, tag: usize| {
+        let (key, flags) = menu::accelerator(chord);
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(label),
+                Some(sel!(act:)),
+                &NSString::from_str(&key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags(flags as _));
+        item.setTag(tag as isize);
+        unsafe { item.setTarget(Some(&target)) };
+        item
+    };
     let mut index = 0;
-    for (title, items) in menu::menus() {
+    for (title, items) in menus {
         let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
-        submenu.setAutoenablesItems(title == "Edit");
+        submenu.setAutoenablesItems(
+            title == "Edit" || menu::DISPLAY_ONLY.contains(&title) || title == "View",
+        );
+        if menu::DISPLAY_ONLY.contains(&title) {
+            delegate(&submenu, MenuKind::DisplayOnly);
+        }
         for spec in items {
             if spec.label.is_empty() {
                 submenu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -1378,39 +1964,52 @@ pub fn install_menus() {
                 item.setSubmenu(Some(&services));
                 app.setServicesMenu(Some(&services));
             }
-            if spec.command == "workspaces" {
-                let workspaces = NSMenu::new(mtm);
-                for (i, (_, label)) in crate::layout::PRESETS.iter().enumerate() {
-                    let row = unsafe {
+            match spec.command.as_str() {
+                "workspaces" => {
+                    let workspaces = NSMenu::new(mtm);
+                    for (i, (_, label)) in crate::layout::PRESETS.iter().enumerate() {
+                        workspaces.addItem(&row(label, "", workspaces_start + i));
+                    }
+                    delegate(&workspaces, MenuKind::Workspaces);
+                    item.setSubmenu(Some(&workspaces));
+                }
+                "tools" => {
+                    let tools = NSMenu::new(mtm);
+                    for (i, t) in menu::tools().iter().enumerate() {
+                        tools.addItem(&row(&t.label, &t.chord, tools_start + i));
+                    }
+                    delegate(&tools, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&tools));
+                }
+                "panels" | "layouts" => {
+                    let dynamic = NSMenu::new(mtm);
+                    delegate(
+                        &dynamic,
+                        if spec.command == "panels" {
+                            MenuKind::Panels
+                        } else {
+                            MenuKind::Layouts
+                        },
+                    );
+                    item.setSubmenu(Some(&dynamic));
+                }
+                "openRecent" => {
+                    let recents = NSMenu::new(mtm);
+                    let clear = unsafe {
                         NSMenuItem::initWithTitle_action_keyEquivalent(
                             NSMenuItem::alloc(mtm),
-                            &NSString::from_str(label),
-                            Some(sel!(act:)),
+                            &NSString::from_str("Clear Menu"),
+                            Some(sel!(clearRecentDocuments:)),
                             &NSString::from_str(""),
                         )
                     };
-                    unsafe {
-                        row.setTarget(Some(&target));
-                    }
-                    row.setTag(
-                        (target.ivars().commands.len() - crate::layout::PRESETS.len() + i) as isize,
-                    );
-                    workspaces.addItem(&row);
+                    recents.addItem(&clear);
+                    item.setSubmenu(Some(&recents));
                 }
-                item.setSubmenu(Some(&workspaces));
+                _ => {}
             }
-            if spec.command == "openRecent" {
-                let recents = NSMenu::new(mtm);
-                let clear = unsafe {
-                    NSMenuItem::initWithTitle_action_keyEquivalent(
-                        NSMenuItem::alloc(mtm),
-                        &NSString::from_str("Clear Menu"),
-                        Some(sel!(clearRecentDocuments:)),
-                        &NSString::from_str(""),
-                    )
-                };
-                recents.addItem(&clear);
-                item.setSubmenu(Some(&recents));
+            if menu::SUBMENUS.contains(&spec.command.as_str()) {
+                unsafe { item.setAction(None) };
             }
             submenu.addItem(&item);
             index += 1;
@@ -1433,5 +2032,4 @@ pub fn install_menus() {
         }
     }
     app.setMainMenu(Some(&root));
-    MENU_TARGET.with(|t| *t.borrow_mut() = Some(target));
 }

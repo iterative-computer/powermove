@@ -16,6 +16,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--display', action='store_true')
 parser.add_argument('--ime', action='store_true')
 parser.add_argument('--no-build', action='store_true')
+parser.add_argument('--p120', action='store_true',
+                    help='A/B the pre-P-120 always-transactional present (S2_SYNC_PRESENT=1) against P-120')
 parser.add_argument('--runs', type=int, default=1)
 parser.add_argument('--seconds', type=float, default=65.)
 args = parser.parse_args()
@@ -51,7 +53,8 @@ def guarded(command):
             p.wait()
 
 # Temporary metadata isolates shared lanes; the source symlinks are exact checkout files.
-meta = Path('/tmp/ptext-120-build')
+# PTEXT_META separates checkouts that share /tmp (each owns its symlinks).
+meta = Path(os.environ.get('PTEXT_META', '/tmp/ptext-120-build'))
 meta.mkdir(exist_ok=True)
 (meta / 'Cargo.toml').write_text('''[workspace]
 resolver="3"
@@ -180,6 +183,12 @@ def metrics(path):
     cpu = [float(n)*{'ns': .000001, 'µs': .001, 'ms': 1, 's': 1000}[u]
            for n,u in re.findall(r'frame duration: ([\d.]+)(ns|µs|ms|s)', content)][30:]
     timestamps = [float(n) for n in re.findall(r'PM_GPUI_PRESENT ([\d.]+)', content)][30:]
+    # Main-thread commit→waitUntilScheduled time; only transactional presents log it.
+    waits = [float(n)*{'ns': .000001, 'µs': .001, 'ms': 1, 's': 1000}[u]
+             for n,u in re.findall(r'GPUI scheduled: ([\d.]+)(ns|µs|ms|s)', content)][30:]
+    # Main-thread nextDrawable time (drawable-pool starvation shows up here).
+    drawable = [float(n)*{'ns': .000001, 'µs': .001, 'ms': 1, 's': 1000}[u]
+                for n,u in re.findall(r'GPUI drawable: ([\d.]+)(ns|µs|ms|s)', content)][30:]
     times = sorted(t for t in timestamps if t > 0)
     gaps = [b-a for a,b in zip(times,times[1:])]
     # Zero timestamps are unknown, never counted as successful presentations.
@@ -188,6 +197,15 @@ def metrics(path):
              and len(times) > 1 and times[-1]-times[0] >= 60 and all(d>0 for d in gaps))
     return {'cpu_samples':len(cpu), 'cpu_p50_ms':percentile(cpu,.5) if cpu else None,
             'cpu_p95_ms':percentile(cpu,.95) if cpu else None,
+            'cpu_p99_ms':percentile(cpu,.99) if cpu else None,
+            'scheduled_waits':len(waits),
+            'scheduled_wait_p50_ms':percentile(waits,.5) if waits else 0,
+            'scheduled_wait_p95_ms':percentile(waits,.95) if waits else 0,
+            'drawable_wait_p50_ms':percentile(drawable,.5) if drawable else None,
+            'drawable_wait_p95_ms':percentile(drawable,.95) if drawable else None,
+            'gap_p50_ms':percentile(gaps,.5)*1000 if gaps else None,
+            'gap_p95_ms':percentile(gaps,.95)*1000 if gaps else None,
+            'gap_max_ms':max(gaps)*1000 if gaps else None,
             'positive_presentations':len(times),'unknown_presentations':timestamps.count(0),
             'missed_120hz_intervals':dropped,'presentation_evidence_valid':valid,
             'tile_render_calls':content.count('S2_TILE_RENDER'),
@@ -195,12 +213,21 @@ def metrics(path):
 
 results = []
 for run in range(args.runs):
-    # At most 4 * 70 seconds under the GUI lock; release after every batch.
+    # At most 6 * 70 seconds under the GUI lock (< 10 minutes); release after every batch.
     with GuiLock():
-        for label, env in [('tiles-before', {'S2_PACING':'1','S2_BASELINE':'1'}),
-                           ('tiles-after', {'S2_PACING':'1'}),
-                           ('timeline-before', {'S2_TIMELINE':'1','S2_BASELINE':'1'}),
-                           ('timeline-after', {'S2_TIMELINE':'1'})]:
+        # sync = pre-P-120 (every frame transactional); async = no transaction unless
+        # geometry moved (first cut, drawable-pool starvation); p120 = adaptive policy.
+        workloads = ([('tiles-sync', {'S2_PACING':'1','S2_SYNC_PRESENT':'1'}),
+                      ('tiles-async', {'S2_PACING':'1','PM_GPUI_ASYNC_PRESENT':'1'}),
+                      ('tiles-p120', {'S2_PACING':'1'}),
+                      ('timeline-sync', {'S2_TIMELINE':'1','S2_SYNC_PRESENT':'1'}),
+                      ('timeline-async', {'S2_TIMELINE':'1','PM_GPUI_ASYNC_PRESENT':'1'}),
+                      ('timeline-p120', {'S2_TIMELINE':'1'})] if args.p120 else
+                     [('tiles-before', {'S2_PACING':'1','S2_BASELINE':'1'}),
+                      ('tiles-after', {'S2_PACING':'1'}),
+                      ('timeline-before', {'S2_TIMELINE':'1','S2_BASELINE':'1'}),
+                      ('timeline-after', {'S2_TIMELINE':'1'})])
+        for label, env in workloads:
             screen()
             path = Path('/tmp/ptext-' + label + '-' + str(run) + '.log')
             with path.open('w') as log:
@@ -222,8 +249,8 @@ for run in range(args.runs):
             row = {'run':run,'workload':label,**metrics(path)}
             print(json.dumps(row),flush=True)
             results.append(row)
-Path('/tmp/ptext-120-results.json').write_text(json.dumps({'display':state,'runs':results},indent=2))
-after = [r for r in results if r['workload'].endswith('after')]
+Path('/tmp/ptext-120-results.json' if not args.p120 else '/tmp/p120-results.json').write_text(json.dumps({'display':state,'runs':results},indent=2))
+after = [r for r in results if r['workload'].endswith('after') or r['workload'].endswith('p120')]
 if not all(r['pass'] for r in after):
     raise SystemExit('FAIL/UNVERIFIED: see /tmp/ptext-120-results.json; no 120 Hz pass claimed')
 print('Measured sample PASS. Formal matrix requires --runs 30 and the paired reference conditions.' if args.runs<30 else 'PASS all 30 measured A/B runs; paired corpus/reference certification remains separate.')

@@ -26,6 +26,8 @@ pub struct Host {
     menu: Retained<NSWindow>,
     menu_open: bool,
     registration: Option<gpui_macos::composition::CompositionRegistration>,
+    /// P-120: slots and content height of the last presented composition frame.
+    presented: Option<(Vec<Slot>, f64)>,
 }
 fn nsrect(r: Rect, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h))
@@ -160,15 +162,17 @@ impl Host {
             menu,
             menu_open: false,
             registration: None,
+            presented: None,
         }));
         let weak = Rc::downgrade(&host);
         let hit = weak.clone();
-        let reg = gpui_macos::composition::register(
+        let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
-                if let Some(h) = weak.upgrade() {
-                    h.borrow_mut().present();
-                }
+                weak.upgrade()
+                    .map_or(gpui_macos::composition::SlotChange::Unchanged, |h| {
+                        h.borrow_mut().present()
+                    })
             }),
             Rc::new(move |p| {
                 hit.upgrade()
@@ -228,8 +232,22 @@ impl Host {
             ],
         };
     }
-    fn present(&mut self) {
+    fn present(&mut self) -> gpui_macos::composition::SlotChange {
         let height = self.content.bounds().size.height;
+        let moved = crate::contract::slots_moved(
+            self.presented.as_ref().map(|(s, h)| (s.as_slice(), *h)),
+            &self.frame.slots,
+            height,
+        );
+        if moved {
+            self.presented = Some((self.frame.slots.clone(), height));
+        }
+        // `S2_SYNC_PRESENT=1` restores the pre-P-120 always-transactional present (A/B).
+        let change = if moved || std::env::var_os("S2_SYNC_PRESENT").is_some() {
+            gpui_macos::composition::SlotChange::Moved
+        } else {
+            gpui_macos::composition::SlotChange::Unchanged
+        };
         for s in &self.frame.slots {
             let [_, _, _, _, x, y] = s.transform.0;
             let r = Rect::new(x, y, s.bounds.w, s.bounds.h);
@@ -320,7 +338,7 @@ impl Host {
         // Static native viewer pattern: do not acquire/present a second drawable for
         // unchanged content on every GPUI tick. Real viewer invalidation belongs to S3.
         if self.viewer_size == Some((size, scale)) && std::env::var_os("S2_BASELINE").is_none() {
-            return;
+            return change;
         }
         self.layer
             .set_drawable_size(core_graphics::geometry::CGSize::new(
@@ -351,6 +369,7 @@ impl Host {
             d.present();
             self.viewer_size = Some((size, scale));
         }
+        change
     }
     pub fn toggle_menu(&mut self) {
         unsafe {

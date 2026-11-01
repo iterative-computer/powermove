@@ -381,6 +381,267 @@ impl Layout {
             );
         }
     }
+    /// Where `(x, y)` would drop a dragged panel, in the coordinates of `geometry`.
+    /// `bounds` is the docking area passed to [`Layout::geometry`]. Edge zones win
+    /// over panels so a dock can be created even when its neighbour fills the edge.
+    pub fn drop_target(
+        &self,
+        geometry: &Geometry,
+        bounds: Rect,
+        x: f32,
+        y: f32,
+        t: &Tokens,
+    ) -> Option<DropPreview> {
+        if !bounds.contains(x, y) {
+            return None;
+        }
+        let zone = t.metrics.drag_threshold.max(4.) * 4.;
+        let gap = t.metrics.gap;
+        let edge = if x < bounds.x + zone {
+            Some(Edge::Left)
+        } else if x > bounds.x + bounds.w - zone {
+            Some(Edge::Right)
+        } else if y > bounds.y + bounds.h - zone {
+            Some(Edge::Bottom)
+        } else {
+            None
+        };
+        if let Some(edge) = edge {
+            let existing = geometry
+                .panels
+                .iter()
+                .filter(|p| self.docks[p.dock].id == edge.dock_id())
+                .map(|p| p.rect)
+                .reduce(|a, b| {
+                    let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+                    Rect {
+                        x: x0,
+                        y: y0,
+                        w: (a.x + a.w).max(b.x + b.w) - x0,
+                        h: (a.y + a.h).max(b.y + b.h) - y0,
+                    }
+                });
+            let rect = existing.unwrap_or(match edge {
+                Edge::Left => Rect {
+                    w: DEFAULT_LEFT.min(bounds.w / 3.),
+                    ..bounds
+                },
+                Edge::Right => {
+                    let w = DEFAULT_RIGHT.min(bounds.w / 3.);
+                    Rect {
+                        x: bounds.x + bounds.w - w,
+                        w,
+                        ..bounds
+                    }
+                }
+                Edge::Bottom => {
+                    let h = DEFAULT_TIMELINE.min(bounds.h / 3.);
+                    Rect {
+                        y: bounds.y + bounds.h - h,
+                        h,
+                        ..bounds
+                    }
+                }
+            });
+            return Some(DropPreview {
+                target: DropTarget::Edge(edge),
+                rect,
+            });
+        }
+        let p = geometry.panels.iter().find(|p| p.rect.contains(x, y))?;
+        let r = p.rect;
+        if y < r.y + t.metrics.header {
+            let n = self.docks[p.dock].groups[p.group].tabs.len();
+            let index = (((x - r.x) / r.w.max(1.)) * n as f32).round() as usize;
+            return Some(DropPreview {
+                target: DropTarget::Tab {
+                    dock: p.dock,
+                    group: p.group,
+                    index: index.min(n),
+                },
+                rect: r,
+            });
+        }
+        let lower = y > r.y + r.h / 2.;
+        let half = ((r.h - gap) / 2.).max(0.);
+        Some(DropPreview {
+            target: DropTarget::Split {
+                dock: p.dock,
+                group: p.group + usize::from(lower),
+            },
+            rect: Rect {
+                y: if lower { r.y + r.h - half } else { r.y },
+                h: half,
+                ..r
+            },
+        })
+    }
+    /// Validated, atomic move of panel `id` to `target`. Moving a lone tab onto its
+    /// own group, or a group's only panel next to itself, leaves the layout unchanged.
+    pub fn move_panel_to(&mut self, id: &str, target: DropTarget) -> anyhow::Result<()> {
+        let (di, gi, ti) = self
+            .find(id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
+        match target {
+            DropTarget::Tab { dock, group, index } => {
+                anyhow::ensure!(
+                    self.docks.get(dock).is_some_and(|d| group < d.groups.len()),
+                    "Unknown group"
+                );
+                if (dock, group) == (di, gi) {
+                    return self.reorder_tab(dock, group, ti, index);
+                }
+                let mut next = self.clone();
+                let item = next.docks[di].groups[gi].tabs.remove(ti);
+                let g = &mut next.docks[dock].groups[group];
+                let index = index.min(g.tabs.len());
+                g.tabs.insert(index, item);
+                g.active = index;
+                next.commit(self)
+            }
+            DropTarget::Split { dock, group } => {
+                anyhow::ensure!(dock < self.docks.len(), "Unknown dock");
+                let alone = self.docks[di].groups[gi].tabs.len() == 1;
+                if alone && dock == di && (group == gi || group == gi + 1) {
+                    return Ok(());
+                }
+                let mut next = self.clone();
+                let item = next.docks[di].groups[gi].tabs.remove(ti);
+                let index = group.min(next.docks[dock].groups.len());
+                next.docks[dock]
+                    .groups
+                    .insert(index, self::group(&[&item], None));
+                next.docks[dock].collapsed = false;
+                next.commit(self)
+            }
+            DropTarget::Edge(edge) => {
+                let mut next = self.clone();
+                let item = next.docks[di].groups[gi].tabs.remove(ti);
+                let g = self::group(&[&item], None);
+                if let Some(d) = next.docks.iter_mut().find(|d| d.id == edge.dock_id()) {
+                    if d.collapsed {
+                        d.collapsed = false;
+                        // A collapsed dock reopens with only the dropped panel visible on top.
+                        d.groups.insert(0, g);
+                    } else {
+                        d.groups.push(g);
+                    }
+                } else {
+                    let size = match edge {
+                        Edge::Left => DEFAULT_LEFT,
+                        Edge::Right => DEFAULT_RIGHT,
+                        Edge::Bottom => DEFAULT_TIMELINE,
+                    };
+                    next.docks.push(dock(edge.dock_id(), Some(size), vec![g]));
+                }
+                next.commit(self)
+            }
+        }
+    }
+    /// Reorders a tab within its group; the moved tab becomes active.
+    pub fn reorder_tab(
+        &mut self,
+        dock: usize,
+        group: usize,
+        from: usize,
+        to: usize,
+    ) -> anyhow::Result<()> {
+        let g = self
+            .docks
+            .get_mut(dock)
+            .and_then(|d| d.groups.get_mut(group))
+            .ok_or_else(|| anyhow::anyhow!("Unknown group"))?;
+        anyhow::ensure!(from < g.tabs.len(), "Unknown tab");
+        let item = g.tabs.remove(from);
+        // `to` is an insertion slot in the original list; account for the removal.
+        let to = if to > from { to - 1 } else { to }.min(g.tabs.len());
+        g.tabs.insert(to, item);
+        g.active = to;
+        Ok(())
+    }
+    /// Closes a panel. The viewer cannot be closed.
+    pub fn close_panel(&mut self, id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(id != "viewer", "The viewer cannot be closed");
+        let (di, gi, ti) = self
+            .find(id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown panel"))?;
+        let mut next = self.clone();
+        next.docks[di].groups[gi].tabs.remove(ti);
+        next.commit(self)
+    }
+    /// Shows a panel: activates its tab and reopens its dock, or adds it back to
+    /// the dock it occupies in this workspace's preset (else the right dock).
+    pub fn show_panel(&mut self, id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(PANELS.contains(&id), "Unknown panel");
+        if let Some((di, gi, ti)) = self.find(id) {
+            self.docks[di].groups[gi].active = ti;
+            self.docks[di].collapsed = false;
+            return Ok(());
+        }
+        let preset = Layout::preset(&self.workspace);
+        let home = preset
+            .docks
+            .iter()
+            .find(|d| d.groups.iter().any(|g| g.tabs.iter().any(|t| t == id)))
+            .map_or("right", |d| d.id.as_str());
+        let mut next = self.clone();
+        let g = self::group(&[id], None);
+        match next.docks.iter_mut().find(|d| d.id == home) {
+            Some(d) if !d.groups.is_empty() => {
+                d.collapsed = false;
+                let first = &mut d.groups[0];
+                first.tabs.push(id.into());
+                first.active = first.tabs.len() - 1;
+            }
+            Some(d) => {
+                d.collapsed = false;
+                d.groups.push(g);
+            }
+            None => {
+                let size = preset
+                    .docks
+                    .iter()
+                    .find(|d| d.id == home)
+                    .and_then(|d| d.size);
+                next.docks
+                    .push(dock(home, size.or(Some(DEFAULT_RIGHT)), vec![g]));
+            }
+        }
+        next.commit(self)
+    }
+    /// Panel ids currently in the layout, in dock/group/tab order.
+    pub fn open_panels(&self) -> Vec<&str> {
+        self.docks
+            .iter()
+            .flat_map(|d| d.groups.iter())
+            .flat_map(|g| g.tabs.iter().map(String::as_str))
+            .collect()
+    }
+    fn find(&self, id: &str) -> Option<(usize, usize, usize)> {
+        self.docks.iter().enumerate().find_map(|(di, d)| {
+            d.groups
+                .iter()
+                .enumerate()
+                .find_map(|(gi, g)| g.tabs.iter().position(|p| p == id).map(|ti| (di, gi, ti)))
+        })
+    }
+    /// Normalizes empty groups/active tabs, validates, then replaces `into`.
+    fn commit(mut self, into: &mut Layout) -> anyhow::Result<()> {
+        for d in &mut self.docks {
+            d.groups.retain(|g| !g.tabs.is_empty());
+            for g in &mut d.groups {
+                g.active = g.active.min(g.tabs.len() - 1);
+            }
+            if d.groups.iter().all(|g| g.size.is_some())
+                && let Some(g) = d.groups.first_mut()
+            {
+                g.size = None;
+            }
+        }
+        self.validate()?;
+        *into = self;
+        Ok(())
+    }
     pub fn move_panel(
         &mut self,
         id: &str,
@@ -437,8 +698,46 @@ pub struct LayoutStore {
     #[serde(default)]
     pub active: std::collections::BTreeMap<String, String>,
     pub projects: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Layout>>,
+    /// User-named layouts, shared by every project (Window ▸ Layouts).
+    #[serde(default)]
+    pub saved: std::collections::BTreeMap<String, Layout>,
+}
+/// Longest accepted saved-layout name, in characters.
+pub const LAYOUT_NAME_MAX: usize = 64;
+/// Trims and validates a saved-layout name.
+pub fn layout_name(name: &str) -> anyhow::Result<String> {
+    let name = name.trim();
+    anyhow::ensure!(!name.is_empty(), "Layout name is empty");
+    anyhow::ensure!(
+        name.chars().count() <= LAYOUT_NAME_MAX,
+        "Layout name is longer than {LAYOUT_NAME_MAX} characters"
+    );
+    anyhow::ensure!(
+        !name.chars().any(char::is_control),
+        "Layout name contains control characters"
+    );
+    Ok(name.to_string())
 }
 impl LayoutStore {
+    /// Saves `layout` under a user name, replacing an existing one with that name.
+    pub fn save_named(&mut self, name: &str, layout: &Layout) -> anyhow::Result<String> {
+        let name = layout_name(name)?;
+        layout.validate()?;
+        self.version = 1;
+        self.saved.insert(name.clone(), layout.clone());
+        Ok(name)
+    }
+    /// The saved layout, re-labelled for `workspace` so it replaces that workspace's
+    /// arrangement (presets keep their identity; a saved layout is an arrangement).
+    pub fn named(&self, name: &str, workspace: &str) -> Option<Layout> {
+        self.saved.get(name).map(|l| Layout {
+            workspace: workspace.into(),
+            ..l.clone()
+        })
+    }
+    pub fn delete_named(&mut self, name: &str) -> bool {
+        self.saved.remove(name).is_some()
+    }
     pub fn put(&mut self, project: &str, layout: Layout) {
         self.version = 1;
         self.active.insert(project.into(), layout.workspace.clone());
@@ -461,6 +760,10 @@ impl LayoutStore {
             for l in p.values() {
                 l.validate()?;
             }
+        }
+        for (name, l) in &s.saved {
+            layout_name(name)?;
+            l.validate()?;
         }
         Ok(s)
     }
@@ -487,6 +790,61 @@ pub fn panel_title(id: &str) -> &str {
         "timeline" => "Timeline",
         "inspector" => "Properties",
         "fxbrowser" => "Effects & Presets",
+        "gradient-controls" => "Gradient",
+        "takes" => "Takes",
+        "shader" => "Shader",
+        "perf" => "Performance",
+        "notes" => "Notes",
         _ => id,
     }
+}
+/// Every built-in panel, in Window ▸ Panels order.
+pub const PANELS: [&str; 11] = [
+    "assets",
+    "layer-effects",
+    "viewer",
+    "timeline",
+    "inspector",
+    "fxbrowser",
+    "gradient-controls",
+    "takes",
+    "shader",
+    "perf",
+    "notes",
+];
+/// Window edges that can receive a docked panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Edge {
+    Left,
+    Right,
+    Bottom,
+}
+impl Edge {
+    pub fn dock_id(self) -> &'static str {
+        match self {
+            Edge::Left => "left",
+            Edge::Right => "right",
+            Edge::Bottom => "bottom",
+        }
+    }
+}
+/// Where a dragged panel tab lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropTarget {
+    /// Join a tab group at `index` (an index past the end appends).
+    Tab {
+        dock: usize,
+        group: usize,
+        index: usize,
+    },
+    /// A new group inserted into `dock` before `group` (`group == len` appends).
+    Split { dock: usize, group: usize },
+    /// Dock at a window edge; creates or reopens that dock.
+    Edge(Edge),
+}
+/// A drop target plus the rectangle the shell highlights while dragging.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DropPreview {
+    pub target: DropTarget,
+    pub rect: Rect,
 }

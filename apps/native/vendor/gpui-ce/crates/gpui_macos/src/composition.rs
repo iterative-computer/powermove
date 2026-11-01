@@ -1,14 +1,62 @@
 //! Powermove P-LAYER/P-HIT: main-thread slot hooks at the Metal presentation boundary.
 //! See vendor POWERMOVE.md. The host owns and retains its AppKit slot views.
+//!
+//! P-120: GPUI presents its drawable inside the composition `CATransaction`
+//! (`presentsWithTransaction`, which waits on the main thread until the command
+//! buffer is scheduled) only when it must: native slot geometry moved, AppKit is
+//! painting synchronously, or frames are continuous. Isolated frames (hover,
+//! caret, a single edit) present asynchronously from the command buffer.
+//!
+//! Why continuous frames stay transactional (measured on screen, 120 Hz): an
+//! asynchronous present stays on glass ~3 refreshes, so with CAMetalLayer's three
+//! drawables back-to-back async frames starve the pool and the main thread blocks
+//! in `nextDrawable` instead (p95 0.04 → 4.2–9.1 ms), costing more than the
+//! ~0.4 ms `waitUntilScheduled` it saved. See docs/native/s2-gpui-ce.md.
 use objc2::{MainThreadMarker, class, msg_send, rc::Retained};
 use objc2_app_kit::NSView;
 use objc2_foundation::NSPoint;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+/// What a host's present callback did to native slot geometry this frame.
+///
+/// `Moved` covers any frame, clip/mask, transform, visibility or z-order change of
+/// a native slot that must land on glass together with the GPUI pixels around it.
+/// Property changes that do not move a slot edge (layer contents, colors, text)
+/// are `Unchanged`: they still commit in the same explicit `CATransaction`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotChange {
+    Unchanged,
+    Moved,
+}
+impl SlotChange {
+    pub fn moved(self) -> bool {
+        self == SlotChange::Moved
+    }
+    /// `Moved` if either side moved.
+    pub fn or(self, other: SlotChange) -> SlotChange {
+        if self.moved() || other.moved() {
+            SlotChange::Moved
+        } else {
+            SlotChange::Unchanged
+        }
+    }
+}
+impl From<bool> for SlotChange {
+    fn from(moved: bool) -> Self {
+        if moved {
+            SlotChange::Moved
+        } else {
+            SlotChange::Unchanged
+        }
+    }
+}
+
 struct Hooks {
-    present: Rc<dyn Fn()>,
+    present: Rc<dyn Fn() -> SlotChange>,
     accepts: Rc<dyn Fn(NSPoint) -> bool>,
     accessibility: Vec<AccessibilityItem>,
+    /// The first publication places every slot, so it is always transactional.
+    fresh: bool,
 }
 thread_local! { static HOSTS: RefCell<HashMap<usize, Hooks>> = RefCell::new(HashMap::new()); }
 
@@ -30,13 +78,43 @@ impl Drop for CompositionRegistration {
 /// only for transparent GPUI regions (compat overlay holes included). AppKit
 /// visits above siblings/child windows first and preserves pressed-view capture.
 /// Callbacks must not re-enter GPUI window operations while its draw lock is held.
+///
+/// This untracked form cannot say whether geometry moved, so every frame keeps the
+/// transaction-coupled (main-thread-blocking) present. Prefer [`register_tracked`].
 pub fn register(
     view: &NSView,
     present: Rc<dyn Fn()>,
     accepts: Rc<dyn Fn(NSPoint) -> bool>,
 ) -> CompositionRegistration {
+    register_tracked(view, untracked(present), accepts)
+}
+fn untracked(present: Rc<dyn Fn()>) -> Rc<dyn Fn() -> SlotChange> {
+    Rc::new(move || {
+        present();
+        SlotChange::Moved
+    })
+}
+/// Like [`register`], but `present` reports whether slot geometry moved. Frames
+/// that return [`SlotChange::Unchanged`] present GPUI's drawable without waiting
+/// on the main thread. The first frame after registration is always transactional.
+pub fn register_tracked(
+    view: &NSView,
+    present: Rc<dyn Fn() -> SlotChange>,
+    accepts: Rc<dyn Fn(NSPoint) -> bool>,
+) -> CompositionRegistration {
     let mtm = MainThreadMarker::new().expect("composition requires main thread");
     let key = view as *const NSView as usize;
+    insert_hooks(key, present, accepts);
+    CompositionRegistration {
+        key,
+        _main_thread: mtm,
+    }
+}
+fn insert_hooks(
+    key: usize,
+    present: Rc<dyn Fn() -> SlotChange>,
+    accepts: Rc<dyn Fn(NSPoint) -> bool>,
+) {
     HOSTS.with(|h| {
         h.borrow_mut().insert(
             key,
@@ -44,13 +122,10 @@ pub fn register(
                 present,
                 accepts,
                 accessibility: Vec::new(),
+                fresh: true,
             },
         );
     });
-    CompositionRegistration {
-        key,
-        _main_thread: mtm,
-    }
 }
 pub(crate) fn accepts(view: usize, point: NSPoint) -> bool {
     let accepts = HOSTS.with(|h| h.borrow().get(&view).map(|h| h.accepts.clone()));
@@ -100,24 +175,55 @@ pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
     }
     Some(order)
 }
-/// Explicit CATransaction also covers GPUI's transactional drawable present.
+/// Opens the explicit CATransaction for this frame's slot publication and runs the
+/// host. When geometry moved, GPUI's drawable must be presented with the
+/// transaction ([`Transaction::moved`]); otherwise it presents asynchronously.
 pub(crate) fn present(view: usize) -> Option<Transaction> {
-    let present = HOSTS.with(|h| h.borrow().get(&view).map(|h| h.present.clone()));
-    if present.is_none() && !crate::native_text::has_slots(view) {
+    let hook = HOSTS.with(|h| {
+        h.borrow_mut()
+            .get_mut(&view)
+            .map(|h| (h.present.clone(), std::mem::take(&mut h.fresh)))
+    });
+    if hook.is_none() && !crate::native_text::has_slots(view) {
         return None;
     }
     unsafe {
         let _: () = msg_send![class!(CATransaction), begin];
         let _: () = msg_send![class!(CATransaction), setDisableActions: true];
     }
-    let transaction = Transaction;
-    if let Some(present) = present {
-        gpui_util::measure("native composition", || present());
+    let mut transaction = Transaction {
+        change: SlotChange::Unchanged,
+    };
+    if let Some((present, fresh)) = hook {
+        let change = gpui_util::measure("native composition", || present());
+        transaction.change = change.or(fresh.into());
     }
-    crate::native_text::present(view);
+    let text = crate::native_text::present(view);
+    transaction.change = transaction.change.or(text);
     Some(transaction)
 }
-pub(crate) struct Transaction;
+/// A frame drawn within this long after the previous one is "continuous".
+/// Two 60 Hz refreshes: async presents can then never hold all three drawables.
+pub const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_micros(33_334);
+/// P-120 policy for one GPUI frame. `forced` is set by AppKit-driven synchronous
+/// paints (live resize `displayLayer:`, tab activation) that must match the window;
+/// `continuous` when the previous frame was drawn within [`CONTINUOUS_FRAME`].
+/// Windows without composition hosts keep upstream behaviour (async unless forced).
+pub(crate) fn presents_with_transaction(
+    forced: bool,
+    frame: Option<&Transaction>,
+    continuous: bool,
+) -> bool {
+    forced || frame.is_some_and(|t| t.moved() || continuous)
+}
+pub(crate) struct Transaction {
+    change: SlotChange,
+}
+impl Transaction {
+    pub(crate) fn moved(&self) -> bool {
+        self.change.moved()
+    }
+}
 impl Drop for Transaction {
     fn drop(&mut self) {
         unsafe {
@@ -148,5 +254,45 @@ pub(crate) fn clear_parents(order: &[AccessibilityItem]) {
                 }
             }
         }
+    }
+}
+
+/// Screen-free probe of the P-120 presentation policy for contract tests that
+/// live outside this (non-member) crate. Uses fake keys, never an AppKit view.
+#[doc(hidden)]
+pub mod probe {
+    use super::*;
+    /// Removes the fake host on drop.
+    pub struct Registration(usize);
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            HOSTS.with(|h| h.borrow_mut().remove(&self.0));
+        }
+    }
+    pub fn register(key: usize, present: Rc<dyn Fn() -> SlotChange>) -> Registration {
+        insert_hooks(key, present, Rc::new(|_| true));
+        Registration(key)
+    }
+    /// Same wrapping as the public untracked [`super::register`].
+    pub fn register_untracked(key: usize, present: Rc<dyn Fn()>) -> Registration {
+        register(key, untracked(present))
+    }
+    /// Runs one composition frame exactly as `MacWindow::draw` does and returns
+    /// whether GPUI would present with the transaction (`None`: no host).
+    pub fn frame(key: usize, forced: bool) -> Option<bool> {
+        frame_after(key, forced, false)
+    }
+    /// `continuous`: the previous frame was within [`super::CONTINUOUS_FRAME`].
+    pub fn frame_after(key: usize, forced: bool, continuous: bool) -> Option<bool> {
+        let transaction = present(key);
+        transaction.as_ref()?;
+        Some(presents_with_transaction(
+            forced,
+            transaction.as_ref(),
+            continuous,
+        ))
+    }
+    pub fn unregistered_frame(forced: bool) -> bool {
+        presents_with_transaction(forced, None, true)
     }
 }

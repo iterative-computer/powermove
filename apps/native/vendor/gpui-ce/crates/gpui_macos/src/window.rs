@@ -874,6 +874,10 @@ struct MacWindowState {
     select_previous_tab_callback: Option<Box<dyn FnMut()>>,
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
+    // Powermove P-120: an AppKit-driven synchronous paint is in progress.
+    sync_present_requested: bool,
+    // Powermove P-120: when the previous GPUI frame was drawn.
+    last_draw: Option<std::time::Instant>,
     closed: Arc<AtomicBool>,
     accesskit_adapter: Option<crate::composition_accessibility::Adapter>,
     // The parent window if this window is a sheet (Dialog kind)
@@ -1315,6 +1319,8 @@ impl MacWindow {
                 select_previous_tab_callback: None,
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
+                sync_present_requested: false,
+                last_draw: None,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
                 sheet_parent: None,
@@ -2170,9 +2176,23 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         let transaction = crate::composition::present(this.native_view.as_ptr() as usize);
+        // Powermove P-120: block on the transaction only when slot geometry moved
+        // (or AppKit is painting synchronously), and reset it on every other frame.
         #[cfg(not(feature = "wgpu"))]
-        if transaction.is_some() {
-            this.renderer.set_presents_with_transaction(true);
+        {
+            let now = std::time::Instant::now();
+            let continuous = this
+                .last_draw
+                .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
+            this.last_draw = Some(now);
+            let sync = std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none()
+                && crate::composition::presents_with_transaction(
+                    this.sync_present_requested,
+                    transaction.as_ref(),
+                    continuous,
+                )
+                || this.sync_present_requested;
+            this.renderer.set_presents_with_transaction(sync);
         }
         #[cfg(feature = "wgpu")]
         if this.renderer.draw(scene) {
@@ -3294,6 +3314,7 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
         if lock.activated_least_once {
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
+                lock.sync_present_requested = true;
                 lock.stop_display_link();
                 let request = lock.next_frame_request();
                 drop(lock);
@@ -3302,6 +3323,7 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
                 lock.renderer.set_presents_with_transaction(false);
+                lock.sync_present_requested = false;
                 lock.start_display_link();
             }
         } else {
@@ -3418,6 +3440,7 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
+        lock.sync_present_requested = true;
         lock.stop_display_link();
         let request = lock.next_frame_request();
         drop(lock);
@@ -3426,6 +3449,7 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
         lock.renderer.set_presents_with_transaction(false);
+        lock.sync_present_requested = false;
         lock.start_display_link();
     }
 }

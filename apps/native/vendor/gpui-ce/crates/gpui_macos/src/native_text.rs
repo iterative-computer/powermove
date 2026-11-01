@@ -325,7 +325,10 @@ impl Drop for NativeTextSlot {
         });
     }
 }
-pub(crate) fn present(key: usize) {
+/// Applies staged text-slot geometry. Returns `Moved` when any slot's frame,
+/// clip or visibility changed this frame (P-120 transactional present).
+pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
+    let mut moved = false;
     let slots = SLOTS.with(|slots| slots.borrow().get(&key).cloned().unwrap_or_default());
     for state in slots.into_iter().filter_map(|s| s.upgrade()) {
         let Some((bounds, clip)) = state.geometry.get() else {
@@ -343,6 +346,7 @@ pub(crate) fn present(key: usize) {
         );
         if state.wrapper.frame() != frame {
             state.wrapper.setFrame(frame);
+            moved = true;
         }
         let local = NSRect::new(
             NSPoint::new(
@@ -354,6 +358,7 @@ pub(crate) fn present(key: usize) {
         if let Some(scroll) = &state.scroll {
             if scroll.frame() != local {
                 scroll.setFrame(local);
+                moved = true;
             }
             let size = scroll.contentSize();
             let view = state.editor.view();
@@ -365,12 +370,14 @@ pub(crate) fn present(key: usize) {
             }
         } else if state.editor.view().frame() != local {
             state.editor.view().setFrame(local);
+            moved = true;
         }
         let hidden = visible.size.width <= 0.
             || visible.size.height <= 0.
             || (state.kind.dense() && !state.editing.get());
         if state.wrapper.isHidden() != hidden {
             state.wrapper.setHidden(hidden);
+            moved = true;
             crate::composition_accessibility::changed(key);
         }
         if state.focus_pending.replace(false) {
@@ -389,6 +396,7 @@ pub(crate) fn present(key: usize) {
             }
         }
     }
+    moved.into()
 }
 pub(crate) fn accessibility(key: usize) -> Vec<crate::composition::AccessibilityItem> {
     SLOTS.with(|slots| {
