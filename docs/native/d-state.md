@@ -16,6 +16,8 @@ Source baseline: **`v1.2.0` (`07ed5fa17ee640659cb075f9cad1af2095011d60`)**. All 
 
 These are migration requirements, not claims that a migration reader has already been implemented or tested.
 
+> **Correction (2026-11-01, found by pm-kernel):** since v1.3.0, store values of 32 KiB or more are written as a gzip envelope (`__powermoveDiskValue`, `main/storage-codec.ts`). This inventory is based on v1.2.0 and did not list it, but real profiles contain such files (8 history files on the owner's profile). Every migration reader must decode the envelope; pm-kernel's library reader does.
+
 ## 1. File store: `P/store/<key>.json`
 
 **52 registered key families: 42 literal keys + 10 dynamic prefixes.** Full authoritative registry: [store-keys.ts:8–83](https://github.com/iterative-computer/powermove/blob/v1.2.0/apps/desktop/src/shared/store-keys.ts#L8). Each is ordinary UTF-8 JSON, readable without Electron. Dynamic suffixes accept `[A-Za-z0-9_-]{1,120}`. The Electron shim accepts `pm.<key>` aliases but strips `pm.` before IPC: **there is no independent `pm.*` file-store namespace** (`R/legacy/host/electron-shim.ts:320–331`). The browser-only fallback does use localStorage `pm.*` (§2).

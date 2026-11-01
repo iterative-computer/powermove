@@ -1,0 +1,2016 @@
+[
+  {
+    "id": "K001",
+    "chord": "cmd+k",
+    "command": "palette",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K002",
+    "chord": "ctrl+k",
+    "command": "palette",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K003",
+    "chord": "cmd+shift+k",
+    "command": "agent",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K004",
+    "chord": "ctrl+shift+k",
+    "command": "agent",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K005",
+    "chord": "cmd+,",
+    "command": "settings",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K006",
+    "chord": "ctrl+,",
+    "command": "settings",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K007",
+    "chord": "cmd+z",
+    "command": "undo",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K008",
+    "chord": "ctrl+z",
+    "command": "undo",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K009",
+    "chord": "cmd+shift+z",
+    "command": "redo",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K010",
+    "chord": "ctrl+shift+z",
+    "command": "redo",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K011",
+    "chord": "cmd+y",
+    "command": "newSolid",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K012",
+    "chord": "ctrl+y",
+    "command": "newSolid",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K013",
+    "chord": "cmd+shift+y",
+    "command": "newShape",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K014",
+    "chord": "ctrl+shift+y",
+    "command": "newShape",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K015",
+    "chord": "cmd+t",
+    "command": "toolText",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K016",
+    "chord": "ctrl+t",
+    "command": "toolText",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K017",
+    "chord": "cmd+shift+t",
+    "command": "toolText",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K018",
+    "chord": "ctrl+shift+t",
+    "command": "toolText",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K019",
+    "chord": "cmd+d",
+    "command": "duplicate",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K020",
+    "chord": "ctrl+d",
+    "command": "duplicate",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K021",
+    "chord": "cmd+shift+d",
+    "command": "split",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K022",
+    "chord": "ctrl+shift+d",
+    "command": "split",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K023",
+    "chord": "cmd+c",
+    "command": "copyLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K024",
+    "chord": "ctrl+c",
+    "command": "copyLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K025",
+    "chord": "cmd+shift+c",
+    "command": "precompose",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K026",
+    "chord": "ctrl+shift+c",
+    "command": "precompose",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K027",
+    "chord": "cmd+g",
+    "command": "groupLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K028",
+    "chord": "ctrl+g",
+    "command": "groupLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K029",
+    "chord": "cmd+shift+g",
+    "command": "ungroupLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K030",
+    "chord": "ctrl+shift+g",
+    "command": "ungroupLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K031",
+    "chord": "cmd+v",
+    "command": "contextPaste",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K032",
+    "chord": "ctrl+v",
+    "command": "contextPaste",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K033",
+    "chord": "cmd+a",
+    "command": "selectAll",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K034",
+    "chord": "ctrl+a",
+    "command": "selectAll",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K035",
+    "chord": "cmd+shift+a",
+    "command": "deselect",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K036",
+    "chord": "ctrl+shift+a",
+    "command": "deselect",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K037",
+    "chord": "cmd+i",
+    "command": "import",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K038",
+    "chord": "ctrl+i",
+    "command": "import",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K039",
+    "chord": "cmd+shift+i",
+    "command": "import",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K040",
+    "chord": "ctrl+shift+i",
+    "command": "import",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K041",
+    "chord": "cmd+s",
+    "command": "save",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K042",
+    "chord": "ctrl+s",
+    "command": "save",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K043",
+    "chord": "cmd+shift+s",
+    "command": "saveAs",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K044",
+    "chord": "ctrl+shift+s",
+    "command": "saveAs",
+    "args": [],
+    "priority": 100,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K045",
+    "chord": "cmd+o",
+    "command": "open",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K046",
+    "chord": "ctrl+o",
+    "command": "open",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K047",
+    "chord": "cmd+shift+o",
+    "command": "open",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K048",
+    "chord": "ctrl+shift+o",
+    "command": "open",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K049",
+    "chord": "cmd+e",
+    "command": "export",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K050",
+    "chord": "ctrl+e",
+    "command": "export",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K051",
+    "chord": "cmd+shift+e",
+    "command": "export",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K052",
+    "chord": "ctrl+shift+e",
+    "command": "export",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K053",
+    "chord": "cmd+p",
+    "command": "projects",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K054",
+    "chord": "ctrl+p",
+    "command": "projects",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K055",
+    "chord": "cmd+n",
+    "command": "newComposition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K056",
+    "chord": "ctrl+n",
+    "command": "newComposition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K057",
+    "chord": "cmd+alt+n",
+    "command": "newProject",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K058",
+    "chord": "ctrl+alt+n",
+    "command": "newProject",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K059",
+    "chord": "cmd+alt+y",
+    "command": "newAdjustment",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K060",
+    "chord": "ctrl+alt+y",
+    "command": "newAdjustment",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K061",
+    "chord": "cmd+alt+k",
+    "command": "compositionSettings",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K062",
+    "chord": "ctrl+alt+k",
+    "command": "compositionSettings",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K063",
+    "chord": "cmd+b",
+    "command": "split",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K064",
+    "chord": "ctrl+b",
+    "command": "split",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K065",
+    "chord": "cmd+x",
+    "command": "cutLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K066",
+    "chord": "ctrl+x",
+    "command": "cutLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K067",
+    "chord": "cmd+shift+h",
+    "command": "toggleLayerControls",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K068",
+    "chord": "ctrl+shift+h",
+    "command": "toggleLayerControls",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K069",
+    "chord": "cmd+l",
+    "command": "lockSelectedLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K070",
+    "chord": "ctrl+l",
+    "command": "lockSelectedLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K071",
+    "chord": "cmd+shift+l",
+    "command": "unlockAllLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K072",
+    "chord": "ctrl+shift+l",
+    "command": "unlockAllLayers",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K073",
+    "chord": "cmd+up",
+    "command": "selectPreviousLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K074",
+    "chord": "ctrl+up",
+    "command": "selectPreviousLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K075",
+    "chord": "cmd+down",
+    "command": "selectNextLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K076",
+    "chord": "ctrl+down",
+    "command": "selectNextLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K077",
+    "chord": "cmd+shift+up",
+    "command": "extendSelectionPreviousLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K078",
+    "chord": "ctrl+shift+up",
+    "command": "extendSelectionPreviousLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K079",
+    "chord": "cmd+shift+down",
+    "command": "extendSelectionNextLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K080",
+    "chord": "ctrl+shift+down",
+    "command": "extendSelectionNextLayer",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K081",
+    "chord": "cmd+=",
+    "command": "zoomIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K082",
+    "chord": "ctrl+=",
+    "command": "zoomIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K083",
+    "chord": "cmd+shift++",
+    "command": "zoomIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K084",
+    "chord": "ctrl+shift++",
+    "command": "zoomIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K085",
+    "chord": "cmd+-",
+    "command": "zoomOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K086",
+    "chord": "ctrl+-",
+    "command": "zoomOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K087",
+    "chord": "cmd+0",
+    "command": "fitComposition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K088",
+    "chord": "ctrl+0",
+    "command": "fitComposition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K089",
+    "chord": "cmd+1",
+    "command": "actualSize",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K090",
+    "chord": "ctrl+1",
+    "command": "actualSize",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K091",
+    "chord": "cmd+alt+home",
+    "command": "centerAnchor",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K092",
+    "chord": "ctrl+alt+home",
+    "command": "centerAnchor",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K093",
+    "chord": "cmd+]",
+    "command": "bringForward",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K094",
+    "chord": "ctrl+]",
+    "command": "bringForward",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K095",
+    "chord": "cmd+[",
+    "command": "sendBackward",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K096",
+    "chord": "ctrl+[",
+    "command": "sendBackward",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K097",
+    "chord": "cmd+shift+]",
+    "command": "bringToFront",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K098",
+    "chord": "ctrl+shift+]",
+    "command": "bringToFront",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K099",
+    "chord": "cmd+shift+[",
+    "command": "sendToBack",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K100",
+    "chord": "ctrl+shift+[",
+    "command": "sendToBack",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K101",
+    "chord": "left",
+    "command": "nudgeSelection",
+    "args": [
+      -1,
+      0
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K102",
+    "chord": "shift+left",
+    "command": "nudgeSelection",
+    "args": [
+      -10,
+      0
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K103",
+    "chord": "right",
+    "command": "nudgeSelection",
+    "args": [
+      1,
+      0
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K104",
+    "chord": "shift+right",
+    "command": "nudgeSelection",
+    "args": [
+      10,
+      0
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K105",
+    "chord": "up",
+    "command": "nudgeSelection",
+    "args": [
+      0,
+      -1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K106",
+    "chord": "shift+up",
+    "command": "nudgeSelection",
+    "args": [
+      0,
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K107",
+    "chord": "down",
+    "command": "nudgeSelection",
+    "args": [
+      0,
+      1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K108",
+    "chord": "shift+down",
+    "command": "nudgeSelection",
+    "args": [
+      0,
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K109",
+    "chord": "alt+left",
+    "command": "nudgeKeyframes",
+    "args": [
+      -1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K110",
+    "chord": "alt+right",
+    "command": "nudgeKeyframes",
+    "args": [
+      1
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K111",
+    "chord": "alt+shift+left",
+    "command": "nudgeKeyframes",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K112",
+    "chord": "alt+shift+right",
+    "command": "nudgeKeyframes",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K113",
+    "chord": "space",
+    "command": "play",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": true
+  },
+  {
+    "id": "K114",
+    "chord": "home",
+    "command": "gotoStart",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K115",
+    "chord": "end",
+    "command": "gotoEnd",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K116",
+    "chord": "shift+home",
+    "command": "gotoWorkIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K117",
+    "chord": "shift+end",
+    "command": "gotoWorkOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K118",
+    "chord": "pageup",
+    "command": "prevFrame",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K119",
+    "chord": "pagedown",
+    "command": "nextFrame",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K120",
+    "chord": "backspace",
+    "command": "delete",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K121",
+    "chord": "delete",
+    "command": "delete",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K122",
+    "chord": "escape",
+    "command": "deselect",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K123",
+    "chord": "shift+pageup",
+    "command": "stepFrames",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K124",
+    "chord": "shift+pagedown",
+    "command": "stepFrames",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K125",
+    "chord": "cmd+left",
+    "command": "prevFrame",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K126",
+    "chord": "cmd+right",
+    "command": "nextFrame",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K127",
+    "chord": "cmd+shift+left",
+    "command": "stepFrames",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K128",
+    "chord": "cmd+shift+right",
+    "command": "stepFrames",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K129",
+    "chord": "ctrl+left",
+    "command": "timeline.adjacentKeyframe:prev",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K130",
+    "chord": "ctrl+right",
+    "command": "timeline.adjacentKeyframe:next",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K131",
+    "chord": "ctrl+shift+left",
+    "command": "stepFrames",
+    "args": [
+      -10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K132",
+    "chord": "ctrl+shift+right",
+    "command": "stepFrames",
+    "args": [
+      10
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": true,
+    "loose": false
+  },
+  {
+    "id": "K133",
+    "chord": "j",
+    "command": "prevVisibleEvent",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K134",
+    "chord": "k",
+    "command": "nextVisibleEvent",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K135",
+    "chord": "shift+j",
+    "command": "timeline.adjacentKeyframe:prev",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K136",
+    "chord": "shift+k",
+    "command": "timeline.adjacentKeyframe:next",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K137",
+    "chord": "i",
+    "command": "gotoLayerIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K138",
+    "chord": "o",
+    "command": "gotoLayerOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K139",
+    "chord": "[",
+    "command": "moveLayerIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K140",
+    "chord": "]",
+    "command": "moveLayerOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K141",
+    "chord": "alt+[",
+    "command": "trimIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K142",
+    "chord": "alt+]",
+    "command": "trimOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K143",
+    "chord": "alt+home",
+    "command": "moveLayerInToStart",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K144",
+    "chord": "alt+end",
+    "command": "moveLayerOutToEnd",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K145",
+    "chord": ".",
+    "command": "zoomIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K146",
+    "chord": ",",
+    "command": "zoomOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K147",
+    "chord": "/",
+    "command": "actualSize",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K148",
+    "chord": "shift+/",
+    "command": "fitComposition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K149",
+    "chord": "shift+f3",
+    "command": "graph",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K150",
+    "chord": "f9",
+    "command": "easyEase",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K151",
+    "chord": "shift+f9",
+    "command": "easyEaseIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K152",
+    "chord": "cmd+shift+f9",
+    "command": "easyEaseOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K153",
+    "chord": "ctrl+shift+f9",
+    "command": "easyEaseOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K154",
+    "chord": "v",
+    "command": "toolSelect",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K155",
+    "chord": "shift+v",
+    "command": "toolSelect",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K156",
+    "chord": "h",
+    "command": "toolHand",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K157",
+    "chord": "shift+h",
+    "command": "toolHand",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K158",
+    "chord": "z",
+    "command": "toolZoom",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K159",
+    "chord": "shift+z",
+    "command": "toolZoom",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K160",
+    "chord": "w",
+    "command": "toolRotate",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K161",
+    "chord": "shift+w",
+    "command": "toolRotate",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K162",
+    "chord": "y",
+    "command": "toolAnchor",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K163",
+    "chord": "shift+y",
+    "command": "toolAnchor",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K164",
+    "chord": "q",
+    "command": "toolShape",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K165",
+    "chord": "shift+q",
+    "command": "toolShape",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K166",
+    "chord": "g",
+    "command": "toolPen",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K167",
+    "chord": "shift+g",
+    "command": "toolPen",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K168",
+    "chord": "b",
+    "command": "workIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K169",
+    "chord": "shift+b",
+    "command": "workIn",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K170",
+    "chord": "n",
+    "command": "workOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K171",
+    "chord": "shift+n",
+    "command": "workOut",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K172",
+    "chord": "p",
+    "command": "timeline.revealProperty:p",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K173",
+    "chord": "shift+p",
+    "command": "timeline.revealProperty:p",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K174",
+    "chord": "s",
+    "command": "timeline.revealProperty:s",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K175",
+    "chord": "shift+s",
+    "command": "timeline.revealProperty:s",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K176",
+    "chord": "r",
+    "command": "timeline.revealProperty:r",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K177",
+    "chord": "shift+r",
+    "command": "timeline.revealProperty:r",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K178",
+    "chord": "t",
+    "command": "timeline.revealProperty:t",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K179",
+    "chord": "shift+t",
+    "command": "timeline.revealProperty:t",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K180",
+    "chord": "a",
+    "command": "timeline.revealProperty:a",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K181",
+    "chord": "shift+a",
+    "command": "timeline.revealProperty:a",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K182",
+    "chord": "u",
+    "command": "timeline.revealProperty:u",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K183",
+    "chord": "shift+u",
+    "command": "timeline.revealProperty:u",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K184",
+    "chord": "m",
+    "command": "timeline.revealProperty:m",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K185",
+    "chord": "shift+m",
+    "command": "timeline.revealProperty:m",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K186",
+    "chord": "f",
+    "command": "timeline.revealProperty:f",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K187",
+    "chord": "shift+f",
+    "command": "timeline.revealProperty:f",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K188",
+    "chord": "e",
+    "command": "timeline.revealProperty:e",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K189",
+    "chord": "shift+e",
+    "command": "timeline.revealProperty:e",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K190",
+    "chord": "l",
+    "command": "timeline.revealProperty:l",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K191",
+    "chord": "shift+l",
+    "command": "timeline.revealProperty:l",
+    "args": [
+      true
+    ],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K192",
+    "chord": "cmd+`",
+    "command": "timeline.revealAll",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K193",
+    "chord": "ctrl+`",
+    "command": "timeline.revealAll",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K194",
+    "chord": "escape",
+    "command": "blurField",
+    "args": [],
+    "priority": 50,
+    "in_fields": true,
+    "repeat": false,
+    "loose": false
+  },
+  {
+    "id": "K195",
+    "chord": "enter",
+    "command": "text.editSelected",
+    "args": [],
+    "priority": 0,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  }
+]

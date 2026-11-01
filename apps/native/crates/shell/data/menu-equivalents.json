@@ -1,0 +1,212 @@
+[
+  {
+    "id": "M001",
+    "accelerator": "CommandOrControl+=",
+    "command": "zoomIn",
+    "label": "Zoom In"
+  },
+  {
+    "id": "M002",
+    "accelerator": "CommandOrControl+-",
+    "command": "zoomOut",
+    "label": "Zoom Out"
+  },
+  {
+    "id": "M003",
+    "accelerator": "CommandOrControl+1",
+    "command": "actualSize",
+    "label": "Actual Size"
+  },
+  {
+    "id": "M004",
+    "accelerator": "CommandOrControl+0",
+    "command": "fitComposition",
+    "label": "Fit Composition"
+  },
+  {
+    "id": "M005",
+    "accelerator": "CommandOrControl+Shift+H",
+    "command": "toggleLayerControls",
+    "label": "Show/Hide Layer Controls"
+  },
+  {
+    "id": "M006",
+    "accelerator": "CommandOrControl+,",
+    "command": "settings",
+    "label": "Settings\u2026"
+  },
+  {
+    "id": "M007",
+    "accelerator": "CommandOrControl+Alt+N",
+    "command": "newProject",
+    "label": "New Project"
+  },
+  {
+    "id": "M008",
+    "accelerator": "CommandOrControl+O",
+    "command": "open",
+    "label": "Open Project\u2026"
+  },
+  {
+    "id": "M009",
+    "accelerator": "CommandOrControl+W",
+    "command": "closeTab",
+    "label": "Close Tab"
+  },
+  {
+    "id": "M010",
+    "accelerator": "CommandOrControl+S",
+    "command": "save",
+    "label": "Save Project"
+  },
+  {
+    "id": "M011",
+    "accelerator": "CommandOrControl+Shift+S",
+    "command": "saveAs",
+    "label": "Save Project As\u2026"
+  },
+  {
+    "id": "M012",
+    "accelerator": "CommandOrControl+I",
+    "command": "import",
+    "label": "Import Media\u2026"
+  },
+  {
+    "id": "M013",
+    "accelerator": "CommandOrControl+E",
+    "command": "export",
+    "label": "Export\u2026"
+  },
+  {
+    "id": "M014",
+    "accelerator": "CommandOrControl+Z",
+    "command": "contextUndo",
+    "label": "Undo"
+  },
+  {
+    "id": "M015",
+    "accelerator": "CommandOrControl+Shift+Z",
+    "command": "contextRedo",
+    "label": "Redo"
+  },
+  {
+    "id": "M016",
+    "accelerator": "CommandOrControl+X",
+    "command": "contextCut",
+    "label": "Cut"
+  },
+  {
+    "id": "M017",
+    "accelerator": "CommandOrControl+C",
+    "command": "contextCopy",
+    "label": "Copy"
+  },
+  {
+    "id": "M018",
+    "accelerator": "CommandOrControl+V",
+    "command": "contextPaste",
+    "label": "Paste"
+  },
+  {
+    "id": "M019",
+    "accelerator": "CommandOrControl+A",
+    "command": "contextSelectAll",
+    "label": "Select All"
+  },
+  {
+    "id": "M020",
+    "accelerator": "CommandOrControl+D",
+    "command": "duplicate",
+    "label": "Duplicate Layers"
+  },
+  {
+    "id": "M021",
+    "accelerator": "CommandOrControl+Shift+D",
+    "command": "split",
+    "label": "Split at Playhead"
+  },
+  {
+    "id": "M022",
+    "accelerator": "CommandOrControl+]",
+    "command": "bringForward",
+    "label": "Bring Forward"
+  },
+  {
+    "id": "M023",
+    "accelerator": "CommandOrControl+[",
+    "command": "sendBackward",
+    "label": "Send Backward"
+  },
+  {
+    "id": "M024",
+    "accelerator": "CommandOrControl+Shift+]",
+    "command": "bringToFront",
+    "label": "Bring to Front"
+  },
+  {
+    "id": "M025",
+    "accelerator": "CommandOrControl+Shift+[",
+    "command": "sendToBack",
+    "label": "Send to Back"
+  },
+  {
+    "id": "M026",
+    "accelerator": "CommandOrControl+N",
+    "command": "newComposition",
+    "label": "New Composition\u2026"
+  },
+  {
+    "id": "M027",
+    "accelerator": "CommandOrControl+Alt+K",
+    "command": "compositionSettings",
+    "label": "Composition Settings\u2026"
+  },
+  {
+    "id": "M028",
+    "accelerator": "CommandOrControl+Shift+C",
+    "command": "precompose",
+    "label": "Pre-compose\u2026"
+  },
+  {
+    "id": "M029",
+    "accelerator": "Control+Tab",
+    "command": "nextTab",
+    "label": "Show Next Tab"
+  },
+  {
+    "id": "M030",
+    "accelerator": "Control+Shift+Tab",
+    "command": "previousTab",
+    "label": "Show Previous Tab"
+  },
+  {
+    "id": "M031",
+    "accelerator": "CommandOrControl+Shift+N",
+    "command": "newWindow",
+    "label": "New Window"
+  },
+  {
+    "id": "M032",
+    "accelerator": "CommandOrControl+Shift+W",
+    "command": "closeWindow",
+    "label": "Close Window"
+  },
+  {
+    "id": "M033",
+    "accelerator": "Command+H",
+    "command": "hide",
+    "label": "Hide"
+  },
+  {
+    "id": "M034",
+    "accelerator": "Command+Alt+H",
+    "command": "hideOthers",
+    "label": "Hide Others"
+  },
+  {
+    "id": "M035",
+    "accelerator": "Command+Q",
+    "command": "quit",
+    "label": "Quit"
+  }
+]

@@ -1,0 +1,28 @@
+[package]
+name = "pm-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+[dependencies]
+pm-design = { path = "../design" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
+metal = "0.33"
+foreign-types = "0.5"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-quartz-core = "0.3"
+block2 = "0.6"
+raw-window-handle = "0.6"
+async-channel = "2"
+core-graphics = "0.24"
+[dev-dependencies]
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["test-support"] }
+gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
+gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }
+image = { version = "0.25", default-features = false, features = ["png"] }

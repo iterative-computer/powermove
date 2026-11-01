@@ -1,0 +1,12 @@
+[package]
+name = "pm-native-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+[[bin]]
+name = "powermove-native"
+path = "src/main.rs"
+[dependencies]
+pm-shell = { path = "../shell" }
+anyhow = "1"
