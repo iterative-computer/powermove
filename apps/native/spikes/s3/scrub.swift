@@ -12,7 +12,8 @@ precondition(CGPreflightPostEventAccess(), "Input posting access is required")
 let b = windows.first![kCGWindowBounds as String] as! NSDictionary
 let bounds = CGRect(dictionaryRepresentation: b)!
 for i in 0..<120 {
-    let fraction = Double((i*37)%120)/120
+    let cached = CommandLine.arguments.contains("--cached")
+    let fraction = cached ? Double((i*3)%8)/8 : Double((i*37)%120)/120
     let point = CGPoint(x: bounds.minX+30+fraction*(bounds.width-60), y: bounds.maxY-58)
     CGEvent(mouseEventSource:nil, mouseType:.leftMouseDown, mouseCursorPosition:point, mouseButton:.left)!.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.001)

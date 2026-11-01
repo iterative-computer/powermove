@@ -244,3 +244,192 @@ composition/accessibility/capture inherited from S2; release-build profiling;
 paired Electron margins; required hardware/corpora and ≥30 repetitions; and
 orchestrator/Opus review. Fix scrub/presentation latency and all continuity gaps,
 then repeat the gates. This run does not authorize promotion or release.
+
+## S3b (2026-11-01)
+
+**Gate: OPEN / NOT PASSED.** This follow-up instruments and changes the scrub and
+playback paths. The Mac stayed locked throughout. Offscreen GPU completion and
+hidden-window drawable callbacks are explicitly separate from physical display
+presentation; neither is accepted as a replacement for a foreground gate run.
+Earlier results above remain the before measurements.
+
+### Root causes and fixes
+
+- A scrub request previously waited for a display-link tick, then performed a
+  fresh full-resolution render even when revisiting an unchanged frame. Input
+  now wakes the render worker immediately through a seek-priority mailbox.
+  Eight exact working frames are cached by revision, time and physical size;
+  display conversion and locked overlays are still applied in the final pass.
+  Drawable loss or output retirement retries a paused seek without replacing
+  newer input or resetting the original latency timestamps. Output changes also
+  repaint a paused selection, without counting that repaint as a new input.
+  Revision/size changes retire cached entries. This spike owns one immutable
+  composition per engine; changing scenes clears the cache. There is no proxy
+  approximation or change to export pixels.
+- The one-item tick channel preserved an **old** tick while rejecting newer
+  ones. It now replaces the pending tick with the newest one. Foreground
+  playback also extrapolates deadlines from observed display-link phase on the
+  worker, so a delayed AppKit callback does not itself stop render scheduling.
+  Predicted frames, received callbacks, skipped callback sequences and expired
+  render targets have separate counters. This is a silent spike clock, not the
+  finished audio-clock service.
+- The producer and consumer previously used separate Metal queues and two
+  synchronous GPU waits per frame. The final pass now uses the engine's actual
+  Metal command queue and tracked source-texture dependencies. Normal rendering
+  polls completions without blocking; at most two submissions remain in flight.
+  Completion handlers retain source leases. Waits remain for diagnostics,
+  shutdown, obsolete producer retirement and bounded backpressure. The source
+  pool is bounded to eleven surfaces (eight cached plus in-flight/free slots).
+- The worker now requests interactive QoS. Encoding and presentation both have
+  per-frame autorelease pools. Pipelines, offscreen destination and reusable
+  source surfaces survive between frames. Trace records intentionally allocate
+  per frame in this diagnostic harness; this is not a production allocation
+  profile.
+- The layer requests **two** drawables to bound FIFO latency. Hidden-window
+  measurements show that acquisition can still consume substantial time; this
+  is a latency experiment awaiting a foreground headroom/continuity check,
+  not proof that drawable starvation has been eliminated.
+
+The old **44.600 / 45.701 ms** AppKit-to-display result cannot be decomposed
+exactly while locked. Waiting for a tick, unnecessary rendering, synchronous
+completion and old queued ticks are confirmed code-path defects; their removal
+is testable offscreen. How much of the remaining delay belonged to drawable
+FIFO, WindowServer and display-link phase requires the new foreground trace.
+No claim is made that all **6–11** earlier scanout gaps have been explained or
+fixed by the headless evidence.
+
+### Instrumentation and decisions
+
+Each submitted frame writes monotonic host timestamps for input, request
+publication, worker start, render start/submission, producer readiness bound,
+drawable request/acquisition, encode end, presentation request, command commit,
+scheduling callback, consumer GPU start/end, completion callback, actual drawable
+`presentedTime` and display callback receipt. A one-texel source blit makes the
+producer marker depend on the tracked source texture; an empty Metal command
+buffer would not establish that dependency. Producer readiness is an upper
+bound, not isolated producer GPU execution time. Raw traces are written beside
+the report as `.trace.json`, outside Git.
+
+Missing/zero display times never become GPU completion times. Empty latency
+samples and unobservable scanout gaps are null. Scrub cache hits have their own
+distribution, excluding the initial misses. Synthetic input comes from a
+separate thread through the same control mailbox/wake; it does not include
+AppKit/HID delivery. Real AppKit runs still start at `NSEvent.timestamp`.
+
+| Decision | Picking rule |
+|---|---|
+| Exact cached frames and immediate seek priority; pause at the selected frame instead of replacing it on the next playback tick. | N1/N2 and §5 cached input-to-present budget; N3 forbids an approximate cache hit. No low-resolution stand-in was needed for the cached fixture. |
+| Same-device, same-queue rendering, bounded submissions and retained leases, with revision/output stamps checked before submission. | §3.3 lifecycle and N8; adapt the existing engine presenter policy without changing engine crates or adding transport. |
+| Worker deadlines use display-link phase, count expired targets, and keep seek wakeups independent. | §5 zero-drop constraint; a latest-tick queue alone cannot mask missing main-thread callbacks. |
+| Keep `presentsWithTransaction=false`; present scrub frames ASAP and playback at explicit host targets. Do not add `afterMinimumDuration`. | N2/N8 low input latency; locked overlays already share the engine pass. Transaction presentation adds main-thread coordination, and minimum-duration presentation can defer an interactive replacement. See [Apple's transaction presentation contract](https://developer.apple.com/documentation/quartzcore/cametallayer/presentswithtransaction) and [timed drawable presentation](https://developer.apple.com/documentation/metal/mtldrawable/present(at:)). |
+| Separate a GPUI-free headless binary, synthetic-clock offscreen runs, hidden-window drawable runs and foreground runs. | N7 and §5 evidence integrity: GPU completion is not scanout. No screen unlock, screenshot or HID posting occurred in this follow-up. |
+
+### Measurements and verification
+
+All final timing cases used the unchanged public shape fixture, **1280 × 720**,
+one S3 process, one second of warmup and the pinned **Rust 1.96.1** toolchain.
+Release offscreen cases sampled one-minute load every second: maxima were
+**11.30 / 7.49 / 5.45** for sync-120 / async-120 / async-60 and below **4.90** for
+both scrub cases. These are single runs, not the required ≥30 repetitions or a
+paired Electron/hardware/corpus gate. Source rendering remains full resolution.
+
+| Final offscreen, optimized, 60 s | Sync comparison, 120 Hz | Async, 120 Hz | Async, 60 Hz |
+|---|---:|---:|---:|
+| Measured frames | 7,113 | 7,188 | 3,589 |
+| Worker → completion callback p50 / p95 (ms) | 3.326 / **5.563** | 2.367 / **4.085** | 1.856 / **2.936** |
+| Worker → GPU done p50 / p95 (ms) | 3.234 / 5.459 | 2.187 / 4.005 | 1.662 / 2.754 |
+| Offscreen headroom (4.167 / 8.333 ms budgets) | **Fail** | **Pass, render boundary only** | **Pass, render boundary only** |
+| GPU failures | 0 | 0 | 0 |
+| Synthetic timer sequences skipped, including warmup | 92 | 13 | 11 |
+| Physical scanout / continuity | Unobserved | **Unverified** | **Unverified** |
+
+The sync comparison is the **same instrumented code** with `--legacy-sync
+--no-cache`, not a replay of the complete original S3 presenter. The rows have
+separate load conditions and no paired-run confidence interval. Completion cost
+includes CPU encoding, GPU work and callback delivery, without a drawable wait
+in offscreen mode. Skipped synthetic timer slots prevent even these runs from
+being advertised as uninterrupted 120/60 Hz delivery. Offscreen GPU completion
+does not include the layer's FIFO or compositor delay.
+
+| Scrub boundary | Before | S3b result and verdict |
+|---|---|---|
+| AppKit event → actual display | **44.600 / 45.701 ms** p50/p95; fail | **Unverified** while locked; no substitute endpoint is used. |
+| Separate-thread synthetic input → GPU done, cache disabled | New diagnostic | **1.537 / 3.376 ms**, 120 requests. This is not AppKit input or display latency. |
+| Separate-thread synthetic input → GPU done, exact cache hits | No previous cached-frame path | **0.600 / 3.031 ms**, **112 hits / 120 requests**; initial eight misses excluded from this row. |
+| Cached request → worker; worker → commit | New diagnostic | p50/p95 **0.024 / 0.053 ms** and **0.123 / 0.207 ms**. No render submission on the 112 cache hits. |
+| Cached physical gate (≤9.333 ms at 120 Hz and ≤60% Electron) | Fail in prior AppKit run | **Unverified**. GPU-only latency cannot pass this row. |
+
+Initial instrumented **dev** diagnostics also failed 120 Hz headroom: sync p95
+**6.743 ms**, async **7.988 ms**; async at 60 Hz was **6.733 ms**. The worst async
+CPU render-encoding span was **183.172 ms**, versus consumer GPU execution p95
+**1.123 ms**. Producer synchronous-wait p95 fell to **0.007 ms** on the async
+path, but CPU/scheduling tails remained. These diagnostics preceded the final
+producer marker and worker-phase updates; the failed 120 Hz rows are retained
+without claiming a regression-free comparison. One launcher was edited while a shell was
+executing it, causing that wrapper to fail after writing its 60 Hz report. The
+final optimized matrix and hidden run all exited successfully with the launcher
+unchanged during execution.
+
+Final **hidden-window dev** diagnostic, three measured seconds at synthetic
+120 Hz: **360** measured submissions/callbacks, **360 zero `presentedTime`**,
+**0** positive display samples, **0** no-drawable returns. Drawable acquisition
+p50/p95 **4.563 / 6.787 ms**; worker-to-completion **9.203 / 11.569 ms**. Thus the
+hidden layer does recycle drawables, but **does not display** while locked and
+fails the 4.167 ms diagnostic cost budget. This is evidence of drawable
+backpressure, not a physical playback pass or a prediction of foreground cost.
+
+Validation: **15/15 tests per binary (30 total)** pass in the full default-feature
+Cargo test run; **11/11** isolated policy/color/mailbox tests pass. Both the dev
+viewer and optimized GPUI-free binary build. Formatting, shell/Python syntax,
+and diff whitespace checks pass. Offscreen SDR/PQ-input comparison under
+**Metal API validation** has no validation errors: SDR ΔE2000 p99/max
+**0.030891 / 0.060174**, PQ **0.057133 / 0.121483**, each over **921,600** pixels.
+Linear probe patches remain **0.5, 1, 2, 4, 8**. This validates queue ordering and
+render output, not a CAMetalLayer/display color oracle. The existing `block 0.1.6`
+future-compatibility warning remains.
+
+Final review added unit-tested paused-seek retries and output-change repainting
+without changing the measured successful-render path. No drawable loss or stale
+rejection occurred in the final offscreen timing cases.
+
+No engine-crate or vendor files were changed by S3b. Disk stayed above the
+explicit 4 GiB stop threshold (lowest observed approximately **5.8 GiB** before
+space was reclaimed externally). Only the shared target was used; no clean,
+release publication, tag, push, private plan or screenshot commit occurred.
+
+### Reproduction
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+# No GPUI or WindowServer needed for this binary.
+python3 apps/native/spikes/s3/build.py build -p pm-native-s3-spike \
+  --no-default-features --bin pm-native-s3-headless --release
+python3 apps/native/spikes/s3/bench.py --release
+# Hidden capability check: never activates or shows its window.
+python3 apps/native/spikes/s3/build.py build -p pm-native-s3-spike \
+  --bin pm-native-s3-spike
+python3 apps/native/spikes/s3/bench.py --hidden
+python3 apps/native/spikes/s3/build.py test -p pm-native-s3-spike \
+  --no-default-features --bin pm-native-s3-headless
+zsh apps/native/spikes/s3/test-units.sh
+
+# Ready for a future foreground quiet window; does not unlock the Mac.
+zsh apps/native/spikes/s3/foreground.sh
+```
+
+`bench.py` runs one S3 process at a time, waits up to three minutes for load below
+12, samples load during each run, and records the condition separately. It uses
+the shared target only and stops its own batch below 4 GiB. `--case=<name>` selects
+one experiment; `--quick` shortens playback diagnostics to three seconds. Raw
+reports/logs stay in `/tmp/s3b-*`; no local dumps or screenshots are tracked.
+`foreground.sh` builds and selects the optimized viewer by default;
+`S3_PROFILE=debug` selects a dev comparison run. The script includes ordinary
+and repeated-position **AppKit** scrub tests, synthetic cached seeks, two 60-second
+soaks and SDR/PQ-input accuracy.
+
+Still required: physical input-to-display p95 (including the ≤60% Electron
+comparison), zero physical scanout gaps at both rates, foreground headroom,
+release viewer build/run, matched audio-clock behavior, physical display moves,
+required machines/corpora/repetitions and review. The earlier outstanding HDR
+output, overlay and composition items remain open.

@@ -16,7 +16,13 @@ until (set -o noclobber; echo s3 > /tmp/pm-shots/gui.lock) 2>/dev/null; do
   sleep 30
 done
 trap 'rm -f /tmp/pm-shots/gui.lock' EXIT INT TERM
-python3 - "$CARGO_TARGET_DIR/debug/pm-native-s3-spike" --document=/tmp/pm-s3-corpus/document.json "$@" <<'PYRUN'
+binary=pm-native-s3-spike
+for arg in "$@"; do
+  if [[ "$arg" == --offscreen ]]; then binary=pm-native-s3-headless; fi
+done
+profile=${S3_PROFILE:-debug}
+[[ "$profile" == debug || "$profile" == release ]] || { echo 'S3_PROFILE must be debug or release' >&2; exit 1; }
+python3 - "$CARGO_TARGET_DIR/$profile/$binary" --document=/tmp/pm-s3-corpus/document.json "$@" <<'PYRUN'
 import os,subprocess,sys
 s=os.statvfs('/')
 assert s.f_bavail*s.f_frsize >= 4*1024**3, 'S3 STOP: below 4 GiB after GUI wait'

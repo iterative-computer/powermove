@@ -4,10 +4,23 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["ui"]
+ui = ["dep:gpui", "dep:gpui_macos"]
+
+[[bin]]
+name = "pm-native-s3-spike"
+path = "src/main.rs"
+required-features = ["ui"]
+
+[[bin]]
+name = "pm-native-s3-headless"
+path = "src/headless.rs"
+
 [dependencies]
 anyhow = "1"
-gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
-gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, optional = true }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", optional = true }
 pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
 pm-render = { path = "../../../../engine/crates/pm-render" }
 pm-model = { path = "../../../../engine/crates/pm-model" }

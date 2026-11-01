@@ -1,24 +1,15 @@
 //! A view-bound display link; no GPUI invalidation in the callback. One queued
 //! tick bounds latency. Invalidate before releasing the target on window close.
+use crate::mailbox::{Clock, Tick};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
 };
 use objc2_app_kit::NSView;
 use objc2_foundation::{NSObject, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
-use std::{
-    cell::Cell,
-    sync::mpsc::{Receiver, SyncSender, sync_channel},
-};
-
-#[derive(Clone, Copy)]
-pub struct Tick {
-    pub sequence: u64,
-    pub timestamp: f64,
-    pub target: f64,
-}
+use std::cell::Cell;
 struct State {
-    sender: SyncSender<Tick>,
+    sender: Clock,
     sequence: Cell<u64>,
 }
 define_class!(
@@ -33,7 +24,7 @@ define_class!(
             let s = self.ivars();
             let sequence = s.sequence.get();
             s.sequence.set(sequence + 1);
-            let _ = s.sender.try_send(Tick { sequence, timestamp: link.timestamp(), target: link.targetTimestamp() });
+            s.sender.tick(Tick { sequence, timestamp: link.timestamp(), target: link.targetTimestamp(), callback: crate::trace::now() });
         }
     }
 );
@@ -42,8 +33,9 @@ pub struct Pacer {
     _target: Retained<DisplayTarget>,
 }
 impl Pacer {
-    pub fn new(view: &NSView, hz: f64) -> (Self, Receiver<Tick>) {
-        let (sender, receiver) = sync_channel(1);
+    pub fn new(view: &NSView, hz: f64) -> (Self, Clock) {
+        let sender = Clock::default();
+        let receiver = sender.clone();
         let this = DisplayTarget::alloc(MainThreadMarker::new().unwrap()).set_ivars(State {
             sender,
             sequence: Cell::new(0),

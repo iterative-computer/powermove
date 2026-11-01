@@ -15,7 +15,9 @@ pub struct Control {
     pub rect: [f32; 4],
     pub stop: bool,
     pub appkit_inputs: u64,
-    pub seek: Option<(f64, f64, Stamp)>,
+    pub superseded: u64,
+    pub selected_time: Option<f64>,
+    pub seek: Option<(f64, f64, f64, Stamp)>,
 }
 #[derive(Clone, Debug)]
 pub struct Update {
@@ -24,6 +26,7 @@ pub struct Update {
     pub error: Option<String>,
 }
 pub struct Host {
+    pub clock: crate::mailbox::Clock,
     pub control: Arc<Mutex<Control>>,
     pub updates: async_channel::Receiver<Update>,
     pub renders: Arc<std::sync::atomic::AtomicU64>,
@@ -37,13 +40,17 @@ pub struct Options {
     pub verify: bool,
     pub measure_overlays: bool,
     pub report: String,
+    pub mode: String,
+    pub legacy_sync: bool,
+    pub synthetic_scrub: bool,
+    pub cache: bool,
 }
 impl Host {
     pub fn start(
         gpu: pm_gpu::Gpu,
         layer: metal::MetalLayer,
         output: Output,
-        clock: std::sync::mpsc::Receiver<crate::pacing::Tick>,
+        clock: crate::mailbox::Clock,
         layer_updates: Arc<std::sync::atomic::AtomicU64>,
         options: Options,
     ) -> Self {
@@ -52,6 +59,8 @@ impl Host {
             rect: [0.1, 0.1, 0.9, 0.9],
             stop: false,
             appkit_inputs: 0,
+            superseded: 0,
+            selected_time: None,
             seek: None,
         }));
         let renders = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -60,12 +69,16 @@ impl Host {
         let redraws = renders.clone();
         let presents = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let commits = presents.clone();
+        let input_clock = clock.clone();
         std::thread::Builder::new()
             .name("s3-engine-viewer".into())
             .spawn(move || {
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let timer = (options.mode == "hidden")
+                    .then(|| timer(clock.clone(), options.hz, done.clone()));
                 let result = run(
                     gpu,
-                    layer,
+                    Some(layer),
                     clock,
                     &c,
                     &tx,
@@ -74,6 +87,10 @@ impl Host {
                     &layer_updates,
                     options,
                 );
+                done.store(true, Ordering::Release);
+                if let Some(timer) = timer {
+                    timer.join().unwrap();
+                }
                 let update = Update {
                     time: 0.,
                     finished: true,
@@ -83,6 +100,7 @@ impl Host {
             })
             .unwrap();
         Self {
+            clock: input_clock,
             control,
             updates,
             renders,
@@ -104,13 +122,22 @@ fn now() -> f64 {
 fn accuracy(
     engine: &mut Engine,
     scene: &Scene,
-    layer: &metal::MetalLayer,
+    layer: Option<&metal::MetalLayer>,
     output: Output,
 ) -> anyhow::Result<serde_json::Value> {
     let t = ticks(0.13);
     let reference = engine.export(scene, t, Size::new(output.width, output.height))?;
     let sub = engine
-        .encode(scene, t, output, layer, [0.; 4], 0, true)?
+        .frame(
+            scene,
+            t,
+            output,
+            layer,
+            [0.; 4],
+            0,
+            true,
+            Arc::new(Mutex::new(Default::default())),
+        )?
         .ok_or_else(|| anyhow::anyhow!("no drawable in accuracy run"))?;
     sub.commit();
     sub.complete()?;
@@ -130,130 +157,193 @@ fn accuracy(
         maximum_linear = maximum_linear.max(expected.into_iter().fold(0_f64, f64::max));
         errors.push(color::delta(*actual, expected));
     }
-    let report = json!({"pixels":pixels.len(),"deltaE2000_p50":percentile(&errors,0.5),"deltaE2000_p99":percentile(&errors,0.99),"deltaE2000_max":percentile(&errors,1.),"export_peak_linear_P3":maximum_linear,"passes_deltaE_gate":percentile(&errors,0.99)<=1. && percentile(&errors,1.)<=2.,"overlays":false,"readback":"actual drawable blit before present; pm-export::render_frame independent render"});
+    let report = json!({"pixels":pixels.len(),"deltaE2000_p50":percentile(&errors,0.5),"deltaE2000_p99":percentile(&errors,0.99),"deltaE2000_max":percentile(&errors,1.),"export_peak_linear_P3":maximum_linear,"passes_deltaE_gate":percentile(&errors,0.99)<=1. && percentile(&errors,1.)<=2.,"overlays":false,"readback":if layer.is_some() { "drawable blit; independent export render" } else { "offscreen texture blit; independent export render; NOT display accuracy" }});
     Ok(report)
 }
 fn run(
     gpu: pm_gpu::Gpu,
-    layer: metal::MetalLayer,
-    clock: std::sync::mpsc::Receiver<crate::pacing::Tick>,
-    c: &Mutex<Control>,
+    layer: Option<metal::MetalLayer>,
+    clock: crate::mailbox::Clock,
+    c: &Arc<Mutex<Control>>,
     tx: &async_channel::Sender<Update>,
     redraws: &std::sync::atomic::AtomicU64,
     gpui_commits: &std::sync::atomic::AtomicU64,
     layer_updates: &std::sync::atomic::AtomicU64,
     options: Options,
 ) -> anyhow::Result<()> {
+    set_interactive();
     let mut engine = Engine::new(gpu)?;
-    // Wait for the first committed GPUI slot geometry. No worker→main waits.
-    std::thread::sleep(Duration::from_millis(1500));
+    engine.legacy_sync = options.legacy_sync;
+    engine.cache_enabled = options.cache;
+    if options.mode != "offscreen" {
+        std::thread::sleep(Duration::from_millis(1500));
+    }
     let output = c.lock().unwrap().policy.output;
     let mut accuracy_rows = json!({});
     if options.verify {
-        accuracy_rows["edr_drawable"] = edr_probe(&mut engine, &options.scene, &layer, output)?;
-        accuracy_rows["sdr"] = accuracy(&mut engine, &options.scene, &layer, output)?;
+        let target = layer.as_ref();
+        accuracy_rows["edr_target"] = edr_probe(&mut engine, &options.scene, target, output)?;
+        accuracy_rows["sdr"] = accuracy(&mut engine, &options.scene, target, output)?;
         if let Some(pq) = &options.pq {
-            accuracy_rows["pq"] = accuracy(&mut engine, pq, &layer, output)?;
+            // Different immutable scene: do not let a matching revision/time
+            // from the previous scene satisfy this independent oracle.
+            engine.clear_cache();
+            accuracy_rows["pq"] = accuracy(&mut engine, pq, target, output)?;
+            engine.clear_cache();
         }
     }
     let interval = 1. / options.hz;
     let start = Instant::now();
-    while clock.try_recv().is_ok() {}
-    let mut first_sequence = None;
     let mut last_sequence = None;
-    let mut tick_gaps = Vec::new();
     let mut last_timestamp = None;
+    let mut tick_gaps = Vec::with_capacity(8000);
+    let mut callback_jitter = Vec::with_capacity(8000);
     let mut missed_ticks = 0;
-    let mut work = Vec::new();
-    let mut stale = 0;
     let mut no_drawable = 0;
-    let mut late = 0;
-    let presented = Arc::new(Mutex::new(Vec::<(u64, f64, f64, f64)>::new()));
+    let mut stale = 0;
+    let mut seek_retries = 0;
+    let mut blocked = Vec::new();
+    let mut traces = Vec::with_capacity(8000);
+    let mut pending = std::collections::VecDeque::<crate::render::Submission>::with_capacity(2);
+    let mut overlay_rows = Vec::new();
     let mut gpui_at_start = None;
     let mut commits_at_start = None;
     let mut layers_at_start = None;
-    let mut overlay_rows = Vec::new();
+    let mut paused = false;
+    let mut stimulus = Stimulus::start(c.clone(), clock.clone(), options.synthetic_scrub);
+    let mut ticks_received = 0;
+    let mut schedule = crate::policy::PlaybackSchedule::default();
+    let mut predicted_frames = 0;
     while start.elapsed().as_secs_f64() < options.seconds + 1. {
-        let tick = clock.recv_timeout(Duration::from_secs(2))?;
-        let first = *first_sequence.get_or_insert(tick.sequence);
-        let index = tick.sequence - first;
-        if let Some(last) = last_sequence {
-            missed_ticks += tick.sequence - last - 1;
+        let elapsed = start.elapsed().as_secs_f64();
+        let foreground_clock = options.mode == "foreground" && !paused;
+        let event = if foreground_clock {
+            clock.next_for(schedule.wait(now(), interval))
+        } else {
+            clock.next()
+        };
+        if c.lock().unwrap().stop {
+            break;
         }
-        last_sequence = Some(tick.sequence);
-        if let Some(last) = last_timestamp {
-            tick_gaps.push((tick.timestamp - last) * 1000.);
+        let (due, callback) = match event {
+            crate::mailbox::Event::Tick(tick) => {
+                ticks_received += 1;
+                if let Some(last) = last_sequence {
+                    missed_ticks += tick.sequence - last - 1;
+                }
+                last_sequence = Some(tick.sequence);
+                if let Some(last) = last_timestamp {
+                    tick_gaps.push((tick.timestamp - last) * 1000.);
+                }
+                last_timestamp = Some(tick.timestamp);
+                callback_jitter.push((now() - tick.callback) * 1000.);
+                if paused {
+                    continue;
+                }
+                if foreground_clock {
+                    schedule.observe(tick.target, interval);
+                    let Some(due) = schedule.take(now(), interval) else {
+                        continue;
+                    };
+                    (due, tick.callback)
+                } else {
+                    (tick.target, tick.callback)
+                }
+            }
+            crate::mailbox::Event::Seek => (0., 0.),
+            crate::mailbox::Event::Timeout => {
+                if !foreground_clock {
+                    continue;
+                }
+                let Some(due) = schedule.take(now(), interval) else {
+                    continue;
+                };
+                predicted_frames += 1;
+                (due, 0.)
+            }
+        };
+        // Completion status retires surfaces without a per-frame CPU wait.
+        while pending
+            .front()
+            .is_some_and(|s| s.command.status() == metal::MTLCommandBufferStatus::Completed)
+        {
+            pending.pop_front();
         }
-        last_timestamp = Some(tick.timestamp);
-        let due = tick.target;
-        let began = Instant::now();
+        if pending.len() == 2 {
+            let began = now();
+            pending.pop_front().unwrap().complete()?;
+            blocked.push((now() - began) * 1000.);
+        }
         let (output, stamp, rect, seek) = {
             let mut ctl = c.lock().unwrap();
-            if ctl.stop {
-                break;
+            let seek = ctl.seek.take();
+            if let Some(s) = seek {
+                ctl.selected_time = Some(s.0);
             }
-            let stamp = if let Some((_, _, stamp)) = ctl.seek {
+            let stamp = if let Some((_, _, _, stamp)) = seek {
                 stamp
             } else {
                 ctl.policy.request(options.scene.doc.revision())
             };
-            (ctl.policy.output, stamp, ctl.rect, ctl.seek.take())
+            (ctl.policy.output, stamp, ctl.rect, seek)
         };
-        let time = seek.map_or((index as f64 * interval) % 2.5, |s| s.0);
-        let input = seek.map_or(now(), |s| s.1);
-        let Some(sub) = engine.encode(
+        if due == 0. && seek.is_none() {
+            continue;
+        }
+        let time = seek.map_or(elapsed % 2.5, |s| s.0);
+        // Seeking is a transport discontinuity. Keep the selected frame, rather
+        // than immediately overwriting it with the next playback tick.
+        paused |= seek.is_some();
+        let trace = Arc::new(Mutex::new(crate::trace::Trace {
+            id: traces.len() as u64,
+            measured: elapsed >= 1.,
+            scrub: seek.is_some_and(|s| s.1 > 0.),
+            input: seek.map_or(0., |s| s.1),
+            request: seek.map_or(callback, |s| s.2),
+            worker_start: now(),
+            link_callback: callback,
+            target: due,
+            ..Default::default()
+        }));
+        let sub = engine.frame(
             &options.scene,
             ticks(time),
             output,
-            &layer,
+            layer.as_ref(),
             rect,
             1,
             options.measure_overlays,
-        )?
-        else {
+            trace.clone(),
+        )?;
+        let Some(sub) = sub else {
             no_drawable += 1;
+            seek_retries += u64::from(retry_seek(c, &clock, seek));
             continue;
         };
         let current = c.lock().unwrap();
         if !current.policy.accepts(stamp) {
+            // Producer work was already submitted. The source remains leased
+            // until it finishes even when no consumer will present it.
+            drop(current);
+            sub.finish_producer()?;
+            seek_retries += u64::from(retry_seek(c, &clock, seek));
             stale += 1;
             continue;
         }
-        let samples = presented.clone();
-        let measured = index;
-        let scrub = seek.is_some();
-        let handler = block::ConcreteBlock::new(move |d: &metal::DrawableRef| {
-            let t = d.presented_time();
-            samples
-                .lock()
-                .unwrap()
-                .push((measured, t, due, if scrub { input } else { 0. }));
-        })
-        .copy();
-        sub.drawable.add_presented_handler(&handler);
-        // Present at the next refresh target. Queue is bounded to one GPU buffer.
-        unsafe {
-            use foreign_types::ForeignTypeRef;
-            use objc2::{msg_send, runtime::AnyObject};
-            let _: () = msg_send![sub.command.as_ptr() as *mut AnyObject,presentDrawable:sub.drawable.as_ptr() as *mut AnyObject,atTime:due];
-        }
-        sub.command.commit();
+        sub.submit((seek.is_none() && due > 0.).then_some(due));
         drop(current);
-        sub.complete()?;
-        if options.measure_overlays {
-            overlay_rows.push(measure_overlay(&sub, rect, index, time));
+        if options.legacy_sync || options.measure_overlays {
+            sub.complete()?;
         }
-        // Retained surface lives through completion, including errors and resize.
-        debug_assert!(Arc::strong_count(&sub.surface) >= 2);
-        if index >= options.hz as u64 {
+        if options.measure_overlays {
+            overlay_rows.push(measure_overlay(&sub, rect, trace.lock().unwrap().id, time));
+        }
+        traces.push(trace);
+        pending.push_back(sub);
+        if elapsed >= 1. {
             layers_at_start.get_or_insert_with(|| layer_updates.load(Ordering::Acquire));
             commits_at_start.get_or_insert_with(|| gpui_commits.load(Ordering::Acquire));
             gpui_at_start.get_or_insert_with(|| redraws.load(Ordering::Acquire));
-            let elapsed = began.elapsed().as_secs_f64() * 1000.;
-            work.push(elapsed);
-            if elapsed > interval * 1000. {
-                late += 1
-            }
         }
         let _ = tx.try_send(Update {
             time,
@@ -261,21 +351,44 @@ fn run(
             error: None,
         });
     }
+    stimulus.stop();
+    for sub in pending {
+        sub.complete()?;
+    }
+    // WindowServer may not present a hidden/locked layer. Leave missing/zero
+    // callback counts visible instead of converting GPU completion to display.
     std::thread::sleep(Duration::from_millis(300));
-    let samples = presented.lock().unwrap();
-    let measured: Vec<_> = samples
-        .iter()
-        .filter(|s| s.0 >= options.hz as u64)
-        .collect();
-    let scanout: Vec<_> = measured.iter().filter(|s| s.1 > 0.).map(|s| s.1).collect();
-    let gaps: Vec<_> = scanout.windows(2).map(|w| (w[1] - w[0]) * 1000.).collect();
-    let scrub: Vec<_> = samples
-        .iter()
-        .filter(|s| s.3 > 0. && s.1 > 0.)
-        .map(|s| (s.1 - s.3) * 1000.)
-        .collect();
-    let dropped = measured.iter().filter(|s| s.1 == 0.).count();
-    let report = json!({"pacing":"NSView CADisplayLink, preferredFrameRateRange", "display_link_gap_ms":{"p50":percentile(&tick_gaps,0.5),"p95":percentile(&tick_gaps,0.95)},"display_link_ticks_missed":missed_ticks,"requested_hz":options.hz,"requested_seconds":options.seconds,"measured_frames":work.len(),"presented_callbacks":measured.len(),"not_presented":dropped,"missing_presented_callbacks":work.len().saturating_sub(measured.len()),"scanout_gaps_over_1_5_intervals":gaps.iter().filter(|g| **g > interval*1500.).count(),"presentation_late_ms_p95":percentile(&measured.iter().filter(|s| s.1>0.).map(|s| (s.1-s.2)*1000.).collect::<Vec<_>>(),0.95),"late_or_missed_schedule":late,"no_drawable":no_drawable,"stale_rejected":stale,"frame_ms":{"p50":percentile(&work,0.5),"p95":percentile(&work,0.95)},"scanout_gap_ms":{"p50":percentile(&gaps,0.5),"p95":percentile(&gaps,0.95)},"appkit_input_events":c.lock().unwrap().appkit_inputs,"scrub_ms":{"samples":scrub.len(),"p50":percentile(&scrub,0.5),"p95":percentile(&scrub,0.95)},"headroom_budget_ms":interval*500.,"native_layer_updates_during_measurement":layer_updates.load(Ordering::Acquire)-layers_at_start.unwrap_or(0),"overlay_measurements":overlay_rows,"gpui_presents_during_measurement":gpui_commits.load(Ordering::Acquire)-commits_at_start.unwrap_or(0),"gpui_paints_during_measurement":redraws.load(Ordering::Acquire)-gpui_at_start.unwrap_or(0),"accuracy":accuracy_rows,"scope":"one public corpus project; silent transport; scrub origin is NSEvent timestamp for AppKit clicks, enqueue time for exercise seeks; no paired Electron baseline"});
+    let rows: Vec<_> = traces.iter().map(|t| t.lock().unwrap().json()).collect();
+    let mut report = crate::metrics::report(&rows, interval, &options.mode);
+    report["predicted_phase_frames"] = json!(predicted_frames);
+    report["expired_playback_targets"] = json!(schedule.skipped);
+    report["requested_seconds"] = json!(options.seconds);
+    report["requested_hz"] = json!(options.hz);
+    report["legacy_sync"] = json!(options.legacy_sync);
+    report["cache_enabled"] = json!(options.cache);
+    report["synthetic_scrub_requests"] = json!(stimulus.count.load(Ordering::Acquire));
+    report["display_link_ticks_received"] = json!(ticks_received);
+    report["display_link_ticks_missed"] = json!(missed_ticks);
+    report["display_link_gap_ms"] = crate::metrics::distribution(&tick_gaps);
+    report["callback_to_worker_ms"] = crate::metrics::distribution(&callback_jitter);
+    report["in_flight_bound_wait_ms"] = crate::metrics::distribution(&blocked);
+    report["seek_retries"] = json!(seek_retries);
+    report["no_drawable"] = json!(no_drawable);
+    report["stale_rejected"] = json!(stale);
+    report["appkit_input_events"] = json!(c.lock().unwrap().appkit_inputs);
+    report["superseded_requests"] = json!(c.lock().unwrap().superseded);
+    report["accuracy"] = accuracy_rows;
+    report["overlay_measurements"] = json!(overlay_rows);
+    report["native_layer_updates_during_measurement"] =
+        json!(layer_updates.load(Ordering::Acquire) - layers_at_start.unwrap_or(0));
+    report["gpui_presents_during_measurement"] =
+        json!(gpui_commits.load(Ordering::Acquire) - commits_at_start.unwrap_or(0));
+    report["gpui_paints_during_measurement"] =
+        json!(redraws.load(Ordering::Acquire) - gpui_at_start.unwrap_or(0));
+    std::fs::write(
+        format!("{}.trace.json", options.report),
+        serde_json::to_vec(&rows)?,
+    )?;
     std::fs::write(&options.report, serde_json::to_vec_pretty(&report)?)?;
     eprintln!("S3 report {report}");
     // Collect every row and save the report, then preserve --verify failure
@@ -351,11 +464,20 @@ fn measure_overlay(
 fn edr_probe(
     engine: &mut Engine,
     scene: &Scene,
-    layer: &metal::MetalLayer,
+    layer: Option<&metal::MetalLayer>,
     output: Output,
 ) -> anyhow::Result<serde_json::Value> {
     let sub = engine
-        .encode(scene, ticks(0.), output, layer, [0.; 4], 2, true)?
+        .frame(
+            scene,
+            ticks(0.),
+            output,
+            layer,
+            [0.; 4],
+            2,
+            true,
+            Arc::new(Mutex::new(Default::default())),
+        )?
         .ok_or_else(|| anyhow::anyhow!("no EDR probe drawable"))?;
     sub.commit();
     sub.complete()?;
@@ -367,6 +489,235 @@ fn edr_probe(
         })
         .collect();
     Ok(
-        json!({"current_headroom":output.headroom,"pixel_format":"RGBA16Float","colorspace":"kCGColorSpaceExtendedLinearDisplayP3","edr_enabled":true,"requested_linear_patches":[0.5,1.,2.,4.,8.],"drawable_linear_patches":patches,"limit":"pre-compositor drawable values; no photometer measurement"}),
+        json!({"current_headroom":output.headroom,"pixel_format":"RGBA16Float","colorspace":"kCGColorSpaceExtendedLinearDisplayP3","edr_enabled":layer.is_some(),"requested_linear_patches":[0.5,1.,2.,4.,8.],"drawable_linear_patches":patches,"limit":if layer.is_some() {"pre-compositor drawable values; no photometer measurement"} else {"offscreen texture values; no compositor or display"}}),
     )
+}
+
+fn set_interactive() {
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos: u32, relative: i32) -> i32;
+    }
+    unsafe {
+        pthread_set_qos_class_self_np(0x21, 0);
+    }
+}
+
+/// No AppKit/WindowServer/display link at all; the clock is explicitly synthetic.
+pub fn offscreen(gpu: pm_gpu::Gpu, options: Options) -> anyhow::Result<()> {
+    let clock = crate::mailbox::Clock::default();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread = timer(clock.clone(), options.hz, done.clone());
+    let c = Arc::new(Mutex::new(Control {
+        policy: Policy::new(Output {
+            width: 1280,
+            height: 720,
+            display: 0,
+            headroom: 1.,
+        }),
+        rect: [0.1, 0.1, 0.9, 0.9],
+        stop: false,
+        appkit_inputs: 0,
+        superseded: 0,
+        selected_time: None,
+        seek: None,
+    }));
+    let (tx, _) = async_channel::bounded(1);
+    let counter = std::sync::atomic::AtomicU64::new(0);
+    let result = run(
+        gpu, None, clock, &c, &tx, &counter, &counter, &counter, options,
+    );
+    done.store(true, Ordering::Release);
+    thread.join().unwrap();
+    result
+}
+
+fn timer(
+    clock: crate::mailbox::Clock,
+    hz: f64,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        set_interactive();
+        let began = Instant::now();
+        let host = now();
+        let mut sequence = 0;
+        while !stop.load(Ordering::Acquire) {
+            let due = Duration::from_secs_f64(sequence as f64 / hz);
+            if let Some(wait) = due.checked_sub(began.elapsed()) {
+                std::thread::sleep(wait);
+            }
+            let timestamp = host + sequence as f64 / hz;
+            clock.tick(crate::mailbox::Tick {
+                sequence,
+                timestamp,
+                target: timestamp + 1. / hz,
+                callback: now(),
+            });
+            sequence += 1;
+        }
+    })
+}
+
+/// A separate synthetic input producer exercises the SAME queue/wake as AppKit.
+/// It is explicitly not a measurement of HID/AppKit delivery.
+struct Stimulus {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    count: Arc<std::sync::atomic::AtomicU64>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Stimulus {
+    fn start(c: Arc<Mutex<Control>>, clock: crate::mailbox::Clock, enabled: bool) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let done = stop.clone();
+        let sent = count.clone();
+        let thread = enabled.then(|| {
+            std::thread::spawn(move || {
+                let began = Instant::now();
+                for i in 0..120 {
+                    let due = Duration::from_secs_f64(2. + i as f64 * 0.05);
+                    while let Some(wait) = due.checked_sub(began.elapsed()) {
+                        if done.load(Ordering::Acquire) {
+                            return;
+                        }
+                        std::thread::sleep(wait.min(Duration::from_millis(50)));
+                    }
+                    if done.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let input = now();
+                    let mut ctl = c.lock().unwrap();
+                    let revision = ctl.policy.stamp.revision;
+                    let stamp = ctl.policy.request(revision);
+                    ctl.superseded += u64::from(ctl.seek.is_some());
+                    ctl.seek = Some((((i * 3) % 8) as f64 / 8., input, now(), stamp));
+                    drop(ctl);
+                    clock.seek();
+                    sent.fetch_add(1, Ordering::Release);
+                }
+            })
+        });
+        Self {
+            stop,
+            count,
+            thread,
+        }
+    }
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            t.join().unwrap();
+        }
+    }
+}
+impl Drop for Stimulus {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+// A paused seek must survive drawable loss/resize, unless newer input replaced
+// it. Keep the ORIGINAL input/request times so retries cannot hide latency.
+fn retry_seek(
+    c: &Mutex<Control>,
+    clock: &crate::mailbox::Clock,
+    seek: Option<(f64, f64, f64, Stamp)>,
+) -> bool {
+    let Some((time, input, request, _)) = seek else {
+        return false;
+    };
+    let mut ctl = c.lock().unwrap();
+    if ctl.seek.is_some() || ctl.stop {
+        return false;
+    }
+    let revision = ctl.policy.stamp.revision;
+    let stamp = ctl.policy.request(revision);
+    ctl.seek = Some((time, input, request, stamp));
+    drop(ctl);
+    clock.seek();
+    true
+}
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    #[test]
+    fn drawable_retry_keeps_latency_origin_and_never_overwrites_new_input() {
+        let mut policy = Policy::new(Output {
+            width: 1280,
+            height: 720,
+            display: 0,
+            headroom: 1.,
+        });
+        let stamp = policy.request(1);
+        let original = Some((0.5, 10., 10.001, stamp));
+        let c = Mutex::new(Control {
+            policy,
+            rect: [0.; 4],
+            stop: false,
+            appkit_inputs: 0,
+            superseded: 0,
+            selected_time: None,
+            seek: None,
+        });
+        let clock = crate::mailbox::Clock::default();
+        assert!(retry_seek(&c, &clock, original));
+        let pending = c.lock().unwrap().seek.unwrap();
+        assert_eq!((pending.0, pending.1, pending.2), (0.5, 10., 10.001));
+        assert_ne!(pending.3, stamp);
+        assert!(matches!(clock.next(), crate::mailbox::Event::Seek));
+        assert!(!retry_seek(&c, &clock, Some((0.1, 9., 9.001, stamp))));
+        assert_eq!(c.lock().unwrap().seek.unwrap(), pending);
+    }
+}
+
+impl Control {
+    /// Repaint a paused selection after resize/display retirement. This is not
+    /// new input, so its zero input origin must stay out of scrub distributions.
+    pub fn configure_output(&mut self, output: Output, request: f64) -> bool {
+        let generation = self.policy.stamp.generation;
+        self.policy.configure(output);
+        if generation == self.policy.stamp.generation || self.seek.is_some() {
+            return false;
+        }
+        let Some(time) = self.selected_time else {
+            return false;
+        };
+        let revision = self.policy.stamp.revision;
+        let stamp = self.policy.request(revision);
+        self.seek = Some((time, 0., request, stamp));
+        true
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn paused_resize_requeues_selection_without_inventing_new_input() {
+        let output = Output {
+            width: 1280,
+            height: 720,
+            display: 0,
+            headroom: 1.,
+        };
+        let mut c = Control {
+            policy: Policy::new(output),
+            rect: [0.; 4],
+            stop: false,
+            appkit_inputs: 0,
+            superseded: 0,
+            selected_time: Some(0.5),
+            seek: None,
+        };
+        let resized = Output {
+            width: 640,
+            ..output
+        };
+        assert!(c.configure_output(resized, 12.));
+        let s = c.seek.unwrap();
+        assert_eq!((s.0, s.1, s.2), (0.5, 0., 12.));
+        assert!(c.policy.accepts(s.3));
+        assert!(!c.configure_output(resized, 13.));
+        assert_eq!(c.seek.unwrap(), s);
+    }
 }

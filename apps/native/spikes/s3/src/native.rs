@@ -28,7 +28,7 @@ pub struct Native {
     _pacer: crate::pacing::Pacer,
     pub playback_ready: bool,
     pub layer_updates: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    pub clock: Option<std::sync::mpsc::Receiver<crate::pacing::Tick>>,
+    pub clock: Option<crate::mailbox::Clock>,
     window: Retained<NSWindow>,
     view: Retained<NSView>,
     above: Retained<PassiveOverlay>,
@@ -84,7 +84,7 @@ impl Native {
         unsafe {
             let p = layer.as_ptr() as *mut AnyObject;
             let _: () = msg_send![p,setWantsExtendedDynamicRangeContent:true];
-            let _: () = msg_send![p,setMaximumDrawableCount:3_u64];
+            let _: () = msg_send![p,setMaximumDrawableCount:2_u64];
             let _: () = msg_send![p,setAllowsNextDrawableTimeout:true];
             let name = objc2_core_graphics::kCGColorSpaceExtendedLinearDisplayP3;
             let space = objc2_core_graphics::CGColorSpace::with_name(Some(name)).unwrap();
@@ -184,7 +184,14 @@ impl Native {
             self.last_output = Some(output);
         }
         if let Some(host) = &self.host {
-            host.control.lock().unwrap().policy.configure(output);
+            let refresh = host
+                .control
+                .lock()
+                .unwrap()
+                .configure_output(output, crate::trace::now());
+            if refresh {
+                host.clock.seek();
+            }
         }
     }
     pub fn update(&mut self, update: &Update) {
@@ -230,7 +237,10 @@ impl Native {
             let revision = c.policy.stamp.revision;
             let stamp = c.policy.request(revision);
             c.appkit_inputs += u64::from(appkit);
-            c.seek = Some((time, input, stamp));
+            c.superseded += u64::from(c.seek.is_some());
+            c.seek = Some((time, input, crate::trace::now(), stamp));
+            drop(c);
+            host.clock.seek();
         }
     }
     pub fn seek_input(&mut self, x: f64) {
@@ -243,6 +253,9 @@ impl Native {
             |e| e.timestamp(),
         );
         self.seek_at(time, input, true);
+    }
+    pub fn hide(&self) {
+        self.window.orderOut(None);
     }
     pub fn identity(&self) {
         eprintln!(
