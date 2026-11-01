@@ -327,6 +327,26 @@ impl Draft {
         self.commit(now, false);
         Ok(())
     }
+    /// Keyboard interception concerns tokens only. Ordinary character, word and
+    /// line deletion remains native and supplies its exact UTF-16 edit range.
+    pub fn delete_token(&mut self, backward: bool, repeat: bool, now: u64) -> bool {
+        let mut range = self.state.selection.clone();
+        if range.is_empty() {
+            if backward && range.start > 0 {
+                range.start -= 1;
+            } else if !backward && range.end < self.state.units.len() {
+                range.end += 1;
+            }
+        }
+        if !self.state.units[range]
+            .iter()
+            .any(|u| matches!(u, Unit::File(_)))
+        {
+            self.disarm();
+            return false;
+        }
+        self.delete(backward, repeat, now)
+    }
     /// Returns true for both arm and removal; repeated token deletion is inert.
     pub fn delete(&mut self, backward: bool, repeat: bool, now: u64) -> bool {
         let mut range = self.state.selection.clone();

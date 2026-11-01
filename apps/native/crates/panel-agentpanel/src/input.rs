@@ -75,16 +75,12 @@ pub fn composer(key: &Key, context: ComposerContext) -> Route {
         );
     }
     if key.name == "Backspace" || key.name == "Delete" {
-        // Modified word/line deletions use the platform's exact deletion range.
-        if key.primary() || key.alt {
-            return route(Intent::NativeText, false);
-        }
         return route(
             Intent::Delete {
                 backward: key.name == "Backspace",
                 repeat: key.repeat,
             },
-            true,
+            false,
         );
     }
     if key.name == "Enter" && key.repeat {
@@ -256,4 +252,15 @@ impl SlashMenu {
             (self.index.min(count - 1) as i64 + i64::from(delta)).rem_euclid(count as i64) as usize
         };
     }
+}
+
+/// Tagged K003/K004 are loose-modifier chords: added Alt/Cmd/Ctrl still match;
+/// fields and autorepeat do not. Registry arbitration stays with the host.
+pub fn agent_shortcut(key: &Key, in_field: bool) -> bool {
+    !in_field
+        && !key.repeat
+        && !key.composing
+        && key.primary()
+        && key.shift
+        && key.name.eq_ignore_ascii_case("k")
 }
