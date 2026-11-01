@@ -290,6 +290,9 @@ struct FontDouble {
     fail: bool,
 }
 impl fonts::FontHook for FontDouble {
+    fn faces(&mut self, _: &str) -> Result<Vec<fonts::Face>> {
+        Ok(vec![])
+    }
     fn version(&mut self) -> Result<Option<u64>> {
         Ok(self.versions.pop_front().unwrap_or(Some(1)))
     }

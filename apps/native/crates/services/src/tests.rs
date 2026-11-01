@@ -9,6 +9,7 @@ fn test_storage() -> (tempfile::TempDir, ServiceStorage) {
 mod diagnostics;
 mod entrypoints;
 mod errors;
+mod fonts;
 mod foundation;
 mod media;
 mod store;

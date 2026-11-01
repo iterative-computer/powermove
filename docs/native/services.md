@@ -207,3 +207,14 @@ Strict crate Clippy passes. Feed adapters must supply the new name/size fields;
 there is still no production feed parser/installer in this crate. The shell owner
 must render the specified sheet and verify browser links and pm-design styling on
 macOS. Metadata is never interpreted as executable markup by this lane.
+
+| Review item | Implementation / selecting rule |
+|---|---|
+| 5 — font faces | `Face { name, weight, italic }` and `FontCatalog::faces(family)` use the same required `FontHook` broker as family/version enumeration. Registered names and fractional CSS/OpenType weights are preserved; owned face snapshots are fetched fresh so activation cannot leave a stale face cache. Shell draws each family in its own face and shares face facts with the inspector Weight row. N1 pro font selection, N3 broker facts rather than inferred names, N6 existing family-cache contract, N8 worker-only broker calls. |
+
+**71 tests pass**, including three face tests for family grouping/weight/italic
+facts, owned results, activation changes, empty results and typed broker failure
+recovery. Strict crate Clippy passes. The CoreText broker adapter must implement
+`faces` and map its native weights into the engine's CSS/OpenType weight scale;
+macOS must verify activation, face selection, family-font submenus and inspector
+Weight choices. This lane adds no font renderer, face synthesis or visual metric.
