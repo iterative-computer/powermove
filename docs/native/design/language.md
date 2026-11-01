@@ -542,6 +542,8 @@ semantics, effect and property names, light-mode palette, the orange accent.
 
 These are made in this document; reverse any of them here and in pm-design.
 
+**Approved by the owner (Chike, 2026-11-01):** all five, as written below.
+
 1. Values left-aligned in wells (Electron Nov 2026) rather than right-aligned
    (mockup v2). Chosen: left, to match the shipped app.
 2. Timecode neutral, not orange. Chosen: neutral.
