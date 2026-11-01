@@ -1,9 +1,12 @@
 # P5 pro media and colour (package 21)
 
-CPU implementation: `apps/native/crates/promedia` (`pm-promedia`), plus the new
-`engine/crates/pm-color/src/lut.rs` and `scopes.rs` sources. These are worker-side
-services and single-writer models. No native UI, codec, platform performance,
-render-graph integration or cutover acceptance is claimed.
+Worker implementation: `apps/native/crates/promedia` (`pm-promedia`), portable
+`engine/crates/pm-media/src/proxy.rs` and `cache_frame.rs`, and the existing
+`engine/crates/pm-color/src/lut.rs` / `scopes.rs` sources. Real Linux software
+encodes and exact source frames drive the job/cache/LUT/scopes paths. Native
+composition-renderer wiring, VideoToolbox, UI, platform performance and cutover
+acceptance remain unverified. The final slice-2 evidence below supersedes the
+historical first-slice counts and lockfile limitation.
 
 Read against `pro-editing.md`, W1's pro-media additions and W019/W020, D-STATE's
 original/proxy-only/offline closure, the kernel single-writer contract,
@@ -140,7 +143,7 @@ active usage, not necessarily physical disk usage; full disks need another volum
 or an explicit host recovery flow. Original storage roots and archived files are
 never automatically collected by the render-cache policy.
 
-## Verification and remaining integration
+## First-slice verification and remaining integration (historical)
 
 Linux validation passes **83 crate tests** (72 original plus 11 design-review
 regressions): 16 colour/scope, 21 task, 18 media, 21 disk and 7 codec tests.
@@ -151,9 +154,10 @@ reopen/quota changes, quota refusal, archive preservation and symlink rejection.
 The unchanged engine suite passes **61 pm-color tests**. Strict Clippy
 (`--all-targets -- -D warnings`) and formatting pass on the new crate/sources.
 
-The requested root `cd apps/native && cargo test --locked -p pm-promedia` currently
-refuses because the new workspace package is absent from the native lockfile.
-That lockfile is outside ownership and remains untouched. Reproducible isolation:
+The first-slice root `cd apps/native && cargo test --locked -p pm-promedia`
+refused because the workspace package was absent from the native lockfile.
+The slice-2 base includes it and the root locked command now passes. The lockfile
+remains outside this lane's ownership and unchanged. Reproducible isolation:
 
 ```sh
 source /workspace/.tools/activate.sh
@@ -170,11 +174,9 @@ inspection. This is portable crate validation, not a root-workspace locked pass.
 
 Integration required outside owned paths:
 
-1. Native workspace owner: add `pm-promedia` to `apps/native/Cargo.lock` with
-   dependencies `blake3`, `serde`, `serde_json`, `tempfile` (all already locked)
-   and the existing engine `pm-time` path package,
-   then run the root locked test command. No root manifest edit is needed because
-   its existing `crates/*` glob discovers this crate.
+1. Native workspace owner: the first slice required the `pm-promedia` lock entry;
+   the current base already includes it. The native locked command now passes
+   without changing the lockfile or root manifest.
 2. Colour owner: add `pub mod lut; pub mod scopes;` to `pm-color/src/lib.rs`, then
    replace this crate's temporary source-path exports with a `pm-color` dependency
    when its integration lock entry is available. Tests currently compile the
@@ -254,8 +256,9 @@ Eight additional task tests cover the required data, all kind labels/symbols,
 window events, serialization, unknown totals, transitions, typed failures and
 legacy diagnostics. Combined with the three render-bar tests, all 83 tests pass
 in the Linux isolation harness, with formatting and strict Clippy clean.
-The root native locked command was attempted and refuses because the shared
-lockfile lacks this package; ownership keeps that lockfile unchanged.
+The first-slice root native locked command refused because its shared lockfile
+lacked the package. That limitation is resolved on the slice-2 base; this lane
+keeps the shared lockfile unchanged.
 
 Review disposition beyond must-fix items: item 10 is done at the presentation
 boundary. Should-fix item 3 (shared VoiceOver range summary), item 8 (sample-gated
@@ -266,3 +269,215 @@ The shell still owns toolbar visibility/aggregate progress, project grouping,
 popover/window controls, Retry routing and completion-row lifecycle. Verify these
 and live VoiceOver, Reduce Motion and render patterns on macOS using pm-design
 and the review, with Opus review before treating any visual result as final.
+
+## Pro media integration, slice 2: real worker encodes
+
+`pm-media/src/proxy.rs` adds the portable `RenditionEncoder` worker port and a
+Linux `SoftwareEncoder` using explicit FFmpeg/ffprobe executables, never a shell.
+The existing engine's encode sinks live in `pm-export`, not `pm-media`; its
+native build requires macOS dylibs/frameworks. This slice introduces the allowed
+portable pm-media path without changing that build or claiming to have connected
+VideoToolbox. A macOS adapter implements this same trait using the existing
+`pm-export` sink; it must satisfy the same output-verification contract.
+
+The software profile is deliberately `ffv1` / `mkv`: lossless, alpha-capable
+video and copied optional audio. Other profiles return typed `CodecUnsupported`.
+One video stream and at most one audio stream are admitted; other stream
+configurations remain original media, not project-open errors. Stream timebase,
+ordered presentation timestamps, individual sample durations, audio sample
+counts, alpha presence and interpretation metadata must match after encoding.
+Missing exact timing refuses rather than inferring a last frame from frame rate.
+This restricted adapter is Linux correctness evidence, not the shipping codec
+portfolio, performance certification or a replacement for the existing importers.
+
+`worker::RenditionWork::prepare` freezes the catalog job, live task ticket and
+original artifact on the kernel actor. Workers verify the source bytes, encode
+into a new private staging directory, probe/verify output and recheck the source.
+`WorkReport::accept` is the only attachment route in this integration; it calls
+`MediaCatalog::complete_task`. Late cancellation/pause wins even over a completed
+encode. Stale catalog jobs and queue lifetimes refuse. Retained staging paths
+are returned on errors and controls for the host's archive policy; no worker
+removes original, previous rendition or interrupted output bytes. Restarting a
+paused task uses a fresh job/output and reports monotone frame progress.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Add a portable FFV1 encode path and native encoder trait rather than importing the Apple-only `pm-export` graph into Linux. | N1/N8 and ownership: real CPU codec work, no Node/Chromium or main-thread JS wait; preserve existing engine consumers. |
+| Verify the ordered sample timeline and audio sample counts, beyond nominal frame-rate/duration metadata. Refuse missing exact timing. | N3: exact authored timing; do not manufacture unavailable evidence. |
+| Admit only explicitly supported software profiles/stream layouts and retain originals for everything else. | N1/N3/N4: no silent flattening, discarded streams or user-data loss. |
+| Validate output-path absence independently of process exit status; keep `-n` as defense in depth. | N3 quirk policy: FFmpeg 7.1.5 can report success for an existing-output refusal; correctness wins over reproducing the tool's status quirk. |
+| Freeze work on the actor and accept only current job/ticket results; controls win after codec release. | N3/N7/N8: headless inspectable jobs without a second writer. |
+
+The actual portable engine module is compiled by source path from `pm-promedia`,
+following the existing colour-module boundary. Out-of-lane follow-up: the media
+owner exports `pub mod proxy;` from `pm-media/src/lib.rs`, gates Apple-only build
+requirements for Linux, and the native workspace owner then replaces the source
+path with a normal `pm-media` dependency. No existing pm-media file is changed.
+The current base already includes `pm-promedia` in the native lockfile; the earlier
+lockfile limitation above is historical and no longer applies to this slice.
+
+Synthetic tests exercise real alpha/audio transcodes, nonzero start timestamps,
+optimized dimensions, no-clobber refusal, unsupported codecs, altered timing,
+changed sources, late cancellation and pause/restart. The exact executable build
+is a host-supplied deployment dependency; Linux validation does not establish
+VideoToolbox, AVFoundation, Metal, GPUI or macOS UI acceptance. No visual design
+or new UI copy is introduced.
+
+## Pro media integration, slice 2: engine frame render path
+
+`pm-media/src/cache_frame.rs` defines worker `FrameSource`, `GraphIdentity`,
+`FrameRequest` and validated `EngineFrame` readback. The port carries exact
+engine ticks, complete graph/media digests, renderer version and an explicit
+colour encoding. Pixels are straight float RGBA at that declared stage. The
+macOS renderer adapter must decode engine E and handle premultiplication through
+`pm-color`; labelling raw E/premultiplied data as RGB violates this contract.
+
+`render::RenderWork` routes those frames through the real engine
+`pm-color/src/lut.rs` implementation before immutable cache publication. The key
+combines the supplied complete graph digest with LUT content bytes, colour stage
+and the versioned readback representation; media digest, dimensions, exact ticks
+and renderer version remain separate key fields. A changed graph/LUT/media key
+is immediately Missing while old Keep Rendered frames remain readable.
+`FrameSource::identity` is checked before rendering and again before publication.
+`RenderWork::accept` is the actor receipt fence: call it on the **current** work
+and current identity, including the current LUT selection, to reject late results.
+A concurrent graph publication can leave an old-key cache entry; it can never
+make that old entry a hit under the new key.
+
+Scopes consume validated engine float frames, before or after the LUT as
+explicitly requested. After-LUT scopes use exactly the cached/rendered picture;
+Before-LUT scopes request original engine readback even when the transformed
+picture is already cached. Matrix, range and analysis stage are caller inputs;
+there is no implicit display transform or tone map. Alpha and extended/negative
+RGB survive the path; LUT domains clamp only as the existing LUT contract states.
+Nonfinite values, f32 overflow, bad frame shapes, mismatched frame identities,
+invalid scope configurations and overlarge readbacks refuse before cache fill.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Require the engine's complete graph/media identity; derive only the additional LUT/readback-stage identity in this lane. | N1/N3: document revision is not a semantic graph hash. |
+| Verify frame identity around worker rendering and again at actor receipt. Keep old bytes under old keys. | N3/N4/N7: no stale presentation or destructive invalidation. |
+| Apply the actual pm-color LUT source and compute scopes from the selected engine RGB stage on both cache misses and hits. | N1/N3: one numerical implementation; picture and analysis share authored colour intent. |
+| Keep the renderer/readback port platform independent and inject native frames. | N7/N8: Linux test double and headless operation, no UI/JS wait. |
+
+The native locked crate command now passes **102 tests** (83 existing, nine real
+encode integrations and ten render-path regressions). Strict crate Clippy with
+`--all-targets -- -D warnings` and package formatting pass; unchanged
+`cd engine && cargo test --locked -p pm-color` passes **61 tests**. The isolation
+harness copies both new engine files as well as the existing LUT/scopes sources.
+
+Remaining out-of-lane changes: export `cache_frame` alongside `proxy` from
+pm-media; export `lut`/`scopes` from pm-color; replace temporary source exports
+with normal dependencies when those owners provide portable build boundaries.
+The engine-service owner implements `FrameSource` around actual renderer graph
+hashes and E-to-straight readback at the declared stage, wires task dispatch and
+actor receipt, and supplies the source lease/archive/persistence route. macOS
+must verify actual GPU readback, LUT/scopes reference vectors, graph publication
+races, native encoder cancellation, HDR/alpha/audio tags, APFS publication and
+real playback/seek performance. No visual surface or unprovided UX copy is added;
+there are no new `DESIGN-TODO(opus)` placeholders in this slice.
+
+### Worker control and sample verification follow-up
+
+Probing now streams bounded records through a bounded channel and checks control
+while waiting for output, including a blocked decoder. `probe_controlled` is the
+native trait's override point; the software implementation kills/reaps and joins
+its reader before returning Interrupted. Source/output hashing checks controls
+at 64 KiB boundaries and reuses verified probe metadata instead of repeatedly
+scanning entire movie frame tables. Interrupted probing/hashing settles as the
+requested control, not a task failure. The software encoder uses four codec
+threads and all-intra frames; it disables autorotation so stored interpretation
+is not accidentally baked into pixels.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Poll controls while probes are blocked; acknowledge only after process release, including before/after encoding. | N1/N2/N8: useful native pause/cancel without main-thread waits. |
+| Hash with bounded checkpoints and reuse one probe per source/output. | N1/N3: bounded memory and fewer redundant decodes without weakening byte identity. |
+| Preserve resumed frame-progress floors and verify non-silent stereo samples byte-for-byte in integration tests. | N1/N3/N7: honest monotone progress and explicit audio-fidelity evidence. |
+| Refuse a synthetic variable-PTS stream whose last duration is absent. | N3: frame-rate inference cannot establish exact authored timing; originals remain available under N4. |
+
+The locked native suite passes **106 tests**, including blocked-probe/process
+release, running encode cancellation with retained partials, cancellation during
+probing, resume progress and missing-duration refusal. Clippy with warnings denied
+and formatting pass. General VFR/container support still requires a native probe
+that provides exact sample durations; this FFV1 test path does not infer them.
+
+### Background render-cache fill jobs
+
+`render_job::RenderFillWork` freezes a frame sequence against one complete engine
+identity and a live `BackgroundTasks` Render ticket. Preparation validates project,
+kind, units, total and graph ownership. Workers fill one frame at a time, check
+controls between frames and preserve completed entries. Pause/restart reuses
+exact cache hits with monotone progress. Receipt on the current work checks the
+batch's graph/LUT/key signature and current publication before completing the
+task. Late controls win after resource release, even across a graph publication.
+A stale publication refuses without changing task progress; the host then cancels
+and replaces that old-graph task. No old bytes are removed by invalidation.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Use the existing BackgroundTasks actor model for cache fills, with frame units and the same ticket/control lifecycle as media encodes. | N1/N7/N8: one inspectable execution model and no alternate writer. |
+| Fence the complete ordered graph/LUT/key batch at receipt; retain frames completed before a stop. | N3/N4: accurate cache identity and recoverable work. |
+
+Six additional regressions cover real queue completion, pause/cache-hit restart,
+late cancellation across an edit, stale progress refusal, admission ownership,
+worker failure and unrequested-stop refusal. Existing low-level `RenderWork`
+remains available for direct frame/scopes requests. These worker primitives do
+not schedule themselves or create another project/settings authority.
+
+### Real software source-frame integration and final verification
+
+`source_frames::SoftwareSourceFrames` implements the engine frame port for a
+single source-media graph. It hashes the complete source interpretation and
+explicit decoder/conversion version, uses the artifact fingerprint for media
+identity, and maps engine ticks through `pm-time` to an exact native PTS. The
+FFmpeg decode selector requires that PTS; between-frame and fractional-source
+requests refuse. Nonzero starts stay nonzero. Source bytes are verified before
+and after readback under the host's media lease. Cache hits require the host to
+hold that lease and publish relinks/interpretation changes before using a new
+source identity, as with composition-renderer sources.
+
+This software RGB source path drives both direct `RenderWork` scopes and a real
+BackgroundTasks Render cache fill. One integration test runs actual encoded
+synthetic media through exact-PTS decode, float frames, the pm-color LUT, cache
+miss/hit, integer scopes and task completion. The native composition renderer
+must implement its own `FrameSource` using complete composition graph hashes;
+this source-only graph does not impersonate a composition render.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Use exact PTS selection and engine rational conversion; reject absent timestamps rather than nearest-frame seeking. | N3: exact authored timing, including nonzero starts. |
+| Restrict software scope readback to decoded RGB layouts; leave generic YUV/working-E conversion to the native pm-color adapter. | N1/N3: never let an implicit FFmpeg matrix/transfer choice become authored colour intent. |
+| Disable automatic encoder pixel-format conversion (`-pix_fmt +`). | N3: an unsupported lossless input format must refuse instead of silently losing component precision. |
+| Include decoder version and source interpretation in source-graph identity. | N3/N7: cache identity is inspectable and changes with the actual decode contract. |
+
+Final Linux evidence, Rust **1.96.1**, synthetic fixtures only:
+
+- `cd apps/native && cargo test --locked -p pm-promedia`: **115 passed** —
+  83 existing plus 16 engine-work and 16 render-work tests (32 additions).
+- `cargo clippy --locked -p pm-promedia --all-targets -- -D warnings`: pass.
+- `cargo fmt -p pm-promedia -- --check` and formatting of both new engine files:
+  pass. The lane's disposable-workspace Linux harness also passes 115 tests and
+  strict Clippy against the actual engine source files.
+- `cd engine && cargo test --locked -p pm-color`: **61 passed**, unchanged.
+- `cd engine && cargo test --locked -p pm-media`: attempted; the existing
+  `build.rs` refuses because this Linux container lacks the required Powermove
+  macOS FFmpeg dylib build (`PM_FFMPEG_DIR`). No pm-media build/export file was
+  modified. The new portable modules are tested via the native crate's source
+  exports; this is not a full pm-media/platform pass.
+- Staged gitleaks scans and the repository pre-commit hook pass before commits.
+
+Remaining integration outside ownership: `pm-media` exports and portable build
+boundary; `pm-color` exports; normal crate dependencies replacing source-path
+exports; engine-service composition graph/readback and native VideoToolbox
+adapters; kernel/host scheduling, current-result receipt, durable catalog/task
+persistence, source leases, capability negotiation, free-space reservations and
+archival of private/superseded outputs. No old implementation is removed while
+it retains consumers (N4/N6 and the prune rule).
+
+On macOS verify actual VideoToolbox codec/alpha/HDR/colour tags, exact VFR/PTS and
+audio sync, cancellation/resource release, engine-E/unpremultiplication and
+LUT/scope reference vectors, graph publication races, GPU/source-frame equivalence,
+seek/playback performance, APFS/cross-volume durability, low-space recovery and
+security-scoped source leases. No AppKit, Metal, GPUI, WebKit or screen validation
+ran here. No visual/UX decisions or new `DESIGN-TODO(opus)` placeholders were added.

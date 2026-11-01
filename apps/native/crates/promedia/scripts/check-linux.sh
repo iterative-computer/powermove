@@ -2,10 +2,13 @@
 # Validate this owned lane without changing the out-of-lane native lockfile.
 set -euo pipefail
 repo=$(git rev-parse --show-toplevel)
-validation_root=$(mktemp -d "${TMPDIR:-/tmp}/pm-promedia.XXXXXXXX")
+mkdir -p "$repo/work"
+validation_root=$(mktemp -d "$repo/work/pm-promedia.XXXXXXXX")
 mkdir -p "$validation_root/apps/native/crates" "$validation_root/engine/crates/pm-color/src"
 cp -R "$repo/apps/native/crates/promedia" "$validation_root/apps/native/crates/"
 cp "$repo/engine/crates/pm-color/src/lut.rs" "$repo/engine/crates/pm-color/src/scopes.rs" "$validation_root/engine/crates/pm-color/src/"
+mkdir -p "$validation_root/engine/crates/pm-media/src"
+cp "$repo/engine/crates/pm-media/src/cache_frame.rs" "$repo/engine/crates/pm-media/src/proxy.rs" "$validation_root/engine/crates/pm-media/src/"
 # Reuse the exact engine time sources without importing the platform workspace.
 mkdir -p "$validation_root/engine/crates/pm-time"
 cp -R "$repo/engine/crates/pm-time/src" "$validation_root/engine/crates/pm-time/"
