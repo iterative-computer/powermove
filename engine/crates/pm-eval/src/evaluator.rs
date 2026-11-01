@@ -424,6 +424,8 @@ pub struct Evaluator {
     /// `ev` answers' time-independent part, per layer and channel, while a
     /// renderer has it open (`crate::channel_memo`).
     channel_memo: crate::channel_memo::ChannelMemo,
+    /// Prepared keyframe tracks by array (`crate::track_cache`).
+    tracks: crate::track_cache::TrackCache,
 }
 
 impl Default for Evaluator {
@@ -486,6 +488,7 @@ impl Evaluator {
             last_root: 0,
             stats: CacheStats::default(),
             channel_memo: Default::default(),
+            tracks: crate::track_cache::TrackCache::default(),
         }
     }
 
@@ -661,6 +664,11 @@ impl Evaluator {
         t: f64,
         interpolate_color: bool,
     ) -> JsResult<JsValue> {
+        // A long track is prepared once per array, as today's
+        // `temporalEvaluate` caches it per array and version.
+        if let Some(track) = self.tracks.get(kf, &mut self.springs) {
+            return track.value(kf, t, interpolate_color, &mut self.springs);
+        }
         crate::keyframes::evaluate(kf, t, interpolate_color, &mut self.springs)
     }
 
@@ -686,6 +694,17 @@ impl Evaluator {
     /// The memo's hits and misses so far.
     pub fn channel_memo_stats(&self) -> (u64, u64) {
         (self.channel_memo.hits, self.channel_memo.misses)
+    }
+
+    /// The prepared-track cache's counters: reads answered from a kept
+    /// track, tracks prepared, tracks held.
+    pub fn track_cache_stats(&self) -> (u64, u64, usize) {
+        (self.tracks.hits, self.tracks.prepared, self.tracks.len())
+    }
+
+    /// Estimated bytes of the prepared-track cache.
+    pub fn track_cache_bytes(&self) -> usize {
+        self.tracks.bytes()
     }
 
     /// `PM.ev(L, key, T)`: one channel of `L.p` at composition time `T`.

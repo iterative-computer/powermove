@@ -127,3 +127,87 @@ Conflicted paths:
 - `engine/crates/pm-render/src/plan.rs`
 - `engine/crates/pm-render/src/renderer.rs`
 - `engine/crates/pm-render/src/shaders/source.wgsl`
+
+## Merge 4: feat/ne-bigrender (`94d982e28`)
+
+Conflicts listed below. Preserve native coverage rasterization, native shader
+ownership, recorder/compat and source-monitor protocols, plus current GPU
+resource-release accounting (N3/N6/N8). Do not resurrect deleted browser SVG,
+Canvas2D or runtime WebGL parity modules. These older optimizations target
+paths already replaced on the base; ancestry archives their implementation.
+
+Integrate immutable-array prepared keyframe caching alongside the channel memo,
+without cloning the prepared track on each read (N2/N3); constant-table hoisting
+into program constants (unchanged shader meaning); definition program builds
+on the native worker, with source-specific claims published before sending and
+retired on device release (N1/N8); and excluding unused audio from silent-export
+offline dependencies (N3). GPU timing, prewarming and the full large-project
+performance gate require the Mac run; no Linux performance claim is made.
+
+- `apps/desktop/e2e/helpers/app.ts`
+- `apps/desktop/src/extensions/viewer/engine-present/present-worker.ts`
+- `apps/desktop/src/extensions/viewer/engine-present/presenter.ts`
+- `apps/desktop/src/extensions/viewer/engine-present/worker-presenter.ts`
+- `apps/desktop/src/extensions/viewer/manifest.json`
+- `apps/desktop/src/main/engine/compat-frames.test.ts`
+- `apps/desktop/src/main/engine/engine-process.ts`
+- `apps/desktop/src/main/engine/index.ts`
+- `apps/desktop/src/main/engine/native-engine.ts`
+- `apps/desktop/src/main/engine/offline-media.test.ts`
+- `apps/desktop/src/main/engine/offline-media.ts`
+- `apps/desktop/src/main/engine/snapshots.ts`
+- `apps/desktop/src/preload/index.ts`
+- `apps/desktop/src/renderer/src/engine-connection/connection.ts`
+- `apps/desktop/src/renderer/src/engine-connection/install.ts`
+- `apps/desktop/src/renderer/src/engine-connection/render-transport.test.ts`
+- `apps/desktop/src/renderer/src/engine-connection/render-transport.ts`
+- `apps/desktop/src/renderer/src/engine-connection/transport.ts`
+- `apps/desktop/src/renderer/src/engine-doc/install.ts`
+- `apps/desktop/src/renderer/src/kernel/install.ts`
+- `apps/desktop/src/renderer/src/kernel/raster-compat.ts`
+- `apps/desktop/src/renderer/src/legacy/app.test.ts`
+- `apps/desktop/src/renderer/src/legacy/app.ts`
+- `apps/desktop/src/renderer/src/legacy/core/engine.ts`
+- `apps/desktop/src/renderer/src/legacy/host/electron-shim.test.ts`
+- `apps/desktop/src/shared/engine-protocol/CompatFrameRequest.ts`
+- `apps/desktop/src/shared/engine-protocol/CompatMessage.ts`
+- `apps/desktop/src/shared/engine-protocol/index.ts`
+- `docs/engine/effects.md`
+- `docs/engine/perfbench.md`
+- `docs/engine/vector.md`
+- `engine/Cargo.lock`
+- `engine/crates/pm-eval/src/evaluator.rs`
+- `engine/crates/pm-glsl/src/lib.rs`
+- `engine/crates/pm-gpu/src/target.rs`
+- `engine/crates/pm-node/src/jobs/blender_png.rs`
+- `engine/crates/pm-node/src/jobs/compat.rs`
+- `engine/crates/pm-node/src/jobs/mod.rs`
+- `engine/crates/pm-node/src/jobs/svg.rs`
+- `engine/crates/pm-node/src/present/compat.rs`
+- `engine/crates/pm-node/src/present/compose.rs`
+- `engine/crates/pm-node/src/present/document.rs`
+- `engine/crates/pm-node/src/present/render.rs`
+- `engine/crates/pm-node/src/present/schedule.rs`
+- `engine/crates/pm-node/tests/render_fonts.rs`
+- `engine/crates/pm-node/tests/snapshot.rs`
+- `engine/crates/pm-perfbench/baselines.json`
+- `engine/crates/pm-protocol/src/samples.rs`
+- `engine/crates/pm-protocol/src/snapshot.rs`
+- `engine/crates/pm-protocol/src/svg_raster.rs`
+- `engine/crates/pm-render/src/compat.rs`
+- `engine/crates/pm-render/src/composite/exec.rs`
+- `engine/crates/pm-render/src/effects/exec.rs`
+- `engine/crates/pm-render/src/effects/parity.rs`
+- `engine/crates/pm-render/src/lib.rs`
+- `engine/crates/pm-render/src/plan.rs`
+- `engine/crates/pm-render/src/renderer.rs`
+- `engine/crates/pm-render/src/renderer/layer_raster.rs`
+- `engine/crates/pm-render/src/shader_layers/exec.rs`
+- `engine/crates/pm-render/src/vector/cache.rs`
+- `engine/crates/pm-render/src/vector/mod.rs`
+- `engine/crates/pm-render/tests/effects_fallback.rs`
+- `engine/crates/pm-vector/Cargo.toml`
+- `engine/crates/pm-vector/src/canvas2d/analytic.rs`
+- `engine/crates/pm-vector/src/canvas2d/context.rs`
+- `engine/crates/pm-vector/src/canvas2d/msaa.rs`
+- `engine/crates/pm-vector/src/canvas2d/shape.rs`

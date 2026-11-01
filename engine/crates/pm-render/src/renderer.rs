@@ -486,6 +486,26 @@ impl Renderer {
         self.evaluator.channel_memo_stats()
     }
 
+    /// Queues the document's native effect programs on the compiler worker.
+    /// Host-provided effects retain their own lifecycle.
+    pub fn prewarm_programs(&mut self, document: &pm_model::Document) -> usize {
+        if self.effect_host.is_some() {
+            return 0;
+        }
+        let first = crate::effects::prewarm::document_definitions(document);
+        let precision = document
+            .root()
+            .and_then(|root| crate::composite::color::project_color(root).ok())
+            .map_or(pm_protocol::color::Precision::Float16, |color| {
+                color.precision
+            });
+        self.effects.prewarm(
+            &self.device,
+            pm_gpu::target::working_format(precision),
+            &first,
+        )
+    }
+
     /// The draw reuse's counters (with the frames drawn from a kept bottom
     /// and the draws those did not draw again).
     pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {

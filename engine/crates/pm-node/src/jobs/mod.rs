@@ -1515,7 +1515,12 @@ fn run_job(
     // obtained the user's "Export Without Missing Media" choice in main;
     // agent exports are unattended. Both use pm-export's missing-layer
     // appearance and report the clips to their caller.
-    let offline = offline_media(&document.document, composition.as_str(), &export.media);
+    let offline = pm_export::render::offline_media_with_audio(
+        &document.document,
+        composition.as_str(),
+        &export.media,
+        settings.audio && !settings.format.is_image(),
+    );
     if !offline.is_empty() {
         let message = offline_message(&offline);
         if settings.draft_from_proxies {
