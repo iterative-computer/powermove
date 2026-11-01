@@ -1,5 +1,13 @@
 # Powermove native engine: plan and design
 
+> Native-app E-track status (2026-11-01): the five open author branches are
+> integrated with dispositions in [engine/etrack-integration.md](engine/etrack-integration.md).
+> The exhaustive [Gate E ledger](engine/e2e-ledger.md#gate-e--native-engine-integration-2026-11-01)
+> remains open. The GPUI/in-process/V8 architecture in docs/native supersedes
+> this document's older Electron-host assumptions. Native H.273 Log100/Log316
+> input interpretation extends the earlier Phase 3b transfer list; proprietary
+> camera log/gamut pairs still need explicit contracts and evidence.
+
 Status: proposal, not started. Revision 5, reconciled with main at `d5d5b731`
 and audited by five independent reviewers (architecture and readiness, 3D and
 Blender, agents and security, color and video, preservation).

@@ -249,3 +249,64 @@ the Mac and portable verification rows in the Gate E ledger.
 - `engine/crates/pm-vector/tests/svg.rs`
 - `engine/crates/pm-vector/tools/canvas-ref/page.ts`
 - `engine/crates/pm-vector/tools/canvas-ref/run.ts`
+
+## Linux qualification of the final implementation
+
+Rust 1.96.1; tools installed under /workspace/.tools because the attached
+container did not include the activation script, Rust or gitleaks. The
+activation script is outside Git. No Apple SDK, Metal, CoreAudio, CoreText,
+VideoToolbox, WebKit, screen or frozen external captures are available here.
+
+| Validation | Result |
+|---|---|
+| pm-time/model/expr/geom3d/reference/protocol/stretch/color, library + integration + doctests | **497 passed, 4 measurement tests ignored**, with only the known desktop TypeScript drift test explicitly filtered (see below) |
+| pm-eval library and ten portable integration targets | **77 passed**; exact TS/V8 evaluation, captions, helper, layer, retiming, invalidation, identity and shadow vectors |
+| pm-glsl default test concurrency, binaries, integration and doctests | **71 passed**, including constant tables, uniform acceptance and production source WGSL validation |
+| pm-proxy + pm-cache, `--no-default-features` | **12 passed**: policy, power probe, store integrity/cancellation, sequence identity, disk guard and cache budgets |
+| Actual production device_policy source compiled standalone, `rustc --test -D warnings` | **5 passed** with a Linux probe double |
+| Gate E inventory audit unit tests | **5 passed**; inventory accounts for 17 variants and 74 production references |
+| Total passing tests above, without double-counting the earlier 395-test library run | **667 passed; 4 ignored; one separately recorded cross-lane failing test** |
+| Clippy `-D warnings` | CPU libraries pm-color/eval/expr/geom3d/reference/protocol/glsl; pm-glsl all targets; pm-proxy/cache portable all targets pass |
+| Apple-dependent crate check | **Blocked:** objc2 explicitly rejects the Linux target. pm-media/render/export/audio/node and dependent Mac crates cannot be typechecked/tested/clippied here. No claim of Mac build success. |
+| Formatting | rustfmt check passes for all 136 changed Rust files; unrelated base formatting is preserved |
+| Secret scanning | Staged diff inspected and `gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow` before every commit; hook also enabled |
+
+Representative commands (each shell first sources /workspace/.tools/activate.sh):
+
+```sh
+cd /workspace/powermove/engine
+cargo test --locked -p pm-time -p pm-model -p pm-expr -p pm-geom3d -p pm-reference -p pm-protocol -p pm-stretch -p pm-color -- --skip typescript_regeneration_is_a_no_op
+cargo test --locked -p pm-eval --lib --test index_identity --test expression_helpers --test layers_unit --test js_sem_v8 --test hooks_and_expressions --test shadow --test invalidation --test ts_parity --test layer_parity --test caption_parity
+cargo test --locked -p pm-glsl
+cargo test --locked --no-default-features -p pm-proxy -p pm-cache
+cargo clippy --locked --lib -p pm-color -p pm-eval -p pm-expr -p pm-geom3d -p pm-reference -p pm-protocol -p pm-glsl -- -D warnings
+cargo clippy --locked --all-targets -p pm-glsl -- -D warnings
+cargo clippy --locked --all-targets --no-default-features -p pm-proxy -p pm-cache -- -D warnings
+```
+
+The unfiltered broad test run exposed exactly one remaining protocol failure:
+`typescript_regeneration_is_a_no_op` needs the generated desktop index's build
+id updated. Ownership forbids editing apps/desktop here. The exact patch is
+`etrack-desktop-protocol.patch`; the owning lane should apply or regenerate it.
+Do not remove the drift test or relax draft-protocol identity. pm-eval's full
+`corpus` target requires CoreText and does not compile on Linux; portable targets
+above were selected explicitly rather than pretending to run that capture gate.
+
+The first compiler parallel run exposed a test-only scheduling issue: the
+one-millisecond deadline measurement began before waiting for another unit
+test's global compiler lock. Its timer now starts where the real request
+budget starts; the 1 ms deadline and 2 s cleanup bound are unchanged. The
+output-only constant-table tests serialize their own compiler requests; real
+admission/overload tests remain intact. Final default-concurrency run passes.
+Pipeline revision 4 gives the integrated optimization fresh cache identity;
+the measured prepared-output digest is unchanged and pinned at that revision.
+
+N2/N3 selected prepared-track reuse with reset/overflow regressions and the
+extreme finite inverse-root fix. N1/N3 selected exact log metadata and native
+float still handling, plus explicit device transitions. N6/N8 selected retaining
+current native protocols and rejecting resurrected Chromium replay paths.
+No visual/UX decisions or DESIGN-TODO placeholders were introduced.
+
+Gate E remains open: see e2e-ledger.md and gate-e.json for implementation,
+consumer-binding, platform and qualification blockers. A complete inventory
+is not a completed rendering gate.
