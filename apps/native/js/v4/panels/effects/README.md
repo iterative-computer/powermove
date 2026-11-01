@@ -174,3 +174,27 @@ skips. Scoped/full TypeScript and Prettier, browser builds, package rustfmt and
 strict all-target Clippy pass. Cold probe compilation was also exercised during
 module setup, outside per-test interaction timeouts. Cargo.lock adds only this
 test package; no resolved dependency version changes.
+
+## Frozen-contract rebase — 2026-11-01
+
+Merged `feat/native-engine` at
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005`, which includes the v4 integration
+branch and the recorded 40/40 freeze decision. The frozen `v4-api.md`, `ui-kit.md`,
+`js/v4/src` and `crates/surface/src` are unchanged from the contract already used
+by this panel. No runtime adaptation or dependency/lockfile change is needed.
+Neither shared API implementation is modified by this lane.
+
+The six numbered API gaps above remain **API requests for additive extensions**,
+not proposed changes to the frozen shape. Existing callbacks, wire operations and
+host envelopes must retain their behaviour (N6; freeze instruction). Until the
+capabilities exist, the documented neutral placeholders and production-integration
+gates remain; no API support is inferred from an accepted metadata bag (N3/N7).
+
+Re-ran the 65 Effects tests/17 snapshots, all 237 v4 tests and all 95 pm-surface
+Rust tests with locked Cargo resolution. TypeScript, Prettier, browser build,
+rustfmt and strict all-target Clippy pass. Spec coverage, both DESIGN-TODOs and
+the macOS/Opus gates above are unchanged.
+
+Also re-ran `bun run eval --wire --include-held-out`: **40 passed, 0 failed,
+0 pending**, with **10 owner fixtures explicitly production-blocked**. The frozen
+headless eval does not certify native panel integration or visual acceptance.
