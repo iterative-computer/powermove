@@ -756,10 +756,12 @@ impl Render for TextInput {
                     "enter" => {
                         cx.emit(InputEvent::Commit);
                         window.blur(cx);
+                        cx.stop_propagation();
                     }
                     "escape" => {
                         cx.emit(InputEvent::Cancel);
                         window.blur(cx);
+                        cx.stop_propagation();
                     }
                     _ => {}
                 }

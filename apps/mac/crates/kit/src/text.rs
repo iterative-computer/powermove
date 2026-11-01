@@ -28,6 +28,12 @@ impl TextField {
         cx.subscribe_in(&input, window, |this, _, event, _, cx| {
             match event {
                 InputEvent::Change(value) => {
+                    // A newly created window may auto-focus its first input before
+                    // focus subscriptions are active. The first mutation still
+                    // starts the same transaction from the live document value.
+                    if !this.editing {
+                        this.editing = this.state.begin(cx);
+                    }
                     if this.editing {
                         this.state.change(value.clone(), cx);
                     }

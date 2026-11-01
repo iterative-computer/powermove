@@ -34,3 +34,5 @@ pub use fill::{FillField, FillMode, FillValue};
 pub mod binding;
 pub mod motion;
 pub mod native;
+#[cfg(test)]
+mod tests;
