@@ -6,5 +6,7 @@ fn test_storage() -> (tempfile::TempDir, ServiceStorage) {
     (temp, storage)
 }
 
+mod diagnostics;
 mod foundation;
+mod media;
 mod worker;

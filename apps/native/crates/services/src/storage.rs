@@ -200,8 +200,27 @@ impl ServiceStorage {
                 Err(error) => return Err(error.into()),
             }
         };
-        std::io::copy(&mut bytes, &mut file)?;
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let read = bytes.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read])?;
+            hasher.update(&buffer[..read]);
+            size = size
+                .checked_add(read as u64)
+                .context("payload size overflow")?;
+        }
         file.sync_all()?;
+        let checksum = format!("{:x} {size}", hasher.finalize());
+        let mut receipt = private_file(&directory.join(format!("{generation:020}.sha256")))?;
+        receipt.write_all(checksum.as_bytes())?;
+        receipt.sync_all()?;
+        // A published generation must never outlive its integrity receipt.
+        File::open(directory)?.sync_all()?;
         let destination = directory.join(format!("{generation:020}.data"));
         // Hard-link is an atomic no-clobber publication. Keep the staging name as archive.
         fs::hard_link(&staging, &destination)?;
@@ -281,6 +300,12 @@ pub(crate) fn read_capped(path: &Path, max: usize) -> Result<Vec<u8>> {
     if bytes.len() > max {
         bail!("service payload too large")
     }
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "data")
+    {
+        verify_integrity(path, &digest(&bytes), bytes.len() as u64)?;
+    }
     Ok(bytes)
 }
 
@@ -298,5 +323,16 @@ pub(crate) fn hash_file(path: &Path) -> Result<(String, u64)> {
         hash.update(&buffer[..read]);
         size += read as u64;
     }
-    Ok((format!("{:x}", hash.finalize()), size))
+    let hash = format!("{:x}", hash.finalize());
+    verify_integrity(path, &hash, size)?;
+    Ok((hash, size))
+}
+
+fn verify_integrity(path: &Path, hash: &str, size: u64) -> Result<()> {
+    let receipt = read_capped(&path.with_extension("sha256"), 128)?;
+    ensure!(
+        receipt == format!("{hash} {size}").as_bytes(),
+        "service generation integrity failure"
+    );
+    Ok(())
 }

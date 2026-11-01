@@ -165,6 +165,26 @@ fn backups_stream_and_never_prune_sixth_generation() {
     ));
 }
 
+#[test]
+fn backup_inventory_detects_corruption_against_publication_receipt() {
+    let (_temp, mut store) = test_storage();
+    let backup = store.backup("project", &b"original"[..]).unwrap();
+    fs::write(&backup.path, b"modified").unwrap();
+    assert!(store.backups("project").is_err());
+}
+
+#[test]
+fn valid_json_corruption_is_not_accepted_as_a_new_setting_value() {
+    let (_temp, mut store) = test_storage();
+    store.set("key", json!("before")).unwrap();
+    let entries = storage::generations(&store.directory("settings", "key").unwrap()).unwrap();
+    let mut value: Value = serde_json::from_slice(&fs::read(&entries[0].1).unwrap()).unwrap();
+    value["value"] = json!("after");
+    fs::write(&entries[0].1, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(store.setting("key").is_err());
+    assert!(store.set("key", json!("next")).is_err());
+}
+
 #[derive(Default)]
 struct LibraryDouble {
     entries: Vec<library::ProjectEntry>,
