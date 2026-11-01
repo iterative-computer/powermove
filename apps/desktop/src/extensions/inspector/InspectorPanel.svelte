@@ -19,6 +19,8 @@
   import ContributedSections from './ContributedSections.svelte';
   import InspectorSurface from './InspectorSurface.svelte';
   import SectionHeading from './SectionHeading.svelte';
+  import Icon from './Icon.svelte';
+  import { showFxMenu } from './actions';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   let { panelId, api }: PanelProps & { api: PowermoveAPI } = $props();
@@ -70,7 +72,9 @@
         {#if firstLayer.type === 'shader'}<ShaderUniforms layer={firstLayer} />{/if}
         {#if firstLayer.type === 'extension'}<ExtensionLayerParams layer={firstLayer} />{/if}
         {#if takesEffects}
-          <SectionHeading title="Effects" />
+          <SectionHeading title="Effects">
+            <button type="button" class="section-action" aria-label="Add effect" title="Add effect" onclick={(event) => showFxMenu(api, event.currentTarget, firstLayer)}><Icon name="plus" /></button>
+          </SectionHeading>
           {#key firstLayer.id}<EffectsSection layer={firstLayer} />{/key}
         {/if}
         <ContributedSections {api} after="effects" layerIds={selectedLayers.map(layer => layer.id)} />

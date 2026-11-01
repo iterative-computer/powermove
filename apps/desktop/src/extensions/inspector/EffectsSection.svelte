@@ -9,12 +9,15 @@
   import Icon from './Icon.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
   import { provideEffectControls } from './effect-controls';
+  import { showFxMenu } from './actions';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector } = inspectorContext();
   const { ToggleField, SelectField, Row } = api.ui.controls;
   provideEffectControls();
 
-  let { layer }: { layer: any } = $props();
+  /* Effect Controls has no section heading to carry a +, so it shows its own
+     Add Effect button; Properties puts the + on the Effects heading. */
+  let { layer, addButton = false }: { layer: any; addButton?: boolean } = $props();
 
   let openVersion = $state(0);
   let selectedIds = $state<string[]>([]);
@@ -300,7 +303,7 @@
   aria-label="Effects section"
 >
   {#if effects.length === 0 && !matteSource}
-    <div class="fx-empty">Add effects from Effects &amp; Presets: double-click one, or drag it onto a layer.</div>
+    <div class="fx-empty">{addButton ? 'No effects yet.' : 'Click + to add an effect, or drag one from Effects & Presets onto a layer.'}</div>
   {/if}
   {#if effects.length > 0}
   <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
@@ -399,6 +402,11 @@
     {/if}
   {/if}
 
+  {#if addButton}
+    <button type="button" class="fx-add" onclick={(event) => showFxMenu(api, event.currentTarget, layer)}>
+      <Icon name="plus" /><span>Add Effect</span>
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -540,6 +548,25 @@
   .effects-section .fx-params :global(.row.split .pm-select .pm-select-chevron) { width: 8px; height: 8px; margin-top: -4px; }
   .effects-section .fx-params :global(.row.split .num) { color: var(--tx-value); }
   .effects-section .fx-params :global(.row.split:has(> .stopwatch.on) .num) { color: var(--accent-tx); }
+
+  .fx-add {
+    display: flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: 6px;
+    height: 26px;
+    margin: 6px 6px 0;
+    padding: 0 10px 0 8px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--bg-field);
+    color: var(--tx-2);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .fx-add:hover { background: var(--ink-2, var(--bg-row)); color: var(--tx); }
+  .fx-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .fx-add :global(svg) { width: 12px; height: 12px; }
 
   .fx-empty {
     padding: 10px 6px;

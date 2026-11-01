@@ -45,7 +45,7 @@
     {/if}
     {#key firstLayer.id}
       <div class="effects-layer" data-effects-layer={firstLayer.id}>
-        <EffectsSection layer={firstLayer} />
+        <EffectsSection layer={firstLayer} addButton />
       </div>
     {/key}
   {/if}

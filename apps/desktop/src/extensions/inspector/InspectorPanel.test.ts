@@ -532,8 +532,8 @@ describe('InspectorPanel', () => {
 
     const headings = [...target.querySelectorAll('.sec')].map((item) => item.textContent?.trim());
     expect(headings).toContain('Masks');
-    // Effects are added from Effects & Presets; the header has no Add button.
-    expect(target.querySelector('[aria-label="Add effect"]')).toBeNull();
+    // The Effects heading carries a + that opens the effect menu.
+    expect(target.querySelector('[aria-label="Add effect"]')).not.toBeNull();
     expect(target.querySelector('[data-effects-layer="G"] [data-effects-section]')).not.toBeNull();
     expect(labelledSelect('Blend Mode')).not.toBeNull();
     expect([...target.querySelectorAll('button[aria-labelledby], [role="radiogroup"][aria-labelledby]')].some((control) =>
@@ -907,8 +907,6 @@ describe('InspectorPanel', () => {
   it('sends the exact legacy remove-effect command', () => {
     const candidate = layer('A');
     const { apply } = setup([candidate], ['A'], { effects: true });
-    // Effects are added from Effects & Presets, not from a Properties button.
-    expect(target.querySelector('[aria-label="Add effect"]')).toBeNull();
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: {} });
     bump('structure');
     flushSync();
