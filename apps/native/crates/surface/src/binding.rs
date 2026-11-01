@@ -136,10 +136,18 @@ pub fn scrub(sample: Scrub) -> Result<f64, String> {
     } else {
         1.
     };
-    let delta = if dx.abs() >= dy.abs() { dx } else { -dy };
+    // v1.2.0 NumField.svelte: both axes contribute, including diagonal cancellation.
+    let delta = dx - dy;
     let value = start + delta * step * speed * multiplier;
     if !value.is_finite() {
         return Err("non-finite scrub".into());
     }
-    Ok((value.clamp(bounds.0, bounds.1) * 10_000.).round() / 10_000.)
+    let value = value.clamp(bounds.0, bounds.1);
+    let scaled = value * 1_000.;
+    // Large finite authored numbers already have no fractional precision.
+    Ok(if scaled.is_finite() {
+        scaled.round() / 1_000.
+    } else {
+        value
+    })
 }

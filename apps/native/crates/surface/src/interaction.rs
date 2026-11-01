@@ -133,21 +133,7 @@ impl Interaction {
     }
     pub fn tab(&mut self, surface: &Surface, backwards: bool) -> Result<Option<Id>, String> {
         let root = self.scopes.last().map_or(0, |s| s.0);
-        let mut order = vec![];
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
-            let node = surface.node(id).ok_or("missing focus scope")?;
-            let disabled = node.props.get("disabled").and_then(|v| v.as_bool()) == Some(true);
-            let tab = node.props.get("tabIndex").and_then(|v| v.as_i64());
-            if !disabled
-                && (tab.is_some_and(|n| n >= 0)
-                    || (tab.is_none()
-                        && matches!(node.r#type.as_str(), "input" | "textarea" | "button")))
-            {
-                order.push(id);
-            }
-            pending.extend(node.children.iter().rev());
-        }
+        let order = focus_order(surface, root)?;
         if order.is_empty() {
             self.focused = None;
             return Ok(None);
@@ -196,4 +182,24 @@ impl Drag {
         self.active |= delta.0.hypot(delta.1) >= 3.;
         self.active.then_some(delta)
     }
+}
+
+/// Visual traversal shared by keyboard navigation and headless inspection.
+pub fn focus_order(surface: &Surface, root: Id) -> Result<Vec<Id>, String> {
+    let mut order = vec![];
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let node = surface.node(id).ok_or("missing focus scope")?;
+        let disabled = node.props.get("disabled").and_then(|v| v.as_bool()) == Some(true);
+        let tab = node.props.get("tabIndex").and_then(|v| v.as_i64());
+        if !disabled
+            && (tab.is_some_and(|n| n >= 0)
+                || (tab.is_none()
+                    && matches!(node.r#type.as_str(), "input" | "textarea" | "button")))
+        {
+            order.push(id);
+        }
+        pending.extend(node.children.iter().rev());
+    }
+    Ok(order)
 }
