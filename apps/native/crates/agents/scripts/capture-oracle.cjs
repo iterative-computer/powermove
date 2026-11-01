@@ -117,4 +117,11 @@ function execTranscript(){
  for(const line of raw.trim().split('\n')){try{frames.push({kind:'in',value:JSON.parse(line)});}catch{}parser.push(Buffer.from(line+'\n'));}parser.finish();
  fs.writeFileSync(path.join(dest,'codex-exec.json'),JSON.stringify({baseline,source:'apps/desktop/src/main/codex/__fixtures__/recorded-transcript.ndjson; CodexEventParser',frames},null,2)+'\n');
 }
-(async()=>{fs.mkdirSync(dest,{recursive:true});execTranscript();for(const s of ['happy','question','steer','cancel','compact','async-question','tools','retry'])await codex(s);await claude();console.log('Recorded 11 synthetic TS transcripts.');})().catch(e=>{console.error(e);process.exitCode=1;});
+function threadContext(){
+ const {conversationContextForAgent,threadMessageText}=load('renderer/src/panels/agent/threads');
+ const messages=[{role:'user',text:'Original synthetic direction: keep the title blue.'},{role:'trace',steps:[{kind:'question',status:'answered',questions:[{id:'q',question:'Which font?'}],answers:{q:'Sans'}},{kind:'tool',label:'Read',output:'synthetic project'}]}];
+ for(let i=0;i<30;i++)messages.push({role:i%3===0?'user':'assistant',text:`Round ${i}: `+'synthetic history '.repeat(500)});
+ messages.push({role:'assistant',text:'Preview ready',visualReplies:[{id:'visual-1',title:'Composition'}]});
+ fs.writeFileSync(path.join(dest,'thread-context.json'),JSON.stringify({baseline,source:'apps/desktop/src/renderer/src/panels/agent/threads.ts',messages,context:JSON.parse(conversationContextForAgent(messages,'thread-1')),messageText:messages.map(threadMessageText)},null,2)+'\n');
+}
+(async()=>{fs.mkdirSync(dest,{recursive:true});execTranscript();threadContext();for(const s of ['happy','question','steer','cancel','compact','async-question','tools','retry'])await codex(s);await claude();console.log('Recorded 11 synthetic TS transcripts and thread context.');})().catch(e=>{console.error(e);process.exitCode=1;});

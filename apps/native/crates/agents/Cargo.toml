@@ -1,0 +1,15 @@
+[package]
+name = "pm-agents"
+description = "Rust agent protocol workers, durable threads and pinned native runtimes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+libc = "0.2"
