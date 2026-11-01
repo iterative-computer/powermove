@@ -1,14 +1,14 @@
 //! Effects, transitions, compositions, markers, content, masks and paths,
 //! text, media, library and nudges against the old app's semantics.
 
-use pm_mac_core::commands::comps::{CompPatch, NewComp};
-use pm_mac_core::commands::effects::{
+use pm_kernel::commands::comps::{CompPatch, NewComp};
+use pm_kernel::commands::effects::{
     AddEffect, Edge, EffectDefinition, EffectPatch, ParamDefinition, TransitionDefinition,
     TransitionSpec,
 };
-use pm_mac_core::commands::masks::{MaskPatch, MaskShape};
-use pm_mac_core::commands::properties::SetProperty;
-use pm_mac_core::{
+use pm_kernel::commands::masks::{MaskPatch, MaskShape};
+use pm_kernel::commands::properties::SetProperty;
+use pm_kernel::{
     Command, CommandError, CompCommand, ContentCommand, DocumentStore, EffectCommand,
     LibraryCommand, MarkerCommand, MaskCommand, MediaCommand, Origin, PropertyCommand, TextCommand,
     TransactionError, TransformCommand,
@@ -52,8 +52,8 @@ fn store() -> DocumentStore {
 
 fn layer(store: &DocumentStore, id: &str) -> Value {
     let root = store.root().unwrap();
-    let loc = pm_mac_core::model::find_layer(root, id).unwrap_or_else(|| panic!("no {id}"));
-    pm_mac_core::model::layer_at(root, &loc).unwrap().to_value()
+    let loc = pm_kernel::model::find_layer(root, id).unwrap_or_else(|| panic!("no {id}"));
+    pm_kernel::model::layer_at(root, &loc).unwrap().to_value()
 }
 
 fn root(store: &DocumentStore) -> Value {
@@ -276,7 +276,7 @@ fn transitions_keep_channels_of_the_same_type() {
     run(
         &mut s,
         PropertyCommand::Set(SetProperty {
-            mode: pm_mac_core::commands::properties::KeyMode::Keyframe,
+            mode: pm_kernel::commands::properties::KeyMode::Keyframe,
             ..SetProperty::new("box", "transitionIn.p.softness", 0.8, 0.0)
         }),
     );
@@ -578,7 +578,7 @@ fn set_content_merges_keys_animated_fields_and_guards_audio() {
     run(
         &mut s,
         PropertyCommand::Set(SetProperty {
-            mode: pm_mac_core::commands::properties::KeyMode::Keyframe,
+            mode: pm_kernel::commands::properties::KeyMode::Keyframe,
             ..SetProperty::new("box", "c.h", 40.0, 0.0)
         }),
     );

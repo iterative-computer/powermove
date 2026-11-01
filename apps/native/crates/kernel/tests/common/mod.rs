@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use pm_mac_core::project_io::{OpenOptions, SaveOptions, SaveTarget, open_project};
-use pm_mac_core::{DocumentStore, ProjectIoError, SaveReceipt};
+use pm_kernel::project_io::{OpenOptions, SaveOptions, SaveTarget, open_project};
+use pm_kernel::{DocumentStore, ProjectIoError, SaveReceipt};
 
 /// A fresh directory under the system temp dir, removed on drop.
 pub struct TempDir(pub PathBuf);
@@ -101,8 +101,8 @@ pub fn read(path: &Path) -> Vec<u8> {
 
 pub fn opacity_of(store: &DocumentStore, layer: &str) -> Option<f64> {
     let root = store.root()?;
-    let loc = pm_mac_core::model::find_layer(root, layer)?;
-    let node = pm_mac_core::model::layer_at(root, &loc)?;
+    let loc = pm_kernel::model::find_layer(root, layer)?;
+    let node = pm_kernel::model::layer_at(root, &loc)?;
     match node.get("p")?.get("opacity")?.get("v")?.kind() {
         pm_model::NodeKind::Number(n) => Some(*n),
         _ => None,

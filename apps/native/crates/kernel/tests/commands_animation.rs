@@ -3,12 +3,12 @@
 //! the old app's semantics (`editing.ts`, `anim.ts`, `temporal-ease.ts`,
 //! the timeline's dialogs).
 
-use pm_mac_core::commands::keyframes::{
+use pm_kernel::commands::keyframes::{
     CopiedKey, EaseSide, EaseSpec, HandleValue, Interpolation, KeyframeSpec, ReplaceKeyframes,
     TemporalEase,
 };
-use pm_mac_core::commands::properties::{KeyMode, SetProperty};
-use pm_mac_core::{
+use pm_kernel::commands::properties::{KeyMode, SetProperty};
+use pm_kernel::{
     Command, CommandError, DocumentStore, KeyframeCommand, Origin, PropertyCommand,
     TransactionError,
 };
@@ -54,8 +54,8 @@ fn store() -> DocumentStore {
 
 fn layer(store: &DocumentStore, id: &str) -> Value {
     let root = store.root().unwrap();
-    let loc = pm_mac_core::model::find_layer(root, id).unwrap();
-    pm_mac_core::model::layer_at(root, &loc).unwrap().to_value()
+    let loc = pm_kernel::model::find_layer(root, id).unwrap();
+    pm_kernel::model::layer_at(root, &loc).unwrap().to_value()
 }
 
 fn at<'v>(v: &'v Value, path: &[&str]) -> &'v Value {
@@ -764,7 +764,7 @@ fn simplify_drops_only_constant_interior_keys() {
     run(
         &mut s,
         kc(KeyframeCommand::Simplify {
-            scope: pm_mac_core::commands::keyframes::SimplifyScope::Layers(vec!["s1".into()]),
+            scope: pm_kernel::commands::keyframes::SimplifyScope::Layers(vec!["s1".into()]),
         }),
     );
     let k = keys(&s, "s1", "opacity");
@@ -786,7 +786,7 @@ fn simplify_drops_only_constant_interior_keys() {
     run(
         &mut s,
         kc(KeyframeCommand::Simplify {
-            scope: pm_mac_core::commands::keyframes::SimplifyScope::All,
+            scope: pm_kernel::commands::keyframes::SimplifyScope::All,
         }),
     );
     assert_eq!(s.revision(), before);
