@@ -1,3 +1,4 @@
+// Powermove modified: macOS S2 integration; see vendor/gpui-ce/POWERMOVE.md.
 #![cfg(target_os = "macos")]
 //! macOS platform implementation for GPUI.
 //!
@@ -24,6 +25,7 @@ mod wgpu_renderer;
 #[cfg(feature = "wgpu")]
 use wgpu_renderer as renderer;
 
+pub mod composition;
 mod platform;
 mod window;
 mod window_appearance;

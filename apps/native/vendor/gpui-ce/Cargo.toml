@@ -1,29 +1,20 @@
+# Powermove modified: macOS S2 integration; see vendor/gpui-ce/POWERMOVE.md.
 [workspace]
 members = [
   "./crates/gpui/",
   "./crates/gpui_render/",
-  "./crates/gpui_web/",
-  "./crates/gpui_wgpu/",
   "./crates/gpui_ce_parley/",
-  "./crates/gpui_linux/",
   "./crates/gpui_macos/",
   "./crates/gpui_apple/",
-  "./crates/gpui_tokio/",
   "./crates/gpui_macros/",
-  "./crates/gpui_windows/",
-  "./crates/gpui_platform/",
   "./crates/gpui_shared_string/",
-  "./crates/gpui_elements/",
-  "./crates/gpui_ce_fonts/",
   "./crates/gpui_collections/",
   "./crates/gpui_refineable/",
   "./crates/gpui_derive_refineable/",
   "./crates/gpui_scheduler/",
   "./crates/gpui_sum_tree/",
   "./crates/gpui_media/",
-  "./crates/gpui_zed_util/",
   "./crates/gpui_ce_util/",
-  "./crates/gpui_path/",
 ]
 default-members = ["./crates/gpui/"]
 resolver = "3"
@@ -177,7 +168,6 @@ ashpd = { version = "0.13", default-features = false, features = [
 ] }
 libc = "0.2"
 smol = "2.0"
-util = { path = "crates/gpui_zed_util", version = "0.2.2", package = "gpui_ce_zed_util" }
 wgpu = "29.0.3"
 wgsl-rs = { git = "https://github.com/schell/wgsl-rs", rev = "b2de16a1b81e67d76bc265c296184f882864badb", default-features = false, features = [
   "validation",
@@ -240,19 +230,13 @@ gpui_util = { path = "crates/gpui_ce_util", version = "0.2.6", package = "gpui_c
 
 gpui = { path = "./crates/gpui/", version = "0.2.2", package = "gpui-ce", default-features = false }
 gpui_render = { path = "./crates/gpui_render/", version = "0.1.0", package = "gpui_ce_render" }
-gpui_platform = { path = "./crates/gpui_platform/", version = "0.1.0", package = "gpui_ce_platform" }
-gpui_linux = { path = "./crates/gpui_linux/", version = "0.1.0", package = "gpui_ce_linux", default-features = false }
 gpui_macos = { path = "./crates/gpui_macos/", version = "0.1.0", package = "gpui_ce_macos" }
 gpui_apple = { path = "./crates/gpui_apple/", version = "0.1.0", package = "gpui_ce_apple" }
-gpui_windows = { path = "./crates/gpui_windows/", version = "0.1.0", package = "gpui_ce_windows" }
-gpui_web = { path = "./crates/gpui_web/", version = "0.1.0", package = "gpui_ce_web" }
 gpui_parley = { path = "./crates/gpui_ce_parley/", version = "0.1.0", package = "gpui_ce_parley", default-features = false }
 
-gpui_wgpu = { path = "./crates/gpui_wgpu/", version = "0.1.0", package = "gpui_ce_wgpu" }
 
 gpui_macros = { path = "./crates/gpui_macros/", version = "0.1.0", package = "gpui_ce_macros" }
 gpui_shared_string = { path = "./crates/gpui_shared_string/", version = "0.1.0", package = "gpui_ce_shared_string" }
-gpui_tokio = { path = "./crates/gpui_tokio/", version = "0.1.0", package = "gpui_ce_tokio" }
 
 [workspace.dependencies.windows]
 version = "0.62.2"

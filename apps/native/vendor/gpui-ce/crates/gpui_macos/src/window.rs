@@ -1,3 +1,4 @@
+// Powermove modified: composition presentation and hit-test hooks; see POWERMOVE.md.
 use crate::{
     MacDisplay, TISCopyCurrentKeyboardInputSource, TISGetInputSourceProperty, WindowFrameSource,
     events::platform_input_from_native, kTISPropertyInputSourceIsASCIICapable,
@@ -342,6 +343,10 @@ unsafe fn build_classes() {
                 ClassBuilder::new(CString::new("GPUIView").unwrap().as_c_str(), class!(NSView))
                     .unwrap();
             decl.add_ivar::<*mut c_void>(CString::new(WINDOW_STATE_IVAR).unwrap().as_c_str());
+            decl.add_method(
+                sel!(hitTest:),
+                composition_hit_test as unsafe extern "C" fn(_, _, _) -> _,
+            );
             decl.add_method(sel!(dealloc), dealloc_view as unsafe extern "C" fn(_, _));
 
             decl.add_method(
@@ -2150,6 +2155,11 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
+        let transaction = crate::composition::present(this.native_view.as_ptr() as usize);
+        #[cfg(not(feature = "wgpu"))]
+        if transaction.is_some() {
+            this.renderer.set_presents_with_transaction(true);
+        }
         #[cfg(feature = "wgpu")]
         if this.renderer.draw(scene) {
             this.force_render_pending = true;
@@ -4069,4 +4079,23 @@ mod tests {
             ))
         );
     }
+}
+
+// Powermove P-HIT: convert AppKit superview coordinates to top-left window points.
+unsafe extern "C" fn composition_hit_test(
+    view: &Objc2Object,
+    _sel: Sel,
+    point: Objc2NSPoint,
+) -> ObjcId {
+    let parent: ObjcId = unsafe { msg_send![view, superview] };
+    let mut local: Objc2NSPoint = unsafe { msg_send![view, convertPoint: point, fromView: parent] };
+    let flipped: bool = unsafe { msg_send![view, isFlipped] };
+    if !flipped {
+        let bounds: Objc2NSRect = unsafe { msg_send![view, bounds] };
+        local.y = bounds.size.height - local.y;
+    }
+    if !crate::composition::accepts(view as *const _ as usize, local) {
+        return NIL;
+    }
+    unsafe { msg_send![super(view, class!(NSView)), hitTest: point] }
 }
