@@ -18,6 +18,11 @@ pub struct State {
     pub blocked: AtomicBool,
     pub pings: AtomicUsize,
     pub failures: AtomicUsize,
+    pub life_phase: AtomicUsize,
+    pub life_ready: AtomicBool,
+    pub loop_started: AtomicBool,
+    pub terminated: AtomicBool,
+    pub restarted: AtomicBool,
     pub cancelled_tasks: Mutex<std::collections::HashSet<usize>>,
     pub epoch: Instant,
     pub pixels: Vec<u8>,
@@ -47,6 +52,11 @@ pub fn start() -> Arc<State> {
         blocked: AtomicBool::new(false),
         pings: AtomicUsize::new(0),
         failures: AtomicUsize::new(0),
+        life_phase: AtomicUsize::new(1),
+        life_ready: AtomicBool::new(false),
+        loop_started: AtomicBool::new(false),
+        terminated: AtomicBool::new(false),
+        restarted: AtomicBool::new(false),
         cancelled_tasks: Mutex::new(std::collections::HashSet::new()),
         epoch: Instant::now(),
         pixels: crate::pixels::frame(),
@@ -77,29 +87,6 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    // Peek only at the request line so the WebSocket handshake can read it itself.
-    let mut peek = [0; 2048];
-    let n = stream.peek(&mut peek)?;
-    let prefix = format!("GET /{}/ws ", s.token);
-    if peek[..n].starts_with(prefix.as_bytes()) {
-        let mut ws = tungstenite::accept(stream).map_err(std::io::Error::other)?;
-        for _ in 0..400 {
-            std::thread::sleep(Duration::from_millis(2));
-            let start = s.ns();
-            ws.send(tungstenite::Message::Text(start.to_string().into()))
-                .map_err(std::io::Error::other)?;
-            let msg = ws.read().map_err(std::io::Error::other)?;
-            if msg.to_text().ok().and_then(|x| x.parse::<u64>().ok()) != Some(start) {
-                break;
-            }
-            s.results
-                .lock()
-                .unwrap()
-                .push(json!({"ws_ack_ms":(s.ns()-start) as f64/1e6}));
-        }
-        let _ = ws.close(None);
-        return Ok(());
-    }
     let mut reader = BufReader::new(stream);
     loop {
         let mut line = String::new();
@@ -110,6 +97,7 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
         let mut length = 0usize;
         let mut host = String::new();
         let mut origin = String::new();
+        let mut ws_key = None;
         loop {
             line.clear();
             reader.read_line(&mut line)?;
@@ -128,6 +116,9 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
             }
             if lower.starts_with("host:") {
                 host = line[5..].trim().to_string();
+            }
+            if lower.starts_with("sec-websocket-key:") {
+                ws_key = Some(line[18..].trim().to_string());
             }
             if lower.starts_with("origin:") {
                 origin = line[7..].trim().to_string();
@@ -149,11 +140,38 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
             continue;
         }
         let path = route[base.len()..].split('?').next().unwrap_or("");
+        if path == "ws" {
+            if let Some(key) = ws_key {
+                let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+                write!(
+                    reader.get_mut(),
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                )?;
+                reader.get_mut().flush()?;
+                return serve_ws(reader.into_inner(), s);
+            }
+            respond(
+                reader.get_mut(),
+                400,
+                "text/plain",
+                b"missing websocket key",
+            )?;
+            continue;
+        }
         match path {
             "" => {
                 let page = include_str!("page.html")
                     .replace("__BASE__", &base)
                     .replace("__PIXELS_JS__", include_str!("pixels.js"))
+                    .replace("__LIFECYCLE_JS__", include_str!("lifecycle.js"))
+                    .replace(
+                        "__RESTARTED__",
+                        if s.restarted.load(Ordering::SeqCst) {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    )
                     .replace(
                         "__CASE__",
                         &std::env::var("S5_CASE").unwrap_or_else(|_| "http".into()),
@@ -165,6 +183,37 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
                     page.as_bytes(),
                 )?;
             }
+            "life-next" => {
+                let after: usize = route.split('?').nth(1).unwrap_or("0").parse().unwrap_or(0);
+                let start = Instant::now();
+                while s.life_phase.load(Ordering::SeqCst) <= after
+                    && start.elapsed() < Duration::from_secs(100)
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    json!({"phase":s.life_phase.load(Ordering::SeqCst)})
+                        .to_string()
+                        .as_bytes(),
+                )?;
+            }
+            "life-ready" => {
+                s.life_ready.store(true, Ordering::SeqCst);
+                respond(reader.get_mut(), 200, "text/plain", b"ok")?;
+            }
+            "loop-start" => {
+                s.loop_started.store(true, Ordering::SeqCst);
+                respond(reader.get_mut(), 200, "text/plain", b"ok")?;
+            }
+            "kernel-snapshot" => respond(
+                reader.get_mut(),
+                200,
+                "application/json",
+                b"{\"revision\":7,\"acknowledged\":true}",
+            )?,
             "outer-pixels" => {
                 let renders = s.renders.lock().unwrap();
                 respond(
@@ -324,4 +373,26 @@ pub fn stats(mut a: Vec<f64>) -> Value {
             .min(n - 1)]
     };
     json!({"n":n,"p50_ms":p(0.5),"p95_ms":p(0.95),"p99_ms":p(0.99),"max_ms":a[n-1]})
+}
+
+fn serve_ws(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
+    // Handshake is parsed by the same authenticated HTTP path, including partial reads.
+    let mut ws =
+        tungstenite::WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Server, None);
+    for _ in 0..400 {
+        std::thread::sleep(Duration::from_millis(2));
+        let start = s.ns();
+        ws.send(tungstenite::Message::Text(start.to_string().into()))
+            .map_err(std::io::Error::other)?;
+        let msg = ws.read().map_err(std::io::Error::other)?;
+        if msg.to_text().ok().and_then(|x| x.parse::<u64>().ok()) != Some(start) {
+            return Err(std::io::Error::other("wrong websocket acknowledgment"));
+        }
+        s.results
+            .lock()
+            .unwrap()
+            .push(json!({"ws_ack_ms":(s.ns()-start)as f64/1e6}));
+    }
+    let _ = ws.close(None);
+    Ok(())
 }

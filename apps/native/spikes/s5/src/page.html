@@ -12,6 +12,7 @@ function sync(path,body){const x=new XMLHttpRequest();x.open(body===undefined?'G
 function stats(a){a.sort((a,b)=>a-b);const p=q=>a[Math.min(a.length-1,Math.ceil(q*a.length)-1)];return {n:a.length,p50_ms:p(.5),p95_ms:p(.95),p99_ms:p(.99),max_ms:p(1)};}
 async function bench(name,fn){const a=[];try{for(let i=0;i<10;i++)fn();for(let batch=0;batch<20;batch++){for(let i=0;i<100;i++){const t=performance.now();if(fn()===null)throw Error('bridge returned null');a.push(performance.now()-t);}}await report({test:name,status:'measured',...stats(a)});}catch(e){await report({test:name,status:'failed',error:String(e),...stats(a)});}}
 __PIXELS_JS__
+__LIFECYCLE_JS__
 async function channels(){
  if(testCase==='http') await bench('sync_http',()=>sync('ping'));
  if(testCase==='scheme') await bench('sync_scheme',()=>{const x=new XMLHttpRequest();x.open('GET','s5probe://kernel/ping',false);x.send();if(x.responseText!=='{"ok":true}')throw Error('no scheme response');return x.responseText;});
@@ -30,7 +31,7 @@ async function channels(){
  const a=[];
  for(let i=0;i<400;i++){const t=await (await fetch(base+'poll')).text();await fetch(base+'ack',{method:'POST',body:t});}
  await report({test:'long_poll_done',n:400});
- await new Promise(resolve=>{const ws=new WebSocket(location.origin.replace('http:','ws:')+base+'ws');let n=0;ws.onmessage=e=>{ws.send(e.data);n++;};ws.onclose=()=>{report({test:'websocket_done',n}).then(resolve);};ws.onerror=()=>report({test:'websocket_error'});});
+ await new Promise((resolve,reject)=>{const ws=new WebSocket(location.origin.replace('http:','ws:')+base+'ws');let n=0;ws.onmessage=e=>{ws.send(e.data);n++;};ws.onclose=()=>{if(n!==400){reject(Error('incomplete WebSocket probe '+n));return;}report({test:'websocket_done',n}).then(resolve);};ws.onerror=()=>reject(Error('WebSocket transport failed'));});
 }
-(async()=>{try{await report({test:'page_started',isolated:crossOriginIsolated,timer_resolution_ms:(()=>{let t=performance.now(),next=t;while(next===t)next=performance.now();return next-t;})()});if(testCase==='binary')await binary();else if(testCase==='continuation')await continuations();else await channels();}catch(e){await report({test:'fatal',error:String(e)});}finally{await fetch(base+'done');}})();
+(async()=>{try{await report({test:'page_started',isolated:crossOriginIsolated,timer_resolution_ms:(()=>{let t=performance.now(),next=t;while(next===t)next=performance.now();return next-t;})()});if(testCase.startsWith('lifecycle-'))await lifecycleJob();else if(testCase.startsWith('kill-'))await infiniteLoop();else if(testCase==='binary')await binary();else if(testCase==='continuation')await continuations();else await channels();}catch(e){await report({test:'fatal',error:String(e)});}finally{await fetch(base+'done');}})();
 </script>
