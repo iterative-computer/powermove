@@ -194,6 +194,7 @@ pub struct Published {
     pub entry: Option<OpenEntryInfo>,
     pub selection: Selection,
     pub workspace: Value,
+    pub ui_state: crate::state::UiState,
     pub dirty: bool,
 }
 
@@ -206,6 +207,14 @@ impl Published {
 /// What subscribers hear, after publication.
 #[derive(Clone, Debug)]
 pub enum KernelEvent {
+    StateChanged {
+        revision: u64,
+        change: crate::state::StateChange,
+    },
+    WorkspaceChanged {
+        project: String,
+        workspace: Value,
+    },
     Published {
         project: String,
         revision: u64,
@@ -236,6 +245,7 @@ pub struct RealmEnvelope {
 #[derive(Default)]
 struct Shared {
     published: Mutex<HashMap<String, Arc<Published>>>,
+    state: Mutex<Arc<crate::state::StateSnapshot>>,
     subscribers: Mutex<Vec<mpsc::Sender<KernelEvent>>>,
     realms: Mutex<HashMap<Writer, mpsc::Sender<RealmEnvelope>>>,
 }
@@ -243,6 +253,14 @@ struct Shared {
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
 
 enum Msg {
+    State {
+        tx: crate::state::StateTransaction,
+        reply: Reply<Result<crate::state::StateAck, KernelFailure>>,
+    },
+    Shell {
+        call: crate::session::ShellCall,
+        reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
+    },
     Call {
         project: String,
         request: Request,
@@ -325,6 +343,31 @@ impl Drop for KernelActor {
 }
 
 impl KernelHandle {
+    pub fn shell(
+        &self,
+        call: crate::session::ShellCall,
+    ) -> Pending<Result<crate::session::ShellReply, KernelFailure>> {
+        let (r, p) = oneshot();
+        self.send(Msg::Shell {
+            call,
+            reply: Box::new(move |v| r.resolve(v)),
+        });
+        p
+    }
+    pub fn state_transaction(
+        &self,
+        tx: crate::state::StateTransaction,
+    ) -> Pending<Result<crate::state::StateAck, KernelFailure>> {
+        let (r, p) = oneshot();
+        self.send(Msg::State {
+            tx,
+            reply: Box::new(move |v| r.resolve(v)),
+        });
+        p
+    }
+    pub fn state(&self) -> Arc<crate::state::StateSnapshot> {
+        self.shared.state.lock().expect("state").clone()
+    }
     fn send(&self, msg: Msg) {
         // A stopped kernel drops the message; the resolver's drop closes
         // the `Pending` (`None`).
@@ -465,6 +508,7 @@ fn publish(kernel: &mut Kernel, shared: &Shared, project: &str) -> Option<u64> {
         }),
         selection: store.selection().clone(),
         workspace: p.workspace().clone(),
+        ui_state: kernel.state().ui.get(project).cloned().unwrap_or_default(),
         dirty: store.is_dirty(),
     };
     let revision = published.revision();
@@ -489,11 +533,68 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     let mut deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>> = HashMap::new();
     for msg in rx {
         match msg {
+            Msg::State { tx, reply } => {
+                let result = kernel.state_transaction(tx);
+                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+                let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+                for id in ids {
+                    publish(&mut kernel, &shared, &id);
+                }
+                let events = result
+                    .as_ref()
+                    .ok()
+                    .map(|a| (a.revision, a.changes.clone()));
+                reply(result);
+                if let Some((revision, changes)) = events {
+                    for change in changes {
+                        emit(&shared, KernelEvent::StateChanged { revision, change });
+                    }
+                }
+            }
+            Msg::Shell { call, reply } => {
+                let before: Vec<_> = kernel.projects().map(str::to_owned).collect();
+                let result = kernel.shell(call);
+                let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+                shared
+                    .published
+                    .lock()
+                    .expect("published")
+                    .retain(|id, _| ids.contains(id));
+                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+                for id in &ids {
+                    publish(&mut kernel, &shared, id);
+                }
+                reply(result);
+                for id in &ids {
+                    if !before.contains(id) {
+                        emit(
+                            &shared,
+                            KernelEvent::Opened {
+                                project: id.clone(),
+                            },
+                        );
+                    } else if let Some(p) = kernel.project(id) {
+                        emit(
+                            &shared,
+                            KernelEvent::Published {
+                                project: id.clone(),
+                                revision: p.store().revision(),
+                            },
+                        );
+                    }
+                }
+                for id in before {
+                    if !ids.contains(&id) {
+                        emit(&shared, KernelEvent::Closed { project: id });
+                    }
+                }
+            }
             Msg::Call {
                 project,
                 request,
                 reply,
             } => {
+                let before_state = kernel.state().clone();
                 let handled = match kernel.handle(&project, request) {
                     Ok(h) => h,
                     Err(e) => {
@@ -501,6 +602,20 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                         continue;
                     }
                 };
+                if before_state.revision != kernel.state().revision {
+                    *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+                }
+                let workspace_changed = kernel
+                    .project(&project)
+                    .map(|p| p.workspace().clone())
+                    .filter(|ws| {
+                        shared
+                            .published
+                            .lock()
+                            .expect("published")
+                            .get(&project)
+                            .is_some_and(|p| &p.workspace != ws)
+                    });
                 // Publication boundary: publish, then answer, then events.
                 let revision = publish(&mut kernel, &shared, &project);
                 let (outbox, notices) = match kernel.project_mut(&project) {
@@ -543,6 +658,36 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                         },
                     );
                 }
+                if let Some(workspace) = workspace_changed {
+                    emit(
+                        &shared,
+                        KernelEvent::WorkspaceChanged {
+                            project: project.clone(),
+                            workspace,
+                        },
+                    );
+                }
+                if before_state.revision != kernel.state().revision {
+                    for key in before_state
+                        .settings
+                        .keys()
+                        .chain(kernel.state().settings.keys())
+                        .collect::<std::collections::BTreeSet<_>>()
+                    {
+                        if before_state.settings.get(key) != kernel.state().settings.get(key) {
+                            emit(
+                                &shared,
+                                KernelEvent::StateChanged {
+                                    revision: kernel.state().revision,
+                                    change: crate::state::StateChange::Setting {
+                                        key: key.clone(),
+                                        value: kernel.state().settings.get(key).cloned(),
+                                    },
+                                },
+                            );
+                        }
+                    }
+                }
                 for notice in notices {
                     emit(
                         &shared,
@@ -574,7 +719,10 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
             }
             Msg::Close { project, reply } => {
                 let closed = kernel.close(&project);
-                shared.published.lock().expect("published").remove(&project);
+                if closed {
+                    shared.published.lock().expect("published").remove(&project);
+                }
+                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
                 reply(closed);
                 if closed {
                     emit(&shared, KernelEvent::Closed { project });
