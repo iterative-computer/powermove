@@ -46,4 +46,9 @@ def analyze(rows):
 
 
 def load(path):
-    return analyze(json.loads(path.read_text()))
+    raw = path.read_text()
+    try:
+        rows = json.loads(raw)
+    except json.JSONDecodeError:
+        rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    return analyze([rows] if isinstance(rows, dict) else rows)

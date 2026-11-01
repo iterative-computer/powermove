@@ -367,3 +367,47 @@ resize-lag, menu and display gates are unchanged. No P1 approval is implied.
 
 Raw AX/build/test logs are temporary, outside Git; only synthetic fixture results
 are summarized here. No screenshots, private baseline text or user data are added.
+
+
+## S2b unlocked foreground follow-up (2026-11-01)
+
+**S2 remains OPEN / NOT PASSED.** Required Rust 1.96.1 fixture build, contracts
+and AppKit bridge probe passed before the on-screen session. The foreground
+external AX walker passed with the floating menu closed: published reading order,
+parents, native/WebKit subtree, focus transitions GPUI → WebKit → GPUI and
+GPUI → native field → GPUI, value restoration, hit testing and actions. With the
+floating menu open, one transport-button center hit test hit the menu window;
+that occlusion case is retained, not called a transport regression or hidden.
+
+App set A, present and untouched: Finder, Aside, Grok Bot, Notion, Mail,
+Claude, T3 Code (Nightly), installed Powermove/helpers, RobloxPlayer,
+RobloxMenuBar and figma_agent. Every result below retains this app-presence
+caveat; load is the observed one-minute average before → after the case.
+Existing Powermove process count changed from seven to five without this lane
+closing them. No owned benchmark instance remains. All projects and profiles
+were disposable public/synthetic fixtures under `/tmp`.
+
+| Check | Result | Conditions |
+|---|---|---|
+| Foreground AX walk, no menu | PASS all walker checks; zero failures | A; one-minute load 3.90 → 4.26 over the S2 session |
+| Dark titlebar / native menu | PASS visual smoke; both report DarkAqua; black titlebar and dark menu captured | A; same session load |
+| Previously clipped overlay label | PASS visual smoke and leading-edge hit test; full “Compat overlay hole” visible; DOM button changed to “Clicked” | A; same session load |
+| Live resize endpoint | PASS endpoint smoke: real edge drag 1180×844 → 1032×772; WebKit/mask reflow and hit region followed | A; resize/IME checkpoint load 3.38 |
+| ≤1-frame reflow lag or stretch | UNVERIFIED; no frame-resolved DOM paint instrumentation or stretch proof | A; same resize checkpoint |
+| VoiceOver speech/next-previous traversal | UNVERIFIED. First-use Quickstart appeared; VoiceOver started without changing its “do not show again” checkbox. Cursor query returned −1728, scripted move −1708; no spoken-navigation pass claimed | A; S2 ending load 4.26 |
+| Japanese IME | UNVERIFIED. Romaji selection returned −50; selection remained U.S.; U.S. restore returned 0 | A; resize/IME checkpoint load 3.38 |
+
+Owner's 30-second IME check: choose Japanese Romaji from the input menu, focus
+“Native name”, type `nihon`, Space to convert, Return to commit; start another
+composition and Escape to cancel. Check candidate placement/caret and cross-slot
+focus, then switch back to U.S. Do the spoken VoiceOver walk separately with
+VO-Right/Left across GPUI, native field, WebKit and back; programmatic focus is
+not a speech substitute.
+
+Captures, outside Git: `/tmp/pm-shots/onscreen-s2-dark.png` and
+`/tmp/pm-shots/onscreen-s2-resized.png`. No system appearance, contrast or
+transparency setting was changed. Input selection was restored to U.S.; initially
+off VoiceOver and its Quickstart process were both verified absent at the end.
+No product/vendor code changed in this lane. All foreground processes were owned,
+time-bounded and closed. Remaining prior layout, menu, performance and display
+contracts are not promoted to passes by these appearance/AX observations.

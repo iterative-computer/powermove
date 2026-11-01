@@ -94,3 +94,30 @@ before that interpretation can accept a result.
 Consequently this first harness can collect reproducible diagnostics and reject
 bad/incomplete evidence, but **cannot certify Gate P1** yet. See the gate report
 for the current run and the exact remaining instrument/API requirements.
+
+## Diagnostic foreground sessions
+
+When an operator explicitly retains installed apps or accepts high load, pass
+`--diagnostic`. Only those two condition blockers may be bypassed for collection.
+Power, disk, unlocked-session and active-build checks still stop execution.
+Every before/after observation retains app presence and load. Acceptance results
+exclude invalid pairs; `diagnostic_results` separately summarizes the observed
+numbers and cannot certify the gate.
+
+For an operator-owned whole-session GUI lock, pass `--session-lock-inode` with
+its inode. The lock must already contain `onscreen`; identity is checked for each
+pair. The caller must retain the lock and release it in its own exit trap. The
+runner never removes a caller-owned lock. Ordinary runs keep their per-pair lock
+and nine-minute alarm.
+
+Each app receives its own writable project copy for every pair. The prepared
+corpus file remains immutable even when native edits save a PMV back to their
+source path. Setup seeks skip a frame already displayed by native; the measured
+cached seek still changes frame identity and requires a new presentation.
+Playback errors retain earlier observations. Service traces accept both JSON
+arrays and the service's NDJSON stream; malformed records still fail explicitly.
+
+For real-app service foreground runs use `python3 tools/perf-gate/foreground.py`
+with the original runbook arguments. It retains the service harness's guards and
+uses Quartz host seconds for window markers. Python 3.9 process-relative
+monotonic origins must not be joined directly to NSEvent/Metal host timestamps.

@@ -8,13 +8,13 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from types import SimpleNamespace
 
 from budgets import ROWS, check, percentile, ratio
-from macos import Processes, delta
+from macos import Processes, delta, host_seconds
 import driver
-from trace import analyze
+from trace import analyze, load as load_trace
 
 
 class GateTests(unittest.TestCase):
@@ -133,6 +133,107 @@ class GateTests(unittest.TestCase):
         finally:
             child.terminate()
             child.wait(timeout=3)
+
+    def test_session_lock_requires_matching_owner_and_inode_and_stays_held(self):
+        with tempfile.TemporaryDirectory() as root:
+            lock = Path(root) / 'gui.lock'
+            lock.write_text('onscreen\n')
+            with patch.object(driver, 'LOCK', lock):
+                with driver.gui_lock(session_inode=lock.stat().st_ino):
+                    self.assertTrue(lock.exists())
+                self.assertTrue(lock.exists())
+                with self.assertRaises(RuntimeError):
+                    with driver.gui_lock(session_inode=lock.stat().st_ino + 1): pass
+                lock.write_text('foreign\n')
+                with self.assertRaises(RuntimeError):
+                    with driver.gui_lock(session_inode=lock.stat().st_ino): pass
+
+    def test_diagnostic_exceptions_never_allow_locked_disk_power_or_build_failures(self):
+        conditions = {'blockers': ['One-minute load is not below 12',
+            'Other Powermove/Electron instances are active; leave them untouched']}
+        self.assertEqual(driver.execution_blockers(conditions, True), [])
+        self.assertEqual(driver.execution_blockers(conditions, False), conditions['blockers'])
+        for reason in ['Mac session is locked', 'Less than 8 GiB free',
+                       'Machine is not on AC power', 'Build processes are active; machine is not settled']:
+            self.assertEqual(driver.execution_blockers({'blockers': [reason]}, True), [reason])
+
+    def test_invalid_pairs_are_only_summarized_separately_and_never_pass(self):
+        pair = {'valid_conditions': False,
+                'native': {'idle': {'cpu_percent': .1}},
+                'electron': {'idle': {'cpu_percent': 1.}}}
+        data = {'pairs': [pair] * 30, 'refresh_hz': 120,
+                'machine': {'required_rigs_certified': False}}
+        self.assertEqual(driver.summary(data)['idle']['stats']['native'], {})
+        diagnostic = driver.summary(data, diagnostic=True)['idle']
+        self.assertEqual(diagnostic['stats']['native']['cpu_percent']['n'], 30)
+        self.assertEqual(diagnostic['status'], 'INCOMPLETE')
+
+    def test_service_ndjson_and_single_row_preserve_missing_presentations(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'trace.json'
+            path.write_text('{"gpu_ok":true,"display":1.0}\n{"gpu_ok":true,"display":null}\n')
+            report = load_trace(path)
+            self.assertEqual(report['rows'], 2)
+            self.assertEqual(report['positive_display_rows'], 1)
+            path.write_text('{"gpu_ok":true,"display":null}\n')
+            self.assertEqual(load_trace(path)['positive_display_rows'], 0)
+            path.write_text('{"gpu_ok":true}\nmalformed\n')
+            with self.assertRaises(ValueError): load_trace(path)
+
+    def test_setup_seek_skips_only_an_already_displayed_native_frame(self):
+        app = Mock(kind='native')
+        app.request.return_value = {'frame': {'ticks': 0}}
+        driver.position(app, 0.)
+        app.action.assert_not_called()
+        driver.position(app, 1 / 30)
+        app.action.assert_called_once_with('seek', seconds=1 / 30)
+        app.kind = 'electron'
+        driver.position(app, 0.)
+        self.assertEqual(app.action.call_count, 2)
+
+    def test_app_local_copies_keep_fixture_immutable_and_partial_values_survive(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / 'corpus'; source.mkdir()
+            (source / 'document.json').write_text('{"fixture":true}')
+            scratch = root / 'scratch'; scratch.mkdir()
+            args = SimpleNamespace(output=root/'results.json',corpus=source,
+                fps=30,settle_seconds=.001,idle_seconds=.001,playback_runs=1)
+            paths = []
+            def factory(kind, args, scratch):
+                app = Mock(kind=kind, pid=123, ready_ms=1, ready={'endpoint':'test'},
+                           trace_path=root/'absent.trace')
+                def action(op, **kwargs):
+                    if op == 'open':
+                        path=Path(kwargs['path']); paths.append(path)
+                        path.write_text('PMV4 mutated disposable app copy')
+                    return {'ms':1,'cache_hit':True}
+                app.action.side_effect = action
+                def request(op):
+                    if op == 'play': raise RuntimeError('forced playback failure')
+                    return {'frame':{'ticks':0}}
+                app.request.side_effect = request
+                return app
+            proc=Mock();proc.family.return_value={123:{'phys_footprint':1000000}}
+            with patch.object(driver,'App',side_effect=factory), patch.object(driver,'observe',return_value={'family_phys_footprint_mb':1,'per_process':[]}):
+                for kind in ['native','electron']:
+                    values,errors=driver.one_app(kind,args,proc,scratch,0)
+                    self.assertIn('cold_launch',values)
+                    self.assertIn('open',values)
+                    self.assertIn('memory_small',values)
+                    self.assertIn('playback_cost',errors)
+            self.assertNotEqual(paths[0],paths[1])
+            self.assertEqual((source/'document.json').read_text(),'{"fixture":true}')
+
+    @unittest.skipUnless(os.uname().sysname == 'Darwin', 'Darwin host clock')
+    def test_foreground_clock_matches_native_mach_host_origin(self):
+        import ctypes
+        host_seconds()  # Load Quartz before the bounded comparison.
+        lib=ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        lib.mach_absolute_time.restype=ctypes.c_uint64
+        proc=Processes()
+        native=lib.mach_absolute_time()*proc.timebase[0]/proc.timebase[1]/1e9
+        self.assertAlmostEqual(host_seconds(),native,delta=.05)
 
 
 if __name__ == '__main__':

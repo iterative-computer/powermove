@@ -96,8 +96,15 @@ def conditions(proc, *, quiet=True):
         state['build_process_count'] = len(builds)
         if builds:
             blockers.append('Build processes are active; machine is not settled')
+    presence_names = {'Finder','Aside','Grok Bot','Notion','Mail','Claude','T3 Code (Nightly)','Powermove','RobloxPlayer','RobloxMenuBar','figma_agent','OBS','Paper'}
+    state['app_presence'] = sorted({Path(proc.path(pid)).name for pid in proc.all()} & presence_names)
     state['blockers'] = blockers
     return state
+
+
+def execution_blockers(state, diagnostic=False):
+    allowed = {'One-minute load is not below 12', 'Other Powermove/Electron instances are active; leave them untouched'}
+    return [reason for reason in state['blockers'] if not diagnostic or reason not in allowed]
 
 
 def machine():
@@ -116,7 +123,12 @@ def machine():
 
 
 @contextmanager
-def gui_lock(wait_seconds=300):
+def gui_lock(wait_seconds=300, session_inode=None):
+    if session_inode is not None:
+        if not LOCK.exists() or LOCK.stat().st_ino != session_inode or LOCK.read_text().strip() != "onscreen":
+            raise RuntimeError("Session GUI lock identity changed")
+        yield
+        return
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -254,6 +266,16 @@ def observe(app, proc, seconds):
                 per_process=[{'pid':pid,'phys_footprint_bytes':u['phys_footprint']} for pid,u in end.items()])
 
 
+def position(app, seconds):
+    # Setup seeks to an already displayed frame do not require another drawable.
+    # Never use this shortcut for the measured cached seek itself.
+    if app.kind == 'native':
+        frame = app.request('status').get('frame')
+        if frame and abs(frame['ticks'] - round(seconds * TICKS)) <= 1:
+            return
+    app.action('seek', seconds=seconds)
+
+
 def one_app(kind, args, proc, scratch, run):
     values, errors = {}, {}
     app = App(kind, args, scratch)
@@ -262,7 +284,9 @@ def one_app(kind, args, proc, scratch, run):
         base = proc.family(app.pid)
         base_mb = sum(p['phys_footprint'] for p in base.values()) / 1e6
         try:
-            values['open'] = app.action('open', path=str(args.corpus / 'document.json'))
+            project = scratch / (kind + '-document.json')
+            shutil.copyfile(args.corpus / 'document.json', project)
+            values['open'] = app.action('open', path=str(project))
         except Exception as error:
             errors['open'] = str(error)
             return values, errors
@@ -271,12 +295,12 @@ def one_app(kind, args, proc, scratch, run):
             try:
                 if row == 'scrub_cached':
                     for t in [0., 1 / args.fps, 0.]:
-                        app.action('seek', seconds=t)
+                        position(app, t)
                     values[row] = app.action('seek', seconds=1 / args.fps)
                     if kind == 'native' and values[row].get('cache_hit') is not True:
                         raise RuntimeError('Native frame was not a verified cache hit')
                 else:
-                    app.action('seek', seconds=0.)
+                    position(app, 0.)
                     values[row] = app.action('edit', value=37 if run % 2 == 0 else 73)
             except Exception as error:
                 values.pop(row, None)
@@ -293,15 +317,18 @@ def one_app(kind, args, proc, scratch, run):
         # Full 60 s intervals. Limited repeats because the missing GPU/display
         # streams already prevent these rows passing; no short interval is called playback.
         if run < args.playback_runs:
-            app.action('seek', seconds=0.)
-            app.request('play')
-            values['playback_cost'] = observe(app, proc, 60)
-            if not app.request('status').get('playing'):
-                values.pop('playback_cost', None)
-                raise RuntimeError('Transport stopped during playback interval; reject CPU-only interval')
-            app.request('pause')
-            values['playback'] = {'duration_s': values['playback_cost']['duration_s'],
-                                  'endpoint': 'CPU-accounting window; physical frame census unavailable'}
+            try:
+                position(app, 0.)
+                app.request('play')
+                values['playback_cost'] = observe(app, proc, 60)
+                if not app.request('status').get('playing'):
+                    values.pop('playback_cost', None)
+                    raise RuntimeError('Transport stopped during playback interval; reject CPU-only interval')
+                app.request('pause')
+                values['playback'] = {'duration_s': values['playback_cost']['duration_s'],
+                                      'endpoint': 'CPU-accounting window; physical frame census unavailable'}
+            except Exception as error:
+                errors['playback_cost'] = str(error)
     finally:
         app.close()
         if kind == 'native' and app.trace_path.exists():
@@ -312,12 +339,12 @@ def one_app(kind, args, proc, scratch, run):
     return values, errors
 
 
-def summary(data):
+def summary(data, *, diagnostic=False):
     rows = {}
     for row in ROWS:
         sides = {}
         for kind in ['native', 'electron']:
-            observations = [p[kind].get(row, {}) for p in data['pairs'] if p.get('valid_conditions') and kind in p]
+            observations = [p[kind].get(row, {}) for p in data['pairs'] if (p.get('valid_conditions') or diagnostic) and kind in p]
             keys = sorted({key for o in observations for key, value in o.items() if isinstance(value, (int, float)) and not isinstance(value, bool) and not key.endswith('_delta_mb')})
             sides[kind] = {key: [o[key] for o in observations if key in o] for key in keys}
         # These measurements have explicitly different or unavailable gate endpoints.
@@ -337,11 +364,12 @@ def run(args):
             'native_revision': command(['git', '-C', str(ROOT), 'rev-parse', 'HEAD']).stdout.strip(),
             'reference_revision': command(['git', '-C', str(args.reference), 'rev-parse', 'HEAD']).stdout.strip(),
             'reference_tag': 'v1.2.0', 'requested_runs': args.runs, 'pairs': [],
+            'diagnostic_mode': getattr(args, 'diagnostic', False),
             'playback_runs': args.playback_runs, 'playback_repeat_reason': 'Physical frame census, GPU and app-attributed energy are unavailable; extra CPU-only repeats cannot satisfy the combined rows.',
             'initial_conditions': conditions(proc), 'blockers': []}
     data['blockers'].extend(data['initial_conditions']['blockers'])
     try:
-        if data['blockers']:
+        if execution_blockers(data['initial_conditions'], getattr(args, "diagnostic", False)):
             return data
         expected = command(['git', '-C', str(ROOT), 'rev-parse', 'v1.2.0^{commit}']).stdout.strip()
         if data['reference_revision'] != expected or not expected:
@@ -357,16 +385,16 @@ def run(args):
         data['fixture'] = fixture
         for iteration in range(args.runs):
             pair = {'index': iteration, 'order': ['native', 'electron'] if iteration % 2 == 0 else ['electron', 'native'], 'conditions': [], 'errors': {}}
-            with gui_lock(args.lock_wait_seconds):
+            with gui_lock(args.lock_wait_seconds, getattr(args, "session_lock_inode", None)):
                 state = conditions(proc)
-                if state['blockers']:
+                if execution_blockers(state, getattr(args, "diagnostic", False)):
                     data['blockers'].extend(state['blockers'])
                     break
                 with tempfile.TemporaryDirectory(prefix='pm-perf-pair-', dir='/tmp') as scratch:
                     for kind in pair['order']:
                         before = conditions(proc)
                         pair['conditions'].append(before)
-                        if before['blockers']:
+                        if execution_blockers(before, getattr(args, "diagnostic", False)):
                             raise RuntimeError('; '.join(before['blockers']))
                         try:
                             pair[kind], pair['errors'][kind] = one_app(kind, args, proc, Path(scratch), iteration)
@@ -388,12 +416,15 @@ def run(args):
         data['blockers'].append(str(error))
     finally:
         data['results'] = summary(data)
+        data['diagnostic_results'] = summary(data, diagnostic=True) if getattr(args, "diagnostic", False) else {}
         args.output.write_text(json.dumps(data, indent=2))
     return data
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--diagnostic', action='store_true', help='Collect with existing apps/high load; preserve invalid conditions and never accept gate results')
+    p.add_argument('--session-lock-inode', type=int, help='Reuse the caller-owned onscreen lock by verified inode; caller must retain/release it')
     p.add_argument('--reference', type=Path, default=Path('/tmp/pm-ref-v1.2.0'))
     p.add_argument('--native', type=Path, default=Path.home() / 'Developer/pm-target/release/powermove-native')
     p.add_argument('--corpus', type=Path, required=True)
