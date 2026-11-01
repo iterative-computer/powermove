@@ -92,6 +92,20 @@ pub enum ChangeCause {
         label: String,
         origin: Origin,
     },
+    /// A kernel write (`crate::tx`): applied now, recorded in history when
+    /// its open entry closes (or never, for direct writes outside one).
+    Write {
+        label: String,
+        origin: Origin,
+        /// The open entry the write folded into.
+        entry: Option<u64>,
+    },
+    /// A kernel cancel reverting a lease owner's operations.
+    Revert {
+        label: String,
+    },
+    /// Journal recovery replaying a record.
+    Recover,
 }
 
 /// One published revision: what readers need to follow incrementally.
@@ -625,6 +639,9 @@ impl DocumentStore {
             .peek_undo()
             .ok_or(TransactionError::NothingToUndo)?
             .clone();
+        if !record.is_document() {
+            return Err(TransactionError::ExternalEntry);
+        }
         let staged = self.stage_ops(&record.inverse, false)?;
         let revision = staged.document.revision();
         self.publish(
@@ -650,6 +667,9 @@ impl DocumentStore {
             .peek_redo()
             .ok_or(TransactionError::NothingToRedo)?
             .clone();
+        if !record.is_document() {
+            return Err(TransactionError::ExternalEntry);
+        }
         let staged = self.stage_ops(&record.forward, false)?;
         let revision = staged.document.revision();
         self.publish(
@@ -895,8 +915,18 @@ impl DocumentStore {
     /// Stages raw operations (undo, redo, cancel, restore). `capture`
     /// records inverses (only `restore_project` needs them).
     fn stage_ops(&self, ops: &[Op], capture: bool) -> Result<Staged, TransactionError> {
+        self.stage_ops_from(self.current.root().cloned(), ops, capture)
+    }
+
+    /// [`stage_ops`](Self::stage_ops) on another tree.
+    fn stage_ops_from(
+        &self,
+        root: Option<Node>,
+        ops: &[Op],
+        capture: bool,
+    ) -> Result<Staged, TransactionError> {
         let revision = self.revision() + 1;
-        let mut root = self.current.root().cloned();
+        let mut root = root;
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
         let mut changed = false;
@@ -1096,10 +1126,307 @@ impl DocumentStore {
     }
 }
 
+/// What one kernel write applied ([`DocumentStore::kernel_apply`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Applied {
+    pub revision: u64,
+    pub forward: Vec<Op>,
+    /// Inverses in undo order (last operation first).
+    pub inverse: Vec<Op>,
+    /// Where each operation's inverse was captured (forward order).
+    pub scopes: Vec<Vec<PathPart>>,
+}
+
+/// What a kernel undo/redo step did ([`DocumentStore::kernel_undo`]).
+#[derive(Clone, Debug)]
+pub(crate) enum Step {
+    /// A document entry: its operations were applied as `revision`.
+    Document {
+        revision: u64,
+        ops: Arc<[Op]>,
+        /// The operations that reverse this step (the other side of the record).
+        reverse: Arc<[Op]>,
+        label: String,
+    },
+    /// An external entry: the cursor moved; its realm must run the closure.
+    External { external: crate::history::ExternalRef, label: String },
+}
+
+/// What a kernel write carries.
+#[derive(Clone, Debug)]
+pub enum WriteBody {
+    /// Typed commands, planned on the scratch tree in order.
+    Commands(Vec<Command>),
+    /// Raw operations (direct writes, `edit.mutate` results, journal replay).
+    Ops(Vec<Op>),
+}
+
+impl WriteBody {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            WriteBody::Commands(c) => c.is_empty(),
+            WriteBody::Ops(o) => o.is_empty(),
+        }
+    }
+}
+
+impl From<Command> for WriteBody {
+    fn from(c: Command) -> Self {
+        WriteBody::Commands(vec![c])
+    }
+}
+
+impl From<Vec<Command>> for WriteBody {
+    fn from(c: Vec<Command>) -> Self {
+        WriteBody::Commands(c)
+    }
+}
+
+/// Kernel primitives: apply now, record later. The transaction layer
+/// (`crate::tx`) composes these into today's open-entry semantics; the
+/// stand-alone [`DocumentStore::execute`]/gesture API above stays for
+/// single-owner callers and tests.
+impl DocumentStore {
+    /// The current document (shared, immutable).
+    pub(crate) fn current(&self) -> &Arc<Document> {
+        &self.current
+    }
+
+    /// Stages, validates and publishes `body` without recording history.
+    /// `Ok(None)`: nothing changed (nothing published).
+    pub(crate) fn kernel_apply(
+        &mut self,
+        body: &WriteBody,
+        origin: Origin,
+        cause: ChangeCause,
+    ) -> Result<Option<Applied>, TransactionError> {
+        let staged = match body {
+            WriteBody::Commands(commands) => self.stage_commands(commands, origin)?,
+            WriteBody::Ops(ops) => self.stage_ops(ops, true)?,
+        };
+        if !staged.changed {
+            return Ok(None);
+        }
+        let revision = staged.document.revision();
+        let applied = Applied {
+            revision,
+            forward: staged.forward.clone(),
+            inverse: staged.inverse,
+            scopes: staged.scopes,
+        };
+        self.publish(staged.document, staged.forward.into(), cause);
+        self.set_state_token(next_token());
+        Ok(Some(applied))
+    }
+
+    /// A gesture step that supersedes the previous one: `prev_inverse`
+    /// (that step's inverses, already validated by the caller) and `body`
+    /// are staged together and published as one revision. The returned
+    /// forward/inverse describe `body` alone, relative to the reverted state.
+    pub(crate) fn kernel_replace(
+        &mut self,
+        prev_inverse: &[Op],
+        body: &WriteBody,
+        origin: Origin,
+        cause: ChangeCause,
+    ) -> Result<Option<Applied>, TransactionError> {
+        let revision = self.revision() + 1;
+        let mut root = self.current.root().cloned();
+        for op in prev_inverse {
+            root = apply_one(root, op, revision)?.0;
+        }
+        let staged = match body {
+            WriteBody::Commands(commands) => self.stage_commands_on(root.as_ref(), commands, origin)?,
+            WriteBody::Ops(ops) => self.stage_ops_from(root, ops, true)?,
+        };
+        let mut ops = prev_inverse.to_vec();
+        ops.extend(staged.forward.iter().cloned());
+        validate(&staged.document, &ops)?;
+        if ops.is_empty() {
+            return Ok(None);
+        }
+        let applied = Applied {
+            revision: staged.document.revision(),
+            forward: staged.forward,
+            inverse: staged.inverse,
+            scopes: staged.scopes,
+        };
+        self.publish(staged.document, ops.into(), cause);
+        self.set_state_token(next_token());
+        Ok(Some(applied))
+    }
+
+    /// Publishes an already staged document (a validated cancel).
+    pub(crate) fn kernel_publish(&mut self, document: Document, ops: Vec<Op>, cause: ChangeCause) {
+        self.publish(document, ops.into(), cause);
+        self.set_state_token(next_token());
+    }
+
+    /// Pushes a document entry covering writes that are already applied.
+    /// `before` is the document right before the first of them (for the
+    /// file's leaf-patch form when any operation is structural).
+    pub(crate) fn kernel_record(
+        &mut self,
+        label: String,
+        origin: Origin,
+        forward: Vec<Op>,
+        inverse: Vec<Op>,
+        before: &Document,
+        scopes: Vec<Vec<PathPart>>,
+    ) -> u64 {
+        let structural = forward
+            .iter()
+            .chain(inverse.iter())
+            .any(|op| !matches!(op, Op::Leaf(_)));
+        let saved =
+            structural.then(|| scoped_patches(before.root(), self.current.root(), scopes));
+        let record = self
+            .history
+            .push(label, origin, forward, inverse, saved, self.revision());
+        self.history_owned = true;
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        record
+    }
+
+    /// Pushes a document entry exactly as journalled (recovery).
+    pub(crate) fn kernel_record_saved(
+        &mut self,
+        label: String,
+        origin: Origin,
+        forward: Vec<Op>,
+        inverse: Vec<Op>,
+        saved: Option<(Vec<Patch>, Vec<Patch>)>,
+    ) -> u64 {
+        let record = self
+            .history
+            .push(label, origin, forward, inverse, saved, self.revision());
+        self.history_owned = true;
+        self.set_state_token(self.history.state_token());
+        record
+    }
+
+    /// `history.external`: pushes a closure entry.
+    pub(crate) fn kernel_push_external(
+        &mut self,
+        label: String,
+        origin: Origin,
+        external: crate::history::ExternalRef,
+        bytes: usize,
+    ) -> u64 {
+        let id = self
+            .history
+            .push_external(label, origin, external, bytes, self.revision());
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        id
+    }
+
+    /// Undo of the newest applied entry, document or external. An external
+    /// entry moves the cursor first (as `idx--` did before `entry.undo()`),
+    /// then its realm runs the closure.
+    pub(crate) fn kernel_undo(&mut self) -> Result<Step, TransactionError> {
+        let record = self
+            .history
+            .peek_undo()
+            .ok_or(TransactionError::NothingToUndo)?
+            .clone();
+        if let Some(external) = record.external {
+            self.history.mark_undone();
+            self.set_state_token(self.history.state_token());
+            self.emit(StoreEvent::HistoryChanged);
+            return Ok(Step::External {
+                external,
+                label: record.label,
+            });
+        }
+        let staged = self.stage_ops(&record.inverse, false)?;
+        let revision = staged.document.revision();
+        self.publish(
+            staged.document,
+            record.inverse.clone(),
+            ChangeCause::Undo {
+                label: record.label.clone(),
+            },
+        );
+        self.history.mark_undone();
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        Ok(Step::Document {
+            revision,
+            ops: record.inverse.clone(),
+            reverse: record.forward.clone(),
+            label: record.label,
+        })
+    }
+
+    /// Redo, as [`kernel_undo`](Self::kernel_undo).
+    pub(crate) fn kernel_redo(&mut self) -> Result<Step, TransactionError> {
+        let record = self
+            .history
+            .peek_redo()
+            .ok_or(TransactionError::NothingToRedo)?
+            .clone();
+        if let Some(external) = record.external {
+            self.history.mark_redone();
+            self.set_state_token(self.history.state_token());
+            self.emit(StoreEvent::HistoryChanged);
+            return Ok(Step::External {
+                external,
+                label: record.label,
+            });
+        }
+        let staged = self.stage_ops(&record.forward, false)?;
+        let revision = staged.document.revision();
+        self.publish(
+            staged.document,
+            record.forward.clone(),
+            ChangeCause::Redo {
+                label: record.label.clone(),
+            },
+        );
+        self.history.mark_redone();
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        Ok(Step::Document {
+            revision,
+            ops: record.forward.clone(),
+            reverse: record.inverse.clone(),
+            label: record.label,
+        })
+    }
+
+    /// Mutable history (recovery replay, retention budget, clear).
+    pub(crate) fn history_mut(&mut self) -> &mut History {
+        &mut self.history
+    }
+
+    /// Replaces the selection (a cancelled edit restores the one it began
+    /// with).
+    pub(crate) fn set_selection(&mut self, selection: Selection) {
+        if self.selection != selection {
+            self.selection = selection;
+            self.prune_selection();
+            self.emit(StoreEvent::SelectionChanged);
+        }
+    }
+
+    /// Replaces document and history wholesale (journal recovery).
+    pub(crate) fn kernel_reset(&mut self, document: Document, history: History) {
+        self.queries.resync(&document);
+        self.current = Arc::new(document);
+        self.history = history;
+        self.history_owned = true;
+        self.log.clear();
+        let token = self.history.state_token();
+        self.state_token = token;
+    }
+}
+
 // ── staging helpers ─────────────────────────────────────────────────────────
 
 /// Applies one operation to a tree as `revision`.
-fn apply_one(
+pub(crate) fn apply_one(
     root: Option<Node>,
     op: &Op,
     revision: u64,
@@ -1218,7 +1545,7 @@ fn same_part(a: &PathPart, b: &PathPart) -> bool {
 
 /// The old app's scoped history entries (`scopedPatches`): for each touched
 /// path not already covered by a shorter one, its value before and after.
-fn scoped_patches(
+pub(crate) fn scoped_patches(
     before: Option<&Node>,
     after: Option<&Node>,
     mut scopes: Vec<Vec<PathPart>>,
@@ -1247,7 +1574,7 @@ fn scoped_patches(
 }
 
 /// Whole-transaction validation on the staged result.
-fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
+pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
     let invalid = |m: String| Err(TransactionError::Invalid(m));
     let Some(root) = document.root() else {
         return invalid("the project was removed".into());

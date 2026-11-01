@@ -69,6 +69,7 @@ pub mod model;
 pub mod project_io;
 pub mod queries;
 pub mod selection;
+pub mod tx;
 
 pub use commands::{
     CaptionCommand, Command, CompCommand, ContentCommand, EffectCommand, GroupCommand,
@@ -77,10 +78,10 @@ pub use commands::{
 };
 pub use document::{
     Change, ChangeCause, Committed, DocumentStore, GestureId, Snapshot, StoreEvent, Subscription,
-    TransactOptions,
+    TransactOptions, WriteBody,
 };
 pub use error::{CommandError, ProjectIoError, TransactionError};
-pub use history::{History, HistoryMark, HistoryRecord};
+pub use history::{ExternalRef, History, HistoryMark, HistoryRecord};
 pub use model::LayerInfo;
 pub use project_io::{
     OpenOptions, OpenedProject, ProjectFile, SaveOptions, SavePlan, SaveReceipt, SaveTarget,

@@ -101,6 +101,9 @@ pub enum TransactionError {
     /// Nothing to undo / redo.
     NothingToUndo,
     NothingToRedo,
+    /// The entry is an extension's closure entry (`history.external`): only
+    /// the kernel can undo it, through a continuation to its realm.
+    ExternalEntry,
 }
 
 impl fmt::Display for TransactionError {
@@ -120,6 +123,9 @@ impl fmt::Display for TransactionError {
             TransactionError::NoDocument => f.write_str("No project is open"),
             TransactionError::NothingToUndo => f.write_str("Nothing to undo"),
             TransactionError::NothingToRedo => f.write_str("Nothing to redo"),
+            TransactionError::ExternalEntry => {
+                f.write_str("This step belongs to an extension; undo it through the kernel")
+            }
         }
     }
 }

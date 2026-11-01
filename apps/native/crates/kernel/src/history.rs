@@ -17,8 +17,10 @@
 //! | `squash(mark)` combines an agent run | [`DocumentStore::squash_since`](crate::DocumentStore::squash_since) |
 //! | `export()`/`import()` as `{ version: 1, paths: 'composition', index, entries }` | [`HistorySnapshot::to_saved`] / [`History::from_saved`], same format (root-relative histories are canonicalized on import, dictionary-packed ones unpacked) |
 //! | "Selection" entries while at the top of the stack | Not ported: selection is not history (see `docs/gpui/core-api.md`) |
-//! | `external` closure entries (media replacement) | Not ported yet |
-//! | Nested `begin`/`commit` depth | Not ported: [`transact`](crate::DocumentStore::transact) takes the whole command list |
+//! | `external` closure entries | [`HistoryRecord::external`]: `(realm, generation, handle)`, undone by the realm through a kernel continuation (`docs/native/kernel.md`); not exported, as before |
+//! | Cleanup closures when entries fall off | [`History::take_retired`] hands the kernel every retired external entry with a cleanup |
+//! | Nested `begin`/`commit` depth | The kernel's open entry (`crate::tx`); [`transact`](crate::DocumentStore::transact) takes the whole command list |
+//! | `packHistory` (`projectHistory.<id>` dictionary) | [`HistorySnapshot::to_saved_packed`] (content-interned records) |
 
 use std::sync::Arc;
 
@@ -33,6 +35,18 @@ use crate::commands::Origin;
 pub const MAX_ENTRIES: usize = 1_000;
 /// Default byte budget (`DEFAULT_MAX_BYTES`).
 pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// An entry whose undo/redo runs in an extension realm (`history.external`).
+/// The closures live in the realm; the kernel holds only this handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExternalRef {
+    pub realm: u32,
+    pub generation: u32,
+    pub handle: u64,
+    /// The realm registered a cleanup closure (`options.cleanup`), run when
+    /// the entry retires ([`History::take_retired`]).
+    pub cleanup: bool,
+}
 
 /// One undoable step.
 #[derive(Clone, Debug)]
@@ -54,9 +68,16 @@ pub struct HistoryRecord {
     pub revision: u64,
     /// Serialized size, for the byte budget.
     pub bytes: usize,
+    /// `Some` for an external (closure) entry: no operations, undone by its
+    /// realm. Never exported (the old `export()` kept document entries only).
+    pub external: Option<ExternalRef>,
 }
 
 impl HistoryRecord {
+    pub fn is_document(&self) -> bool {
+        self.external.is_none()
+    }
+
     /// The patches the file stores for this record (`forward`, `backward`).
     pub(crate) fn saved_patches(&self) -> (Vec<Patch>, Vec<Patch>) {
         if let Some(saved) = &self.saved {
@@ -110,6 +131,9 @@ pub struct History {
     /// The state token of "no record applied": the opened document, or the
     /// state after the newest record trimmed from the bottom.
     base_token: u64,
+    /// External entries with a cleanup that fell off the stack, waiting for
+    /// the kernel to ask their realm to run it.
+    retired: Vec<ExternalRef>,
 }
 
 impl Default for History {
@@ -144,6 +168,7 @@ impl History {
             max_entries,
             max_bytes,
             base_token: next_token(),
+            retired: Vec::new(),
         }
     }
 
@@ -219,6 +244,7 @@ impl History {
         while self.total_bytes > self.max_bytes && self.entries.len() > 1 {
             if self.cursor < self.entries.len() {
                 let removed = self.entries.pop().expect("non-empty");
+                self.retire(&removed);
                 self.total_bytes -= removed.bytes;
             } else {
                 self.drop_oldest();
@@ -226,8 +252,34 @@ impl History {
         }
     }
 
+    fn retire(&mut self, removed: &HistoryRecord) {
+        if let Some(ext) = removed.external
+            && ext.cleanup
+        {
+            self.retired.push(ext);
+        }
+    }
+
+    /// External entries with a cleanup that left the stack since the last
+    /// call (trimmed, discarded redo, cleared). Oldest first.
+    pub fn take_retired(&mut self) -> Vec<ExternalRef> {
+        std::mem::take(&mut self.retired)
+    }
+
+    /// `PM.hist.clear()`: drops every entry (cleanups retire).
+    pub fn clear(&mut self) {
+        let entries = std::mem::take(&mut self.entries);
+        for r in &entries {
+            self.retire(r);
+        }
+        self.total_bytes = 0;
+        self.cursor = 0;
+        self.base_token = next_token();
+    }
+
     fn drop_oldest(&mut self) {
         let removed = self.entries.remove(0);
+        self.retire(&removed);
         self.total_bytes -= removed.bytes;
         if self.cursor > 0 {
             self.cursor -= 1;
@@ -250,8 +302,10 @@ impl History {
     }
 
     fn discard_redo(&mut self) {
-        for removed in self.entries.drain(self.cursor..) {
-            self.total_bytes -= removed.bytes;
+        let removed: Vec<HistoryRecord> = self.entries.drain(self.cursor..).collect();
+        for r in &removed {
+            self.retire(r);
+            self.total_bytes -= r.bytes;
         }
     }
 
@@ -282,6 +336,37 @@ impl History {
             saved: saved.map(Arc::new),
             revision,
             bytes,
+            external: None,
+        });
+        self.total_bytes += bytes;
+        self.cursor = self.entries.len();
+        self.trim();
+        id
+    }
+
+    /// `history.external(label, undo, redo, options)`: pushes a closure entry
+    /// (discarding redo, as any push). `bytes` is `max(256, options.bytes)`.
+    pub(crate) fn push_external(
+        &mut self,
+        label: String,
+        origin: Origin,
+        external: ExternalRef,
+        bytes: usize,
+        revision: u64,
+    ) -> u64 {
+        self.discard_redo();
+        let bytes = bytes.max(256);
+        let id = next_token();
+        self.entries.push(HistoryRecord {
+            id,
+            label,
+            origin,
+            forward: Vec::new().into(),
+            inverse: Vec::new().into(),
+            saved: None,
+            revision,
+            bytes,
+            external: Some(external),
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -316,6 +401,9 @@ impl History {
             Some(id) => self.entries.iter().position(|r| r.id == id)? + 1,
         };
         if base > self.cursor || self.cursor != self.entries.len() || base == self.entries.len() {
+            return None;
+        }
+        if self.entries[base..].iter().any(|r| !r.is_document()) {
             return None;
         }
         let tail: Vec<HistoryRecord> = self.entries.drain(base..).collect();
@@ -499,6 +587,7 @@ impl History {
                 saved: None,
                 revision: 0,
                 bytes,
+                external: None,
             });
             history.total_bytes += bytes;
         }
@@ -520,10 +609,17 @@ impl HistorySnapshot {
         let mut out = Map::new();
         out.insert("version", Value::Number(1.0));
         out.insert("paths", Value::from("composition"));
-        out.insert("index", Value::Number(self.cursor as f64 - 1.0));
+        // Document entries only; the index counts applied document entries
+        // (`export()` filtered closure entries the same way).
+        let applied = self.records[..self.cursor]
+            .iter()
+            .filter(|r| r.is_document())
+            .count();
+        out.insert("index", Value::Number(applied as f64 - 1.0));
         let entries = self
             .records
             .iter()
+            .filter(|r| r.is_document())
             .map(|r| {
                 let (forward, backward) = r.saved_patches();
                 let list = |p: Vec<Patch>| Value::Array(p.iter().map(Patch::to_value).collect());
@@ -541,6 +637,86 @@ impl HistorySnapshot {
     pub fn records(&self) -> &[HistoryRecord] {
         &self.records
     }
+
+    /// `packHistory(export())`: the dictionary form `projectHistory.<id>`
+    /// stores. Equal layer/edit records are stored once (the old packer
+    /// shared them by object identity after interning by content; equal
+    /// content gives the same dictionary). Returns the plain form when
+    /// nothing is packable, as the old packer did.
+    pub fn to_saved_packed(&self) -> Value {
+        pack(self.to_saved())
+    }
+}
+
+/// `packHistory`.
+pub fn pack(saved: Value) -> Value {
+    use std::collections::HashMap;
+    let Some(map) = saved.as_object() else {
+        return saved;
+    };
+    let Some(entries) = map.get("entries").and_then(Value::as_array) else {
+        return saved;
+    };
+    let mut records: Vec<Value> = Vec::new();
+    let mut ids: HashMap<String, usize> = HashMap::new();
+    let mut pack_patch = |patch: &Value| -> Value {
+        let mut out = Map::new();
+        let record_array = patch.as_object().is_some_and(|p| {
+            p.get("exists") == Some(&Value::Bool(true))
+                && p.get("path")
+                    .and_then(Value::as_array)
+                    .is_some_and(|path| is_record_array_path(path))
+                && p.get("value").and_then(Value::as_array).is_some()
+        });
+        if !record_array {
+            out.insert("patch", patch.clone());
+            return Value::Object(out);
+        }
+        let mut meta = patch.as_object().expect("checked").clone();
+        let values = meta.remove("value").expect("checked");
+        let refs = values
+            .as_array()
+            .expect("checked")
+            .iter()
+            .map(|item| {
+                let key = pm_model::json::to_canonical_string(item);
+                let n = *ids.entry(key).or_insert_with(|| {
+                    records.push(item.clone());
+                    records.len() - 1
+                });
+                Value::Number(n as f64)
+            })
+            .collect();
+        out.insert("patch", Value::Object(meta));
+        out.insert("refs", Value::Array(refs));
+        Value::Object(out)
+    };
+    let mut packed_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(e) = entry.as_object() else {
+            return saved;
+        };
+        let mut e = e.clone();
+        for side in ["forward", "backward"] {
+            let Some(list) = e.get(side).and_then(Value::as_array) else {
+                return saved;
+            };
+            let list: Vec<Value> = list.iter().map(&mut pack_patch).collect();
+            e.insert(side, Value::Array(list));
+        }
+        packed_entries.push(Value::Object(e));
+    }
+    if records.is_empty() {
+        return saved;
+    }
+    let mut history = map.clone();
+    history.insert("entries", Value::Array(packed_entries));
+    let mut out = Map::new();
+    out.insert("format", Value::from(DICTIONARY_FORMAT));
+    out.insert("version", Value::Number(1.0));
+    out.insert("records", Value::Array(records));
+    out.insert("history", Value::Object(history));
+    Value::Object(out)
 }
 
 #[cfg(test)]
