@@ -13,6 +13,109 @@ pub enum TaskKind {
     Export,
     Purge,
 }
+impl TaskKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Proxy => "Creating Proxy Media",
+            Self::Optimized => "Creating Optimized Media",
+            Self::Render => "Rendering",
+            Self::Import => "Importing",
+            Self::Export => "Exporting",
+            Self::Purge => "Freeing Disk Space",
+        }
+    }
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Proxy => "film.stack",
+            Self::Optimized => "film.stack.fill",
+            Self::Render => "square.stack.3d.down.right",
+            Self::Import => "square.and.arrow.down",
+            Self::Export => "square.and.arrow.up",
+            Self::Purge => "trash",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProgressUnit {
+    Frames,
+    Bytes,
+    Items,
+}
+/// UI progress must pattern-match this type: unknown totals have no percentage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskProgress {
+    Indeterminate {
+        completed: u64,
+        unit: Option<ProgressUnit>,
+    },
+    Determinate {
+        completed: u64,
+        total: u64,
+        unit: Option<ProgressUnit>,
+    },
+}
+/// Admission requires authored media/composition title and explicit counter units.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskSpec {
+    pub title: String,
+    pub kind: TaskKind,
+    pub unit: ProgressUnit,
+    /// Scheduler input only; deliberately absent from TaskPresentation.
+    pub priority: i32,
+    pub total: u64,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskFailureCode {
+    SourceOffline,
+    DiskFull,
+    CodecUnsupported,
+    Cancelled,
+    #[default]
+    Unknown,
+}
+impl TaskFailureCode {
+    pub fn ui_message(self) -> Option<&'static str> {
+        match self {
+            Self::DiskFull => Some("Not enough disk space. Free some space and try again."),
+            // DESIGN-TODO(opus): review supplies no approved copy for these
+            // codes. None is a neutral placeholder, never a raw-log fallback.
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskFailure {
+    pub code: TaskFailureCode,
+    /// Worker diagnostics, retained for logs only, never presentation text.
+    pub diagnostic: String,
+}
+impl From<String> for TaskFailure {
+    fn from(diagnostic: String) -> Self {
+        Self {
+            code: TaskFailureCode::Unknown,
+            diagnostic,
+        }
+    }
+}
+impl From<&str> for TaskFailure {
+    fn from(diagnostic: &str) -> Self {
+        diagnostic.to_owned().into()
+    }
+}
+/// Safe binding boundary: no priority, raw diagnostic or enum-name UI copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskPresentation<'a> {
+    pub title: &'a str,
+    pub kind_label: &'static str,
+    pub symbol: &'static str,
+    pub progress: TaskProgress,
+    pub transition_label: Option<&'static str>,
+    pub pause_resume_label: Option<&'static str>,
+    pub pause_resume_enabled: bool,
+    pub cancel_enabled: bool,
+    pub error_code: Option<TaskFailureCode>,
+    pub error_message: Option<&'static str>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
     Queued,
@@ -35,12 +138,66 @@ pub struct Task {
     pub window: String,
     pub project: String,
     pub kind: TaskKind,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub unit: Option<ProgressUnit>,
     pub priority: i32,
     pub state: TaskState,
     pub completed: u64,
     pub total: u64,
-    pub error: Option<String>,
+    /// Legacy diagnostic field is preserved in serialization, never UI bindings.
+    error: Option<String>,
+    #[serde(default)]
+    error_code: Option<TaskFailureCode>,
     generation: u64,
+}
+impl Task {
+    pub fn diagnostic_for_log(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+    pub fn presentation(&self) -> TaskPresentation<'_> {
+        let transitional = matches!(
+            self.state,
+            TaskState::PauseRequested | TaskState::CancelRequested
+        );
+        TaskPresentation {
+            title: &self.title,
+            kind_label: self.kind.label(),
+            symbol: self.kind.symbol(),
+            progress: if self.total == 0 {
+                TaskProgress::Indeterminate {
+                    completed: self.completed,
+                    unit: self.unit,
+                }
+            } else {
+                TaskProgress::Determinate {
+                    completed: self.completed,
+                    total: self.total,
+                    unit: self.unit,
+                }
+            },
+            transition_label: match self.state {
+                TaskState::PauseRequested => Some("Pausing…"),
+                TaskState::CancelRequested => Some("Cancelling…"),
+                _ => None,
+            },
+            pause_resume_label: match self.state {
+                TaskState::Paused => Some("Resume"),
+                TaskState::Queued
+                | TaskState::Running
+                | TaskState::PauseRequested
+                | TaskState::CancelRequested => Some("Pause"),
+                _ => None,
+            },
+            pause_resume_enabled: !transitional && !self.state.terminal(),
+            cancel_enabled: !transitional && !self.state.terminal(),
+            error_code: self
+                .error_code
+                .or_else(|| self.error.as_ref().map(|_| TaskFailureCode::Unknown)),
+            error_message: self.error_code.and_then(TaskFailureCode::ui_message),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ticket {
@@ -107,11 +264,9 @@ impl BackgroundTasks {
         &mut self,
         window: String,
         project: String,
-        kind: TaskKind,
-        priority: i32,
-        total: u64,
+        spec: TaskSpec,
     ) -> Result<TaskId, TaskError> {
-        if window.is_empty() || project.is_empty() {
+        if window.is_empty() || project.is_empty() || spec.title.is_empty() {
             return Err(TaskError::EmptyIdentity);
         }
         self.next = self.next.checked_add(1).ok_or(TaskError::Exhausted)?;
@@ -122,12 +277,15 @@ impl BackgroundTasks {
                 id,
                 window,
                 project,
-                kind,
-                priority,
+                kind: spec.kind,
+                title: spec.title,
+                unit: Some(spec.unit),
+                priority: spec.priority,
                 state: TaskState::Queued,
                 completed: 0,
-                total,
+                total: spec.total,
                 error: None,
+                error_code: None,
                 generation: 0,
             },
         );
@@ -255,7 +413,10 @@ impl BackgroundTasks {
         total: u64,
     ) -> Result<(), TaskError> {
         let t = self.worker(ticket)?;
-        if completed < t.completed || completed > total || (t.total != 0 && t.total != total) {
+        if completed < t.completed
+            || (total != 0 && completed > total)
+            || (t.total != 0 && t.total != total)
+        {
             return Err(TaskError::InvalidProgress);
         }
         t.completed = completed;
@@ -264,18 +425,25 @@ impl BackgroundTasks {
         Ok(())
     }
     /// A completion racing pause/cancel cannot publish an output as successful.
-    pub fn finish(&mut self, ticket: Ticket, result: Result<(), String>) -> Result<(), TaskError> {
+    pub fn finish(
+        &mut self,
+        ticket: Ticket,
+        result: Result<(), TaskFailure>,
+    ) -> Result<(), TaskError> {
         let t = self.worker(ticket)?;
         if t.state != TaskState::Running {
             return Err(TaskError::InvalidTransition);
         }
         match result {
             Ok(()) => {
-                t.completed = t.total;
+                if t.total != 0 {
+                    t.completed = t.total;
+                }
                 t.state = TaskState::Completed;
             }
             Err(e) => {
-                t.error = Some(e);
+                t.error_code = Some(e.code);
+                t.error = Some(e.diagnostic);
                 t.state = TaskState::Failed;
             }
         }

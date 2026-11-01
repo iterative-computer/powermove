@@ -379,12 +379,22 @@ fn reopening_same_project_fences_old_catalog_jobs() {
 }
 #[test]
 fn coordinated_task_attachment_refuses_cancelled_or_invalid_outputs_atomically() {
-    use pm_promedia::tasks::{BackgroundTasks, TaskKind, TaskState};
+    use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec, TaskState};
     for cancel in [false, true] {
         let mut c = catalog(true);
         let mut q = BackgroundTasks::default();
         let id = q
-            .enqueue("w".into(), "project".into(), TaskKind::Proxy, 0, 10)
+            .enqueue(
+                "w".into(),
+                "project".into(),
+                TaskSpec {
+                    title: "Clip".into(),
+                    kind: TaskKind::Proxy,
+                    unit: ProgressUnit::Frames,
+                    priority: 0,
+                    total: 10,
+                },
+            )
             .unwrap();
         let ticket = q.start_next().unwrap();
         let job = c
@@ -412,11 +422,23 @@ fn coordinated_task_attachment_refuses_cancelled_or_invalid_outputs_atomically()
 }
 #[test]
 fn coordinated_completion_checks_task_kind_and_project() {
-    use pm_promedia::tasks::{BackgroundTasks, TaskKind, TaskState};
+    use pm_promedia::tasks::{BackgroundTasks, ProgressUnit, TaskKind, TaskSpec, TaskState};
     for (project, kind) in [("other", TaskKind::Proxy), ("project", TaskKind::Render)] {
         let mut c = catalog(true);
         let mut q = BackgroundTasks::default();
-        let id = q.enqueue("w".into(), project.into(), kind, 0, 10).unwrap();
+        let id = q
+            .enqueue(
+                "w".into(),
+                project.into(),
+                TaskSpec {
+                    title: "Clip".into(),
+                    kind,
+                    unit: ProgressUnit::Frames,
+                    priority: 0,
+                    total: 10,
+                },
+            )
+            .unwrap();
         let ticket = q.start_next().unwrap();
         let job = c
             .begin("m", RenditionKind::Proxy, profile(RenditionKind::Proxy), id)

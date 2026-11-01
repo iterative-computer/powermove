@@ -1,7 +1,17 @@
 use pm_promedia::tasks::*;
 fn add(q: &mut BackgroundTasks, window: &str, priority: i32) -> TaskId {
-    q.enqueue(window.into(), "p".into(), TaskKind::Proxy, priority, 10)
-        .unwrap()
+    q.enqueue(
+        window.into(),
+        "p".into(),
+        TaskSpec {
+            title: "Clip".into(),
+            kind: TaskKind::Proxy,
+            unit: ProgressUnit::Frames,
+            priority,
+            total: 10,
+        },
+    )
+    .unwrap()
 }
 #[test]
 fn priority_then_fifo_and_window_events() {
@@ -97,7 +107,7 @@ fn failure_is_terminal_and_inspectable() {
     let t = q.start_next().unwrap();
     q.finish(t, Err("decoder unavailable".into())).unwrap();
     assert_eq!(
-        q.get(id).unwrap().error.as_deref(),
+        q.get(id).unwrap().diagnostic_for_log(),
         Some("decoder unavailable")
     );
     assert!(q.priority(id, 1).is_err());
@@ -132,7 +142,17 @@ fn event_compaction_requests_snapshot_and_bounds_backlog() {
 fn invalid_identity_unknown_ids_and_active_retirement() {
     let mut q = BackgroundTasks::default();
     assert_eq!(
-        q.enqueue("".into(), "p".into(), TaskKind::Render, 0, 0),
+        q.enqueue(
+            "".into(),
+            "p".into(),
+            TaskSpec {
+                title: "Composition".into(),
+                kind: TaskKind::Render,
+                unit: ProgressUnit::Frames,
+                priority: 0,
+                total: 0
+            }
+        ),
         Err(TaskError::EmptyIdentity)
     );
     assert_eq!(q.pause(TaskId(9)), Err(TaskError::Unknown));
@@ -143,7 +163,17 @@ fn invalid_identity_unknown_ids_and_active_retirement() {
 fn unknown_total_can_become_known_and_task_roundtrips() {
     let mut q = BackgroundTasks::default();
     let id = q
-        .enqueue("a".into(), "p".into(), TaskKind::Import, 0, 0)
+        .enqueue(
+            "a".into(),
+            "p".into(),
+            TaskSpec {
+                title: "Clip".into(),
+                kind: TaskKind::Import,
+                unit: ProgressUnit::Items,
+                priority: 0,
+                total: 0,
+            },
+        )
         .unwrap();
     let t = q.start_next().unwrap();
     q.progress(t, 2, 4).unwrap();
@@ -162,4 +192,254 @@ fn queue_recreation_fences_identical_id_and_generation() {
     let fresh = b.start_next().unwrap();
     assert_eq!(b.progress(old, 1, 10), Err(TaskError::StaleTicket));
     b.progress(fresh, 1, 10).unwrap();
+}
+
+#[test]
+fn reviewed_kind_copy_and_symbols_are_exact() {
+    for (kind, label, symbol) in [
+        (TaskKind::Proxy, "Creating Proxy Media", "film.stack"),
+        (
+            TaskKind::Optimized,
+            "Creating Optimized Media",
+            "film.stack.fill",
+        ),
+        (TaskKind::Render, "Rendering", "square.stack.3d.down.right"),
+        (TaskKind::Import, "Importing", "square.and.arrow.down"),
+        (TaskKind::Export, "Exporting", "square.and.arrow.up"),
+        (TaskKind::Purge, "Freeing Disk Space", "trash"),
+    ] {
+        assert_eq!(kind.label(), label);
+        assert_eq!(kind.symbol(), symbol);
+    }
+}
+
+#[test]
+fn authored_title_and_units_survive_events_snapshot_and_serialization() {
+    for unit in [
+        ProgressUnit::Frames,
+        ProgressUnit::Bytes,
+        ProgressUnit::Items,
+    ] {
+        let mut q = BackgroundTasks::default();
+        let id = q
+            .enqueue(
+                "window".into(),
+                "project-id".into(),
+                TaskSpec {
+                    title: "Composition α".into(),
+                    kind: TaskKind::Render,
+                    unit,
+                    priority: 9,
+                    total: 300,
+                },
+            )
+            .unwrap();
+        let ticket = q.start_next().unwrap();
+        q.progress(ticket, 128, 300).unwrap();
+        let task = q.get(id).unwrap();
+        assert_eq!(task.presentation().title, "Composition α");
+        assert!(!format!("{:?}", task.presentation()).contains("priority"));
+        assert_eq!(
+            task.presentation().progress,
+            TaskProgress::Determinate {
+                completed: 128,
+                total: 300,
+                unit: Some(unit)
+            }
+        );
+        assert_eq!(q.snapshot("window"), vec![task.clone()]);
+        assert_eq!(&q.events("window", 0).events.last().unwrap().task, task);
+        assert_eq!(
+            serde_json::from_slice::<Task>(&serde_json::to_vec(task).unwrap()).unwrap(),
+            *task
+        );
+    }
+}
+
+#[test]
+fn missing_title_refuses_admission_without_publishing() {
+    let mut q = BackgroundTasks::default();
+    assert_eq!(
+        q.enqueue(
+            "w".into(),
+            "p".into(),
+            TaskSpec {
+                title: String::new(),
+                kind: TaskKind::Import,
+                unit: ProgressUnit::Items,
+                priority: 0,
+                total: 0,
+            }
+        ),
+        Err(TaskError::EmptyIdentity)
+    );
+    assert_eq!(q.events("w", 0).cursor, 0);
+    assert!(q.snapshot("w").is_empty());
+}
+
+#[test]
+fn unknown_total_stays_indeterminate_with_progress_until_total_is_known() {
+    let mut q = BackgroundTasks::default();
+    let id = q
+        .enqueue(
+            "w".into(),
+            "p".into(),
+            TaskSpec {
+                title: "Clip".into(),
+                kind: TaskKind::Import,
+                unit: ProgressUnit::Bytes,
+                priority: 0,
+                total: 0,
+            },
+        )
+        .unwrap();
+    let ticket = q.start_next().unwrap();
+    q.progress(ticket, 128, 0).unwrap();
+    assert_eq!(
+        q.get(id).unwrap().presentation().progress,
+        TaskProgress::Indeterminate {
+            completed: 128,
+            unit: Some(ProgressUnit::Bytes)
+        }
+    );
+    let before = q.get(id).unwrap().clone();
+    assert_eq!(q.progress(ticket, 127, 0), Err(TaskError::InvalidProgress));
+    assert_eq!(q.get(id), Some(&before));
+    q.progress(ticket, 128, 300).unwrap();
+    assert_eq!(
+        q.get(id).unwrap().presentation().progress,
+        TaskProgress::Determinate {
+            completed: 128,
+            total: 300,
+            unit: Some(ProgressUnit::Bytes)
+        }
+    );
+    assert_eq!(q.progress(ticket, 129, 0), Err(TaskError::InvalidProgress));
+}
+
+#[test]
+fn reviewed_transitions_disable_controls_and_paused_offers_resume() {
+    let mut q = BackgroundTasks::default();
+    let id = add(&mut q, "w", 0);
+    let ticket = q.start_next().unwrap();
+    q.pause(id).unwrap();
+    let pausing = q.get(id).unwrap().presentation();
+    assert_eq!(pausing.transition_label, Some("Pausing…"));
+    assert!(!pausing.pause_resume_enabled);
+    assert!(!pausing.cancel_enabled);
+    q.settle_control(ticket).unwrap();
+    let paused = q.get(id).unwrap().presentation();
+    assert_eq!(paused.pause_resume_label, Some("Resume"));
+    assert!(paused.pause_resume_enabled);
+    assert!(paused.cancel_enabled);
+    assert_eq!(paused.transition_label, None);
+    q.resume(id).unwrap();
+    let ticket = q.start_next().unwrap();
+    assert_eq!(
+        q.get(id).unwrap().presentation().pause_resume_label,
+        Some("Pause")
+    );
+    q.cancel(id).unwrap();
+    let cancelling = q.get(id).unwrap().presentation();
+    assert_eq!(cancelling.transition_label, Some("Cancelling…"));
+    assert!(!cancelling.pause_resume_enabled);
+    assert!(!cancelling.cancel_enabled);
+    q.settle_control(ticket).unwrap();
+    let cancelled = q.get(id).unwrap().presentation();
+    assert_eq!(cancelled.transition_label, None);
+    assert_eq!(cancelled.pause_resume_label, None);
+    assert!(!cancelled.cancel_enabled);
+}
+
+#[test]
+fn typed_failure_keeps_diagnostics_out_of_ui_and_uses_only_approved_copy() {
+    for code in [
+        TaskFailureCode::SourceOffline,
+        TaskFailureCode::DiskFull,
+        TaskFailureCode::CodecUnsupported,
+        TaskFailureCode::Cancelled,
+        TaskFailureCode::Unknown,
+    ] {
+        let mut q = BackgroundTasks::default();
+        let id = add(&mut q, "w", 0);
+        let ticket = q.start_next().unwrap();
+        q.finish(
+            ticket,
+            Err(TaskFailure {
+                code,
+                diagnostic: "worker-only diagnostic".into(),
+            }),
+        )
+        .unwrap();
+        let task = q.get(id).unwrap();
+        assert_eq!(task.diagnostic_for_log(), Some("worker-only diagnostic"));
+        let view = task.presentation();
+        assert_eq!(view.error_code, Some(code));
+        assert_eq!(
+            view.error_message,
+            if code == TaskFailureCode::DiskFull {
+                Some("Not enough disk space. Free some space and try again.")
+            } else {
+                None
+            }
+        );
+        assert!(!format!("{view:?}").contains("worker-only diagnostic"));
+        assert!(!view.pause_resume_enabled);
+        assert!(!view.cancel_enabled);
+        assert_eq!(
+            serde_json::from_slice::<Task>(&serde_json::to_vec(task).unwrap()).unwrap(),
+            *task
+        );
+    }
+}
+
+#[test]
+fn legacy_task_record_retains_log_without_treating_it_as_ui_copy() {
+    let mut q = BackgroundTasks::default();
+    let id = add(&mut q, "w", 0);
+    let ticket = q.start_next().unwrap();
+    q.finish(ticket, Err("legacy diagnostic".into())).unwrap();
+    let mut json = serde_json::to_value(q.get(id).unwrap()).unwrap();
+    let record = json.as_object_mut().unwrap();
+    record.remove("title");
+    record.remove("unit");
+    record.remove("error_code");
+    let legacy: Task = serde_json::from_value(json).unwrap();
+    assert_eq!(legacy.diagnostic_for_log(), Some("legacy diagnostic"));
+    assert_eq!(
+        legacy.presentation().error_code,
+        Some(TaskFailureCode::Unknown)
+    );
+    assert_eq!(legacy.presentation().error_message, None);
+    assert_eq!(legacy.presentation().title, "");
+    assert_eq!(legacy.unit, None);
+}
+
+#[test]
+fn completing_indeterminate_work_preserves_observed_counter() {
+    let mut q = BackgroundTasks::default();
+    let id = q
+        .enqueue(
+            "w".into(),
+            "p".into(),
+            TaskSpec {
+                title: "Clip".into(),
+                kind: TaskKind::Import,
+                unit: ProgressUnit::Items,
+                priority: 0,
+                total: 0,
+            },
+        )
+        .unwrap();
+    let ticket = q.start_next().unwrap();
+    q.progress(ticket, 3, 0).unwrap();
+    q.finish(ticket, Ok(())).unwrap();
+    assert_eq!(q.get(id).unwrap().completed, 3);
+    assert_eq!(
+        q.get(id).unwrap().presentation().progress,
+        TaskProgress::Indeterminate {
+            completed: 3,
+            unit: Some(ProgressUnit::Items)
+        }
+    );
 }

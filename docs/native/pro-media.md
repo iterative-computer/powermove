@@ -142,9 +142,9 @@ never automatically collected by the render-cache policy.
 
 ## Verification and remaining integration
 
-Linux validation currently passes **72 new tests**: 16 colour/scope, 13 task,
-18 media, 18 disk and 7 codec tests. They cover all six tetrahedra and nontrilinear
-fixtures, domains/shapers, malformed LUTs, exact scope density/conservation,
+Linux validation passes **83 crate tests** (72 original plus 11 design-review
+regressions): 16 colour/scope, 21 task, 18 media, 21 disk and 7 codec tests.
+They cover all six tetrahedra and nontrilinear fixtures, domains/shapers, malformed LUTs, exact scope density/conservation,
 alpha/audio/timing metadata refusal, proxy-only relink, stale jobs/queue lifetimes,
 window event compaction, cancellation races, checksums, Keep Rendered across
 reopen/quota changes, quota refusal, archive preservation and symlink rejection.
@@ -171,7 +171,8 @@ inspection. This is portable crate validation, not a root-workspace locked pass.
 Integration required outside owned paths:
 
 1. Native workspace owner: add `pm-promedia` to `apps/native/Cargo.lock` with
-   dependencies `blake3`, `serde`, `serde_json`, `tempfile` (all already locked),
+   dependencies `blake3`, `serde`, `serde_json`, `tempfile` (all already locked)
+   and the existing engine `pm-time` path package,
    then run the root locked test command. No root manifest edit is needed because
    its existing `crates/*` glob discovers this crate.
 2. Colour owner: add `pub mod lut; pub mod scopes;` to `pm-color/src/lib.rs`, then
@@ -209,3 +210,55 @@ both kept and unkept old bytes. The Linux harness now copies the unchanged
 `pm-time` sources into its disposable dependency workspace. Native painter,
 pattern, Reduce Motion and VoiceOver verification remain with the macOS host;
 this change introduces no visual literals or UI copy.
+
+## Design review follow-up: Background Tasks model
+
+Review must-fix items 4–7 are implemented in `tasks.rs`:
+
+- `enqueue(window, project, TaskSpec)` requires the media/composition `title`
+  and explicit `ProgressUnit::{Frames, Bytes, Items}`. All in-repository callers
+  are in this owned crate and are updated. `TaskKind::label` and `symbol` use
+  the review's six table rows verbatim.
+- Bind `Task::presentation()`, not raw task/debug/serialized fields. It excludes
+  scheduling priority and log diagnostics. Units accompany counters; zero total
+  produces `TaskProgress::Indeterminate`, even when completed work is nonzero.
+  Unknown totals can become known; known totals cannot change or become unknown.
+- The presentation exposes the exact `Pausing…` / `Cancelling…` transition copy,
+  disables both controls during either transition, and offers `Resume` when
+  paused. Cooperative worker acknowledgement and ticket fencing are unchanged.
+- `finish` accepts `TaskFailure { code, diagnostic }`; the five review codes are
+  represented by `TaskFailureCode`. String conversion classifies a legacy worker
+  diagnostic as `Unknown`. `diagnostic_for_log` is the explicit logging accessor;
+  serialization/debug retain model facts but must never be used for UI copy.
+  DiskFull uses exactly: "Not enough disk space. Free some space and try again."
+  `DESIGN-TODO(opus)`: the review supplies no approved copy for SourceOffline,
+  CodecUnsupported, Cancelled or Unknown. Their `ui_message()` is `None`, a
+  neutral placeholder; hosts must never fall back to log strings or enum names.
+- Older serialized task facts remain readable: missing title stays empty,
+  missing unit stays `None` (host leaves the unit unspecified), and a legacy raw
+  error is classified `Unknown`. These records are host persistence inputs, not
+  a replacement authority or a v1.2.0 render-queue migration adapter.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Require authored titles and units for new work; preserve unspecified legacy fields without inventing their meaning. | N1/N3/N4: accurate progress and readable retained records. |
+| Make `TaskPresentation` the UI boundary; keep diagnostics available separately for logs and omit scheduler priority. | N1/N7: consistent inspectable status without internal implementation text in the UI; review item 10 is pure plumbing. |
+| Use only review-approved copy; keep explicit neutral placeholders for unprovided error messages. | Design ownership plus N3: no invented UX or accidental raw-error wording. |
+| Keep queue execution, acknowledgement, event filtering and single-writer ownership unchanged; remove the old unitless admission signature only after updating all its consumers. | N6/N8 and the prune rule: no extension execution change or dropped live consumer. |
+
+Eight additional task tests cover the required data, all kind labels/symbols,
+window events, serialization, unknown totals, transitions, typed failures and
+legacy diagnostics. Combined with the three render-bar tests, all 83 tests pass
+in the Linux isolation harness, with formatting and strict Clippy clean.
+The root native locked command was attempted and refuses because the shared
+lockfile lacks this package; ownership keeps that lockfile unchanged.
+
+Review disposition beyond must-fix items: item 10 is done at the presentation
+boundary. Should-fix item 3 (shared VoiceOver range summary), item 8 (sample-gated
+ETA), and item 9 (session-retained terminal rows) remain follow-up work. Nice-to-have
+item 11 (legacy modal Retry/Remove routing) remains host/shell integration; the
+old modal still has consumers and is not removed. No new visual surface is built.
+The shell still owns toolbar visibility/aggregate progress, project grouping,
+popover/window controls, Retry routing and completion-row lifecycle. Verify these
+and live VoiceOver, Reduce Motion and render patterns on macOS using pm-design
+and the review, with Opus review before treating any visual result as final.
