@@ -445,20 +445,29 @@ session was locked, so there are no on-screen rows.
   submission is not re-presented (`ViewerStatus::held_frames`). Re-presenting a
   30 fps frame at 120 Hz kept all three drawables queued behind ~2.4 intervals of
   WindowServer latency and starved `nextDrawable`.
-- **Lag-compensated picture time:** each viewer keeps the median of the last 15
-  `presentedTime − target` values. The picture and its matched `audio_host` are
-  chosen for `target + lag`, rounded to the nearest onset for forward play.
+- **Lag-compensated picture time:** each viewer keeps the median of the last 31
+  `presentedTime − requested` values (`present::PresentLag`; each sample and the
+  estimate are clamped to 4 refreshes; prior 1.5 refreshes until 3 samples exist).
+  The picture and its matched `audio_host` are chosen for `requested + lag`,
+  rounded to the nearest onset for forward play.
 - **Vsync-aligned start:** `Transport::grid` (last display tick/presentation) places
   the audio `Start::At` and host-clock run start on a vsync. `wants_display` asks the
   host to run its display link while awaiting the audio epoch.
 - **Render-ahead:** while content changes at most every other refresh, playing frames
   are encoded two refreshes before their target (one otherwise). WindowServer missed
   the vsync when GPU completion landed within ~2 ms of the target.
-- **Timed present:** playing frames use `presentDrawable:atTime:` at the predicted glass
-  time minus half a refresh (never before the target). The compositor otherwise
-  sometimes latched a frame a refresh early, before its audio. The lag estimate is
-  the upper decile of the last 15 target → glass samples, so frames are held to the
-  slower of the compositor's usual 1-or-2-refresh slots instead of alternating.
+- **Timed present (P1 fix pass):** playing frames use `presentDrawable:atTime:` at
+  **target − ½ refresh**, a time that never depends on the lag estimate
+  (`present::plan`). The compositor cannot latch the frame for a vsync before the
+  target, and a request exactly on the predicted grid line no longer slips a refresh
+  when the real vsync is a hair early. On screen at 120 Hz, 597 of 600 presents then
+  landed exactly 1.5 refreshes after the request. The `atTime:` argument is when
+  WindowServer may composite, not a glass time: glass follows about one refresh later.
+  The earlier schedule requested `target + lag − ½` and sampled lag against the
+  target, so each sample contained the previous estimate plus that refresh. With the
+  upper-decile estimator it climbed one refresh at a time to 333–375 ms at 120 Hz
+  and frames stopped reaching glass (see
+  [P1 fix pass](perf-gate-p1.md#p1-fix-pass--2026-11-01)). Traces record `requested`.
 - `PM_ENGINE_PRESENT=legacy` restores the previous schedule for same-build A/B only.
 
 Layer configuration is unchanged (3 drawables, display sync, no transaction present):

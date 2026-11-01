@@ -4,6 +4,7 @@ pub mod color;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
+mod present;
 mod render;
 pub mod resources;
 pub mod trace;
@@ -655,10 +656,10 @@ struct Runtime {
     content: u64,
     interval: f64,
     next: f64,
-    /// Observed presentedTime − link target for timed presents: the
-    /// WindowServer/compositor queue the picture cannot avoid. Media time is
-    /// chosen for target + this lag, so a frame lands when its audio plays.
-    lag: VecDeque<f64>,
+    /// Observed presentedTime − requested present time: the WindowServer/
+    /// compositor delay the picture cannot avoid. Media time is chosen for
+    /// requested + this lag, so a frame lands when its audio plays.
+    lag: present::PresentLag,
     /// Most recent known vsync (host s) and refresh interval.
     grid: Option<(f64, f64)>,
     /// Refreshes ahead of the target at which a playing frame is encoded.
@@ -666,22 +667,6 @@ struct Runtime {
     /// Stamp/time already submitted. Repeating identical pixels at the
     /// display rate only queues more drawables behind the compositor.
     last: Option<(Stamp, Ticks)>,
-}
-impl Runtime {
-    fn lag(&self) -> f64 {
-        present_lag(&self.lag)
-    }
-}
-/// Upper decile of recent target → glass lags, 0 until three exist. Presents
-/// land 1 or (≈10%) 2 refreshes after target; the median would leave every
-/// slow one a refresh late. The timed present then holds frames to this slot.
-fn present_lag(samples: &VecDeque<f64>) -> f64 {
-    if samples.len() < 3 {
-        return 0.;
-    }
-    let mut v: Vec<_> = samples.iter().copied().collect();
-    v.sort_by(f64::total_cmp);
-    v[(v.len() * 9).div_ceil(10) - 1]
 }
 struct Flight {
     id: u64,
@@ -741,11 +726,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match t.display.filter(|d| *d > 0.) {
                     Some(display) => {
                         r.grid = Some((display, r.interval));
-                        if t.target > 0. && display >= t.target - 0.0005 {
-                            if r.lag.len() == 15 {
-                                r.lag.pop_front();
-                            }
-                            r.lag.push_back(display - t.target);
+                        // Timed (playing) presents only; legacy requests the
+                        // target itself and never reads the estimate.
+                        if t.requested > 0. {
+                            r.lag.record(t.requested, display, r.interval);
                         }
                     }
                     // Never shown on a layer: the screen may not hold it.
@@ -766,7 +750,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
-                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"predicted":t.predicted})) {
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
                 if v.stamp != f.stamp {
@@ -844,7 +828,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     content: v.content,
                     interval: 1. / 60.,
                     next: now,
-                    lag: VecDeque::with_capacity(15),
+                    lag: present::PresentLag::default(),
                     grid: None,
                     last: None,
                     ahead: 1.,
@@ -920,11 +904,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - r.ahead * interval) {
                 continue;
             }
-            // A timed present reaches glass `lag` after its target (measured
+            // A timed present reaches glass `lag` after its request (measured
             // from presentedTime). Pick the picture for that instant, and for
             // forward play show each frame from the vsync nearest its onset,
             // so picture onsets straddle their audio instead of trailing it.
-            let shown = due.map(|due| due + if legacy { 0. } else { r.lag() });
+            // The request itself never depends on the estimate (see present).
+            let plan = due.map(|due| {
+                if legacy {
+                    present::Plan {
+                        requested: due,
+                        shown: due,
+                    }
+                } else {
+                    present::plan(due, interval, &r.lag, now)
+                }
+            });
+            let shown = plan.map(|p| p.shown);
             let media = if let Some(shown) = shown {
                 let at = |s: f64| {
                     sample.media_time_at(
@@ -983,8 +978,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 r.transport
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
-                shown,
-                interval,
+                plan,
             ));
             break;
         }
@@ -1016,15 +1010,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             input,
             pipeline,
             audio_host,
-            shown,
-            interval,
+            plan,
         )) = work
         {
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
                 target: due.unwrap_or(0.),
-                predicted: shown.unwrap_or(0.),
+                requested: plan.filter(|_| !legacy).map_or(0., |p| p.requested),
+                predicted: plan.map_or(0., |p| p.shown),
                 ..Default::default()
             }));
             engine.mastering = mastering;
@@ -1056,16 +1050,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match result {
                     Ok(Some(s)) => {
                         let completed = Arc::downgrade(&shared);
-                        // Ask for glass no earlier than half a refresh before the
-                        // predicted instant: the compositor otherwise sometimes
-                        // latches an early commit one refresh sooner, which shows
-                        // the frame before its audio (and moves the onset).
-                        let present_at = due.map(|d| match shown {
-                            Some(shown) if !legacy => (shown - interval / 2.).max(d),
-                            _ => d,
-                        });
                         s.submit_notifying(
-                            present_at,
+                            plan.map(|p| p.requested),
                             Some(Arc::new(move || {
                                 // Bounded tokens cannot lose a wake; callbacks
                                 // never acquire the service state lock.
@@ -1251,23 +1237,5 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
-    }
-}
-
-#[cfg(test)]
-mod lag_tests {
-    use super::*;
-    #[test]
-    fn lag_is_the_upper_decile_once_three_samples_exist() {
-        let i = 1. / 120.;
-        let mut samples: VecDeque<f64> = std::iter::repeat_n(i, 13).collect();
-        assert_eq!(present_lag(&samples), i);
-        samples.extend([2. * i, 2. * i]);
-        assert_eq!(
-            present_lag(&samples),
-            2. * i,
-            "two slow presents of 15 select the slow slot"
-        );
-        assert_eq!(present_lag(&VecDeque::from([i, i])), 0.);
     }
 }
