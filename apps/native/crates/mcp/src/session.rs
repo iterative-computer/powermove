@@ -103,6 +103,12 @@ impl McpSession {
             }
             return self.manage(&mut host, args);
         }
+        if name == "get_panel_layout" {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            return host.panel_layout(session.project.as_deref());
+        }
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
         }

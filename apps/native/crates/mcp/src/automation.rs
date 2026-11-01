@@ -299,6 +299,70 @@ impl Automation {
             .ok_or_else(|| Error::unavailable("engine-service headless render"))?
             .capture(request)
     }
+    /// The frozen layout digest reads saved data, never live surface controls.
+    pub fn panel_layout(&self, project: Option<&str>) -> Result<Value> {
+        let state = self.kernel.state();
+        let saved = project
+            .map(|id| {
+                self.kernel
+                    .project(id)
+                    .ok_or_else(|| Error::invalid("Project is not open"))
+            })
+            .transpose()?
+            .map(|p| json_value(p.workspace()));
+        let named = state
+            .settings
+            .get("workspaces")
+            .map(json_value)
+            .unwrap_or(json!([]));
+        let current = state.settings.get("workspace").map(json_value);
+        let workspace = saved.as_ref().filter(|v| v.is_object()).or_else(|| {
+            named
+                .as_array()?
+                .iter()
+                .find(|v| Some(&v["id"]) == current.as_ref())
+        });
+        let registrations = state.registries.get("panels");
+        // A contribution stack exposes only its winning provider, retaining
+        // first-registration ordering just like object property replacement.
+        let mut panels = Vec::<Value>::new();
+        if let Some(registrations) = registrations {
+            for entry in registrations {
+                let definition = json_value(&entry.definition);
+                let id = definition["id"].as_str().unwrap_or(&entry.id);
+                if id.is_empty() {
+                    continue;
+                }
+                let panel = json!({"id":id,"title":definition["title"].as_str().filter(|s| !s.is_empty()).unwrap_or(id)});
+                if let Some(previous) = panels.iter_mut().find(|v| v["id"] == id) {
+                    *previous = panel;
+                } else {
+                    panels.push(panel);
+                }
+            }
+        }
+        let docks = workspace.and_then(|w| w["layout"]["docks"].as_array()).map(|docks| docks.iter().map(|dock| {
+            let children = dock["panels"].as_array().map(|children| children.iter().map(|panel| {
+                let id = panel["id"].as_str().unwrap_or("");
+                let title = panel["title"].as_str().filter(|s| !s.is_empty())
+                    .or_else(|| panels.iter().find(|v| v["id"] == id).and_then(|v| v["title"].as_str()))
+                    .unwrap_or(id);
+                json!({"id":id,"title":title,"collapsed":panel["collapsed"] == true,"flex":panel["flex"] == true,
+                    "size":panel["size"].as_f64().map(|_| panel["size"].clone())})
+            }).collect::<Vec<_>>()).unwrap_or_default();
+            json!({"id":dock["id"].as_str().unwrap_or(""),"size":dock["size"].as_f64().map(|_| dock["size"].clone()),"panels":children})
+        }).collect::<Vec<_>>()).unwrap_or_default();
+        let mut identity = json!(null);
+        if let Some(workspace) = workspace {
+            identity = json!({});
+            for key in ["id", "name"] {
+                if let Some(value) = workspace.get(key) {
+                    identity[key] = value.clone();
+                }
+            }
+        }
+        Ok(json!({"workspace":identity,"docks":docks,"registeredPanels":panels}))
+    }
     pub fn list_panels(&self) -> Result<Value> {
         self.surfaces
             .as_ref()
@@ -732,3 +796,7 @@ impl ActorAutomation {
         Ok(ack)
     }
 }
+
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod layout_tests;
