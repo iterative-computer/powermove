@@ -24,11 +24,17 @@ export interface KeyInput {
   skipOwner?: string;
 }
 export class CompatKeymap {
-  readonly commands = new Registry<
+  readonly commands: Registry<
     Data & { id: string; run: (...args: any[]) => any }
-  >();
-  readonly keybindings = new Registry<Binding>();
-  constructor(private reportError: (error: unknown) => void) {}
+  >;
+  readonly keybindings: Registry<Binding>;
+  constructor(
+    private reportError: (error: unknown) => void,
+    registries?: Data,
+  ) {
+    this.commands = registries?.commands ?? new Registry();
+    this.keybindings = registries?.keybindings ?? new Registry();
+  }
   bind(ownerId: string, definition: Data): Disposable {
     const chord = normalizeChord(definition.key ?? "");
     if (!chord)
