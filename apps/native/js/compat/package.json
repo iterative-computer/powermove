@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/frozen/kernel/editor-helpers.ts",
+    ".": "./src/index.ts",
+    "./testing": "./tests/fake-host.ts",
     "./powermove": "./src/frozen/kernel/editor-helpers.ts"
   },
   "scripts": {
-    "test": "bun test tests/frozen",
-    "typecheck": "tsc --noEmit"
+    "test": "bun test tests",
+    "build": "bun build src/index.ts --target=browser --format=iife --global-name=PowermoveCompat --outfile=dist/compat-realm.js",
+    "typecheck": "tsc --noEmit",
+    "replay": "bun scripts/replay.ts"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
