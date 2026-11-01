@@ -1,5 +1,6 @@
 mod media;
 mod panels;
+mod perf_gate;
 mod platform;
 mod playback;
 mod session;
@@ -110,6 +111,7 @@ fn main() -> Result<()> {
                 });
                 playback::install(&entity, cx);
                 entity.update(cx, |v, cx| v.initialize(launch.clone(), cx));
+                perf_gate::install(&entity, cx);
                 Rc::new(session::Bridge(entity))
             }
         }),
