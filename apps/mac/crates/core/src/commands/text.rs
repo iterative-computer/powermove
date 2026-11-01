@@ -7,9 +7,11 @@
 //! kernel), and the structured text channels (`ta.` animators, `ts.` style
 //! ranges) of `legacy/core/text-animation.ts`.
 
-use pm_model::Value;
+use pm_model::{Map, Value};
 
-use super::Cx;
+use super::content::ContentCommand;
+use super::properties::{self, SetProperty};
+use super::{Cx, values};
 use crate::error::CommandError;
 
 /// How Split Text divides a layer.
@@ -32,8 +34,9 @@ pub enum TextCommand {
         text: String,
         time: f64,
     },
-    /// Paragraph text box (`boxWidth`/`boxHeight`, 0 = automatic), keyed at
-    /// `time` when animated. Label "Resize Text Box".
+    /// Paragraph text box (`boxWidth`/`boxHeight` channels, 0 = automatic),
+    /// keyed at `time` when animated; Size and Scale are not touched. Label
+    /// "Resize Text Box".
     SetBox {
         layer_id: String,
         width: Option<f64>,
@@ -82,14 +85,55 @@ impl TextCommand {
     }
 
     pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
-        let _ = cx;
-        Err(CommandError::NotImplemented(match self {
-            TextCommand::SetText { .. } => "set_text",
-            TextCommand::SetBox { .. } => "set_text_box",
-            TextCommand::Split { .. } => "split_text",
-            TextCommand::AddAnimator { .. } => "add_text_animator",
-            TextCommand::RemoveAnimator { .. } => "remove_text_animator",
-            TextCommand::SetStyleRange { .. } => "set_text_style",
-        }))
+        let text_layer = |cx: &Cx<'_>, id: &str| -> Result<(), CommandError> {
+            let (_, l) = cx.layer_mut_checked(id)?;
+            if values::text(&l, "type") != Some("text") {
+                return Err(CommandError::Invalid("Not a text layer".into()));
+            }
+            Ok(())
+        };
+        match self {
+            TextCommand::SetText {
+                layer_id,
+                text,
+                time,
+            } => {
+                text_layer(cx, layer_id)?;
+                let mut patch = Map::new();
+                patch.insert("text", values::s(text));
+                ContentCommand::Set {
+                    layer_id: layer_id.clone(),
+                    patch,
+                    time: *time,
+                }
+                .plan(cx)
+            }
+            TextCommand::SetBox {
+                layer_id,
+                width,
+                height,
+                time,
+            } => {
+                text_layer(cx, layer_id)?;
+                for (key, v) in [("boxWidth", width), ("boxHeight", height)] {
+                    let Some(v) = v else { continue };
+                    let v = values::finite(*v, key)?.max(0.0);
+                    let mut c = SetProperty::new(layer_id.clone(), format!("c.{key}"), v, *time);
+                    c.preserve_hand_edits = false;
+                    properties::set_property(cx, &c)?;
+                }
+                Ok(())
+            }
+            TextCommand::Split { .. } => Err(CommandError::NotImplemented("split_text")),
+            TextCommand::AddAnimator { .. } => {
+                Err(CommandError::NotImplemented("add_text_animator"))
+            }
+            TextCommand::RemoveAnimator { .. } => {
+                Err(CommandError::NotImplemented("remove_text_animator"))
+            }
+            TextCommand::SetStyleRange { .. } => {
+                Err(CommandError::NotImplemented("set_text_style"))
+            }
+        }
     }
 }

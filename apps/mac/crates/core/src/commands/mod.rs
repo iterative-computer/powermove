@@ -78,7 +78,6 @@ mod channels;
 mod cx;
 mod spine;
 mod track;
-#[allow(dead_code)] // helpers for the commands being ported
 mod values;
 
 pub mod captions;
