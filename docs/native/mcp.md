@@ -1,7 +1,7 @@
 # MCP and automation core (Phase 1)
 
 Crate: `apps/native/crates/mcp` (`pm-mcp`); binary: `powermove-mcp`.
-Status: **67 tools / 67 schema-identical / 13 implemented / 54 pending**.
+Status: **67 tools / 67 schema-identical / 14 implemented / 53 pending**.
 This is the standalone automation core, with an asynchronous adapter to the
 application's kernel actor. It does not yet provide the complete agent runtime,
 extension activation, rendering or surface automation of the windowed app.
@@ -46,7 +46,7 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `start_session` | Yes | Implemented | Connection state, pinned document identity, isolated workspace |
 | `publish_extensions` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
 | `import_media_to_timeline` | Yes | Pending | Durable media import/version/Undo service |
-| `finish_session` | Yes | Implemented | DocumentStore mark/squash/restore + kernel journal drain |
+| `finish_session` | Yes | Implemented | Actor-bound kernel mark/squash/restore + journal publication |
 | `orchestrator_capabilities` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
 | `delegate_task` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
 | `task_status` | Yes | Pending | Agent protocols, approvals, child/thread lifecycle |
@@ -73,21 +73,21 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `replace_media` | Yes | Pending | Durable media import/version/Undo service |
 | `import_media` | Yes | Pending | Durable media import/version/Undo service |
 | `manage_media` | Yes | Pending | Durable media import/version/Undo service |
-| `select_layers` | Yes | Implemented | DocumentStore selection (standalone host) |
+| `select_layers` | Yes | Implemented | Kernel SelectionCall; ephemeral selection publication |
 | `inspect_creative_workspace` | Yes | Pending | Creative-app inventory and bounded source reader |
-| `set_panel_layout` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `get_panel_layout` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
+| `set_panel_layout` | Yes | Pending | Workspace editing state and external workspace Undo/Redo callback host; settings alone are insufficient |
+| `get_panel_layout` | Yes | Implemented | Kernel project/named workspace snapshot + winning panel registrations; tagged digest |
 | `inspect_creative_extension` | Yes | Pending | Creative-app inventory and bounded source reader |
 | `open_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
 | `get_panel_state` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
 | `interact_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
 | `capture_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
 | `computer_use_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
-| `get_workspace_state` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
+| `get_workspace_state` | Yes | Pending | Kernel identity/selection/effects exist; viewport, renderer errors, projects-screen state and extension health require shell/runtime |
 | `render_frames` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
 | `apply_commands` | Yes | Implemented | Frozen JSON adapter → typed kernel commands → guarded Transact |
 | `edit_video` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
-| `rollback_changes` | Yes | Implemented | Revision guard + validated DocumentStore restore + journal drain |
+| `rollback_changes` | Yes | Implemented | Document/revision guard + validated kernel Restore + journal publication |
 | `validate_effect` | Yes | Pending | Extension registration validator |
 | `stage_fork_rebase` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
 | `probe_media` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
@@ -96,10 +96,10 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `media_waveform` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
 | `transcribe_media` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
 | `check_project` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
-| `store_search` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_extension` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_source` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
-| `store_library` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
+| `store_search` | Yes | Pending | Remote Store catalog/query service; local registry is not the catalog |
+| `store_extension` | Yes | Pending | Remote release/detail service; installed/version/source metadata lacks listing and releases |
+| `store_source` | Yes | Pending | Remote release tree/file service; kernel overlay inventory is not release-ID addressed |
+| `store_library` | Yes | Pending | Full extension manifests/health/trust, provenance, update checks and local-tree hashes; kernel inventory alone is insufficient |
 | `store_install` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
 | `store_update` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
 | `store_uninstall` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
@@ -107,6 +107,39 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `store_publish` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
 | `generate_captions` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
 | `export_captions` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
+
+## Kernel-backed pending-tool audit
+
+This lane starts with 13 implemented / 54 pending and ends with **14 / 53**.
+Project/library management, project/timeline reads, selection, session history and
+rollback were already implemented on the base branch; the new body is
+`get_panel_layout`. It uses the kernel's project workspace when attached, or the
+selected named workspace in app context, plus the winning panel providers.
+It returns the exact tagged digest fields and null size defaults. It reads saved
+layout data without activating panels, changing selection, refreshing a run's
+revision guard, dirtying the document or adding history. No surface runtime is
+needed to enumerate registered IDs and titles. The standalone host reports only
+registrations actually present; it does not invent built-in panels.
+
+The pending tools above cannot return complete v1.2.0 results from kernel data:
+`get_workspace_state` additionally requires real viewport, renderer diagnostics,
+projects-screen state and extension health. `set_panel_layout` promises external
+workspace Undo/Redo and checks workspace editing state; persisting settings
+without those callbacks would falsely claim that Undo works. Panel interaction,
+inspection and capture still require real surfaces. Store reads require the
+remote catalog/releases or full extension records, provenance, trust and update
+services shown in tagged `cloud/store-agent.ts` and `cloud/store-ipc.ts`;
+`ExtensionEntry { installed, enabled, version, source }` is not that contract.
+Kernel extension-source inventory addresses overlay/shared files, not Store
+release IDs. Creative inventory inspects After Effects, not native extensions.
+There is no project-memory tool or memory operation in the frozen 67-tool
+catalog; no new schema or tool is introduced to expose opaque project metadata.
+Engine/media/3D/agent tools retain their explicit structured unavailable errors.
+
+**Deliberate differences:** no new public schema or result-shape differences.
+The layout read reports the native kernel's saved/current facts; no claim of a
+live DOM, captured pixels or running extension health is made. Existing adapter
+limitations below remain in force.
 
 ## Implemented adapter limits
 
@@ -163,15 +196,15 @@ returns the full ShellReply so app callers can present recovery-copy decisions.
    timeline read refreshes that observation. If newer work arrived after this
    run edited, the run becomes interleaved; reading never makes foreign work
    eligible for rollback or grouping. No-op batches do not mark the run changed.
-5. `finish_session(commit:true)` groups an uninterrupted run using the kernel's
-   `squash_since`. Interleaved/folded runs keep normal history entries. History
-   taps are drained through Kernel::handle before acknowledgement, using the
-   kernel journal rather than a second history store.
+5. `finish_session(commit:true)` groups an uninterrupted run using actor-bound
+   `HistoryCall::Squash`. Interleaved/folded runs keep normal history entries.
+   Kernel::handle owns the journal/publication boundary before acknowledgement;
+   MCP does not keep a second history store.
 6. `rollback_changes`, a false finish and disconnect attempt guarded snapshot
    restore. The document identity and revision must still match, no foreign
    edits may have been observed, and no kernel entry may be open. Restore uses
-   validated `DocumentStore::restore_project`, adds an undoable restore entry
-   and drains its journal taps. Refusal preserves all work. Disconnect logs a
+   validated `Call::Restore`, adds an undoable restore entry and publishes
+   through the kernel's journal boundary. Refusal preserves all work. Disconnect logs a
    refusal; the client is already gone. Undo can recover a successful rollback.
 7. Finish removes extension staging; false finish/disconnect removes the run
    workspace. Committed artifacts/API/input files remain. Finish errors also
@@ -234,11 +267,11 @@ with credentials and other sensitive controls omitted.
 * **Present and used:** DocumentStore selection, history_mark/squash_since,
   restore_project; guarded Transact; slice-2 shell sessions, Save/SaveAs,
   Recent/Duplicate/Trash/Restore; immutable state, UI facts and registries.
-* **Missing actor messages:** selection mutation/publication; history mark and
-  guarded squash; validated snapshot restore with expected revision and an
-  open-entry check. Store-only methods cannot be used through KernelHandle.
-  The standalone host's journal drain is an interim integration boundary, not
-  an actor API. Once these messages exist, bind McpSession to the app actor.
+* **Present since kernel slice 3:** actor-bound selection, history mark/guarded
+  squash and validated snapshot restore with document identity, expected revision
+  and open-entry fencing. Standalone MCP uses those messages and the kernel's
+  normal journal/publication boundary. Full McpSession/transport hosting in the
+  application remains an integration task.
 * An unopened-library-slot rename operation and application binding of the
   current generation-bound session. Preserve recovery/copy decisions in UI.
 * Complete caption/transform/3D/video command implementations and legacy
@@ -272,10 +305,23 @@ with credentials and other sensitive controls omitted.
 
 ## Validation
 
-Verified: **25 passing tests** (1 unit + 24 integration), formatting and strict
+Verified in this lane: **29 passing MCP tests** (5 unit + 24 integration),
+**207 passing kernel tests + 1 ignored optional smoke test**, formatting and strict
 Clippy (`--all-targets --no-deps -- -D warnings`). Recovery checks prove that
 both grouped history and snapshot rollback reach the kernel journal. A forced
 rotation failure verifies that a NotDurable notice keeps applied work tracked.
+The four new tests cover frozen layout schema validation, tagged digest results
+on an isolated corpus project copy in editor/app sessions, empty registry and
+provider override/disposal, and corpus state/timeline source pairs plus guarded
+selection/edit/rollback and library duplicate/trash/restore/save. The corpus
+source is checked unchanged. `layout-pairs.mjs` executes the actual tagged digest;
+these are source-backed conformance checks, not live Electron captures.
+
+Required command passed: `cargo test --locked -p pm-mcp -p pm-kernel`.
+Verification used pinned Rust 1.96.1, Node 24.19.0 (which supports the tagged
+TypeScript oracle), and both `v1.2.0` and `v1.3.0` tags for existing parity tests.
+Strict Clippy applies to pm-mcp; the Linux build reports the kernel's existing
+unused `path` warning in `locks.rs`.
 
 From `apps/native`, with toolchain `1.96.1` pinned by rust-toolchain.toml:
 
