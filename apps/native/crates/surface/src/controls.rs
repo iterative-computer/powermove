@@ -17,6 +17,7 @@ struct Draft {
     initial: String,
     text: String,
     text_control: bool,
+    binding: String,
 }
 #[derive(Default)]
 pub struct Controls {
@@ -38,6 +39,12 @@ impl Controls {
             return Err("disabled control".into());
         }
         let text_control = node.props.get("control").and_then(Value::as_str) == Some("text");
+        let binding = node
+            .props
+            .get("binding")
+            .and_then(Value::as_str)
+            .ok_or("missing binding")?
+            .to_owned();
         let value = node.props.get("value").cloned().unwrap_or(Value::Null);
         let text = value
             .as_str()
@@ -52,6 +59,7 @@ impl Controls {
                 initial: text.clone(),
                 text: text.clone(),
                 text_control,
+                binding,
             },
         );
         Ok(vec![Effect::Draft(id, text)])
@@ -218,10 +226,12 @@ impl Controls {
         sink: &mut impl BindingSink,
     ) -> Result<(), String> {
         self.bindings.reconcile(surface, sink)?;
-        self.drafts.retain(|id, _| {
-            surface
-                .node(*id)
-                .is_some_and(|n| n.props.get("disabled").and_then(Value::as_bool) != Some(true))
+        self.drafts.retain(|id, draft| {
+            surface.node(*id).is_some_and(|n| {
+                n.props.get("disabled").and_then(Value::as_bool) != Some(true)
+                    && n.props.get("binding").and_then(Value::as_str)
+                        == Some(draft.binding.as_str())
+            })
         });
         Ok(())
     }

@@ -289,7 +289,7 @@ fn focus_scope_traps_tab_and_restores_previous_focus() {
     assert!(i.focus(&s, 0).is_err());
     assert!(i.focus(&s, 3).is_err());
     i.pop_scope(&s);
-    assert_eq!(i.focused, Some(3));
+    assert_eq!(i.focused, None);
 }
 #[test]
 fn selectors_cascade_specificity_source_order_inline_and_token_data() {
@@ -615,4 +615,32 @@ fn stylesheet_replacement_is_in_the_same_atomic_commit_as_tree_ops() {
         .is_err()
     );
     assert_eq!(s.computed_style(3).unwrap()["display"], "grid");
+}
+#[test]
+fn rebinding_a_numeric_draft_never_commits_to_the_replacement_binding() {
+    let mut s = bound("number", json!(1));
+    let mut c = Controls::default();
+    let mut sink = Sink::default();
+    c.focus(&s, 2, &mut sink).unwrap();
+    c.input(2, "99".into(), &mut sink).unwrap();
+    apply(
+        &mut s,
+        json!([{"op":"setProps","id":2,"patch":{"binding":"replacement"}}]),
+    )
+    .unwrap();
+    c.reconcile(&s, &mut sink).unwrap();
+    c.finish(&s, 2, false, &mut sink).unwrap();
+    assert!(sink.edits.is_empty());
+}
+#[test]
+fn removing_a_focus_scope_restores_an_existing_enabled_target() {
+    let mut s = surface();
+    let mut i = Interaction::default();
+    i.focus(&s, 3).unwrap();
+    apply(&mut s,json!([{"op":"setProps","id":1,"patch":{"focusScope":true}},{"op":"insertBefore","parent":0,"id":3,"before":null}])).unwrap();
+    i.push_scope(&s, 1).unwrap();
+    i.focus(&s, 2).unwrap();
+    apply(&mut s, json!([{"op":"remove","id":1}])).unwrap();
+    i.reconcile(&s);
+    assert_eq!(i.focused, Some(3));
 }

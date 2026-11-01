@@ -39,6 +39,13 @@ impl Interaction {
     /// Call after an accepted commit; rejected commits do not alter focus/capture.
     pub fn reconcile(&mut self, surface: &Surface) {
         self.captures.retain(|_, id| surface.node(*id).is_some());
+        while self
+            .scopes
+            .last()
+            .is_some_and(|(id, _)| surface.node(*id).is_none())
+        {
+            self.pop_scope(surface);
+        }
         self.scopes.retain(|(id, _)| surface.node(*id).is_some());
         if self.focused.is_some_and(|id| surface.node(id).is_none()) {
             self.focused = None;
@@ -105,7 +112,10 @@ impl Interaction {
     }
     pub fn pop_scope(&mut self, surface: &Surface) {
         if let Some((_, restore)) = self.scopes.pop() {
-            self.focused = restore.filter(|id| surface.node(*id).is_some());
+            self.focused = None;
+            if let Some(id) = restore {
+                let _ = self.focus(surface, id);
+            }
         }
     }
     pub fn focus(&mut self, surface: &Surface, id: Id) -> Result<(), String> {
