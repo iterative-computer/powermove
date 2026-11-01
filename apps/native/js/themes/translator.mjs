@@ -488,7 +488,12 @@ export function evaluateTheme(plan, inputTree, environment = {}) {
       };
     }
   }
-  const palette = designTokens(surfaces[root.id].base.variables.values);
+  const palette = designTokens(surfaces[root.id].base.variables.values, {
+    baseline: environment[FOUNDATION_PASS]
+      ? null
+      : foundationValues(plan.scheme, root, environment),
+    nativeTokens: environment.nativeTokens ?? null,
+  });
   const reversed = root.attributes["data-timeline-surfaces"] === "reversed";
   const values = surfaces[root.id].base.variables.values;
   return {
@@ -513,6 +518,38 @@ export function evaluateTheme(plan, inputTree, environment = {}) {
     compat: copyData(plan.compat),
     blockers,
   };
+}
+
+const FOUNDATION_PASS = Symbol("foundation pass");
+const foundationCache = new Map();
+/** Frozen v1.2.0 token values for a scheme at normal density, untouched by any
+ * theme, workspace or attribute. They mark which values are the old app's
+ * defaults rather than an authored choice (see designTokens). */
+function foundationValues(scheme, root, environment) {
+  if (!foundationCache.has(scheme)) {
+    const plan = translateTheme(
+      { id: "pm-foundation", name: "Foundation", scheme },
+      { preference: scheme, systemScheme: scheme },
+    );
+    plan.rootAttributes = { "data-theme": scheme };
+    const result = evaluateTheme(
+      plan,
+      { id: root.id, tag: root.tag },
+      { ...environment, [FOUNDATION_PASS]: true },
+    );
+    foundationCache.set(
+      scheme,
+      Object.freeze(
+        Object.fromEntries(
+          Object.entries(result.tokens).map(([name, token]) => [
+            name,
+            token.value,
+          ]),
+        ),
+      ),
+    );
+  }
+  return foundationCache.get(scheme);
 }
 
 export function compatSelectors(catalog) {

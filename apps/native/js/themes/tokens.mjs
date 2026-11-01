@@ -15,10 +15,18 @@ const groups = {
   easing: "ease ease-io",
 };
 
-// Only semantically equivalent fields in pm-design are mapped. Missing fields
-// stay typed in v4; no approximation of alpha, focus stacks, fonts or easing.
+// Only semantically equivalent fields in pm-design are mapped (see
+// docs/native/design/tokens.md, "Theme mapping"). Missing fields stay typed in
+// v4; no approximation of focus stacks, fonts or easing. A token may feed more
+// than one native role. Unmapped on purpose:
+// - r-pill: "fully round" is a shape, not a radius; capsules are height / 2.
+// - hairline: CSS device-pixel workaround; native separator width is owned by
+//   pm-design and Increase Contrast.
+// - fs-xl: v1.2.0's 18 px heading has no native role; display (22) is native-only.
 const native = {
   accent: "colors.accent",
+  "accent-dim": "colors.accent_wash",
+  "accent-tx": "colors.accent_text",
   "bg-field": "colors.field",
   "bg-float": "colors.floating",
   "bg-panel": "colors.panel",
@@ -26,26 +34,37 @@ const native = {
   "bg-sunken": "colors.viewer",
   "bg-row-hi": "colors.hover",
   "bg-window": "colors.window",
+  danger: "colors.danger",
   line: "colors.separator",
   "on-accent": "colors.selected_text",
+  success: "colors.success",
   tx: "colors.text",
   "tx-2": "colors.secondary",
   "tx-3": "colors.muted",
+  warning: "colors.warning",
   "ctl-h": "metrics.control",
   gap: "metrics.gap",
-  hairline: "metrics.border",
   "hdr-h": "metrics.header",
   pad: "metrics.inset",
   "r-lg": "metrics.panel_radius",
   "r-sm": "metrics.control_radius",
-  "r-pill": "metrics.capsule_radius",
+  "r-xs": "metrics.inner_radius",
   "row-h": "metrics.row",
+  "val-w": "metrics.value_column",
   "fs-xs": "typography.minimum",
-  "fs-sm": "typography.label",
-  "fs-md": "typography.body",
-  "fs-lg": "typography.title",
-  "fs-xl": "typography.display",
+  "fs-sm": ["typography.body", "typography.label"],
+  "fs-md": ["typography.title", "typography.reading"],
+  "fs-lg": "typography.heading",
 };
+// Translucent colours are composited over this backdrop before projection,
+// because pm-design colours are opaque.
+const backdrop = {
+  "accent-dim": "--bg-panel",
+  line: "--bg-panel",
+  "tx-2": "--bg-panel",
+  "tx-3": "--bg-panel",
+};
+const targets = (name) => [native[name] ?? []].flat();
 
 export const FOUNDATION_TOKENS = Object.freeze(
   Object.fromEntries(
@@ -54,8 +73,8 @@ export const FOUNDATION_TOKENS = Object.freeze(
         `--${name}`,
         Object.freeze({
           kind,
-          native: native[name] ?? null,
-          v4: native[name] ?? `legacy.${kind}.${name}`,
+          native: targets(name).length ? Object.freeze(targets(name)) : null,
+          v4: targets(name)[0] ?? `legacy.${kind}.${name}`,
         }),
       ]),
     ),
@@ -263,10 +282,27 @@ export function color(text) {
   return null;
 }
 
-export function designTokens(values) {
+/** Project resolved v4 values onto pm-design fields.
+ *
+ * `baseline` holds the frozen v1.2.0 foundation values for the same scheme at
+ * normal density. A value equal to its baseline is the old app's default, not
+ * an authored choice, so pm-design's native default stands (listed in
+ * `nativeDefaults`). Without a baseline every value projects (legacy callers).
+ *
+ * `nativeTokens` (`"metrics.gap" -> 6`, from the host's current pm-design
+ * tokens) makes length changes relative: a compact workspace that takes 4 px
+ * off a v1.2.0 row takes 4 pt off the native row, instead of imposing the old
+ * absolute size. Colours always project absolutely.
+ */
+export function designTokens(values, { baseline = null, nativeTokens = null } = {}) {
   const tokens = {},
     nativePatch = {},
+    nativeDefaults = [],
     additions = [];
+  const opaque = (name) => {
+    const typed = values[name] == null ? null : color(values[name]);
+    return typed?.alpha === 1 ? typed : null;
+  };
   for (const [name, value] of Object.entries(values)) {
     if (value === null) continue;
     const spec = FOUNDATION_TOKENS[name] ?? {
@@ -281,21 +317,42 @@ export function designTokens(values) {
           ? scalar(value)
           : null;
     tokens[name] = { ...spec, value, typed };
+    const fields = spec.native ?? [];
+    if (fields.length && baseline && baseline[name] === value) {
+      nativeDefaults.push(name);
+      continue;
+    }
     let projected = false;
-    if (spec.native && spec.kind === "color" && typed?.alpha === 1) {
-      nativePatch[spec.native] = typed.channels.reduce(
-        (rgb, channel) => rgb * 256 + Math.round(channel * 255),
-        0,
-      );
-      projected = true;
+    if (fields.length && spec.kind === "color" && typed) {
+      let channels = typed.alpha === 1 ? typed.channels : null;
+      const under = backdrop[name.slice(2)] && opaque(backdrop[name.slice(2)]);
+      if (!channels && under)
+        channels = typed.channels.map(
+          (c, i) => c * typed.alpha + under.channels[i] * (1 - typed.alpha),
+        );
+      if (channels) {
+        const rgb = channels.reduce(
+          (sum, channel) => sum * 256 + Math.round(channel * 255),
+          0,
+        );
+        for (const field of fields) nativePatch[field] = rgb;
+        projected = true;
+      }
     } else if (
-      spec.native &&
+      fields.length &&
       spec.kind === "length" &&
       typed &&
       typed.value >= 0 &&
       (typed.unit === "px" || (typed.unit === "" && typed.value === 0))
     ) {
-      nativePatch[spec.native] = typed.value;
+      const before = baseline?.[name] == null ? null : scalar(baseline[name]);
+      for (const field of fields) {
+        const current = nativeTokens?.[field];
+        nativePatch[field] =
+          typeof current === "number" && before?.unit === "px"
+            ? Math.max(0, current + typed.value - before.value)
+            : typed.value;
+      }
       projected = true;
     }
     if (!projected)
@@ -303,10 +360,10 @@ export function designTokens(values) {
         token: name,
         target: spec.v4,
         kind: spec.kind,
-        reason: spec.native
+        reason: fields.length
           ? "native_field_cannot_represent_value"
           : "native_field_missing",
       });
   }
-  return { tokens, nativePatch, additions };
+  return { tokens, nativePatch, nativeDefaults, additions };
 }
