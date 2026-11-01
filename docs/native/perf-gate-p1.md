@@ -251,3 +251,131 @@ The runner refuses locked sessions, active builds, insufficient disk and battery
 power. It retains existing-app/high-load caveats as diagnostics, restores display
 mode and reaps only its own process group. Release artifacts are removed after
 measurement. No push, tag, release or workflow dispatch.
+
+## Latency pass — 2026-11-01
+
+**Gate P1 remains NOT PASSED.** This pass root-caused the presentation rows,
+changed the engine service's playback schedule and the harness's A/V/drop
+definitions, and produced headless evidence. **The Mac stayed locked for the
+whole on-screen window (09:00 through commit at ~09:42, `CGSSessionScreenIsLocked = true`); no
+on-screen before/after row was measured.** The commands at the end reproduce
+every row under one owned GUI lock per batch (`latency`, each < 10 minutes).
+
+Conditions: Apple M5 / 16 GiB, macOS 27.2 (26B5086k), AC power, built-in
+Retina panel only (3024×1964, ProMotion: minimum/maximum refresh interval
+8.333/41.667 ms, EDR potential 16). Rust 1.96.1 release build. The release
+build also contained other lanes' **uncommitted** GPUI-CE/shell edits
+(P-120/P-TEXT); load 12–15 during the probe (another build), 2.8–5.5 later.
+
+### Root causes
+
+| Row | Root cause | Evidence |
+|---|---|---|
+| Edit → present, cached scrub (p95 30.5 / 24.2 ms vs ≤ 9.333) | **WindowServer composition latency, not Powermove.** commit → `presentedTime` for an asynchronous `CAMetalLayer` present is ~2.4 refresh intervals at 120 Hz. Kernel, service and render work total ≈ 2–3 ms. | A standalone Swift probe (`tools/perf-gate/present_probe.swift`: layer-hosting root, RGBA16F EDR `CAMetalLayer`, clear-only frame) measured commit → display **p50 20.1 / p95 25.3 ms** at 120 Hz, n=39. **No layer setting moved it:** `maximumDrawableCount` 2 (20.3/24.4), `displaySyncEnabled = NO` (19.7/23.7), 120 Hz `CADisplayLink` voting (19.1/24.3), `presentsWithTransaction` + main-thread present (19.2/24.6), EDR off (20.1/24.6). GPU commit → completion was ~1 ms. **Caveat:** these ran while the session was locked (window behind the lock screen; display links did not fire, so the `link=1` and continuous variants are invalid). They must be repeated on screen. |
+| 60 s playback gaps (34 at 120 Hz) | **Drawable-pool starvation by re-presenting held frames.** The service presented every display tick, and a 30 fps frame was presented 4× at 120 Hz. A drawable stays busy acquire → commit → ~2.4 intervals → on glass → released after the *next* scanout, ≈ 3.5–4 intervals. Three drawables (the CAMetalLayer maximum) cannot sustain one present per vsync, so `nextDrawable` blocks and ticks are missed. This is also why 2 drawables showed 2,266 gaps. | Pool arithmetic from the measured lag. Headless: the new schedule submits exactly **1,800** frames per 60 s (30 fps content) and holds **5,290** ticks at 120 Hz / **1,796** at 60 Hz. |
+| A/V mean 34.6 / jitter p95 12.6 ms | **(1) Metric:** every scanout of a held frame was compared with its frame-start audio time, giving offsets 0/8.3/16.7/25 ms + lag. That is exactly ±12.5 ms of "jitter" (reported 12.558). **(2) Mapping:** the picture was chosen for the *target* vsync, but it reaches glass one lag (~22 ms) later. **(3) Phase:** audio started at `now + 50 ms`, not on the display's vsync line, so onsets cannot be closer than the phase difference (≤ ±4.2 ms at 120 Hz). | Same arithmetic reproduced in the new harness test (`av_all_presentations` jitter 12.5 ms, onset jitter 0). |
+| Main-thread GPU waits (edit row's ≤ 4 ms clause) | **GPUI-CE vendor:** `composition::present` always returns `Some(Transaction)`, so `MacWindow::draw` sets `presents_with_transaction(true)` on every frame and never clears it. Every GPUI frame then runs `commit(); wait_until_scheduled(); present()` on the main thread inside the composition `CATransaction`. | Code inspection (`gpui_macos/src/window.rs` `draw`, `composition.rs` `present`); not timed this pass. |
+
+`displaySyncEnabled`, `present(afterMinimumDuration:)` and EDR settings are not
+factors for these rows. A transaction-coupled viewer present is unnecessary
+except while slot geometry is moving.
+
+### Fixes (engine service, harness, two app hunks)
+
+- **Hold, don't re-present.** While playing, a tick whose frame (stamp + media
+  time) equals the last submitted one is skipped. The layer keeps showing it.
+  `ViewerStatus::held_frames` counts these. A submission that never reached
+  glass clears the hold, so the next tick re-presents it.
+- **Present-lag compensation.** The worker keeps the median of the last 15
+  `presentedTime − target` values per viewer. It chooses the picture for
+  `target + lag`, and for forward play rounds to the frame whose onset is
+  nearest that vsync (half-interval lead, not past the end). `audio_host` is
+  matched at the same instant. Traces add `predicted`.
+- **Vsync-aligned audio start.** `Transport::grid` holds the latest display tick
+  or `presentedTime`. Play places its sample-accurate `Start::At` (and the
+  host-clock run start) on the first vsync of that grid ≥ `now + 50 ms`. The
+  first sample and every refresh-multiple onset then share the display line.
+- **App** (`crates/app/src/playback.rs`, one line): the view display link runs
+  while `ViewerStatus::wants_display` (playing *or* awaiting the audio epoch).
+  Previously it ran only once the clock had a rate, so no phase was available
+  for the start. `crates/app/src/perf_gate.rs` reports `held_frames`.
+- **Harness:** A/V is measured at **content-frame onsets** (first presentation
+  of each media frame). All-presentation numbers stay as
+  `av_all_presentations`. Playback continuity reports **skipped and late
+  content frames** (`continuity.dropped`; late = onset interval > content
+  interval + ¾ refresh). Raw `presentation_gaps` are retained but are no longer
+  a drop count with held frames. `native.py --lock-owner` and
+  `PM_ENGINE_PRESENT=legacy` (A/B of the previous schedule in the same build)
+  were added.
+- **Not changed:** drawable count stays 3, display sync stays on and
+  `presentsWithTransaction` stays off on the viewer. Measurements showed no
+  latency benefit, and transaction coupling would add main-thread waits.
+
+### Before / after
+
+| Row | Before (fix pass) | After | Status |
+|---|---|---|---|
+| Edit → presentation 120 / 60 Hz p95 (ms) | 30.545 / 32.110 | **not measured on screen (locked)** | FAIL expected: windowed compositor floor ≈ 25 ms p95 > 9.333 |
+| Cached scrub 120 / 60 Hz p95 (ms) | 24.249 / 24.506 | **not measured on screen** | FAIL expected for the same reason |
+| Content frames dropped, 60 s, 120 / 60 Hz | 34 / 3 raw scanout gaps | headless: 0 skipped of 1,800 content frames at both rates; on screen **not measured** | UNVERIFIED |
+| Worker → completion p95 120 / 60 Hz (ms) | 3.445 / 4.147 (headless dev, earlier) | **1.806 / 2.657** (headless dev, same bench) | PASS local 4.167 / 8.333 bounds, offscreen only |
+| Presents per 60 s at 120 Hz (30 fps content) | ~7,141 | **1,800** (+5,290 held) headless | Drawable/compositor load ÷ ~4 |
+| A/V mean / p95 jitter (ms) | 34.634 / 12.558 (all presentations) | **not measured on screen**; harness reproduces the 12.5 ms artefact and 0 onset jitter | UNVERIFIED |
+
+### What still fails or is open
+
+- **Edit/scrub ≤ vsync + 1 against `presentedTime` looks unattainable for a
+  windowed `CAMetalLayer` on this OS/machine.** The probe floor (p95 ≈ 24–25 ms
+  at 120 Hz) is ~2.7× the budget before any app work. Electron's 15–19 ms
+  reference ends at GPU completion + rAF, not glass. A matched-endpoint
+  Electron measurement is required before any ratio is meaningful, and the
+  §5 row needs either a defined endpoint (e.g. commit, or the compositor
+  floor subtracted) or a council decision. If the on-screen probe confirms the
+  floor, no service/layer change can meet the absolute clause.
+- **A/V ≤ 1 / ≤ 2 ms** depends on (a) a stable lag estimate (lag variance of one
+  refresh appears directly as onset jitter), (b) the grid being current at Play
+  (the start uses the last known vsync; ProMotion may re-phase after idle),
+  and (c) content rates that divide the refresh rate. 24/25 fps at 60/120 Hz
+  keeps a cadence error of up to half a refresh.
+- **GPUI-CE patch for the P-120 lane (described, not applied):** in
+  `MacWindow::draw`, enable `presents_with_transaction` only when the
+  composition `present` callback reports that slot geometry changed this
+  frame (live resize/animation). Restore `false` after `draw`. Otherwise use
+  `present_drawable` + `commit` with no `wait_until_scheduled` on main. The
+  composition contract (§3.1.2) only needs the transaction when slots move.
+- Main-thread work per frame, paired Electron runs, required rigs/corpora and
+  ≥30-run gates remain outstanding.
+
+### Reproduce (unlocked, AC, quiet machine)
+
+```sh
+source engine/env.sh; export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+cargo +1.96.1 build --manifest-path apps/native/Cargo.toml --release -p pm-native-app
+swiftc -O tools/perf-gate/present_probe.swift -o /tmp/pm-present-probe
+# Fixtures: public shapes/primitives document + media/audio with absolute tone/AAC paths under /tmp.
+bun apps/native/crates/app/tools/prepare-corpus.ts /tmp/pm-lat-corpus
+# 1) Compositor floor, per refresh (pin with tools/perf-gate/display.swift, restore after):
+set -o noclobber; echo latency > /tmp/pm-shots/gui.lock
+for c in "count=3 sync=1" "count=3 sync=1 link=1" "count=2 sync=1" "count=3 sync=0" "count=3 sync=1 txn=1"; do
+  /tmp/pm-present-probe mode=ondemand samples=40 $=c; done
+for c in "at=0" "at=1"; do /tmp/pm-present-probe mode=continuous seconds=8 $=c; done
+rm /tmp/pm-shots/gui.lock
+# 2) App A/B, same build (each command owns the lock as `latency`, < 10 min):
+for mode in legacy default; do for hz in 120 60; do
+  PM_ENGINE_PRESENT=$mode python3 tools/perf-gate/native.py --lock-owner latency \
+    --project /tmp/pm-lat-fixtures/public-shape.json --output /tmp/pm-lat/$mode-$hz.json --hz $hz --runs 30 --seconds 60
+done
+  PM_ENGINE_PRESENT=$mode python3 tools/perf-gate/native.py --lock-owner latency --audio \
+    --project /tmp/pm-lat-fixtures/public-audio.json --output /tmp/pm-lat/$mode-audio.json --hz 120 --runs 1 --seconds 20
+done
+```
+
+Read `playback.continuity`, `playback.av_*` (onsets) and the runs' scrub/edit
+`ms`. Headless service evidence: `pm-engine-service --bench --hz=120|60
+--seconds=60` (dev build), reporting `held_frames`.
+
+Validation: service **25/25** (kernel adapter) and **25/25**
+(`--no-default-features`), including new tests for held frames and grid
+alignment. App **16/16**. Harness **27/27**, including onset A/V and content
+continuity. App/service Clippy `--all-targets -D warnings` and package `fmt`
+pass. No kernel, engine, vendor, shell or Cargo.lock change.

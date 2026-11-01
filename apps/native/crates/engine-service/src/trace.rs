@@ -4,6 +4,8 @@
 pub struct Trace {
     pub worker_start: f64,
     pub target: f64,
+    /// target + measured present lag: when this frame is expected on glass.
+    pub predicted: f64,
     pub render_start: f64,
     pub render_submitted: f64,
     pub drawable_asked: f64,
