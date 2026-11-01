@@ -37,6 +37,12 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 3. **S5 direction:** page→app sync uses the scheme handler (0.10 ms p95); pixels stay in the engine and are referenced by id; a focused spike on continuation latency and background activity follows; the V8 + remote-DOM fallback is evaluated once S1 can run.
 4. **Pro features missing at v1.2.0** (J/K/L, ripple, linked A/V, slide/roll, three-point editing) are cutover work, as §1 already states.
 
+## Owner decisions (Chike, 2026-11-01)
+
+- **Eval specs:** anonymised behaviour specs of Chike's panels may be used in the v4 eval (no names, ids or code in tracked files).
+- **Store-wide counts:** pull published Store extension sources read-only through the Store tools; record usage counts only.
+- **S1:** runs on a cloud/CI macOS runner (this Mac lacks the disk).
+
 ## Questions from the inventories (original wording, kept for traceability)
 
 1. **Reference build.** §2 says `renderFrameToAsync`, `snapshotAsync` and `rasterAsync` ship to every apiVersion; at tag `v1.2.0` they don't exist in `RenderAPI`/`makeRender` (only `PM.Export.snapshotAsync`). Which build is the frozen reference for traces? (C-MATRIX Q1)
