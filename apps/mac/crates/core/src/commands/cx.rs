@@ -174,6 +174,36 @@ impl<'a> Cx<'a> {
         super::spine::check_lock(self.root(), loc, layer, layer_id)
     }
 
+    /// Every layer of every composition: the open one first.
+    pub fn all_layers(&self) -> Vec<LayerLoc> {
+        let root = self.root();
+        let open = model::open_comp_id(root);
+        let mut comps = vec![open.clone()];
+        if open.is_some()
+            && let Some(NodeKind::Object(map)) = root.get("comps").map(Node::kind)
+        {
+            for (k, _) in map.iter() {
+                if let Some(k) = k.as_str()
+                    && Some(k) != open.as_deref()
+                {
+                    comps.push(Some(k.to_owned()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for comp_id in comps {
+            if let Some(comp) = model::comp_node(root, comp_id.as_deref()) {
+                for index in 0..model::layers_of(comp).count() {
+                    out.push(LayerLoc {
+                        comp_id: comp_id.clone(),
+                        index,
+                    });
+                }
+            }
+        }
+        out
+    }
+
     /// Writes an edited copy of a layer back (only what changed).
     pub fn put_layer(&mut self, loc: &LayerLoc, layer: Value) -> Result<(), CommandError> {
         self.replace(loc.path(), layer)

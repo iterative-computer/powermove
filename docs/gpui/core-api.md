@@ -85,23 +85,23 @@ Status: **done** (ported, tested), **todo** (typed and documented, returns
 | `Restack { layer_ids, to }` | Cmd+[ ] (Shift: front/back) | todo |
 | `TransformLayers` | `transform_layers` (generated tools) | todo |
 | **Properties** `PropertyCommand` | | |
-| `Set(SetProperty)` | `set_property` (keys at `time` when animated) | todo |
-| `SetExpression` | `set_expression` | todo |
-| `ToggleStopwatch` | stopwatch, `PM.toggleStopwatch` | todo |
+| `Set(SetProperty)` | `set_property` (keys at `time` when animated) | done |
+| `SetExpression` | `set_expression` | done |
+| `ToggleStopwatch` | stopwatch, `PM.toggleStopwatch` | done |
 | `Reset` | channel-row Reset | todo |
 | **Keyframes** `KeyframeCommand` | | |
-| `Replace(ReplaceKeyframes)` | `replace_keyframes` | todo |
-| `SetEasing { key_ids, curve }` | `set_easing`, easing panel apply | todo |
+| `Replace(ReplaceKeyframes)` | `replace_keyframes` | done |
+| `SetEasing { key_ids, curve }` | `set_easing`, easing panel apply | done |
 | `Simplify { scope }` | `simplify_keyframes` | todo |
-| `Add`, `Toggle` | Add Keyframe Here, diamond | todo |
-| `Delete { key_ids }` | Delete on keys, `PM.removeKey` | todo |
-| `ClearAll` | Clear All Keyframes / Remove Animation | todo |
-| `Move { key_ids, delta }` | key drag, Option+←/→ | todo |
-| `Edit { key_id, time, value }` | keyframe value dialog | todo |
-| `Paste` | Paste Keyframes Here | todo |
-| `EasyEase`, `SetInterpolation`, `SetHold` | F9 family, interpolation menu, hold | todo |
-| `SetHandle` | graph editor handles | todo |
-| `SetSpring` | spring easing | todo |
+| `Add`, `Toggle` | Add Keyframe Here, diamond | done |
+| `Delete { key_ids }` | Delete on keys, `PM.removeKey` | done |
+| `ClearAll` | Clear All Keyframes / Remove Animation | done |
+| `Move { key_ids, delta }` | key drag, Option+←/→ | done |
+| `Edit { key_id, time, value }` | keyframe value dialog | done |
+| `Paste` | Paste Keyframes Here (one destination track) | done |
+| `EasyEase`, `SetInterpolation`, `SetHold` | F9 family, interpolation menu, hold | done |
+| `SetHandle` | graph editor handles (ease or point) | done |
+| `SetSpring` | spring easing | done |
 | `Transform` | graph transform box | todo |
 | **Timing** `TimingCommand` | | |
 | `Move { layer_ids, delta }` | strip drag (group strips move members) | todo |
