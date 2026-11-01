@@ -36,6 +36,14 @@ fn absent_backings_are_portable_blockers_and_filters_do_not_call_them() {
         };
         let r = run(&c, &filter, &[]).unwrap();
         assert_eq!(r.counts(), (0, 0, 1));
+        assert_eq!(
+            r.cases[0].kind,
+            if id.starts_with(['A', 'B']) {
+                "original"
+            } else {
+                "runtime-probe"
+            }
+        );
         assert!(!r.cases[0].needs_macos);
         let b = Backing {
             bundle: true,

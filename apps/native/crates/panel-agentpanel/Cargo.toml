@@ -1,0 +1,13 @@
+[package]
+name = "pm-panel-agentpanel"
+description = "Headless agent conversation panel model and asynchronous kernel adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-kernel = { path = "../kernel" }
+pm-agents = { path = "../agents" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+serde_json = "1"

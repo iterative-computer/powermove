@@ -8,7 +8,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1411, 0, 3175));
+    assert_eq!(r.counts(), (1421, 0, 3177));
     assert_eq!(r.exit_code(false), 0);
     assert_eq!(r.exit_code(true), 2);
     assert_eq!(
@@ -27,7 +27,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
             .iter()
             .filter(|x| x.kind == "original" && x.status == Status::Pass)
             .count(),
-        11
+        20
     );
     assert_eq!(
         r.cases
@@ -108,10 +108,90 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1411 pass / 0 fail / 3175 blocked-by")
+            .contains("1421 pass / 0 fail / 3177 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
+}
+
+#[test]
+fn every_remaining_original_names_the_exact_unverified_contract() {
+    let catalog = Catalog::embedded().unwrap();
+    let report = run(&catalog, &Filter::default(), &[]).unwrap();
+    for workflow in &catalog.workflows {
+        for contract in &workflow.cases {
+            let result = report.cases.iter().find(|c| c.id == contract.id).unwrap();
+            if result.status == Status::BlockedBy {
+                assert!(
+                    result.reason.contains(&contract.expected),
+                    "{}",
+                    contract.id
+                );
+                assert!(result.blocked_by.as_ref().is_some_and(|s| !s.is_empty()));
+            }
+        }
+    }
+    let pending = report.cases.iter().find(|c| c.id == "A514").unwrap();
+    assert_eq!(pending.blocked_by.as_deref(), Some("mcp:replace_media"));
+    assert!(
+        pending
+            .reason
+            .contains("verified bytes, fingerprints, retained versions")
+    );
+    let pixels = report.cases.iter().find(|c| c.id == "A535").unwrap();
+    assert_eq!(
+        pixels.blocked_by.as_deref(),
+        Some("mcp:sample_media_frames")
+    );
+    assert!(pixels.needs_macos);
+}
+
+#[test]
+fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
+    // This double certifies metadata/snapshot determinism only. Actual worker
+    // assertions execute in verify.sh, and failures stay failures there.
+    struct Available;
+    impl pm_acceptance::runtime::RuntimeHook for Available {
+        fn has_compat_bundle(&self) -> bool {
+            true
+        }
+        fn check(&self, id: &str) -> Result<(), String> {
+            assert!(pm_acceptance::runtime::CASES.iter().any(|c| c.0 == id));
+            Ok(())
+        }
+    }
+    let report = pm_acceptance::runner::run_with_runtime(
+        &Catalog::embedded().unwrap(),
+        &Filter::default(),
+        &[],
+        Some(&Available),
+    )
+    .unwrap();
+    if std::env::var_os("PM_UPDATE_BLOCKERS").is_some() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/remaining-blockers.csv");
+        std::fs::write(path, report.blockers_csv()).unwrap();
+        eprintln!("counts {:?}", report.counts());
+        return;
+    }
+    assert_eq!(report.counts(), (1439, 0, 3159));
+    assert_eq!(
+        report.blockers_csv(),
+        include_str!("../data/remaining-blockers.csv")
+    );
+    let rows = csv_rows(&report.blockers_csv()).unwrap();
+    assert_eq!(rows.len(), 3160);
+    assert!(rows.iter().all(|r| r.len() == 6));
+    for workflow in &report.workflows {
+        let row = format!(
+            "| {} | blocked-by | {} | {} | {} |",
+            workflow.id, workflow.passed, workflow.failed, workflow.blocked
+        );
+        assert!(
+            pm_acceptance::catalog::WORKFLOWS.contains(&row),
+            "{}",
+            workflow.id
+        );
+    }
 }
 #[test]
 fn filtered_pass_does_not_claim_complete_workflow() {
