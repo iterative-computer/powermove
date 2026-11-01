@@ -26,7 +26,7 @@ First measured with the Mac locked, then rerun unlocked and confirmed foreground
 2. **Render continuations:** work without deadlock (inline override, nested capture, real canvas, JPEG), but p95 384 ms on the synthetic path.
 3. **Background activity:** with the visibility/throttling SPI, a page-driven job kept 74% (app hidden) and 69% (windowless) of foreground throughput, short of the ≥ 95% rule. Offscreen-window-only stalled.
 4. **Hang kill:** `_killWebContentProcess` and WebKit's own termination did not end a real infinite loop within 20 s; a different reset-state SPI restarted the page in 106 ms (old process confirmed gone).
-5. **Fallback** (trusted realm in V8 + remote DOM): S1 now works, so the evaluation (S5c) is running.
+5. **Fallback** (trusted realm in V8 + remote DOM): evaluated in S5c and adopted (orchestrator decision 5).
 
 Decision needed (now firmer after the unlocked rerun): choose the scheme handler for page→app sync calls, and either accept S5 as "channels viable, pixel/continuation/background budgets need the engine-id design and an unlocked rerun", or trigger the V8 + remote-DOM fallback evaluation (blocked on S1).
 
@@ -35,6 +35,7 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 1. **Reference build:** tag `v1.2.0` (the plan's definition of "today"). The async render siblings added after the tag are supported too (a superset); traces come from v1.2.0.
 2. **Authored vs fixed:** decided case by case under §4's quirk policy; each decision is recorded beside its fixture/trace.
 3. **S5 direction:** page→app sync uses the scheme handler (0.10 ms p95); pixels stay in the engine and are referenced by id; a focused spike on continuation latency and background activity follows; the V8 + remote-DOM fallback is evaluated once S1 can run.
+5. **Compat architecture (after S5c, 2026-11-01):** adopt the plan's documented fallback. The trusted v1–3 realm runs in **V8**: extension logic, `PM`, synchronous services, raster overrides and sync pixel APIs, using the recorder canvas rasterised natively. **WebKit** only renders DOM panels through a remote-DOM bridge. Rule: §5 budgets plus N4/N6 (synchronous behaviour unchanged). Measured: V8 sync pixels 1.3–3.9 ms vs WebKit 10–31 ms; cold continuation 3.1 vs 14.3 ms; background throughput ~116% vs 24–32%; DOM key→render 36 ms via the bridge vs 21 ms in WebKit (to optimise). The synchronous service cluster stays in one realm. Open: JPEG snapshot of noisy frames (21 ms), full DOM/canvas semantics, pm-vector/pm-text raster integration, the 39-extension memory row.
 4. **Pro features missing at v1.2.0** (J/K/L, ripple, linked A/V, slide/roll, three-point editing) are cutover work, as §1 already states.
 
 ## Owner decisions (Chike, 2026-11-01)
