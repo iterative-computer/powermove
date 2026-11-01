@@ -135,6 +135,7 @@ impl Request {
 
 #[derive(Clone, Debug)]
 pub enum Call {
+    Extension(crate::extensions::ExtensionCall),
     History(HistoryCall),
     Edit(EditCall),
     Gesture(GestureCall),
@@ -206,7 +207,10 @@ impl From<SelectionCall> for Call {
 #[derive(Clone, Debug)]
 pub enum HistoryCall {
     /// Explicit navigation record, suppressed inside an entry or after undo.
-    Selection { before: Selection, after: Selection },
+    Selection {
+        before: Selection,
+        after: Selection,
+    },
     Mark,
     Squash {
         mark: ActorHistoryMark,
@@ -340,6 +344,8 @@ pub enum Direction {
 /// A call's answer, in the form the API returns today.
 #[derive(Clone, Debug)]
 pub enum Reply {
+    Activation(u64),
+    Export(crate::extensions::ExportJob),
     /// `undefined`.
     Unit,
     Mark(ActorHistoryMark),
@@ -589,6 +595,7 @@ pub struct Project {
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
     notices: Vec<Notice>,
+    extensions: crate::extensions::Extensions,
 }
 
 #[derive(Clone, Debug)]
@@ -617,6 +624,7 @@ impl Project {
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
+            extensions: Default::default(),
         }
     }
 
@@ -707,6 +715,10 @@ impl Project {
         let before_mark = self.store.history_mark();
         let before_cursor = self.store.history().applied();
         let handled = match call {
+            Call::Extension(call) => {
+                let reply = self.extension(caller, call);
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
             Call::Selection(selection) => {
                 let reply = self.select(selection);
                 Handled::reply(self.ack(txid, None, None, reply))
@@ -1106,7 +1118,11 @@ impl Project {
     fn history(&mut self, caller: Caller, txid: Option<TxId>, call: HistoryCall) -> Handled {
         let writer = caller.writer;
         let reply = match call {
-            HistoryCall::Selection { before, after } => Reply::Entry(if self.entry.is_none() { self.store.kernel_selection(before, after) } else { None }),
+            HistoryCall::Selection { before, after } => Reply::Entry(if self.entry.is_none() {
+                self.store.kernel_selection(before, after)
+            } else {
+                None
+            }),
             HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
                 document: self.store.doc_id(),
                 writer,
@@ -1792,9 +1808,122 @@ impl Project {
         }
     }
 
+    fn extension(&mut self, caller: Caller, call: crate::extensions::ExtensionCall) -> Reply {
+        use crate::extensions::{Activation, ExportJob, ExtensionCall, ExtensionGeneration};
+        match call {
+            ExtensionCall::PinExport => {
+                if self
+                    .extensions
+                    .current
+                    .values()
+                    .any(|g| self.dead.contains(&g.writer))
+                {
+                    return Reply::Throw(KernelError::Guard(
+                        "An export extension generation is unavailable".into(),
+                    ));
+                }
+                Reply::Export(ExportJob {
+                    snapshot: self.store.snapshot(),
+                    generations: self.extensions.current.clone(),
+                })
+            }
+            ExtensionCall::BeginActivation {
+                extension,
+                definitions,
+            } => {
+                if extension.is_empty() {
+                    return Reply::Throw(KernelError::Guard("Extension id is empty".into()));
+                }
+                if self
+                    .extensions
+                    .current
+                    .get(&extension)
+                    .is_some_and(|g| g.writer == caller.writer)
+                {
+                    return Reply::Throw(KernelError::Guard(
+                        "Activation requires a new generation".into(),
+                    ));
+                }
+                let ticket = crate::history::next_token();
+                self.extensions.staged.insert(
+                    ticket,
+                    Activation {
+                        generation: Arc::new(ExtensionGeneration {
+                            extension,
+                            writer: caller.writer,
+                            definitions,
+                        }),
+                        revision: self.revision(),
+                        epoch: self.extensions.epoch,
+                        ops: Vec::new(),
+                    },
+                );
+                Reply::Activation(ticket)
+            }
+            ExtensionCall::Stage { ticket, ops } => {
+                let Some(stage) = self
+                    .extensions
+                    .staged
+                    .get_mut(&ticket)
+                    .filter(|s| s.generation.writer == caller.writer)
+                else {
+                    return Reply::Throw(KernelError::UnknownTicket);
+                };
+                stage.ops.extend(ops);
+                Reply::Unit
+            }
+            ExtensionCall::Finish { ticket, success } => {
+                let Some(stage) = self
+                    .extensions
+                    .staged
+                    .get(&ticket)
+                    .filter(|s| s.generation.writer == caller.writer)
+                else {
+                    return Reply::Throw(KernelError::UnknownTicket);
+                };
+                if !success {
+                    self.extensions.staged.remove(&ticket);
+                    return Reply::Bool(false);
+                }
+                // Refuse folding: activation and generation publication must
+                // succeed together, independently of another live gesture.
+                if self.entry.is_some() {
+                    return Reply::Throw(KernelError::Guard(
+                        "Finish the active edit before activating an extension".into(),
+                    ));
+                }
+                if stage.revision != self.revision() || stage.epoch != self.extensions.epoch {
+                    self.extensions.staged.remove(&ticket);
+                    return Reply::Throw(KernelError::Guard(
+                        "Project changed during activation; retry activate".into(),
+                    ));
+                }
+                let stage = self.extensions.staged.remove(&ticket).expect("checked");
+                match self.write(
+                    caller.writer,
+                    caller.origin,
+                    "Activate extension",
+                    &WriteBody::Ops(stage.ops),
+                    true,
+                ) {
+                    Err(e) => Reply::Throw(e.into()),
+                    Ok(_) => {
+                        self.extensions.epoch += 1;
+                        Arc::make_mut(&mut self.extensions.current)
+                            .insert(stage.generation.extension.clone(), stage.generation);
+                        Reply::Bool(true)
+                    }
+                }
+            }
+        }
+    }
+
     fn realm_failed(&mut self, caller: Caller, txid: Option<TxId>) -> Handled {
         let failed = caller.writer;
         self.dead.insert(failed);
+        self.extensions
+            .staged
+            .retain(|_, s| s.generation.writer != failed);
         let mut notice = None;
         if let Some(entry) = &mut self.entry {
             entry.leases.retain(|l| l.owner != failed);

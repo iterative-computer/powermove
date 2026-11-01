@@ -146,3 +146,333 @@ fn shared_budget_trims_parked_redo_then_undo_before_active_and_keeps_latest() {
     }
 }
 
+use pm_kernel::extensions::ExtensionCall;
+use pm_kernel::{Origin, Writer};
+use pm_model::patch::{Patch, PathPart};
+use pm_model::{Op, Value};
+fn ext(k: &mut Kernel, generation: u32, c: ExtensionCall) -> Reply {
+    k.handle(
+        "P",
+        Request::new(Caller::realm(7, generation, Origin::Extension), c),
+    )
+    .unwrap()
+    .reply
+    .unwrap()
+    .reply
+}
+fn begin(k: &mut Kernel, generation: u32) -> u64 {
+    let Reply::Activation(ticket) = ext(
+        k,
+        generation,
+        ExtensionCall::BeginActivation {
+            extension: "test".into(),
+            definitions: Value::from(format!("shader-{generation}")),
+        },
+    ) else {
+        panic!("begin failed")
+    };
+    ticket
+}
+fn name_op(name: &str) -> Op {
+    Op::Leaf(Patch::set(vec![PathPart::from("name")], Value::from(name)))
+}
+fn pinned(k: &mut Kernel) -> pm_kernel::extensions::ExportJob {
+    let Reply::Export(job) = ext(k, 99, ExtensionCall::PinExport) else {
+        panic!()
+    };
+    job
+}
+
+#[test]
+fn activation_stages_without_a_lease_and_export_jobs_pin_one_generation() {
+    let mut k = Kernel::new(Default::default());
+    open(&mut k, "P");
+    let t = begin(&mut k, 1);
+    ext(
+        &mut k,
+        1,
+        ExtensionCall::Stage {
+            ticket: t,
+            ops: vec![name_op("first")],
+        },
+    );
+    assert!(k.project("P").unwrap().open_entry().is_none());
+    assert_eq!(
+        k.project("P")
+            .unwrap()
+            .store()
+            .snapshot()
+            .root()
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .to_value(),
+        Value::from("Fixture")
+    );
+    assert!(matches!(
+        ext(
+            &mut k,
+            1,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: true
+            }
+        ),
+        Reply::Bool(true)
+    ));
+    let job = pinned(&mut k);
+    let t = begin(&mut k, 2);
+    ext(
+        &mut k,
+        2,
+        ExtensionCall::Stage {
+            ticket: t,
+            ops: vec![name_op("second")],
+        },
+    );
+    assert!(matches!(
+        ext(
+            &mut k,
+            2,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: true
+            }
+        ),
+        Reply::Bool(true)
+    ));
+    let next = pinned(&mut k);
+    assert_eq!(
+        job.generations["test"].writer,
+        Writer {
+            realm: 7,
+            generation: 1
+        }
+    );
+    assert_eq!(job.generations["test"].definitions, Value::from("shader-1"));
+    assert_eq!(
+        job.snapshot.root().unwrap().get("name").unwrap().to_value(),
+        Value::from("first")
+    );
+    assert_eq!(next.generations["test"].writer.generation, 2);
+    assert_eq!(
+        next.snapshot
+            .root()
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .to_value(),
+        Value::from("second")
+    );
+    call(&mut k, "P", HistoryCall::Undo);
+    assert_eq!(
+        k.project("P")
+            .unwrap()
+            .store()
+            .snapshot()
+            .root()
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .to_value(),
+        Value::from("first")
+    );
+}
+
+#[test]
+fn activation_throw_stale_invalid_and_foreign_ticket_never_publish_partial_edits() {
+    let mut k = Kernel::new(Default::default());
+    open(&mut k, "P");
+    let t = begin(&mut k, 1);
+    ext(
+        &mut k,
+        1,
+        ExtensionCall::Stage {
+            ticket: t,
+            ops: vec![name_op("discard")],
+        },
+    );
+    assert!(matches!(
+        ext(
+            &mut k,
+            2,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: true
+            }
+        ),
+        Reply::Throw(_)
+    ));
+    assert!(matches!(
+        ext(
+            &mut k,
+            1,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: false
+            }
+        ),
+        Reply::Bool(false)
+    ));
+    let t = begin(&mut k, 2);
+    ext(
+        &mut k,
+        2,
+        ExtensionCall::Stage {
+            ticket: t,
+            ops: vec![name_op("stale")],
+        },
+    );
+    edit(&mut k, "P", "foreign"); // Proves activate isn't holding the writer lease.
+    assert!(matches!(
+        ext(
+            &mut k,
+            2,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: true
+            }
+        ),
+        Reply::Throw(_)
+    ));
+    let t = begin(&mut k, 3);
+    let revision = k.project("P").unwrap().store().revision();
+    ext(
+        &mut k,
+        3,
+        ExtensionCall::Stage {
+            ticket: t,
+            ops: vec![
+                name_op("partial"),
+                Op::Leaf(Patch::set(
+                    vec!["comps".into(), "C1".into(), "layers".into()],
+                    Value::Null,
+                )),
+            ],
+        },
+    );
+    assert!(matches!(
+        ext(
+            &mut k,
+            3,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: true
+            }
+        ),
+        Reply::Throw(_)
+    ));
+    assert_eq!(k.project("P").unwrap().store().revision(), revision);
+    assert_eq!(
+        k.project("P")
+            .unwrap()
+            .store()
+            .snapshot()
+            .root()
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .to_value(),
+        Value::from("Fixture")
+    );
+    assert!(pinned(&mut k).generations.is_empty());
+}
+
+#[test]
+fn default_shared_count_budget_publishes_parked_histories_and_delivers_cleanup() {
+    let actor = pm_kernel::KernelActor::spawn(Default::default());
+    let h = actor.handle();
+    let caller = Caller::realm(7, 1, Origin::Extension);
+    let mailbox = h.register_realm(caller.writer);
+    for id in ["A", "B"] {
+        h.open(id, OpenSource::Untitled(parse(PROJECT).unwrap()))
+            .wait()
+            .unwrap()
+            .unwrap();
+        for handle in 0..600 {
+            h.call(
+                id,
+                Request::new(
+                    caller,
+                    HistoryCall::External {
+                        label: format!("{id}-{handle}"),
+                        handle,
+                        bytes: 256,
+                        cleanup: true,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        }
+    }
+    assert_eq!(h.published("A").unwrap().history.entries, 400);
+    assert_eq!(h.published("B").unwrap().history.entries, 600);
+    let messages: Vec<_> = mailbox.try_iter().collect();
+    assert_eq!(messages.len(), 200);
+    for (index, message) in messages.iter().enumerate() {
+        assert_eq!(message.project, "A");
+        assert!(
+            matches!(message.message,pm_kernel::RealmMessage::Cleanup {handle,..} if handle == index as u64)
+        );
+    }
+}
+
+#[test]
+fn generation_only_activation_races_and_dead_realms_are_fenced() {
+    let mut k = Kernel::new(Default::default());
+    open(&mut k, "P");
+    let older = begin(&mut k, 1);
+    let newer = begin(&mut k, 2);
+    assert!(matches!(
+        ext(
+            &mut k,
+            2,
+            ExtensionCall::Finish {
+                ticket: newer,
+                success: true
+            }
+        ),
+        Reply::Bool(true)
+    ));
+    assert!(matches!(
+        ext(
+            &mut k,
+            1,
+            ExtensionCall::Finish {
+                ticket: older,
+                success: true
+            }
+        ),
+        Reply::Throw(_)
+    ));
+    let job = pinned(&mut k);
+    k.handle(
+        "P",
+        Request::new(Caller::realm(7, 2, Origin::Extension), Call::RealmFailed),
+    )
+    .unwrap();
+    assert!(matches!(
+        ext(&mut k, 99, ExtensionCall::PinExport),
+        Reply::Throw(_)
+    ));
+    assert_eq!(job.generations["test"].writer.generation, 2); // Never rebound.
+    let t = begin(&mut k, 3);
+    k.handle(
+        "P",
+        Request::new(Caller::realm(7, 3, Origin::Extension), Call::RealmFailed),
+    )
+    .unwrap();
+    assert!(matches!(
+        ext(
+            &mut k,
+            3,
+            ExtensionCall::Finish {
+                ticket: t,
+                success: true
+            }
+        ),
+        Reply::Throw(_)
+    ));
+}

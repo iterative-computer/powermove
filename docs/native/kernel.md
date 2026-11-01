@@ -281,9 +281,36 @@ record (ordinary selection calls remain unrecorded). Equal selections, pending
 entries and redo navigation return `Entry(None)`. Undo/redo restores/prunes IDs,
 without changing the document revision, persisted history or dirty state.
 
+## Export generations and v4 activation
+
+`Call::Extension` runs through normal actor fencing, deduplication and journal
+publication. `PinExport` returns an `ExportJob`: one immutable document snapshot
+and one immutable map of extension generations. Every frame/worker uses that
+same job; reloads copy the map rather than updating a job's bindings. Generation
+objects include realm/generation and immutable resource definitions. Runtime
+adapters must keep the corresponding realm/resources alive while a job pins
+that object, then dispose after the final pin; the kernel never executes JS.
+A failed realm makes new exports refuse; existing jobs never silently rebind.
+
+For v4 hot reload, `BeginActivation` allocates a writer-bound staging ticket.
+The host runs/awaits activate outside the actor and sends document ops through
+`Stage`; these calls append only, opening no entry or lease and publishing no
+edits. `Finish(success: false)` discards only unpublished staged operations.
+On success the kernel checks the document revision and extension publication
+epoch, validates the complete batch, commits one history step, then swaps the
+generation in the same actor turn. Invalid or stale batches leave the document
+and old generation intact. A live entry refuses success (the ticket remains
+available to abort/retry); failed realms drop their unpublished staging tickets.
+No-op activations can swap generations without a document history entry.
+
+This v4 policy deliberately differs from v1–3's live activation writes: staged
+edits are invisible until success; concurrent document edits or another reload
+require activate to retry, and activation never folds into a live gesture.
+The runtime adapters still own JS execution, routing v4 writes to `Stage`,
+resource disposal, and applying the pinned definitions to the render pipeline.
+
 ## Remaining for P1
 
-* History: export pinning of extension generations, v4 hot-reload staging (§3.2.1).
 * Index hazards: rebase index paths by id so more cancels revert instead of
   committing with notice.
 * Realm adapters: the compat page's write barrier (dirty-path diffing, resync
