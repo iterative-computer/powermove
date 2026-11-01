@@ -1,4 +1,7 @@
-use crate::{CacheKey, CodeCache, Error, FetchRequest, Limits, Result, SnapshotKind};
+use crate::{
+    CacheKey, Cancellation, CodeCache, EngineProxy, Error, FetchRequest, Generation, HostBudget,
+    Limits, Result, SnapshotKind,
+};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -74,6 +77,10 @@ pub(crate) struct NativeState {
     pub reserved: usize,
     next_id: u64,
     start: Instant,
+    generation: Generation,
+    engine: Option<Arc<dyn EngineProxy>>,
+    cancellation: Cancellation,
+    sync_calls: usize,
 }
 #[derive(Clone)]
 struct Native(Arc<Mutex<NativeState>>);
@@ -136,9 +143,23 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         return;
     }
     let arg = text.to_rust_string_lossy(s);
+    if arg.len() > state.lock().unwrap().limits.max_op_bytes {
+        throw(s, "Host argument quota");
+        return;
+    }
     let result = serde_json::from_str(&arg)
         .map_err(|e| e.to_string())
-        .and_then(|v| host_op(&mut state.lock().unwrap(), &op, v));
+        .and_then(|v| {
+            if op == "engine" {
+                engine_op(&state, v)
+            } else {
+                host_op(&mut state.lock().unwrap(), &op, v)
+            }
+        });
+    if state.lock().unwrap().cancellation.is_cancelled() {
+        s.terminate_execution();
+        return;
+    }
     match result {
         Ok(value) => {
             let result = v8::String::new(s, &value.to_string()).unwrap();
@@ -146,6 +167,40 @@ fn native(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::Re
         }
         Err(error) => throw(s, &error),
     }
+}
+fn engine_op(state: &Arc<Mutex<NativeState>>, input: Value) -> std::result::Result<Value, String> {
+    let (engine, generation, budget) = {
+        let mut n = state.lock().unwrap();
+        if n.sync_calls >= n.limits.max_host_ops {
+            return Err("Engine operation quota".into());
+        }
+        n.sync_calls += 1;
+        (
+            n.engine.clone().ok_or("Engine service is not attached")?,
+            n.generation.clone(),
+            HostBudget {
+                cancellation: n.cancellation.clone(),
+                deadline: Instant::now() + n.limits.host_timeout,
+                max_response_bytes: n.limits.max_response_bytes.min(n.limits.external_bytes),
+            },
+        )
+    };
+    budget.check().map_err(|e| e.to_string())?;
+    let value = engine
+        .call(
+            &generation,
+            input["operation"]
+                .as_str()
+                .ok_or("Invalid engine operation")?,
+            &input["input"],
+            budget.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+    budget.check().map_err(|e| e.to_string())?;
+    if value.to_string().len() > budget.max_response_bytes {
+        return Err("Engine response quota".into());
+    }
+    Ok(value)
 }
 fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value, String> {
     match op {
@@ -273,12 +328,12 @@ fn host_op(n: &mut NativeState, op: &str, v: Value) -> std::result::Result<Value
                     "search" => url.set_query(if value.is_empty() {
                         None
                     } else {
-                        Some(value.trim_start_matches('?'))
+                        Some(value.strip_prefix('?').unwrap_or(value))
                     }),
                     "hash" => url.set_fragment(if value.is_empty() {
                         None
                     } else {
-                        Some(value.trim_start_matches('#'))
+                        Some(value.strip_prefix('#').unwrap_or(value))
                     }),
                     _ => return Err("Unknown URL field".into()),
                 }
@@ -308,6 +363,10 @@ impl v8::ValueSerializerImpl for CloneDelegate {
     }
 }
 impl v8::ValueDeserializerImpl for CloneDelegate {}
+fn throw_clone(s: &mut v8::PinScope, message: &str) {
+    let message = v8::String::new(s, message).unwrap();
+    v8::ValueSerializerImpl::throw_data_clone_error(&CloneDelegate, s, message);
+}
 fn clone_value(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let value = a.get(0);
     let Ok(list) = v8::Local::<v8::Array>::try_from(a.get(1)) else {
@@ -320,11 +379,11 @@ fn clone_value(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v
             return;
         };
         let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(item) else {
-            throw(s, "Only ArrayBuffers can be transferred");
+            throw_clone(s, "Only ArrayBuffers can be transferred");
             return;
         };
         if buffer.was_detached() || transfers.contains(&buffer) {
-            throw(s, "Detached or duplicate transfer");
+            throw_clone(s, "Detached or duplicate transfer");
             return;
         }
         transfers.push(buffer);
@@ -384,6 +443,8 @@ impl Vm {
         storage: &Value,
         hot: &Value,
         cache: CodeCache,
+        generation: Generation,
+        engine: Option<Arc<dyn EngineProxy>>,
     ) -> Result<Self> {
         let blob = snapshot(kind);
         let mut isolate = v8::Isolate::new(
@@ -406,6 +467,10 @@ impl Vm {
             reserved: 0,
             next_id: 0,
             start: Instant::now(),
+            generation,
+            engine,
+            cancellation: Cancellation::default(),
+            sync_calls: 0,
         }));
         isolate.set_slot(Native(native_state.clone()));
         let context = {
@@ -436,8 +501,22 @@ impl Vm {
             cache_hits: 0,
             owner: std::thread::current().id(),
         };
-        vm.text(&format!("globalThis.__timeOrigin={}; globalThis.__limits={}; storage={storage}; hot.data={hot};",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()*1000.,json!({"max_host_ops":limits.max_host_ops,"max_ops":limits.max_ops,"max_op_bytes":limits.max_op_bytes})))?;
+        let origin = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1000.;
+        vm.text(&format!("globalThis.__timeOrigin={origin}; globalThis.__limits={};",json!({"max_host_ops":limits.max_host_ops,"max_ops":limits.max_ops,"max_op_bytes":limits.max_op_bytes})))?;
+        vm.restore(storage, hot)?;
         Ok(vm)
+    }
+    pub fn task_cancelled(&self) -> bool {
+        self.native.lock().unwrap().cancellation.is_cancelled()
+    }
+    pub fn begin_task(&self, cancellation: Cancellation) {
+        let mut n = self.native.lock().unwrap();
+        n.cancellation = cancellation;
+        n.sync_calls = 0;
     }
     pub fn handle(&self) -> v8::IsolateHandle {
         self.quota.handle.clone()
@@ -446,11 +525,24 @@ impl Vm {
         self.native.lock().unwrap().start.elapsed().as_secs_f64() * 1000.
     }
     pub fn start(&mut self, code: &str) -> Result<v8::Global<v8::Value>> {
+        self.compile_run(code, true)
+    }
+    fn compile_run(&mut self, code: &str, cached: bool) -> Result<v8::Global<v8::Value>> {
         if code.len() > self.native.lock().unwrap().limits.max_source_bytes {
             return Err(Error::Quota("source bytes"));
         }
-        let key = CacheKey::new(v8::V8::get_version(), &self.blob, code.as_bytes(), FLAGS);
-        let cache = self.cache.get(key);
+        let key = cached.then(|| {
+            CacheKey::new(
+                v8::V8::get_version(),
+                &self.blob,
+                code.as_bytes(),
+                &format!(
+                    "{FLAGS};tag={}",
+                    v8::script_compiler::cached_data_version_tag()
+                ),
+            )
+        });
+        let cache = key.and_then(|key| self.cache.get(key));
         let mut isolate = self.isolate.as_ref().unwrap().lock();
         v8::scope!(let hs,&mut *isolate);
         let context = v8::Local::new(hs, self.context.as_ref().unwrap());
@@ -481,14 +573,18 @@ impl Vm {
             if source.get_cached_data().is_some_and(|c| !c.rejected()) {
                 self.cache_hits += 1;
             }
-            if let Some(cache) = script.create_code_cache() {
-                self.cache.insert(key, cache.to_vec());
+            if cached && let Some(cache) = script.create_code_cache() {
+                self.cache.insert(key.unwrap(), cache.to_vec());
             }
             if let Some(value) = script.bind_to_current_context(s).run(s) {
                 return Ok(v8::Global::new(s, value));
             }
         }
-        Err(exception(s))
+        Err(if self.quota.exceeded.load(Ordering::Acquire) {
+            Error::Quota("heap")
+        } else {
+            exception(s)
+        })
     }
     pub fn settle(&self, value: &v8::Global<v8::Value>) -> Result<Option<String>> {
         let mut isolate = self.isolate.as_ref().unwrap().lock();
@@ -530,16 +626,50 @@ impl Vm {
             .ok_or_else(|| exception(s))
     }
     pub fn text(&mut self, code: &str) -> Result<String> {
-        let value = self.start(code)?;
+        let value = self.compile_run(code, false)?;
         self.settle(&value)?
             .ok_or(Error::Invalid("Unexpected pending promise"))
     }
+    fn control(&mut self, method: &str, args: Value) -> Result<String> {
+        let mut isolate = self.isolate.as_ref().unwrap().lock();
+        let value = {
+            v8::scope!(let hs,&mut *isolate);
+            let context = v8::Local::new(hs, self.context.as_ref().unwrap());
+            let cs = &mut v8::ContextScope::new(hs, context);
+            let tc = std::pin::pin!(v8::TryCatch::new(cs));
+            let s = &mut tc.init();
+            let result = (|| {
+                let key = v8::String::new(s, "__pm")?;
+                let object = context.global(s).get(s, key.into())?.to_object(s)?;
+                let key = v8::String::new(s, method)?;
+                let function =
+                    v8::Local::<v8::Function>::try_from(object.get(s, key.into())?).ok()?;
+                let text = v8::String::new(s, &args.to_string())?;
+                let array = v8::Local::<v8::Array>::try_from(v8::json::parse(s, text)?).ok()?;
+                let mut values = Vec::with_capacity(array.length() as usize);
+                for i in 0..array.length() {
+                    values.push(array.get_index(s, i)?);
+                }
+                function
+                    .call(s, object.into(), &values)
+                    .map(|value| v8::Global::new(s, value))
+            })();
+            result.ok_or_else(|| exception(s))?
+        };
+        drop(isolate);
+        self.settle(&value)?
+            .ok_or(Error::Invalid("Pending control operation"))
+    }
+    pub fn restore(&mut self, storage: &Value, hot: &Value) -> Result<()> {
+        self.control("restore", json!([storage, hot]))?;
+        Ok(())
+    }
     pub fn effects(&mut self) -> Result<Value> {
-        let data = self.text("__pm.take()")?;
+        let data = self.control("take", json!([]))?;
         serde_json::from_str(&data).map_err(|e| Error::JavaScript(e.to_string()))
     }
     pub fn pump(&mut self, completed: Value) -> Result<()> {
-        self.text(&format!("__pm.pump({},{});", self.now(), completed))?;
+        self.control("pump", json!([self.now(), completed]))?;
         Ok(())
     }
 }

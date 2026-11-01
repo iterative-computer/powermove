@@ -156,3 +156,33 @@ pub fn builtin_cluster(id: &str) -> RealmKind {
         _ => RealmKind::BuiltinEditor,
     }
 }
+
+/// A synchronous engine operation runs only on a V8 owner, never the UI thread.
+/// Implementations must check cancellation/deadline while waiting, enforce the
+/// output budget before allocating, and never synchronously enter JS or main.
+#[derive(Clone)]
+pub struct HostBudget {
+    pub cancellation: Cancellation,
+    pub deadline: Instant,
+    pub max_response_bytes: usize,
+}
+impl HostBudget {
+    pub fn check(&self) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(crate::Error::Terminated);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(crate::Error::Host("Engine operation timed out".into()));
+        }
+        Ok(())
+    }
+}
+pub trait EngineProxy: Send + Sync + 'static {
+    fn call(
+        &self,
+        generation: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Value>;
+}

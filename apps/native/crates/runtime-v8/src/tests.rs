@@ -17,6 +17,7 @@ struct Kernel {
     revoked: Mutex<Vec<Generation>>,
     sealed: Mutex<Vec<Generation>>,
     refuse: AtomicBool,
+    calls: AtomicUsize,
 }
 impl KernelHooks for Kernel {
     fn load_storage(&self, realm: &str) -> Result<Value> {
@@ -35,6 +36,7 @@ impl KernelHooks for Kernel {
         ops: &[Value],
         storage: &Value,
     ) -> Result<()> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         if self.refuse.load(Ordering::Acquire) {
             return Err(Error::Host("Synthetic commit refusal".into()));
         }
@@ -162,6 +164,7 @@ fn fixture_with(change: impl FnOnce(&mut Config)) -> Fixture {
         host: host.clone(),
         watchdog_hooks: watch.clone(),
         cache: CodeCache::new(4 * 1024 * 1024),
+        engine: None,
         admission: admission.clone(),
     };
     change(&mut config);
@@ -665,6 +668,10 @@ fn watchdog_wait_then_explicit_stop_recreates_and_seals() {
         thread::sleep(Duration::from_millis(3));
     }
     assert!(infinite.try_take().is_none());
+    let active = r.active_execution().unwrap();
+    assert_eq!(active.execution, id);
+    assert_eq!(active.generation, first.generation);
+    assert!(active.elapsed >= Duration::from_millis(30));
     assert!(r.stop(id));
     assert!(matches!(wait(infinite), Err(Error::Terminated)));
     let recovered = wait(r.eval("storage.persisted.n+':'+typeof ephemeral").unwrap()).unwrap();
@@ -761,7 +768,10 @@ fn heap_quota_child() {
     if std::env::var_os("PM_RUNTIME_SYNTHETIC_HEAP_CHILD").is_none() {
         return;
     }
-    let f = fixture_with(|c| c.limits.heap_bytes = 16 * 1024 * 1024);
+    let f = fixture_with(|c| {
+        c.limits.heap_bytes = 16 * 1024 * 1024;
+        c.watchdog.prompt = Duration::from_secs(2);
+    });
     let r = f.pool.realm(RealmKind::Compat).unwrap();
     eval(&r, "storage.n=19");
     assert!(matches!(
@@ -769,7 +779,7 @@ fn heap_quota_child() {
             r.eval("globalThis.kept=[];for(;;)kept.push(new Array(65536).fill(123))")
                 .unwrap()
         ),
-        Err(Error::Quota("heap")) | Err(Error::Terminated)
+        Err(Error::Quota("heap"))
     ));
     assert_eq!(eval(&r, "storage.n"), "19");
     close(&r);
@@ -807,4 +817,362 @@ fn watchdog_defaults_are_two_and_eight_seconds() {
     let p = WatchdogPolicy::default();
     assert_eq!(p.notice, Duration::from_secs(2));
     assert_eq!(p.prompt, Duration::from_secs(8));
+}
+
+#[derive(Default)]
+struct Engine {
+    calls: AtomicUsize,
+    mode: AtomicUsize,
+}
+impl EngineProxy for Engine {
+    fn call(
+        &self,
+        _: &Generation,
+        operation: &str,
+        input: &Value,
+        budget: HostBudget,
+    ) -> Result<Value> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        match self.mode.load(Ordering::Relaxed) {
+            1 => loop {
+                budget.check()?;
+                thread::sleep(Duration::from_millis(1));
+            },
+            2 => Ok(json!("x".repeat(1000))),
+            _ => Ok(json!({"operation":operation,"input":input,"owner":thread::current().name()})),
+        }
+    }
+}
+#[test]
+fn engine_hook_runs_on_owner_and_preserves_arguments() {
+    let engine = Arc::new(Engine::default());
+    let f = fixture_with(|c| c.engine = Some(engine.clone()));
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{const r=runtime.engine('bounds',{id:'layer-1',time:1.25});return r.operation+':'+r.input.id+':'+r.input.time+':'+r.owner})()"
+        ),
+        "bounds:layer-1:1.25:pm-v8-owner"
+    );
+    assert_eq!(engine.calls.load(Ordering::Relaxed), 1);
+    close(&r);
+}
+#[test]
+fn engine_hook_obeys_cancellation_timeout_and_byte_limits() {
+    let engine = Arc::new(Engine::default());
+    engine.mode.store(1, Ordering::Relaxed);
+    let f = fixture_with(|c| {
+        c.engine = Some(engine.clone());
+        c.limits.host_timeout = Duration::from_millis(15);
+        c.limits.max_response_bytes = 100;
+    });
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{try{runtime.engine('slow')}catch(e){return String(e).includes('timed out')}})()"
+        ),
+        "true"
+    );
+    engine.mode.store(2, Ordering::Relaxed);
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{try{runtime.engine('large')}catch(e){return String(e).includes('quota')}})()"
+        ),
+        "true"
+    );
+    close(&r);
+    engine.mode.store(1, Ordering::Relaxed);
+    let f = fixture_with(|c| c.engine = Some(engine.clone()));
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    let before = engine.calls.load(Ordering::Relaxed);
+    let pending = r.eval("runtime.engine('cancel')").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while engine.calls.load(Ordering::Relaxed) == before {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(r.stop(pending.execution));
+    assert!(matches!(wait(pending), Err(Error::Terminated)));
+    assert_eq!(eval(&r, "42"), "42");
+    close(&r);
+}
+#[test]
+fn idle_realms_do_not_poll_or_commit_and_timers_wake_them() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(&r, "42");
+    let before = f.kernel.calls.load(Ordering::Relaxed);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(f.kernel.calls.load(Ordering::Relaxed), before);
+    assert_eq!(f.watch.notices.load(Ordering::Relaxed), 0);
+    eval(
+        &r,
+        "setTimeout(()=>{storage.timer=19;runtime.stage({id:'timer'})},15)",
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !f
+        .kernel
+        .commits
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, ops)| ops.iter().any(|op| op["id"] == "timer"))
+    {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(3));
+    }
+    assert_eq!(eval(&r, "storage.timer"), "19");
+    close(&r);
+}
+#[test]
+fn clear_interval_and_timer_arguments() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "new Promise(resolve=>{let n=0;const gone=setTimeout(()=>n=1000,1);clearTimeout(gone);const interval=setInterval(x=>{n+=x;if(n===6){clearInterval(interval);setTimeout(()=>resolve(n),8)}},2,2)})"
+        ),
+        "6"
+    );
+    close(&r);
+}
+#[test]
+fn throwing_retained_history_stays_callable_and_cannot_clobber_active_storage() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("history".into()))
+        .unwrap();
+    eval(&r, "storage.n=7;globalThis.undo=()=>19");
+    let pin = wait(r.pin().unwrap()).unwrap();
+    wait(r.reload("storage.n=23").unwrap()).unwrap();
+    assert!(
+        wait(
+            r.invoke_retained(
+                &pin,
+                "storage.n=99;runtime.stage({id:'failed'});throw new Error('undo failure')"
+            )
+            .unwrap()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        wait(r.invoke_retained(&pin, "undo()").unwrap())
+            .unwrap()
+            .value,
+        "19"
+    );
+    wait(
+        r.invoke_retained(&pin, "storage.n=999;runtime.stage({id:'undo'})")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(eval(&r, "storage.n"), "23");
+    assert!(
+        f.kernel
+            .commits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, ops)| ops.iter().any(|op| op["id"] == "undo"))
+    );
+    close(&r);
+}
+#[test]
+fn active_history_pin_failure_recovers_and_seals() {
+    let f = fixture();
+    f.watch.stop.store(true, Ordering::Relaxed);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(&r, "storage.n=19");
+    let pin = wait(r.pin().unwrap()).unwrap();
+    assert!(matches!(
+        wait(r.invoke_retained(&pin, "for(;;){}").unwrap()),
+        Err(Error::Terminated)
+    ));
+    assert_eq!(eval(&r, "storage.n"), "19");
+    assert!(f.kernel.sealed.lock().unwrap().contains(&pin.generation));
+    close(&r);
+}
+#[test]
+fn storage_restore_preserves_proto_keys_and_does_not_use_source_budget() {
+    let f = fixture_with(|c| c.limits.max_source_bytes = 1000);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    let g = wait(r.eval("42").unwrap()).unwrap().generation;
+    close(&r);
+    f.kernel.stores.lock().unwrap().insert(
+        g.realm.clone(),
+        json!({"__proto__":{"authored":true},"large":"x".repeat(5000)}),
+    );
+    let next = f.pool.realm(RealmKind::Compat).unwrap();
+    let value=wait(next.eval("Object.hasOwn(storage,'__proto__')+':'+storage.__proto__.authored+':'+storage.large.length").unwrap()).unwrap();
+    assert_eq!(value.value, "true:true:5000");
+    assert_ne!(value.generation, g);
+    close(&next);
+}
+#[test]
+fn no_script_runs_after_activation_is_committed() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("atomic".into()))
+        .unwrap();
+    eval(&r, "storage.n=7");
+    let before = f.kernel.calls.load(Ordering::Relaxed);
+    // Corrupting the scheduling surface must fail before publication, rather than
+    // returning failure after already installing candidate storage/registrations.
+    assert!(wait(r.reload("storage.n=99;runtime.stage({id:'no'});globalThis.__pm={take:()=>JSON.stringify({ops:[{id:'no'}],storage:{n:99},hot:{}}),nextDelay(){throw new Error('schedule')}}").unwrap()).is_err());
+    assert_eq!(f.kernel.calls.load(Ordering::Relaxed), before);
+    assert_eq!(eval(&r, "storage.n"), "7");
+    close(&r);
+}
+#[test]
+fn queue_is_bounded_and_future_wakes() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Wake, Waker},
+    };
+    struct WakeCount(AtomicUsize);
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let f = fixture_with(|c| c.limits.queue_capacity = 2);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    let infinite = r.eval("for(;;){}").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while f.watch.notices.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let a = r.eval("1").unwrap();
+    let b = r.eval("2").unwrap();
+    assert!(matches!(r.eval("3"), Err(Error::Busy)));
+    assert!(r.stop(infinite.execution));
+    assert!(wait(infinite).is_err());
+    assert_eq!(wait(a).unwrap().value, "1");
+    assert_eq!(wait(b).unwrap().value, "2");
+    let mut ticket = r
+        .eval("new Promise(resolve=>setTimeout(()=>resolve(19),20))")
+        .unwrap();
+    let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+    let mut cx = Context::from_waker(&waker);
+    assert!(Pin::new(&mut ticket).poll(&mut cx).is_pending());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while wake.0.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(matches!(
+        Pin::new(&mut ticket).poll(&mut cx),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    close(&r);
+}
+#[test]
+fn dropping_last_handle_disposes_parked_realm() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(&r, "42");
+    drop(r);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while f.admission.used() != 0 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+#[test]
+fn search_params_iterators_do_not_expose_internal_pairs() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{let p=new URLSearchParams('x=1');let pair=p.entries().next().value;pair[1]='bad';let it=p.entries();it.next();p.append('y','2');return p.toString()+':'+it.next().value[0]})()"
+        ),
+        "x=1&y=2:y"
+    );
+    close(&r);
+}
+
+#[test]
+fn external_interrupt_child() {
+    if std::env::var_os("PM_RUNTIME_SYNTHETIC_EXTERNAL_CHILD").is_none() {
+        return;
+    }
+    let f = fixture_with(|c| c.limits.external_bytes = 2 * 1024 * 1024);
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    eval(&r, "storage.n=19");
+    assert!(matches!(
+        wait(
+            r.eval(
+                "globalThis.kept=[];for(;;){let b=new Uint8Array(256*1024);b.fill(1);kept.push(b)}"
+            )
+            .unwrap()
+        ),
+        Err(Error::Terminated) | Err(Error::Quota("external memory"))
+    ));
+    assert_eq!(eval(&r, "storage.n"), "19");
+    close(&r);
+}
+#[test]
+fn external_quota_interrupts_a_running_task_in_subprocess() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::external_interrupt_child", "--nocapture"])
+        .env("PM_RUNTIME_SYNTHETIC_EXTERNAL_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn operation_budget_counts_utf8_bytes_and_native_boundary_revalidates() {
+    let f = fixture_with(|c| c.limits.max_op_bytes = 100);
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("bytes".into()))
+        .unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{try{runtime.stage({text:'😀'.repeat(30)})}catch(e){return String(e).includes('quota')}})()"
+        ),
+        "true"
+    );
+    assert!(f.kernel.commits.lock().unwrap().is_empty());
+    // The host independently validates even if extension JS replaces the staging facade.
+    assert!(matches!(wait(r.reload("globalThis.__pm={take:()=>JSON.stringify({ops:[{text:'😀'.repeat(30)}],storage:{},hot:{}}),nextDelay:()=>null}").unwrap()),Err(Error::Quota("staged operation bytes/count"))));
+    assert!(f.kernel.commits.lock().unwrap().is_empty());
+    close(&r);
+}
+#[test]
+fn clone_transfer_errors_keep_buffers_attached_and_url_prefixes_are_exact() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{let b=new ArrayBuffer(4);try{structuredClone({b},{transfer:[b,b]})}catch(e){return e.name+':'+b.byteLength}})()"
+        ),
+        "DataCloneError:4"
+    );
+    assert_eq!(
+        eval(
+            &r,
+            "(()=>{let u=new URL('https://example.test');u.search='??x=1';u.hash='##a';return u.search+'|'+u.hash})()"
+        ),
+        "??x=1|##a"
+    );
+    close(&r);
 }

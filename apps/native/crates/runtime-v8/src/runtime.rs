@@ -8,7 +8,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Condvar, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
@@ -73,35 +73,56 @@ pub struct Evaluation {
     pub value: String,
     pub cache_hits: usize,
 }
+#[derive(Debug, Clone)]
+pub struct ActiveExecution {
+    pub execution: u64,
+    pub generation: Generation,
+    pub elapsed: Duration,
+}
 #[derive(Clone)]
 pub struct GenerationPin {
     pub generation: Generation,
     live: Arc<()>,
+    notifier: Weak<SyncSender<Command>>,
 }
 impl std::fmt::Debug for GenerationPin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.generation.fmt(f)
     }
 }
+impl Drop for GenerationPin {
+    fn drop(&mut self) {
+        if let Some(tx) = self.notifier.upgrade() {
+            let _ = tx.try_send(Command::Wake);
+        }
+    }
+}
 struct Execution {
     id: u64,
     handle: v8::IsolateHandle,
     cancellation: Cancellation,
+    generation: Generation,
+    epoch: u64,
+    started: Instant,
+    noticed: bool,
+    next_prompt: Duration,
 }
 struct Control {
     active: Mutex<Option<Execution>>,
     closing: AtomicBool,
     disposed: AtomicBool,
+    wake: Condvar,
+    ids: AtomicU64,
 }
 struct Inner {
-    tx: SyncSender<Command>,
+    tx: Arc<SyncSender<Command>>,
     control: Arc<Control>,
-    ids: AtomicU64,
     max_source: usize,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
         self.control.closing.store(true, Ordering::Release);
+        self.control.wake.notify_all();
         if let Some(e) = &*self.control.active.lock().unwrap() {
             e.cancellation.cancel();
             e.handle.terminate_execution();
@@ -113,6 +134,7 @@ pub struct Realm {
     inner: Arc<Inner>,
 }
 enum Command {
+    Wake,
     Eval {
         id: u64,
         source: String,
@@ -161,7 +183,7 @@ impl Realm {
     ) -> Result<Ticket<Evaluation>> {
         let source = source.into();
         self.check_source(&source)?;
-        let id = self.inner.ids.fetch_add(1, Ordering::Relaxed);
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
         let (ticket, reply) = ticket(id);
         self.send(Command::Eval {
             id,
@@ -176,7 +198,7 @@ impl Realm {
     pub fn reload(&self, source: impl Into<String>) -> Result<Ticket<Evaluation>> {
         let source = source.into();
         self.check_source(&source)?;
-        let id = self.inner.ids.fetch_add(1, Ordering::Relaxed);
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
         let (ticket, reply) = ticket(id);
         self.send(Command::Reload { id, source, reply })?;
         Ok(ticket)
@@ -193,7 +215,7 @@ impl Realm {
     ) -> Result<Ticket<Evaluation>> {
         let source = source.into();
         self.check_source(&source)?;
-        let id = self.inner.ids.fetch_add(1, Ordering::Relaxed);
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
         let (ticket, reply) = ticket(id);
         self.send(Command::Retained {
             id,
@@ -202,6 +224,20 @@ impl Realm {
             reply,
         })?;
         Ok(ticket)
+    }
+    /// Inspect a hung or active realm without entering JavaScript.
+    pub fn active_execution(&self) -> Option<ActiveExecution> {
+        self.inner
+            .control
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| ActiveExecution {
+                execution: e.id,
+                generation: e.generation.clone(),
+                elapsed: e.started.elapsed(),
+            })
     }
     /// Fenced by execution id; an old Stop cannot terminate a later task.
     pub fn stop(&self, execution: u64) -> bool {
@@ -217,6 +253,8 @@ impl Realm {
     /// Nonblocking shutdown; disposal and all revocations happen on the owner.
     pub fn close(&self) {
         self.inner.control.closing.store(true, Ordering::Release);
+        self.inner.control.wake.notify_all();
+        let _ = self.inner.tx.try_send(Command::Wake);
         if let Some(e) = &*self.inner.control.active.lock().unwrap() {
             e.cancellation.cancel();
             e.handle.terminate_execution();
@@ -242,6 +280,7 @@ pub struct Config {
     pub host: Arc<dyn HostProxy>,
     pub watchdog_hooks: Arc<dyn WatchdogHooks>,
     pub cache: CodeCache,
+    pub engine: Option<Arc<dyn EngineProxy>>,
     /// Shared admission account must include all pools and retained generations.
     pub admission: Admission,
 }
@@ -316,19 +355,31 @@ impl RuntimePool {
             active: Mutex::new(None),
             closing: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
+            wake: Condvar::new(),
+            ids: AtomicU64::new(1),
         });
         let inner = Arc::new(Inner {
-            tx,
+            tx: Arc::new(tx),
             control: control.clone(),
-            ids: AtomicU64::new(1),
             max_source: self.config.limits.max_source_bytes,
         });
         let name = format!("{}:{kind:?}", self.scope);
         let config = self.config.clone();
         let worker_kind = kind.clone();
+        let notifier = Arc::downgrade(&inner.tx);
         thread::Builder::new()
             .name("pm-v8-owner".into())
-            .spawn(move || worker(rx, control, name, worker_kind, config, reservation))
+            .spawn(move || {
+                worker(
+                    rx,
+                    control,
+                    name,
+                    worker_kind,
+                    config,
+                    reservation,
+                    notifier,
+                )
+            })
             .map_err(|e| Error::Host(e.to_string()))?;
         realms.insert(kind.clone(), Arc::downgrade(&inner));
         Ok(Realm { inner })
@@ -344,11 +395,82 @@ impl RuntimePool {
     }
 }
 
-struct Guard {
-    done: Option<mpsc::Sender<()>>,
-    join: Option<thread::JoinHandle<()>>,
+// One sleeping watchdog per owner, never a new thread per task or timer tick.
+struct WatchdogThread {
     control: Arc<Control>,
-    id: u64,
+    join: Option<thread::JoinHandle<()>>,
+}
+impl WatchdogThread {
+    fn new(control: &Arc<Control>, config: &Config) -> Self {
+        let control = control.clone();
+        let watched = control.clone();
+        let hooks = config.watchdog_hooks.clone();
+        let repeat = config.watchdog.repeat;
+        let notice_after = config.watchdog.notice;
+        let join = thread::spawn(move || {
+            loop {
+                let mut active = watched.active.lock().unwrap();
+                while active.is_none() && !watched.closing.load(Ordering::Acquire) {
+                    active = watched.wake.wait(active).unwrap();
+                }
+                if watched.closing.load(Ordering::Acquire) {
+                    break;
+                }
+                let (mut active, _) = watched
+                    .wake
+                    .wait_timeout(active, Duration::from_millis(5))
+                    .unwrap();
+                let Some(execution) = active.as_mut() else {
+                    continue;
+                };
+                if execution.cancellation.is_cancelled() {
+                    execution.handle.terminate_execution();
+                }
+                execution
+                    .handle
+                    .request_interrupt(vm::check_external, std::ptr::null_mut());
+                let elapsed = execution.started.elapsed();
+                let notice = !execution.noticed && elapsed >= notice_after;
+                if notice {
+                    execution.noticed = true;
+                }
+                let prompt = elapsed >= execution.next_prompt;
+                if prompt {
+                    execution.next_prompt = elapsed + repeat;
+                }
+                let (generation, id, epoch) =
+                    (execution.generation.clone(), execution.id, execution.epoch);
+                drop(active);
+                if notice {
+                    hooks.notice(&generation, id);
+                }
+                if prompt && hooks.prompt(&generation, id) == WatchdogDecision::Stop {
+                    let active = watched.active.lock().unwrap();
+                    if let Some(execution) = active.as_ref().filter(|e| e.epoch == epoch) {
+                        execution.cancellation.cancel();
+                        execution.handle.terminate_execution();
+                    }
+                }
+            }
+        });
+        Self {
+            control,
+            join: Some(join),
+        }
+    }
+}
+impl Drop for WatchdogThread {
+    fn drop(&mut self) {
+        self.control.closing.store(true, Ordering::Release);
+        self.control.wake.notify_all();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+struct Guard {
+    control: Arc<Control>,
+    epoch: u64,
 }
 impl Guard {
     fn new(
@@ -358,70 +480,39 @@ impl Guard {
         config: &Config,
         control: &Arc<Control>,
     ) -> Self {
+        static EPOCH: AtomicU64 = AtomicU64::new(1);
+        let epoch = EPOCH.fetch_add(1, Ordering::Relaxed);
         let handle = vm.handle();
         let cancellation = Cancellation::default();
+        vm.begin_task(cancellation.clone());
         *control.active.lock().unwrap() = Some(Execution {
             id,
+            epoch,
+            generation: generation.clone(),
             handle: handle.clone(),
             cancellation: cancellation.clone(),
+            started: Instant::now(),
+            noticed: false,
+            next_prompt: config.watchdog.prompt,
         });
+        control.wake.notify_all();
         if control.closing.load(Ordering::Acquire) {
             cancellation.cancel();
             handle.terminate_execution();
         }
-        let (tx, rx) = mpsc::channel();
-        let hooks = config.watchdog_hooks.clone();
-        let policy = config.watchdog.clone();
-        let generation = generation.clone();
-        let join = thread::spawn(move || {
-            let start = Instant::now();
-            let mut noticed = false;
-            let mut prompt = policy.prompt;
-            loop {
-                if rx.recv_timeout(Duration::from_millis(5)).is_ok() {
-                    break;
-                }
-                handle.request_interrupt(vm::check_external, std::ptr::null_mut());
-                if cancellation.is_cancelled() {
-                    handle.terminate_execution();
-                }
-                let elapsed = start.elapsed();
-                if !noticed && elapsed >= policy.notice {
-                    noticed = true;
-                    hooks.notice(&generation, id);
-                }
-                if elapsed >= prompt {
-                    match hooks.prompt(&generation, id) {
-                        WatchdogDecision::Stop => {
-                            cancellation.cancel();
-                            handle.terminate_execution();
-                            break;
-                        }
-                        WatchdogDecision::Wait => prompt = elapsed + policy.repeat,
-                    }
-                }
-            }
-        });
         Self {
-            done: Some(tx),
-            join: Some(join),
             control: control.clone(),
-            id,
+            epoch,
         }
     }
 }
 impl Drop for Guard {
     fn drop(&mut self) {
-        if let Some(tx) = self.done.take() {
-            let _ = tx.send(());
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
         let mut active = self.control.active.lock().unwrap();
-        if active.as_ref().is_some_and(|a| a.id == self.id) {
+        if active.as_ref().is_some_and(|a| a.epoch == self.epoch) {
             *active = None;
         }
+        self.control.wake.notify_all();
     }
 }
 struct Request {
@@ -438,6 +529,7 @@ struct Live {
     pins: Arc<()>,
     requests: Vec<Request>,
     _reservation: Reservation,
+    next_wake: Option<Instant>,
 }
 impl Live {
     fn new(
@@ -454,6 +546,8 @@ impl Live {
             &storage,
             &hot,
             config.cache.clone(),
+            generation.clone(),
+            config.engine.clone(),
         )?;
         Ok(Self {
             vm,
@@ -463,6 +557,7 @@ impl Live {
             pins: Arc::new(()),
             requests: vec![],
             _reservation: reservation,
+            next_wake: None,
         })
     }
     fn cancel_io(&mut self) {
@@ -541,8 +636,18 @@ impl Live {
         config: &Config,
         control: &Arc<Control>,
     ) -> Result<String> {
-        let value = self.vm.start(source)?;
+        let value = self.vm.start(source).map_err(|error| {
+            if self.vm.task_cancelled() {
+                Error::Terminated
+            } else {
+                error
+            }
+        })?;
         loop {
+            if self.vm.task_cancelled() {
+                self.vm.handle().terminate_execution();
+                return Err(Error::Terminated);
+            }
             if control.closing.load(Ordering::Acquire) {
                 self.vm.handle().terminate_execution();
                 return Err(Error::Closed);
@@ -564,6 +669,16 @@ impl Live {
         let ops = effects["ops"]
             .as_array()
             .ok_or(Error::Invalid("Invalid staged operations"))?;
+        if ops.len() > config.limits.max_ops
+            || serde_json::to_vec(ops)
+                .map_err(|e| Error::JavaScript(e.to_string()))?
+                .len()
+                > config.limits.max_op_bytes
+        {
+            return Err(Error::Quota("staged operation bytes/count"));
+        }
+        // Finish every fallible JS step before the kernel's atomic publication.
+        self.update_schedule()?;
         if retained {
             config.kernel.commit_retained(&self.generation, ops)?;
         } else {
@@ -578,12 +693,30 @@ impl Live {
         }
         Ok(())
     }
-    fn restore_storage(&mut self) -> Result<()> {
-        self.vm.text(&format!(
-            "__pm.resetOps(); storage={}; hot.data={};",
-            self.storage, self.hot
-        ))?;
+    fn update_schedule(&mut self) -> Result<()> {
+        let delay = self.vm.text("__pm.nextDelay(__now())")?;
+        let delay = delay
+            .parse::<f64>()
+            .ok()
+            .map(|n| Duration::from_secs_f64(n.max(0.) / 1000.));
+        let native = self.vm.native.lock().unwrap();
+        let io_delay = if !native.queued.is_empty() || !native.logs.is_empty() {
+            Some(Duration::ZERO)
+        } else if !self.requests.is_empty() {
+            Some(Duration::from_millis(5))
+        } else {
+            None
+        };
+        self.next_wake = delay
+            .into_iter()
+            .chain(io_delay)
+            .min()
+            .map(|d| Instant::now() + d);
         Ok(())
+    }
+    fn restore_storage(&mut self) -> Result<()> {
+        self.vm.restore(&self.storage, &self.hot)?;
+        self.update_schedule()
     }
 }
 impl Drop for Live {
@@ -603,7 +736,9 @@ fn worker(
     kind: RealmKind,
     config: Config,
     reservation: Reservation,
+    notifier: Weak<SyncSender<Command>>,
 ) {
+    let _watchdog = WatchdogThread::new(&control, &config);
     let generation = Generation {
         realm: name.clone(),
         number: next_generation(),
@@ -616,13 +751,24 @@ fn worker(
     let mut retained: HashMap<u64, Live> = HashMap::new();
     while !control.closing.load(Ordering::Acquire) {
         retained.retain(|_, live| Arc::strong_count(&live.pins) > 1);
-        let command = match rx.recv_timeout(Duration::from_millis(5)) {
+        let wake = current.as_ref().ok().and_then(|live| live.next_wake);
+        let received = match wake {
+            Some(wake) => rx.recv_timeout(wake.saturating_duration_since(Instant::now())),
+            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        let command = match received {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Ok(live) = &mut current {
                     // Timers and pending host operations run without a submitted task.
-                    let guard = Guard::new(&live.vm, &live.generation, 0, &config, &control);
+                    let guard = Guard::new(
+                        &live.vm,
+                        &live.generation,
+                        control.ids.fetch_add(1, Ordering::Relaxed),
+                        &config,
+                        &control,
+                    );
                     let result = live
                         .pump(&config)
                         .and_then(|_| live.commit(Some(&live.generation.clone()), &config, false));
@@ -637,6 +783,7 @@ fn worker(
             }
         };
         match command {
+            Command::Wake => continue,
             Command::Pin { reply } => complete(
                 reply,
                 current
@@ -644,6 +791,7 @@ fn worker(
                     .map(|live| GenerationPin {
                         generation: live.generation.clone(),
                         live: live.pins.clone(),
+                        notifier: notifier.clone(),
                     })
                     .map_err(Clone::clone),
             ),
@@ -764,9 +912,10 @@ fn worker(
                 source,
                 reply,
             } => {
-                let live = if current.as_ref().is_ok_and(|v| {
+                let is_current = current.as_ref().is_ok_and(|v| {
                     v.generation == pin.generation && Arc::ptr_eq(&v.pins, &pin.live)
-                }) {
+                });
+                let live = if is_current {
                     current.as_mut().ok()
                 } else {
                     retained.get_mut(&pin.generation.number).filter(|v| {
@@ -788,10 +937,34 @@ fn worker(
                 } else {
                     Err(Error::StaleGeneration)
                 };
-                if result.is_err()
-                    && let Some(mut live) = retained.remove(&pin.generation.number)
-                {
-                    fail_generation(&mut live, &config);
+                let mut failed = matches!(
+                    result,
+                    Err(Error::Terminated
+                        | Error::Quota("heap" | "external memory")
+                        | Error::Closed)
+                );
+                if result.is_err() && !failed {
+                    let live = if is_current {
+                        current.as_mut().ok()
+                    } else {
+                        retained.get_mut(&pin.generation.number)
+                    };
+                    if let Some(live) = live {
+                        let guard = Guard::new(&live.vm, &live.generation, id, &config, &control);
+                        failed = live.restore_storage().is_err();
+                        drop(guard);
+                    }
+                }
+                if failed {
+                    if is_current {
+                        if let Ok(live) = &mut current {
+                            fail_generation(live, &config);
+                        }
+                        drop(std::mem::replace(&mut current, Err(Error::Closed)));
+                        current = recover(&name, &kind, &config);
+                    } else if let Some(mut live) = retained.remove(&pin.generation.number) {
+                        fail_generation(&mut live, &config);
+                    }
                 }
                 complete(reply, result);
             }
@@ -808,6 +981,7 @@ fn worker(
     control.closing.store(true, Ordering::Release);
     for command in rx.try_iter() {
         match command {
+            Command::Wake => continue,
             Command::Pin { reply } => complete(reply, Err(Error::Closed)),
             Command::Eval { reply, .. }
             | Command::Reload { reply, .. }

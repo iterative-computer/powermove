@@ -144,9 +144,9 @@
     has(k,v) { return this.#items.some(p => p[0] === String(k) && (v === undefined || p[1] === String(v))); }
     set(k,v) { k=String(k); v=String(v); const first=this.#items.findIndex(p=>p[0]===k); this.#items=this.#items.filter(p=>p[0]!==k); this.#items.splice(first<0?this.#items.length:first,0,[k,v]); this.#changed(this.toString()); }
     sort() { this.#items.sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0); this.#changed(this.toString()); }
-    *entries() { yield* this.#items; } *keys() { for(const p of this.#items) yield p[0]; } *values() { for(const p of this.#items) yield p[1]; }
+    *entries() { for(let i=0;i<this.#items.length;i++) yield [...this.#items[i]]; } *keys() { for(const p of this) yield p[0]; } *values() { for(const p of this) yield p[1]; }
     [Symbol.iterator]() { return this.entries(); }
-    forEach(fn, thisArg) { for(const [k,v] of this.#items) fn.call(thisArg,v,k,this); }
+    forEach(fn, thisArg) { for(const [k,v] of this) fn.call(thisArg,v,k,this); }
     toString() { return native('params.serialize', this.#items); }
     _reset(s) { this.#items = native('params.parse',s.replace(/^\?/, '')); }
   }
@@ -171,7 +171,7 @@
     has(k) { return this.get(k)!==null; }
     set(k,v) { this.delete(k); this.append(k,v); }
     delete(k) { this.#items=this.#items.filter(p=>p[0]!==String(k).toLowerCase()); }
-    *entries() { yield* [...this.#items].sort((a,b)=>a[0]<b[0]?-1:1); }
+    *entries() { yield* this.#items.map(p=>[...p]).sort((a,b)=>a[0]<b[0]?-1:1); }
     [Symbol.iterator]() { return this.entries(); }
     forEach(fn,thisArg) { for(const [k,v] of this) fn.call(thisArg,v,k,this); }
   }
@@ -198,16 +198,19 @@
       requests.set(id,{resolve,reject,signal,abort}); signal?.addEventListener('abort',abort,{once:true});
     });
   };
-  let ops=[];
+  let ops=[], opBytes=2;
   globalThis.storage = {};
   globalThis.hot = {data:{}};
   globalThis.runtime = Object.freeze({
-    stage(op) { const copy=JSON.parse(JSON.stringify(op)); if(ops.length>=__limits.max_ops || JSON.stringify([...ops,copy]).length>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); }
+    engine(operation, input = null) { return native('engine', {operation:String(operation), input}); },
+    stage(op) { const text=JSON.stringify(op), copy=JSON.parse(text); const bytes=new TextEncoder().encode(text).byteLength+(ops.length?1:0); if(ops.length>=__limits.max_ops || opBytes+bytes>__limits.max_op_bytes) throw new RangeError('Operation quota'); ops.push(copy); opBytes+=bytes; }
   });
   globalThis.__pm = Object.freeze({
-    take() { const out={ops,storage,hot:hot.data}; ops=[]; return JSON.stringify(out); },
-    resetOps() { ops=[]; },
-    retire() { timers.clear(); requests.clear(); ops=[]; },
+    take() { const out={ops,storage,hot:hot.data}; ops=[]; opBytes=2; return JSON.stringify(out); },
+    nextDelay(now) { return timers.size ? Math.max(0,Math.min(...Array.from(timers.values(),t=>t.due-now))) : null; },
+    restore(value, hotValue) { storage=value; hot.data=hotValue; ops=[]; opBytes=2; },
+    resetOps() { ops=[]; opBytes=2; },
+    retire() { timers.clear(); requests.clear(); ops=[]; opBytes=2; },
     pump(now, completed) {
       for (const [id,result] of completed) {
         const req=requests.get(id); if(!req) continue;

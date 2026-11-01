@@ -24,12 +24,17 @@ implement Future and `try_take`; there is no blocking wait or join API. Sources
 are bundled script expressions, optionally returning Promises. The compiler lane
 must resolve imports and wrap activation before submission. IDs fence queued
 calls and Stop requests. `eval_generation` refuses a retired generation.
+`active_execution()` returns generation/id/elapsed time from native state,
+including during a hang, without entering JS.
 
 Each worker exclusively owns its isolate, strong context handles, host jobs and
 quota callback. `SharedIsolate`/Locker guards every V8 entry; no Local or borrowed
 V8 reference crosses an unlock. Idle receive waits park the owner and release the
-Locker. Workers retain their OS threads; migrating parked isolates onto a bounded
-shared executor is a possible later optimization. All disposal, callback removal
+Locker. A realm with no timer/I/O work sleeps until a submission, close or pin
+retirement; timer deadlines and active I/O determine wakeups. One persistent
+watchdog per owner also sleeps while idle. Workers retain their OS threads;
+migrating parked isolates onto a bounded shared executor is a possible later
+optimization. All disposal, callback removal
 and retained-generation retirement occur on that owner, including close and last
 handle drop. `close()` is nonblocking; `is_disposed()` reports completed cleanup.
 
@@ -40,7 +45,9 @@ The bootstrap contains the web definitions, no user state or native function
 pointers. Restore attaches native functions and injects persisted JSON storage.
 The process initializes V8 once. `CodeCache` has a byte budget and keys all of:
 V8 version, exact snapshot bytes, exact bundle bytes, and runtime flag/feature
-identity, with domain separation and length-delimited SHA-256. V8 independently
+identity (including V8's effective cached-data version tag), with domain
+separation and length-delimited SHA-256. Internal control scripts do not populate
+the bundle cache. V8 independently
 checks cached-data acceptance. Snapshots are in-memory process caches.
 
 `Limits` bounds source bytes, queued submissions, concurrent host requests,
@@ -77,14 +84,18 @@ Process-unique generation IDs prevent revival after close/reopen. Completed
 acknowledged edits/storage remain kernel-owned. Ephemeral JS state is lost on a
 failure; persisted storage is never deleted. The adapter must map scoped realm
 identities to the existing extension ID/storage namespace, preserving `ext.<id>`
-objects and unknown keys rather than creating a new disk format.
+objects and unknown keys rather than creating a new disk format. Storage enters
+V8 through JSON parsing rather than JavaScript object-literal source, preserving
+own `__proto__` keys and keeping storage independent of the source-text budget.
 
 ## Activation and history
 
 Only v4 can reload into a fresh isolate. The candidate receives deep JSON copies
 of persisted storage and `hot.data`; `runtime.stage(op)` accumulates an op list.
 Await activation, then call `KernelHooks::commit_activation(previous,next,ops,
-storage)`. The adapter must validate and atomically publish ops, storage and new
+storage)`. UTF-8 byte/count checks, scheduling and effect serialization all finish
+before that kernel call; no further candidate JS runs after publication. The
+adapter must validate and atomically publish ops, storage and new
 registrations, replacing previous registrations only on success. Rejection or a
 throw disposes the candidate and leaves the active generation unchanged. Network
 I/O and logs already completed during activation are observable and cannot be
@@ -95,7 +106,8 @@ staged op surface. Arbitrary module-global mutation is not transactional.
 replacement cancels old I/O, clears old timer registrations and revokes old
 registrations; pinned isolates stay until their last pin retires. Retained calls
 use `commit_retained`, which must apply only lease-authorized history operations
-and never overwrite current storage. Failure revokes/seals failed generations.
+and never overwrite current storage. A throwing retained callback reports its error
+and stays callable; termination/quota failure revokes/seals its generation.
 The compat/editor cluster deliberately rejects whole-isolate hot reload: that
 would break held provider identity. Staged same-realm module replacement belongs
 to the compiler/compat host, keeping the C-MATRIX live-object contract.
@@ -115,6 +127,14 @@ HostProxy starts nonblocking requests; HostRequest::poll is nonblocking and
 cancel propagates on abort, timeout, shutdown, reload and generation failure.
 The host enforces permissions, credentials, redirects and streaming byte limits
 before buffering. The runtime independently checks completed response limits.
+`runtime.engine(operation,input)` calls the optional EngineProxy on the V8 owner.
+HostBudget supplies a cancellation token, deadline and response-byte ceiling;
+cooperative engine implementations must check these while waiting and before
+allocating. Operation count, argument/output bytes and post-call deadline checks
+are enforced here too. No engine callback may synchronously enter JS or main.
+The Linux engine double verifies owner placement, arguments, timeout, over-budget
+responses and cancellation during a native call.
+
 These are bounded buffered APIs, not a complete browser platform: non-UTF-8
 TextDecoder labels, streams, Blob/FormData, full Request/cache/service-worker
 semantics, DOM/layout/canvas and remote panels need their owning compatibility
@@ -130,7 +150,7 @@ those adapters. No Electron quirk was adopted as a runtime specification.
 | Fresh v4 activation candidates, atomic staged op publication, persisted-storage recovery | N3 authored edits are exact; N4 never discard acknowledged state |
 | Pin old callable generations; separate retained history commits from active storage | N4/N6 history remains callable without overwriting newer storage |
 | Version/snapshot/bundle/flags cache key; reject stale execution/generation IDs | N3 correctness before reuse; N1 reliable reload and recovery |
-| Bounded host queues, heap/external checks and shared admission, explicit Stop/Wait | N1/N2 responsive editor; N8 independent UI; S1's hard-external-limit gap remains explicit |
+| Deadline-driven idle sleep, bounded host queues, heap/external checks and shared admission, explicit Stop/Wait | N1/N2 responsive editor; N8 independent UI; S1's hard-external-limit gap remains explicit |
 | UTF-8/WHATWG/V8 primitives, explicit adapter gaps, no browser-bug imitation | N3 specification wins; N4/N6 do not silently remove legacy capabilities |
 | Preserve all replaced Electron/spike consumers | Prune rule: no deletion before the final consumer is retired |
 
@@ -153,12 +173,15 @@ lockfile needs this new package/dependencies. This lane does not own that file.
 The integration lane must regenerate it; the existing `crates/*` workspace glob
 already discovers this crate. No other crate/source or shared lock was edited.
 
-Current evidence: **30 tests pass**, including real isolate/snapshot/cache
+Current evidence: **45 tests pass**, including real isolate/snapshot/cache
 execution, cross-thread submissions with parked Lockers, routing/identity,
 web APIs, host abort/time/byte bounds, staged activation failure/success,
 retained closures/admission retirement, Wait/Stop and microtask/infinite-loop
 recovery, persisted storage, external-memory termination and a real near-heap
-callback in a subprocess. Strict Clippy and Rust formatting pass. All inputs
+callback in a subprocess. Further regressions cover sleeping idle owners,
+native Future wakeups, queue saturation, cooperative engine cancellation,
+throwing/active history pins, pre-publication scheduling failure, UTF-8 op budgets
+and exact unusual storage keys. Strict Clippy and Rust formatting pass. All inputs
 are synthetic; no private profile, user project or secret is used.
 
 Still needed from other lanes: concrete kernel actor hooks (atomic activation,
