@@ -29,6 +29,7 @@ pub mod normalize;
 pub mod pipeline;
 pub mod reflect;
 pub mod rewrite;
+pub mod safety;
 
 pub use cache::{Cache, Key};
 pub use errors::Diagnostic;

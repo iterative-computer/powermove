@@ -1,0 +1,18 @@
+[package]
+name = "pm-glsl-headless-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Separate test-only Vulkan resolution: do not enable Linux GPU backends in
+# the macOS application or change the engine's shared lockfile.
+[workspace]
+
+[dependencies]
+pm-glsl = { path = ".." }
+wgpu = { version = "=30.0.1", default-features = false, features = ["vulkan", "naga-ir"] }
+pollster = "0.4"
+serde_json = "1"
+
+[profile.dev.package."*"]
+opt-level = 2

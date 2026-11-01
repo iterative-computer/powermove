@@ -37,13 +37,20 @@ pub enum Request {
         stage: naga::ShaderStage,
         slots: Vec<Slot>,
     },
+    /// Diagnostic writer with naga's default resource mapping.
+    DiagnosticMsl(naga::Module),
+    Fuzz {
+        fragment: String,
+        line_offset: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum Response {
-    Prepared(Prepared),
-    Program(Program),
+    Prepared(Box<Prepared>),
+    Program(Box<Program>),
     Msl(String, String),
+    Fuzz(crate::fuzz::Outcome),
 }
 
 /// Explicit Metal slots from the caller's actual pipeline layout.
@@ -125,7 +132,69 @@ fn budget(pid: u32, deadline: Instant, resident_limit: u64) -> Result<Duration, 
         }
         // A just-exited process may already be absent; EOF/status reports it.
     }
+    #[cfg(target_os = "linux")]
+    {
+        let resident = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+            Ok(status) => linux_resident_bytes(&status).or_else(|e| {
+                // /proc/status snapshots State and the memory map separately:
+                // exit can drop the map after State was read as R/S. Verify
+                // statm is entirely zero before accepting this transient.
+                match std::fs::read_to_string(format!("/proc/{pid}/statm")) {
+                    Ok(statm)
+                        if statm.split_whitespace().count() == 7
+                            && statm.split_whitespace().all(|n| n == "0") =>
+                    {
+                        Ok(0)
+                    }
+                    Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                    _ => Err(e),
+                }
+            }),
+            // A reaped worker is absent; IPC reports its exit.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e),
+        }
+        .map_err(|e| {
+            Failure::new(
+                FailureStage::CompilerResources,
+                format!("could not monitor compiler resident memory: {e}"),
+            )
+        })?;
+        if resident > resident_limit {
+            return Err(Failure::new(
+                FailureStage::CompilerResources,
+                format!(
+                    "GLSL compiler exceeded {resident_limit} resident bytes; worker killed and reaped"
+                ),
+            ));
+        }
+    }
     Ok(left.min(WATCH_INTERVAL))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resident_bytes(status: &str) -> std::io::Result<u64> {
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmRSS:") {
+            let mut fields = value.split_whitespace();
+            if let (Some(kib), Some("kB"), None) = (fields.next(), fields.next(), fields.next())
+                && let Some(bytes) = kib.parse::<u64>().ok().and_then(|n| n.checked_mul(1024))
+            {
+                return Ok(bytes);
+            }
+            return Err(std::io::Error::other("invalid VmRSS"));
+        }
+    }
+    // Zombies have no address space and no VmRSS. Any other omission is a
+    // monitoring failure, not evidence that a live compiler uses zero bytes.
+    if status.lines().any(|line| {
+        line.strip_prefix("State:")
+            .is_some_and(|v| matches!(v.split_whitespace().next(), Some("Z" | "X")))
+    }) {
+        Ok(0)
+    } else {
+        Err(std::io::Error::other("missing VmRSS for live compiler"))
+    }
 }
 
 impl Pool {
@@ -320,13 +389,13 @@ pub fn prepare(fragment: &str, line_offset: u32, timeout: Duration) -> Result<Pr
         },
         timeout,
     )? {
-        Response::Prepared(p) => Ok(p),
+        Response::Prepared(p) => Ok(*p),
         _ => Err(process_error("unexpected prepare response")),
     }
 }
 pub fn finish(prepared: &Prepared, timeout: Duration) -> Result<Program, Failure> {
     match default_pool().run(Request::Finish(prepared.clone()), timeout)? {
-        Response::Program(p) => Ok(p),
+        Response::Program(p) => Ok(*p),
         _ => Err(process_error("unexpected finish response")),
     }
 }
@@ -339,7 +408,7 @@ pub fn translate(fragment: &str, line_offset: u32, timeout: Duration) -> Result<
         },
         timeout,
     )? {
-        Response::Program(p) => Ok(p),
+        Response::Program(p) => Ok(*p),
         _ => Err(process_error("unexpected translate response")),
     }
 }
@@ -365,6 +434,16 @@ pub fn msl(
     }
 }
 
+pub(crate) fn diagnostic_msl(module: &naga::Module) -> Result<String, Failure> {
+    match default_pool().run(
+        Request::DiagnosticMsl(module.clone()),
+        crate::cache::DEFAULT_DEADLINE,
+    )? {
+        Response::Msl(source, _) => Ok(source),
+        _ => Err(process_error("unexpected diagnostic MSL response")),
+    }
+}
+
 fn msl_local(
     module: &naga::Module,
     stage: naga::ShaderStage,
@@ -373,11 +452,13 @@ fn msl_local(
     use naga::back::msl;
     let info = crate::pipeline::naga_validate(module)
         .map_err(|e| Failure::new(FailureStage::NagaValidate, e))?;
-    let ep = module
+    let (entry_index, ep) = module
         .entry_points
         .iter()
-        .find(|e| e.stage == stage)
-        .ok_or_else(|| Failure::new(FailureStage::NagaValidate, "missing MSL entry point"))?;
+        .enumerate()
+        .find(|(_, e)| e.stage == stage)
+        .ok_or_else(|| Failure::new(FailureStage::NagaMsl, "missing MSL entry point"))?;
+    validate_slots(module, info.get_entry_point(entry_index), slots)?;
     let resources = slots
         .iter()
         .map(|s| {
@@ -413,7 +494,7 @@ fn msl_local(
             index: naga::proc::BoundsCheckPolicy::Restrict,
             buffer: naga::proc::BoundsCheckPolicy::Restrict,
             image_load: naga::proc::BoundsCheckPolicy::Restrict,
-            binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
+            binding_array: naga::proc::BoundsCheckPolicy::Restrict,
         },
         force_loop_bounding: true,
         emit_int_div_checks: true,
@@ -424,17 +505,84 @@ fn msl_local(
         ..Default::default()
     };
     let (source, translated) = msl::write_string(module, &info, &options, &pipeline)
-        .map_err(|e| Failure::new(FailureStage::NagaValidate, format!("MSL: {e}")))?;
+        .map_err(|e| Failure::new(FailureStage::NagaMsl, format!("MSL: {e}")))?;
     let entry = translated
         .entry_point_names
         .into_iter()
         .next()
         .ok_or_else(|| process_error("MSL emitted no entry point"))?
-        .map_err(|e| Failure::new(FailureStage::NagaValidate, format!("MSL entry: {e}")))?;
+        .map_err(|e| Failure::new(FailureStage::NagaMsl, format!("MSL entry: {e}")))?;
     Ok(Response::Msl(
         format!("#pragma METAL fp math_mode(fast)\n{source}"),
         entry,
     ))
+}
+
+/// A caller supplies the real pipeline layout; the SPIR-V-derived module
+/// decides each resource's kind. Never silently overwrite a duplicate or
+/// invent a missing Metal slot. Extra slots for other stages are allowed.
+fn validate_slots(
+    module: &naga::Module,
+    used: &naga::valid::FunctionInfo,
+    slots: &[Slot],
+) -> Result<(), Failure> {
+    use std::collections::HashSet;
+    let mut bindings = HashSet::new();
+    let mut metal = HashSet::new();
+    for s in slots {
+        if !bindings.insert((s.group, s.binding)) {
+            return Err(Failure::new(
+                FailureStage::Bind,
+                "duplicate resource binding in MSL layout",
+            ));
+        }
+        for (kind, slot) in [(0, s.buffer), (1, s.texture), (2, s.sampler)] {
+            if let Some(slot) = slot
+                && !metal.insert((kind, slot))
+            {
+                return Err(Failure::new(
+                    FailureStage::Bind,
+                    "aliased Metal slots in MSL layout",
+                ));
+            }
+        }
+    }
+    for (handle, global) in module.global_variables.iter() {
+        if used[handle].is_empty() {
+            continue;
+        }
+        let Some(binding) = &global.binding else {
+            continue;
+        };
+        let slot = slots
+            .iter()
+            .find(|s| s.group == binding.group && s.binding == binding.binding);
+        let valid = slot.is_some_and(|s| match global.space {
+            naga::AddressSpace::Uniform | naga::AddressSpace::Storage { .. } => {
+                s.buffer.is_some() && s.texture.is_none() && s.sampler.is_none()
+            }
+            naga::AddressSpace::Handle => match module.types[global.ty].inner {
+                naga::TypeInner::Image { .. } => {
+                    s.texture.is_some() && s.buffer.is_none() && s.sampler.is_none()
+                }
+                naga::TypeInner::Sampler { .. } => {
+                    s.sampler.is_some() && s.buffer.is_none() && s.texture.is_none()
+                }
+                _ => false,
+            },
+            _ => false,
+        });
+        if !valid {
+            return Err(Failure::new(
+                FailureStage::Bind,
+                format!(
+                    "missing or incompatible MSL resource slot at set {} binding {}",
+                    binding.group, binding.binding,
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Worker protocol. Only the helper calls this. Raw compiler calls stay in
@@ -455,6 +603,13 @@ pub fn worker_main() -> Result<(), Box<dyn std::error::Error>> {
             let request: Request =
                 serde_json::from_slice(&bytes).map_err(|e| process_error(e.to_string()))?;
             match request {
+                Request::Fuzz {
+                    fragment,
+                    line_offset,
+                } => Ok(Response::Fuzz(crate::fuzz::outcome(&fragment, line_offset))),
+                Request::DiagnosticMsl(module) => {
+                    crate::pipeline::msl_local(&module).map(|s| Response::Msl(s, String::new()))
+                }
                 Request::Msl {
                     module,
                     stage,
@@ -463,14 +618,16 @@ pub fn worker_main() -> Result<(), Box<dyn std::error::Error>> {
                 Request::Prepare {
                     fragment,
                     line_offset,
-                } => crate::pipeline::prepare_local(&fragment, line_offset).map(Response::Prepared),
-                Request::Finish(prepared) => prepared.finish_local().map(Response::Program),
+                } => crate::pipeline::prepare_local(&fragment, line_offset)
+                    .map(|p| Response::Prepared(Box::new(p))),
+                Request::Finish(prepared) => prepared
+                    .finish_local()
+                    .map(|p| Response::Program(Box::new(p))),
                 Request::Translate {
                     fragment,
                     line_offset,
-                } => {
-                    crate::pipeline::translate_local(&fragment, line_offset).map(Response::Program)
-                }
+                } => crate::pipeline::translate_local(&fragment, line_offset)
+                    .map(|p| Response::Program(Box::new(p))),
             }
         })?;
     let result = task
@@ -487,7 +644,7 @@ pub fn worker_main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn resource_limits() -> std::io::Result<()> {
     #[repr(C)]
     struct Limit {
@@ -497,7 +654,7 @@ fn resource_limits() -> std::io::Result<()> {
     unsafe extern "C" {
         fn setrlimit(resource: i32, limit: *const Limit) -> i32;
     }
-    // Darwin resource.h: CPU=0, CORE=4. Darwin rejects finite AS/DATA
+    // Darwin/Linux resource.h: CPU=0, CORE=4. Darwin rejects finite AS/DATA
     // hard limits; the parent samples resident memory during IPC instead.
     // No core dumps containing private GLSL.
     for (resource, size) in [(0, 30), (4, 0)] {
@@ -505,16 +662,38 @@ fn resource_limits() -> std::io::Result<()> {
             current: size,
             maximum: size,
         };
-        // SAFETY: native Darwin rlimit layout and a valid immutable pointer.
+        // SAFETY: native Darwin/Linux rlimit layout and a valid immutable pointer.
         if unsafe { setrlimit(resource, &limit) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }
     Ok(())
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn resource_limits() -> std::io::Result<()> {
     Err(std::io::Error::other(
-        "GLSL compiler OS resource limits require macOS",
+        "GLSL compiler OS resource limits require macOS or Linux",
     ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_monitor_fails_closed_except_for_exited_workers() {
+        assert_eq!(
+            linux_resident_bytes("State:\tR (running)\nVmRSS:\t123 kB\n").unwrap(),
+            123 * 1024
+        );
+        assert_eq!(linux_resident_bytes("State:\tZ (zombie)\n").unwrap(), 0);
+        for status in [
+            "",
+            "State:\tR (running)\n",
+            "VmRSS: 2 MB",
+            "VmRSS: 18446744073709551615 kB",
+        ] {
+            assert!(linux_resident_bytes(status).is_err());
+        }
+    }
 }
