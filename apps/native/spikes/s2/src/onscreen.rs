@@ -53,19 +53,33 @@ impl Fixture {
         let top = crate::glass::toolbar_inset().max(52.) as f32 + 12.;
         let tw = (w - 510.).max(80.) / 40.;
         let th = (h - top - 208.).max(100.) / 25.;
-        for (i, t) in self.tiles.iter().enumerate() {
-            window.paint_texture(
-                Bounds::new(
-                    point(
-                        px(204. + (i % 40) as f32 * tw),
-                        px(top + (i / 40) as f32 * th),
+        let paint = |window: &mut Window| {
+            for (i, t) in self.tiles.iter().enumerate() {
+                window.paint_texture(
+                    Bounds::new(
+                        point(
+                            px(204. + (i % 40) as f32 * tw),
+                            px(top + (i / 40) as f32 * th),
+                        ),
+                        size(px(tw - 1.), px(th - 1.)),
                     ),
-                    size(px(tw - 1.), px(th - 1.)),
-                ),
-                t.clone(),
+                    t.clone(),
+                );
+            }
+        };
+        // Non-overlapping tiles share one stacking layer. Cached scene replay
+        // otherwise reinserts 1,000 bounds into the order tree on every frame.
+        // Keep the ungrouped path for an identical-pixels A/B control.
+        if std::env::var_os("S2_UNGROUPED_TILES").is_some() {
+            paint(window);
+        } else {
+            window.paint_layer(
+                Bounds::new(point(px(204.), px(top)), size(px(40. * tw), px(25. * th))),
+                paint,
             );
         }
     }
+
     pub fn paint(&mut self, _w: f32, _h: f32, window: &mut Window) {
         self.frames += 1;
         let frame = (self.started.elapsed().as_secs_f64() * 60.) as u64;

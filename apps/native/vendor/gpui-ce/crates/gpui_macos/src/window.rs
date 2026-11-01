@@ -355,6 +355,14 @@ unsafe fn build_classes() {
                 sel!(accessibilityHitTest:),
                 composition_accessibility_hit_test as unsafe extern "C" fn(_, _, _) -> _,
             );
+            decl.add_method(
+                sel!(metalDisplayLink:needsUpdate:),
+                metal_display_link_step as unsafe extern "C" fn(_, _, _, _),
+            );
+            decl.add_method(
+                sel!(pmDisplayLink:),
+                ca_display_link_step as unsafe extern "C" fn(_, _, _),
+            );
             decl.add_method(sel!(dealloc), dealloc_view as unsafe extern "C" fn(_, _));
 
             decl.add_method(
@@ -692,11 +700,6 @@ unsafe fn build_window_class(
         );
 
         decl.add_method(
-            sel!(addTitlebarAccessoryViewController:),
-            add_titlebar_accessory_view_controller as unsafe extern "C" fn(_, _, _),
-        );
-
-        decl.add_method(
             sel!(moveTabToNewWindow:),
             move_tab_to_new_window as unsafe extern "C" fn(_, _, _),
         );
@@ -837,6 +840,9 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
+    // P-120: AppKit's compositor-aligned source (macOS 14+).
+    ca_display_link: Option<Retained<Objc2Object>>,
+    frame_budget_seconds: f64,
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
@@ -1011,7 +1017,8 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
-        // Powermove P-120: WindowFrameSource changes subscriptions only on display moves.
+        // Core Animation follows the layer/view's display and refresh timing.
+        // Metal updates also provide a drawable and a CPU submission deadline.
         unsafe {
             if !self
                 .native_window
@@ -1027,6 +1034,43 @@ impl MacWindowState {
             self.stop_display_link();
             return;
         };
+        unsafe {
+            let view = self.native_view.as_ref();
+            let available: Bool =
+                msg_send![view, respondsToSelector: sel!(displayLinkWithTarget:selector:)];
+            if available.as_bool() && std::env::var_os("PM_GPUI_CV_DISPLAY_LINK").is_none() {
+                if self.ca_display_link.is_none() {
+                    let link: Retained<Objc2Object>;
+                    #[cfg(not(feature = "wgpu"))]
+                    if std::env::var_os("PM_GPUI_CA_DISPLAY_LINK").is_none() {
+                        let allocated: *mut Objc2Object =
+                            msg_send![class!(CAMetalDisplayLink), alloc];
+                        let raw: *mut Objc2Object = msg_send![allocated, initWithMetalLayer: self.renderer.layer_ptr() as ObjcId];
+                        link = Retained::from_raw(raw).expect("CAMetalDisplayLink initialization");
+                        let _: () = msg_send![&*link, setDelegate: view];
+                        let _: () = msg_send![&*link, setPreferredFrameLatency: 2.0_f32];
+                    } else {
+                        link = msg_send![view, displayLinkWithTarget: view, selector: sel!(pmDisplayLink:)];
+                    }
+                    #[cfg(feature = "wgpu")]
+                    {
+                        link = msg_send![view, displayLinkWithTarget: view, selector: sel!(pmDisplayLink:)];
+                    }
+                    let run_loop = objc2_foundation::NSRunLoop::mainRunLoop();
+                    let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: objc2_foundation::NSRunLoopCommonModes];
+                    self.ca_display_link = Some(link);
+                }
+                let screen = self.native_window.screen();
+                let hz: isize = msg_send![screen, maximumFramesPerSecond];
+                self.frame_budget_seconds = 0.5 / hz.max(1) as f64;
+                let link = self.ca_display_link.as_ref().unwrap();
+                let range =
+                    objc2_quartz_core::CAFrameRateRange::new(hz as f32, hz as f32, hz as f32);
+                let _: () = msg_send![&**link, setPreferredFrameRateRange: range];
+                let _: () = msg_send![&**link, setPaused: false];
+                return;
+            }
+        }
         let data = self.native_view.as_ptr() as *mut c_void;
         self.frame_source
             .get_or_insert_with(|| WindowFrameSource::new(data, step))
@@ -1035,6 +1079,11 @@ impl MacWindowState {
     }
 
     fn stop_display_link(&mut self) {
+        if let Some(link) = &self.ca_display_link {
+            unsafe {
+                let _: () = msg_send![&**link, setPaused: true];
+            }
+        }
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
         }
@@ -1284,6 +1333,8 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
+                ca_display_link: None,
+                frame_budget_seconds: 1. / 240.,
                 renderer,
                 force_render_pending: false,
                 request_frame_callback: None,
@@ -1556,6 +1607,11 @@ impl Drop for MacWindow {
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
         this.frame_source.take();
+        if let Some(link) = this.ca_display_link.take() {
+            unsafe {
+                let _: () = msg_send![&*link, invalidate];
+            }
+        }
         unsafe {
             this.native_window.setDelegate_(NIL);
         }
@@ -2185,13 +2241,12 @@ impl PlatformWindow for MacWindow {
                 .last_draw
                 .is_some_and(|t| now.duration_since(t) < crate::composition::CONTINUOUS_FRAME);
             this.last_draw = Some(now);
-            let sync = std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none()
-                && crate::composition::presents_with_transaction(
-                    this.sync_present_requested,
-                    transaction.as_ref(),
-                    continuous,
-                )
-                || this.sync_present_requested;
+            let sync = crate::composition::presents_with_transaction(
+                this.sync_present_requested,
+                transaction.as_ref(),
+                continuous && std::env::var_os("PM_GPUI_ASYNC_PRESENT").is_none(),
+                this.ca_display_link.is_some(),
+            );
             this.renderer.set_presents_with_transaction(sync);
         }
         #[cfg(feature = "wgpu")]
@@ -3454,6 +3509,55 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     }
 }
 
+unsafe extern "C" fn metal_display_link_step(
+    view: &Objc2Object,
+    _: Sel,
+    _: &Objc2Object,
+    update: &Objc2Object,
+) {
+    #[cfg(not(feature = "wgpu"))]
+    unsafe {
+        let state = get_window_state(view);
+        let deadline: f64 = msg_send![update, targetTimestamp];
+        if !crate::composition::has_frame_budget(
+            objc2_quartz_core::CACurrentMediaTime(),
+            deadline,
+            state.lock().frame_budget_seconds,
+        ) {
+            if std::env::var_os("PM_FRAME_PACING").is_some() {
+                println!("PM_GPUI_SKIP_DEADLINE");
+            }
+            return;
+        }
+        let drawable: *mut Objc2Object = msg_send![update, drawable];
+        let drawable = metal::MetalDrawableRef::from_ptr(drawable.cast()).to_owned();
+        state
+            .lock()
+            .renderer
+            .set_display_link_drawable(Some(drawable));
+        let target: f64 = msg_send![update, targetPresentationTimestamp];
+        if std::env::var_os("PM_FRAME_PACING").is_some() {
+            let deadline: f64 = msg_send![update, targetTimestamp];
+            println!(
+                "PM_GPUI_TARGET {target:.9} deadline_lead_ms={:.6}",
+                (deadline - objc2_quartz_core::CACurrentMediaTime()) * 1000.
+            );
+        }
+        step(view as *const _ as *mut c_void);
+        state.lock().renderer.set_display_link_drawable(None);
+    }
+}
+
+unsafe extern "C" fn ca_display_link_step(view: &Objc2Object, _: Sel, link: &Objc2Object) {
+    unsafe {
+        let target: f64 = msg_send![link, targetTimestamp];
+        if std::env::var_os("PM_FRAME_PACING").is_some() {
+            println!("PM_GPUI_TARGET {target:.9}");
+        }
+        step(view as *const _ as *mut c_void);
+    }
+}
+
 extern "C" fn step(view: *mut c_void) {
     unsafe {
         let view = view as ObjcId;
@@ -3998,23 +4102,9 @@ unsafe fn remove_layer_background(layer: ObjcId) {
     }
 }
 
-unsafe extern "C" fn add_titlebar_accessory_view_controller(
-    this: &Objc2Object,
-    _: Sel,
-    view_controller: ObjcId,
-) {
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSWindow)), addTitlebarAccessoryViewController: view_controller];
-
-        // Hide the native tab bar and set its height to 0, since we render our own.
-        let accessory_view: ObjcId = msg_send![view_controller, view];
-        let _: () = msg_send![accessory_view, setHidden: Bool::new(true)];
-        let mut frame: Objc2NSRect = msg_send![accessory_view, frame];
-        frame.size.height = 0.0;
-        let _: () = msg_send![accessory_view, setFrame: frame];
-    }
-}
-
+// P-120 / shell3: leave addTitlebarAccessoryViewController: to NSWindow.
+// Upstream hid and collapsed every accessory for its custom tab strip, which
+// made Window > Show Tab Bar invisible even when AppKit reported it visible.
 unsafe extern "C" fn move_tab_to_new_window(this: &Objc2Object, _: Sel, _: ObjcId) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSWindow)), moveTabToNewWindow:NIL];

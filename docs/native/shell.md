@@ -192,3 +192,15 @@ restore as one native tab group (verified: two windows, one hidden as a tab), bu
 native **tab bar did not appear** with this window style (unified-compact toolbar,
 transparent titlebar); switching tabs by Show Next Tab was not tested. Needs a fix in the
 window chrome or an explicit tab-bar accessory.
+
+
+## Native tab-bar vendor fix (2026-11-01, P-120 lane)
+
+The vendor `GPUIWindow` override of `addTitlebarAccessoryViewController:` hid
+and reduced every native accessory to zero height, assuming an application-owned
+tab strip. That override is removed: AppKit now owns its native tab-bar accessory.
+The S2 `--verify-tab-bar` regression probe creates one GPUI window with a transparent
+titlebar and a unified-compact NSToolbar, invokes the same `toggleTabBar:` selector
+as Window ▸ Show Tab Bar, checks both AppKit's visibility flag and a non-hidden,
+positive-height accessory, then hides the bar again and quits. No replacement
+accessory or visual design change is introduced. See the P-120 validation in S2.

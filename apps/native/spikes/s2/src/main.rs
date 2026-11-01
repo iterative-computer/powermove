@@ -5,6 +5,7 @@ mod native;
 mod onscreen;
 mod p120;
 mod slot_view;
+mod tab_bar;
 mod verify;
 use gpui::{prelude::*, *};
 use std::{cell::RefCell, rc::Rc};
@@ -163,6 +164,9 @@ impl Render for Demo {
     }
 }
 fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|a| a == "--verify-tab-bar") {
+        return tab_bar::run();
+    }
     if std::env::args().any(|a| a == "--verify") {
         return verify::run();
     }

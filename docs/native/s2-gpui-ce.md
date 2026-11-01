@@ -677,3 +677,146 @@ temporarily enabled Kotoeri parent was disabled again.
 Captures (outside Git): `/tmp/pm-onscreen2/s2/crop-converted.png`
 (candidate window), `japanese-3-committed*.png`, and the P-120 batch
 screenshots `ptext-{tiles,timeline}-{before,after}-0.png`.
+
+
+## Compositor-paced P-120 implementation (2026-11-01, lane `feat/na-p120`)
+
+**Headroom and drawable acquisition improved; 120-Hz gate still FAIL. S2 stays
+OPEN / NOT PASSED.** All four measured candidate rows meet the **4.166667-ms
+main-thread frame-duration p95** budget, but all still contain missing intervals
+and zero `presentedTime` values. This is not a zero-drop result or P1 approval.
+
+### Strategy and contract
+
+- Use **CAMetalDisplayLink** on macOS 14+ for the Metal window renderer. Each update
+  supplies one available drawable; hold it only for that callback and release it
+  even when GPUI has nothing to paint. This removes `nextDrawable` acquisition
+  from continuous main-thread rendering. Pause on occlusion and invalidate on
+  window teardown. The legacy CVDisplayLink implementation remains the fallback.
+- Request two frames of GPU render-ahead with `preferredFrameLatency = 2`. Start
+  a callback only if half a refresh still fits before its `targetTimestamp` CPU
+  deadline (4.166667 ms at 120 Hz). Rejection leaves the pending GPUI callbacks
+  and dirty state queued for the next update; it does not count as a successful
+  presentation. Track actual timestamps and all measured gaps as before.
+- For unchanged geometry, commit the command buffer and call the supplied
+  drawable's `present()` before the CPU deadline, without a scheduling wait.
+  [Apple's update contract](https://developer.apple.com/documentation/quartzcore/cametaldisplaylinkdelegate/metaldisplaylink(_:needsupdate:))
+  requires that deadline; it prohibits timed-present variants on this path.
+  Geometry movement, first publication, untracked hosts and AppKit synchronous
+  paints still couple the drawable to the composition CATransaction. Diagnostic
+  async overrides no longer bypass geometry/forced-paint coupling.
+- Group the fixture's **1,000 distinct, non-overlapping texture tiles** into one
+  `paint_layer`. Cached scene replay previously rebuilt 1,000 stacking-tree
+  entries every frame. Sampling the baseline located that cost in BoundsTree
+  insertion. The group keeps all sources, producer updates and GPU leases;
+  grouped and replayed scenes must match ungrouped pixels exactly. No UI design,
+  resolution or workload-count reduction.
+- Keep the existing full main-thread wall-duration gate (drawing, encoding and
+  blocking included). Also report actual running CPU via
+  `CLOCK_THREAD_CPUTIME_ID`; running CPU does not replace the wall-duration gate.
+  Encode against the supplied drawable texture's actual dimensions during resize.
+
+`PM_GPUI_CV_DISPLAY_LINK=1` selects the old source;
+`PM_GPUI_CA_DISPLAY_LINK=1` selects the NSView CADisplayLink diagnostic.
+`--p120` compares legacy CV synchronous/async policies with the new default.
+A short plain-CADisplayLink async timeline trial still had **6.934 ms** drawable
+wait p95 and **9.934 ms** frame p95; that path did not solve pool starvation.
+Short Metal trials removed the wait but did not eliminate unknown timestamps,
+so neither a source switch nor deadline admission is called a passed gate.
+
+### On-screen before / after
+
+Base binary: `0efb71afa` before this patch. Pinned **Rust 1.96.1**, development
+profile, same shared `~/Developer/pm-target`; built-in 120-Hz M5 display, macOS 27.2.
+Each completed case ran for 65 s, with the first 30 CPU/presentation samples
+excluded by the unchanged evidence rules. The original binary was copied outside
+Git for the control. Before rows are the old continuous transaction policy; after
+rows use compositor pacing and tile grouping, with fixture baseline/cache flags
+unchanged between each corresponding pair.
+
+The console was unlocked, checked with `/tmp/pm-shots/is_locked.sh`
+(**IOConsoleLocked**, not CGSSessionScreenIsLocked). Every timing run held both
+`/tmp/pm-build.lock` and a GUI lock created by this lane. All owned applications
+were terminated and the GUI lock released. Desktop captures and raw logs stay
+under `/tmp/pm-p120/`, outside Git. No user profile/project or Keychain access.
+
+**Shared-machine diagnostic:** one-minute load before/after the baseline cases
+ranged **6.06–7.34**; candidate case endpoints ranged **3.83–6.02**. Existing
+Electron and system FileProvider activity remained present; no other apps were
+closed. The first baseline tile case includes a two-second `sample` profile and
+its 241.664-ms maximum gap is therefore additionally perturbed. Do not treat
+these runs as a settled, paired performance certification. A disk guard stopped
+the first candidate batch during its third case; only completed cases below
+are used, with both timeline cases rerun after free space recovered above 8 GiB.
+
+“CPU frame” below is the complete main-thread **wall** duration used by the gate.
+Drawable wait is main-thread acquisition p95. All times are milliseconds.
+
+| Workload | CPU frame p50/p95, before → after | Missed 120-Hz intervals, before → after | Drawable wait p95, before → after | Unknown timestamps, before → after |
+|---|---|---|---|---|
+| Tiles, repeated subtree + native viewer | 6.074/6.999 → **2.311/3.585** | 217 → **124** | 0.010708 → **0.000292** | 102 → 103 |
+| Tiles, cached subtree + held native viewer | 5.921/6.428 → **2.052/3.642** | 104 → **112** | 0.019125 → **0.000292** | 96 → 95 |
+| Timeline, repeated native viewer | 3.175/3.608 → **2.886/3.503** | 232 → **126** | 0.012625 → **0.000250** | 224 → 109 |
+| Timeline, held native viewer | 3.065/3.537 → **2.711/3.143** | 223 → **95** | 0.027084 → **0.000292** | 214 → 82 |
+
+After-patch running main-thread CPU and evidence census:
+
+| Workload | Running CPU p50/p95 ms | CPU samples | Valid positive presents | Deadline skips (whole run) |
+|---|---|---|---|---|
+| Tiles, repeated subtree + native viewer | 2.243/3.301 | 7370 | 7267 | 0 |
+| Tiles, cached subtree + held native viewer | 2.047/3.579 | 7370 | 7275 | 0 |
+| Timeline, repeated native viewer | 2.816/3.247 | 7368 | 7260 | 1 |
+| Timeline, held native viewer | 2.708/3.092 | 7368 | 7287 | 0 |
+
+There were **no post-warmup main-thread scheduling waits** in the candidate rows.
+Baseline wait p95 was 0.373 / 0.381 / 0.063 / 0.082 ms in table order. Tile render
+counts remained 7,401 (baseline fixture) and 2 (cached fixture). The cached-tile
+miss count did not improve (104 → 112); shared load differs and no pacing
+regression/improvement attribution is justified from that small difference.
+Unknown timestamps invalidate **all four rows**. Remaining compositor misses
+are not explained away by the macOS edit-to-display latency floor: the Budget
+endpoint decision does not waive the S2 zero-miss pacing requirement.
+
+### Validation and reproduction
+
+- Pinned 1.96.1 build **PASS**; **63 Rust tests PASS**, including 19 S2 tests
+  (10 P-120 policy/deadline tests) and design/shell model, snapshot, renderer and
+  cache regressions. Formatting and the native workspace's locked metadata check
+  pass. Existing spike deprecation/dead-code warnings remain.
+- AppKit text/AX bridge probe **PASS**: marked UTF-16 text/commit, multiline,
+  numeric validation, clip/dense geometry, foreign-child order/parents,
+  reorder/removal, AccessKit update/unregister and retained-node teardown.
+- Exact-pixel GPU comparison: grouped and cached/replayed 1,000-tile scenes equal
+  the original ungrouped image. The independent 60-Hz producer remains enabled.
+- Four parser regressions verify complete 120-Hz evidence, missing/zero/duplicate
+  timestamps, a real presentation gap, and that running CPU cannot hide a wall-time
+  headroom failure.
+- The native tab-bar override that hid/collapsed AppKit titlebar accessories is
+  removed. `--verify-tab-bar` uses one window, a transparent titlebar and a
+  unified-compact NSToolbar; checks Show, a visible positive-height native
+  accessory, Hide, then quits. **PASS**: `shown=true`,
+  `accessory_visible=true`, `hidden=true`, process exits successfully. It uses no
+  stored shell profile.
+
+```sh
+source engine/env.sh
+export PATH="$HOME/.local/bin:$PATH"
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+export PTEXT_META=/tmp/pm-p120/reproduce-meta
+export PTEXT_ARTIFACTS=/tmp/pm-p120/reproduce
+apps/native/spikes/s2/scripts/check-ptext-120.sh
+
+# Timing only: driver acquires its GUI lock; outer lock excludes all Cargo builds.
+flock /tmp/pm-build.lock python3 apps/native/spikes/s2/scripts/check-ptext-120.py \
+  --display --no-build --runs 1
+
+python3 -m unittest discover -s apps/native/spikes/s2/scripts -p test_p120_metrics.py
+# --verify-tab-bar must also run unlocked under both locks, with a temp-only app.
+```
+
+The driver wraps Cargo commands in the build lock, enforces the 8-GiB floor,
+keeps results incrementally, and mirrors repository depth in temporary metadata
+so specification tests can resolve their docs/theme files. No shared target,
+profile or secret-scanning exception is introduced. Thirty repetitions, mixed
+rate/display moves, a settled reference/corpus comparison and zero-miss display
+acceptance remain unverified; the diagnostic itself still fails.

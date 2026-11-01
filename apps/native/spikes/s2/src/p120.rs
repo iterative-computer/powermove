@@ -1,5 +1,5 @@
-//! P-120 contract: GPUI blocks on the composition transaction only on frames where
-//! native slot geometry moved, then returns to the asynchronous present.
+//! P-120 contract: geometry and AppKit synchronous paints remain transactional.
+//! Compositor-paced stable frames use a supplied drawable without main-thread waits.
 #[cfg(test)]
 mod tests {
     use gpui_macos::composition::{SlotChange, probe};
@@ -87,6 +87,43 @@ mod tests {
             gpui_macos::composition::CONTINUOUS_FRAME,
             std::time::Duration::from_micros(33_334)
         );
+    }
+
+    #[test]
+    fn compositor_pacing_keeps_geometry_atomic_without_continuous_waits() {
+        let (_reg, next, _) = host(0x70);
+        assert_eq!(probe::paced_frame(0x70, false), Some(true), "fresh slots");
+        for _ in 0..4 {
+            assert_eq!(probe::paced_frame(0x70, false), Some(false));
+        }
+        next.set(SlotChange::Moved);
+        assert_eq!(probe::paced_frame(0x70, false), Some(true));
+        next.set(SlotChange::Unchanged);
+        assert_eq!(probe::paced_frame(0x70, true), Some(true), "AppKit paint");
+        assert_eq!(probe::paced_frame(0x70, false), Some(false), "resets");
+    }
+
+    #[test]
+    fn compositor_pacing_does_not_make_untracked_geometry_async() {
+        let _reg = probe::register_untracked(0x80, Rc::new(|| {}));
+        for _ in 0..4 {
+            assert_eq!(probe::paced_frame(0x80, false), Some(true));
+        }
+    }
+
+    #[test]
+    fn deadline_admission_reserves_half_a_refresh_and_rejects_stale_updates() {
+        let budget = 1. / 240.;
+        assert!(probe::has_frame_budget(10., 10. + 1. / 120., budget));
+        assert!(!probe::has_frame_budget(10., 10. + budget, budget));
+        assert!(!probe::has_frame_budget(10., 9., budget));
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!probe::has_frame_budget(invalid, 11., budget));
+            assert!(!probe::has_frame_budget(10., invalid, budget));
+            assert!(!probe::has_frame_budget(10., 11., invalid));
+        }
+        assert!(!probe::has_frame_budget(10., 11., 0.));
+        assert!(!probe::has_frame_budget(10., 11., -budget));
     }
 
     #[test]
