@@ -1,0 +1,7137 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`wire tree / AX: empty-no-project (placeholders do not certify rendering): empty-no-project 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+      5,
+      7,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "data-pm-component": "empty-state",
+      "label": "No Composition",
+      "role": "group",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "column",
+        "justifyContent": "center",
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "role": "heading",
+      "style": {
+        "color": {
+          "token": "colors.text",
+        },
+        "fontSize": {
+          "token": "typography.heading",
+        },
+        "fontWeight": {
+          "token": "typography.semibold_weight",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "4": {
+    "children": [],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {},
+    "text": "No Composition",
+    "type": "text",
+  },
+  "5": {
+    "children": [
+      6,
+    ],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.reading",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "6": {
+    "children": [],
+    "id": 6,
+    "input": null,
+    "listeners": {},
+    "parent": 5,
+    "props": {},
+    "text": "Open a project to start editing.",
+    "type": "text",
+  },
+  "7": {
+    "children": [
+      8,
+    ],
+    "id": 7,
+    "input": null,
+    "listeners": {
+      "click": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 2,
+    "props": {
+      "data-pm-component": "toolbar-item",
+      "id": "viewer.open",
+      "label": "Open…",
+      "style": {
+        "color": {
+          "token": "colors.secondary",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+        "symbolSize": {
+          "token": "metrics.symbol_toolbar",
+        },
+      },
+    },
+    "text": "",
+    "type": "button",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 7,
+    "props": {},
+    "text": "Open…",
+    "type": "text",
+  },
+}
+`;
+
+exports[`wire tree / AX: empty-composition (placeholders do not certify rendering): empty-composition 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": true,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 0,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 0 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: loading-first-frame (placeholders do not certify rendering): loading-first-frame 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": true,
+          "resource": null,
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: loading-retains-last-good (placeholders do not certify rendering): loading-retains-last-good 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": true,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: selected (placeholders do not certify rendering): selected 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 1,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 1 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: hover (placeholders do not certify rendering): hover 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "hover",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: focus (placeholders do not certify rendering): focus 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "focus",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: disabled-no-project (placeholders do not certify rendering): disabled-no-project 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+      5,
+      7,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "data-pm-component": "empty-state",
+      "label": "No Composition",
+      "role": "group",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "column",
+        "justifyContent": "center",
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "role": "heading",
+      "style": {
+        "color": {
+          "token": "colors.text",
+        },
+        "fontSize": {
+          "token": "typography.heading",
+        },
+        "fontWeight": {
+          "token": "typography.semibold_weight",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "4": {
+    "children": [],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {},
+    "text": "No Composition",
+    "type": "text",
+  },
+  "5": {
+    "children": [
+      6,
+    ],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.reading",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "6": {
+    "children": [],
+    "id": 6,
+    "input": null,
+    "listeners": {},
+    "parent": 5,
+    "props": {},
+    "text": "Open a project to start editing.",
+    "type": "text",
+  },
+  "7": {
+    "children": [
+      8,
+    ],
+    "id": 7,
+    "input": null,
+    "listeners": {
+      "click": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 2,
+    "props": {
+      "data-pm-component": "toolbar-item",
+      "id": "viewer.open",
+      "label": "Open…",
+      "style": {
+        "color": {
+          "token": "colors.secondary",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+        "symbolSize": {
+          "token": "metrics.symbol_toolbar",
+        },
+      },
+    },
+    "text": "",
+    "type": "button",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 7,
+    "props": {},
+    "text": "Open…",
+    "type": "text",
+  },
+}
+`;
+
+exports[`wire tree / AX: error-last-good (placeholders do not certify rendering): error-last-good 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": true,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: drag-media (placeholders do not certify rendering): drag-media 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "media-drop",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: drag-effect (placeholders do not certify rendering): drag-effect 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "effect-drop",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: multi-select (placeholders do not certify rendering): multi-select 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: source-image (placeholders do not certify rendering): source-image 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      15,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "10": {
+    "children": [
+      11,
+      13,
+    ],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "11": {
+    "children": [
+      12,
+    ],
+    "id": 11,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 10,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "12": {
+    "children": [],
+    "id": 12,
+    "input": null,
+    "listeners": {},
+    "parent": 11,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "13": {
+    "children": [
+      14,
+    ],
+    "id": 13,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 10,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "14": {
+    "children": [],
+    "id": 14,
+    "input": null,
+    "listeners": {},
+    "parent": 13,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "15": {
+    "children": [],
+    "id": 15,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": {
+          "duration": null,
+          "epoch": "1",
+          "id": "a",
+          "kind": "image",
+          "name": "Still.png",
+          "playing": false,
+          "time": 0,
+        },
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+      10,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "space-between",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+      8,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.muted",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Source:",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.text",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "whiteSpace": "nowrap",
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Still.png",
+    "type": "text",
+  },
+  "8": {
+    "children": [
+      9,
+    ],
+    "id": 8,
+    "input": null,
+    "listeners": {
+      "click": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "data-pm-component": "toolbar-item",
+      "id": "viewer.source.close",
+      "label": "Back to composition",
+      "style": {
+        "color": {
+          "token": "colors.accent_text",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+        "symbolSize": {
+          "token": "metrics.symbol_toolbar",
+        },
+      },
+    },
+    "text": "",
+    "type": "button",
+  },
+  "9": {
+    "children": [],
+    "id": 9,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {},
+    "text": "Back to Composition",
+    "type": "text",
+  },
+}
+`;
+
+exports[`wire tree / AX: source-video (placeholders do not certify rendering): source-video 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      15,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "10": {
+    "children": [
+      11,
+      13,
+    ],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "11": {
+    "children": [
+      12,
+    ],
+    "id": 11,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 10,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "12": {
+    "children": [],
+    "id": 12,
+    "input": null,
+    "listeners": {},
+    "parent": 11,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "13": {
+    "children": [
+      14,
+    ],
+    "id": 13,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 10,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "14": {
+    "children": [],
+    "id": 14,
+    "input": null,
+    "listeners": {},
+    "parent": 13,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "15": {
+    "children": [],
+    "id": 15,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": {
+          "duration": 3,
+          "epoch": "2",
+          "id": "a",
+          "kind": "video",
+          "name": "Take.mov",
+          "playing": false,
+          "time": 0.125,
+        },
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+      10,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "space-between",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+      8,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.muted",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Source:",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.text",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "whiteSpace": "nowrap",
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Take.mov",
+    "type": "text",
+  },
+  "8": {
+    "children": [
+      9,
+    ],
+    "id": 8,
+    "input": null,
+    "listeners": {
+      "click": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "data-pm-component": "toolbar-item",
+      "id": "viewer.source.close",
+      "label": "Back to composition",
+      "style": {
+        "color": {
+          "token": "colors.accent_text",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+        "symbolSize": {
+          "token": "metrics.symbol_toolbar",
+        },
+      },
+    },
+    "text": "",
+    "type": "button",
+  },
+  "9": {
+    "children": [],
+    "id": 9,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {},
+    "text": "Back to Composition",
+    "type": "text",
+  },
+}
+`;
+
+exports[`wire tree / AX: source-audio (placeholders do not certify rendering): source-audio 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      15,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "10": {
+    "children": [
+      11,
+      13,
+    ],
+    "id": 10,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "11": {
+    "children": [
+      12,
+    ],
+    "id": 11,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 10,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "12": {
+    "children": [],
+    "id": 12,
+    "input": null,
+    "listeners": {},
+    "parent": 11,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "13": {
+    "children": [
+      14,
+    ],
+    "id": 13,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 10,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "14": {
+    "children": [],
+    "id": 14,
+    "input": null,
+    "listeners": {},
+    "parent": 13,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "15": {
+    "children": [],
+    "id": 15,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": {
+          "duration": 3,
+          "epoch": "3",
+          "id": "a",
+          "kind": "audio",
+          "name": "VO_take03.wav",
+          "playing": true,
+          "time": 0.125,
+        },
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+      10,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "space-between",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+      8,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.muted",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Source:",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {},
+    "parent": 3,
+    "props": {
+      "style": {
+        "color": {
+          "token": "colors.text",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "whiteSpace": "nowrap",
+      },
+    },
+    "text": "",
+    "type": "text",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "VO_take03.wav",
+    "type": "text",
+  },
+  "8": {
+    "children": [
+      9,
+    ],
+    "id": 8,
+    "input": null,
+    "listeners": {
+      "click": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "data-pm-component": "toolbar-item",
+      "id": "viewer.source.close",
+      "label": "Back to composition",
+      "style": {
+        "color": {
+          "token": "colors.accent_text",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+        "symbolSize": {
+          "token": "metrics.symbol_toolbar",
+        },
+      },
+    },
+    "text": "",
+    "type": "button",
+  },
+  "9": {
+    "children": [],
+    "id": 9,
+    "input": null,
+    "listeners": {},
+    "parent": 8,
+    "props": {},
+    "text": "Back to Composition",
+    "type": "text",
+  },
+}
+`;
+
+exports[`wire tree / AX: playing-auto-half (placeholders do not certify rendering): playing-auto-half 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: playing-auto-full (placeholders do not certify rendering): playing-auto-full 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Full",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Full resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: focus-workspace (placeholders do not certify rendering): focus-workspace 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Focus",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: full-screen (placeholders do not certify rendering): full-screen 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "FullScreen",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: lost-canvas (placeholders do not certify rendering): lost-canvas 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": true,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: hidden-controls (placeholders do not certify rendering): hidden-controls 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": false,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: custom-zoom (placeholders do not certify rendering): custom-zoom 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": 0.54321,
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "54 %",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 2,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 2 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
+
+exports[`wire tree / AX: 60000-selected-no-row-list (placeholders do not certify rendering): 60000-selected-no-row-list 1`] = `
+{
+  "0": {
+    "children": [
+      1,
+    ],
+    "id": 0,
+    "input": null,
+    "listeners": {},
+    "parent": null,
+    "props": {},
+    "text": "",
+    "type": "root",
+  },
+  "1": {
+    "children": [
+      2,
+      8,
+    ],
+    "id": 1,
+    "input": null,
+    "listeners": {},
+    "parent": 0,
+    "props": {
+      "id": "viewer",
+      "label": "Viewer",
+      "role": "group",
+      "style": {
+        "background": {
+          "token": "colors.panel",
+        },
+        "borderRadius": {
+          "token": "metrics.panel_radius",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "2": {
+    "children": [
+      3,
+    ],
+    "id": 2,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.bar",
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+        "height": {
+          "token": "metrics.header",
+        },
+        "justifyContent": "end",
+        "paddingLeft": {
+          "token": "metrics.inset",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "3": {
+    "children": [
+      4,
+      6,
+    ],
+    "id": 3,
+    "input": null,
+    "listeners": {},
+    "parent": 2,
+    "props": {
+      "style": {
+        "alignItems": "center",
+        "display": "flex",
+        "flexDirection": "row",
+        "gap": {
+          "token": "metrics.gap",
+        },
+      },
+    },
+    "text": "",
+    "type": "div",
+  },
+  "4": {
+    "children": [
+      5,
+    ],
+    "id": 4,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.zoom",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.zoom",
+      "label": "Zoom, Fit, 54 percent",
+      "options": [
+        {
+          "label": "Fit",
+          "v": "fit",
+        },
+        {
+          "label": "5 %",
+          "v": 0.05,
+        },
+        {
+          "label": "12.5 %",
+          "v": 0.125,
+        },
+        {
+          "label": "25 %",
+          "v": 0.25,
+        },
+        {
+          "label": "50 %",
+          "v": 0.5,
+        },
+        {
+          "label": "100 %",
+          "v": 1,
+        },
+        {
+          "label": "200 %",
+          "v": 2,
+        },
+        {
+          "label": "400 %",
+          "v": 4,
+        },
+        {
+          "label": "800 %",
+          "v": 8,
+        },
+        {
+          "label": "Zoom In",
+          "v": "viewer.zoom.in",
+        },
+        {
+          "label": "Zoom Out",
+          "v": "viewer.zoom.out",
+        },
+        {
+          "label": "Actual Size",
+          "v": "actual",
+        },
+        {
+          "label": "Fit Composition",
+          "v": "viewer.fit",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Zoom",
+      "value": "fit",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "5": {
+    "children": [],
+    "id": 5,
+    "input": null,
+    "listeners": {},
+    "parent": 4,
+    "props": {},
+    "text": "Fit (54 %)",
+    "type": "text",
+  },
+  "6": {
+    "children": [
+      7,
+    ],
+    "id": 6,
+    "input": null,
+    "listeners": {
+      "change": {
+        "bubble": true,
+        "capture": false,
+        "keys": [],
+        "preventDefault": false,
+      },
+    },
+    "parent": 3,
+    "props": {
+      "binding": "viewer.quality",
+      "control": "select",
+      "data-pm-component": "pop-up-button",
+      "id": "viewer.quality",
+      "label": "Preview resolution, Auto, currently Half",
+      "options": [
+        {
+          "label": "Auto",
+          "v": "auto",
+        },
+        {
+          "label": "Full",
+          "v": "1",
+        },
+        {
+          "label": "Half",
+          "v": "0.5",
+        },
+        {
+          "label": "Quarter",
+          "v": "0.25",
+        },
+      ],
+      "style": {
+        "background": null,
+        "borderRadius": {
+          "token": "metrics.control_radius",
+        },
+        "color": {
+          "token": "colors.secondary",
+        },
+        "fontSize": {
+          "token": "typography.body",
+        },
+        "height": {
+          "token": "metrics.field",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "title": "Preview Resolution",
+      "value": "auto",
+    },
+    "text": "",
+    "type": "button",
+  },
+  "7": {
+    "children": [],
+    "id": 7,
+    "input": null,
+    "listeners": {},
+    "parent": 6,
+    "props": {},
+    "text": "Auto (Half)",
+    "type": "text",
+  },
+  "8": {
+    "children": [],
+    "id": 8,
+    "input": null,
+    "listeners": {},
+    "parent": 1,
+    "props": {
+      "id": "viewer.canvas",
+      "label": "Viewer",
+      "metadata": {
+        "canvasLost": false,
+        "empty": false,
+        "frame": {
+          "failed": false,
+          "loading": false,
+          "resource": "synthetic:last-good",
+        },
+        "pendingRecipe": "viewer-chrome.md §§2–3,6–7",
+        "presentation": "Docked",
+        "selectionCount": 60000,
+        "showControls": true,
+        "source": null,
+      },
+      "role": "group",
+      "state": {
+        "interaction": "idle",
+      },
+      "style": {
+        "background": {
+          "token": "colors.viewer",
+        },
+        "minHeight": {
+          "token": "metrics.hit",
+        },
+        "minWidth": {
+          "token": "metrics.hit",
+        },
+      },
+      "tabIndex": 0,
+      "value": "Launch Film, 54 percent, Half resolution, 60000 layers selected",
+    },
+    "text": "",
+    "type": "div",
+  },
+}
+`;
