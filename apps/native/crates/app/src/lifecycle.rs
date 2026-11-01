@@ -295,10 +295,14 @@ impl Controller {
                     if let Some(viewer) = v.viewer.take() {
                         viewer.retire();
                     }
+                    if let Some(popout) = v.popout.take() {
+                        popout.shutdown();
+                    }
                     v.session = None;
                     v.published = None;
                     v.mirror = None;
-                    v.layers.clear();
+                    v.rows.clear();
+                    v.saving_note = false;
                     v.selected = None;
                     v.path = None;
                     v.host

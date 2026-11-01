@@ -1,3 +1,4 @@
+mod diag;
 mod lifecycle;
 mod mcp;
 mod media;
@@ -5,8 +6,10 @@ mod panels;
 mod perf_gate;
 mod platform;
 mod playback;
+mod rows;
 mod session;
 mod smoke;
+mod viewer2;
 use anyhow::{Context, Result};
 use gpui::AppContext;
 use pm_node::fonts::{
@@ -115,6 +118,7 @@ fn main() -> Result<()> {
             let broker = broker.clone();
             move |host, window, cx| {
                 if !started.replace(true) {
+                    diag::install_probe(cx);
                     let rx = wake_rx.clone();
                     let broker = broker.clone();
                     let service = service.clone();
@@ -139,6 +143,7 @@ fn main() -> Result<()> {
                     )
                 });
                 lifecycle::install(&entity, window, cx);
+                viewer2::install(&entity, cx);
                 let weak = entity.downgrade();
                 let rx = mcp_host.subscribe();
                 cx.spawn(async move |cx| {

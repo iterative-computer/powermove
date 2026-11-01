@@ -604,3 +604,102 @@ numbers from this batch (present probe floor, 60 Hz and audio A/B, CPU) are in
 or opt-in switch. A physical PQ/HLG check first needs a small verify-only seam
 (e.g. an env var applied when the viewer is created in `playback.rs`). J/K/L
 remain covered only by the service's headless shuttle tests.
+
+## Viewer 2 in the real app (2026-11-01)
+
+**Gate: S3 still OPEN / NOT PASSED.** This adds the open viewer-2 items to
+`pm-native-app` (not the spike) and records on-screen functional results.
+Playback timing was measured only under heavy shared-machine load and is not
+gate evidence.
+
+### What was added
+
+- **Output switch SDR / PQ / HLG.** View → Viewer Output (SDR = extended-linear
+  P3, HDR PQ BT.2100, HDR HLG BT.2100), the `PM_PERF_GATE` op
+  `{"op":"output","mode":"sdr|pq|hlg"}` and `PM_NATIVE_VIEWER_OUTPUT=sdr|pq|hlg`
+  at launch. It calls engine-service `Viewer::mastering` (layer relabel plus
+  the engine's explicit mastering transform) with fixed 1,000-nit source/target
+  peaks and 203-nit reference white; display headroom never changes pixels.
+- **Engine-drawn locked overlays.** View → Show Safe Areas (SMPTE ST 2046-1:
+  action safe 93 %, title safe 90 %) and Show Guides (thirds + centre cross),
+  op `overlays`. Geometry is normalized to the content viewport and drawn by the
+  engine in the final display pass. Fix: a new revision used to clear all
+  overlays, so safe areas vanished after any edit; only time-bound (paused
+  gizmo) geometry is cleared now.
+- **Popout viewer.** View → Popout Viewer, op `popout`. A plain AppKit window
+  with its own CAMetalLayer, Viewer (same engine device, no audio), display link
+  and output binding; it follows the editor's publications and mirrors its
+  play/pause/paused frame. It opens at the bottom-right of the editor's screen.
+- **Display moves.** The output binding now also observes
+  `NSWindowDidChangeScreenNotification` and
+  `NSWindowDidChangeBackingPropertiesNotification` (NSWindow.screen is not
+  documented as KVO-compliant), so a window dragged to another display
+  republishes display id and EDR headroom. Op `move` moves the editor or popout
+  to a screen; op `screens` lists screens with current/potential headroom.
+- **Paused re-present.** A paused frame presented while the window is being
+  ordered/activated can be dropped by WindowServer (`presentedTime` 0) and
+  nothing repaints while paused, so the screen kept an older picture (seen in
+  the unmodified binary too). The worker now re-presents such a frame once per
+  stamp from the exact cache (bounded for hidden windows; counted in
+  `ViewerStatus::represented`).
+- **Soak script.** `apps/native/crates/app/tools/viewer2-soak.py` runs the
+  switch, overlays, popout, display moves (when > 1 screen) and a 60 s playback
+  soak in one GUI-locked batch under 10 minutes, with window-only captures.
+
+### On-screen results (unlocked, dev build, public shape fixture)
+
+Built-in XDR only: 1512 × 982 pt, 120 Hz, current headroom **2.667**, potential
+**16**. The external display was not connected, so **no physical display move
+was possible** (the script recorded the skip).
+
+| Check | Result |
+|---|---|
+| SDR → PQ → HLG → SDR | each switch presented a new generation (4 → 7) in **330 / 105 / 101 / 106 ms** (stdin op → presented frame) |
+| Safe areas + guides | drawn in the picture, registered in editor and popout (`overlays-safe-guides.png`, `popout.png`) |
+| Popout | 1280 × 720 drawable on display 1, headroom 2.667, presented frames, no errors |
+| Overlays after an edit | engine test: still drawn after a new revision and after a display/size change |
+| Display/headroom retirement | engine test: display change bumps the generation; headroom-only change does not |
+| Physical display move | **UNVERIFIED** (one screen) |
+| 60 s playback soak | **not gate evidence**: load 6 → 20 (other lanes' builds) |
+
+Soak observations, kept as findings: with the popout covering the editor's
+viewer completely, the editor viewer's drawables came back slowly and the single
+engine worker stalled (p50 120 ms per frame; the popout itself got 13 frames in
+60 s). The popout now opens in a corner; the general fix — not blocking the
+shared worker on one viewer's `nextDrawable` — is engine-service work for the
+next lane. Without the popout, playback was also slow under that load. A
+back-to-back A/B against the unmodified binary under load 16–27 gave
+worker→completion p50 35–51 ms (before) vs 76 ms (after) with 83–130 vs 125
+presented frames in 15 s: both far outside budget, no clear regression signal at
+that load. Rerun on a quiet machine, ideally release:
+
+```sh
+python3 apps/native/crates/app/tools/viewer2-soak.py --seconds 60 --hz 120
+python3 apps/native/crates/app/tools/viewer2-soak.py --seconds 60 --hz 120 --soak-popout
+```
+
+Captures (outside Git): `/tmp/pm-viewer2/output-{sdr,pq,hlg}.png`,
+`overlays-safe-guides.png`, `popout.png`, `popout-editor.png`.
+Still open: physical mixed-display moves (needs the external display), physical
+PQ/HLG luminance with an instrument, metadata/export parity, release-build soak
+at the measured display rate, and the shared-worker drawable stall above. The
+S3 spike foreground script was not rerun this batch.
+
+### S3 spike foreground rerun (2026-11-01, 12:21–12:25)
+
+`foreground.sh` cases (dev build, unchanged spike source, public shape fixture
+1280 × 720, built-in XDR at 120 Hz, headroom 2.667) ran unlocked, each case
+under its own GUI lock. Load 9.0 → 14.6 from other lanes' builds; single runs.
+
+| Case | Result | Verdict |
+|---|---|---|
+| 60 s playback, 120 Hz | 6,768 frames, 0 unpresented/missing; **389** gaps > 1.5 intervals (max 62.5 ms); worker→completion p50/p95 **8.75 / 14.49 ms**; 466 display-link ticks missed; 6,760 native-layer updates, **0** GPUI presents/paints | FAIL continuity and 4.167 ms headroom (load-affected) |
+| 60 s playback, 60 Hz | 3,600 frames; **6** gaps (max 41.7 ms); worker→completion p50/p95 **5.54 / 7.46 ms** | PASS 8.333 ms local headroom; FAIL zero-gap |
+| Synthetic seeks (120) | cached input→display p50/p95 **19.83 / 24.74 ms** (n = 111); input→GPU done 0.65 / 1.95 ms | FAIL 9.333 ms physical bound (GPU side is fast; ~19 ms is drawable→glass) |
+| AppKit scrub (`input.py`) | n = 120, input→display p50/p95 **31.92 / 40.53 ms** | FAIL; the `--cached` run writes the same report path, so only one report survived |
+| SDR / PQ-input accuracy | 921,600 px each; SDR ΔE2000 p99/max **0.0309 / 0.0602**; PQ **0.0571 / 0.1215**; linear probes 0.5–8 preserved | PASS (unchanged from earlier runs) |
+
+Reports and traces: `/tmp/s3b-foreground-{120,60,cached,accuracy}.json`,
+`/tmp/s3-input.json` (outside Git). The 120 Hz gap count is far worse than the
+earlier quiet-window run (4), consistent with the load; it is recorded, not
+explained away.

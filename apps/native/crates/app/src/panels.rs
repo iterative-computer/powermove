@@ -6,6 +6,7 @@ use pm_kernel::{
     *,
 };
 use pm_shell::layout::Rect;
+use std::ops::Range;
 
 pub struct NumericDrag {
     pub channel: String,
@@ -129,7 +130,7 @@ impl Controller {
             return;
         };
         let value = if channel == "name" {
-            self.layers
+            self.layers()
                 .iter()
                 .find(|l| l.id == layer)
                 .map(|l| l.name.clone())
@@ -182,6 +183,12 @@ pub fn render(
     _: &mut Window,
     cx: &mut Context<Controller>,
 ) -> Option<AnyElement> {
+    let _span = crate::diag::span(match id {
+        "project" | "assets" => "render.project",
+        "timeline" => "render.timeline",
+        "viewer" => "render.viewer",
+        _ => "render.other",
+    });
     let t = v.host.borrow().tokens.clone();
     let c = t.colors;
     let m = t.metrics;
@@ -189,7 +196,6 @@ pub fn render(
         .id(format!("p1-{id}"))
         .h(px((bounds.h - m.header).max(0.)))
         .w_full()
-        .overflow_y_scroll()
         .p(px(m.inset))
         .flex()
         .flex_col()
@@ -219,6 +225,7 @@ pub fn render(
                     })),
             );
             if v.show_library || v.session.is_none() {
+                body = body.overflow_y_scroll();
                 for (index, (id, name)) in v.recent.clone().into_iter().enumerate() {
                     body = body.child(
                         div()
@@ -237,36 +244,27 @@ pub fn render(
                     body = body.child("No projects in this isolated library. Use File → Open…");
                 }
             } else {
-                for (index, layer) in v.layers.clone().into_iter().enumerate() {
-                    let selected = v.selected.as_ref() == Some(&layer.id);
-                    body = body.child(
-                        div()
-                            .id(index)
-                            .h(px(m.row))
-                            .px(px(m.gap))
-                            .flex()
-                            .items_center()
-                            .rounded(px(m.control_radius))
-                            .bg(rgb(if selected { c.selected_fill } else { c.panel }))
-                            .hover_style(|s| s.bg(rgb(c.hover)))
-                            .cursor_pointer()
-                            .child(format!(
-                                "{}   {}",
-                                if layer.effectively_locked {
-                                    "◇"
-                                } else {
-                                    "▱"
-                                },
-                                layer.name
-                            ))
-                            .on_click(
-                                cx.listener(move |v, _, _, cx| v.select(layer.id.clone(), cx)),
-                            ),
-                    );
-                }
+                // Only visible rows are built: a 60,000-layer composition must
+                // not lay out 60,000 rows on the UI thread per repaint.
+                let rows = uniform_list(
+                    "project-layers",
+                    v.layers().len(),
+                    cx.processor(move |v: &mut Controller, range: Range<usize>, _, cx| {
+                        let rows = v.rows.rows.clone();
+                        rows[range.start.min(rows.len())..range.end.min(rows.len())]
+                            .iter()
+                            .enumerate()
+                            .map(|(offset, layer)| project_row(v, range.start + offset, layer, cx))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&v.project_scroll)
+                .flex_1();
+                body = body.child(rows);
             }
         }
         "properties" | "inspector" => {
+            body = body.overflow_y_scroll();
             body = body.child(
                 div()
                     .text_size(px(t.typography.minimum))
@@ -274,7 +272,7 @@ pub fn render(
                     .child("TEMPORARY · PHASE 1"),
             );
             if let Some(layer) = v
-                .layers
+                .layers()
                 .iter()
                 .find(|l| Some(&l.id) == v.selected.as_ref())
                 .cloned()
@@ -378,56 +376,23 @@ pub fn render(
                     .child("TEMPORARY · PHASE 1    ·    Click a track to seek"),
             );
             let width = (bounds.w - m.inset * 2. - m.min_panel).max(1.);
-            for (index, layer) in v.layers.clone().into_iter().enumerate() {
-                let from = (layer.in_time / v.duration).clamp(0., 1.) as f32;
-                let span = ((layer.out_time - layer.in_time) / v.duration)
-                    .clamp(0., 1. - from as f64) as f32;
-                let layer_id = layer.id.clone();
-                let active = v.selected.as_ref() == Some(&layer.id);
-                let row = div()
-                    .id(index)
-                    .h(px(m.row))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .w(px(m.min_panel))
-                            .truncate()
-                            .child(layer.name)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |v, _, _, cx| v.select(layer_id.clone(), cx)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(format!("track-{index}"))
-                            .relative()
-                            .w(px(width))
-                            .h(px(m.row - m.gap))
-                            .bg(rgb(c.panel_secondary))
-                            .rounded(px(m.control_radius))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(width * from))
-                                    .w(px(width * span))
-                                    .h_full()
-                                    .bg(rgb(if active { c.accent } else { c.selected_fill }))
-                                    .rounded(px(m.control_radius)),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |v, e: &MouseDownEvent, _, cx| {
-                                    let x =
-                                        f32::from(e.position.x) - bounds.x - m.inset - m.min_panel;
-                                    v.select(layer.id.clone(), cx);
-                                    v.seek(x as f64 / width as f64 * v.duration);
-                                }),
-                            ),
-                    );
-                body = body.child(row);
-            }
+            let rows = uniform_list(
+                "timeline-layers",
+                v.layers().len(),
+                cx.processor(move |v: &mut Controller, range: Range<usize>, _, cx| {
+                    let rows = v.rows.rows.clone();
+                    rows[range.start.min(rows.len())..range.end.min(rows.len())]
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, layer)| {
+                            timeline_row(v, range.start + offset, layer, bounds, width, cx)
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(&v.timeline_scroll)
+            .flex_1();
+            body = body.child(rows);
             // Native playhead coordinates are published with this panel's geometry.
             crate::playback::set_timeline(
                 cx.entity_id(),
@@ -460,4 +425,93 @@ pub fn render(
         _ => return None,
     }
     Some(body.into_any_element())
+}
+
+fn project_row(
+    v: &Controller,
+    index: usize,
+    layer: &LayerInfo,
+    cx: &mut Context<Controller>,
+) -> Stateful<Div> {
+    let t = v.host.borrow().tokens.clone();
+    let (c, m) = (t.colors, t.metrics);
+    let selected = v.selected.as_ref() == Some(&layer.id);
+    let id = layer.id.clone();
+    div()
+        .id(index)
+        .h(px(m.row))
+        .px(px(m.gap))
+        .flex()
+        .items_center()
+        .rounded(px(m.control_radius))
+        .bg(rgb(if selected { c.selected_fill } else { c.panel }))
+        .hover_style(|s| s.bg(rgb(c.hover)))
+        .cursor_pointer()
+        .child(format!(
+            "{}   {}",
+            if layer.effectively_locked {
+                "◇"
+            } else {
+                "▱"
+            },
+            layer.name
+        ))
+        .on_click(cx.listener(move |v, _, _, cx| v.select(id.clone(), cx)))
+}
+
+fn timeline_row(
+    v: &Controller,
+    index: usize,
+    layer: &LayerInfo,
+    bounds: Rect,
+    width: f32,
+    cx: &mut Context<Controller>,
+) -> Stateful<Div> {
+    let t = v.host.borrow().tokens.clone();
+    let (c, m) = (t.colors, t.metrics);
+    let from = (layer.in_time / v.duration).clamp(0., 1.) as f32;
+    let span = ((layer.out_time - layer.in_time) / v.duration).clamp(0., 1. - from as f64) as f32;
+    let active = v.selected.as_ref() == Some(&layer.id);
+    let (name_id, track_id) = (layer.id.clone(), layer.id.clone());
+    div()
+        .id(index)
+        .h(px(m.row))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .w(px(m.min_panel))
+                .truncate()
+                .child(layer.name.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| v.select(name_id.clone(), cx)),
+                ),
+        )
+        .child(
+            div()
+                .id(format!("track-{index}"))
+                .relative()
+                .w(px(width))
+                .h(px(m.row - m.gap))
+                .bg(rgb(c.panel_secondary))
+                .rounded(px(m.control_radius))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(width * from))
+                        .w(px(width * span))
+                        .h_full()
+                        .bg(rgb(if active { c.accent } else { c.selected_fill }))
+                        .rounded(px(m.control_radius)),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, e: &MouseDownEvent, _, cx| {
+                        let x = f32::from(e.position.x) - bounds.x - m.inset - m.min_panel;
+                        v.select(track_id.clone(), cx);
+                        v.seek(x as f64 / width as f64 * v.duration);
+                    }),
+                ),
+        )
 }

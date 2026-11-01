@@ -343,3 +343,72 @@ Reproduce: the local untracked driver `/tmp/pm-onscreen/lifecycle/saveflight.py
 `/tmp/pm-native-saveflight.*` and writes window captures to
 `/tmp/pm-onscreen/lifecycle/` (outside Git). Run it under one GUI lock. Use
 `layers=0` for the small-project refresh check.
+
+## Viewer 2 lane: save-in-flight and large-project refresh fixed (2026-11-01)
+
+Both open rows from the 09:53 batch are fixed and verified on screen. Root cause
+was main-thread work proportional to the layer count, not a missing notification:
+
+- The temporary Project and Timeline panels built one GPUI row per layer on
+  every repaint (2 × 60,001 rows with text and listeners, after cloning the whole
+  layer vector twice). Any `cx.notify()` — the MCP edit's refresh, the close
+  refusal's note — started a multi-second layout, so the window looked frozen and
+  the edit "never" appeared. Rows are now `uniform_list`s: only visible rows are
+  built (`panels.rs`).
+- Every kernel event caused a full refresh, including listing all layers
+  (~85 ms per refresh for 60k layers, dev build). Bursts are now coalesced into
+  one refresh, and compositions above 2,000 layers list their rows on a worker
+  (`rows.rs`; at most one in flight, stale/foreign-session results dropped).
+- The engine worker rebuilt the audio-graph input for each revision (a walk of
+  the whole document) while holding the viewer state lock that `publish`,
+  `configure` and `status` take on the UI thread. That update now runs outside
+  the lock (engine-service `run`).
+- Saves started by MCP or the kernel now show **Saving…** in the status bar, a
+  close/quit refusal note stays visible for the whole save, and the end of the
+  save reports **Saved** (or that it did not complete). The main thread never
+  waits on a save; the existing Command-W/Command-Q refusal is unchanged.
+
+`PM_NATIVE_MAIN_TRACE=1` adds an opt-in main-thread probe (5 ms timer lateness,
+stalls ≥ 50 ms, refresh/panel spans) on stderr as `PM_MAIN` lines. The
+`PM_PERF_GATE` seam gained `close`, `save`, `layer` lookup and save/dirty status.
+
+| Check (dev build, 60,001 shape layers, 22 MB PMV4) | Before (09:53 batch) | After (12:16, load 8.7 → 8.0) |
+|---|---|---|
+| MCP `add_layer` visible in the editor | never within ~4 s; title not updated | controller had it in **1 ms**; row, timeline bar, Properties and “Edited” title on screen |
+| Main-thread stalls ≥ 50 ms, MCP edit phase (8.7 s) | window did not repaint | **0** (refresh spans ≤ 6.4 ms) |
+| Close requested 0.10 s into a 5.68 s MCP save | refused, but no note; capture byte-identical | refused; note “A project operation is in progress…” painted during the save, then **Saved** |
+| Main-thread stalls ≥ 50 ms during the save | — | **0** |
+| Saved file | contains the edit | PMV4, contains `flight-layer`; window still open; dirty cleared |
+| Small project (2 layers), 11:13 | unknown | edit seen in **5 ms**; 0 stalls in the edit phase; the 0.09 s save finished before the close request, so the window closed normally |
+
+An earlier 11:24 repeat measured 2 stalls of 104/82 ms under load ≈ 20 and is
+kept as contaminated evidence only. **Lock incident:** that run's ad-hoc shell
+wrapper ignored a failed noclobber acquisition, ran while another lane (most
+likely the s2 `check-ptext-120.py` run started ~11:15) held
+`/tmp/pm-shots/gui.lock`, and then deleted that lane's lock. That lane's
+measurement window around 11:24–11:26 overlaps this app and should be rerun.
+The committed `check-save-flight.py` and `viewer2-soak.py` only remove a lock
+they created. Release-build save time
+(the 1.2–1.6 s in the 09:53 batch) was not re-measured; the dev build saves the
+same file in 5.4–5.7 s.
+
+Reproduce (takes the GUI lock, refuses while locked, screenshots to
+`/tmp/pm-viewer2`, never committed):
+
+```sh
+python3 apps/native/crates/app/tools/check-save-flight.py \
+  ~/Developer/pm-target/debug/powermove-native 60000 --close
+python3 apps/native/crates/app/tools/check-save-flight.py \
+  ~/Developer/pm-target/debug/powermove-native 0 --close
+```
+
+Window captures: `/tmp/pm-viewer2/final-60000-{1-opened,2-after-mcp-edit,3-during-save,4-after-save}.png`.
+Tests: app **20** unit (rows 2, viewer2 3, save note 1 new) + 2 integration
+(+1 ignored 60k timing diagnostic, `tests/large_project.rs`); engine-service
+8 unit + service **14** (2 new) + av 3 + jobs 3. Clippy `--no-deps
+--all-targets` adds no warnings.
+
+Shell-lane follow-ups (no shell files changed here): the shell's status bar is
+the only place the save note can appear, so it should also be exposed to
+accessibility; the shell's menu model should own the new View-menu viewer items
+(see s3-viewer.md) instead of the app appending them through AppKit.

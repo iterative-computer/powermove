@@ -62,10 +62,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     .detach();
     let current = Rc::new(RefCell::new(None::<pm_engine_service::Viewer>));
     let placed = current.clone();
+    let main_output = entity.read(cx).main_output.clone();
     let binding = pm_engine_service::layers::OutputBinding::new(
         &host.borrow().window,
         host.borrow().viewer_layer(),
         Rc::new(move |output| {
+            main_output.set(Some(output));
             if let Some(v) = &*placed.borrow() {
                 let _ = v.configure(output);
             }
@@ -96,6 +98,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                     if v.message!=error {v.message=error;cx.notify();}
                 }
                 let scale=v.host.borrow().window.backingScaleFactor();
+                if let Some(clock)=status.clock { v.sync_popout(&clock); }
                 if let Some(clock)=status.clock {
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
                     let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));

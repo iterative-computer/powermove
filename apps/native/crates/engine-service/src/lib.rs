@@ -157,6 +157,8 @@ pub struct ViewerStatus {
     /// Display ticks whose frame was identical to the one already on screen.
     /// The layer keeps showing it; no drawable is spent (see `run`).
     pub held_frames: u64,
+    /// Paused pictures re-presented once because they never reached the glass.
+    pub represented: u64,
     /// Playing or waiting for the audio epoch: the host should keep its
     /// display-phase source running so the start can align to vsync.
     pub wants_display: bool,
@@ -290,7 +292,11 @@ impl Viewer {
                 v.config.snapshot = snapshot;
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
-                v.overlays = OverlayGeometry::default();
+                // Paused gizmo geometry names one revision and time; safe
+                // areas and guides are time-invariant and persist across edits.
+                if v.overlay_time.take().is_some() {
+                    v.overlays = OverlayGeometry::default();
+                }
                 v.dirty = true;
             }
             Ok(())
@@ -667,6 +673,9 @@ struct Runtime {
     /// Stamp/time already submitted. Repeating identical pixels at the
     /// display rate only queues more drawables behind the compositor.
     last: Option<(Stamp, Ticks)>,
+    /// A paused picture that never reached the glass was re-presented once
+    /// for this stamp (bounded: a hidden window does not loop).
+    represented: Option<Stamp>,
 }
 struct Flight {
     id: u64,
@@ -721,6 +730,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if f.submission.command.status() == metal::MTLCommandBufferStatus::Error {
                 engine.clear_cache();
             }
+            let mut represent = false;
             if let Some(r) = runtime.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 match t.display.filter(|d| *d > 0.) {
@@ -736,6 +746,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     None => {
                         if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.time)) {
                             r.last = None;
+                        }
+                        // A paused (untimed) present dropped during window
+                        // activation/reordering leaves an older picture on
+                        // screen; nothing else repaints while paused.
+                        if f.submission.drawable.is_some()
+                            && t.target == 0.
+                            && t.gpu_ok
+                            && r.represented != Some(f.stamp)
+                        {
+                            r.represented = Some(f.stamp);
+                            represent = true;
                         }
                     }
                 }
@@ -756,6 +777,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 if v.stamp != f.stamp {
                     v.status.stale_rejections += 1;
                     continue;
+                }
+                if represent && v.commands.is_empty() {
+                    // Same stamp: an exact-cache re-present, not new content.
+                    v.dirty = true;
+                    v.status.represented += 1;
                 }
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
@@ -792,6 +818,43 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 runtime.remove(&id);
             }
             continue;
+        }
+        // A new revision rebuilds the audio graph input, which walks the whole
+        // document (O(layers)). Do it without the state lock: the UI thread
+        // takes that lock to publish, configure and read status.
+        let stale: Vec<_> = state
+            .views
+            .iter()
+            .filter_map(|(id, v)| {
+                let r = runtime.get(id)?;
+                (r.revision != v.stamp.revision || r.content != v.content).then(|| {
+                    (
+                        *id,
+                        v.config.snapshot.clone(),
+                        v.config.media.audio_paths(),
+                        v.config.composition.clone(),
+                        v.stamp.revision,
+                        v.content,
+                    )
+                })
+            })
+            .collect();
+        if !stale.is_empty() {
+            drop(state);
+            for (id, snapshot, media, composition, revision, content) in stale {
+                if let Some(r) = runtime.get_mut(&id) {
+                    r.transport.update(&snapshot, media, &composition);
+                    r.revision = revision;
+                    r.content = content;
+                }
+            }
+            // Fall through (no `continue`): a continuous stream of publications
+            // must not starve rendering. A revision that arrived meanwhile is
+            // still caught by the in-loop check below, as before.
+            state = shared.state.lock().unwrap();
+            if state.stop {
+                break;
+            }
         }
         let now = trace::now();
         let mut work = None;
@@ -831,6 +894,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     lag: present::PresentLag::default(),
                     grid: None,
                     last: None,
+                    represented: None,
                     ahead: 1.,
                 }
             });
