@@ -1,3 +1,4 @@
+// Powermove modified: native S2 interop; see vendor/gpui-ce/POWERMOVE.md.
 #[cfg(target_os = "windows")]
 use crate::WindowsScreenCaptureFrame;
 use crate::{
@@ -11,6 +12,9 @@ use refineable::Refineable;
 /// A source of a surface's content.
 #[derive(Clone)]
 pub enum SurfaceSource {
+    /// A retained, fenced, packed RGB Metal texture.
+    #[cfg(target_os = "macos")]
+    NativeTexture(std::sync::Arc<NativeTexture>),
     /// A macOS image buffer from CoreVideo
     #[cfg(target_os = "macos")]
     Surface(CVPixelBuffer),
@@ -45,6 +49,11 @@ impl std::fmt::Debug for SurfaceSource {
     fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             #[cfg(target_os = "macos")]
+            SurfaceSource::NativeTexture(ref texture) => _f
+                .debug_tuple("NativeTexture")
+                .field(&texture.texture.width())
+                .finish(),
+            #[cfg(target_os = "macos")]
             SurfaceSource::Surface(ref buf) => _f.debug_tuple("Surface").field(buf).finish(),
             #[cfg(any(
                 target_os = "linux",
@@ -66,6 +75,11 @@ impl std::fmt::Debug for SurfaceSource {
 impl SurfaceSource {
     fn size(&self) -> Size<DevicePixels> {
         match self {
+            #[cfg(target_os = "macos")]
+            SurfaceSource::NativeTexture(texture) => crate::size(
+                (texture.texture.width() as i32).into(),
+                (texture.texture.height() as i32).into(),
+            ),
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(buffer) => {
                 crate::size(buffer.get_width().into(), buffer.get_height().into())
@@ -196,5 +210,92 @@ impl IntoElement for Surface {
 impl Styled for Surface {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
+    }
+}
+
+/// Engine pool lease: scene clones and every GPU submission keep this alive.
+#[cfg(target_os = "macos")]
+pub trait TextureLease: std::fmt::Debug + Send + Sync {
+    /// GPU sampling ended, not physical scanout. May run on a Metal thread.
+    fn gpu_completed(&self, succeeded: bool);
+}
+
+/// Packed RGB source. Input is premultiplied, top-down, display-encoded sRGB.
+/// RGBA16F is accepted only after the engine's extended-linear → SDR conversion.
+/// The retained Metal objects bridge objc2-metal via +1 ownership, never borrowed raw pointers.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub struct NativeTexture {
+    /// Retained source texture.
+    pub texture: metal::Texture,
+    /// Producer event, on the same device.
+    pub event: metal::Event,
+    /// Event value signalled by the producing command buffer.
+    pub value: u64,
+    /// Pool lifetime shared with every scene/submission.
+    pub lease: std::sync::Arc<dyn TextureLease>,
+    retired: std::sync::atomic::AtomicBool,
+}
+#[cfg(target_os = "macos")]
+impl NativeTexture {
+    /// Takes retained (+1) objects. Producer must signal value on its command queue,
+    /// never mutate the texture while any scene/submission retains this lease, and
+    /// use an event on the same device. No CPU wait is inserted.
+    pub fn new(
+        texture: metal::Texture,
+        event: metal::Event,
+        value: u64,
+        lease: std::sync::Arc<dyn TextureLease>,
+    ) -> Result<std::sync::Arc<Self>, &'static str> {
+        if !matches!(
+            texture.pixel_format(),
+            metal::MTLPixelFormat::BGRA8Unorm | metal::MTLPixelFormat::RGBA16Float
+        ) {
+            return Err("P-TEXTURE requires BGRA8Unorm or converted RGBA16Float");
+        }
+        if texture.device().registry_id() != event.device().registry_id() {
+            return Err("P-TEXTURE event/texture device mismatch");
+        }
+        Ok(std::sync::Arc::new(Self {
+            texture,
+            event,
+            value,
+            lease,
+            retired: false.into(),
+        }))
+    }
+    /// Retain borrowed objc2-metal pointers (+0 → +1). Does not transfer ownership.
+    ///
+    /// # Safety
+    /// Both non-null pointers must be live MTLTexture/MTLEvent objects for this call.
+    /// Producer obeys the same format, device, premultiplication and lease contract as `new`.
+    pub unsafe fn from_borrowed_raw(
+        texture: *mut std::ffi::c_void,
+        event: *mut std::ffi::c_void,
+        value: u64,
+        lease: std::sync::Arc<dyn TextureLease>,
+    ) -> Result<std::sync::Arc<Self>, &'static str> {
+        use foreign_types::ForeignTypeRef;
+        if texture.is_null() || event.is_null() {
+            return Err("P-TEXTURE null Metal object");
+        }
+        let texture = unsafe { metal::TextureRef::from_ptr(texture.cast()) }.to_owned();
+        let event = unsafe { metal::EventRef::from_ptr(event.cast()) }.to_owned();
+        Self::new(texture, event, value, lease)
+    }
+    /// Device loss or failed submission permanently invalidates this source.
+    pub fn retire(&self) {
+        self.retired
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    /// Whether a failed submission/device-loss owner retired this source.
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+#[cfg(target_os = "macos")]
+impl From<std::sync::Arc<NativeTexture>> for SurfaceSource {
+    fn from(texture: std::sync::Arc<NativeTexture>) -> Self {
+        Self::NativeTexture(texture)
     }
 }

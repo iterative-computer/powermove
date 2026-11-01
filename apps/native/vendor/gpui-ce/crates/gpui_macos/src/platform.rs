@@ -1,3 +1,4 @@
+// Powermove modified: native S2 interop; see vendor/gpui-ce/POWERMOVE.md.
 use crate::{
     MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
     events::key_to_native, haptic_feedback::MacHaptics, pasteboard::Pasteboard, renderer,
@@ -194,6 +195,8 @@ pub(crate) struct MacPlatformState {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     renderer_context: renderer::Context,
+    #[cfg(not(feature = "wgpu"))]
+    metal_device: Option<metal::Device>,
     headless: bool,
     activation_policy: Option<MacActivationPolicy>,
     general_pasteboard: Pasteboard,
@@ -222,6 +225,14 @@ pub(crate) struct MacPlatformState {
 }
 
 impl MacPlatform {
+    /// The engine chooses the Metal device; all windows follow it.
+    #[cfg(not(feature = "wgpu"))]
+    pub fn new_with_metal_device(headless: bool, device: metal::Device) -> Self {
+        let platform = Self::new(headless);
+        platform.0.lock().metal_device = Some(device);
+        platform
+    }
+
     pub fn new(headless: bool) -> Self {
         let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
@@ -237,6 +248,8 @@ impl MacPlatform {
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
             renderer_context: renderer::Context::default(),
+            #[cfg(not(feature = "wgpu"))]
+            metal_device: None,
             activation_policy: None,
             general_pasteboard: Pasteboard::general(),
             find_pasteboard: Pasteboard::find(),
@@ -696,6 +709,13 @@ impl Platform for MacPlatform {
             )
         };
 
+        #[cfg(not(feature = "wgpu"))]
+        let renderer = if let Some(device) = self.0.lock().metal_device.clone() {
+            renderer::MetalRenderer::new_with_device(renderer_context.clone(), true, device)
+        } else {
+            renderer::MetalRenderer::new(renderer_context.clone(), true)
+        };
+        #[cfg(feature = "wgpu")]
         let renderer = renderer::new_renderer(
             renderer_context,
             options.bounds.size.map(|pixels| pixels.as_f32()),

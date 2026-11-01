@@ -1,3 +1,4 @@
+# Powermove modified: macOS S2 integration; see vendor/gpui-ce/POWERMOVE.md.
 [package]
 name = "gpui_ce_parley"
 version = "0.1.0"
@@ -28,4 +29,3 @@ unicode-segmentation.workspace = true
 collections.workspace = true
 criterion.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
-gpui_fonts = { path = "../gpui_ce_fonts", version = "0.2.2", package = "gpui-ce-fonts" }

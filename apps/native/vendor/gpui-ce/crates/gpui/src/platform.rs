@@ -1,3 +1,4 @@
+// Powermove modified: macOS S2 integration; see vendor/gpui-ce/POWERMOVE.md.
 mod app_menu;
 mod keyboard;
 mod keystroke;
@@ -57,7 +58,6 @@ use anyhow::{Context as _, Result};
 use async_task::Runnable;
 use collections::FxHashMap;
 use futures::channel::oneshot;
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 use image::RgbaImage;
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, DynamicImage, Frame};
@@ -1123,7 +1123,6 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 }
 
 /// A renderer for headless windows that can produce real rendered output.
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 pub trait PlatformHeadlessRenderer {
     /// Render a scene and return the result as an RGBA image.
     fn render_scene_to_image(

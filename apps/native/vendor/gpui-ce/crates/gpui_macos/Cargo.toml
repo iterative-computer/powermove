@@ -1,3 +1,4 @@
+# Powermove modified: macOS S2 integration; see vendor/gpui-ce/POWERMOVE.md.
 [package]
 name = "gpui_ce_macos"
 version = "0.1.0"
@@ -17,14 +18,12 @@ bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
 test-support = [
   "gpui/test-support",
   "gpui_apple/test-support",
-  "gpui_wgpu?/test-support",
 ]
 font-kit = []
 screen-capture = ["gpui/screen-capture", "dep:core-video"]
 # Draw windows with the WGPU renderer instead of Metal, so applications can
 # share its device and composite their own WGPU textures (with gpui's
 # `custom-gpu` feature).
-wgpu = ["dep:gpui_wgpu"]
 
 [dependencies]
 gpui.workspace = true
@@ -51,7 +50,6 @@ futures.workspace = true
 gpui_apple.workspace = true
 gpui_parley = { workspace = true, features = ["system-fonts"] }
 gpui_util.workspace = true
-gpui_wgpu = { workspace = true, optional = true }
 image.workspace = true
 itertools.workspace = true
 libc.workspace = true
@@ -82,4 +80,3 @@ url.workspace = true
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"], default-features = false }
 gpui_apple = { workspace = true, features = ["test-support"] }
-gpui_fonts = { path = "../gpui_ce_fonts", version = "0.2.2", package = "gpui-ce-fonts" }

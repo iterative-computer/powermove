@@ -1,0 +1,25 @@
+[package]
+name = "pm-native-s2-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos" }
+gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple" }
+metal = "0.33"
+parking_lot = "0.12"
+foreign-types = "0.5"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-quartz-core = "0.3"
+block = "0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+async-channel = "2"
+core-graphics = "0.24"
+objc2-core-graphics = "0.3"
+objc2-core-foundation = "0.3"

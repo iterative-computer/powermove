@@ -1,3 +1,4 @@
+// Powermove modified: native S2 interop; see vendor/gpui-ce/POWERMOVE.md.
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds,
@@ -5215,6 +5216,12 @@ impl Window {
             content_mask,
             source: source.into(),
         });
+    }
+
+    /// Paint an engine texture, preserving its producer fence and completion lease.
+    #[cfg(target_os = "macos")]
+    pub fn paint_texture(&mut self, bounds: Bounds<Pixels>, texture: Arc<crate::NativeTexture>) {
+        self.paint_surface(bounds, crate::SurfaceSource::NativeTexture(texture));
     }
 
     /// Removes an image from the sprite atlas.
