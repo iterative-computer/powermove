@@ -1,5 +1,11 @@
-//! Exercise the exact vendored bridge without showing a window. In particular,
-//! validate NSTextView, publication/removal, and restoring Objective-C classes.
+#[path = "../../../vendor/gpui-ce/crates/gpui_macos/src/native_text.rs"]
+mod native_text;
+extern crate self as gpui_util;
+pub fn measure<R>(_: &str, f: impl FnOnce() -> R) -> R {
+    f()
+}
+// Exercise the exact vendored bridge without showing a window. In particular,
+// validate NSTextView, publication/removal, and restoring Objective-C classes.
 #[path = "../../../vendor/gpui-ce/crates/gpui_macos/src/composition.rs"]
 mod composition;
 #[path = "../../../vendor/gpui-ce/crates/gpui_macos/src/composition_accessibility.rs"]
@@ -78,6 +84,7 @@ fn main() {
     let original_class = content.class();
     let gpui = NSView::initWithFrame(NSView::alloc(mtm), content.bounds());
     content.addSubview(&gpui);
+    check_text_slots(&gpui);
     let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(10., 10.));
     field.setAccessibilityIdentifier(Some(&NSString::from_str("field")));
     content.addSubview(&field);
@@ -176,4 +183,64 @@ fn main() {
     assert_eq!(root.class().name().to_string_lossy(), "AccessKitNode");
     println!("PASS bridge teardown restores content/root classes while AX objects are retained");
     println!("S2b BRIDGE RESULT PASS (window never ordered on screen)");
+}
+
+fn check_text_slots(gpui: &NSView) {
+    unsafe {
+        use native_text::{NativeTextSlot, TextKind, valid_number};
+        use objc2_foundation::NSRange;
+        assert!(valid_number("-1.25e2"));
+        assert!(!valid_number("NaN"));
+        assert!(!valid_number("-"));
+        assert!(!valid_number("1a"));
+        let before = gpui.superview().unwrap().subviews().count();
+        let primary = NativeTextSlot::new(gpui, TextKind::Primary, "Name", "名前");
+        let dense = NativeTextSlot::new(gpui, TextKind::DenseNumber, "Scale", "100");
+        let multi = NativeTextSlot::new(gpui, TextKind::Multiline, "Caption", "line one\nline two");
+        let r = NSRect::new(NSPoint::new(10., 20.), NSSize::new(150., 80.));
+        for s in [&primary, &dense, &multi] {
+            s.stage(r, r);
+        }
+        native_text::present(gpui as *const NSView as usize);
+        let clipped = NSRect::new(NSPoint::new(30., 30.), NSSize::new(80., 40.));
+        primary.stage(r, clipped);
+        native_text::present(gpui as *const NSView as usize);
+        assert_eq!(
+            primary.native_view().superview().unwrap().frame().size,
+            clipped.size
+        );
+        primary.stage(r, r);
+        native_text::present(gpui as *const NSView as usize);
+        assert_eq!(primary.value(), "名前");
+        assert_eq!(multi.value(), "line one\nline two");
+        let frame = primary.native_view().superview().unwrap().frame();
+        assert_eq!(frame.size, r.size);
+        assert!(dense.native_view().superview().unwrap().isHidden());
+        dense.begin_editing();
+        native_text::present(gpui as *const NSView as usize);
+        assert_eq!(dense.native_view().superview().unwrap().frame(), frame);
+        assert!(!dense.native_view().superview().unwrap().isHidden());
+        // Exercise AppKit's UTF-16 marked-range and committed-replacement contract.
+        unsafe {
+            let v = multi.native_view();
+            let _: () = msg_send![v,setMarkedText:&*NSString::from_str("にほん"),selectedRange:NSRange::new(3,0),replacementRange:NSRange::new(0,0)];
+            let marked: bool = msg_send![v, hasMarkedText];
+            assert!(marked);
+            let range: NSRange = msg_send![v, markedRange];
+            assert_eq!(range.length, 3);
+            let _: () = msg_send![v,insertText:&*NSString::from_str("日本"),replacementRange:range];
+            let marked: bool = msg_send![v, hasMarkedText];
+            assert!(!marked);
+            assert!(multi.value().starts_with("日本"));
+            let spell: bool = msg_send![v, isContinuousSpellCheckingEnabled];
+            assert!(spell);
+            let undo: bool = msg_send![v, allowsUndo];
+            assert!(undo);
+        }
+        drop((primary, dense, multi));
+        assert_eq!(gpui.superview().unwrap().subviews().count(), before);
+        println!(
+            "PASS native text slots: UTF-16 marked text/commit, multiline, numeric validation, clipping geometry, dense no-layout-jump, teardown (not an OS IME test)"
+        );
+    }
 }

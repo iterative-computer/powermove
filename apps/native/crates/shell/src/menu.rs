@@ -96,6 +96,19 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 m("sendBackward"),
                 m("bringToFront"),
                 m("sendToBack"),
+                sep(),
+                Item::role("Spelling and Grammar…", "showGuessPanel:", ""),
+                Item::role(
+                    "Check Spelling While Typing",
+                    "toggleContinuousSpellChecking:",
+                    "",
+                ),
+                Item::role("Writing Tools…", "showWritingTools:", ""),
+                Item::role(
+                    "Emoji & Symbols",
+                    "orderFrontCharacterPalette:",
+                    "Control+Command+Space",
+                ),
             ],
         ),
         (

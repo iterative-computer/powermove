@@ -23,3 +23,6 @@ async-channel = "2"
 core-graphics = "0.24"
 objc2-core-graphics = "0.3"
 objc2-core-foundation = "0.3"
+
+pm-shell = {path="../../crates/shell"}
+pm-design = {path="../../crates/design"}

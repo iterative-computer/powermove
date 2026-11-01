@@ -49,14 +49,7 @@ impl Fixture {
         )
         .unwrap()
     }
-    pub fn paint(&mut self, w: f32, h: f32, window: &mut Window) {
-        self.frames += 1;
-        let frame = (self.started.elapsed().as_secs_f64() * 60.) as u64;
-        if frame != self.producer_frame {
-            // Allocate a fresh source so an outstanding GPU consumer is never overwritten.
-            self.producer = Self::texture(&self.device, &[frame as u8, 80, 160, 255]);
-            self.producer_frame = frame;
-        }
+    pub fn paint_tiles(&self, w: f32, h: f32, window: &mut Window) {
         let top = crate::glass::toolbar_inset().max(52.) as f32 + 12.;
         let tw = (w - 510.).max(80.) / 40.;
         let th = (h - top - 208.).max(100.) / 25.;
@@ -72,6 +65,15 @@ impl Fixture {
                 t.clone(),
             );
         }
+    }
+    pub fn paint(&mut self, _w: f32, _h: f32, window: &mut Window) {
+        self.frames += 1;
+        let frame = (self.started.elapsed().as_secs_f64() * 60.) as u64;
+        if frame != self.producer_frame {
+            // Allocate a fresh source so an outstanding GPU consumer is never overwritten.
+            self.producer = Self::texture(&self.device, &[frame as u8, 80, 160, 255]);
+            self.producer_frame = frame;
+        }
         window.paint_texture(
             Bounds::new(point(px(440.), px(230.)), size(px(200.), px(170.))),
             self.producer.clone(),
@@ -82,5 +84,27 @@ impl Fixture {
                 self.started.elapsed().as_secs_f64()
             );
         }
+    }
+}
+
+/// Only this entity owns the static 1,000-tile subtree. Parent animation doesn't dirty it.
+pub struct TileView {
+    pub fixture: std::rc::Rc<std::cell::RefCell<Fixture>>,
+    pub renders: usize,
+}
+impl gpui::Render for TileView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        println!("S2_TILE_RENDER {}", self.renders);
+        let fixture = self.fixture.clone();
+        canvas(
+            |_, _, _| (),
+            move |b, _, w, _| {
+                fixture
+                    .borrow()
+                    .paint_tiles(f32::from(b.size.width), f32::from(b.size.height), w)
+            },
+        )
+        .size_full()
     }
 }

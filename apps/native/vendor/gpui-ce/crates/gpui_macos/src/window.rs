@@ -1007,18 +1007,20 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
-        self.stop_display_link();
+        // Powermove P-120: WindowFrameSource changes subscriptions only on display moves.
         unsafe {
             if !self
                 .native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible)
             {
+                self.stop_display_link();
                 return;
             }
         }
         let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
             // AppKit can temporarily report no screen while displays are being reconfigured.
+            self.stop_display_link();
             return;
         };
         let data = self.native_view.as_ptr() as *mut c_void;

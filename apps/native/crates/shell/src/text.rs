@@ -1,0 +1,137 @@
+//! Native primary/multiline editors and a dense GPUI field with an AppKit edit slot.
+use gpui::{prelude::*, *};
+use gpui_macos::native_text::{NativeTextSlot, TextEvent, TextKind};
+use objc2::rc::Retained;
+use objc2_app_kit::NSView;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::rc::Rc;
+
+pub struct TextField {
+    slot: Rc<NativeTextSlot>,
+    kind: TextKind,
+    value: String,
+    tokens: pm_design::Tokens,
+}
+impl EventEmitter<TextEvent> for TextField {}
+impl TextField {
+    pub fn new(
+        kind: TextKind,
+        label: &str,
+        value: &str,
+        tokens: pm_design::Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let RawWindowHandle::AppKit(handle) =
+            HasWindowHandle::window_handle(window).unwrap().as_raw()
+        else {
+            panic!("Mac-only text slot")
+        };
+        let view: Retained<NSView> =
+            unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+        let slot = Rc::new(NativeTextSlot::new(&view, kind, label, value));
+        slot.set_font_size(tokens.typography.body as f64);
+        let (tx, rx) = async_channel::unbounded();
+        slot.on_event(Rc::new(move || {
+            let _ = tx.try_send(());
+        }));
+        cx.spawn(async move |this, cx| {
+            while rx.recv().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| {
+                        for event in this.slot.take_events() {
+                            if let TextEvent::Committed(value) = &event {
+                                this.value = value.clone();
+                            }
+                            cx.emit(event);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Self {
+            slot,
+            kind,
+            value: value.into(),
+            tokens,
+        }
+    }
+    pub fn accessibility_item(&self) -> Option<gpui_macos::composition::AccessibilityItem> {
+        self.slot.accessibility_item()
+    }
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+    pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.slot.set_value(value);
+        if !self.slot.is_editing() {
+            self.value = value.into();
+            cx.notify();
+        }
+    }
+}
+impl Render for TextField {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let slot = self.slot.clone();
+        let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
+        let editing = self.slot.is_editing();
+        div()
+            .id("native-text")
+            .relative()
+            .w_full()
+            .h(px(if self.kind == TextKind::Multiline {
+                88.
+            } else {
+                26.
+            }))
+            .border_1()
+            .border_color(rgb(self.tokens.colors.separator))
+            .rounded(px(self.tokens.metrics.control_radius))
+            .bg(rgb(self.tokens.colors.field))
+            .text_color(rgb(self.tokens.colors.text))
+            .text_size(px(self.tokens.typography.body))
+            .font_family(".AppleSystemUIFont")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.slot.begin_editing();
+                    cx.notify();
+                }),
+            )
+            .child(if dense && !editing {
+                self.value.clone()
+            } else {
+                String::new()
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let mask = window.content_mask().bounds;
+                        let rect = |b: Bounds<Pixels>| {
+                            NSRect::new(
+                                NSPoint::new(
+                                    f32::from(b.origin.x) as f64,
+                                    f32::from(b.origin.y) as f64,
+                                ),
+                                NSSize::new(
+                                    f32::from(b.size.width) as f64,
+                                    f32::from(b.size.height) as f64,
+                                ),
+                            )
+                        };
+                        // Same content rectangle and token-sized native font in either mode.
+                        slot.stage(rect(bounds), rect(mask));
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+    }
+}

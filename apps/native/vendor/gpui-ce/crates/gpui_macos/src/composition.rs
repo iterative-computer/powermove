@@ -89,17 +89,32 @@ pub fn publish_accessibility(view: &NSView, order: Vec<AccessibilityItem>) {
     }
 }
 pub(crate) fn accessibility(view: usize) -> Option<Vec<AccessibilityItem>> {
-    HOSTS.with(|hosts| hosts.borrow().get(&view).map(|h| h.accessibility.clone()))
+    let order = HOSTS.with(|hosts| hosts.borrow().get(&view).map(|h| h.accessibility.clone()));
+    if order.is_none() && !crate::native_text::has_slots(view) {
+        return None;
+    }
+    let mut order = order.unwrap_or_default();
+    // Explicit native anchors win; otherwise append managed text slots once.
+    for entry in crate::native_text::accessibility(view) {
+        if !order.iter().any(|old|matches!((old,&entry),(AccessibilityItem::Native(a),AccessibilityItem::Native(b)) if std::ptr::eq(&**a,&**b))) {order.push(entry);}
+    }
+    Some(order)
 }
 /// Explicit CATransaction also covers GPUI's transactional drawable present.
 pub(crate) fn present(view: usize) -> Option<Transaction> {
-    let present = HOSTS.with(|h| h.borrow().get(&view).map(|h| h.present.clone()))?;
+    let present = HOSTS.with(|h| h.borrow().get(&view).map(|h| h.present.clone()));
+    if present.is_none() && !crate::native_text::has_slots(view) {
+        return None;
+    }
     unsafe {
         let _: () = msg_send![class!(CATransaction), begin];
         let _: () = msg_send![class!(CATransaction), setDisableActions: true];
     }
     let transaction = Transaction;
-    present();
+    if let Some(present) = present {
+        gpui_util::measure("native composition", || present());
+    }
+    crate::native_text::present(view);
     Some(transaction)
 }
 pub(crate) struct Transaction;

@@ -101,3 +101,35 @@ Remaining integration/gates:
 - Interleaved foreign-child accessibility, transformed/clipped slot input and resize lag remain dependent on the open S2 composition gate. The shell publishes its retained native viewer to the existing composition accessibility hook; a nested GPUI/foreign-child reading-order walkthrough still needs verification. No vendor patch was made. If the direct-root-only accessibility splice cannot interleave the viewer at its panel position, P-A11Y needs nested foreign-child insertion support in the vendor lane.
 
 The shared Cargo.lock already has changes from other lanes. This package commits only its three crate directories and this document; workspace lock reconciliation belongs to the integration lane. Nothing is pushed or released.
+
+## P-TEXT integration (2026-11-01)
+
+`pm_shell::text::TextField::new(kind, label, initial, tokens, window, cx)` provides
+primary names, multiline captions/composer text, and dense inspector text/numbers
+using `gpui_macos::native_text::TextKind`. Keep the entity alive for the visible
+field; drop it when its panel is removed. All kinds reserve a fixed GPUI rectangle.
+Dense fields draw their resting value in GPUI, then place a borderless AppKit field
+in that rectangle on click. Return/blur commits; Escape restores the old value.
+Invalid/non-finite numbers restore the previous value only at commit, so typing
+and IME composition are not filtered. `TextEvent` exposes changes/commits/cancel.
+
+A host can insert `field.accessibility_item()` in its committed slot reading order.
+Without an explicit anchor, live text slots append to the foreign-child order.
+Native placement inherits rectangular clipping; arbitrary affine transforms and
+arbitrary shape clips are still open S2 work. Do not cache/remove/hide an owning
+panel without updating or dropping its native text entities: staged native geometry
+is retained until republished, as with the host's other composition slots.
+
+Text editing uses the system field editor / `NSTextView`, preserving native marked
+text, selection, undo and responder-chain services. The shell's key resolver and
+pooled menu navigation let marked-text events go straight to AppKit. Native Edit
+menu items expose spelling, Writing Tools and Emoji & Symbols. Dictation uses the
+system text-input command/shortcut; its microphone/account availability is not
+asserted by the screen-free tests.
+
+The pinned build, 24 Rust tests (including real Metal captures and cache replay),
+and AppKit text/AX probe pass. This run's captures use
+`/tmp/pm-shots/ptext-shell-headless-*.png`. Real Japanese/Pinyin conversion,
+Services, dictation, Writing Tools, emoji, keyboard traversal and the visible dense
+swap remain unverified after the session locked. Exact runnable checks and the
+30-second manual IME check are in [S2](s2-gpui-ce.md).

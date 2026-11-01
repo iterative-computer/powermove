@@ -125,3 +125,56 @@ exact vendor sources and never shows a window. All artifacts stay outside Git.
 The root shape, upstream subclass implementation and native control behavior are
 pin-specific assumptions to recheck at each GPUI/AccessKit rebase. No system-wide
 method swizzle, WebKit DOM mirror or new AccessKit dependency fork was introduced.
+
+### P-TEXT/P-120 pass (2026-11-01)
+
+This is an **implementation / screen-free test pass**, not a 120-Hz or S2 gate pass.
+The session locked before the after-patch display and OS IME checks; those are open.
+
+- **P-TEXT:** `gpui_macos::native_text::NativeTextSlot` owns real `NSTextField`
+  and scrollable plain `NSTextView` editors. Primary/multiline fields stay native;
+  dense text/number fields become native only while editing. Geometry and inherited
+  rectangular clips are staged from GPUI paint, then applied in the composition's
+  `CATransaction`. No custom `NSTextInputClient`, key injection or marked-string
+  conversion is installed. AppKit keeps its field editor, responder chain, undo,
+  selection, marked text, contextual Services, dictation and emoji input. Spell
+  check/correction is enabled for text (disabled for numbers). Writing Tools uses
+  the system default behavior where the selector exists; actual system availability
+  remains an OS/account/hardware condition, not an emulated feature.
+- **P-TEXT / AX:** live native editors join the retained composition reading order;
+  an explicit `accessibility_item()` lets the host anchor one at a panel position.
+  Otherwise managed text editors are appended, with identity deduplication.
+  Visibility changes/removal notify the existing P-A11Y adapter; drop removes the
+  native subview and parent override. Placement currently supports rectangular
+  clipping and translation, matching the existing S2 host limitation.
+- **P-TEXT / shell:** `pm_shell::text::TextField` renders dense values in GPUI and
+  overlays an identically sized native slot while editing. Number validation runs
+  at commit, allowing incomplete/marked strings during editing; invalid values or
+  Escape restore the previous value. Change/commit/cancel events wake GPUI through
+  a channel. Primary and multiline kinds use the same component API. The shell and
+  popup key monitors return marked-text events directly to AppKit. Native Edit
+  menu roles expose spelling, Writing Tools and Emoji & Symbols; Services retains
+  its standard application menu. No dictation permission is requested by tests.
+- **P-120:** retain the existing per-display CoreVideo link and its safe immortal
+  registry. Starting an already subscribed display is now a no-op; a display move
+  changes subscriptions, and occlusion/no-screen stops them. No fixed 60-Hz timer
+  or unsafe display-link teardown was added. ProMotion pacing still needs an
+  unlocked run. `PM_FRAME_PACING=1` records the **GPUI layer's** drawable timestamps;
+  zero timestamps are unknown, never successful presentations. CPU phase timing
+  remains opt-in through `ZED_MEASUREMENTS=1`.
+- **P-120 / headroom candidate:** S2 caches its unchanged native viewer pattern and
+  clip masks, and gives the 1,000 static texture tiles a cached GPUI entity. The
+  fresh 60-Hz producer is separate; texture leases/fences remain intact. This uses
+  GPUI's existing invalidation-aware `.cached(...)` API; it does not introduce a
+  second scene cache. An explicit `S2_BASELINE=1` disables these fixture caches for
+  A/B checks. A real 5,000-row `uniform_list` scroll workload advances seven rows
+  on every requested display frame (`S2_TIMELINE=1`), bounded to 7,400 frames.
+
+Tests: the native AppKit probe checks multiline/UTF-16 marked text and commit,
+spell/undo configuration, clipping, equal dense/native geometry and teardown,
+then reruns the original foreign-child AX bridge probes. A real headless GPUI
+regression test confirms twelve parent invalidations reuse an unchanged child,
+identical rendered pixels, and a child notification invalidates its cache.
+Reproduction and open gates: `docs/native/s2-gpui-ce.md`. Upstream intent is an
+optional native text-slot facility and idempotent frame-source start; no submission
+has been made. No measurements from a locked or occluded session certify pacing.

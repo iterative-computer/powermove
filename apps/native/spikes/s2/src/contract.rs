@@ -15,7 +15,7 @@ impl Rect {
         p[0] >= self.x && p[1] >= self.y && p[0] < self.x + self.w && p[1] < self.y + self.h
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Clip {
     Rect(Rect),
     Union(Vec<Rect>),

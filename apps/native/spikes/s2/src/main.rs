@@ -11,12 +11,27 @@ struct Demo {
     host: Rc<RefCell<native::Host>>,
     fixture: Option<Rc<RefCell<onscreen::Fixture>>>,
     focus: FocusHandle,
+    tiles: Option<Entity<onscreen::TileView>>,
+    scroll: UniformListScrollHandle,
+    frame: usize,
+    text: Vec<Entity<pm_shell::text::TextField>>,
 }
 impl Render for Demo {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.frame += 1;
+        let timeline = std::env::var_os("S2_TIMELINE").is_some();
+        if timeline {
+            self.scroll
+                .scroll_to_item_strict((self.frame * 7) % 4990, ScrollStrategy::Top);
+        }
+        if timeline && self.frame == 7400 {
+            println!("S2_TIMELINE frames=7400 rows=5000 scroll_step=7");
+        }
         let host = self.host.clone();
         let fixture = self.fixture.clone();
-        if fixture.as_ref().is_some_and(|f| f.borrow().frames < 650) {
+        if (timeline && self.frame < 7400)
+            || fixture.as_ref().is_some_and(|f| f.borrow().frames < 7400)
+        {
             let weak = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = weak.update(cx, |_, cx| cx.notify());
@@ -53,15 +68,50 @@ impl Render for Demo {
                                 rgb(c),
                             ));
                         }
-                        if let Some(fixture) = &fixture {
-                            fixture.borrow_mut().paint(w, h, window);
-                        }
                         let _ = cx;
                     },
                 )
                 .absolute()
                 .size_full(),
             )
+            .children(self.tiles.clone().map(|tile| {
+                if std::env::var_os("S2_BASELINE").is_some() {
+                    tile.into_any_element()
+                } else {
+                    tile.cached({
+                        let mut style = StyleRefinement::default();
+                        style.size.width = Some(relative(1.).into());
+                        style.size.height = Some(relative(1.).into());
+                        style.position = Some(Position::Absolute);
+                        style
+                    })
+                    .into_any_element()
+                }
+            }))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, w, _| {
+                        if let Some(f) = &fixture {
+                            f.borrow_mut().paint(
+                                f32::from(b.size.width),
+                                f32::from(b.size.height),
+                                w,
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .children(self.text.iter().enumerate().map(|(i, field)| {
+                div()
+                    .absolute()
+                    .left(px(214.))
+                    .top(px(124. + i as f32 * 106.))
+                    .w(px(250.))
+                    .child(field.clone())
+            }))
             .child(
                 div()
                     .absolute()
@@ -102,6 +152,7 @@ impl Render for Demo {
                         })
                         .collect()
                 })
+                .track_scroll(&self.scroll)
                 .absolute()
                 .left_0()
                 .bottom_0()
@@ -129,6 +180,7 @@ fn main() -> anyhow::Result<()> {
     Application::with_platform(platform)
         .with_accessibility_forced()
         .run(move |cx| {
+            native::install_text_menu();
             cx.set_window_appearance(Some(
                 if std::env::var("S2_APPEARANCE").as_deref() == Ok("light") {
                     WindowAppearance::Light
@@ -153,9 +205,57 @@ fn main() -> anyhow::Result<()> {
                     // Event-driven: native controls wake GPUI, with no idle timer.
                     let fixture = std::env::var_os("S2_PACING")
                         .map(|_| Rc::new(RefCell::new(onscreen::Fixture::new(&device))));
+                    let tiles = fixture.as_ref().map(|f| {
+                        cx.new(|_| onscreen::TileView {
+                            fixture: f.clone(),
+                            renders: 0,
+                        })
+                    });
+                    let text = if std::env::var_os("S2_TEXT").is_some() {
+                        [
+                            (
+                                gpui_macos::native_text::TextKind::Multiline,
+                                "Caption",
+                                "Caption / composer: spell check, IME, Services",
+                            ),
+                            (
+                                gpui_macos::native_text::TextKind::DenseNumber,
+                                "Scale",
+                                "100",
+                            ),
+                            (
+                                gpui_macos::native_text::TextKind::DenseText,
+                                "Layer name",
+                                "Layer name",
+                            ),
+                        ]
+                        .into_iter()
+                        .map(|(kind, label, value)| {
+                            cx.new(|cx| {
+                                pm_shell::text::TextField::new(
+                                    kind,
+                                    label,
+                                    value,
+                                    pm_design::Tokens::new(
+                                        pm_design::Scheme::Dark,
+                                        pm_design::Accessibility::default(),
+                                    ),
+                                    window,
+                                    cx,
+                                )
+                            })
+                        })
+                        .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let demo = cx.new(|cx| Demo {
                         host,
                         fixture,
+                        tiles,
+                        text,
+                        frame: 0,
+                        scroll: UniformListScrollHandle::new(),
                         focus: cx.focus_handle(),
                     });
                     let weak = demo.downgrade();
