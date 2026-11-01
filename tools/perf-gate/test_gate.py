@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from budgets import ROWS, check, percentile, ratio
 from macos import Processes, delta, host_seconds
 import driver
-from trace import analyze, load as load_trace
+from trace import analyze, continuity, load as load_trace
 
 
 class GateTests(unittest.TestCase):
@@ -110,6 +110,35 @@ class GateTests(unittest.TestCase):
         self.assertAlmostEqual(result['av_mean_abs_offset_ms'],2.)
         self.assertAlmostEqual(result['input_to_display_ms']['p95'],4.)
         self.assertFalse(result['gate_eligible'])
+
+    def test_av_uses_content_onsets_not_held_rescans(self):
+        f = 1 / 120
+        rows = []
+        for n in range(4):  # one 30 fps frame re-presented on four vsyncs
+            for k in range(4):
+                rows.append({'gpu_ok': True, 'viewer_id': 1, 'revision': 1, 'generation': 1, 'time': n * 23_520_000,
+                             'display': 10 + (4 * n + k) * f, 'audio_host': 10 + 4 * n * f})
+        result = analyze(rows)
+        self.assertEqual(result['av_matched_samples'], 4)
+        self.assertAlmostEqual(result['av_mean_abs_offset_ms'], 0.)
+        self.assertEqual(result['av_jitter_abs_about_mean_ms']['p95'], 0.)
+        self.assertAlmostEqual(result['av_all_presentations']['jitter_abs_about_mean_ms']['p95'], 12.5, places=3)
+
+    def test_continuity_counts_skipped_and_late_content_frames(self):
+        tick, f = 23_520_000, 1 / 120
+        def row(n, slot):
+            return {'gpu_ok': True, 'viewer_id': 1, 'revision': 1, 'time': n * tick, 'display': 10 + slot * f}
+        ok = continuity([row(n, 4 * n) for n in range(6)], tick, 120, loop_end=6 * tick)
+        self.assertEqual(ok['dropped'], 0)
+        self.assertEqual(ok['content_onsets'], 6)
+        late = continuity([row(0, 0), row(1, 5), row(2, 8)], tick, 120)
+        self.assertEqual((late['late_onsets'], late['skipped_content_frames']), (1, 0))
+        skip = continuity([row(0, 0), row(2, 8), row(3, 12)], tick, 120)
+        self.assertEqual(skip['skipped_content_frames'], 1)
+        wrap = continuity([row(4, 16), row(5, 20), row(0, 24), row(1, 28)], tick, 120, loop_end=6 * tick)
+        self.assertEqual(wrap['dropped'], 0)
+        bad_wrap = continuity([row(4, 16), row(0, 20)], tick, 120, loop_end=6 * tick)
+        self.assertEqual(bad_wrap['skipped_content_frames'], 1)
 
     def test_missing_display_still_exposes_processing_but_not_physical_latency(self):
         result = analyze([dict(gpu_ok=True, display=None, worker=10.002, completed=10.004,

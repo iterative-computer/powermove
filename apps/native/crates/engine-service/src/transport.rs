@@ -51,6 +51,22 @@ pub struct Transport {
     awaiting: Option<(i64, Option<u32>, PlaybackRate)>,
     pub fallback: bool,
     audible: bool,
+    /// Latest known vsync (host s) and refresh interval for this viewer.
+    pub grid: Option<(f64, f64)>,
+}
+/// The first vsync on `grid` at or after `at` (host µs). The picture can only
+/// change on vsync, so a run whose first sample is heard exactly on that line
+/// lets every following frame onset meet its audio (refresh-multiple rates).
+pub fn align_to_grid(at: i64, grid: Option<(f64, f64)>) -> i64 {
+    let Some((vsync, interval)) = grid.filter(|(v, i)| v.is_finite() && *v > 0. && *i >= 0.001)
+    else {
+        return at;
+    };
+    let t = at as f64 / 1e6;
+    let k = ((t - vsync) / interval).ceil();
+    let aligned = vsync + k * interval;
+    // Rounding can land a microsecond early; never start before `at`.
+    ((aligned * 1e6).round() as i64).max(at)
 }
 impl Transport {
     pub fn new(frame_ticks: i64) -> Self {
@@ -60,6 +76,7 @@ impl Transport {
             awaiting: None,
             fallback: false,
             audible: false,
+            grid: None,
         }
     }
     /// Worker only. AudioLink lazily opens Playback after WARM_IDLE if audible.
@@ -121,12 +138,13 @@ impl Transport {
                     }
                     self.clock.hold(from, now);
                 }
-                self.clock.play_at(rate, now, now + PREROLL_US);
+                let start = align_to_grid(now + PREROLL_US, self.grid);
+                self.clock.play_at(rate, now, start);
                 if let Some(a) = self.audio.as_ref().filter(|_| self.audible) {
                     a.send(AudioCtl::Play {
                         from,
                         rate,
-                        at: now + PREROLL_US,
+                        at: start,
                     });
                     self.clock.hold(from, now);
                     self.awaiting = Some((
@@ -282,5 +300,24 @@ impl AvMeasurements {
             mean_abs_ms: self.offsets_ms.iter().map(|v| v.abs()).sum::<f64>() / jitter.len() as f64,
             p95_jitter_ms: jitter[(jitter.len() * 95).div_ceil(100) - 1],
         })
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::align_to_grid;
+    #[test]
+    fn starts_land_on_the_next_vsync_and_never_early() {
+        let grid = Some((100.0, 1. / 120.));
+        // 100.05 s is between vsyncs 6 (100.05) exactly and 7.
+        assert_eq!(align_to_grid(100_050_000, grid), 100_050_000);
+        let at = align_to_grid(100_051_000, grid);
+        assert_eq!(at, 100_058_333);
+        assert!(at >= 100_051_000);
+        // Old phase extrapolates; no grid or a bad one leaves `at` alone.
+        let k = (align_to_grid(160_000_001, grid) - 100_000_000) as f64 / (1e6 / 120.);
+        assert!((k - k.round()).abs() < 1e-3, "extrapolated phase: {k}");
+        assert_eq!(align_to_grid(5, None), 5);
+        assert_eq!(align_to_grid(5, Some((f64::NAN, 0.01))), 5);
     }
 }

@@ -389,3 +389,46 @@ fn telemetry_headroom_does_not_invalidate_identical_pixels() {
     .unwrap();
     assert_ne!(v.stamp().unwrap(), stamp);
 }
+
+#[test]
+fn playback_holds_identical_frames_instead_of_re_presenting_them() {
+    // 30 fps content under 120 Hz ticks: each content frame is submitted once
+    // and held for the remaining ticks; no two consecutive submissions match.
+    let service = EngineService::start(pm_gpu::Gpu::new("held-frame-test").unwrap()).unwrap();
+    let v = service.viewer(config(snapshot())).unwrap();
+    v.command(C::Play {
+        rate: PlaybackRate::NORMAL,
+    })
+    .unwrap();
+    let start = Instant::now();
+    let mut times = Vec::<Ticks>::new();
+    let mut last = None;
+    while start.elapsed() < Duration::from_millis(900) {
+        v.display_tick(trace::now() + 1. / 120., 1. / 120.).unwrap();
+        let status = v.status();
+        assert!(status.error.is_none(), "{:?}", status.error);
+        if let Some(f) = status.frame
+            && f.completion_host_seconds != last
+        {
+            last = f.completion_host_seconds;
+            times.push(f.time);
+        }
+        std::thread::sleep(Duration::from_micros(8_333));
+    }
+    let status = v.status();
+    assert!(status.wants_display);
+    assert!(status.held_frames > 0, "identical ticks must be held");
+    assert!(
+        times.len() >= 10,
+        "content frames keep advancing: {times:?}"
+    );
+    for pair in times.windows(2) {
+        assert_ne!(pair[0], pair[1], "identical frame re-presented: {times:?}");
+    }
+    v.command(C::Pause).unwrap();
+    let start = Instant::now();
+    while v.status().wants_display {
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}

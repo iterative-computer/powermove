@@ -153,6 +153,12 @@ pub struct ViewerStatus {
     pub no_drawable: u64,
     pub audio_fallback: bool,
     pub skipped_targets: u64,
+    /// Display ticks whose frame was identical to the one already on screen.
+    /// The layer keeps showing it; no drawable is spent (see `run`).
+    pub held_frames: u64,
+    /// Playing or waiting for the audio epoch: the host should keep its
+    /// display-phase source running so the start can align to vsync.
+    pub wants_display: bool,
 }
 struct View {
     config: ViewerConfig,
@@ -649,6 +655,25 @@ struct Runtime {
     content: u64,
     interval: f64,
     next: f64,
+    /// Observed presentedTime − requested target for timed presents: the
+    /// WindowServer/compositor queue the picture cannot avoid. Media time is
+    /// chosen for target + this lag, so a frame lands when its audio plays.
+    lag: VecDeque<f64>,
+    /// Most recent known vsync (host s) and refresh interval.
+    grid: Option<(f64, f64)>,
+    /// Stamp/time already submitted. Repeating identical pixels at the
+    /// display rate only queues more drawables behind the compositor.
+    last: Option<(Stamp, Ticks)>,
+}
+impl Runtime {
+    fn lag(&self) -> f64 {
+        if self.lag.len() < 3 {
+            return 0.;
+        }
+        let mut v: Vec<_> = self.lag.iter().copied().collect();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
 }
 struct Flight {
     id: u64,
@@ -676,6 +701,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 None
             }
         });
+    // Diagnostic A/B only: the pre-latency-pass schedule (re-present every
+    // tick, picture for the target vsync, unaligned audio start).
+    let legacy = std::env::var("PM_ENGINE_PRESENT").as_deref() == Ok("legacy");
     let mut cursor = 0;
     loop {
         let mut state = shared.state.lock().unwrap();
@@ -700,6 +728,29 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if f.submission.command.status() == metal::MTLCommandBufferStatus::Error {
                 engine.clear_cache();
             }
+            if let Some(r) = runtime.get_mut(&f.id) {
+                let t = f.submission.trace.lock().unwrap();
+                match t.display.filter(|d| *d > 0.) {
+                    Some(display) => {
+                        r.grid = Some((display, r.interval));
+                        if t.target > 0. && display >= t.target - 0.0005 {
+                            if r.lag.len() == 15 {
+                                r.lag.pop_front();
+                            }
+                            r.lag.push_back(display - t.target);
+                        }
+                    }
+                    // Never shown on a layer: the screen may not hold it.
+                    None => {
+                        if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.time)) {
+                            r.last = None;
+                        }
+                    }
+                }
+                if !t.gpu_ok && r.last == Some((f.stamp, f.time)) {
+                    r.last = None;
+                }
+            }
             if let Some(v) = state.views.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
@@ -707,7 +758,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
-                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target})) {
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
                 if v.stamp != f.stamp {
@@ -785,6 +836,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     content: v.content,
                     interval: 1. / 60.,
                     next: now,
+                    lag: VecDeque::with_capacity(15),
+                    grid: None,
+                    last: None,
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
@@ -797,6 +851,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 r.content = v.content;
             }
             changed |= !v.commands.is_empty() || v.status.clock.is_none();
+            if let Some((target, interval)) = v.phase {
+                r.grid = Some((target, interval));
+            }
+            // Audio starts are placed on this viewer's last known vsync line.
+            r.transport.grid = r.grid.filter(|_| !legacy);
             while let Some(cmd) = v.commands.pop_front() {
                 r.transport.command(cmd, (now * 1e6) as i64);
             }
@@ -809,6 +868,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             v.status.clock = Some(sample);
             v.desired_rate = r.transport.rate();
             v.status.audio_fallback = r.transport.fallback;
+            changed |= v.status.wants_display != r.transport.running();
+            v.status.wants_display = r.transport.running();
             if let Some((_, interval)) = v.phase {
                 r.interval = interval;
             }
@@ -836,16 +897,38 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - interval) {
                 continue;
             }
-            let media = if let Some(due) = due {
-                sample.media_time_at(
-                    pm_protocol::common::HostMicros::new((due * 1e6) as u64).unwrap(),
-                )
+            // A timed present reaches glass `lag` after its target (measured
+            // from presentedTime). Pick the picture for that instant, and for
+            // forward play show each frame from the vsync nearest its onset,
+            // so picture onsets straddle their audio instead of trailing it.
+            let shown = due.map(|due| due + if legacy { 0. } else { r.lag() });
+            let media = if let Some(shown) = shown {
+                let at = |s: f64| {
+                    sample.media_time_at(
+                        pm_protocol::common::HostMicros::new((s.max(0.) * 1e6) as u64).unwrap(),
+                    )
+                };
+                let plain = at(shown);
+                let lead = at(shown + interval / 2.);
+                let forward = sample.rate.num > 0 && lead.get() >= plain.get();
+                let inside = r.transport.clock.end().is_none_or(|end| lead.get() < end);
+                if forward && inside && !legacy {
+                    lead
+                } else {
+                    plain
+                }
             } else {
                 sample.media_time
             };
             let time =
                 Ticks::new(r.transport.clock.snap(media.get()).max(0)).unwrap_or(Ticks::ZERO);
             r.next = due.unwrap_or(now) + interval;
+            let capture = v.capture;
+            if !legacy && due.is_some() && !v.dirty && !capture && r.last == Some((v.stamp, time)) {
+                // Held content frame: the layer already shows these pixels.
+                v.status.held_frames += 1;
+                continue;
+            }
             v.dirty = false;
             let scene = Scene {
                 doc: v.config.snapshot.document.clone(),
@@ -873,8 +956,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 v.input.take(),
                 v.pipeline,
                 r.transport
-                    .audio_host_for(time, (due.unwrap_or(now) * 1e6) as i64)
+                    .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
+                shown,
             ));
             break;
         }
@@ -906,12 +990,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             input,
             pipeline,
             audio_host,
+            shown,
         )) = work
         {
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
                 target: due.unwrap_or(0.),
+                predicted: shown.unwrap_or(0.),
                 ..Default::default()
             }));
             engine.mastering = mastering;
@@ -953,6 +1039,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                                 }
                             })),
                         );
+                        if let Some(r) = runtime.get_mut(&id) {
+                            r.last = Some((stamp, time));
+                        }
                         flights.push_back(Flight {
                             id,
                             stamp,

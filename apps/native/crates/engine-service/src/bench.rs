@@ -90,7 +90,7 @@ pub fn run() -> anyhow::Result<()> {
             .get(((costs.len() as f64 * q).ceil() as usize).saturating_sub(1))
             .copied()
     };
-    let result = json!({"mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,"samples":costs.len(),"worker_to_completion_ms":{"p50":p(0.5),"p95":p(0.95)},"headroom_budget_ms":500./hz,"gpu_failures":failures,"skipped_targets":viewer.status().skipped_targets,"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}});
+    let result = json!({"mode":"offscreen","clock":"synthetic host ticks; NOT a display link","hz":hz,"seconds":seconds,"samples":costs.len(),"worker_to_completion_ms":{"p50":p(0.5),"p95":p(0.95)},"headroom_budget_ms":500./hz,"gpu_failures":failures,"skipped_targets":viewer.status().skipped_targets,"held_frames":viewer.status().held_frames,"on_screen":"UNVERIFIED","build_profile":if cfg!(debug_assertions){"dev"}else{"release"}});
     std::fs::write(
         arg("report", "/tmp/es2-service-offscreen.json"),
         serde_json::to_vec_pretty(&result)?,

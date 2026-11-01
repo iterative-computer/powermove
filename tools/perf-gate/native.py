@@ -13,7 +13,7 @@ import time
 
 import driver
 from macos import host_seconds
-from trace import analyze
+from trace import analyze, continuity
 from budgets import distribution
 
 
@@ -25,9 +25,11 @@ def main():
     p.add_argument('--runs', type=int, default=30)
     p.add_argument('--seconds', type=int, default=60)
     p.add_argument('--audio', action='store_true')
+    p.add_argument('--lock-owner', default='perffix', help='Name written to the GUI lock (alphanumeric)')
     p.add_argument('--interact', action='store_true', help='Leave a disposable registered app on screen for inspector input during the window')
     args = p.parse_args()
     assert 1 <= args.runs <= 60 and 1 <= args.seconds <= 120
+    assert args.lock_owner.isalnum()
     assert args.project.resolve().is_relative_to(Path('/tmp').resolve())
     assert args.output.parent.resolve().is_relative_to(Path('/tmp').resolve()) and not args.output.is_symlink()
     args.native = Path.home() / 'Developer/pm-target/release/powermove-native'
@@ -35,7 +37,7 @@ def main():
     # Display switches, launch, and all measurement share one owned lock.
     driver.LOCK.parent.mkdir(exist_ok=True)
     while True:
-        result = subprocess.run(['zsh', '-c', 'set -o noclobber; echo perffix > /tmp/pm-shots/gui.lock'], capture_output=True)
+        result = subprocess.run(['zsh', '-c', f'set -o noclobber; echo {args.lock_owner} > /tmp/pm-shots/gui.lock'], capture_output=True)
         if result.returncode == 0:
             break
         print('GUI lock held; retry in 30 s', flush=True)
@@ -48,7 +50,8 @@ def main():
     signal.alarm(540)
     app = None
     original = None
-    data = {'hz': args.hz, 'runs': [], 'gate_eligible': False}
+    data = {'hz': args.hz, 'runs': [], 'gate_eligible': False,
+            'present_mode': os.environ.get('PM_ENGINE_PRESENT', 'default')}
     try:
         conditions = driver.conditions(driver.Processes())
         data['before'] = conditions
@@ -114,7 +117,15 @@ def main():
             measured = [r for r in rows if r.get('display') and data['play_start'] <= r['display'] <= data['play_end']]
             data['playback'] = analyze(measured)
             stamps = sorted(r['display'] for r in measured if r.get('gpu_ok'))
-            data['playback']['gaps'] = sum((b - a) > 1.5 / args.hz for a, b in zip(stamps, stamps[1:]))
+            # Raw scanout-to-scanout gaps; with held frames these are expected
+            # whenever content is slower than the display. Drops use continuity.
+            data['playback']['presentation_gaps'] = sum((b - a) > 1.5 / args.hz for a, b in zip(stamps, stamps[1:]))
+            doc = json.loads(args.project.read_text())
+            fps = float(doc.get('fps') or 30)
+            frame_ticks = round(driver.TICKS / fps)
+            loop_end = round(float(data['last_status'].get('duration') or doc.get('dur') or 0) * driver.TICKS) or None
+            data['playback']['continuity'] = continuity(measured, frame_ticks, args.hz, loop_end)
+            data['playback']['held_frames'] = data['last_status'].get('held_frames')
             for key, a, b in [('render_ms','render_start','render_submitted'), ('drawable_wait_ms','drawable_asked','drawable_acquired'), ('commit_to_display_ms','commit','display')]:
                 data['playback'][key] = distribution([(r[b]-r[a])*1000 for r in measured if r.get(a) and r.get(b) and r[b] >= r[a]])
             data['trace_path'] = str(args.output.parent / (root.name + '-native.trace.json'))

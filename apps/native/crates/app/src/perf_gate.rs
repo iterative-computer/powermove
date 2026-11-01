@@ -98,6 +98,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         "playing":status.as_ref().and_then(|s| s.clock).map(|c| c.state != pm_protocol::clock::TransportState::Stopped),
                         "skipped_targets":status.as_ref().map(|s| s.skipped_targets),
                         "no_drawable":status.as_ref().map(|s| s.no_drawable),
+                        "held_frames":status.as_ref().map(|s| s.held_frames),
                         "metal_allocated_bytes":v.engine.metal_device().current_allocated_size(),
                         "duration":v.duration,
                     }))

@@ -435,3 +435,23 @@ release-only, lock-owned foreground diagnostics and display restoration.
 
 No engine, vendor, shell structure or dependency-lock changes were made.
 The only kernel edit adds actor/publication timing in `actor.rs`.
+
+### Latency pass (2026-11-01)
+
+See [the P1 latency pass](perf-gate-p1.md#latency-pass--2026-11-01). **P1 is not passed**; the
+session was locked, so there are no on-screen rows.
+
+- **Held frames:** during playback a tick whose stamp and media time match the last
+  submission is not re-presented (`ViewerStatus::held_frames`). Re-presenting a
+  30 fps frame at 120 Hz kept all three drawables queued behind ~2.4 intervals of
+  WindowServer latency and starved `nextDrawable`.
+- **Lag-compensated picture time:** each viewer keeps the median of the last 15
+  `presentedTime − target` values. The picture and its matched `audio_host` are
+  chosen for `target + lag`, rounded to the nearest onset for forward play.
+- **Vsync-aligned start:** `Transport::grid` (last display tick/presentation) places
+  the audio `Start::At` and host-clock run start on a vsync. `wants_display` asks the
+  host to run its display link while awaiting the audio epoch.
+- `PM_ENGINE_PRESENT=legacy` restores the previous schedule for same-build A/B only.
+
+Layer configuration is unchanged (3 drawables, display sync, no transaction present):
+a standalone probe found no latency difference across those settings.

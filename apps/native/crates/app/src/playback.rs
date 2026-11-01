@@ -89,7 +89,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 }
                 if let Some((target, interval)) = ticks.borrow_mut().take() { let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
-                link.set_paused(status.clock.as_ref().is_none_or(|c|c.rate.num == 0));
+                // Run through the audio-start wait too: its vsync phase places the start.
+                link.set_paused(!status.wants_display);
                 if let Some(error)=status.error {
                     let error=format!("Viewer: {error}");
                     if v.message!=error {v.message=error;cx.notify();}
