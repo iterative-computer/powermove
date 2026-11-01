@@ -1,6 +1,6 @@
 # Agent built-in v4 panel — 2026-11-01
 
-**Partial implementation; blocked for freeze. All visual output is provisional
+**Partial implementation; blocked for native panel acceptance. All visual output is provisional
 until Opus review.** Entry: `index.ts`. Source spec:
 `docs/native/design/panels/agent-panel.md` and its shared README/owner decisions.
 This lane changes only this directory, thin `pm-panel-agentpanel` adapter code
@@ -78,7 +78,7 @@ also projects the emitted commits through the real AccessKit tree builder.
 | §9 Copy           | Spec strings and model/provider-authored content only; no new product copy                                                                                                                               | Unavailable controls' copy remains represented by placeholders until their API lands                                                                                                                                  |
 | §10 Don't         | Popover default; solid content; replies have no bubbles; no decorative canvases; no retired consumer deletion                                                                                            | Platform shortcut/focus/popup proofs require the macOS integration                                                                                                                                                    |
 
-## Required APIs (no edits to surface or v4/src)
+## API requests — additive to the frozen contract
 
 1. Kit native multiline composer: host binding for thread-local draft, IME/UTF-16
    selection, inline attachment tokens/arming/Undo, clipboard/file/layer drop and
@@ -168,3 +168,25 @@ restoration, 60k measured-row scrolling/input latency and full VoiceOver. Captur
 light/dark 2×, Increase Contrast, Reduce Transparency and Reduce Motion states,
 confirm real hit rectangles and no UI-thread JS waits, then obtain Opus review.
 Linux wire/model/AX descriptions do not certify those gates.
+
+## Frozen API baseline — 2026-11-01
+
+Merged `origin/feat/native-engine` at
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005`, including the recorded v4 API freeze
+in `docs/native/p0-decisions.md`. This supersedes the integration branch as this
+panel's API baseline. The frozen `v4-api.md` and `ui-kit.md` contracts match the
+API implementation already consumed by this panel; no code adaptation, API shape
+change, new dependency or lockfile update is required for this merge.
+
+The API requests above are additive requests for their owning lanes. The panel
+continues to use the frozen six-op protocol, existing kit components, asynchronous
+HostClient/HostRouter/HostDataService boundary and explicit diagnostic metadata.
+No change is made to `crates/surface` or `js/v4/src`. Missing native controls and
+application registration remain acceptance blockers; the 40/40 headless API eval
+does not certify completion of this panel or macOS rendering.
+
+Rule-selected decision: consume the frozen contract unchanged and report missing
+capabilities as additive API requests (orchestrator freeze directive; N3/N7).
+Keep all existing consumers and asynchronous authority boundaries intact (N4/N6,
+N8 and the prune rule). The four Opus TODOs and macOS verification list above are
+unchanged.
