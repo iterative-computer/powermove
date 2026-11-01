@@ -1,5 +1,7 @@
 //! Worker-side pro media contracts. The host kernel owns and publishes models.
 //! Filesystem operations and codecs must run on workers, never on the UI thread.
+pub mod cache;
+pub mod storage;
 pub mod tasks;
 
 // Lane ownership excludes pm-color/lib.rs. Compile the actual engine sources
