@@ -10,7 +10,7 @@ Each item names its evidence. Nothing here authorizes dropping a v1–3 member
 
 | Item | State | Evidence |
 |---|---|---|
-| S1 V8 | Not started. The sandbox build needs far more disk than this Mac has (~10 GB free vs §9's 80 GB). Owner: a machine with space or CI. | — |
+| S1 V8 | **Works; gate open.** rusty_v8 152.2.0 (V8 15.2.124.1) with the V8 sandbox + pointer compression built from source on GitHub Actions macOS runners (owner decision: CI), verified artifacts reused locally; Store helper 9.21 MB, stop/recreate 1.39 ms, snapshot restore p95 4.65 ms, signed TurboFan JIT OK. Open: reconciler timing, hard external-memory limits, attribution, cluster integration. | `s1-v8.md` |
 | S2 GPUI-CE | **Open.** GPU tests pass (P-DEVICE, P-HEADLESS, P-TEXTURE). Unlocked rerun: dark glass toolbar PASS, Reduce Transparency fallback PASS, field menu spring 0.32/0.15 PASS, cross-slot drags limited PASS; **accessibility FAIL** (slot children absent from the AX tree, so P-A11Y is required); 120 Hz cadence p95 8.33 ms but CPU p95 6.88 ms vs 4.17 ms headroom (**FAIL**); resize ≤1-frame unproven; IME needs a manual check; one display, so no display-move test. Visual defects: light titlebar over dark content, overlay label clipped. | `s2-gpui-ce.md` |
 | S3 Viewer (EDR) | **Open.** RGBA16F below-slot EDR layer works (headroom 1.2×→2.67×, linear values preserved to 8.0); engine-drawn safe-area overlay 0 px offset; playhead/timecode as native layers with 0 GPUI repaints in playback; viewer = export ΔE p99 0.03 (SDR) / 0.06 (PQ input). **Fails:** 120 Hz soaks show 6–11 scanout gaps per 60 s; scrub input→present p95 45.7 ms vs vsync+1. Open: PQ/BT.2100 output, animated gizmos, display moves. | `s3-viewer.md` |
 | S4 GLSL | **Draw regression passes; gate open.** 661 cases / 1,605 variants by stage: 516 draw natively, 13 cases need the WebGL route, zero naga failures (so no SPIRV-Cross route), zero lost draws vs the previous writer; killable compiler processes. Open: production Metal compile still host-side, no historical WebGL captures, one self-unstable case. | `s4-glsl.md` |
@@ -26,7 +26,7 @@ First measured with the Mac locked, then rerun unlocked and confirmed foreground
 2. **Render continuations:** work without deadlock (inline override, nested capture, real canvas, JPEG), but p95 384 ms on the synthetic path.
 3. **Background activity:** with the visibility/throttling SPI, a page-driven job kept 74% (app hidden) and 69% (windowless) of foreground throughput, short of the ≥ 95% rule. Offscreen-window-only stalled.
 4. **Hang kill:** `_killWebContentProcess` and WebKit's own termination did not end a real infinite loop within 20 s; a different reset-state SPI restarted the page in 106 ms (old process confirmed gone).
-5. **Fallback** (trusted realm in V8 + remote DOM) is unimplemented and unmeasured; it depends on S1.
+5. **Fallback** (trusted realm in V8 + remote DOM): S1 now works, so the evaluation (S5c) is running.
 
 Decision needed (now firmer after the unlocked rerun): choose the scheme handler for page→app sync calls, and either accept S5 as "channels viable, pixel/continuation/background budgets need the engine-id design and an unlocked rerun", or trigger the V8 + remote-DOM fallback evaluation (blocked on S1).
 
