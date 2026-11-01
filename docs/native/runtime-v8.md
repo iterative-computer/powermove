@@ -330,3 +330,54 @@ JIT entitlements, helper crash blast radius, AppKit/main-thread independence,
 real kernel/engine/recorder behavior, Svelte WebKit panels and 39-extension
 memory/performance rows. No Metal/AppKit/GPUI/WebKit or on-screen claim is made
 from Linux.
+
+## macOS verification — 2026-11-01
+
+Test lane: `feat/na-macverify`, based on native-engine commit
+`ff42d751fbf6a9266cd2ba1a8e25345b60baa5d7`.
+ARM64, macOS 27.2 (26B5086k), debug/test configuration.
+No V8 source build, release signing, notarization or publication was performed.
+All inputs were synthetic; logs remain under `/tmp/pm-macverify/`.
+
+The local S1 artifact at `/private/tmp/pm-s1-v8-artifact-final` passed all five
+`SHA256SUMS` checks. Its archive and binding match the pinned hashes in
+[s1-v8.md](s1-v8.md); both overrides below were set and `V8_FROM_SOURCE` was unset.
+Every build/test used the shared build lock and `~/Developer/pm-target`.
+Disk checks stayed above the required 8 GiB.
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+export RUSTY_V8_ARCHIVE=/private/tmp/pm-s1-v8-artifact-final/librusty_v8.a
+export RUSTY_V8_SRC_BINDING_PATH=/private/tmp/pm-s1-v8-artifact-final/src_binding.rs
+unset V8_FROM_SOURCE
+flock /tmp/pm-build.lock cargo +1.96.1 build --locked \
+  --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml \
+  --features macos-sandbox
+flock /tmp/pm-build.lock cargo +1.96.1 test --locked \
+  --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml \
+  --features macos-sandbox -- --nocapture
+```
+
+| Item | Result |
+| --- | --- |
+| Runtime build | PASS: standalone build and complete test suite with pinned Rust 1.96.1. An earlier standalone build/test run with host-default Rust 1.99.1 also passed; the pinned run is the verification result. |
+| Pinned runtime tests | PASS: **55 unit + 6 integration = 61**, zero failures/ignored. Helper binary and doc-test targets contain zero tests. The documented Linux total of 63 includes two Linux-only confinement tests. |
+| Production Store helper IPC | PASS: cluster reuse/separation, inherited pipes, engine/fetch/abort forwarding, idle timer effects, bounded admission, stop/spawn failure, cleanup and storage restart tests. Helper reports `platform=macos`, `seatbelt=true`. |
+| Fatal helper OOM | PASS: fatal V8 diagnostic and expected abort/trap required by the test; trusted parent and sibling helper retained their values. |
+| Compiler/lifecycle coverage | PASS: compiler snapshot/TypeScript/CSS/cache/error paths, activation/reload, retained generations, quotas and watchdog tests in the 55-unit suite. |
+| JS compat bundle inside pm-runtime-v8 | NOT RUN. [compat-realm.md](compat-realm.md) provides the JS embedding contract, but no executable pm-runtime-v8 runner or Rust kernel adapter for `apps/native/js/compat`; that adapter is explicitly listed as integration work. The runtime's synthetic `RealmKind::Compat` routing tests pass, which does not establish execution of the actual compat bundle/corpus. |
+
+The pinned test log reports Store snapshot **402,464 bytes**, used V8 heap
+**156,080 bytes**, physical V8 heap **786,432 bytes**, external **34 bytes**,
+and helper executable **86,050,576 bytes**. macOS RSS is reported as null;
+no physical-footprint or 20-MB budget claim follows from those heap figures.
+The compiler sample reports snapshot **2,936,592 bytes**, used heap **3,516,516
+bytes**, physical heap **4,587,520 bytes**, external **33,024 bytes**.
+
+Remaining gates: the file/network-denial probe in this suite is Linux-only,
+so seatbelt installation and successful confined IPC here do **not** certify
+macOS denial coverage. Final hardened/signed helper JIT, other supported macOS
+versions, production adapters, compat corpus, UI-thread independence and product
+memory/performance gates remain open. This lane changes verification documents
+only.
