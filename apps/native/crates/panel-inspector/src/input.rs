@@ -85,6 +85,8 @@ impl NumericSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEffect {
     Decline,
+    Begin,
+    Consume,
     OpenEditor,
     Write(f64),
     Commit,
@@ -123,7 +125,7 @@ impl NumericInput {
         self.start = self.current;
         self.moved = false;
         self.active = true;
-        InputEffect::Decline
+        InputEffect::Begin
     }
     /// Cumulative movement from gesture start; right/up increase the value.
     pub fn pointer_move(&mut self, dx: f64, dy: f64, mods: Modifiers) -> InputEffect {
@@ -213,12 +215,13 @@ impl NumericInput {
             .initial_draft
             .take()
             .is_some_and(|initial| draft.trim() != initial);
-        if commit && changed {
-            if let Ok(value) = parse_draft(&draft, self.current) {
-                let value = round(value, 4);
-                self.current = value;
-                return InputEffect::Write(value);
-            }
+        if commit
+            && changed
+            && let Ok(value) = parse_draft(&draft, self.current)
+        {
+            let value = round(value, 4);
+            self.current = value;
+            return InputEffect::Write(value);
         }
         if commit {
             InputEffect::Commit
@@ -243,9 +246,9 @@ impl NumericInput {
                             -self.spec.step
                         } * if mods.shift { 10.0 } else { 1.0 };
                     *draft = round(value, 4).to_string();
-                    return InputEffect::Decline;
+                    return InputEffect::Consume;
                 }
-                _ => return InputEffect::Decline,
+                _ => return InputEffect::Consume,
             }
         }
         match key {
@@ -257,7 +260,7 @@ impl NumericInput {
                 self.current = self.spec.step_value(self.current, key == "ArrowUp", mods);
                 InputEffect::Write(self.current)
             }
-            _ => InputEffect::Decline,
+            _ => InputEffect::Consume,
         }
     }
 }
@@ -274,13 +277,17 @@ fn round(n: f64, places: i32) -> f64 {
     (n * factor + 0.5).floor() / factor
 }
 pub fn toggle_key(current: bool, key: &str, disabled: bool) -> Option<bool> {
+    toggle_key_mixed(current, key, disabled, false)
+}
+/// The tag resolves a mixed switch to On for Space/Enter.
+pub fn toggle_key_mixed(current: bool, key: &str, disabled: bool, mixed: bool) -> Option<bool> {
     if disabled {
         return None;
     }
     match key {
         "ArrowLeft" | "ArrowUp" => Some(false),
         "ArrowRight" | "ArrowDown" => Some(true),
-        " " | "Enter" => Some(!current),
+        " " | "Enter" => Some(mixed || !current),
         _ => None,
     }
 }

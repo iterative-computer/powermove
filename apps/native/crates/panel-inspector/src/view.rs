@@ -6,7 +6,7 @@ use pm_kernel::model;
 use pm_kernel::{
     Ack, Caller, KernelFailure, KernelHandle, Pending, Published, QueryError, QueryMirror, Request,
 };
-use pm_model::{Map, Node, Value};
+use pm_model::{JsString, Map, Node, Value};
 
 use crate::{Binding, EffectClipboard, EffectSelection};
 
@@ -211,7 +211,7 @@ impl Inspector {
             value,
             mixed: values
                 .first()
-                .is_some_and(|first| values.iter().any(|v| v != first)),
+                .is_some_and(|first| values.iter().any(|v| !same_mixed_value(v, first))),
             editable_targets: ids,
             animated,
             key_at_playhead: at,
@@ -228,11 +228,14 @@ impl Inspector {
     ) -> Result<RowWindow, InspectorError> {
         if !self.property_ids.contains_key(layer) {
             self.layer_node(layer)?;
-            let records = self.query("allProps", layer, None, None, 0.0)?;
-            let ids = array(Some(&records))
-                .iter()
-                .filter_map(|r| r.get("key").and_then(Value::as_str))
-                .map(|p| PropertyId::new(layer, p))
+            let records = pm_eval::address::all_props(
+                self.layer_node(layer)?,
+                &pm_eval::address::NoDefinitions,
+            )
+            .map_err(eval_error)?;
+            let ids = records
+                .into_iter()
+                .map(|r| PropertyId::new(layer, r.key.to_string_lossy()))
                 .collect();
             self.property_ids.insert(layer.to_owned(), ids);
         }
@@ -342,19 +345,12 @@ impl Inspector {
         Ok(self.mirror.queries().query(&request)?)
     }
     pub(crate) fn property(&mut self, id: &PropertyId) -> Result<Option<Value>, InspectorError> {
-        let path = self.query("findProp", &id.layer, Some(&id.path), None, 0.0)?;
-        let Some(parts) = path.as_array() else {
-            return Ok(None);
-        };
-        let mut at = self.layer_node(&id.layer)?;
-        for part in parts {
-            at = match part {
-                Value::Number(n) => at.at(*n as usize),
-                _ => part.as_str().and_then(|p| at.get(p)),
-            }
-            .ok_or_else(|| InspectorError::MissingProperty(id.clone()))?;
-        }
-        Ok(Some(at.to_value()))
+        let got = pm_eval::address::find_prop(
+            self.layer_node(&id.layer)?,
+            &JsString::from(id.path.as_str()),
+        )
+        .map_err(eval_error)?;
+        Ok(got.node().map(Node::to_value))
     }
     pub(crate) fn evaluate(&mut self, id: &PropertyId, time: f64) -> Result<Value, InspectorError> {
         if let Some(prop) = self.property(id)? {
@@ -490,5 +486,41 @@ impl ReadoutClock {
         } else {
             false
         }
+    }
+}
+
+fn eval_error(error: pm_eval::js_sem::JsThrow) -> InspectorError {
+    InspectorError::Query(QueryError::Thrown {
+        kind: error.kind.to_string(),
+        message: error.message,
+    })
+}
+
+// Object.is semantics of the shipped mixed-value check. Structured values from
+// distinct targets are distinct objects; do not conflate signed zero or NaN.
+fn same_mixed_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => {
+            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+        }
+        (Value::Array(_), Value::Array(_)) | (Value::Object(_), Value::Object(_)) => false,
+        _ => a == b,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mixed_value_identity_matches_tag_numbers_and_objects() {
+        assert!(same_mixed_value(
+            &Value::Number(f64::NAN),
+            &Value::Number(f64::NAN)
+        ));
+        assert!(!same_mixed_value(&Value::Number(-0.0), &Value::Number(0.0)));
+        assert!(same_mixed_value(&Value::from("x"), &Value::from("x")));
+        assert!(!same_mixed_value(
+            &Value::Array(vec![]),
+            &Value::Array(vec![])
+        ));
     }
 }

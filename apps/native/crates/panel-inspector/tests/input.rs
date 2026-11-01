@@ -202,7 +202,7 @@ fn draft_arrow_steps_without_document_write_or_clamp() {
                 ..Default::default()
             }
         ),
-        InputEffect::Decline
+        InputEffect::Consume
     );
     assert_eq!(i.draft, Some("40".into()));
     assert_eq!(i.key("Escape", Modifiers::default()), InputEffect::Cancel);
@@ -365,4 +365,64 @@ fn effect_navigation_extends_range_and_clamps_at_edges() {
     assert_eq!(s.ids, ["a", "b", "c"]);
     s.navigate(&ids, "c", 1, false).unwrap();
     assert_eq!(s.ids, ["a", "b", "c"]);
+}
+#[test]
+fn smoothing_snaps_at_inclusive_detent_and_clamps() {
+    use pm_panel_inspector::content::smoothing_detent;
+    for v in [58.0, 60.0, 62.0] {
+        assert_eq!(smoothing_detent(v).unwrap(), 60.0);
+    }
+    assert_eq!(smoothing_detent(57.9).unwrap(), 57.9);
+    assert_eq!(smoothing_detent(200.0).unwrap(), 100.0);
+    assert!(smoothing_detent(f64::NAN).is_err());
+}
+#[test]
+fn face_selection_prefers_slope_then_nearest_weight() {
+    use pm_panel_inspector::content::*;
+    let faces = vec![
+        FontFace {
+            weight: 400.0,
+            italic: false,
+        },
+        FontFace {
+            weight: 700.0,
+            italic: false,
+        },
+        FontFace {
+            weight: 900.0,
+            italic: true,
+        },
+    ];
+    assert_eq!(nearest_face(&faces, 650.0, false), Some(&faces[1]));
+    assert_eq!(nearest_face(&faces, 400.0, true), Some(&faces[2]));
+    assert!(nearest_face(&[], 400.0, false).is_none());
+}
+#[test]
+fn recursive_audio_detection_handles_video_missing_and_cycles() {
+    use pm_model::json::parse;
+    use pm_panel_inspector::content::*;
+    let comps=parse(r#"{"a":{"layers":[{"type":"precomp","d":{"comp":"b"}}]},"b":{"layers":[{"type":"video","d":{"asset":"V","embeddedAudio":true}}]},"cycle":{"layers":[{"type":"precomp","d":{"comp":"cycle"}}]},"silent":{"layers":[{"type":"video","d":{"asset":"V","embeddedAudio":false}}]}}"#).unwrap();
+    assert!(precomp_carries_audio("a", &comps));
+    for id in ["missing", "cycle", "silent", ""] {
+        assert!(!precomp_carries_audio(id, &comps));
+    }
+}
+
+#[test]
+fn numeric_begin_is_distinct_from_decline_and_unknown_keys_do_not_leak() {
+    let mut i = NumericInput::new(NumericSpec::default(), 10.0).unwrap();
+    assert_eq!(i.pointer_begin(false), InputEffect::Decline);
+    assert_eq!(i.pointer_begin(true), InputEffect::Begin);
+    i.cancel();
+    assert_eq!(i.key("Delete", Modifiers::default()), InputEffect::Consume);
+}
+
+#[test]
+fn mixed_toggle_space_and_enter_choose_on() {
+    assert_eq!(toggle_key_mixed(true, " ", false, true), Some(true));
+    assert_eq!(toggle_key_mixed(false, "Enter", false, true), Some(true));
+    assert_eq!(
+        toggle_key_mixed(true, "ArrowLeft", false, true),
+        Some(false)
+    );
 }

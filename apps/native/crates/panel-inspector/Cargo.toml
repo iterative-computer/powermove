@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }

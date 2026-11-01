@@ -109,6 +109,8 @@ pub enum PropertyAction {
 #[derive(Clone, Debug)]
 pub struct EditSession {
     pub(crate) time: f64,
+    document: u64,
+    owner: Option<pm_kernel::Writer>,
     pub(crate) bindings: Vec<Binding>,
     pub(crate) initial: HashMap<Binding, Value>,
     pub(crate) targets: HashMap<Binding, Vec<Binding>>,
@@ -125,7 +127,11 @@ impl Inspector {
         let source = self.layer(primary)?;
         let dest = self.layer(target)?;
         if let Some(k) = path.strip_prefix("c.") {
-            return Ok(content_field(text(&dest, "type"), k).then(|| path.into()));
+            return Ok(pm_eval::address::can_animate_content(
+                self.layer_node(target)?,
+                k.as_bytes(),
+            )
+            .then(|| path.into()));
         }
         if path.starts_with("l.") {
             return Ok((text(&dest, "type") != "audio" || path == "l.on").then(|| path.into()));
@@ -202,8 +208,13 @@ impl Inspector {
                     let src = self.layer(primary)?;
                     let dst = self.layer(target)?;
                     if text(&src, "type") == text(&dst, "type")
-                        || (content_field(text(&src, "type"), field)
-                            && content_field(text(&dst, "type"), field))
+                        || (pm_eval::address::can_animate_content(
+                            self.layer_node(primary)?,
+                            field.as_bytes(),
+                        ) && pm_eval::address::can_animate_content(
+                            self.layer_node(target)?,
+                            field.as_bytes(),
+                        ))
                     {
                         out.push(binding.retarget(target, None));
                     }
@@ -221,7 +232,10 @@ impl Inspector {
         match binding {
             Binding::Property(id) => self.evaluate(id, time),
             Binding::Content { layer, field } => {
-                self.evaluate(&PropertyId::new(layer, format!("c.{field}")), time)
+                match self.evaluate(&PropertyId::new(layer, format!("c.{field}")), time) {
+                    Err(InspectorError::MissingProperty(_)) => Ok(Value::Null),
+                    result => result,
+                }
             }
             Binding::Layer { layer, field } => {
                 let raw = self.layer(layer)?;
@@ -288,7 +302,8 @@ impl Inspector {
         bindings: &[Binding],
         time: f64,
     ) -> Result<(EditSession, Request), InspectorError> {
-        let session = self.capture(bindings, time)?;
+        let mut session = self.capture(bindings, time)?;
+        session.owner = Some(caller.writer);
         if session.initial.is_empty() {
             return Err(InspectorError::EmptyEdit);
         }
@@ -308,6 +323,11 @@ impl Inspector {
         session: &mut EditSession,
         values: &[Value],
     ) -> Result<Request, InspectorError> {
+        if session.document != self.published.snapshot.doc_id
+            || session.owner != Some(caller.writer)
+        {
+            return Err(InspectorError::InvalidInput);
+        }
         let commands = self.session_commands(session, values, true)?;
         if commands.is_empty() {
             return Err(InspectorError::EmptyEdit);
@@ -414,6 +434,8 @@ impl Inspector {
         }
         Ok(EditSession {
             time,
+            document: self.published.snapshot.doc_id,
+            owner: None,
             bindings: bindings.to_vec(),
             initial,
             keys,
@@ -465,25 +487,24 @@ impl Inspector {
                 } else {
                     value.clone()
                 };
-                if let Binding::Property(id) = &target {
-                    if let Some(keys) = session.keys.get(id).filter(|_| next.as_f64().is_some()) {
-                        let base = session.initial[&target]
-                            .as_f64()
-                            .ok_or(InspectorError::InvalidInput)?;
-                        for key in keys {
-                            let mut c = SetProperty::new(
-                                &id.layer,
-                                &id.path,
-                                number(key, "v", 0.0) + next.as_f64().expect("checked") - base,
-                                number(&self.layer(&id.layer)?, "from", 0.0)
-                                    + number(key, "t", 0.0),
-                            );
-                            c.mode = KeyMode::Keyframe;
-                            c.preserve_hand_edits = false;
-                            commands.push(PropertyCommand::Set(c).into());
-                        }
-                        continue;
+                if let Binding::Property(id) = &target
+                    && let Some(keys) = session.keys.get(id).filter(|_| next.as_f64().is_some())
+                {
+                    let base = session.initial[&target]
+                        .as_f64()
+                        .ok_or(InspectorError::InvalidInput)?;
+                    for key in keys {
+                        let mut c = SetProperty::new(
+                            &id.layer,
+                            &id.path,
+                            number(key, "v", 0.0) + next.as_f64().expect("checked") - base,
+                            number(&self.layer(&id.layer)?, "from", 0.0) + number(key, "t", 0.0),
+                        );
+                        c.mode = KeyMode::Keyframe;
+                        c.preserve_hand_edits = false;
+                        commands.push(PropertyCommand::Set(c).into());
                     }
+                    continue;
                 }
                 let mut next_commands = self.value_commands(&target, next, session.time)?;
                 if *force_keyframe {
@@ -819,61 +840,6 @@ fn nullable_string(v: &Value) -> Result<Option<String>, InspectorError> {
         string(v).map(Some)
     }
 }
-/// Frozen content schema (content-properties.ts); no type-private fanout.
-fn content_field(kind: &str, key: &str) -> bool {
-    let fields: &[&str] = match kind {
-        "text" => &[
-            "text",
-            "font",
-            "weight",
-            "size",
-            "tracking",
-            "leading",
-            "align",
-            "color",
-            "italic",
-            "boxWidth",
-            "boxHeight",
-        ],
-        "solid" => &["color", "w", "h", "radius"],
-        "shape" => &[
-            "color",
-            "shape",
-            "w",
-            "h",
-            "radius",
-            "radiusTL",
-            "radiusTR",
-            "radiusBR",
-            "radiusBL",
-            "smoothing",
-            "stroke",
-            "strokeColor",
-            "points",
-        ],
-        "image" => &["fit", "w", "h"],
-        "video" => &[
-            "fit",
-            "w",
-            "h",
-            "trim",
-            "speed",
-            "timeRemap",
-            "sourceTime",
-            "audioGain",
-        ],
-        "audio" => &["trim", "gain", "fadeIn", "fadeOut"],
-        "shader" | "extension" => &["w", "h"],
-        "precomp" => &["w", "h", "trim", "sourceTime", "timeRemap", "audioGain"],
-        _ => &[],
-    };
-    fields.contains(&key)
-        || (kind == "text"
-            && key.strip_prefix("fontAxis.").is_some_and(|tag| {
-                tag.len() == 4 && tag.bytes().all(|b| (0x20..=0x7e).contains(&b))
-            }))
-}
-
 fn protect_intent(command: &mut Command) {
     match command {
         Command::Property(PropertyCommand::Set(c)) => {

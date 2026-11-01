@@ -4,6 +4,7 @@ use crate::{Inspector, InspectorError};
 use pm_kernel::commands::effects::{AddEffect, EffectPatch};
 use pm_kernel::{Caller, EffectCommand, Request};
 use pm_model::{Map, Value};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// App-owned clipboard shared across panel instances; it outlives layer changes.
@@ -32,7 +33,8 @@ impl EffectSelection {
         *self = Self::default();
     }
     pub(crate) fn retain(&mut self, ordered: &[String]) {
-        self.ids.retain(|id| ordered.contains(id));
+        let available = ordered.iter().collect::<HashSet<_>>();
+        self.ids.retain(|id| available.contains(id));
         if self.anchor.as_ref().is_some_and(|id| !ordered.contains(id)) {
             self.anchor = None;
         }
@@ -63,8 +65,9 @@ impl EffectSelection {
         {
             let range = &ordered[start.min(end)..=start.max(end)];
             if mods.command() {
+                let mut selected = self.ids.iter().cloned().collect::<HashSet<_>>();
                 for id in range {
-                    if !self.ids.contains(id) {
+                    if selected.insert(id.clone()) {
                         self.ids.push(id.clone());
                     }
                 }
@@ -448,5 +451,26 @@ impl Inspector {
                 .into(),
             ],
         )
+    }
+}
+impl Inspector {
+    /// The inspector service's global paste targets the raw selected layers
+    /// (index.ts:56–75), whereas a row-local paste targets its own layer.
+    pub fn paste_selected_effects(&self, caller: Caller) -> Result<Request, InspectorError> {
+        let mut commands = Vec::new();
+        for layer in self.published.selection.layers() {
+            if text(&self.layer(layer)?, "type") == "audio" {
+                continue;
+            }
+            let (request, _) = self.paste_effects(caller, layer)?;
+            if let pm_kernel::Call::Transact {
+                body: pm_kernel::WriteBody::Commands(batch),
+                ..
+            } = request.call
+            {
+                commands.extend(batch);
+            }
+        }
+        self.transaction(caller, commands)
     }
 }
