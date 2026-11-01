@@ -514,3 +514,27 @@ closer than the previous draw. No colour or geometry tolerance is widened.
 | Integer PCM decodes with one scale both sides of zero (AES17, 1/32768) | 1/32767 above zero, 1/32768 below (a 3e-5 gain asymmetry) | symmetric | every 8- and 16-bit PCM source |
 | ProRes frame headers carry the frame-rate code (SMPTE RDD 36 `frame_rate_code`) | 0, unspecified | the movie's code (2 at 24 fps), as VideoToolbox writes it from the session's expected frame rate; aspect ratio stays unspecified in both | every ProRes export; `engine-delivery.spec.ts` |
 | WebM segment duration is the longest track's end (Matroska `Duration`) | 25/24 s for a 1 s project (one frame long) | 1.007 s: the Opus track ends its 312-sample pre-skip (6.5 ms) after the video; within one frame of the project length, as Chromium reads it | every WebM export; `engine-delivery.spec.ts` |
+
+## E-track H.273 logarithmic readings and native still admission
+
+Rule N3: authored source codes and metadata are exact; the standard determines
+how codes map to light. H.273 transfer characteristics 9 (100:1) and 10
+(100×sqrt(10):1) previously fell through to display E in the video probe.
+They now decode their logarithmic curve, convert primaries in linear light,
+and encode to the project's working domain. Zero reconstructs black; values
+above reference white stay extended until output. No filename inference.
+
+Evidence: `pm-color::transfer::log_tests::h273_log_transfers_match_analytic_values_and_round_trip`
+checks 4096 values per curve against an independent natural-exponential
+expression, monotonicity and inverse behavior. `pm-color::cicp::reading_code_points`
+checks tags. `pm-glsl::source_shader::source_shader_validates_for_every_working_storage_format`
+validates the production WGSL at all three working formats on Linux.
+`pm-render::stills::h273_log_png_tags_decode_in_float_at_every_sample`
+provides the probe-to-GPU regression, **unrun here: requires Apple media/Metal**.
+This is not qualification of proprietary camera log curves or HDR output.
+
+EXR/DPX source readers are admitted through the same float still path instead
+of an unconditional media refusal. The added per-sample f64 reference test
+`native_exr_dpx_and_png_metadata_are_supported` needs the Mac run. Until it
+passes, Gate E records the admission as unqualified; no numerical bound or
+pending corpus fingerprint was relaxed.

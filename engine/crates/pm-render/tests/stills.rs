@@ -41,6 +41,7 @@ fn render(renderer: &mut Renderer, path: &Path) -> (Vec<f32>, usize, usize) {
             1.0,
         )],
     );
+    value["colorDepth"] = serde_json::json!(32);
     asset(&mut value, "clip", "image", &ext, w as u32, h as u32, 1.0);
     let mut resolver = pm_render::MapResolver::default();
     resolver.paths.insert("clip".into(), path.to_path_buf());
@@ -132,7 +133,7 @@ fn unsupported(path: &Path) -> String {
 }
 
 #[test]
-fn untested_still_classes_are_unsupported() {
+fn native_exr_dpx_and_png_metadata_are_supported() {
     let d = dir().join("other");
     std::fs::create_dir_all(&d).unwrap();
     let cases: &[(&str, &[&str], &str)] = &[
@@ -146,9 +147,18 @@ fn untested_still_classes_are_unsupported() {
     for (name, args, message) in cases {
         let path = d.join(name);
         ffmpeg(&path, args);
-        let got = unsupported(&path);
-        assert!(got.contains(message), "{name}: {got}");
-        eprintln!("{name:<12} unsupported: {got}");
+        assert_eq!(probe_image(&path), Ok(()), "{name}: {message}");
+        let mut renderer = Renderer::headless().unwrap();
+        let (pixels, w, h) = render(&mut renderer, &path);
+        let reference = support::still_reference::reference(&path);
+        assert_eq!((w, h), (reference.width, reference.height));
+        assert!(pixels.iter().any(|v| *v > 0.0));
+        for (actual, expected) in pixels.iter().zip(reference.rgba) {
+            assert!(
+                (f64::from(*actual) - expected).abs() < 2e-5,
+                "{name}: {actual} vs {expected}"
+            );
+        }
     }
     // gAMA, cHRM and cICP PNGs are drawn.
     let plain = d.join("plain.png");
@@ -1001,4 +1011,48 @@ fn wide_gamut_alpha_and_opaque_rgba_are_supported() {
         }
     }
     std::fs::remove_dir_all(d).unwrap();
+}
+
+/// H.273 log tags reach the same source pass as every other still reading.
+#[test]
+fn h273_log_png_tags_decode_in_float_at_every_sample() {
+    let temp = tempfile::tempdir().unwrap();
+    let codes = [0u8, 1, 16, 64, 128, 192, 254, 255];
+    let mut raw = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut raw, 8, 2);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let rgb: Vec<u8> = codes.iter().flat_map(|c| [*c; 3]).collect();
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&rgb.repeat(2)).unwrap();
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    for (tag, decades) in [(9, 2.0), (10, 2.5)] {
+        let file = temp.path().join(format!("log{tag}.png"));
+        std::fs::write(&file, with_chunk(&raw, b"cICP", &[1, tag, 0, 1])).unwrap();
+        assert_eq!(probe_image(&file), Ok(()));
+        let (actual, w, h) = render(&mut renderer, &file);
+        assert_eq!((w, h), (8, 2));
+        for (i, pixel) in actual.chunks_exact(4).enumerate() {
+            let encoded = f64::from(codes[i % 8]) / 255.0;
+            let light = if encoded == 0.0 {
+                0.0
+            } else {
+                (decades * (encoded - 1.0) * std::f64::consts::LN_10).exp()
+            };
+            let expected = if light <= 0.0031308 {
+                12.92 * light
+            } else {
+                1.055 * light.powf(1.0 / 2.4) - 0.055
+            };
+            for c in &pixel[..3] {
+                assert!(
+                    (f64::from(*c) - expected).abs() < 3e-6,
+                    "tag {tag}, sample {i}: {c} vs {expected}"
+                );
+            }
+            assert_eq!(pixel[3], 1.0);
+        }
+    }
 }

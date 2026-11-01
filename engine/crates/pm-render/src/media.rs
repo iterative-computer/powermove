@@ -759,6 +759,8 @@ fn source_uniform(
         (Transfer::SceneReferredBt709, _) => 2,
         (Transfer::Linear, _) => 3,
         (Transfer::Gamma22, _) => 4,
+        (Transfer::Log100, _) => 8,
+        (Transfer::Log316, _) => 9,
         (Transfer::Pq | Transfer::Hlg, None) => 0,
     };
     // The source's primaries to Rec.709 in linear light: after the tone

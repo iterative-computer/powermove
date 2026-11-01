@@ -2347,6 +2347,7 @@ dependencies = [
  "glslang",
  "glslang-sys",
  "naga",
+ "pm-color",
  "pm-gpu",
  "pm-render",
  "pollster",

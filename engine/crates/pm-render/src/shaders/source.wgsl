@@ -120,6 +120,11 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
         case 4u: {
             return sign(c) * pow(abs(c), vec3<f32>(2.2));
         }
+        case 8u, 9u: {
+            let decades = select(2.0, 2.5, P.a.y == 9u);
+            let light = pow(vec3<f32>(10.0), decades * (c - vec3<f32>(1.0)));
+            return select(light, vec3<f32>(0.0), c <= vec3<f32>(0.0));
+        }
         case 7u: {
             // A pure power (PNG gAMA alone), odd-symmetric.
             return sign(c) * pow(abs(c), vec3<f32>(P.hdr.z));

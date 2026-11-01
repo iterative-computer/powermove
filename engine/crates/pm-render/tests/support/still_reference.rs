@@ -194,6 +194,28 @@ fn conversion(still: &StillImage) -> Option<(Convert, String)> {
                 }),
                 "HLG, BT.2100 OOTF and BT.2390 EETF to 203 cd/m²".into(),
             ),
+            4 | 8 | 9 | 10 => (
+                Box::new(move |c| {
+                    apply(
+                        &m,
+                        c.map(|v| match cicp[1] {
+                            4 => v.abs().powf(2.2).copysign(v),
+                            8 => v,
+                            log => {
+                                if v <= 0.0 {
+                                    0.0
+                                } else {
+                                    ((if log == 9 { 2.0 } else { 2.5 })
+                                        * (v - 1.0)
+                                        * std::f64::consts::LN_10)
+                                        .exp()
+                                }
+                            }
+                        }),
+                    )
+                }),
+                "H.273 explicit gamma, linear or logarithmic transfer".into(),
+            ),
             1 | 2 | 6 | 13 | 14 | 15 => (
                 Box::new(move |c| apply(&m, c.map(|v| T::Srgb.to_linear(v)))),
                 "H.273 primaries, sRGB curve".into(),

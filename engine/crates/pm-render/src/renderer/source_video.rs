@@ -458,7 +458,9 @@ fn chromium_tags(desc: &ColorDescription) -> Option<(&'static str, &'static str,
         | Transfer::SceneReferredBt709
         | Transfer::Gamma22
         | Transfer::Pq
-        | Transfer::Hlg => return None,
+        | Transfer::Hlg
+        | Transfer::Log100
+        | Transfer::Log316 => return None,
     };
     let matrix = match desc.matrix {
         MatrixCoefficients::Bt709 => "bt709",

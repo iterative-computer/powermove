@@ -80,7 +80,9 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         | ImageFormat::Tiff
         | ImageFormat::Bmp
         | ImageFormat::Ico
-        | ImageFormat::Gif => {}
+        | ImageFormat::Gif
+        | ImageFormat::Exr
+        | ImageFormat::Dpx => {}
         ImageFormat::Heif => {
             // ImageIO supplies oriented integer RGBA with its ICC profile
             // and alpha reading intact.
@@ -90,8 +92,6 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         }
         // Container transforms are applied in the reader, as Blink does.
         ImageFormat::Avif => return avif(still),
-        ImageFormat::Exr => return unsupported("OpenEXR stills"),
-        ImageFormat::Dpx => return unsupported("DPX stills"),
         ImageFormat::Svg => return unsupported("SVG stills"),
         ImageFormat::Other => return unsupported("stills of an unrecognized format"),
     }
@@ -200,8 +200,8 @@ pub fn static_format(format: &str, name: &str) -> Result<(), Feature> {
         format.to_ascii_lowercase()
     };
     match ext.as_str() {
-        "png" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp" | "ico" | "gif" => Ok(()),
-        "jpg" | "jpeg" | "jpe" | "jfif" => unsupported("JPEG stills"),
+        "png" | "webp" | "heic" | "heif" | "tif" | "tiff" | "bmp" | "ico" | "gif" | "jpg"
+        | "jpeg" | "jpe" | "jfif" | "avif" | "exr" | "dpx" => Ok(()),
         "" => unsupported("an image of unrecorded format"),
         other => unsupported(format!("{other} stills")),
     }

@@ -57,6 +57,10 @@ pub enum Transfer {
     Linear,
     /// Pure gamma 2.2 (QuickTime tag candidate, decoded as written).
     Gamma22,
+    /// H.273 transfer 9: logarithmic, 100:1 range.
+    Log100,
+    /// H.273 transfer 10: logarithmic, 100 × sqrt(10):1 range.
+    Log316,
     /// SMPTE ST 2084 (HDR input; HDR projects after cutover).
     Pq,
     /// ARIB STD-B67 (HDR input; HDR projects after cutover).

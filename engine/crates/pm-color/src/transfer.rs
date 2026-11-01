@@ -65,6 +65,25 @@ pub fn gamma22_encode(linear: f64) -> f64 {
     libm::pow(linear.abs(), 1.0 / 2.2).copysign(linear)
 }
 
+/// H.273 Table 3, logarithmic transfer characteristics 9 and 10.
+/// Zero codes represent the below-threshold interval; its reconstruction
+/// is black. Values above reference white remain extended until output.
+fn log_decode(encoded: f64, decades: f64) -> f64 {
+    if encoded <= 0.0 {
+        0.0
+    } else {
+        libm::pow(10.0, decades * (encoded - 1.0))
+    }
+}
+
+fn log_encode(linear: f64, decades: f64) -> f64 {
+    if linear <= libm::pow(10.0, -decades) {
+        0.0
+    } else {
+        1.0 + libm::log10(linear) / decades
+    }
+}
+
 /// Why a transfer cannot be read into a Standard project yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferError {
@@ -93,6 +112,8 @@ pub fn to_linear(transfer: Transfer, encoded: f64) -> Result<f64, TransferError>
         Transfer::SceneReferredBt709 => bt709_inverse_oetf(encoded),
         Transfer::Linear => encoded,
         Transfer::Gamma22 => gamma22_decode(encoded),
+        Transfer::Log100 => log_decode(encoded, 2.0),
+        Transfer::Log316 => log_decode(encoded, 2.5),
         Transfer::Pq | Transfer::Hlg => return Err(TransferError::NeedsToneMapping(transfer)),
     })
 }
@@ -105,6 +126,8 @@ pub fn from_linear(transfer: Transfer, linear: f64) -> Result<f64, TransferError
         Transfer::SceneReferredBt709 => bt709_oetf(linear),
         Transfer::Linear => linear,
         Transfer::Gamma22 => gamma22_encode(linear),
+        Transfer::Log100 => log_encode(linear, 2.0),
+        Transfer::Log316 => log_encode(linear, 2.5),
         Transfer::Pq | Transfer::Hlg => return Err(TransferError::NeedsToneMapping(transfer)),
     })
 }
@@ -237,6 +260,33 @@ mod tests {
         }
         for code in 0..=65535 {
             assert_eq!(unit_to_code(code_to_unit(code, 16), 16), code);
+        }
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn h273_log_transfers_match_analytic_values_and_round_trip() {
+        for (transfer, decades) in [(Transfer::Log100, 2.0), (Transfer::Log316, 2.5)] {
+            assert_eq!(to_linear(transfer, 0.0).unwrap(), 0.0);
+            assert_eq!(to_linear(transfer, -0.1).unwrap(), 0.0);
+            assert_eq!(to_linear(transfer, 1.0).unwrap(), 1.0);
+            let mut previous = 0.0;
+            for i in 1..=4096 {
+                let encoded = f64::from(i) / 4096.0;
+                // Independent expression, using the natural exponential.
+                let expected = (decades * (encoded - 1.0) * std::f64::consts::LN_10).exp();
+                let actual = to_linear(transfer, encoded).unwrap();
+                assert!((actual - expected).abs() <= expected * 2e-15);
+                assert!(actual > previous);
+                previous = actual;
+                assert!((from_linear(transfer, actual).unwrap() - encoded).abs() < 5e-16);
+            }
+            assert!(to_linear(transfer, 1.1).unwrap() > 1.0);
+            assert_eq!(from_linear(transfer, 1e-5).unwrap(), 0.0);
         }
     }
 }

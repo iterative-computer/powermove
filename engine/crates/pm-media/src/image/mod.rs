@@ -375,6 +375,7 @@ pub fn ffmpeg_still(path: &Path, pool: &FramePool) -> Result<StillImage> {
     let v = input
         .best_video()
         .ok_or_else(|| MediaError::invalid("no image stream"))?;
+    let info = input.codec_info(v);
     let idx = crate::index::build(path, &input, v)?;
     let mut dec = crate::ff::decoder::FfDecoder::new(&input, v, None, pool.clone(), 1)?;
     let mut reader = PacketReader::new(path, v)?;
@@ -389,12 +390,28 @@ pub fn ffmpeg_still(path: &Path, pool: &FramePool) -> Result<StillImage> {
         .next()
         .ok_or_else(|| MediaError::decode("FFmpeg output no image"))?;
     let bits = frame.format.bits;
+    // Preserve explicit DPX/FFmpeg color metadata. Still defaults are sRGB,
+    // not the SD-video heuristic; unknown explicit codes stay visible to
+    // the interpreted-image capability check instead of becoming sRGB.
+    let tagged = |value: u32, default: u8| match value {
+        0 | 2 => default,
+        v => u8::try_from(v).unwrap_or(255),
+    };
+    let cicp = [
+        tagged(info.color_primaries, 1),
+        tagged(info.color_trc, 13),
+        0,
+        1,
+    ];
+    let transfer = crate::interpret::still_cicp(cicp).map_or(Transfer::DisplayE, |c| c.1);
+    let mut color = ImageColor::plain(transfer, AlphaMode::Straight);
+    color.cicp = Some(cicp);
     Ok(StillImage {
         format: ImageFormat::Dpx,
         backend: ImageBackend::Ffmpeg,
         bit_depth: bits,
         float: false,
-        color: ImageColor::plain(Transfer::DisplayE, AlphaMode::Straight),
+        color,
         orientation: 1,
         oriented: true,
         frame,

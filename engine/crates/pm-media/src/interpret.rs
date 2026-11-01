@@ -637,6 +637,10 @@ pub fn still_cicp(cicp: [u8; 4]) -> Option<(Primaries, Transfer, MatrixCoefficie
     };
     let transfer = match cicp[1] {
         1 | 2 | 6 | 13 | 14 | 15 => Transfer::DisplayE,
+        4 => Transfer::Gamma22,
+        8 => Transfer::Linear,
+        9 => Transfer::Log100,
+        10 => Transfer::Log316,
         16 => Transfer::Pq,
         18 => Transfer::Hlg,
         _ => return None,
