@@ -398,3 +398,26 @@ release, running encode cancellation with retained partials, cancellation during
 probing, resume progress and missing-duration refusal. Clippy with warnings denied
 and formatting pass. General VFR/container support still requires a native probe
 that provides exact sample durations; this FFV1 test path does not infer them.
+
+### Background render-cache fill jobs
+
+`render_job::RenderFillWork` freezes a frame sequence against one complete engine
+identity and a live `BackgroundTasks` Render ticket. Preparation validates project,
+kind, units, total and graph ownership. Workers fill one frame at a time, check
+controls between frames and preserve completed entries. Pause/restart reuses
+exact cache hits with monotone progress. Receipt on the current work checks the
+batch's graph/LUT/key signature and current publication before completing the
+task. Late controls win after resource release, even across a graph publication.
+A stale publication refuses without changing task progress; the host then cancels
+and replaces that old-graph task. No old bytes are removed by invalidation.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Use the existing BackgroundTasks actor model for cache fills, with frame units and the same ticket/control lifecycle as media encodes. | N1/N7/N8: one inspectable execution model and no alternate writer. |
+| Fence the complete ordered graph/LUT/key batch at receipt; retain frames completed before a stop. | N3/N4: accurate cache identity and recoverable work. |
+
+Six additional regressions cover real queue completion, pause/cache-hit restart,
+late cancellation across an edit, stale progress refusal, admission ownership,
+worker failure and unrequested-stop refusal. Existing low-level `RenderWork`
+remains available for direct frame/scopes requests. These worker primitives do
+not schedule themselves or create another project/settings authority.

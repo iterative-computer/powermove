@@ -6,6 +6,7 @@ pub mod cache_frame;
 pub mod codec;
 pub mod media;
 pub mod render;
+pub mod render_job;
 pub mod storage;
 pub mod tasks;
 pub mod worker;

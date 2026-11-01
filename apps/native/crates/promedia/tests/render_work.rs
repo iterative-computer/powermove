@@ -267,3 +267,185 @@ fn oversized_or_incomplete_requests_refuse_before_readback() {
     r.identity.renderer_version.clear();
     assert!(RenderWork::new(r, None).is_err());
 }
+
+fn render_task() -> (
+    pm_promedia::tasks::BackgroundTasks,
+    pm_promedia::tasks::Ticket,
+    Vec<RenderWork>,
+) {
+    use pm_promedia::tasks::*;
+    let mut tasks = BackgroundTasks::default();
+    tasks
+        .enqueue(
+            "w".into(),
+            "p".into(),
+            TaskSpec {
+                title: "Synthetic composition".into(),
+                kind: TaskKind::Render,
+                unit: ProgressUnit::Frames,
+                priority: 0,
+                total: 2,
+            },
+        )
+        .unwrap();
+    let ticket = tasks.start_next().unwrap();
+    let r = request();
+    let mut second = r.clone();
+    second.ticks += 1;
+    (
+        tasks,
+        ticket,
+        vec![
+            RenderWork::new(r, None).unwrap(),
+            RenderWork::new(second, None).unwrap(),
+        ],
+    )
+}
+#[test]
+fn render_task_fills_cache_and_completes_only_on_actor_receipt() {
+    use pm_promedia::{render_job::*, tasks::TaskState};
+    let (mut tasks, ticket, frames) = render_task();
+    let identity = request().identity;
+    let keys: Vec<_> = frames.iter().map(|w| w.key().unwrap()).collect();
+    let work =
+        RenderFillWork::prepare(&mut tasks, ticket, "p".into(), identity.clone(), frames).unwrap();
+    let dir = TempDir::new().unwrap();
+    let cache = RenderCache::open(dir.path(), 4096).unwrap();
+    let mut source = Engine::new(&request());
+    let report = work.run(&mut source, &cache, |_| {
+        pm_promedia::proxy::Control::Continue
+    });
+    assert!(matches!(report.outcome, FillOutcome::Ready));
+    assert_eq!(report.completed, 2);
+    assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Running);
+    work.accept(&report, &mut tasks, &identity).unwrap();
+    assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Completed);
+    for key in keys {
+        assert!(cache.get(&key).unwrap().is_some());
+    }
+}
+#[test]
+fn render_pause_retains_completed_frames_and_resumes_with_cache_hits() {
+    use pm_promedia::{proxy::Control, render_job::*, tasks::TaskState};
+    let (mut tasks, ticket, frames) = render_task();
+    let identity = request().identity;
+    let work = RenderFillWork::prepare(
+        &mut tasks,
+        ticket,
+        "p".into(),
+        identity.clone(),
+        frames.clone(),
+    )
+    .unwrap();
+    let dir = TempDir::new().unwrap();
+    let cache = RenderCache::open(dir.path(), 4096).unwrap();
+    let mut source = Engine::new(&request());
+    let report = work.run(&mut source, &cache, |n| {
+        if n == 1 {
+            tasks.pause(ticket.id).unwrap();
+            Control::Pause
+        } else {
+            Control::Continue
+        }
+    });
+    work.accept(&report, &mut tasks, &identity).unwrap();
+    assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Paused);
+    assert_eq!(source.renders, 1);
+    tasks.resume(ticket.id).unwrap();
+    let resumed = tasks.start_next().unwrap();
+    let next =
+        RenderFillWork::prepare(&mut tasks, resumed, "p".into(), identity.clone(), frames).unwrap();
+    let report = next.run(&mut source, &cache, |n| {
+        assert!(n >= 1);
+        Control::Continue
+    });
+    next.accept(&report, &mut tasks, &identity).unwrap();
+    assert_eq!(source.renders, 2);
+    assert_eq!(tasks.get(resumed.id).unwrap().state, TaskState::Completed);
+    assert!(work.accept(&report, &mut tasks, &identity).is_err());
+}
+#[test]
+fn render_late_cancel_wins_even_after_graph_change() {
+    use pm_promedia::{proxy::Control, render_job::*, tasks::TaskState};
+    let (mut tasks, ticket, frames) = render_task();
+    let identity = request().identity;
+    let work =
+        RenderFillWork::prepare(&mut tasks, ticket, "p".into(), identity.clone(), frames).unwrap();
+    let dir = TempDir::new().unwrap();
+    let cache = RenderCache::open(dir.path(), 4096).unwrap();
+    let report = work.run(&mut Engine::new(&request()), &cache, |_| Control::Continue);
+    tasks.cancel(ticket.id).unwrap();
+    let mut changed = identity;
+    changed.graph[0] ^= 1;
+    work.accept(&report, &mut tasks, &changed).unwrap();
+    assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Cancelled);
+}
+#[test]
+fn render_stale_graph_does_not_complete_or_change_progress() {
+    use pm_promedia::{proxy::Control, render_job::*, tasks::TaskState};
+    let (mut tasks, ticket, frames) = render_task();
+    let identity = request().identity;
+    let work =
+        RenderFillWork::prepare(&mut tasks, ticket, "p".into(), identity.clone(), frames).unwrap();
+    let dir = TempDir::new().unwrap();
+    let cache = RenderCache::open(dir.path(), 4096).unwrap();
+    let report = work.run(&mut Engine::new(&request()), &cache, |_| Control::Continue);
+    let mut changed = identity;
+    changed.graph[0] ^= 1;
+    assert!(work.accept(&report, &mut tasks, &changed).is_err());
+    let task = tasks.get(ticket.id).unwrap();
+    assert_eq!(task.state, TaskState::Running);
+    assert_eq!(task.completed, 0);
+}
+#[test]
+fn render_admission_rejects_foreign_project_and_mixed_graphs() {
+    use pm_promedia::render_job::*;
+    let (mut tasks, ticket, frames) = render_task();
+    let identity = request().identity;
+    assert!(
+        RenderFillWork::prepare(
+            &mut tasks,
+            ticket,
+            "foreign".into(),
+            identity.clone(),
+            frames.clone()
+        )
+        .is_err()
+    );
+    assert!(
+        RenderFillWork::prepare(&mut tasks, ticket, "p".into(), identity.clone(), vec![]).is_err()
+    );
+    let mut r = request();
+    r.identity.media[0] ^= 1;
+    let mut frames = frames;
+    frames[1] = RenderWork::new(r, None).unwrap();
+    assert!(RenderFillWork::prepare(&mut tasks, ticket, "p".into(), identity, frames).is_err());
+}
+
+#[test]
+fn render_failure_is_typed_and_stop_without_actor_request_is_atomic() {
+    use pm_promedia::{
+        proxy::Control,
+        render_job::*,
+        tasks::{TaskFailureCode, TaskState},
+    };
+    let (mut tasks, ticket, frames) = render_task();
+    let identity = request().identity;
+    let work =
+        RenderFillWork::prepare(&mut tasks, ticket, "p".into(), identity.clone(), frames).unwrap();
+    let dir = TempDir::new().unwrap();
+    let cache = RenderCache::open(dir.path(), 4096).unwrap();
+    let stopped = work.run(&mut Engine::new(&request()), &cache, |_| Control::Pause);
+    assert!(work.accept(&stopped, &mut tasks, &identity).is_err());
+    assert_eq!(tasks.get(ticket.id).unwrap().completed, 0);
+    let mut source = Engine::new(&request());
+    source.wrong = true;
+    let failure = work.run(&mut source, &cache, |_| Control::Continue);
+    work.accept(&failure, &mut tasks, &identity).unwrap();
+    let task = tasks.get(ticket.id).unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(
+        task.presentation().error_code,
+        Some(TaskFailureCode::Unknown)
+    );
+}

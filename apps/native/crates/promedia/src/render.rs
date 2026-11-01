@@ -66,6 +66,9 @@ impl RenderWork {
         work.key()?.digest()?;
         Ok(work)
     }
+    pub fn identity(&self) -> &crate::cache_frame::GraphIdentity {
+        &self.request.identity
+    }
     pub fn key(&self) -> io::Result<RenderKey> {
         let mut graph = blake3::Hasher::new_derive_key("powermove pro-media render v1");
         graph.update(&self.request.identity.graph);
