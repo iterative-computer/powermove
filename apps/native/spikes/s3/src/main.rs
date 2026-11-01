@@ -1,8 +1,11 @@
 mod color;
+mod mailbox;
+mod metrics;
 mod native;
 mod pacing;
 mod policy;
 mod render;
+mod trace;
 mod worker;
 use gpui::{prelude::*, *};
 use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -85,10 +88,6 @@ fn arg(name: &str) -> Option<String> {
     std::env::args().find_map(|a| a.strip_prefix(&prefix).map(str::to_owned))
 }
 fn main() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        std::fs::read_to_string("/tmp/pm-shots/gui.lock").is_ok_and(|s| s.trim() == "s3"),
-        "Acquire S3 GUI lock with run.sh before opening windows"
-    );
     let doc = arg("document")
         .ok_or_else(|| anyhow::anyhow!("--document=<corpus document.json> required; see run.sh"))?;
     let scene = render::Scene::load(&doc)?;
@@ -102,8 +101,44 @@ fn main() -> anyhow::Result<()> {
     let verify = std::env::args().any(|a| a == "--verify");
     let exercise = std::env::args().any(|a| a == "--exercise");
     let measure_overlays = std::env::args().any(|a| a == "--measure-overlays");
+    let offscreen = std::env::args().any(|a| a == "--offscreen");
+    let hidden = std::env::args().any(|a| a == "--hidden");
+    let mode = if offscreen {
+        "offscreen"
+    } else if hidden {
+        "hidden"
+    } else {
+        "foreground"
+    }
+    .to_string();
+    let legacy_sync = std::env::args().any(|a| a == "--legacy-sync");
+    let synthetic_scrub = std::env::args().any(|a| a == "--synthetic-scrub");
+    let cache = !std::env::args().any(|a| a == "--no-cache");
     let report = arg("report").unwrap_or("/tmp/s3-report.json".into());
     let gpu = pm_gpu::Gpu::new("S3 engine-owned GPU")?;
+    if offscreen {
+        anyhow::ensure!(!exercise && !measure_overlays, "offscreen is timing-only");
+        return worker::offscreen(
+            gpu,
+            worker::Options {
+                scene,
+                pq,
+                seconds,
+                hz,
+                verify,
+                measure_overlays,
+                report,
+                mode,
+                legacy_sync,
+                synthetic_scrub,
+                cache,
+            },
+        );
+    }
+    anyhow::ensure!(
+        std::fs::read_to_string("/tmp/pm-shots/gui.lock").is_ok_and(|s| s.trim() == "s3"),
+        "Acquire S3 GUI lock with run.sh before opening windows"
+    );
     let device = render::metal_device(&gpu);
     eprintln!(
         "S3 engine and GPUI share Metal registry {}",
@@ -128,6 +163,8 @@ fn main() -> anyhow::Result<()> {
         let entity = cx
             .open_window(
                 WindowOptions::new()
+                    .focus(!hidden)
+                    .show(!hidden)
                     .macos_window_background(MacosWindowBackground::Transparent)
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                         point(px(100.), px(100.)),
@@ -140,10 +177,18 @@ fn main() -> anyhow::Result<()> {
                     native.borrow_mut().publish(688., 510.);
                     native.borrow_mut().place();
                     native.borrow().identity();
+                    if hidden {
+                        native.borrow().hide();
+                    }
                     let layer = native.borrow().layer.clone();
                     let output = native.borrow().output();
                     let layer_updates = native.borrow().layer_updates.clone();
                     let clock = native.borrow_mut().clock.take().unwrap();
+                    let clock = if hidden {
+                        mailbox::Clock::default()
+                    } else {
+                        clock
+                    };
                     let host = worker::Host::start(
                         gpu,
                         layer,
@@ -158,6 +203,10 @@ fn main() -> anyhow::Result<()> {
                             verify,
                             measure_overlays,
                             report,
+                            mode,
+                            legacy_sync,
+                            synthetic_scrub,
+                            cache,
                         },
                     );
                     let poll = Rc::downgrade(&native);
@@ -202,6 +251,8 @@ fn main() -> anyhow::Result<()> {
         if let (Some(gpu), Some(scene)) = (popout_gpu, popout_scene) {
             cx.open_window(
                 WindowOptions::new()
+                    .focus(!hidden)
+                    .show(!hidden)
                     .macos_window_background(MacosWindowBackground::Transparent)
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
                         point(px(800.), px(180.)),
@@ -213,10 +264,18 @@ fn main() -> anyhow::Result<()> {
                     native.borrow_mut().publish(480., 420.);
                     native.borrow_mut().place();
                     native.borrow().identity();
+                    if hidden {
+                        native.borrow().hide();
+                    }
                     let layer = native.borrow().layer.clone();
                     let output = native.borrow().output();
                     let layer_updates = native.borrow().layer_updates.clone();
                     let clock = native.borrow_mut().clock.take().unwrap();
+                    let clock = if hidden {
+                        mailbox::Clock::default()
+                    } else {
+                        clock
+                    };
                     let host = worker::Host::start(
                         gpu,
                         layer,
@@ -231,6 +290,10 @@ fn main() -> anyhow::Result<()> {
                             verify: false,
                             measure_overlays: false,
                             report: "/tmp/s3-popout.json".into(),
+                            mode: "foreground".into(),
+                            legacy_sync,
+                            synthetic_scrub: false,
+                            cache,
                         },
                     );
                     let poll = Rc::downgrade(&native);
@@ -291,7 +354,9 @@ fn main() -> anyhow::Result<()> {
             })
             .detach();
         }
-        cx.activate(true);
+        if !hidden {
+            cx.activate(true);
+        }
     });
     anyhow::ensure!(!outcome.get(), "S3 viewer run failed; see stderr");
     Ok(())

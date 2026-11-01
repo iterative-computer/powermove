@@ -111,3 +111,107 @@ mod tests {
         assert_eq!(std::sync::Arc::strong_count(&ring), 1);
     }
 }
+
+/// Raw working pixels: output display/headroom and overlays are applied later.
+/// An Engine owns one immutable Scene/composition during a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheKey {
+    pub revision: u64,
+    pub time: i64,
+    pub width: u32,
+    pub height: u32,
+}
+impl CacheKey {
+    pub fn same_content(self, other: Self) -> bool {
+        self.revision == other.revision && self.width == other.width && self.height == other.height
+    }
+}
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn cache_never_reuses_another_revision_time_or_size() {
+        let k = CacheKey {
+            revision: 1,
+            time: 123,
+            width: 1280,
+            height: 720,
+        };
+        assert_ne!(k, CacheKey { time: 124, ..k });
+        assert!(!k.same_content(CacheKey { revision: 2, ..k }));
+        assert!(!k.same_content(CacheKey { width: 640, ..k }));
+        assert!(!k.same_content(CacheKey { height: 360, ..k }));
+        assert!(k.same_content(CacheKey { time: 124, ..k }));
+    }
+}
+
+/// Display-link phase anchors a worker clock. AppKit callback jitter must not
+/// stop rendering between anchors. Expired targets are counted, never replayed.
+#[derive(Default)]
+pub struct PlaybackSchedule {
+    next: Option<f64>,
+    pub skipped: u64,
+}
+impl PlaybackSchedule {
+    pub fn observe(&mut self, target: f64, interval: f64) {
+        if let Some(next) = self.next {
+            let difference = target - next;
+            let phase = difference - (difference / interval).round() * interval;
+            self.next = Some(next + phase);
+        } else {
+            self.next = Some(target);
+        }
+    }
+    pub fn wait(&self, now: f64, interval: f64) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(
+            self.next
+                .map_or(0.1, |t| (t - interval - now).clamp(0., 0.1)),
+        )
+    }
+    pub fn take(&mut self, now: f64, interval: f64) -> Option<f64> {
+        let mut target = self.next?;
+        if now < target - interval {
+            return None;
+        }
+        if target < now {
+            let skipped = ((now - target) / interval).floor() as u64 + 1;
+            self.skipped += skipped;
+            target += skipped as f64 * interval;
+        }
+        self.next = Some(target + interval);
+        Some(target)
+    }
+}
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    #[test]
+    fn a_missing_main_thread_tick_does_not_stop_the_worker_clock() {
+        let mut p = PlaybackSchedule::default();
+        let dt = 1. / 120.;
+        p.observe(1. + dt, dt);
+        assert!(p.take(1., dt).is_some());
+        assert!(p.take(1. + dt, dt).is_some());
+        assert!(p.take(1. + 2. * dt, dt).is_some());
+        assert_eq!(p.skipped, 0);
+    }
+    #[test]
+    fn expired_targets_are_counted_and_never_replayed() {
+        let mut p = PlaybackSchedule::default();
+        let dt = 0.01;
+        p.observe(1.01, dt);
+        let target = p.take(1.045, dt).unwrap();
+        assert!(target >= 1.045);
+        assert_eq!(p.skipped, 4);
+        assert!(p.take(1.046, dt).is_none());
+    }
+    #[test]
+    fn an_old_tick_cannot_reset_the_worker_to_an_old_target() {
+        let mut p = PlaybackSchedule::default();
+        p.observe(1.01, 0.01);
+        p.take(1., 0.01);
+        p.take(1.01, 0.01);
+        p.observe(1.01, 0.01);
+        assert!(p.take(1.02, 0.01).unwrap() >= 1.0299);
+    }
+}

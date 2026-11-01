@@ -1,6 +1,7 @@
-//! Adapted from apps/mac/crates/engine-host: worker-only GPU waits, three leased
-//! surfaces, exact Metal-device injection. Here the final consumer IS the viewer.
+//! Adapted from engine-host: bounded cached/leased surfaces, nonblocking GPU
+//! completion and exact Metal-device injection. The final consumer is the viewer.
 use crate::policy::Output;
+use crate::trace::{Trace, now};
 use anyhow::{Result, anyhow, bail};
 use foreign_types::ForeignTypeRef;
 use pm_gpu::{Gpu, Target, bridge_out::surface::ExportedSurface};
@@ -10,7 +11,10 @@ use pm_protocol::{
     interop::{SurfaceFormat, SurfaceRequest},
 };
 use pm_render::Renderer;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 pub struct Scene {
     pub doc: pm_model::Document,
@@ -68,12 +72,18 @@ pub struct Engine {
     metal: metal::Device,
     queue: metal::CommandQueue,
     pipeline: metal::RenderPipelineState,
-    ring: [Option<Arc<ExportedSurface>>; 3],
-    next: usize,
+    producer_probe: metal::Buffer,
+    pool: Vec<Arc<ExportedSurface>>,
+    cache: VecDeque<(crate::policy::CacheKey, Arc<ExportedSurface>)>,
+    offscreen: Option<metal::Texture>,
+    pub legacy_sync: bool,
+    pub cache_enabled: bool,
 }
 pub struct Submission {
-    pub drawable: metal::MetalDrawable,
+    pub drawable: Option<metal::MetalDrawable>,
+    pub trace: Arc<std::sync::Mutex<Trace>>,
     pub command: metal::CommandBuffer,
+    producer: metal::CommandBuffer,
     pub surface: Arc<ExportedSurface>,
     pub readback: Option<metal::Buffer>,
     pub width: u32,
@@ -104,14 +114,30 @@ impl Engine {
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
         renderer.set_definitions(&pm_render::all_builtin_definitions())?;
         Ok(Self {
-            queue: metal.new_command_queue(),
+            // Use the producer's actual queue. Metal tracks the shared source
+            // texture between producer and consumer command buffers. No CPU
+            // completion wait or cross-queue race is needed (§3.3 / N8).
+            queue: unsafe {
+                let hal = gpu.queue.as_hal::<wgpu_hal::api::Metal>().unwrap();
+                metal::CommandQueueRef::from_ptr(
+                    (hal.as_raw() as *const _ as *mut metal::MTLCommandQueue).cast(),
+                )
+                .to_owned()
+            },
+            producer_probe: metal.new_buffer(256, metal::MTLResourceOptions::StorageModeShared),
             gpu,
             renderer,
             metal,
             pipeline,
-            ring: Default::default(),
-            next: 0,
+            pool: Vec::with_capacity(11),
+            cache: VecDeque::with_capacity(8),
+            offscreen: None,
+            legacy_sync: false,
+            cache_enabled: true,
         })
+    }
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
     }
     pub fn export(&mut self, scene: &Scene, time: Ticks, size: Size) -> Result<Vec<f32>> {
         let request = pm_render::RenderRequest::sized(size, Precision::Float16);
@@ -131,18 +157,19 @@ impl Engine {
         }
         Ok(f.rgba)
     }
-    pub fn encode(
+    pub fn frame(
         &mut self,
         scene: &Scene,
         time: Ticks,
         output: Output,
-        layer: &metal::MetalLayer,
+        layer: Option<&metal::MetalLayer>,
         rect: [f32; 4],
         overlay: u32,
         capture: bool,
+        trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
         objc2::rc::autoreleasepool(|_| {
-            self.encode_inner(scene, time, output, layer, rect, overlay, capture)
+            self.encode_inner(scene, time, output, layer, rect, overlay, capture, trace)
         })
     }
     fn encode_inner(
@@ -150,55 +177,84 @@ impl Engine {
         scene: &Scene,
         time: Ticks,
         output: Output,
-        layer: &metal::MetalLayer,
+        layer: Option<&metal::MetalLayer>,
         rect: [f32; 4],
         overlay: u32,
         capture: bool,
+        trace: Arc<std::sync::Mutex<Trace>>,
     ) -> Result<Option<Submission>> {
-        let slot = self.next;
-        self.next = (self.next + 1) % 3;
-        if self.ring[slot]
-            .as_ref()
-            .is_some_and(|s| Arc::strong_count(s) > 1)
-        {
-            bail!("in-flight ring slot must never be overwritten");
-        }
-        let size = Size::new(output.width, output.height);
-        if self.ring[slot].as_ref().is_none_or(|s| s.size != size) {
-            self.ring[slot] = Some(Arc::new(ExportedSurface::create(
-                &self.gpu.device,
-                &SurfaceRequest {
-                    size,
-                    format: SurfaceFormat::Rgba16Float,
-                },
-            )?));
-        }
-        let surface = self.ring[slot].as_ref().unwrap().clone();
-        let target = Target::wrap(surface.texture.clone());
-        let request = pm_render::RenderRequest::sized(size, Precision::Float16);
-        let rendered = self.renderer.render_into(
-            &scene.doc,
-            &scene.comp,
-            time,
-            &request,
-            &scene.media,
-            &target,
-            None,
-        )?;
-        if !rendered.failures.is_empty() {
-            bail!("viewer layer failures: {:?}", rendered.failures);
-        }
-        // Producer completion on render worker. Never wait for this on AppKit.
-        self.gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
-        let Some(drawable) = layer.next_drawable() else {
-            return Ok(None);
+        self.gpu.device.poll(wgpu::PollType::Poll)?;
+        let key = crate::policy::CacheKey {
+            revision: scene.doc.revision(),
+            time: time.get(),
+            width: output.width,
+            height: output.height,
         };
-        let drawable = drawable.to_owned();
-        if drawable.texture().width() != output.width as u64
-            || drawable.texture().height() != output.height as u64
-        {
-            return Ok(None);
-        }
+        // A revision or size change retires all old cached frames. Leases held
+        // by submitted consumers still protect their storage until completion.
+        self.cache.retain(|(k, _)| k.same_content(key));
+        let hit = self
+            .cache_enabled
+            .then(|| self.cache.iter().position(|(k, _)| *k == key))
+            .flatten();
+        let size = Size::new(output.width, output.height);
+        let surface = if let Some(index) = hit {
+            let entry = self.cache.remove(index).unwrap();
+            let surface = entry.1.clone();
+            self.cache.push_back(entry);
+            trace.lock().unwrap().cache_hit = true;
+            surface
+        } else {
+            if self.cache.len() == 8 {
+                self.cache.pop_front();
+            }
+            self.pool
+                .retain(|s| s.size == size || Arc::strong_count(s) > 1);
+            let free = self
+                .pool
+                .iter()
+                .find(|s| s.size == size && Arc::strong_count(s) == 1)
+                .cloned();
+            let surface = match free {
+                Some(s) => s,
+                None => {
+                    anyhow::ensure!(self.pool.len() < 11, "bounded source pool exhausted");
+                    let s = Arc::new(ExportedSurface::create(
+                        &self.gpu.device,
+                        &SurfaceRequest {
+                            size,
+                            format: SurfaceFormat::Rgba16Float,
+                        },
+                    )?);
+                    self.pool.push(s.clone());
+                    s
+                }
+            };
+            let target = Target::wrap(surface.texture.clone());
+            let request = pm_render::RenderRequest::sized(size, Precision::Float16);
+            trace.lock().unwrap().render_start = now();
+            let rendered = self.renderer.render_into(
+                &scene.doc,
+                &scene.comp,
+                time,
+                &request,
+                &scene.media,
+                &target,
+                None,
+            )?;
+            trace.lock().unwrap().render_submitted = now();
+            if !rendered.failures.is_empty() {
+                bail!("viewer layer failures: {:?}", rendered.failures);
+            }
+            if self.legacy_sync {
+                self.gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
+            }
+            if self.cache_enabled {
+                self.cache.push_back((key, surface.clone()));
+            }
+            surface
+        };
+        trace.lock().unwrap().producer_wait_end = now();
         let source = unsafe {
             let hal = surface.texture.as_hal::<wgpu_hal::api::Metal>().unwrap();
             metal::TextureRef::from_ptr(
@@ -206,9 +262,77 @@ impl Engine {
             )
             .to_owned()
         };
+        // Nonblocking producer-completion marker on the SAME queue. Its end
+        // timestamp is an upper bound on producer GPU readiness, not isolated
+        // producer execution time. The consumer below has isolated GPU times.
+        let marker = self.queue.new_command_buffer().to_owned();
+        // Touch the producer's tracked texture: an EMPTY command buffer can
+        // overlap unrelated work, so its completion would not be a valid bound.
+        let blit = marker.new_blit_command_encoder();
+        blit.copy_from_texture_to_buffer(
+            &source,
+            0,
+            0,
+            metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            &self.producer_probe,
+            0,
+            256,
+            256,
+            metal::MTLBlitOption::None,
+        );
+        blit.end_encoding();
+        let t = trace.clone();
+        marker.add_completed_handler(
+            &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
+                t.lock().unwrap().producer_ready = gpu_time(b, false);
+            })
+            .copy(),
+        );
+        marker.commit();
+        trace.lock().unwrap().drawable_asked = now();
+        let drawable = if let Some(layer) = layer {
+            let Some(d) = layer.next_drawable() else {
+                return Ok(None);
+            };
+            Some(d.to_owned())
+        } else {
+            None
+        };
+        trace.lock().unwrap().drawable_acquired = now();
+        if let Some(d) = &drawable {
+            if d.texture().width() != output.width as u64
+                || d.texture().height() != output.height as u64
+            {
+                return Ok(None);
+            }
+        } else if self
+            .offscreen
+            .as_ref()
+            .is_none_or(|t| t.width() != output.width as u64 || t.height() != output.height as u64)
+        {
+            let desc = metal::TextureDescriptor::new();
+            desc.set_texture_type(metal::MTLTextureType::D2);
+            desc.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+            desc.set_width(output.width as u64);
+            desc.set_height(output.height as u64);
+            desc.set_storage_mode(metal::MTLStorageMode::Private);
+            desc.set_usage(
+                metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
+            );
+            self.offscreen = Some(self.metal.new_texture(&desc));
+        }
+        let destination = drawable.as_ref().map_or_else(
+            || self.offscreen.as_ref().unwrap().as_ref(),
+            |d| d.texture(),
+        );
         let desc = metal::RenderPassDescriptor::new();
         let color = desc.color_attachments().object_at(0).unwrap();
-        color.set_texture(Some(drawable.texture()));
+        color.set_texture(Some(destination));
         color.set_load_action(metal::MTLLoadAction::Clear);
         color.set_store_action(metal::MTLStoreAction::Store);
         let command = self.queue.new_command_buffer().to_owned();
@@ -242,7 +366,7 @@ impl Engine {
             );
             let blit = command.new_blit_command_encoder();
             blit.copy_from_texture_to_buffer(
-                drawable.texture(),
+                destination,
                 0,
                 0,
                 metal::MTLOrigin { x: 0, y: 0, z: 0 },
@@ -262,8 +386,11 @@ impl Engine {
         } else {
             None
         };
+        trace.lock().unwrap().encode_end = now();
         Ok(Some(Submission {
             drawable,
+            producer: marker,
+            trace,
             command,
             surface,
             readback,
@@ -287,8 +414,65 @@ impl Submission {
             .collect()
     }
     pub fn commit(&self) {
-        self.command.present_drawable(&self.drawable);
+        self.submit(None);
+    }
+    pub fn submit(&self, due: Option<f64>) {
+        // Metal's present convenience methods may create autoreleased helpers.
+        // Drain these every frame as well as the encoding pool above.
+        objc2::rc::autoreleasepool(|_| self.submit_inner(due));
+    }
+    fn submit_inner(&self, due: Option<f64>) {
+        if let Some(drawable) = &self.drawable {
+            self.trace.lock().unwrap().present_requested = now();
+            let t = self.trace.clone();
+            drawable.add_presented_handler(
+                &block::ConcreteBlock::new(move |d: &metal::DrawableRef| {
+                    let mut t = t.lock().unwrap();
+                    t.display = Some(d.presented_time());
+                    t.display_callback = now();
+                })
+                .copy(),
+            );
+            if let Some(due) = due {
+                unsafe {
+                    use objc2::{msg_send, runtime::AnyObject};
+                    let _: () = msg_send![self.command.as_ptr() as *mut AnyObject,
+                        presentDrawable:drawable.as_ptr() as *mut AnyObject,atTime:due];
+                }
+            } else {
+                self.command.present_drawable(drawable);
+            }
+        }
+        let t = self.trace.clone();
+        self.command.add_scheduled_handler(
+            &block::ConcreteBlock::new(move |_: &metal::CommandBufferRef| {
+                t.lock().unwrap().scheduled = now();
+            })
+            .copy(),
+        );
+        let t = self.trace.clone();
+        let lease = self.surface.clone();
+        self.command.add_completed_handler(
+            &block::ConcreteBlock::new(move |b: &metal::CommandBufferRef| {
+                let _keep_until_complete = &lease;
+                let mut t = t.lock().unwrap();
+                t.gpu_start = gpu_time(b, true);
+                t.gpu_done = gpu_time(b, false);
+                t.completed = now();
+                t.gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
+            })
+            .copy(),
+        );
+        self.trace.lock().unwrap().commit = now();
         self.command.commit();
+    }
+    pub fn finish_producer(&self) -> Result<()> {
+        self.producer.wait_until_completed();
+        anyhow::ensure!(
+            self.producer.status() == metal::MTLCommandBufferStatus::Completed,
+            "producer failed"
+        );
+        Ok(())
     }
     pub fn complete(&self) -> Result<()> {
         self.command.wait_until_completed();
@@ -301,5 +485,17 @@ impl Submission {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.gpu.wait_idle();
+    }
+}
+
+fn gpu_time(b: &metal::CommandBufferRef, start: bool) -> f64 {
+    unsafe {
+        use objc2::{msg_send, runtime::AnyObject};
+        let p = b.as_ptr() as *mut AnyObject;
+        if start {
+            msg_send![p, GPUStartTime]
+        } else {
+            msg_send![p, GPUEndTime]
+        }
     }
 }
