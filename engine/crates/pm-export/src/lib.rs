@@ -16,7 +16,7 @@
 //! * [`export`]: platform delivery for every format ([`OutputSink`]).
 //! * [`mp4box`]: the container reader verification uses.
 //! * `render` (macOS engine integration): the job engine's export and agent-still pipeline: capability
-//!   routing, pm-render frames (sliced through a [`render::GpuGate`]), pm-audio's
+//!   routing, pm-render frames (sliced through a `render::GpuGate`), pm-audio's
 //!   offline mix, and the encoder above.
 
 pub mod atomic;

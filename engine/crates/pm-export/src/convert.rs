@@ -307,7 +307,7 @@ fn fill_rgba8(frame: &WorkingFrame, params: &ConvertParams, out: &mut [u8]) {
 }
 
 /// Converts one working frame to `format`. Rows are converted in parallel
-/// ([`crate::par`]); every sample depends only on its own inputs, so the result is
+/// (`crate::par`); every sample depends only on its own inputs, so the result is
 /// the same bytes on any number of threads.
 pub fn convert(
     frame: &WorkingFrame,
