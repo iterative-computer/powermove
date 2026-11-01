@@ -122,6 +122,45 @@ impl McpSession {
             }
             return host.panel_layout(session.project.as_deref());
         }
+        if name == "validate_effect" {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            return crate::effect::validate(&args["definition"]);
+        }
+        if name == "fork_builtin_extension" {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let staging = session
+                .workspace
+                .as_ref()
+                .ok_or_else(|| Error::invalid("Extension staging requires project access"))?
+                .join("extensions");
+            let sources = host
+                .extension_sources
+                .as_deref()
+                .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
+            return serde_json::to_value(sources.fork_builtin(
+                args["id"].as_str().unwrap(),
+                args["forkId"].as_str(),
+                &staging,
+            )?)
+            .map_err(|_| Error::invalid("Invalid extension fork result"));
+        }
+        if ["store_search", "store_extension", "store_source"].contains(&name) {
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let store = host.store_reads.as_deref().ok_or_else(|| Error::unavailable(
+                "native Store same-origin bounded HTTP transport (search/detail/release/tree/file)"
+            ))?;
+            return match name {
+                "store_search" => crate::store::search(store, args),
+                "store_extension" => crate::store::detail(store, args),
+                _ => crate::store::source(store, args),
+            };
+        }
         if !catalog::IMPLEMENTED.contains(&name) {
             return Err(Error::unavailable(catalog::backing(name)));
         }
@@ -388,7 +427,7 @@ impl McpSession {
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
             result["instructions"] = json!(
-                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. Engine, panels, agents, Store, user MCP servers and scripting sandbox are not available in this build. api/mcp-tools.json lists the frozen public contract; unsupported tools return a structured error. Extension staging is inert until the runtime lane is connected."
+                "Read get_project_state before edits. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. Engine, panels, agents, Store and extension sources require their native host capabilities. User MCP servers and scripting sandbox are not available in this build. api/mcp-tools.json lists the frozen public contract; unsupported tools return a structured error. Extension staging is inert until the runtime lane is connected."
             );
             Some(root)
         };
