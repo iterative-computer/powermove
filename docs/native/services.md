@@ -228,3 +228,29 @@ name retention after reopen, prior-generation preservation and export omission.
 Strict crate Clippy passes. The recovery owner must supply the document name;
 the shell owner must verify the specified notice and Show action on macOS. No
 user-authored name is added to log or bundle output.
+
+| Review item | Implementation / selecting rule |
+|---|---|
+| 7 — failed-open path (nice-to-have) | `EntryQueue::failed_file()` exposes the exact retained path and typed file-error code for the verbatim `Show in Finder` action. File failure context stays independent of auth failure and advances/clears on retry; failing and later entries remain queued. N1 actionable failure, N3 exact path/code, N4 no dropped opens, N7 inspectable context. |
+
+Final verification: **75 tests pass** (58 existing, 17 added), strict crate Clippy
+with `--all-targets --no-deps -- -D warnings`, Rust formatting and diff whitespace
+checks pass. The two new entry tests cover exact Unicode/case-preserved paths,
+FIFO retention, retry, advancing failure context and independent auth errors.
+Gitleaks scans run before every commit; all fixtures are synthetic.
+
+The required `cd apps/native && cargo test --locked -p pm-services` remains blocked
+because the shared workspace lock needs updating for this crate. It was attempted;
+no shared lockfile or other lane's source was edited. The isolated locked manifest
+continues to compile/test the same source files. The integration owner must add
+pm-services to `apps/native/Cargo.lock` and rerun the locked workspace suite.
+
+All seven review items are complete within the service-data scope. Remaining
+host integration: typed error-to-copy mapping; kernel save summaries/thumbnail
+resolution; native relative dates; feed name/size population and safe Markdown
+sheet rendering; CoreText face enumeration/weight mapping; recovered-document
+name supply and notice; Finder action wiring. Each is owned outside this lane.
+macOS must verify those menus, localized dates, update-sheet typography/accent/
+links, font family submenus/Weight rows, recovery notice and Finder selection.
+No UI was drawn, no visual value was chosen, and no DESIGN-TODO(opus) placeholder
+was needed. Opus review is still required for the eventual visual output.

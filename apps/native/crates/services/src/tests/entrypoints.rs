@@ -133,3 +133,81 @@ fn auth_failure_does_not_block_independent_project_opens() {
     assert_eq!(hook.files, 1);
     assert_eq!(queue.pending(), (1, 0));
 }
+
+#[test]
+fn failed_file_context_preserves_exact_path_and_clears_after_retry() {
+    let mut queue = entrypoints::EntryQueue::default();
+    let path = PathBuf::from("/synthetic/Film 日本語.PMV");
+    queue.push_file(path.clone()).unwrap();
+    queue.push_file("/synthetic/Later.pmv".into()).unwrap();
+    assert!(queue.failed_file().is_none());
+    let mut hook = EntryDouble {
+        fail: true,
+        ..Default::default()
+    };
+    let error = queue.drain_files(&mut hook).unwrap_err();
+    let failed = queue.failed_file().unwrap();
+    assert_eq!(failed.path, path);
+    assert_eq!(failed.code, error.code);
+    assert_eq!(queue.pending(), (0, 2));
+    assert_eq!(entrypoints::SHOW_IN_FINDER_LABEL, "Show in Finder");
+    hook.fail = false;
+    queue.drain_files(&mut hook).unwrap();
+    assert_eq!(hook.files, [path, PathBuf::from("/synthetic/Later.pmv")]);
+    assert!(queue.failed_file().is_none());
+    assert_eq!(queue.pending(), (0, 0));
+}
+
+#[test]
+fn file_failure_context_is_independent_of_auth_error_and_tracks_next_path() {
+    use crate::{ServiceError, ServiceErrorCode as Code};
+    struct Failures {
+        refused: Option<PathBuf>,
+    }
+    impl entrypoints::EntryHook for Failures {
+        fn auth(&mut self, _: &entrypoints::AuthLink) -> Result<()> {
+            Err(ServiceError::message(
+                Code::Offline,
+                "synthetic auth failure",
+            ))
+        }
+        fn open_project(&mut self, path: &Path) -> Result<()> {
+            if self.refused.as_deref() == Some(path) {
+                Err(ServiceError::message(
+                    Code::NotFound,
+                    "synthetic project failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        fn register_associations(&mut self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+    let mut queue = entrypoints::EntryQueue::default();
+    queue
+        .push_link("powermove://auth?state=synthetic&token=synthetic-callback")
+        .unwrap();
+    let first = PathBuf::from("/synthetic/First.pmv");
+    let next = PathBuf::from("/synthetic/Next.pmv");
+    queue.push_file(first.clone()).unwrap();
+    queue.push_file(next.clone()).unwrap();
+    let mut hook = Failures {
+        refused: Some(first.clone()),
+    };
+    assert_eq!(queue.drain(&mut hook).unwrap_err().code, Code::Offline);
+    assert_eq!(queue.failed_file().unwrap().code, Code::NotFound);
+    assert_eq!(queue.failed_file().unwrap().path, first);
+    hook.refused = Some(next.clone());
+    assert_eq!(
+        queue.drain_files(&mut hook).unwrap_err().code,
+        Code::NotFound
+    );
+    assert_eq!(queue.failed_file().unwrap().path, next);
+    assert_eq!(queue.pending(), (1, 1));
+    hook.refused = None;
+    assert_eq!(queue.drain(&mut hook).unwrap_err().code, Code::Offline);
+    assert!(queue.failed_file().is_none());
+    assert_eq!(queue.pending(), (1, 0));
+}

@@ -1,11 +1,14 @@
 //! LaunchServices hooks and cold-start deep-link routing, without AppKit on Linux.
-use crate::error::{Context, Result};
+use crate::error::{Context, Result, ServiceErrorCode};
 use crate::service_ensure as ensure;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
 };
 use url::Url;
+
+/// Verbatim error-alert action from design review item 7.
+pub const SHOW_IN_FINDER_LABEL: &str = "Show in Finder";
 
 /// Deliberately has no Debug/Serialize: callback state/token must never enter logs.
 pub struct AuthLink {
@@ -77,10 +80,18 @@ pub enum LinkAdmission {
     Queued,
     ReplacedOldestAuth,
 }
+/// Local UI context only: never include the path in exported diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOpenFailure {
+    pub path: PathBuf,
+    pub code: ServiceErrorCode,
+}
+
 #[derive(Default)]
 pub struct EntryQueue {
     links: VecDeque<AuthLink>,
     files: VecDeque<PathBuf>,
+    failed_file: Option<FileOpenFailure>,
 }
 impl EntryQueue {
     /// Same eight newest auth callback bound as v1.2.0; explicit overflow for inspection.
@@ -125,11 +136,24 @@ impl EntryQueue {
         Ok(())
     }
     pub fn drain_files(&mut self, hook: &mut impl EntryHook) -> Result<()> {
+        self.failed_file = None;
         while let Some(path) = self.files.front() {
-            hook.open_project(path)?;
+            if let Err(error) = hook.open_project(path) {
+                self.failed_file = Some(FileOpenFailure {
+                    path: path.clone(),
+                    code: error.code,
+                });
+                return Err(error);
+            }
             self.files.pop_front();
         }
         Ok(())
+    }
+    /// Last failed open, retained alongside the still-queued path for Show in Finder.
+    /// Independent of auth failure: drain() may return an auth error while this
+    /// carries a separate file error. Cleared when file delivery is retried/succeeds.
+    pub fn failed_file(&self) -> Option<&FileOpenFailure> {
+        self.failed_file.as_ref()
     }
     pub fn pending(&self) -> (usize, usize) {
         (self.links.len(), self.files.len())
