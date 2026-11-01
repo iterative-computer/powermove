@@ -4959,8 +4959,11 @@ dependencies = [
 name = "pm-panel-timeline"
 version = "0.1.0"
 dependencies = [
+ "pm-design",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
