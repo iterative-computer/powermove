@@ -4543,6 +4543,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-effect-controls-wire"
+version = "0.1.0"
+dependencies = [
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-panel-inspector",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-engine"
 version = "0.1.0"
 dependencies = [

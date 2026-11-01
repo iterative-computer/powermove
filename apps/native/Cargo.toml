@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spikes/*", "crates/*"]
+members = ["spikes/*", "crates/*", "js/v4/panels/effect-controls/native"]
 exclude = ["vendor/gpui-ce"]
 
 [workspace.package]
