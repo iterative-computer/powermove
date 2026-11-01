@@ -1514,6 +1514,8 @@ impl Host {
         let mtm = MainThreadMarker::new().unwrap();
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
+        // Match the window (a forced scheme, or the system's).
+        menu.setAppearance(Some(&self.window.effectiveAppearance()));
         for entry in items {
             if entry.label.is_empty() {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
