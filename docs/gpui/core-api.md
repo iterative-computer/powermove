@@ -1,16 +1,20 @@
-# `pm-mac-core`: the API panels code against
+# The document layer of `pm-kernel`: the API panels code against
 
-Crate: `apps/native/crates/core` (package `pm-mac-core`). Pure Rust, no GPUI.
-It is the single owner of the open project: every panel, the MCP server and
-extensions read and change the document only through it
-([engine-boundary.md](engine-boundary.md), sections 1, 2.2, 5.2, 6).
+Crate: `apps/native/crates/kernel` (package `pm-kernel`, grown from
+`pm-mac-core`, which remains a one-line re-export at `apps/native/crates/core`).
+Pure Rust, no GPUI. This page covers the **document layer** (`DocumentStore`,
+commands, files). In the app, the store lives inside the kernel actor and is
+reached through `KernelHandle` calls, `Published` snapshots and the
+`QueryMirror`; see [docs/native/kernel.md](../native/kernel.md) for the
+actor, transactions (v1–3 write APIs), history, journal and library store.
+Single-owner tools and tests may still drive a `DocumentStore` directly.
 The crate-root docs (`src/lib.rs`) are the authoritative reference; this
 page is the short version.
 
 ## Lifecycle
 
 ```rust
-use pm_mac_core::{DocumentStore, Command, Origin, SaveTarget, SaveOptions, open_project, OpenOptions};
+use pm_kernel::{DocumentStore, Command, Origin, SaveTarget, SaveOptions, open_project, OpenOptions};
 
 // Open: blocking I/O, run on a background executor.
 let opened = open_project(&path, OpenOptions::default())?;   // worker thread
@@ -61,7 +65,7 @@ label, and the old function it ports.
 Conventions: times are composition seconds unless a field says otherwise
 (key times are layer-local); commands that depend on the playhead take it
 as `time` (the core has no playhead); ids of things a command creates are
-passed in, made with `pm_mac_core::new_id(prefix)` (`L` layers, `k` keys,
+passed in, made with `pm_kernel::new_id(prefix)` (`L` layers, `k` keys,
 `f` effects, `K` masks, `C` comps, `marker`), so the caller can select what
 it made; channels are the old keys (`opacity`, `position.x`, `c.size`,
 `<fxId>.<param>`, `<fxId>.$enabled`, `m.<maskId>.<param>`, `l.blend`, ...).
@@ -220,11 +224,13 @@ selected layer (`PM.firstSel()`). Selection is never saved and never undone.
 * **Dirty** follows the undo position: undoing back to the saved state is
   clean; re-typing an old value by hand is not (the old app compared content
   fingerprints). Workspace changes never dirty the project (as before).
-* **History**: selection is not an undo step; `external` (closure) entries,
-  nested `begin`/`commit`, takes, and `preserveHandEdits`/`markIntent`
-  per-command flags are not ported. Imported and saved history uses the old
-  format (`{ version: 1, paths: "composition", index, entries }`), so files
-  move between apps with their undo stack.
+* **History**: selection is not an undo step; takes and
+  `preserveHandEdits`/`markIntent` per-command flags are not ported.
+  `external` (closure) entries and nested `begin`/`commit` live in the
+  kernel's transaction layer (`pm_kernel::tx`, docs/native/kernel.md).
+  Imported and saved history uses the old format (`{ version: 1, paths:
+  "composition", index, entries }`, and the packed dictionary), so files move
+  between apps with their undo stack.
 * **Commands** (deliberate, or not yet ported):
   * The spine `SetStaticOpacity` refuses values outside 0–100 and animated
     channels; `PropertyCommand::Set` behaves as the old `set_property`.
@@ -264,4 +270,6 @@ selected layer (`PM.firstSel()`). Selection is never saved and never undone.
   `textLayout`, 3D picks and `edit.*` kernels, and the interned
   `ev_id`/`ev_batch` fast path for drags are TODO (use `query()` meanwhile).
 * **Not in this crate yet**: media catalog/asset resolution for render and
-  audio, composition switching, autosave/recovery journal, keymap/settings.
+  audio, composition switching, keymap/settings, the library write path. The
+  recovery journal and the library read path are in `pm_kernel::journal` and
+  `pm_kernel::library`.
