@@ -4976,6 +4976,20 @@ name = "pm-perf"
 version = "0.1.0"
 
 [[package]]
+name = "pm-project-panel-check"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "pm-design",
+ "pm-kernel",
+ "pm-model",
+ "pm-panel-media",
+ "pm-surface",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-promedia"
 version = "0.1.0"
 dependencies = [
