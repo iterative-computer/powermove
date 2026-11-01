@@ -1,0 +1,73 @@
+{
+  "evidence": "tagged-source; zod 4.6.5; synthetic exporter host",
+  "fixtures": [
+    {
+      "arguments": {},
+      "project": {
+        "id": "synthetic-project",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30
+      },
+      "result": {
+        "path": "$exports/synthetic.mp4",
+        "projectId": "synthetic-project",
+        "width": 1920,
+        "height": 1080,
+        "fps": 30
+      },
+      "options": {
+        "format": "mp4",
+        "range": "all",
+        "audio": true,
+        "motionBlur": true,
+        "alpha": false,
+        "mblur": true,
+        "fps": 30,
+        "scale": 1,
+        "reportPath": true
+      }
+    },
+    {
+      "arguments": {
+        "format": "prores",
+        "range": "work",
+        "alpha": true,
+        "audio": false,
+        "motionBlur": false,
+        "name": "Synthetic"
+      },
+      "project": {
+        "id": "synthetic-project",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30
+      },
+      "result": {
+        "path": "$exports/synthetic.mov",
+        "projectId": "synthetic-project",
+        "width": 1920,
+        "height": 1080,
+        "fps": 30
+      },
+      "options": {
+        "name": "Synthetic",
+        "format": "prores",
+        "range": "work",
+        "audio": false,
+        "motionBlur": false,
+        "alpha": true,
+        "mblur": false,
+        "fps": 30,
+        "scale": 1,
+        "reportPath": true
+      }
+    },
+    {
+      "arguments": {
+        "alpha": true
+      },
+      "error": "Transparent video requires ProRes."
+    }
+  ]
+}

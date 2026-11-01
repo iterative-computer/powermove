@@ -28,6 +28,56 @@ pub struct CaptureRequest {
 /// A later engine lane supplies real image content (MCP base64 image blocks).
 pub trait EngineHook: Send + Sync {
     fn capture(&self, request: &CaptureRequest) -> Result<Value>;
+    fn capture_snapshot(
+        &self,
+        request: &CaptureRequest,
+        _snapshot: &crate::services::FrozenProject,
+    ) -> Result<Value> {
+        self.capture(request)
+    }
+    fn resolve_media(
+        &self,
+        _: &crate::services::MediaRequest,
+    ) -> Result<crate::media_tools::MediaSource> {
+        Err(Error::unavailable(
+            "engine original media resolver and evaluated source timing",
+        ))
+    }
+    fn probe(
+        &self,
+        _: &crate::services::MediaRequest,
+        _: &crate::media_tools::MediaSource,
+    ) -> Result<crate::media_tools::Probe> {
+        Err(Error::unavailable("engine native media probe"))
+    }
+    fn sample(&self, _: &crate::media_tools::FrameRequest) -> Result<Vec<crate::services::Image>> {
+        Err(Error::unavailable("engine native source-frame decoder"))
+    }
+    fn scan(&self, _: &crate::media_tools::ScanRequest) -> Result<crate::media_tools::Scan> {
+        Err(Error::unavailable("engine informative source-frame scan"))
+    }
+    fn sheet(&self, _: &crate::media_tools::SheetRequest) -> Result<crate::services::Image> {
+        Err(Error::unavailable(
+            "engine labelled contact-sheet assembler",
+        ))
+    }
+    fn composition_sheet(
+        &self,
+        request: &crate::media_tools::SheetRequest,
+    ) -> Result<crate::media_tools::SheetOutput> {
+        Ok(crate::media_tools::SheetOutput {
+            image: self.sheet(request)?,
+            completed: request.cells.len(),
+        })
+    }
+    fn waveform(
+        &self,
+        _: &crate::media_tools::WaveformRequest,
+    ) -> Result<crate::media_tools::Waveform> {
+        Err(Error::unavailable(
+            "engine measured waveform and loudness worker",
+        ))
+    }
 }
 /// Stable ids are owned by each surface, never derived from child order. The
 /// same provider is used windowed and headless. Sensitive controls are omitted.
@@ -48,6 +98,8 @@ pub struct Automation {
     subscribers: Vec<mpsc::Sender<AutomationEvent>>,
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
+    pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    pub export_child: Arc<dyn crate::services::ExportChild>,
 }
 impl Automation {
     /// `profile` must be an explicit, isolated native destination, never the
@@ -83,6 +135,8 @@ impl Automation {
             subscribers: Vec::new(),
             engine: None,
             surfaces: None,
+            media_registry: None,
+            export_child: Arc::new(crate::services::NativeExportChild),
         })
     }
     pub fn kernel(&self) -> &Kernel {
@@ -594,6 +648,8 @@ pub struct ActorAutomation {
     pub kernel: KernelHandle,
     pub engine: Option<Arc<dyn EngineHook>>,
     pub surfaces: Option<Arc<dyn SurfaceHook>>,
+    pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
+    pub export_child: Arc<dyn crate::services::ExportChild>,
 }
 impl ActorAutomation {
     pub fn new(kernel: KernelHandle) -> Self {
@@ -601,6 +657,8 @@ impl ActorAutomation {
             kernel,
             engine: None,
             surfaces: None,
+            media_registry: None,
+            export_child: Arc::new(crate::services::NativeExportChild),
         }
     }
     pub fn for_actor(&self, caller: Caller) -> pm_kernel::ActorHandle {

@@ -1,0 +1,1698 @@
+{
+  "evidence": "tagged-source; zod 4.6.5; synthetic static 3D layers; no live app or native output",
+  "fixtures": [
+    {
+      "project": {
+        "id": "synthetic-scene",
+        "name": "Synthetic scene",
+        "w": 640,
+        "h": 360,
+        "fps": 30,
+        "dur": 12,
+        "revision": 0,
+        "layers": [],
+        "assets": {
+          "model": {
+            "id": "model",
+            "name": "Synthetic model",
+            "kind": "model",
+            "format": "glb"
+          },
+          "image": {
+            "id": "image",
+            "name": "Synthetic texture",
+            "kind": "image"
+          }
+        }
+      },
+      "arguments": {},
+      "result": {
+        "layerId": null,
+        "scene": {
+          "version": 1,
+          "objects": [],
+          "lights": [
+            {
+              "id": "default_sun",
+              "name": "Light",
+              "type": "sun",
+              "p": {
+                "x": {
+                  "v": -3,
+                  "kf": [],
+                  "expr": null
+                },
+                "y": {
+                  "v": 5,
+                  "kf": [],
+                  "expr": null
+                },
+                "z": {
+                  "v": 4,
+                  "kf": [],
+                  "expr": null
+                },
+                "targetX": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "targetY": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "targetZ": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "color": {
+                  "v": "#FFFFFF",
+                  "kf": [],
+                  "expr": null
+                },
+                "intensity": {
+                  "v": 3,
+                  "kf": [],
+                  "expr": null
+                },
+                "distance": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "decay": {
+                  "v": 2,
+                  "kf": [],
+                  "expr": null
+                },
+                "angle": {
+                  "v": 45,
+                  "kf": [],
+                  "expr": null
+                },
+                "penumbra": {
+                  "v": 0.4,
+                  "kf": [],
+                  "expr": null
+                },
+                "visible": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                }
+              },
+              "castShadow": true
+            }
+          ],
+          "camera": {
+            "projection": "perspective",
+            "p": {
+              "x": {
+                "v": 3,
+                "kf": [],
+                "expr": null
+              },
+              "y": {
+                "v": 2,
+                "kf": [],
+                "expr": null
+              },
+              "z": {
+                "v": 6,
+                "kf": [],
+                "expr": null
+              },
+              "targetX": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "targetY": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "targetZ": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "fov": {
+                "v": 45,
+                "kf": [],
+                "expr": null
+              },
+              "zoom": {
+                "v": 1,
+                "kf": [],
+                "expr": null
+              },
+              "near": {
+                "v": 0.01,
+                "kf": [],
+                "expr": null
+              },
+              "far": {
+                "v": 1000,
+                "kf": [],
+                "expr": null
+              }
+            }
+          },
+          "environment": {
+            "p": {
+              "ambient": {
+                "v": 0.5,
+                "kf": [],
+                "expr": null
+              },
+              "ambientColor": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "exposure": {
+                "v": 1,
+                "kf": [],
+                "expr": null
+              }
+            },
+            "background": null,
+            "shadows": true
+          }
+        },
+        "layers": [],
+        "channels": [],
+        "assets": [
+          {
+            "id": "image",
+            "name": "Synthetic texture",
+            "kind": "image"
+          },
+          {
+            "id": "model",
+            "name": "Synthetic model",
+            "kind": "model",
+            "format": "glb"
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "project": {
+        "id": "synthetic-scene",
+        "name": "Synthetic scene",
+        "w": 640,
+        "h": 360,
+        "fps": 30,
+        "dur": 12,
+        "revision": 0,
+        "layers": [
+          {
+            "id": "L_synthetic_0",
+            "type": "extension",
+            "name": "Synthetic object",
+            "from": 0,
+            "dur": 12,
+            "on": true,
+            "lock": false,
+            "shy": false,
+            "collapsed": true,
+            "color": "#9B8CFF",
+            "blend": "normal",
+            "mblur": false,
+            "parent": null,
+            "p": {
+              "perspective": {
+                "v": 50,
+                "kf": [],
+                "expr": null
+              },
+              "position.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "scale.z": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "rotation.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "rotation.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "position.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "position.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "scale.x": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "scale.y": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "rotation": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "opacity": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "skew": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              }
+            },
+            "fx": [],
+            "transitionIn": null,
+            "transitionOut": null,
+            "masks": [],
+            "d": {
+              "definition": "powermove.3d.object",
+              "version": 1,
+              "w": 640,
+              "h": 360,
+              "params": {},
+              "data": {
+                "object": {
+                  "source": {
+                    "primitive": "box"
+                  },
+                  "material": {
+                    "p": {
+                      "color": {
+                        "v": "#C7C4FF",
+                        "kf": [],
+                        "expr": null
+                      },
+                      "roughness": {
+                        "v": 0.4,
+                        "kf": [],
+                        "expr": null
+                      },
+                      "metalness": {
+                        "v": 0.1,
+                        "kf": [],
+                        "expr": null
+                      },
+                      "emissive": {
+                        "v": "#000000",
+                        "kf": [],
+                        "expr": null
+                      },
+                      "emissiveIntensity": {
+                        "v": 1,
+                        "kf": [],
+                        "expr": null
+                      },
+                      "opacity": {
+                        "v": 1,
+                        "kf": [],
+                        "expr": null
+                      }
+                    },
+                    "maps": {},
+                    "doubleSided": true
+                  },
+                  "useSourceMaterials": false,
+                  "castShadow": true,
+                  "receiveShadow": true
+                }
+              }
+            },
+            "locked_intent": {},
+            "threeD": true
+          },
+          {
+            "id": "L_synthetic_1",
+            "type": "extension",
+            "name": "Synthetic light",
+            "from": 0,
+            "dur": 12,
+            "on": true,
+            "lock": false,
+            "shy": false,
+            "collapsed": true,
+            "color": "#9B8CFF",
+            "blend": "normal",
+            "mblur": false,
+            "parent": null,
+            "p": {
+              "perspective": {
+                "v": 50,
+                "kf": [],
+                "expr": null
+              },
+              "position.z": {
+                "v": 4,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "scale.z": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "rotation.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "rotation.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "position.x": {
+                "v": -3,
+                "kf": [],
+                "expr": null
+              },
+              "position.y": {
+                "v": 5,
+                "kf": [],
+                "expr": null
+              },
+              "scale.x": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "scale.y": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "rotation": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "opacity": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "skew": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              }
+            },
+            "fx": [],
+            "transitionIn": null,
+            "transitionOut": null,
+            "masks": [],
+            "d": {
+              "definition": "powermove.3d.light",
+              "version": 1,
+              "w": 640,
+              "h": 360,
+              "params": {},
+              "data": {
+                "light": {
+                  "type": "point",
+                  "p": {
+                    "targetX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "targetY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "targetZ": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "color": {
+                      "v": "#FFFFFF",
+                      "kf": [],
+                      "expr": null
+                    },
+                    "intensity": {
+                      "v": 3,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "distance": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "decay": {
+                      "v": 2,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "angle": {
+                      "v": 45,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "penumbra": {
+                      "v": 0.4,
+                      "kf": [],
+                      "expr": null
+                    }
+                  },
+                  "castShadow": true
+                }
+              }
+            },
+            "locked_intent": {},
+            "threeD": true
+          },
+          {
+            "id": "L_synthetic_2",
+            "type": "extension",
+            "name": "Synthetic camera",
+            "from": 0,
+            "dur": 12,
+            "on": true,
+            "lock": false,
+            "shy": false,
+            "collapsed": true,
+            "color": "#9B8CFF",
+            "blend": "normal",
+            "mblur": false,
+            "parent": null,
+            "p": {
+              "perspective": {
+                "v": 50,
+                "kf": [],
+                "expr": null
+              },
+              "position.z": {
+                "v": 6,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "scale.z": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "rotation.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "rotation.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "orientation.z": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.x": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "anchor.y": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "position.x": {
+                "v": 3,
+                "kf": [],
+                "expr": null
+              },
+              "position.y": {
+                "v": 2,
+                "kf": [],
+                "expr": null
+              },
+              "scale.x": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "scale.y": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "rotation": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "opacity": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              },
+              "skew": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              }
+            },
+            "fx": [],
+            "transitionIn": null,
+            "transitionOut": null,
+            "masks": [],
+            "d": {
+              "definition": "powermove.3d.camera",
+              "version": 1,
+              "w": 640,
+              "h": 360,
+              "params": {},
+              "data": {
+                "camera": {
+                  "projection": "perspective",
+                  "p": {
+                    "targetX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "targetY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "targetZ": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "fov": {
+                      "v": 45,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "zoom": {
+                      "v": 1,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "near": {
+                      "v": 0.01,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "far": {
+                      "v": 1000,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                "environment": {
+                  "p": {
+                    "ambient": {
+                      "v": 0.5,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "ambientColor": {
+                      "v": "#FFFFFF",
+                      "kf": [],
+                      "expr": null
+                    },
+                    "exposure": {
+                      "v": 1,
+                      "kf": [],
+                      "expr": null
+                    }
+                  },
+                  "background": null,
+                  "shadows": true
+                }
+              }
+            },
+            "locked_intent": {},
+            "threeD": true
+          }
+        ],
+        "assets": {
+          "image": {
+            "id": "image",
+            "kind": "image",
+            "name": "Synthetic texture"
+          },
+          "model": {
+            "format": "glb",
+            "id": "model",
+            "kind": "model",
+            "name": "Synthetic model"
+          }
+        }
+      },
+      "arguments": {
+        "target": "L_synthetic_0"
+      },
+      "result": {
+        "layerId": "L_synthetic_0",
+        "scene": {
+          "version": 1,
+          "objects": [
+            {
+              "id": "L_synthetic_0",
+              "name": "Synthetic object",
+              "parent": null,
+              "source": {
+                "primitive": "box"
+              },
+              "p": {
+                "x": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "y": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "z": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "rx": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "ry": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "rz": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "sx": {
+                  "v": 1,
+                  "kf": [],
+                  "expr": null
+                },
+                "sy": {
+                  "v": 1,
+                  "kf": [],
+                  "expr": null
+                },
+                "sz": {
+                  "v": 1,
+                  "kf": [],
+                  "expr": null
+                },
+                "visible": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                }
+              },
+              "material": {
+                "p": {
+                  "color": {
+                    "v": "#C7C4FF",
+                    "kf": [],
+                    "expr": null
+                  },
+                  "roughness": {
+                    "v": 0.4,
+                    "kf": [],
+                    "expr": null
+                  },
+                  "metalness": {
+                    "v": 0.1,
+                    "kf": [],
+                    "expr": null
+                  },
+                  "emissive": {
+                    "v": "#000000",
+                    "kf": [],
+                    "expr": null
+                  },
+                  "emissiveIntensity": {
+                    "v": 1,
+                    "kf": [],
+                    "expr": null
+                  },
+                  "opacity": {
+                    "v": 1,
+                    "kf": [],
+                    "expr": null
+                  }
+                },
+                "maps": {},
+                "doubleSided": true
+              },
+              "useSourceMaterials": false,
+              "castShadow": true,
+              "receiveShadow": true
+            }
+          ],
+          "lights": [
+            {
+              "id": "L_synthetic_1",
+              "name": "Synthetic light",
+              "type": "point",
+              "p": {
+                "x": {
+                  "v": -3,
+                  "kf": [],
+                  "expr": null
+                },
+                "y": {
+                  "v": 5,
+                  "kf": [],
+                  "expr": null
+                },
+                "z": {
+                  "v": 4,
+                  "kf": [],
+                  "expr": null
+                },
+                "targetX": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "targetY": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "targetZ": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "color": {
+                  "v": "#FFFFFF",
+                  "kf": [],
+                  "expr": null
+                },
+                "intensity": {
+                  "v": 3,
+                  "kf": [],
+                  "expr": null
+                },
+                "distance": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "decay": {
+                  "v": 2,
+                  "kf": [],
+                  "expr": null
+                },
+                "angle": {
+                  "v": 45,
+                  "kf": [],
+                  "expr": null
+                },
+                "penumbra": {
+                  "v": 0.4,
+                  "kf": [],
+                  "expr": null
+                },
+                "visible": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                }
+              },
+              "castShadow": true
+            }
+          ],
+          "camera": {
+            "projection": "perspective",
+            "p": {
+              "x": {
+                "v": 3,
+                "kf": [],
+                "expr": null
+              },
+              "y": {
+                "v": 2,
+                "kf": [],
+                "expr": null
+              },
+              "z": {
+                "v": 6,
+                "kf": [],
+                "expr": null
+              },
+              "targetX": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "targetY": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "targetZ": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "fov": {
+                "v": 45,
+                "kf": [],
+                "expr": null
+              },
+              "zoom": {
+                "v": 1,
+                "kf": [],
+                "expr": null
+              },
+              "near": {
+                "v": 0.01,
+                "kf": [],
+                "expr": null
+              },
+              "far": {
+                "v": 1000,
+                "kf": [],
+                "expr": null
+              }
+            }
+          },
+          "environment": {
+            "p": {
+              "ambient": {
+                "v": 0.5,
+                "kf": [],
+                "expr": null
+              },
+              "ambientColor": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "exposure": {
+                "v": 1,
+                "kf": [],
+                "expr": null
+              }
+            },
+            "background": null,
+            "shadows": true
+          }
+        },
+        "layers": [
+          {
+            "id": "L_synthetic_0",
+            "name": "Synthetic object",
+            "role": "object",
+            "parent": null,
+            "visible": true,
+            "locked": false,
+            "from": 0,
+            "duration": 12,
+            "content": {
+              "object": {
+                "castShadow": true,
+                "material": {
+                  "doubleSided": true,
+                  "maps": {},
+                  "p": {
+                    "color": {
+                      "expr": null,
+                      "kf": [],
+                      "v": "#C7C4FF"
+                    },
+                    "emissive": {
+                      "expr": null,
+                      "kf": [],
+                      "v": "#000000"
+                    },
+                    "emissiveIntensity": {
+                      "expr": null,
+                      "kf": [],
+                      "v": 1
+                    },
+                    "metalness": {
+                      "expr": null,
+                      "kf": [],
+                      "v": 0.1
+                    },
+                    "opacity": {
+                      "expr": null,
+                      "kf": [],
+                      "v": 1
+                    },
+                    "roughness": {
+                      "expr": null,
+                      "kf": [],
+                      "v": 0.4
+                    }
+                  }
+                },
+                "receiveShadow": true,
+                "source": {
+                  "primitive": "box"
+                },
+                "useSourceMaterials": false
+              }
+            }
+          },
+          {
+            "id": "L_synthetic_1",
+            "name": "Synthetic light",
+            "role": "light",
+            "parent": null,
+            "visible": true,
+            "locked": false,
+            "from": 0,
+            "duration": 12,
+            "content": {
+              "light": {
+                "castShadow": true,
+                "p": {
+                  "angle": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 45
+                  },
+                  "color": {
+                    "expr": null,
+                    "kf": [],
+                    "v": "#FFFFFF"
+                  },
+                  "decay": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 2
+                  },
+                  "distance": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  },
+                  "intensity": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 3
+                  },
+                  "penumbra": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0.4
+                  },
+                  "targetX": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  },
+                  "targetY": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  },
+                  "targetZ": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  }
+                },
+                "type": "point"
+              }
+            }
+          },
+          {
+            "id": "L_synthetic_2",
+            "name": "Synthetic camera",
+            "role": "camera",
+            "parent": null,
+            "visible": true,
+            "locked": false,
+            "from": 0,
+            "duration": 12,
+            "content": {
+              "camera": {
+                "p": {
+                  "far": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 1000
+                  },
+                  "fov": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 45
+                  },
+                  "near": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0.01
+                  },
+                  "targetX": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  },
+                  "targetY": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  },
+                  "targetZ": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0
+                  },
+                  "zoom": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 1
+                  }
+                },
+                "projection": "perspective"
+              },
+              "environment": {
+                "background": null,
+                "p": {
+                  "ambient": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 0.5
+                  },
+                  "ambientColor": {
+                    "expr": null,
+                    "kf": [],
+                    "v": "#FFFFFF"
+                  },
+                  "exposure": {
+                    "expr": null,
+                    "kf": [],
+                    "v": 1
+                  }
+                },
+                "shadows": true
+              }
+            }
+          }
+        ],
+        "channels": [
+          {
+            "layerId": "L_synthetic_0",
+            "path": "anchor.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "anchor.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "anchor.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "opacity",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "orientation.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "orientation.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "orientation.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "perspective",
+            "value": 50,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "position.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "position.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "position.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "rotation",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "rotation.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "rotation.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "scale.x",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "scale.y",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "scale.z",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "skew",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "m.color",
+            "value": "#C7C4FF",
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "m.emissive",
+            "value": "#000000",
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "m.emissiveIntensity",
+            "value": 1,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "m.metalness",
+            "value": 0.1,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "m.opacity",
+            "value": 1,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_0",
+            "path": "m.roughness",
+            "value": 0.4,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "anchor.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "anchor.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "anchor.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "opacity",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "orientation.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "orientation.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "orientation.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "perspective",
+            "value": 50,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "position.x",
+            "value": -3,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "position.y",
+            "value": 5,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "position.z",
+            "value": 4,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "rotation",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "rotation.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "rotation.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "scale.x",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "scale.y",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "scale.z",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "skew",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.angle",
+            "value": 45,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.color",
+            "value": "#FFFFFF",
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.decay",
+            "value": 2,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.distance",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.intensity",
+            "value": 3,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.penumbra",
+            "value": 0.4,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.targetX",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.targetY",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_1",
+            "path": "light.targetZ",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "anchor.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "anchor.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "anchor.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "opacity",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "orientation.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "orientation.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "orientation.z",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "perspective",
+            "value": 50,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "position.x",
+            "value": 3,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "position.y",
+            "value": 2,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "position.z",
+            "value": 6,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "rotation",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "rotation.x",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "rotation.y",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "scale.x",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "scale.y",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "scale.z",
+            "value": 100,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "skew",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.far",
+            "value": 1000,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.fov",
+            "value": 45,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.near",
+            "value": 0.01,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.targetX",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.targetY",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.targetZ",
+            "value": 0,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "camera.zoom",
+            "value": 1,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "environment.ambient",
+            "value": 0.5,
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "environment.ambientColor",
+            "value": "#FFFFFF",
+            "keyframeCount": 0
+          },
+          {
+            "layerId": "L_synthetic_2",
+            "path": "environment.exposure",
+            "value": 1,
+            "keyframeCount": 0
+          }
+        ],
+        "assets": [
+          {
+            "id": "image",
+            "name": "Synthetic texture",
+            "kind": "image"
+          },
+          {
+            "id": "model",
+            "name": "Synthetic model",
+            "kind": "model",
+            "format": "glb"
+          }
+        ],
+        "revision": 0
+      }
+    }
+  ]
+}

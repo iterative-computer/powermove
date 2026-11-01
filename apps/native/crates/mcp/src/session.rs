@@ -27,6 +27,7 @@ struct Active {
     transaction: Option<Transaction>,
     workspace: Option<PathBuf>,
     committed: bool,
+    external_actions: bool,
 }
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
@@ -51,6 +52,18 @@ impl McpSession {
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
         match self.dispatch(name, &args) {
+            Ok(v)
+                if [
+                    "render_frames",
+                    "probe_media",
+                    "sample_media_frames",
+                    "media_contact_sheet",
+                    "media_waveform",
+                ]
+                .contains(&name) =>
+            {
+                json!({"content":v,"isError":false})
+            }
             Ok(v) => success(v),
             Err(e) => failure(e),
         }
@@ -119,9 +132,15 @@ impl McpSession {
             .ok_or_else(|| Error::invalid("This tool requires an attached project."))?
             .clone();
         assert_project(session, &host, &id)?;
-        if name == "get_project_state" || name == "get_timeline" {
+        if ["get_project_state", "get_timeline", "list_media"].contains(&name) {
             let result = if name == "get_project_state" {
                 views::project_state(&host, &id, args)?
+            } else if name == "list_media" {
+                crate::media::list(
+                    &host.read_document(&id)?,
+                    args,
+                    host.media_registry.as_deref(),
+                )
             } else {
                 views::timeline(&host, &id, args)?
             };
@@ -129,6 +148,62 @@ impl McpSession {
             return Ok(result);
         }
         match name {
+            "get_3d_scene" => {
+                let result = crate::inspection::scene(&host, &id, args)?;
+                refresh(session, &mut host, &id, self.writer)?;
+                Ok(result)
+            }
+            "check_project" => crate::inspection::check(&host, &id),
+            "render_frames" => host.render(&id, args)?.content(),
+            "probe_media" | "sample_media_frames" | "media_contact_sheet" | "media_waveform" => {
+                use crate::services::MediaOperation;
+                let operation = match name {
+                    "probe_media" => MediaOperation::Probe,
+                    "sample_media_frames" => MediaOperation::SampleFrames,
+                    "media_contact_sheet" => MediaOperation::ContactSheet,
+                    _ => MediaOperation::Waveform,
+                };
+                host.media_tool(&id, operation, args)?.content()
+            }
+            "export_video" => host.export_video(&id, args),
+            "export_captions" => host.export_captions(&id, args),
+            "manage_media" => {
+                let expected = session
+                    .transaction
+                    .as_ref()
+                    .map_or(session.baseline, |t| t.revision);
+                if host.revision(&id)? != expected {
+                    return Err(Error::conflict(
+                        "The project changed. Read get_project_state before managing media.",
+                    ));
+                }
+                let plan = crate::media::manage(&host.read_document(&id)?, args)?;
+                let ack = host.apply_body(&id, plan.body, "Manage media", expected, self.writer)?;
+                // Native media Undo is separate from run grouping and snapshot
+                // rollback, exactly as the frozen contract promises.
+                session.external_actions = true;
+                session.committed |= ack.revision != expected;
+                session.baseline = ack.revision;
+                if let Some(tx) = session.transaction.as_mut() {
+                    tx.revision = ack.revision;
+                }
+                let selected = host
+                    .store(&id)?
+                    .selection()
+                    .layers()
+                    .iter()
+                    .filter(|s| !plan.removed.contains(s))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                host.select_layers(&id, &selected, false, self.writer)?;
+                let mut result = plan.result;
+                result["changed"] = json!(ack.revision != expected);
+                result["revision"] = json!(ack.revision);
+                if let Some(notice) = ack.notice {
+                    result["notice"] = json!(format!("{notice:?}"));
+                }
+                Ok(result)
+            }
             "select_layers" => {
                 let ids = args["layerIds"]
                     .as_array()
@@ -141,7 +216,7 @@ impl McpSession {
                 )
             }
             "save_project" => host.save_project(&id),
-            "apply_commands" | "edit_layer_strips" => {
+            "apply_commands" | "edit_layer_strips" | "edit_video" => {
                 let expected = session
                     .transaction
                     .as_ref()
@@ -172,7 +247,16 @@ impl McpSession {
                 } else {
                     None
                 };
-                let batch = if strips.is_none() {
+                let video = if name == "edit_video" {
+                    Some(crate::video::plan(
+                        &p,
+                        args,
+                        host.media_registry.as_deref(),
+                    )?)
+                } else {
+                    None
+                };
+                let batch = if strips.is_none() && video.is_none() {
                     Some(commands::plan_with_definitions(
                         &p,
                         &selection,
@@ -193,7 +277,12 @@ impl McpSession {
                         label: label.clone(),
                     });
                 }
-                let (ack, descriptions, results, strips_result) = if let Some(plan) = strips {
+                let mut clip = Value::Null;
+                let (ack, descriptions, results, strips_result) = if let Some(plan) = video {
+                    clip = plan.clip;
+                    let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
+                    (ack, vec![], vec![], None)
+                } else if let Some(plan) = strips {
                     let ack = host.apply_body(&id, plan.body, &label, expected, self.writer)?;
                     let result = if plan.state {
                         json!({"results":plan.results,"revision":ack.revision})
@@ -220,7 +309,12 @@ impl McpSession {
                 tx.changed |= ack.revision != revision;
                 // Folded foreign gestures retain their own normal undo entry.
                 tx.interleaved |= ack.folded.is_some();
-                let mut result = json!({"applied":descriptions,"clip":null,"results":results,"message":label,"revision":ack.revision});
+                let message = if name == "edit_video" && ack.revision == revision {
+                    "No source changes"
+                } else {
+                    &label
+                };
+                let mut result = json!({"applied":descriptions,"clip":clip,"results":results,"message":message,"revision":ack.revision});
                 if let Some(notice) = ack.notice {
                     result["notice"] = json!(format!("{notice:?}"));
                 }
@@ -307,6 +401,7 @@ impl McpSession {
             transaction: None,
             workspace,
             committed: false,
+            external_actions: false,
         });
         Ok(result)
     }
@@ -328,9 +423,13 @@ impl McpSession {
             };
             let changed = tx.changed;
             let mut history_id = None;
-            if !commit {
+            if !commit && changed {
                 rollback(&mut session, &mut host, &id, self.writer)?;
-            } else if changed && !tx.interleaved && tx.revision == host.revision(&id)? {
+            } else if changed
+                && !session.external_actions
+                && !tx.interleaved
+                && tx.revision == host.revision(&id)?
+            {
                 history_id = host.squash(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
             }
             Ok(
@@ -338,15 +437,11 @@ impl McpSession {
             )
         })();
         if let Some(root) = session.workspace {
-            let cleanup = if commit {
-                std::fs::remove_dir_all(root.join("extensions"))
-            } else {
-                std::fs::remove_dir_all(root)
-            };
+            let cleanup = archive_workspace(&root, commit);
             if let Err(e) = cleanup
                 && result.is_ok()
             {
-                return Err(e.into());
+                return Err(e);
             }
         }
         result
@@ -393,7 +488,11 @@ impl McpSession {
         };
         // Library operations are immediate commit boundaries, outside rollback.
         if let (Some(project), Some(tx)) = (active.project.clone(), active.transaction.take()) {
-            if tx.changed && !tx.interleaved && host.revision(&project)? == tx.revision {
+            if tx.changed
+                && !active.external_actions
+                && !tx.interleaved
+                && host.revision(&project)? == tx.revision
+            {
                 host.squash(&project, &tx.mark, &format!("Agent · {}", tx.label))?;
             }
             active.committed |= tx.changed;
@@ -505,6 +604,11 @@ fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -
     Ok(())
 }
 fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
+    if session.external_actions {
+        return Err(Error::conflict(
+            "This run used media actions. Use the editor Undo command; media actions cannot be snapshot-rolled back.",
+        ));
+    }
     let Some(tx) = session.transaction.as_mut() else {
         return Ok(());
     };
@@ -522,5 +626,28 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     tx.mark = host.history_mark(id, writer)?;
     tx.changed = false;
     session.baseline = tx.revision;
+    Ok(())
+}
+
+/// N4: retiring an agent workspace must preserve its authored files. Moving
+/// within the explicit profile is atomic and never follows staged symlinks.
+fn archive_workspace(root: &std::path::Path, commit: bool) -> Result<()> {
+    let profile = root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| Error::invalid("Invalid run workspace"))?;
+    let runs = profile.join("mcp-archives");
+    std::fs::create_dir_all(&runs)?;
+    let archive = runs.join(
+        root.file_name()
+            .ok_or_else(|| Error::invalid("Missing run identity"))?,
+    );
+    // Exclusive creation prevents overwriting an earlier archive on retry.
+    std::fs::create_dir(&archive)?;
+    if commit {
+        std::fs::rename(root.join("extensions"), archive.join("extensions"))?;
+    } else {
+        std::fs::rename(root, archive.join("workspace"))?;
+    }
     Ok(())
 }
