@@ -398,3 +398,19 @@ unmet requirement justifies that extra implementation. Sources:
 
 These remaining gates prevent declaring S6/cutover passed. They are not exceptions
 to N4, and no data is removed to make a gate appear green.
+
+## P1 package 7 hardening decisions
+
+- Recover only complete, checksummed manifest edits and WAL batches. A torn final
+  append is uncommitted; checksum damage and unfinished IDB scopes still stop with
+  a named error. Never guess a different CURRENT manifest (N3, N4).
+- Permission-denied blobs pause migration with a private, named retry receipt;
+  they cannot be classified as already offline (N1, N4, N7).
+- Cutover uses the sealed beta checkpoint as its three-way base. Missing keys are
+  tombstones, concurrent edits retain both values in a conflict manifest, library
+  work is additive, and extension trees merge by relative file path (N3, N4, N6).
+- Restore publishes a new Electron-readable profile from an unpublished sibling
+  stage. Original profiles remain intact, native-only work gets named copies,
+  and native journal replay uses the kernel reader (N4, single writer, prune rule).
+- OS secret access stays behind a consent-bound trait. Tests use synthetic secret
+  material; migration manifests never contain plaintext (N4, N8).
