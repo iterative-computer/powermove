@@ -59,7 +59,7 @@ test('New project asks for the settings that matter before creating', async ({},
   try {
     const { page } = session;
     await page.evaluate(() => (window as any).PM.newProject());
-    const dialog = page.getByRole('dialog', { name: 'New project', exact: true });
+    const dialog = page.getByRole('dialog', { name: 'New Project', exact: true });
     await expect(dialog).toBeVisible();
 
     await dialog.getByLabel('Project name').fill('Square spot');

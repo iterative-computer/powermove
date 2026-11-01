@@ -66,7 +66,7 @@ const WorkspaceEditor: any = {
   },
   save(asNew?: any) {
     const input: any = h('input', { value: PM.WS.current.name.replace(' (edited)', '') + ' copy' });
-    PM.modal({ title: 'Save workspace as new', body: h('div.field', input), actions: [
+    PM.modal({ title: 'Save Workspace as New', body: h('div.field', input), actions: [
       { label: 'Cancel' }, { label: 'Save as New', pri: true, run: () => { PM.WS.saveEdit(asNew, input.value); this.hide(); } },
     ] });
   },

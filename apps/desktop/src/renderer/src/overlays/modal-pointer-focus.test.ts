@@ -60,3 +60,51 @@ it('preserves a focused field when a pointer action does not take focus', async 
   button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true }));
   expect(document.activeElement).toBe(input);
 });
+
+it('opens a sheet of only buttons focused on itself, not on its first button', async () => {
+  const body = document.createElement('div');
+  body.innerHTML = '<button type="button">Video</button><button type="button">Images</button>';
+  const modal = controller.open({ title: 'Export', body, actions: [{ label: 'Cancel' }, { label: 'Export', pri: true }] });
+  await Promise.resolve(); flushSync();
+  expect(document.activeElement).toBe(modal.el);
+});
+
+it('opens on the first text field even when buttons come before it', async () => {
+  const body = document.createElement('div');
+  body.innerHTML = '<button type="button">Video</button><input aria-label="Name" />';
+  controller.open({ title: 'Export', body });
+  await Promise.resolve(); flushSync();
+  expect(document.activeElement).toBe(body.querySelector('input'));
+});
+
+it('confirms with Return from a text field, committing the field first', async () => {
+  const body = document.createElement('div');
+  body.innerHTML = '<input aria-label="Name" /><textarea aria-label="Notes"></textarea>';
+  const input = body.querySelector('input')!;
+  const committed = vi.fn();
+  input.addEventListener('change', committed);
+  const run = vi.fn();
+  const modal = controller.open({ title: 'Rename', body, actions: [{ label: 'Cancel' }, { label: 'Rename', pri: true, run }] });
+  await Promise.resolve(); flushSync();
+
+  body.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
+  const claimed = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+  claimed.preventDefault();
+  input.dispatchEvent(claimed);
+  expect(run).not.toHaveBeenCalled();
+
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  expect(committed).toHaveBeenCalledTimes(1);
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(modal.el.isConnected).toBe(false);
+});
+
+it('leaves Return alone in a sheet without a primary action', async () => {
+  const body = document.createElement('div');
+  body.innerHTML = '<input aria-label="Name" />';
+  const modal = controller.open({ title: 'Details', body, actions: [{ label: 'Close' }] });
+  await Promise.resolve(); flushSync();
+  body.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  expect(modal.el.isConnected).toBe(true);
+});

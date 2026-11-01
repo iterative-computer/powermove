@@ -185,7 +185,7 @@
     presetColor = preset.color || '#ff6b1a';
     const body = document.createElement('div'); body.className = 'field';
     const picker = mount(ColorField, { target: body, props: { api, label: 'Preset color', get: () => presetColor, edit: local('Preset color',v => presetColor = String(v)) } });
-    PM.modal({ title: 'Preset color', body, onClose: () => void unmount(picker), actions: [{ label: 'Cancel' }, { label: 'Use Native Color', run: () => updatePreset(preset.id, { color: '' }) }, { label: 'Save', pri: true, run: () => updatePreset(preset.id, { color: presetColor }) }] });
+    PM.modal({ title: 'Preset Color', body, onClose: () => void unmount(picker), actions: [{ label: 'Cancel' }, { label: 'Use Native Color', run: () => updatePreset(preset.id, { color: '' }) }, { label: 'Save', pri: true, run: () => updatePreset(preset.id, { color: presetColor }) }] });
   }
   function groupMenu(event: MouseEvent, g: Group) {
     event.preventDefault(); event.stopPropagation();

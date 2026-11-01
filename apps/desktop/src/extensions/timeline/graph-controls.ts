@@ -42,7 +42,7 @@ export function scaleGraphDialog(api: Pick<PowermoveAPI, 'anim' | 'history' | 'p
     input.type='number';input.value='100'; input.setAttribute('aria-label',label);
     const row=document.createElement('label');row.textContent=label;row.append(input);body.append(row);
   }
-  api.ui.modal({title:'Scale selected keyframes',body,actions:[{label:'Cancel'},{label:'Apply',pri:true,run:()=>{
+  api.ui.modal({title:'Scale Selected Keyframes',body,actions:[{label:'Cancel'},{label:'Apply',pri:true,run:()=>{
     const ts=time.valueAsNumber/100, vs=value.valueAsNumber/100;
     if (!Number.isFinite(ts)||!Number.isFinite(vs)||ts<=0) return false;
     const t0=Math.min(...entries.map(e=>e.L.from+e.key.t)), v0=Math.min(...entries.map(e=>e.key.v));

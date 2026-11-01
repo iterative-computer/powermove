@@ -1206,7 +1206,7 @@ function refreshInk() {
   INK.sub = a('.32'); INK.hi = a('.72'); INK.lo = a('.16'); INK.thumb = a('.14');
   /* Layer-row hairline, and the column-heading strip's tone and edge. */
   INK.rule = a('.04'); INK.strip = a(dark ? '.016' : '.025'); INK.stripLine = a('.08');
-  INK.key = dark ? '#C9C4C0' : '#54545c';
+  INK.key = dark ? '#C6C6C6' : '#54545c';
   INK.handle = dark ? '#8f8f96' : '#8B8B93';
   INK.inv = dark ? '#fff' : '#1C1C1F';
 }
@@ -4522,7 +4522,7 @@ function editKeyframeValues(clickedEntries: any[]) {
   const value = field('Value', values.every((v: number) => v === values[0]) ? values[0] : null);
   const message = document.createElement('div'); message.setAttribute('role', 'status'); body.append(message);
   api.ui.modal({
-    title: single ? 'Edit keyframe' : `Edit ${entries.length} keyframes`,
+    title: single ? 'Edit Keyframe' : `Edit ${entries.length} Keyframes`,
     body,
     actions: [{ label: 'Cancel' }, { label: 'Apply', pri: true, run: () => {
       const nextValue = value.value.trim() === '' ? null : value.valueAsNumber;

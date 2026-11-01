@@ -21,10 +21,7 @@ html,body{height:100%;overflow:hidden}
    unchanged: only the canvas between them carries the material. Anything that
    must stay opaque mixes from --bg-window-solid instead. */
 :root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .86)}
-:root[data-theme="dark"]{--bg-window-solid:#0F0D0D;--bg-window:rgb(15 13 13 / .94)}
-/* Floating surfaces share the agent panel's solid material. Keep their existing
-   shadows for depth, rather than switching to a lighter brown fill. */
-:root[data-theme="dark"]{--bg-float:var(--bg-panel)}
+:root[data-theme="dark"]{--bg-window-solid:#0E0E0E;--bg-window:rgb(14 14 14 / .94)}
 /* Content areas of the full-screen views (projects, settings) are all but
    solid; the material is a whisper behind them. */
 :root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 94%,transparent)}
@@ -721,8 +718,13 @@ body:has(#projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(#settings
 .titlebar-overlay-drag{position:absolute;left:0;right:0;top:0;height:44px;z-index:1;-webkit-app-region:drag}
 :root[data-theme="dark"] #scrim{background:rgb(0 0 0 / .5)}
 #scrim.on{display:block}
-.modal{position:fixed;z-index:401;background:var(--bg-float);border:0;border-radius:var(--r-xl);
-  box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden}
+/* Sheets are cut from the same material as the editor's panels, so a dialog
+   reads as one more panel lifted over the dimmed workspace (its shadow does
+   the lifting). Settings-style cards inside a sheet sit one tonal step above
+   it, and their controls one more (the float tone), as on the Settings page. */
+.modal{position:fixed;z-index:401;background:var(--bg-panel);border:0;border-radius:var(--r-xl);
+  box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden;
+  --sg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel))}
 .modal h3{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;padding:16px 18px 0}
 .modal .mb{padding:12px 18px 18px;display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:8px;overflow:auto}
 .modal .mf{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line)}
@@ -777,10 +779,27 @@ body:has(#projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(#settings
 .settings-row>.color-field{width:170px;flex:none}
 .settings-row.is-dim{opacity:.45;transition:opacity var(--dur-1)}
 .settings-row[hidden]{display:none}
-.new-project-form{display:flex;flex-direction:column;gap:2px}
-.new-project-field{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:38px}
-.new-project-field>span{color:var(--tx-2);font-size:var(--fs-sm)}
-.precompose-form .onoff{flex:0 0 190px}
+/* New Project, New Composition, Composition Settings and Pre-compose speak the
+   inspector's grammar: a muted label, then one value column whose wells share
+   a width, a height and a left edge. Values sit left-aligned in the field
+   tone, numbers in the mono face, units trailing inside their well. */
+.new-project-form{--np-value:236px;display:flex;flex-direction:column;gap:6px}
+.new-project-field{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:30px}
+.new-project-field>span:first-child{flex:1 1 auto;min-width:0;color:var(--tx-2);font-size:var(--fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.new-project-field>:not(:first-child):not(.pm-select-native){flex:0 0 var(--np-value);width:var(--np-value);min-width:0}
+.new-project-form :is(.settings-input,.settings-select){width:100%;min-width:0;height:28px;padding:0 8px;border-radius:var(--r-sm);background:var(--bg-field);color:var(--tx-value);font-size:var(--fs-sm);text-align:left}
+.new-project-form .settings-select{padding-right:26px}
+.new-project-form input[type=number]{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+/* No native stepper: the inspector's wells have none, and it would cover the unit. Arrow keys still step. */
+.new-project-form input[type=number]::-webkit-inner-spin-button,.new-project-form input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.new-project-form .new-project-size{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:6px;color:var(--tx-4);font-size:var(--fs-xs)}
+.new-project-well{position:relative;display:flex;align-items:center}
+.new-project-well>.settings-input{padding-right:34px}
+.new-project-unit{position:absolute;right:8px;color:var(--tx-4);font-family:var(--f-mono);font-size:var(--fs-xs);pointer-events:none}
+.new-project-form .color-field{width:100%;height:28px;background:var(--bg-field)}
+.new-project-form .color-field:hover{background:color-mix(in srgb,var(--tx) 4%,var(--bg-field))}
+.new-project-form .segmented{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
+.new-project-form .segmented button{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .precompose-note{margin:0 0 6px;color:var(--tx-3);font-size:var(--fs-sm);line-height:1.45;text-wrap:pretty}
 .new-project-field.is-dim{opacity:.45;transition:opacity var(--dur-1)}
 /* Palette: the same filled surfaces as the library, with concentric radii. */

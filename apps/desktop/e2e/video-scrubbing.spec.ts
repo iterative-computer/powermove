@@ -36,7 +36,7 @@ for (const sequence of [false, true]) test(`${sequence ? '4K image sequence' : '
   await page.evaluate(() => (window as any).PM.pickFiles());
   await (await chooser).setFiles(sources);
   if (sequence) {
-    const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+    const dialog = page.getByRole('dialog', { name: 'Import Image Sequence', exact: true });
     await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('30');
     await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
   }

@@ -1158,7 +1158,7 @@ PM.newProject = () => {
     : {}, {
       backgroundField: (get, set) => PM.colorField(get, set, { label: 'Background', local: true })
     });
-  PM.modal({ title: 'New project', body: form.element, width: 420, actions: [
+  PM.modal({ title: 'New Project', body: form.element, width: 420, actions: [
     { label: 'Cancel' },
     { label: 'Create', pri: true, run: () => {
       const values = form.values();

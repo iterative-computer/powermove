@@ -68,7 +68,7 @@ export function chooseSequence(PM: PMRegistry, files: File[], required: boolean,
         h('div.sequence-import-timing', h('span', 'Clip duration'), duration)),
       warning);
     fps.addEventListener('input', update); update();
-    PM.modal({ title: 'Import image sequence', width: 480, body,
+    PM.modal({ title: 'Import Image Sequence', width: 480, body,
       onClose: () => { closed = true; cleanupPicker(); resolve(null); },
       actions: [
         { label: 'Cancel' },

@@ -50,7 +50,7 @@ test('numeric keyframe times extend beyond the layer strip, Undo, and reject inv
       };
     }, ids);
     await page.mouse.dblclick(point.x, point.y);
-    const dialog = page.getByRole('dialog', { name: 'Edit keyframe', exact: true });
+    const dialog = page.getByRole('dialog', { name: 'Edit Keyframe', exact: true });
     await expect(dialog).toBeVisible();
     return dialog;
   };

@@ -784,7 +784,7 @@ WS.saveEdit = (asNew: any = false, name: any) => {
 WS.saveAsNew = () => {
   const inp: any = h('input', { value: WS.current.name.replace(' (edited)', '') + ' copy' });
   PM.modal({
-    title: 'Save workspace', body: h('div.field', inp), width: 400,
+    title: 'Save Workspace', body: h('div.field', inp), width: 400,
     actions: [{ label: 'Cancel' }, {
       label: 'Save', pri: true, run: () => {
         const w: any = JSON.parse(JSON.stringify(WS.current));
@@ -800,7 +800,7 @@ WS.editJSON = () => {
   const ta: any = h('textarea.code', { style: { height: '420px', borderRadius: '8px' }, spellcheck: 'false' }, JSON.stringify(WS.current, null, 2));
   ta.addEventListener('keydown', (e: any) => e.stopPropagation());
   PM.modal({
-    title: 'Workspace definition', body: ta, width: 680,
+    title: 'Workspace Definition', body: ta, width: 680,
     actions: [{ label: 'Cancel' }, {
       label: 'Apply', pri: true, run: () => {
         try {

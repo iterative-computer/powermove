@@ -25,7 +25,7 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
   const chooser = page.waitForEvent('filechooser');
   await page.evaluate(() => (window as any).PM.pickFiles());
   await (await chooser).setFiles([paths[2]!, paths[0]!, paths[1]!]);
-  const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Import Image Sequence', exact: true });
   await expect(dialog).toBeVisible();
   if (fps === 12) await expect(dialog).toContainText('Missing frame number: 11');
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill(String(fps));
@@ -122,7 +122,7 @@ test('sequence import warns about gaps and permits importing individual stills o
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 16;
     canvas.toBlob(blob => { void PM.importFiles([new File([blob!], 'f1.png'), new File([blob!], 'f3.png')]); });
   });
-  const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Import Image Sequence', exact: true });
   await expect(dialog).toContainText('Missing frame number: 2');
   await dialog.getByRole('button', { name: 'Individual images', exact: true }).click();
   await page.waitForFunction(() => (window as any).PM.proj.layers.filter((l: any) => l.type === 'image').length === 2);
@@ -146,7 +146,7 @@ test('reimport replaces missing frames, preserves the frame rate and insertion t
   const chooser = page.waitForEvent('filechooser');
   await page.evaluate(() => (window as any).PM.pickFiles(true));
   await (await chooser).setFiles([paths[0]!, paths[2]!]);
-  const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Import Image Sequence', exact: true });
   await expect(dialog).toContainText('Missing frame number: 2');
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('24');
   await dialog.screenshot({ path: test.info().outputPath('missing-frames.png') });

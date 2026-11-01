@@ -296,7 +296,7 @@ function emptyState(searching: any) {
 
 function renameDialog(m: any) {
   const raw = PM.Projects.get(m.id), name = h('input', { value: raw && raw.name || m.name });
-  PM.modal({ title: 'Rename project', body: h('div.field', name), width: 400, actions: [
+  PM.modal({ title: 'Rename Project', body: h('div.field', name), width: 400, actions: [
     { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => {
       try {
         if (!PM.Projects.rename(m.id, name.value)) throw new Error('Project data is missing');

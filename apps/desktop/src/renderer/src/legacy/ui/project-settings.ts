@@ -219,9 +219,10 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   const width = numberInput('Width in pixels', MIN_DIMENSION, MAX_DIMENSION, 2);
   const height = numberInput('Height in pixels', MIN_DIMENSION, MAX_DIMENSION, 2);
   const size = document.createElement('div');
-  size.className = 'settings-field-pair';
+  size.className = 'settings-field-pair new-project-size';
   const times = document.createElement('span');
   times.textContent = '×';
+  times.setAttribute('aria-hidden', 'true');
   size.append(width, times, height);
 
   const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 1);
@@ -521,9 +522,22 @@ export function createNewProjectForm(
     const wrap = document.createElement('label');
     wrap.className = 'new-project-field';
     const text = document.createElement('span');
+    text.className = 'new-project-label';
     text.textContent = label;
     wrap.append(text, ...([] as HTMLElement[]).concat(control));
     return wrap;
+  };
+  /* A number well with its unit trailing inside it, as the inspector shows
+     "10s": the value reads on its own and the unit never needs a label. */
+  const withUnit = (input: HTMLInputElement, unit: string): HTMLElement => {
+    const well = document.createElement('span');
+    well.className = 'new-project-well';
+    const suffix = document.createElement('span');
+    suffix.className = 'new-project-unit';
+    suffix.textContent = unit;
+    suffix.setAttribute('aria-hidden', 'true');
+    well.append(input, suffix);
+    return well;
   };
 
   const name = document.createElement('input');
@@ -545,9 +559,10 @@ export function createNewProjectForm(
   width.value = String(seed.w);
   height.value = String(seed.h);
   const size = document.createElement('div');
-  size.className = 'settings-field-pair';
+  size.className = 'settings-field-pair new-project-size';
   const times = document.createElement('span');
   times.textContent = '×';
+  times.setAttribute('aria-hidden', 'true');
   size.append(width, times, height);
 
   const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 1);
@@ -588,12 +603,14 @@ export function createNewProjectForm(
   width.addEventListener('change', syncPreset);
   height.addEventListener('change', syncPreset);
 
+  /* The visible label stays "Name" in every sheet that uses this form; the
+     field's accessible name says whose name it is. */
   element.append(
-    field(options.nameLabel ?? 'Name', name),
+    field('Name', name),
     field('Resolution', preset),
     field('Size', size),
-    field('Frame rate', frameRate),
-    field('Duration', duration),
+    field('Frame rate', withUnit(frameRate, 'fps')),
+    field('Duration', withUnit(duration, 's')),
     field('Background', background)
   );
 

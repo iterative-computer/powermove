@@ -46,7 +46,35 @@
        focuses an [autofocus] element itself on mount, without preventScroll,
        and the body scrolls to it before this runs. */
     const autofocus = dialog.querySelector<HTMLElement>('[autofocus], [data-autofocus]');
-    (autofocus ?? focusable[0] ?? dialog).focus({ preventScroll: true });
+    /* Without a marked target, open on the first place to type. A sheet of
+       only buttons, tabs and pickers focuses itself instead: a keyboard ring
+       on its first button reads as a stray outline, and suggests a default
+       the sheet does not have. Tab still starts at the first control. */
+    const entry = focusable.find(isTextEntry);
+    (autofocus ?? entry ?? dialog).focus({ preventScroll: true });
+  }
+
+  const TEXT_TYPES = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+  function isTextEntry(element: Element | null): element is HTMLInputElement | HTMLTextAreaElement {
+    if (element instanceof HTMLTextAreaElement) return !element.readOnly;
+    return element instanceof HTMLInputElement && !element.readOnly
+      && TEXT_TYPES.has(element.getAttribute('type')?.toLowerCase() ?? '');
+  }
+
+  /* Return in a single-line field confirms the sheet, as a macOS sheet's
+     default button does. Controls that claim Return themselves (a search
+     picker choosing a row, a textarea's new line) prevent it first. */
+  function confirmKey(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || event.defaultPrevented || event.isComposing) return;
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || pending) return;
+    const target = event.target as Element | null;
+    if (!isTextEntry(target) || target instanceof HTMLTextAreaElement) return;
+    const index = actions.findIndex((action) => action.pri);
+    if (index < 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+    onaction(index);
   }
 
   function focusables(): HTMLElement[] {
@@ -124,8 +152,12 @@
     if (bodyContent instanceof HTMLElement) body.appendChild(bodyContent);
     else if (bodyContent != null) body.textContent = String(bodyContent);
     dialog.addEventListener('keydown', keydown, true);
+    dialog.addEventListener('keydown', confirmKey);
     if (typeof ResizeObserver === 'undefined' || typeof MutationObserver === 'undefined') {
-      return () => dialog.removeEventListener('keydown', keydown, true);
+      return () => {
+        dialog.removeEventListener('keydown', keydown, true);
+        dialog.removeEventListener('keydown', confirmKey);
+      };
     }
     measure();
     const sizes = new ResizeObserver(() => measure());
@@ -144,6 +176,7 @@
       sizes.disconnect();
       tree.disconnect();
       dialog.removeEventListener('keydown', keydown, true);
+      dialog.removeEventListener('keydown', confirmKey);
     };
   });
 </script>

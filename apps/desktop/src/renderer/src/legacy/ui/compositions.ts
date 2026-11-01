@@ -69,7 +69,7 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
   let openAfter = false;
   const layerName = single ? `“${single.name}”` : 'the layer';
   const modes = [
-    { id: 'move', label: 'Move into new comp', note: 'Moves the selected layers, with their transforms and effects, into a new composition.' },
+    { id: 'move', label: 'Move layers', note: 'Moves the selected layers, with their transforms and effects, into a new composition.' },
     { id: 'leave', label: `Keep on layer`, note: `${layerName} keeps its transforms, effects and timing here. Only its source moves into the new composition.` },
   ] as const;
   const segmented = h('div.segmented', { role: 'radiogroup', 'aria-label': 'Attributes' });

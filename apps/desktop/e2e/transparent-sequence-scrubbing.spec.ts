@@ -24,7 +24,7 @@ for (const auto of [false, true]) test(`transparent sequence scrubbing replaces 
   const chooser = session.page.waitForEvent('filechooser');
   await session.page.evaluate(() => (window as any).PM.pickFiles());
   await (await chooser).setFiles(paths);
-  const dialog = session.page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  const dialog = session.page.getByRole('dialog', { name: 'Import Image Sequence', exact: true });
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('10');
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((layer: any) => layer.type === 'video'));

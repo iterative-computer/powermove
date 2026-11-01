@@ -47,7 +47,7 @@ test('flat controls remain consistent across home, editor, settings, library, an
     await inspect(`export-${theme}`);
     await exportDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await page.evaluate(() => (window as any).PM.newProject());
-    const composition = page.getByRole('dialog', { name: 'New project', exact: true });
+    const composition = page.getByRole('dialog', { name: 'New Project', exact: true });
     await composition.getByRole('button', { name: /^Background · / }).click();
     const color = page.getByRole('dialog', { name: 'Background', exact: true });
     await expect(color).toBeVisible();

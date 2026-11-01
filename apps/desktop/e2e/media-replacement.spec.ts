@@ -22,7 +22,7 @@ test('replacement uses the import picker, progress, and image sequence flow', as
   expect(await picker.element().getAttribute('accept')).toBe(MEDIA_ACCEPT);
   expect(MEDIA_ACCEPT).toContain('.gif');
   await picker.setFiles(frames);
-  const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Import Image Sequence', exact: true });
   await expect(dialog).toBeVisible();
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('12');
   await page.evaluate(() => {

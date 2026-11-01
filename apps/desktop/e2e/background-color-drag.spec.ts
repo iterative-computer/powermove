@@ -3,7 +3,7 @@ import { expect, test } from './helpers/app';
 test('New project background follows dragging and restores on Escape', async ({ session }) => {
   const { page } = session;
   await page.evaluate(() => (window as any).PM.newProject());
-  const dialog = page.getByRole('dialog', { name: 'New project', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'New Project', exact: true });
   const background = dialog.locator('.color-field');
   const original = await background.textContent();
   await background.click();

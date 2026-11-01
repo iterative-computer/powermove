@@ -20,8 +20,10 @@
   --sg-group-edge:var(--ink-1);
   --sg-edge-hot:var(--line-strong);
   --sg-edge-focus:var(--line-strong);
-  --sg-row:var(--bg-panel);
 }
+/* Cards are panel-coloured on the Settings page; inside a sheet (itself
+   panel-coloured) they take the lifted tone .modal defines in app.css. */
+#settings-screen{--sg-row:var(--bg-panel)}
 #settings-screen{
   position:fixed;inset:44px 0 0;z-index:36;display:none;min-height:0;padding:0 10px 10px 0;background:transparent;
 }
