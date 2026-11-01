@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { CompatRealm } from "../src";
-import type { RemoteDOMBridge, DOMBatch } from "../src/remote-dom";
+import type { RemoteDOMBridge } from "../src/remote-dom";
 import { FakeHost } from "./fake-host";
 test("DOM bridge receives realm/generation, shared canvas factory and owned task boundary", () => {
   const host = new FakeHost();
@@ -17,15 +17,6 @@ test("DOM bridge receives realm/generation, shared canvas factory and owned task
         },
       };
     },
-    submit(_batch: DOMBatch) {},
-    read() {
-      throw new Error("layout not acknowledged");
-    },
-    invoke() {},
-    subscribe() {
-      return { dispose() {} };
-    },
-    resolveDefault() {},
   };
   const realm = new CompatRealm({
     id: "dom",
@@ -42,9 +33,6 @@ test("DOM bridge receives realm/generation, shared canvas factory and owned task
   });
   host.drain();
   expect(host.state.document.name).toBe("remote event");
-  expect(() => bridge.read("remote-node", "clientWidth", 5)).toThrow(
-    "not acknowledged",
-  );
   realm.dispose();
   expect(disconnected).toBe(true);
 });

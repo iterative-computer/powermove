@@ -453,6 +453,9 @@ export class RemoteDOM {
   private pending: Batch | null = null;
   private backlog: { ops: Op[]; caused_by: number | null }[] = [];
   private disposed = false;
+  private lifecycle: 'created' | 'connected' | 'faulted' | 'retired' = 'created';
+  private visibility: 'foreground' | 'background' | 'headless' = 'foreground';
+  private realmTask: <T>(run: () => T) => T = (run) => run();
   private request = 0;
   private layoutWanted = new Set<N>();
   private waits = new Map<
@@ -912,11 +915,32 @@ export class RemoteDOM {
     }
   }
 
+  /** Bind exactly one owning compat realm; transport remains protocol v1. */
+  connect(context: { realm: string; generation: number; task<T>(run: () => T): T }) {
+    if (this.lifecycle !== 'created') throw new Error('Remote DOM is already connected or retired');
+    if (context.realm !== this.session.panel || context.generation !== this.session.generation)
+      throw new Error('Remote DOM realm/generation mismatch');
+    const globals: Record<string, unknown> = {};
+    this.installGlobals(globals);
+    this.realmTask = (run) => context.task(run);
+    this.lifecycle = 'connected';
+    return { globals, dispose: () => this.dispose() };
+  }
+  /** Visibility is inspectable host state; V8 work is never paused by a hidden page. */
+  setVisibility(visibility: 'foreground' | 'background' | 'headless'): void {
+    if (this.disposed) throw new Error('Remote DOM retired');
+    this.visibility = visibility;
+  }
   receive(message: PageMessage): boolean {
+    if (this.disposed || !sameSession(message.session, this.session)) return false;
+    return this.realmTask(() => this.receiveMessage(message));
+  }
+  private receiveMessage(message: PageMessage): boolean {
     if (this.disposed || !sameSession(message.session, this.session)) return false;
     if (message.kind === 'fault') {
       this.report(new Error(message.message));
       this.dispose();
+      this.lifecycle = 'faulted';
       return true;
     }
     if (message.kind === 'applied') {
@@ -1102,6 +1126,8 @@ export class RemoteDOM {
   inspect() {
     return {
       session: this.session,
+      lifecycle: this.lifecycle,
+      visibility: this.visibility,
       sent: this.seq,
       applied: this.applied,
       nodes: this.nodes.size,
@@ -1111,7 +1137,9 @@ export class RemoteDOM {
     };
   }
   dispose() {
+    if (this.disposed) return;
     this.disposed = true;
+    this.lifecycle = 'retired';
     this.observer.disconnect();
     for (const wait of this.waits.values()) wait.reject(new Error('Remote DOM retired'));
     this.waits.clear();

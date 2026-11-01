@@ -1,7 +1,13 @@
 import * as powermove from "./frozen/kernel/editor-helpers";
 import { HostChannel, HostError } from "./channel";
 import { DocumentMirror, copy, diff, patch, rebase, reconcile } from "./mirror";
-import { createServicesRegistry } from "./services";
+import type { ServicesRegistry } from "./services";
+import { createKernel } from "./frozen/host/registries";
+import {
+  extensionAPI,
+  type ExtensionHandle,
+  type ExtensionOptions,
+} from "./extensions";
 import { EditGesture } from "./gesture";
 import { CompatKeymap } from "./keymap";
 import { installModelFactories } from "./legacy/model";
@@ -41,7 +47,8 @@ export interface RealmOptions {
 export class CompatRealm {
   readonly PM: Data;
   readonly keymap: CompatKeymap;
-  readonly services = createServicesRegistry();
+  readonly kernel = createKernel();
+  readonly services: ServicesRegistry = this.kernel.services;
   readonly history: HistoryAPI;
   readonly edit: EditAPI;
   readonly workspace: {
@@ -62,6 +69,8 @@ export class CompatRealm {
   private handles = 0;
   private extensions = new Map<string, { api: Data; dispose(): void }>();
   private disposed = false;
+  private abandonedMutationStart = false;
+  private deferredPublications: Publication[] = [];
   private unacknowledgedDocument?: Data;
   private unacknowledgedSelection?: Data;
   private unacknowledgedWorkspace?: Data;
@@ -70,7 +79,10 @@ export class CompatRealm {
   private nativeCanvases = new Map<string, RecorderCanvas>();
 
   constructor(private options: RealmOptions) {
-    this.keymap = new CompatKeymap((error) => options.host.reportError(error));
+    this.keymap = new CompatKeymap(
+      (error) => options.host.reportError(error),
+      this.kernel,
+    );
     this.publication = copy(options.initial);
     this.mirror = new DocumentMirror(options.initial.document);
     this.workspaceValue = copy(options.initial.workspace);
@@ -164,7 +176,14 @@ export class CompatRealm {
         if (typeof action !== "function")
           return { ok: false, message: "A structural edit action is required" };
         // A callback lease keeps reentrant writes in the same native history entry.
-        const lease = call("edit.mutateBegin", { label, meta: copy(meta) });
+        let lease: EditResult;
+        try {
+          lease = call("edit.mutateBegin", { label, meta: copy(meta) });
+        } catch (error) {
+          this.abandonedMutationStart =
+            this.channel.pendingMethod === "edit.mutateBegin";
+          throw error;
+        }
         if (!lease.ok) return lease;
         let result: unknown;
         try {
@@ -172,7 +191,7 @@ export class CompatRealm {
           const ops = this.mirror.pending();
           this.unacknowledgedDocument = this.mirror.snapshot();
           const reply: EditResult = this.channel.call("edit.mutateFinish", {
-            lease: lease.data.lease,
+            lease: lease.data!.lease,
             label,
             meta: copy(meta),
             ops,
@@ -184,11 +203,11 @@ export class CompatRealm {
           return reply;
         } catch (error) {
           // Discard only unacknowledged JS writes; the kernel selectively aborts acknowledged owner writes.
-          this.mirror.accept(this.publication.document);
           if (!this.channel.pending) {
+            this.mirror.accept(this.publication.document);
             try {
               this.channel.call("edit.mutateAbort", {
-                lease: lease.data.lease,
+                lease: lease.data!.lease,
               });
             } catch (abortError) {
               options.host.reportError(abortError);
@@ -202,7 +221,7 @@ export class CompatRealm {
       },
     };
     this.workspace = {
-      current: () => copy(this.workspaceValue),
+      current: () => copy(this.workspaceValue, true),
       mutate: (fn, settings = {}) => {
         call("workspace.prepare", { options: copy(settings) });
         let result: Data;
@@ -211,7 +230,7 @@ export class CompatRealm {
         } catch (error) {
           try {
             call("workspace.mutate", {
-              next: copy(this.workspaceValue),
+              next: copy(this.workspaceValue, true),
               threw: true,
               options: copy(settings),
             });
@@ -221,7 +240,7 @@ export class CompatRealm {
           throw error;
         }
         result = call("workspace.mutate", {
-          next: copy(this.workspaceValue),
+          next: copy(this.workspaceValue, true),
           threw: false,
           options: copy(settings),
         });
@@ -263,18 +282,11 @@ export class CompatRealm {
           return realm.workspaceValue;
         },
         set current(value: Data) {
-          realm.call("workspace.replace", { next: copy(value) });
+          realm.call("workspace.replace", { next: copy(value, true) });
         },
         mutate: this.workspace.mutate,
       },
-      Kernel: {
-        services: this.services,
-        commands: this.keymap.commands,
-        keybindings: this.keymap.keybindings,
-        bind: this.keymap.bind.bind(this.keymap),
-        unbind: this.keymap.unbind.bind(this.keymap),
-        bindingsFor: this.keymap.bindingsFor.bind(this.keymap),
-      },
+      Kernel: this.kernel,
       bus: {
         on: (name: string, fn: (value: any) => void) => this.on(name, fn),
         emit: (name: string, value?: any) => this.emit(name, value),
@@ -305,6 +317,7 @@ export class CompatRealm {
     };
     this.PM.version = "1.0.0";
     installModelFactories(this.PM);
+    this.PM.layerDefinition = (id: string) => this.kernel.layerTypes.get(id);
     this.PM.renderFrameTo = (...args: any[]) =>
       this.renderQuery("render.renderFrameTo", args);
     this.PM.Export = {
@@ -321,6 +334,12 @@ export class CompatRealm {
       createCanvas: (w, h) => this.createCanvas(w, h),
       task: (run) => this.task(run),
     });
+    const window = this.domConnection?.globals.window;
+    if (window)
+      this.kernel.installKeyListener(
+        (id: string, args: any[]) => this.keymap.run(id, args),
+        window,
+      );
     this.globals = {
       ...(this.domConnection?.globals ?? {}),
       PM: this.PM,
@@ -342,17 +361,22 @@ export class CompatRealm {
       );
     const documentBase =
       this.unacknowledgedDocument ?? this.publication.document;
-    const later = !reply.error
-      ? diff(documentBase, this.mirror.snapshot())
-      : [];
+    const later =
+      this.unacknowledgedDocument || !reply.error
+        ? diff(documentBase, this.mirror.snapshot())
+        : [];
     const selectionBase =
       this.unacknowledgedSelection ?? this.publication.selection;
-    const selected = !reply.error ? diff(selectionBase, this.selection) : [];
+    const selected =
+      this.unacknowledgedSelection || !reply.error
+        ? diff(selectionBase, this.selection)
+        : [];
     const workspaceBase =
       this.unacknowledgedWorkspace ?? this.publication.workspace;
-    const workspaceChanges = !reply.error
-      ? diff(workspaceBase, this.workspaceValue)
-      : [];
+    const workspaceChanges =
+      this.unacknowledgedWorkspace || !reply.error
+        ? diff(workspaceBase, copy(this.workspaceValue, true))
+        : [];
     this.unacknowledgedDocument = undefined;
     this.unacknowledgedSelection = undefined;
     this.unacknowledgedWorkspace = undefined;
@@ -379,12 +403,24 @@ export class CompatRealm {
     );
     for (const event of publication.events ?? [])
       this.emit(event.name, event.value);
-    for (const handle of reply.retired ?? []) this.retireExternal(handle, true);
+    for (const handle of reply.retired ?? []) {
+      try {
+        this.retireExternal(handle, true);
+      } catch (error) {
+        this.options.host.reportError(error);
+      }
+    }
     if (publication.notice) this.emit("kernel:notice", publication.notice);
   }
   /** Host mailbox publication while local raw writes are still pending. */
   receive(publication: Publication): void {
     this.live();
+    // A mailbox may overtake an acknowledgement lost in transport. Resolve that
+    // immutable request before treating its acknowledged writes as new local intent.
+    if (this.channel.pending) {
+      this.deferredPublications.push(copy(publication));
+      return;
+    }
     if (publication.revision < this.publication.revision)
       throw new HostError(
         "StalePublication",
@@ -393,7 +429,7 @@ export class CompatRealm {
     const selected = diff(this.publication.selection, this.selection);
     const workspaceChanges = diff(
       this.publication.workspace,
-      this.workspaceValue,
+      copy(this.workspaceValue, true),
     );
     let failed = false,
       failure: unknown;
@@ -430,7 +466,18 @@ export class CompatRealm {
   }
   flush(): void {
     this.live();
-    if (this.channel.pending) this.channel.retry();
+    if (this.channel.pending) {
+      const recovered = this.channel.retry();
+      if (this.abandonedMutationStart) {
+        this.abandonedMutationStart = false;
+        if (recovered?.ok && recovered.data?.lease)
+          this.channel.call("edit.mutateAbort", {
+            lease: recovered.data.lease,
+          });
+      }
+    }
+    while (this.deferredPublications.length)
+      this.receive(this.deferredPublications.shift()!);
     let ops;
     try {
       ops = this.mirror.pending();
@@ -475,8 +522,14 @@ export class CompatRealm {
     };
   }
   private emit(name: string, value: any): void {
-    for (const listener of [...(this.listeners.get(name) ?? [])])
-      listener(value);
+    this.kernel.events.emit(name, value);
+    for (const listener of [...(this.listeners.get(name) ?? [])]) {
+      try {
+        listener(value);
+      } catch (error) {
+        this.options.host.reportError(error);
+      }
+    }
   }
   private continueExternal(reply: Reply): any {
     const next = reply.continuation!,
@@ -555,188 +608,45 @@ export class CompatRealm {
   }
   private baseRaster = (...args: any[]): any =>
     this.renderQuery("render.raster", args);
+  /** Metadata only: safe for headless inspection without exposing vars/user data. */
+  inspect() {
+    return {
+      realm: this.options.id,
+      generation: this.options.generation,
+      revision: this.publication.revision,
+      lifecycle: this.disposed ? "retired" : "active",
+      pendingMethod: this.channel.pendingMethod ?? null,
+      deferredPublications: this.deferredPublications.length,
+      extensions: [...this.extensions.keys()],
+      externalEntries: this.external.size,
+    };
+  }
+  selectionSnapshot(): Data {
+    return copy(this.selection);
+  }
+  reportError(error: unknown): void {
+    this.options.host.reportError(error);
+  }
   extension(
     id: string,
     apiVersion: 1 | 2 | 3 = 1,
-  ): { api: Data; dispose(): void } {
+    settings: ExtensionOptions = {},
+  ): ExtensionHandle {
     this.live();
     if (!id || this.extensions.has(id))
       throw new Error("Extension id is empty or already active");
-    const owned: Disposable[] = [];
-    let active = true;
-    const own = (d: Disposable): Disposable => {
-      owned.push(d);
-      return d;
-    };
-    const check = () => {
-      this.live();
-      if (!active)
-        throw new HostError("DisposedExtension", "Extension is disposed");
-    };
-    const guard = <T extends (...args: any[]) => any>(
-      fn: T,
-      label: string,
-      afterDispose = false,
-    ): T =>
-      ((...args: any[]) => {
-        if (!active && !afterDispose) return undefined;
-        const fail = (error: unknown) => {
-          this.options.host.reportError({ extensionId: id, label, error });
-          return undefined;
-        };
-        try {
-          const result = fn(...args);
-          return result && typeof result.then === "function"
-            ? Promise.resolve(result).catch(fail)
-            : result;
-        } catch (error) {
-          return fail(error);
-        }
-      }) as T;
-    const api: Data = {
-      ...this.options.capabilities,
+    const handle = extensionAPI(
+      this,
       id,
-      manifest: this.options.capabilities?.manifest ?? {
-        id,
-        name: id,
-        version: "0.0.0",
-        apiVersion,
-      },
-      onDispose: (fn: () => void) => {
-        check();
-        own({ dispose: guard(fn, "onDispose handler", true) });
-      },
-      apiVersion, // Report the declared contract version; see N3 decision in compat-realm.md.
-      host: { pm: this.PM },
-      history: this.history,
-      edit: this.edit,
-      workspace: this.workspace,
-      services: {
-        get: <T>(name: string) => {
-          this.live();
-          return this.services.get<T>(name);
-        },
-        register: <T>(name: string, value: T) => {
-          check();
-          return own(this.services.register(name, value));
-        },
-      },
-      commands: {
-        register: (
-          definition: Data & { id: string; run: (...args: any[]) => any },
-        ) => {
-          check();
-          if (
-            !definition ||
-            !definition.id ||
-            typeof definition.run !== "function"
-          )
-            throw new Error("commands.register requires id and run()");
-          return own(
-            this.keymap.commands.register(id, {
-              ...definition,
-              run: guard(definition.run, `command ${definition.id}`),
-            }),
-          );
-        },
-        run: (command: string, ...args: any[]) => {
-          this.live();
-          return this.keymap.run(command, args);
-        },
-        has: (command: string) => this.keymap.commands.has(command),
-        list: () => this.keymap.commands.list(),
-      },
-      keybindings: {
-        bind: (definition: Data) => {
-          check();
-          return own(this.keymap.bind(id, definition));
-        },
-        unbind: (key: string, all = false) => {
-          check();
-          this.keymap.unbind(id, key, all);
-        },
-      },
-      events: {
-        emit: (name: string, value: any) => this.emit(name, value),
-        on: (name: string, fn: (value: any) => void) => {
-          check();
-          return own({ dispose: this.on(name, guard(fn, `event ${name}`)) });
-        },
-      },
-      project: {
-        get: () => this.PM.proj,
-        latest: () => this.PM.proj,
-        revision: () => Number(this.PM.proj.revision ?? 0),
-        apply: (commands: EditCommand | EditCommand[], meta: EditMeta = {}) =>
-          this.edit.apply(commands, { ...meta, origin: `ext:${id}` }),
-        selection: () => copy(this.selection),
-        undo: this.history.undo,
-        redo: this.history.redo,
-        snapshot: async (time?: number, maxWidth = 480) =>
-          this.renderQuery("render.snapshot", [time, maxWidth]),
-      },
-      model: {
-        P: this.PM.P,
-        KF: this.PM.KF,
-        mkLayer: this.PM.mkLayer,
-        mkMask: this.PM.mkMask,
-        mkProject: this.PM.mkProject,
-        cloneLayer: this.PM.cloneLayer,
-        normalizeFill: this.PM.normalizeFill,
-        CH: this.PM.CH,
-        BLENDS: this.PM.BLENDS,
-        TYPE_META: this.PM.TYPE_META,
-        MASK_SHAPES: this.PM.MASK_SHAPES,
-        layer: this.PM.L,
-        byName: this.PM.byName,
-        curComp: this.PM.curComp,
-      },
-      render: {
-        raster: (...args: any[]) => this.PM.raster(...args),
-        renderFrameTo: (...args: any[]) =>
-          this.renderQuery("render.renderFrameTo", args),
-        snapshot: (...args: any[]) => this.renderQuery("render.snapshot", args),
-        rasterAsync: async (...args: any[]) => this.PM.raster(...args),
-        renderFrameToAsync: async (...args: any[]) =>
-          this.renderQuery("render.renderFrameTo", args),
-        snapshotAsync: async (...args: any[]) =>
-          this.renderQuery("render.snapshot", args),
-      },
-    };
-    // Preserve backend accessors and all namespace members that this adapter does not override.
-    for (const [name, backend] of Object.entries(
+      apiVersion,
+      settings,
       this.options.capabilities ?? {},
-    )) {
-      if (name === "PM") continue;
-      if (
-        backend &&
-        typeof backend === "object" &&
-        api[name] &&
-        typeof api[name] === "object"
-      ) {
-        api[name] = Object.defineProperties(
-          {},
-          {
-            ...Object.getOwnPropertyDescriptors(backend),
-            ...Object.getOwnPropertyDescriptors(api[name]),
-          },
-        );
-      }
-    }
-    const handle = {
-      api,
-      dispose: () => {
-        if (!active) return;
-        active = false;
-        for (const d of owned.reverse()) {
-          try {
-            d.dispose();
-          } catch (error) {
-            this.options.host.reportError(error);
-          }
-        }
-        this.extensions.delete(id); // External history closures/generation pins deliberately survive.
-      },
+      this.options.runtimeModules ?? {},
+    );
+    const dispose = handle.dispose;
+    handle.dispose = () => {
+      dispose();
+      this.extensions.delete(id);
     };
     this.extensions.set(id, handle);
     return handle;
@@ -772,7 +682,7 @@ export class CompatRealm {
     }
     for (const canvas of this.canvases) canvas.dispose();
     this.domConnection?.dispose();
-    this.services.clear();
+    this.kernel.dispose();
     this.listeners.clear();
     this.disposed = true;
   }

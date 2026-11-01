@@ -43,11 +43,21 @@ export class HostChannel {
       method,
       args: copy(clean(args)),
     };
+    const freeze = (value: any): void => {
+      if (value && typeof value === "object") {
+        for (const child of Object.values(value)) freeze(child);
+        Object.freeze(value);
+      }
+    };
+    freeze(request);
     this.outstanding = request;
     return this.send(request);
   }
   retry(): any {
     return this.outstanding ? this.send(this.outstanding) : undefined;
+  }
+  get pendingMethod(): string | undefined {
+    return this.outstanding?.method;
   }
   get pending(): boolean {
     return !!this.outstanding;
