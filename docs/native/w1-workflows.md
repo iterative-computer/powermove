@@ -59,6 +59,101 @@ Acceptance variants: renamed matching file accepted; changed sampled bytes rejec
 
 The plan’s additional native colour/format/proxy requirements are not proven by shipped UI labels. v1.2.0 has preview Auto/Full/Half/Quarter, automatic conversion proxies for unsupported video, depth controls, embedded audio/mixer and format-gated export. It does not have the full pro media management suite: explicit Proxy Preferred/Only modes, Toggle Proxies, ingest presets and per-selection proxy lifecycle, attach-existing proxies, optimized media, disk render cache/render bar/Keep Rendered, Background Tasks pause/priority and per-cache storage controls. Main’s later Storage screen is not evidence that those shipped. Camera-log vendor transforms, `.cube` apply UI and waveform/parade/vectorscope/histogram panels are also absent from the tag; later main effect/LUT support is separate. They remain additional cutover gates rather than retroactive W1 parity claims. W1 does not claim performance, all planned native codecs/HDR/display paths, system audio-device switching or native text services are already met.
 
+<!-- native-acceptance-status:start -->
+## Native execution status
+
+Wave 5 Linux configured run; portable supporting probes are separate from full workflow verdicts.
+All 396 legacy spec replacements remain blocked. See [acceptance.md](acceptance.md) for evidence and limits;
+[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv) names every remaining case and exact unverified assertion.
+
+| Workflow | Status | Pass | Fail | Blocked | Remaining backing |
+|---|---|---:|---:|---:|---|
+| W001 | blocked-by | 1 | 0 | 14 | shell-integration |
+| W002 | blocked-by | 0 | 0 | 20 | shell-integration |
+| W003 | blocked-by | 0 | 0 | 9 | shell-integration |
+| W004 | blocked-by | 1 | 0 | 6 | project-lifecycle-integration |
+| W005 | blocked-by | 0 | 0 | 4 | shell-integration |
+| W006 | blocked-by | 57 | 0 | 82 | real-keyboard-dispatch; shell-integration |
+| W007 | blocked-by | 32 | 0 | 64 | project-lifecycle-integration; real-keyboard-dispatch |
+| W008 | blocked-by | 0 | 0 | 9 | project-lifecycle-integration |
+| W009 | blocked-by | 29 | 0 | 44 | real-keyboard-dispatch; shell-integration |
+| W010 | blocked-by | 7 | 0 | 25 | real-keyboard-dispatch; shell-integration |
+| W011 | blocked-by | 0 | 0 | 77 | shell-integration |
+| W012 | blocked-by | 15 | 0 | 34 | real-keyboard-dispatch; shell-integration |
+| W013 | blocked-by | 0 | 0 | 6 | shell-integration |
+| W014 | blocked-by | 0 | 0 | 14 | shell-integration |
+| W015 | blocked-by | 0 | 0 | 5 | shell-integration |
+| W016 | blocked-by | 0 | 0 | 7 | shell-integration |
+| W017 | blocked-by | 14 | 0 | 41 | real-keyboard-dispatch; shell-integration |
+| W018 | blocked-by | 0 | 0 | 17 | shell-integration |
+| W019 | blocked-by | 29 | 0 | 61 | media-service; real-keyboard-dispatch |
+| W020 | blocked-by | 0 | 0 | 9 | media-service |
+| W021 | blocked-by | 0 | 0 | 8 | media-service |
+| W022 | blocked-by | 2 | 0 | 13 | media-service |
+| W023 | blocked-by | 0 | 0 | 4 | media-service |
+| W024 | blocked-by | 0 | 0 | 32 | agent-runtime |
+| W025 | blocked-by | 14 | 0 | 34 | agent-runtime; real-keyboard-dispatch |
+| W026 | blocked-by | 0 | 0 | 12 | agent-runtime |
+| W027 | blocked-by | 0 | 0 | 24 | agent-runtime; mcp:task_send; mcp:thread_cancel; mcp:thread_launch; mcp:thread_list; mcp:thread_read; mcp:thread_send; mcp:thread_unwatch; mcp:thread_watch |
+| W028 | blocked-by | 0 | 0 | 7 | agent-runtime |
+| W029 | blocked-by | 0 | 0 | 11 | agent-runtime; mcp:publish_visual_reply |
+| W030 | blocked-by | 4 | 0 | 15 | mcp-integration; project-memory-contract |
+| W031 | blocked-by | 3 | 0 | 14 | mcp:import_media_to_timeline; mcp:media_contact_sheet; mcp:media_waveform; mcp:probe_media; mcp:replace_media; mcp:sample_media_frames; mcp:save_project; media-service |
+| W032 | blocked-by | 3 | 0 | 14 | mcp:computer_use_panel; mcp:get_panel_state; mcp:get_workspace_state; mcp:interact_panel; mcp:open_panel; mcp:set_panel_layout; shell-integration |
+| W033 | blocked-by | 14 | 0 | 9 | mcp-integration; mcp:render_frames; mcp:stage_fork_rebase |
+| W034 | blocked-by | 0 | 0 | 8 | owner-scope |
+| W035 | blocked-by | 0 | 0 | 5 | store-service |
+| W036 | blocked-by | 0 | 0 | 18 | mcp:store_extension; mcp:store_install; mcp:store_library; mcp:store_publish; mcp:store_publish_prepare; mcp:store_search; mcp:store_source; mcp:store_uninstall; mcp:store_update; store-service |
+| W037 | blocked-by | 2 | 0 | 30 | compat-runtime; mcp:capture_panel; mcp:fork_builtin_extension; mcp:import_media; mcp:inspect_creative_extension; mcp:inspect_creative_workspace; mcp:publish_extensions; mcp:validate_effect |
+| W038 | blocked-by | 2 | 0 | 13 | compat-runtime |
+| W039 | blocked-by | 0 | 0 | 3 | compat-runtime |
+| W040 | blocked-by | 4 | 0 | 51 | compat-runtime |
+| W041 | blocked-by | 0 | 0 | 16 | transcription-service |
+| W042 | blocked-by | 0 | 0 | 17 | shell-integration |
+| W043 | blocked-by | 0 | 0 | 7 | shell-integration |
+| W044 | blocked-by | 0 | 0 | 5 | shell-integration |
+| W045 | blocked-by | 126 | 0 | 194 | real-keyboard-dispatch; shell-integration |
+| W046 | blocked-by | 204 | 0 | 287 | real-keyboard-dispatch; shell-integration |
+| W047 | blocked-by | 42 | 0 | 73 | real-keyboard-dispatch; shell-integration |
+| W048 | blocked-by | 71 | 0 | 114 | real-keyboard-dispatch; shell-integration |
+| W049 | blocked-by | 36 | 0 | 76 | real-keyboard-dispatch; shell-integration |
+| W050 | blocked-by | 1 | 0 | 30 | mcp:edit_3d; shell-integration |
+| W051 | blocked-by | 133 | 0 | 187 | real-keyboard-dispatch; shell-integration |
+| W052 | blocked-by | 57 | 0 | 82 | real-keyboard-dispatch; shell-integration |
+| W053 | blocked-by | 1 | 0 | 8 | shell-integration |
+| W054 | blocked-by | 0 | 0 | 17 | shell-integration |
+| W055 | blocked-by | 1 | 0 | 60 | shell-integration |
+| W056 | blocked-by | 71 | 0 | 104 | real-keyboard-dispatch; shell-integration |
+| W057 | blocked-by | 3 | 0 | 1 | video-domain-adapter |
+| W058 | blocked-by | 0 | 0 | 3 | video-domain-adapter |
+| W059 | blocked-by | 0 | 0 | 7 | audio-service |
+| W060 | blocked-by | 183 | 0 | 277 | real-keyboard-dispatch; shell-integration |
+| W061 | blocked-by | 36 | 0 | 72 | real-keyboard-dispatch; shell-integration |
+| W062 | blocked-by | 99 | 0 | 159 | real-keyboard-dispatch; shell-integration |
+| W063 | blocked-by | 1 | 0 | 59 | shell-integration |
+| W064 | blocked-by | 0 | 0 | 7 | shell-integration |
+| W065 | blocked-by | 0 | 0 | 11 | shell-integration |
+| W066 | blocked-by | 0 | 0 | 19 | shell-integration |
+| W067 | blocked-by | 1 | 0 | 78 | mcp:generate_captions; mcp:transcribe_media; shell-integration |
+| W068 | blocked-by | 0 | 0 | 8 | audio-service |
+| W069 | blocked-by | 28 | 0 | 56 | export-service; mcp:export_video; real-keyboard-dispatch |
+| W070 | blocked-by | 0 | 0 | 6 | export-service |
+| W071 | blocked-by | 1 | 0 | 1 | export-service |
+| W072 | blocked-by | 0 | 0 | 1 | owner-scope |
+| W073 | blocked-by | 0 | 0 | 58 | shell-integration |
+| W074 | blocked-by | 0 | 0 | 38 | shell-integration |
+| W075 | blocked-by | 99 | 0 | 142 | real-keyboard-dispatch; shell-integration |
+| W076 | blocked-by | 1 | 0 | 1 | engine-macos |
+| W077 | blocked-by | 1 | 0 | 1 | engine-macos |
+| W078 | blocked-by | 0 | 0 | 1 | engine-macos |
+| W079 | blocked-by | 1 | 0 | 1 | transport-integration |
+| W080 | blocked-by | 2 | 0 | 2 | pro-edit-integration |
+| W081 | blocked-by | 2 | 0 | 1 | pro-edit-integration |
+| W082 | blocked-by | 1 | 0 | 1 | pro-edit-integration |
+| W083 | blocked-by | 1 | 0 | 1 | pro-edit-integration |
+
+<!-- native-acceptance-status:end -->
+
 ## Workflow contracts
 
 ### W001 — Launch, restore and activate the last project

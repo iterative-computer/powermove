@@ -1,5 +1,6 @@
 //! Optional real V8 backing. The parent acceptance runner owns the wall timeout.
 use pm_runtime_v8::*;
+mod portable;
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
@@ -66,6 +67,9 @@ fn eval(realm: &Realm, source: impl Into<String>) -> Result<Evaluation> {
     wait(realm.eval(source)?)
 }
 fn check(id: &str, bundle: Option<&str>) -> Result<()> {
+    if let Some(result) = portable::check(id) {
+        return result.map_err(Error::Host);
+    }
     let host = Arc::new(Host {
         storage: Mutex::new(json!({})),
         ..Default::default()
@@ -109,7 +113,7 @@ fn check(id: &str, bundle: Option<&str>) -> Result<()> {
             );
         }
         "W038.v8-stop" => {
-            let other = pool.realm(RealmKind::Store("other".into()))?;
+            let other = pool.realm(RealmKind::V4Extension("other".into()))?;
             let ticket = realm.eval("while(true){}")?;
             assert_eq!(eval(&other, "6*7")?.value, "42");
             let end = Instant::now() + Duration::from_secs(3);
@@ -122,13 +126,27 @@ fn check(id: &str, bundle: Option<&str>) -> Result<()> {
             assert_eq!(eval(&other, "40+2")?.value, "42");
             other.close();
         }
-        "W037.compat-services" | "W040.compat-recorder" => {
+        "W037.compat-services" | "W040.compat-recorder" | "W040.compat-remote-dom" => {
             let bundle = bundle.ok_or(Error::Invalid("compat bundle required"))?;
             eval(&realm, bundle)?;
             assert_eq!(
                 eval(&realm, format!("PowermoveAcceptance.run({})", json!(id)))?.value,
                 "true"
             );
+            if id == "W040.compat-remote-dom" {
+                let evidence = eval(&realm, "JSON.stringify(PowermoveAcceptance.evidence())")?;
+                let evidence: Value = serde_json::from_str(&evidence.value)
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                portable::admit_remote_evidence(evidence, |event| {
+                    let reply = eval(
+                        &realm,
+                        format!("JSON.stringify(PowermoveAcceptance.receive({event}))"),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    serde_json::from_str(&reply.value).map_err(|e| e.to_string())
+                })
+                .map_err(Error::Host)?;
+            }
         }
         _ => return Err(Error::Invalid("unknown runtime acceptance ID")),
     }
