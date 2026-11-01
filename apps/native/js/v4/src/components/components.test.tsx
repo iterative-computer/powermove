@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { test, expect } from "bun:test";
 import type { ComponentChild } from "preact";
 import { createRoot, type Commit } from "../index";
@@ -397,7 +398,9 @@ test("component styles reject literal colours, sizes, radii, fonts and durations
 test("UI kit bundles and mounts with no Node, Chromium, window, Buffer or global document", async () => {
   const { runInNewContext } = await import("node:vm");
   const build = await Bun.build({
-    entrypoints: [new URL("./nodefree-fixture.tsx", import.meta.url).pathname],
+    entrypoints: [
+      fileURLToPath(new URL("./nodefree-fixture.tsx", import.meta.url)),
+    ],
     target: "browser",
     format: "iife",
     minify: true,
