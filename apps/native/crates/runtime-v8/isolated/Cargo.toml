@@ -1,0 +1,26 @@
+[package]
+name = "pm-runtime-v8"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+build = "../build.rs"
+
+[features]
+macos-sandbox = ["v8/v8_enable_sandbox"]
+
+[dependencies]
+v8 = "=152.2.0"
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+url = "2.5"
+
+[workspace]
+resolver = "3"
+
+[lib]
+path = "../src/lib.rs"
+
+[profile.dev]
+debug = 0
+incremental = false

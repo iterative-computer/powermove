@@ -1,0 +1,1005 @@
+use crate::{
+    vm::{self, Vm},
+    *,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Condvar, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
+    task::{Context, Poll, Waker},
+    thread,
+    time::{Duration, Instant},
+};
+
+struct Completion<T> {
+    value: Option<Result<T>>,
+    waker: Option<Waker>,
+}
+type SharedCompletion<T> = Arc<Mutex<Completion<T>>>;
+/// Nonblocking result: poll as a Future or inspect with try_take. No wait/join API.
+pub struct Ticket<T> {
+    pub execution: u64,
+    shared: SharedCompletion<T>,
+}
+impl<T> Ticket<T> {
+    pub fn try_take(&self) -> Option<Result<T>> {
+        self.shared.lock().unwrap().value.take()
+    }
+}
+impl<T> Future for Ticket<T> {
+    type Output = Result<T>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut c = self.shared.lock().unwrap();
+        if let Some(value) = c.value.take() {
+            Poll::Ready(value)
+        } else {
+            c.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+fn ticket<T>(id: u64) -> (Ticket<T>, SharedCompletion<T>) {
+    let shared = Arc::new(Mutex::new(Completion {
+        value: None,
+        waker: None,
+    }));
+    (
+        Ticket {
+            execution: id,
+            shared: shared.clone(),
+        },
+        shared,
+    )
+}
+fn complete<T>(shared: SharedCompletion<T>, value: Result<T>) {
+    let waker = {
+        let mut c = shared.lock().unwrap();
+        c.value = Some(value);
+        c.waker.take()
+    };
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+}
+#[derive(Debug, Clone)]
+pub struct Evaluation {
+    pub generation: Generation,
+    pub value: String,
+    pub cache_hits: usize,
+}
+#[derive(Debug, Clone)]
+pub struct ActiveExecution {
+    pub execution: u64,
+    pub generation: Generation,
+    pub elapsed: Duration,
+}
+#[derive(Clone)]
+pub struct GenerationPin {
+    pub generation: Generation,
+    live: Arc<()>,
+    notifier: Weak<SyncSender<Command>>,
+}
+impl std::fmt::Debug for GenerationPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.generation.fmt(f)
+    }
+}
+impl Drop for GenerationPin {
+    fn drop(&mut self) {
+        if let Some(tx) = self.notifier.upgrade() {
+            let _ = tx.try_send(Command::Wake);
+        }
+    }
+}
+struct Execution {
+    id: u64,
+    handle: v8::IsolateHandle,
+    cancellation: Cancellation,
+    generation: Generation,
+    epoch: u64,
+    started: Instant,
+    noticed: bool,
+    next_prompt: Duration,
+}
+struct Control {
+    active: Mutex<Option<Execution>>,
+    closing: AtomicBool,
+    disposed: AtomicBool,
+    wake: Condvar,
+    ids: AtomicU64,
+}
+struct Inner {
+    tx: Arc<SyncSender<Command>>,
+    control: Arc<Control>,
+    max_source: usize,
+}
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.control.closing.store(true, Ordering::Release);
+        self.control.wake.notify_all();
+        if let Some(e) = &*self.control.active.lock().unwrap() {
+            e.cancellation.cancel();
+            e.handle.terminate_execution();
+        }
+    }
+}
+#[derive(Clone)]
+pub struct Realm {
+    inner: Arc<Inner>,
+}
+enum Command {
+    Wake,
+    Eval {
+        id: u64,
+        source: String,
+        expected: Option<Generation>,
+        reply: SharedCompletion<Evaluation>,
+    },
+    Reload {
+        id: u64,
+        source: String,
+        reply: SharedCompletion<Evaluation>,
+    },
+    Pin {
+        reply: SharedCompletion<GenerationPin>,
+    },
+    Retained {
+        id: u64,
+        pin: GenerationPin,
+        source: String,
+        reply: SharedCompletion<Evaluation>,
+    },
+}
+impl Realm {
+    fn send(&self, command: Command) -> Result<()> {
+        if self.inner.control.closing.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        self.inner.tx.try_send(command).map_err(|e| match e {
+            TrySendError::Full(_) => Error::Busy,
+            TrySendError::Disconnected(_) => Error::Closed,
+        })
+    }
+    fn check_source(&self, source: &str) -> Result<()> {
+        if source.len() > self.inner.max_source {
+            Err(Error::Quota("source bytes"))
+        } else {
+            Ok(())
+        }
+    }
+    pub fn eval(&self, source: impl Into<String>) -> Result<Ticket<Evaluation>> {
+        self.eval_generation(source, None)
+    }
+    pub fn eval_generation(
+        &self,
+        source: impl Into<String>,
+        expected: Option<Generation>,
+    ) -> Result<Ticket<Evaluation>> {
+        let source = source.into();
+        self.check_source(&source)?;
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
+        let (ticket, reply) = ticket(id);
+        self.send(Command::Eval {
+            id,
+            source,
+            expected,
+            reply,
+        })?;
+        Ok(ticket)
+    }
+    /// Source is a script expression, optionally yielding a Promise. The caller's
+    /// compiler/bundler resolves ESM imports before submission. Only v4 may reload.
+    pub fn reload(&self, source: impl Into<String>) -> Result<Ticket<Evaluation>> {
+        let source = source.into();
+        self.check_source(&source)?;
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
+        let (ticket, reply) = ticket(id);
+        self.send(Command::Reload { id, source, reply })?;
+        Ok(ticket)
+    }
+    pub fn pin(&self) -> Result<Ticket<GenerationPin>> {
+        let (ticket, reply) = ticket(0);
+        self.send(Command::Pin { reply })?;
+        Ok(ticket)
+    }
+    pub fn invoke_retained(
+        &self,
+        pin: &GenerationPin,
+        source: impl Into<String>,
+    ) -> Result<Ticket<Evaluation>> {
+        let source = source.into();
+        self.check_source(&source)?;
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
+        let (ticket, reply) = ticket(id);
+        self.send(Command::Retained {
+            id,
+            pin: pin.clone(),
+            source,
+            reply,
+        })?;
+        Ok(ticket)
+    }
+    /// Inspect a hung or active realm without entering JavaScript.
+    pub fn active_execution(&self) -> Option<ActiveExecution> {
+        self.inner
+            .control
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| ActiveExecution {
+                execution: e.id,
+                generation: e.generation.clone(),
+                elapsed: e.started.elapsed(),
+            })
+    }
+    /// Fenced by execution id; an old Stop cannot terminate a later task.
+    pub fn stop(&self, execution: u64) -> bool {
+        let active = self.inner.control.active.lock().unwrap();
+        if let Some(active) = active.as_ref().filter(|a| a.id == execution) {
+            active.cancellation.cancel();
+            active.handle.terminate_execution();
+            true
+        } else {
+            false
+        }
+    }
+    /// Nonblocking shutdown; disposal and all revocations happen on the owner.
+    pub fn close(&self) {
+        self.inner.control.closing.store(true, Ordering::Release);
+        self.inner.control.wake.notify_all();
+        let _ = self.inner.tx.try_send(Command::Wake);
+        if let Some(e) = &*self.inner.control.active.lock().unwrap() {
+            e.cancellation.cancel();
+            e.handle.terminate_execution();
+        }
+    }
+    pub fn is_disposed(&self) -> bool {
+        self.inner.control.disposed.load(Ordering::Acquire)
+    }
+}
+
+/// A pool is scoped to one project window. Its compat key is unique in that scope.
+/// Callers must resolve synchronous dependencies before routing to this pool.
+pub struct RuntimePool {
+    scope: String,
+    realms: Mutex<HashMap<RealmKind, Weak<Inner>>>,
+    config: Config,
+}
+#[derive(Clone)]
+pub struct Config {
+    pub limits: Limits,
+    pub watchdog: WatchdogPolicy,
+    pub kernel: Arc<dyn KernelHooks>,
+    pub host: Arc<dyn HostProxy>,
+    pub watchdog_hooks: Arc<dyn WatchdogHooks>,
+    pub cache: CodeCache,
+    pub engine: Option<Arc<dyn EngineProxy>>,
+    /// Shared admission account must include all pools and retained generations.
+    pub admission: Admission,
+}
+#[derive(Clone)]
+pub struct Admission {
+    used: Arc<AtomicUsize>,
+    budget: usize,
+}
+impl Admission {
+    pub fn new(budget: usize) -> Self {
+        Self {
+            used: Arc::new(AtomicUsize::new(0)),
+            budget,
+        }
+    }
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+    fn reserve(&self, bytes: usize) -> Result<Reservation> {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|n| *n <= self.budget)
+            })
+            .map_err(|_| Error::Quota("isolate admission"))?;
+        Ok(Reservation {
+            account: self.clone(),
+            bytes,
+        })
+    }
+}
+struct Reservation {
+    account: Admission,
+    bytes: usize,
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.account.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+impl RuntimePool {
+    pub fn new(scope: impl Into<String>, config: Config) -> Result<Self> {
+        if config.limits.heap_bytes < 16 * 1024 * 1024
+            || config.limits.queue_capacity == 0
+            || config.limits.max_host_ops == 0
+            || config.watchdog.prompt < config.watchdog.notice
+            || config.watchdog.repeat.is_zero()
+        {
+            return Err(Error::Invalid("Invalid runtime limits"));
+        }
+        Ok(Self {
+            scope: scope.into(),
+            realms: Default::default(),
+            config,
+        })
+    }
+    /// Starting is asynchronous: the first task observes startup/load failures.
+    pub fn realm(&self, kind: RealmKind) -> Result<Realm> {
+        let mut realms = self.realms.lock().unwrap();
+        if let Some(inner) = realms
+            .get(&kind)
+            .and_then(Weak::upgrade)
+            .filter(|i| !i.control.closing.load(Ordering::Acquire))
+        {
+            return Ok(Realm { inner });
+        }
+        let reservation = self
+            .config
+            .admission
+            .reserve(self.config.limits.heap_bytes)?;
+        let (tx, rx) = mpsc::sync_channel(self.config.limits.queue_capacity);
+        let control = Arc::new(Control {
+            active: Mutex::new(None),
+            closing: AtomicBool::new(false),
+            disposed: AtomicBool::new(false),
+            wake: Condvar::new(),
+            ids: AtomicU64::new(1),
+        });
+        let inner = Arc::new(Inner {
+            tx: Arc::new(tx),
+            control: control.clone(),
+            max_source: self.config.limits.max_source_bytes,
+        });
+        let name = format!("{}:{kind:?}", self.scope);
+        let config = self.config.clone();
+        let worker_kind = kind.clone();
+        let notifier = Arc::downgrade(&inner.tx);
+        thread::Builder::new()
+            .name("pm-v8-owner".into())
+            .spawn(move || {
+                worker(
+                    rx,
+                    control,
+                    name,
+                    worker_kind,
+                    config,
+                    reservation,
+                    notifier,
+                )
+            })
+            .map_err(|e| Error::Host(e.to_string()))?;
+        realms.insert(kind.clone(), Arc::downgrade(&inner));
+        Ok(Realm { inner })
+    }
+    /// Whole editor closure switches to Compat when any provider has a v1–3 fork.
+    pub fn builtin(&self, id: &str, compat_editor: bool) -> Result<Realm> {
+        let kind = builtin_cluster(id);
+        self.realm(if compat_editor && kind == RealmKind::BuiltinEditor {
+            RealmKind::Compat
+        } else {
+            kind
+        })
+    }
+}
+
+// One sleeping watchdog per owner, never a new thread per task or timer tick.
+struct WatchdogThread {
+    control: Arc<Control>,
+    join: Option<thread::JoinHandle<()>>,
+}
+impl WatchdogThread {
+    fn new(control: &Arc<Control>, config: &Config) -> Self {
+        let control = control.clone();
+        let watched = control.clone();
+        let hooks = config.watchdog_hooks.clone();
+        let repeat = config.watchdog.repeat;
+        let notice_after = config.watchdog.notice;
+        let join = thread::spawn(move || {
+            loop {
+                let mut active = watched.active.lock().unwrap();
+                while active.is_none() && !watched.closing.load(Ordering::Acquire) {
+                    active = watched.wake.wait(active).unwrap();
+                }
+                if watched.closing.load(Ordering::Acquire) {
+                    break;
+                }
+                let (mut active, _) = watched
+                    .wake
+                    .wait_timeout(active, Duration::from_millis(5))
+                    .unwrap();
+                let Some(execution) = active.as_mut() else {
+                    continue;
+                };
+                if execution.cancellation.is_cancelled() {
+                    execution.handle.terminate_execution();
+                }
+                execution
+                    .handle
+                    .request_interrupt(vm::check_external, std::ptr::null_mut());
+                let elapsed = execution.started.elapsed();
+                let notice = !execution.noticed && elapsed >= notice_after;
+                if notice {
+                    execution.noticed = true;
+                }
+                let prompt = elapsed >= execution.next_prompt;
+                if prompt {
+                    execution.next_prompt = elapsed + repeat;
+                }
+                let (generation, id, epoch) =
+                    (execution.generation.clone(), execution.id, execution.epoch);
+                drop(active);
+                if notice {
+                    hooks.notice(&generation, id);
+                }
+                if prompt && hooks.prompt(&generation, id) == WatchdogDecision::Stop {
+                    let active = watched.active.lock().unwrap();
+                    if let Some(execution) = active.as_ref().filter(|e| e.epoch == epoch) {
+                        execution.cancellation.cancel();
+                        execution.handle.terminate_execution();
+                    }
+                }
+            }
+        });
+        Self {
+            control,
+            join: Some(join),
+        }
+    }
+}
+impl Drop for WatchdogThread {
+    fn drop(&mut self) {
+        self.control.closing.store(true, Ordering::Release);
+        self.control.wake.notify_all();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+struct Guard {
+    control: Arc<Control>,
+    epoch: u64,
+}
+impl Guard {
+    fn new(
+        vm: &Vm,
+        generation: &Generation,
+        id: u64,
+        config: &Config,
+        control: &Arc<Control>,
+    ) -> Self {
+        static EPOCH: AtomicU64 = AtomicU64::new(1);
+        let epoch = EPOCH.fetch_add(1, Ordering::Relaxed);
+        let handle = vm.handle();
+        let cancellation = Cancellation::default();
+        vm.begin_task(cancellation.clone());
+        *control.active.lock().unwrap() = Some(Execution {
+            id,
+            epoch,
+            generation: generation.clone(),
+            handle: handle.clone(),
+            cancellation: cancellation.clone(),
+            started: Instant::now(),
+            noticed: false,
+            next_prompt: config.watchdog.prompt,
+        });
+        control.wake.notify_all();
+        if control.closing.load(Ordering::Acquire) {
+            cancellation.cancel();
+            handle.terminate_execution();
+        }
+        Self {
+            control: control.clone(),
+            epoch,
+        }
+    }
+}
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let mut active = self.control.active.lock().unwrap();
+        if active.as_ref().is_some_and(|a| a.epoch == self.epoch) {
+            *active = None;
+        }
+        self.control.wake.notify_all();
+    }
+}
+struct Request {
+    id: u64,
+    job: Box<dyn HostRequest>,
+    cancel: Cancellation,
+    deadline: Instant,
+}
+struct Live {
+    vm: Vm,
+    generation: Generation,
+    storage: Value,
+    hot: Value,
+    pins: Arc<()>,
+    requests: Vec<Request>,
+    _reservation: Reservation,
+    next_wake: Option<Instant>,
+}
+impl Live {
+    fn new(
+        generation: Generation,
+        kind: &RealmKind,
+        config: &Config,
+        storage: Value,
+        hot: Value,
+        reservation: Reservation,
+    ) -> Result<Self> {
+        let vm = Vm::new(
+            kind.snapshot_kind(),
+            config.limits.clone(),
+            &storage,
+            &hot,
+            config.cache.clone(),
+            generation.clone(),
+            config.engine.clone(),
+        )?;
+        Ok(Self {
+            vm,
+            generation,
+            storage,
+            hot,
+            pins: Arc::new(()),
+            requests: vec![],
+            _reservation: reservation,
+            next_wake: None,
+        })
+    }
+    fn cancel_io(&mut self) {
+        for request in &mut self.requests {
+            request.cancel.cancel();
+            request.job.cancel();
+        }
+        self.requests.clear();
+        let mut n = self.vm.native.lock().unwrap();
+        n.queued.clear();
+        n.aborted.clear();
+        n.in_flight = 0;
+        n.reserved = 0;
+    }
+    fn pump(&mut self, config: &Config) -> Result<()> {
+        let (queued, aborted, logs) = {
+            let mut n = self.vm.native.lock().unwrap();
+            (
+                std::mem::take(&mut n.queued),
+                std::mem::take(&mut n.aborted),
+                std::mem::take(&mut n.logs),
+            )
+        };
+        for (level, message) in logs {
+            config.host.console(&self.generation, &level, &message);
+        }
+        let mut completed = Vec::new();
+        let mut retired = 0;
+        for (id, request) in queued {
+            if aborted.contains(&id) {
+                retired += 1;
+                continue;
+            }
+            let cancellation = Cancellation::default();
+            let deadline = request.deadline;
+            match config
+                .host
+                .fetch(&self.generation, request, cancellation.clone())
+            {
+                Ok(job) => self.requests.push(Request {
+                    id,
+                    job,
+                    cancel: cancellation,
+                    deadline,
+                }),
+                Err(error) => {
+                    completed.push(json!([id,{"error":error.to_string()}]));
+                    retired += 1;
+                }
+            }
+        }
+        self.requests.retain_mut(|request|{
+            let result=if aborted.contains(&request.id)||Instant::now()>=request.deadline {request.cancel.cancel();request.job.cancel();Some(Err(Error::Host("Aborted or timed out".into())))}else{request.job.poll()};
+            if let Some(result)=result {
+                retired+=1;
+                let data=match result {
+                    Ok(response) if response.body.len()<=config.limits.max_response_bytes && response.headers.iter().map(|(a,b)|a.len()+b.len()).sum::<usize>()<=config.limits.max_op_bytes =>json!({"status":response.status,"url":response.url,"headers":response.headers,"body":response.body}),
+                    Ok(_)=>{request.cancel.cancel();request.job.cancel();json!({"error":"Host response quota"})},
+                    Err(error)=>json!({"error":error.to_string()})
+                };completed.push(json!([request.id,data]));false
+            }else{true}
+        });
+        {
+            let mut n = self.vm.native.lock().unwrap();
+            n.in_flight = n.in_flight.saturating_sub(retired);
+            n.reserved = n
+                .reserved
+                .saturating_sub(retired * config.limits.max_response_bytes);
+        }
+        self.vm.pump(json!(completed))
+    }
+    fn run(
+        &mut self,
+        source: &str,
+        _id: u64,
+        config: &Config,
+        control: &Arc<Control>,
+    ) -> Result<String> {
+        let value = self.vm.start(source).map_err(|error| {
+            if self.vm.task_cancelled() {
+                Error::Terminated
+            } else {
+                error
+            }
+        })?;
+        loop {
+            if self.vm.task_cancelled() {
+                self.vm.handle().terminate_execution();
+                return Err(Error::Terminated);
+            }
+            if control.closing.load(Ordering::Acquire) {
+                self.vm.handle().terminate_execution();
+                return Err(Error::Closed);
+            }
+            if let Some(value) = self.vm.settle(&value)? {
+                return Ok(value);
+            }
+            self.pump(config)?;
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn commit(
+        &mut self,
+        previous: Option<&Generation>,
+        config: &Config,
+        retained: bool,
+    ) -> Result<()> {
+        let effects = self.vm.effects()?;
+        let ops = effects["ops"]
+            .as_array()
+            .ok_or(Error::Invalid("Invalid staged operations"))?;
+        if ops.len() > config.limits.max_ops
+            || serde_json::to_vec(ops)
+                .map_err(|e| Error::JavaScript(e.to_string()))?
+                .len()
+                > config.limits.max_op_bytes
+        {
+            return Err(Error::Quota("staged operation bytes/count"));
+        }
+        // Finish every fallible JS step before the kernel's atomic publication.
+        self.update_schedule()?;
+        if retained {
+            config.kernel.commit_retained(&self.generation, ops)?;
+        } else {
+            config.kernel.commit_activation(
+                previous,
+                &self.generation,
+                ops,
+                &effects["storage"],
+            )?;
+            self.storage = effects["storage"].clone();
+            self.hot = effects["hot"].clone();
+        }
+        Ok(())
+    }
+    fn update_schedule(&mut self) -> Result<()> {
+        let delay = self.vm.text("__pm.nextDelay(__now())")?;
+        let delay = delay
+            .parse::<f64>()
+            .ok()
+            .map(|n| Duration::from_secs_f64(n.max(0.) / 1000.));
+        let native = self.vm.native.lock().unwrap();
+        let io_delay = if !native.queued.is_empty() || !native.logs.is_empty() {
+            Some(Duration::ZERO)
+        } else if !self.requests.is_empty() {
+            Some(Duration::from_millis(5))
+        } else {
+            None
+        };
+        self.next_wake = delay
+            .into_iter()
+            .chain(io_delay)
+            .min()
+            .map(|d| Instant::now() + d);
+        Ok(())
+    }
+    fn restore_storage(&mut self) -> Result<()> {
+        self.vm.restore(&self.storage, &self.hot)?;
+        self.update_schedule()
+    }
+}
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.cancel_io();
+    }
+}
+fn fail_generation(live: &mut Live, config: &Config) {
+    live.cancel_io();
+    config.kernel.revoke_generation(&live.generation);
+    config.kernel.seal_open_gestures(&live.generation);
+}
+fn worker(
+    rx: Receiver<Command>,
+    control: Arc<Control>,
+    name: String,
+    kind: RealmKind,
+    config: Config,
+    reservation: Reservation,
+    notifier: Weak<SyncSender<Command>>,
+) {
+    let _watchdog = WatchdogThread::new(&control, &config);
+    let generation = Generation {
+        realm: name.clone(),
+        number: next_generation(),
+    };
+    let initial = config
+        .kernel
+        .load_storage(&name)
+        .and_then(|storage| Live::new(generation, &kind, &config, storage, json!({}), reservation));
+    let mut current = initial;
+    let mut retained: HashMap<u64, Live> = HashMap::new();
+    while !control.closing.load(Ordering::Acquire) {
+        retained.retain(|_, live| Arc::strong_count(&live.pins) > 1);
+        let wake = current.as_ref().ok().and_then(|live| live.next_wake);
+        let received = match wake {
+            Some(wake) => rx.recv_timeout(wake.saturating_duration_since(Instant::now())),
+            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        let command = match received {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(live) = &mut current {
+                    // Timers and pending host operations run without a submitted task.
+                    let guard = Guard::new(
+                        &live.vm,
+                        &live.generation,
+                        control.ids.fetch_add(1, Ordering::Relaxed),
+                        &config,
+                        &control,
+                    );
+                    let result = live
+                        .pump(&config)
+                        .and_then(|_| live.commit(Some(&live.generation.clone()), &config, false));
+                    drop(guard);
+                    if result.is_err() {
+                        fail_generation(live, &config);
+                        drop(std::mem::replace(&mut current, Err(Error::Closed)));
+                        current = recover(&name, &kind, &config);
+                    }
+                }
+                continue;
+            }
+        };
+        match command {
+            Command::Wake => continue,
+            Command::Pin { reply } => complete(
+                reply,
+                current
+                    .as_ref()
+                    .map(|live| GenerationPin {
+                        generation: live.generation.clone(),
+                        live: live.pins.clone(),
+                        notifier: notifier.clone(),
+                    })
+                    .map_err(Clone::clone),
+            ),
+            Command::Eval {
+                id,
+                source,
+                expected,
+                reply,
+            } => {
+                let result = match &mut current {
+                    Ok(live) if expected.as_ref().is_none_or(|g| g == &live.generation) => {
+                        // Keep the watchdog armed through effect serialization and commit.
+                        let guard = Guard::new(&live.vm, &live.generation, id, &config, &control);
+                        let result = live.run(&source, id, &config, &control).and_then(|value| {
+                            live.commit(Some(&live.generation.clone()), &config, false)?;
+                            Ok(Evaluation {
+                                generation: live.generation.clone(),
+                                value,
+                                cache_hits: live.vm.cache_hits,
+                            })
+                        });
+                        drop(guard);
+                        result
+                    }
+                    Ok(_) => Err(Error::StaleGeneration),
+                    Err(error) => Err(error.clone()),
+                };
+                if let Ok(live) = &mut current {
+                    if matches!(
+                        result,
+                        Err(Error::Terminated
+                            | Error::Quota("heap" | "external memory")
+                            | Error::Closed)
+                    ) {
+                        fail_generation(live, &config);
+                        drop(std::mem::replace(&mut current, Err(Error::Closed)));
+                        current = recover(&name, &kind, &config);
+                    } else if result.is_err() {
+                        let guard = Guard::new(&live.vm, &live.generation, id, &config, &control);
+                        let restored = live.restore_storage();
+                        drop(guard);
+                        if restored.is_err() {
+                            fail_generation(live, &config);
+                            drop(std::mem::replace(&mut current, Err(Error::Closed)));
+                            current = recover(&name, &kind, &config);
+                        }
+                    }
+                }
+                complete(reply, result);
+            }
+            Command::Reload { id, source, reply } => {
+                if !matches!(kind, RealmKind::V4Extension(_)) {
+                    complete(
+                        reply,
+                        Err(Error::Invalid(
+                            "Only v4 extensions hot reload in separate generations",
+                        )),
+                    );
+                    continue;
+                }
+                let result = (|| -> Result<(Live, String)> {
+                    let old = current.as_ref().map_err(Clone::clone)?;
+                    let reservation = config.admission.reserve(config.limits.heap_bytes)?;
+                    let generation = Generation {
+                        realm: name.clone(),
+                        number: next_generation(),
+                    };
+                    let mut candidate = Live::new(
+                        generation,
+                        &kind,
+                        &config,
+                        old.storage.clone(),
+                        old.hot.clone(),
+                        reservation,
+                    )?;
+                    let guard =
+                        Guard::new(&candidate.vm, &candidate.generation, id, &config, &control);
+                    let result = candidate
+                        .run(&source, id, &config, &control)
+                        .and_then(|value| {
+                            candidate.commit(Some(&old.generation), &config, false)?;
+                            Ok(value)
+                        });
+                    drop(guard);
+                    match result {
+                        Ok(value) => Ok((candidate, value)),
+                        Err(error) => {
+                            fail_generation(&mut candidate, &config);
+                            Err(error)
+                        }
+                    }
+                })();
+                match result {
+                    Ok((candidate, value)) => {
+                        let result = Evaluation {
+                            generation: candidate.generation.clone(),
+                            value,
+                            cache_hits: candidate.vm.cache_hits,
+                        };
+                        if let Ok(mut old) = std::mem::replace(&mut current, Ok(candidate)) {
+                            old.cancel_io();
+                            let guard = Guard::new(&old.vm, &old.generation, id, &config, &control);
+                            let retired = old.vm.text("__pm.retire()");
+                            drop(guard);
+                            config.kernel.revoke_generation(&old.generation);
+                            if retired.is_ok() && Arc::strong_count(&old.pins) > 1 {
+                                retained.insert(old.generation.number, old);
+                            }
+                        }
+                        complete(reply, Ok(result));
+                    }
+                    Err(error) => complete(reply, Err(error)),
+                }
+            }
+            Command::Retained {
+                id,
+                pin,
+                source,
+                reply,
+            } => {
+                let is_current = current.as_ref().is_ok_and(|v| {
+                    v.generation == pin.generation && Arc::ptr_eq(&v.pins, &pin.live)
+                });
+                let live = if is_current {
+                    current.as_mut().ok()
+                } else {
+                    retained.get_mut(&pin.generation.number).filter(|v| {
+                        v.generation == pin.generation && Arc::ptr_eq(&v.pins, &pin.live)
+                    })
+                };
+                let result = if let Some(live) = live {
+                    let guard = Guard::new(&live.vm, &live.generation, id, &config, &control);
+                    let result = live.run(&source, id, &config, &control).and_then(|value| {
+                        live.commit(None, &config, true)?;
+                        Ok(Evaluation {
+                            generation: live.generation.clone(),
+                            value,
+                            cache_hits: live.vm.cache_hits,
+                        })
+                    });
+                    drop(guard);
+                    result
+                } else {
+                    Err(Error::StaleGeneration)
+                };
+                let mut failed = matches!(
+                    result,
+                    Err(Error::Terminated
+                        | Error::Quota("heap" | "external memory")
+                        | Error::Closed)
+                );
+                if result.is_err() && !failed {
+                    let live = if is_current {
+                        current.as_mut().ok()
+                    } else {
+                        retained.get_mut(&pin.generation.number)
+                    };
+                    if let Some(live) = live {
+                        let guard = Guard::new(&live.vm, &live.generation, id, &config, &control);
+                        failed = live.restore_storage().is_err();
+                        drop(guard);
+                    }
+                }
+                if failed {
+                    if is_current {
+                        if let Ok(live) = &mut current {
+                            fail_generation(live, &config);
+                        }
+                        drop(std::mem::replace(&mut current, Err(Error::Closed)));
+                        current = recover(&name, &kind, &config);
+                    } else if let Some(mut live) = retained.remove(&pin.generation.number) {
+                        fail_generation(&mut live, &config);
+                    }
+                }
+                complete(reply, result);
+            }
+        }
+    }
+    if let Ok(live) = &mut current {
+        fail_generation(live, &config);
+    }
+    for live in retained.values_mut() {
+        fail_generation(live, &config);
+    }
+    drop(current);
+    drop(retained);
+    control.closing.store(true, Ordering::Release);
+    for command in rx.try_iter() {
+        match command {
+            Command::Wake => continue,
+            Command::Pin { reply } => complete(reply, Err(Error::Closed)),
+            Command::Eval { reply, .. }
+            | Command::Reload { reply, .. }
+            | Command::Retained { reply, .. } => complete(reply, Err(Error::Closed)),
+        }
+    }
+    control.disposed.store(true, Ordering::Release);
+}
+fn next_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+fn recover(name: &str, kind: &RealmKind, config: &Config) -> Result<Live> {
+    let generation = Generation {
+        realm: name.into(),
+        number: next_generation(),
+    };
+    let reservation = config.admission.reserve(config.limits.heap_bytes)?;
+    let storage = config.kernel.load_storage(name)?;
+    Live::new(generation, kind, config, storage, json!({}), reservation)
+}
