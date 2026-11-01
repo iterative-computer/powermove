@@ -189,11 +189,14 @@ export function projectRows(): Row[] {
         "choice",
         "Pick a common size, or set your own pixel dimensions.",
       ),
+      // Shipped RESOLUTION_PRESETS order (v1.2.0 project-settings.ts), then Custom….
       options: choices([
+        "4K UHD · 3840×2160",
         "HD 1080p · 1920×1080",
         "HD 720p · 1280×720",
-        "Square · 1080×1080",
+        "Vertical HD · 1080×1920",
         "Portrait 4:5 · 1080×1350",
+        "Square · 1080×1080",
         "Custom…",
       ]),
     },
@@ -319,10 +322,11 @@ export function accountRows(): Row[] {
       "Remember Installs on This Account",
       "switch",
     ),
-    ...["ChatGPT", "Claude"].map((name) => ({
-      ...row(name.toLowerCase(), "Subscriptions", name, "status"),
-      value: "Restart needed",
-    })),
+    // No status until the subscription service publishes one: a default
+    // "Restart needed" would claim a state nobody observed (design review).
+    ...["ChatGPT", "Claude"].map((name) =>
+      row(name.toLowerCase(), "Subscriptions", name, "status"),
+    ),
     {
       ...row("provider", "API or Local Model", "Connection Type", "choice"),
       options: choices([

@@ -87,13 +87,13 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -142,7 +142,7 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -152,7 +152,7 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`loading: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -248,7 +248,7 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -297,14 +297,14 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div progress-row progressbar label="Checking…"
           text "Checking…"
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -394,13 +394,13 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -449,7 +449,7 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -459,7 +459,7 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -549,13 +549,13 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -604,7 +604,7 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -614,7 +614,7 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -704,13 +704,13 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -759,7 +759,7 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -769,7 +769,7 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`disabled: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -859,13 +859,13 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -914,7 +914,7 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -924,7 +924,7 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`error: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -1014,13 +1014,13 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -1069,7 +1069,7 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="Extensions couldn’t be loaded."
           text heading
             text "Extensions couldn’t be loaded."
@@ -1081,7 +1081,7 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Try Again","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Try Again","Open Store"]"
 `;
 
 exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -1171,13 +1171,13 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -1226,7 +1226,7 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="Extensions are unavailable in this session."
           text heading
             text "Extensions are unavailable in this session."
@@ -1236,7 +1236,7 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`no-search-results: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -1254,11 +1254,9 @@ exports[`no-search-results: six-op tree snapshot passes the real Rust wire and k
         div list-item listitem settings.nav.extensions label="Extensions"
           text "Extensions"
     scroll group settings.detail label="General"
-      div empty-state group label="No settings found."
-        text heading
-          text "No settings found."
+      div status label="No settings found."
         text
-          text
+          text "No settings found."
 Focus: ["settings.search","settings.sections"]"
 `;
 
@@ -1349,13 +1347,13 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -1518,13 +1516,13 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -1573,7 +1571,7 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -1583,7 +1581,7 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -1673,13 +1671,13 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -1728,7 +1726,7 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -1738,7 +1736,7 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -1828,13 +1826,13 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -1883,7 +1881,7 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
           div list-item listitem settings.extension.fixture-29980 label="Fixture 29980"
             text
@@ -2189,7 +2187,7 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
 `;
 
 exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -2371,13 +2369,13 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -2426,7 +2424,7 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -2436,7 +2434,7 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`transcription available wire/AX state 1`] = `
@@ -2526,13 +2524,13 @@ exports[`transcription available wire/AX state 1`] = `
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -2588,7 +2586,7 @@ exports[`transcription available wire/AX state 1`] = `
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -2598,7 +2596,7 @@ exports[`transcription available wire/AX state 1`] = `
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Download","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Download","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`transcription downloading wire/AX state 1`] = `
@@ -2688,13 +2686,13 @@ exports[`transcription downloading wire/AX state 1`] = `
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -2752,7 +2750,7 @@ exports[`transcription downloading wire/AX state 1`] = `
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -2762,7 +2760,7 @@ exports[`transcription downloading wire/AX state 1`] = `
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Cancel","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Cancel","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`transcription installed wire/AX state 1`] = `
@@ -2852,13 +2850,13 @@ exports[`transcription installed wire/AX state 1`] = `
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -2916,7 +2914,7 @@ exports[`transcription installed wire/AX state 1`] = `
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -2926,7 +2924,7 @@ exports[`transcription installed wire/AX state 1`] = `
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Remove…","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Remove…","Filter extensions","Extension Type","Open Store"]"
 `;
 
 exports[`transcription error wire/AX state 1`] = `
@@ -3016,13 +3014,13 @@ exports[`transcription error wire/AX state 1`] = `
               text
                 text "ChatGPT"
               text
-                text "Restart needed"
+                text
           div group settings.row.account.claude label="Claude"
             div
               text
                 text "Claude"
               text
-                text "Restart needed"
+                text
         div group label="API or Local Model"
           div group settings.row.account.provider label="Connection Type"
             div
@@ -3080,7 +3078,7 @@ exports[`transcription error wire/AX state 1`] = `
         text
           text "Manage extensions and turn them on or off."
         input text-field label="Filter extensions" value=""
-        button pop-up-button label="Filter extensions" value="All Types"
+        button pop-up-button label="Extension Type" value="All Types"
         div empty-state group label="No Extensions"
           text heading
             text "No Extensions"
@@ -3090,5 +3088,5 @@ exports[`transcription error wire/AX state 1`] = `
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
           text "Open Store"
-Focus: ["settings.search","settings.sections","Bring My Workspace…","Retry","Filter extensions","Filter extensions","Open Store"]"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Retry","Filter extensions","Extension Type","Open Store"]"
 `;

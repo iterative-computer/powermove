@@ -132,7 +132,13 @@ function SettingRow({
       label={row.label}
       style={column}
     >
-      <div style={{ display: "flex", alignItems: "center" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
         <Copy>{row.label}</Copy>
         <RowControl row={row} model={model} />
       </div>
@@ -280,7 +286,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         }}
       />
       <UI.PopUpButton
-        label="Filter extensions"
+        label="Extension Type"
         binding={bindings.extensionType}
         value={model.extensionType}
         options={[...extensionTypes]}
@@ -314,6 +320,13 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         <UI.EmptyState
           label="Extensions are unavailable in this session."
           explanation=""
+          action={null}
+        />
+      ) : model.extensions.length === 0 &&
+        (model.extensionQuery.trim() || model.extensionType !== "All Types") ? (
+        <UI.EmptyState
+          label="No Results"
+          explanation="No extensions match this filter."
           action={null}
         />
       ) : model.extensions.length === 0 ? (
@@ -494,11 +507,25 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
         label={sectionCopy[model.active].title}
       >
         {model.query.trim() && model.matches.count === 0 ? (
-          <UI.EmptyState
+          // settings.md §5: centred reading text, not an empty-state title.
+          <div
+            role="status"
             label="No settings found."
-            explanation=""
-            action={null}
-          />
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <text
+              style={{
+                fontSize: t("typography.reading"),
+                color: t("colors.secondary"),
+              }}
+            >
+              No settings found.
+            </text>
+          </div>
         ) : (
           model.visibleSections.map((section) => (
             <SectionContent
