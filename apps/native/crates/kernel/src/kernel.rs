@@ -331,6 +331,11 @@ impl Kernel {
         current_base: Option<&str>,
         base_document: Option<&Value>,
     ) -> Recovery {
+        // Recovery must not read checkpoints while their writer is publishing
+        // or pruning them, nor move a session still referenced by a queued job.
+        if let Some(d) = &self.durability {
+            d.wait_idle();
+        }
         match self.project_dir(id) {
             Some(dir) => journal::recover(&dir, current_base, base_document),
             None => Recovery::Nothing,
@@ -546,7 +551,26 @@ impl Kernel {
         })
     }
 
-    /// Flush one journal, reporting IO failure before releasing its session.
+    /// Preserve rejected work after finishing every writer that uses its path.
+    pub(crate) fn archive_journal(&mut self, id: &str) -> Result<(), KernelFailure> {
+        self.flush_project(id)?;
+        let journal = self
+            .slots
+            .get_mut(id)
+            .unwrap()
+            .journal
+            .as_mut()
+            .ok_or_else(|| {
+                KernelFailure::Journal(
+                    "DiscardClose requires a journal to preserve rejected work".into(),
+                )
+            })?;
+        journal
+            .archive()
+            .map_err(|e| KernelFailure::Journal(e.to_string()))
+    }
+
+    /// Finish checkpoint work and fsync all segments before releasing a session.
     pub fn flush_project(&self, id: &str) -> Result<(), KernelFailure> {
         let slot = self
             .slots
@@ -555,6 +579,10 @@ impl Kernel {
         if let Some(journal) = &slot.journal {
             journal
                 .sync_now()
+                .map_err(|e| KernelFailure::Journal(e.to_string()))?;
+        }
+        if let Some(d) = &self.durability {
+            d.barrier()
                 .map_err(|e| KernelFailure::Journal(e.to_string()))?;
         }
         Ok(())
@@ -569,11 +597,8 @@ impl Kernel {
                 .map_err(|e| KernelFailure::Storage(e.to_string()))?;
         }
         if let Some(d) = &self.durability {
-            d.wait_idle();
-            let errors = d.take_errors();
-            if !errors.is_empty() {
-                return Err(KernelFailure::Journal(errors.join("; ")));
-            }
+            d.barrier()
+                .map_err(|e| KernelFailure::Journal(e.to_string()))?;
         }
         Ok(())
     }
