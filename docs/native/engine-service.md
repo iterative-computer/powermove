@@ -456,7 +456,9 @@ session was locked, so there are no on-screen rows.
   the vsync when GPU completion landed within ~2 ms of the target.
 - **Timed present:** playing frames use `presentDrawable:atTime:` at the predicted glass
   time minus half a refresh (never before the target). The compositor otherwise
-  sometimes latched a frame a refresh early, before its audio.
+  sometimes latched a frame a refresh early, before its audio. The lag estimate is
+  the upper decile of the last 15 target → glass samples, so frames are held to the
+  slower of the compositor's usual 1-or-2-refresh slots instead of alternating.
 - `PM_ENGINE_PRESENT=legacy` restores the previous schedule for same-build A/B only.
 
 Layer configuration is unchanged (3 drawables, display sync, no transaction present):
