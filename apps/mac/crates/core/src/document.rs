@@ -69,15 +69,29 @@ impl Snapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChangeCause {
     /// A committed transaction ([`DocumentStore::execute`], [`DocumentStore::transact`]).
-    Edit { label: String, origin: Origin },
-    Undo { label: String },
-    Redo { label: String },
+    Edit {
+        label: String,
+        origin: Origin,
+    },
+    Undo {
+        label: String,
+    },
+    Redo {
+        label: String,
+    },
     /// One live step of a gesture (no undo step yet).
-    GestureStep { gesture: GestureId },
+    GestureStep {
+        gesture: GestureId,
+    },
     /// A cancelled gesture restoring its starting values.
-    GestureCancel { gesture: GestureId },
+    GestureCancel {
+        gesture: GestureId,
+    },
     /// [`DocumentStore::restore_project`].
-    Restore { label: String, origin: Origin },
+    Restore {
+        label: String,
+        origin: Origin,
+    },
 }
 
 /// One published revision: what readers need to follow incrementally.
@@ -103,7 +117,9 @@ pub enum StoreEvent {
     /// The unsaved-changes state flipped.
     DirtyChanged(bool),
     /// A save finished and was adopted ([`DocumentStore::finish_save`]).
-    Saved { revision: u64 },
+    Saved {
+        revision: u64,
+    },
 }
 
 /// Handle returned by [`DocumentStore::subscribe`].
@@ -214,7 +230,12 @@ impl DocumentStore {
         DocumentStore::from_parts(ProjectFile::untitled(), document, History::new(), true)
     }
 
-    fn from_parts(file: ProjectFile, document: Document, history: History, history_owned: bool) -> DocumentStore {
+    fn from_parts(
+        file: ProjectFile,
+        document: Document,
+        history: History,
+        history_owned: bool,
+    ) -> DocumentStore {
         let queries = QueryContext::new(&document);
         let token = history.state_token();
         DocumentStore {
@@ -287,7 +308,13 @@ impl DocumentStore {
         if revision + 1 < first.revision || revision > self.revision() {
             return None;
         }
-        Some(self.log.iter().filter(|c| c.revision > revision).cloned().collect())
+        Some(
+            self.log
+                .iter()
+                .filter(|c| c.revision > revision)
+                .cloned()
+                .collect(),
+        )
     }
 
     pub fn history(&self) -> &History {
@@ -345,7 +372,10 @@ impl DocumentStore {
     /// Calls `listener` synchronously after every event, on the thread that
     /// caused it. A listener must not call back into the store (it cannot:
     /// the store is mutably borrowed); GPUI wrappers just `cx.notify()`.
-    pub fn subscribe(&mut self, listener: impl FnMut(&StoreEvent) + Send + 'static) -> Subscription {
+    pub fn subscribe(
+        &mut self,
+        listener: impl FnMut(&StoreEvent) + Send + 'static,
+    ) -> Subscription {
         let id = self.next_listener;
         self.next_listener += 1;
         self.listeners.push((id, Box::new(listener)));
@@ -375,10 +405,17 @@ impl DocumentStore {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let live = self.root().map(|r| model::layer_ids(r, None)).unwrap_or_default();
+        let live = self
+            .root()
+            .map(|r| model::layer_ids(r, None))
+            .unwrap_or_default();
         let before = self.selection.clone();
-        self.selection
-            .select_layers(ids.into_iter().map(Into::into).filter(|id| live.contains(id)), add);
+        self.selection.select_layers(
+            ids.into_iter()
+                .map(Into::into)
+                .filter(|id| live.contains(id)),
+            add,
+        );
         if self.selection != before {
             self.emit(StoreEvent::SelectionChanged);
         }
@@ -386,7 +423,9 @@ impl DocumentStore {
 
     /// Adds or removes one layer (Shift/Cmd-click).
     pub fn toggle_layer(&mut self, id: &str) {
-        let live = self.root().is_some_and(|r| model::layer_ids(r, None).contains(id));
+        let live = self
+            .root()
+            .is_some_and(|r| model::layer_ids(r, None).contains(id));
         if live || self.selection.contains(id) {
             self.selection.toggle_layer(id);
             self.emit(StoreEvent::SelectionChanged);
@@ -438,7 +477,11 @@ impl DocumentStore {
     // ── transactions ───────────────────────────────────────────────────────
 
     /// Runs one command as one undo step. `Ok(None)`: nothing to change.
-    pub fn execute(&mut self, command: Command, origin: Origin) -> Result<Option<Committed>, TransactionError> {
+    pub fn execute(
+        &mut self,
+        command: Command,
+        origin: Origin,
+    ) -> Result<Option<Committed>, TransactionError> {
         self.transact_with(
             std::slice::from_ref(&command),
             TransactOptions {
@@ -475,23 +518,28 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
-        if let Some(expected) = options.expected_revision {
-            if expected != self.revision() {
-                return Err(TransactionError::Stale {
-                    expected,
-                    current: self.revision(),
-                });
-            }
+        if let Some(expected) = options.expected_revision
+            && expected != self.revision()
+        {
+            return Err(TransactionError::Stale {
+                expected,
+                current: self.revision(),
+            });
         }
         let staged = self.stage_commands(commands, options.origin)?;
         let label = options
             .label
             .or_else(|| commands.first().map(Command::label))
             .unwrap_or_else(|| "Edit".to_owned());
-        Ok(self.commit_staged(staged, label.clone(), options.origin, ChangeCause::Edit {
-            label,
-            origin: options.origin,
-        }))
+        Ok(self.commit_staged(
+            staged,
+            label.clone(),
+            options.origin,
+            ChangeCause::Edit {
+                label,
+                origin: options.origin,
+            },
+        ))
     }
 
     /// Replaces the whole project with `project` (stored or canonical form)
@@ -507,15 +555,22 @@ impl DocumentStore {
             return Err(TransactionError::GestureInProgress);
         }
         let canonical = model::to_canonical(project);
-        project_io::validate_stored_project(&pm_model::canonical::realize_project(canonical.clone()))
-            .map_err(|e| TransactionError::Invalid(e.to_string()))?;
+        project_io::validate_stored_project(&pm_model::canonical::realize_project(
+            canonical.clone(),
+        ))
+        .map_err(|e| TransactionError::Invalid(e.to_string()))?;
         let after = Node::from_value(canonical, self.revision() + 1);
         let ops = diff_node_ops(self.current.root(), Some(&after));
         let staged = self.stage_ops(&ops, true)?;
-        Ok(self.commit_staged(staged, label.to_owned(), origin, ChangeCause::Restore {
-            label: label.to_owned(),
+        Ok(self.commit_staged(
+            staged,
+            label.to_owned(),
             origin,
-        }))
+            ChangeCause::Restore {
+                label: label.to_owned(),
+                origin,
+            },
+        ))
     }
 
     fn commit_staged(
@@ -565,12 +620,20 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
-        let record = self.history.peek_undo().ok_or(TransactionError::NothingToUndo)?.clone();
+        let record = self
+            .history
+            .peek_undo()
+            .ok_or(TransactionError::NothingToUndo)?
+            .clone();
         let staged = self.stage_ops(&record.inverse, false)?;
         let revision = staged.document.revision();
-        self.publish(staged.document, record.inverse.clone(), ChangeCause::Undo {
-            label: record.label.clone(),
-        });
+        self.publish(
+            staged.document,
+            record.inverse.clone(),
+            ChangeCause::Undo {
+                label: record.label.clone(),
+            },
+        );
         self.history.mark_undone();
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -582,12 +645,20 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
-        let record = self.history.peek_redo().ok_or(TransactionError::NothingToRedo)?.clone();
+        let record = self
+            .history
+            .peek_redo()
+            .ok_or(TransactionError::NothingToRedo)?
+            .clone();
         let staged = self.stage_ops(&record.forward, false)?;
         let revision = staged.document.revision();
-        self.publish(staged.document, record.forward.clone(), ChangeCause::Redo {
-            label: record.label.clone(),
-        });
+        self.publish(
+            staged.document,
+            record.forward.clone(),
+            ChangeCause::Redo {
+                label: record.label.clone(),
+            },
+        );
         self.history.mark_redone();
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -625,7 +696,11 @@ impl DocumentStore {
     /// gesture one undo step, [`cancel_gesture`](Self::cancel_gesture)
     /// restores the starting values. While it is open, other edits, undo and
     /// redo are refused.
-    pub fn begin_gesture(&mut self, label: &str, origin: Origin) -> Result<GestureId, TransactionError> {
+    pub fn begin_gesture(
+        &mut self,
+        label: &str,
+        origin: Origin,
+    ) -> Result<GestureId, TransactionError> {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
@@ -654,7 +729,11 @@ impl DocumentStore {
 
     /// One step: stages `commands` on the current state and publishes it.
     /// Returns the new revision, or `None` when nothing changed.
-    pub fn update_gesture(&mut self, id: GestureId, commands: &[Command]) -> Result<Option<u64>, TransactionError> {
+    pub fn update_gesture(
+        &mut self,
+        id: GestureId,
+        commands: &[Command],
+    ) -> Result<Option<u64>, TransactionError> {
         let origin = self.gesture_mut(id)?.origin;
         let staged = self.stage_commands(commands, origin)?;
         if !staged.changed {
@@ -662,7 +741,11 @@ impl DocumentStore {
         }
         self.gesture_mut(id)?.scopes.extend(staged.scopes);
         let revision = staged.document.revision();
-        self.publish(staged.document, staged.forward.into(), ChangeCause::GestureStep { gesture: id });
+        self.publish(
+            staged.document,
+            staged.forward.into(),
+            ChangeCause::GestureStep { gesture: id },
+        );
         self.set_state_token(next_token());
         Ok(Some(revision))
     }
@@ -672,7 +755,8 @@ impl DocumentStore {
     pub fn commit_gesture(&mut self, id: GestureId) -> Result<Option<u64>, TransactionError> {
         self.gesture_mut(id)?;
         let gesture = self.gesture.take().expect("checked");
-        let (forward, backward) = scoped_patches(gesture.base.root(), self.current.root(), gesture.scopes);
+        let (forward, backward) =
+            scoped_patches(gesture.base.root(), self.current.root(), gesture.scopes);
         if forward == backward {
             self.set_state_token(gesture.base_token);
             return Ok(None);
@@ -701,13 +785,20 @@ impl DocumentStore {
             Some(g) if g.id == id => g,
             _ => return Err(TransactionError::NoSuchGesture),
         };
-        let (forward, backward) =
-            scoped_patches(gesture.base.root(), self.current.root(), gesture.scopes.clone());
+        let (forward, backward) = scoped_patches(
+            gesture.base.root(),
+            self.current.root(),
+            gesture.scopes.clone(),
+        );
         let base_token = gesture.base_token;
         if forward != backward {
             let ops: Vec<Op> = backward.into_iter().map(Op::Leaf).collect();
             let staged = self.stage_ops(&ops, false)?;
-            self.publish(staged.document, ops.into(), ChangeCause::GestureCancel { gesture: id });
+            self.publish(
+                staged.document,
+                ops.into(),
+                ChangeCause::GestureCancel { gesture: id },
+            );
         }
         self.gesture = None;
         self.set_state_token(base_token);
@@ -716,7 +807,11 @@ impl DocumentStore {
 
     // ── staging ────────────────────────────────────────────────────────────
 
-    fn stage_commands(&self, commands: &[Command], origin: Origin) -> Result<Staged, TransactionError> {
+    fn stage_commands(
+        &self,
+        commands: &[Command],
+        origin: Origin,
+    ) -> Result<Staged, TransactionError> {
         let revision = self.revision() + 1;
         let mut root = self.current.root().cloned();
         let mut forward = Vec::new();
@@ -828,15 +923,32 @@ impl DocumentStore {
     /// run the plan with [`SavePlan::run`] on a worker, then pass the
     /// result's receipt to [`finish_save`](Self::finish_save). Edits may
     /// continue meanwhile; they stay dirty.
-    pub fn prepare_save(&mut self, target: SaveTarget, options: SaveOptions) -> Result<SavePlan, ProjectIoError> {
+    pub fn prepare_save(
+        &mut self,
+        target: SaveTarget,
+        options: SaveOptions,
+    ) -> Result<SavePlan, ProjectIoError> {
         if self.is_saving() {
             return Err(ProjectIoError::SaveInProgress);
         }
         let (destination, publish, replace_existing, reuse_previous) = match target {
             SaveTarget::InPlace => {
-                let path = self.file.path.clone().ok_or(ProjectIoError::NoDestination)?;
-                let version = self.file.version.clone().ok_or(ProjectIoError::NoDestination)?;
-                (path, Some(Publish::Replace((*version).clone())), false, true)
+                let path = self
+                    .file
+                    .path
+                    .clone()
+                    .ok_or(ProjectIoError::NoDestination)?;
+                let version = self
+                    .file
+                    .version
+                    .clone()
+                    .ok_or(ProjectIoError::NoDestination)?;
+                (
+                    path,
+                    Some(Publish::Replace((*version).clone())),
+                    false,
+                    true,
+                )
             }
             SaveTarget::SaveAs { path, replace } => (path, None, replace, false),
         };
@@ -928,7 +1040,9 @@ impl DocumentStore {
                 }
             }
         }
-        if let Some(NodeKind::Object(assets)) = self.root().and_then(|r| r.get("assets")).map(Node::kind) {
+        if let Some(NodeKind::Object(assets)) =
+            self.root().and_then(|r| r.get("assets")).map(Node::kind)
+        {
             ids.extend(assets.keys().filter_map(|k| k.as_str().map(str::to_owned)));
         }
         ids
@@ -938,7 +1052,11 @@ impl DocumentStore {
 // ── staging helpers ─────────────────────────────────────────────────────────
 
 /// Applies one operation to a tree as `revision`.
-fn apply_one(root: Option<Node>, op: &Op, revision: u64) -> Result<(Option<Node>, bool), TransactionError> {
+fn apply_one(
+    root: Option<Node>,
+    op: &Op,
+    revision: u64,
+) -> Result<(Option<Node>, bool), TransactionError> {
     let mut step = Document::from_root(root, revision - 1);
     let outcome = step
         .apply_ops_at(std::slice::from_ref(op), revision)
@@ -1009,16 +1127,24 @@ fn capture_inverse(root: Option<&Node>, op: &Op) -> (Op, Vec<PathPart>) {
                 .and_then(Value::as_js_string)
                 .cloned()
                 .unwrap_or_default();
-            (Op::Delete { path: path.clone(), id }, path.clone())
+            (
+                Op::Delete {
+                    path: path.clone(),
+                    id,
+                },
+                path.clone(),
+            )
         }
         Op::Delete { path, id } => {
-            let found = root.and_then(|r| r.lookup(path)).and_then(|array| match array.kind() {
-                NodeKind::Array(items) => items
-                    .iter()
-                    .position(|i| i.get("id").and_then(model::string_of) == Some(id))
-                    .map(|index| (index, items[index].to_value())),
-                _ => None,
-            });
+            let found = root
+                .and_then(|r| r.lookup(path))
+                .and_then(|array| match array.kind() {
+                    NodeKind::Array(items) => items
+                        .iter()
+                        .position(|i| i.get("id").and_then(model::string_of) == Some(id))
+                        .map(|index| (index, items[index].to_value())),
+                    _ => None,
+                });
             match found {
                 Some((index, value)) => (
                     Op::Insert {
@@ -1083,10 +1209,11 @@ fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
         return invalid("the project is not an object".into());
     }
     let open = model::open_comp_id(root);
-    if let Some(open) = &open {
-        if model::comp_node(root, Some(open)).is_none_or(|c| !matches!(c.kind(), NodeKind::Object(_))) {
-            return invalid(format!("the open composition {open} is missing"));
-        }
+    if let Some(open) = &open
+        && model::comp_node(root, Some(open))
+            .is_none_or(|c| !matches!(c.kind(), NodeKind::Object(_)))
+    {
+        return invalid(format!("the open composition {open} is missing"));
     }
     // Compositions the transaction touched.
     let mut all = false;
@@ -1097,7 +1224,9 @@ fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
         match (first.as_ref().and_then(|k| k.as_str()), path.get(1)) {
             (None, _) => all = true,
             (Some("comps"), None) => all = true,
-            (Some("comps"), Some(id)) => touched.push(id.property_key().as_str().map(str::to_owned)),
+            (Some("comps"), Some(id)) => {
+                touched.push(id.property_key().as_str().map(str::to_owned))
+            }
             (Some(k), _) if pm_model::canonical::COMP_FIELDS.contains(&k) || k == "compId" => {
                 touched.push(None);
                 if k == "compId" {
@@ -1110,7 +1239,10 @@ fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
     let comps: Vec<Option<String>> = if all {
         let mut list = vec![None];
         if let Some(NodeKind::Object(map)) = root.get("comps").map(Node::kind) {
-            list.extend(map.keys().filter_map(|k| k.as_str().map(|s| Some(s.to_owned()))));
+            list.extend(
+                map.keys()
+                    .filter_map(|k| k.as_str().map(|s| Some(s.to_owned()))),
+            );
         }
         list
     } else {
@@ -1155,5 +1287,9 @@ fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
 pub(crate) fn assert_inverse_restores(before: Option<&Node>, after: Option<&Node>, inverse: &[Op]) {
     let mut doc = Document::from_root(after.cloned(), 1);
     doc.apply_ops_at(inverse, 2).expect("inverse applies");
-    assert_eq!(doc.to_value(), before.map(Node::to_value), "inverse restores the state");
+    assert_eq!(
+        doc.to_value(),
+        before.map(Node::to_value),
+        "inverse restores the state"
+    );
 }

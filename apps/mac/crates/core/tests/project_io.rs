@@ -21,10 +21,16 @@ fn canonical_of_file(path: &std::path::Path) -> Value {
 
 fn media_bytes(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     let bytes = read(path);
-    let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true }).unwrap();
+    let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true })
+        .unwrap();
     c.media
         .iter()
-        .map(|r| (r.id.to_string_lossy(), c.media_bytes(&bytes, r).unwrap().to_vec()))
+        .map(|r| {
+            (
+                r.id.to_string_lossy(),
+                c.media_bytes(&bytes, r).unwrap().to_vec(),
+            )
+        })
         .collect()
 }
 
@@ -50,7 +56,8 @@ fn container_fixtures_round_trip_through_pmv4() {
     ] {
         let dir = TempDir::new("roundtrip");
         let source = engine_fixture(&format!("containers/{name}"));
-        let opened = open_project(&source, OpenOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let opened =
+            open_project(&source, OpenOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
         let format = opened.file.format;
         let mut store = DocumentStore::open(opened);
         let out = dir.path("out.pmv");
@@ -70,35 +77,70 @@ fn container_fixtures_round_trip_through_pmv4() {
         // undo history) reaches is written, as in the old app.
         let assets = canonical_of_file(&source);
         let reachable = |id: &str| assets.get("assets").and_then(|a| a.get(id)).is_some();
-        let source_media: Vec<_> = media_bytes(&source).into_iter().filter(|(id, _)| reachable(id)).collect();
+        let source_media: Vec<_> = media_bytes(&source)
+            .into_iter()
+            .filter(|(id, _)| reachable(id))
+            .collect();
         if format != ContainerFormat::Json {
-            assert!(!source_media.is_empty() || name.contains("no-media"), "{name}");
-            assert_eq!(sorted(media_bytes(&out)), sorted(source_media.clone()), "{name}: media");
+            assert!(
+                !source_media.is_empty() || name.contains("no-media"),
+                "{name}"
+            );
+            assert_eq!(
+                sorted(media_bytes(&out)),
+                sorted(source_media.clone()),
+                "{name}: media"
+            );
         }
         // Envelope: the old app's members first, unknown ones kept.
         let doc = &saved.document;
-        assert_eq!(doc.get("v").and_then(Value::as_str), Some("1.0.0"), "{name}");
+        assert_eq!(
+            doc.get("v").and_then(Value::as_str),
+            Some("1.0.0"),
+            "{name}"
+        );
         let source_doc = {
             let f = std::fs::File::open(&source).unwrap();
-            read_container(&f, ReadOptions { verify_media: false }).unwrap().document
+            read_container(
+                &f,
+                ReadOptions {
+                    verify_media: false,
+                },
+            )
+            .unwrap()
+            .document
         };
         if source_doc.get("proj").is_some() {
             // `history: { entries: [], index: 0 }` is not replayable (no
             // version), so it is written back exactly as read.
-            assert_eq!(doc.get("history"), source_doc.get("history"), "{name}: history");
+            assert_eq!(
+                doc.get("history"),
+                source_doc.get("history"),
+                "{name}: history"
+            );
         }
         // A second open of our own file works, and saving it again in place
         // appends nothing but a document.
         let mut again = open_store(&out);
         assert_eq!(again.layers(), store.layers(), "{name}");
         again
-            .execute(Command::SetLayerName { layer_id: "a".into(), name: "Renamed".into() }, Origin::Interface)
+            .execute(
+                Command::SetLayerName {
+                    layer_id: "a".into(),
+                    name: "Renamed".into(),
+                },
+                Origin::Interface,
+            )
             .unwrap();
         save(&mut again, SaveTarget::InPlace, SaveOptions::default()).unwrap();
         let reread = open_store(&out);
         assert_eq!(reread.layers()[0].name, "Renamed", "{name}");
         if format != ContainerFormat::Json {
-            assert_eq!(sorted(media_bytes(&out)), sorted(source_media), "{name}: media after append");
+            assert_eq!(
+                sorted(media_bytes(&out)),
+                sorted(source_media),
+                "{name}: media after append"
+            );
         }
         assert_eq!(dir.entries(), ["out.pmv"], "{name}: no temp files");
     }
@@ -121,9 +163,14 @@ fn legacy_base64_media_becomes_a_record() {
     save_as(&mut store, &out).unwrap();
     assert_eq!(media_bytes(&out), [("img".to_owned(), vec![1, 2, 3])]);
     let file = std::fs::File::open(&out).unwrap();
-    let doc = read_container(&file, ReadOptions::default()).unwrap().document;
+    let doc = read_container(&file, ReadOptions::default())
+        .unwrap()
+        .document;
     assert!(doc.get("media").is_none());
-    assert_eq!(to_canonical_string(doc.get("futureEnvelope").unwrap()), r#"{"x":[1,2]}"#);
+    assert_eq!(
+        to_canonical_string(doc.get("futureEnvelope").unwrap()),
+        r#"{"x":[1,2]}"#
+    );
 }
 
 /// Every corpus project survives an untitled save and reopen unchanged.
@@ -142,7 +189,12 @@ fn corpus_projects_round_trip() {
         let mut store = DocumentStore::new_untitled(project_of(&stored).clone());
         let out = dir.path(&format!("{count}.pmv"));
         save_as(&mut store, &out).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert_eq!(to_canonical_string(&canonical_of_file(&out)), expected, "{}", path.display());
+        assert_eq!(
+            to_canonical_string(&canonical_of_file(&out)),
+            expected,
+            "{}",
+            path.display()
+        );
         count += 1;
     }
     assert!(count >= 30, "{count}");
@@ -153,7 +205,13 @@ fn edited_copy(dir: &TempDir) -> (std::path::PathBuf, DocumentStore) {
     std::fs::copy(ts_fixture("fresh.pmv"), &path).unwrap();
     let mut store = open_store(&path);
     store
-        .execute(Command::SetStaticOpacity { layer_id: "a".into(), value: 25.0 }, Origin::Interface)
+        .execute(
+            Command::SetStaticOpacity {
+                layer_id: "a".into(),
+                value: 25.0,
+            },
+            Origin::Interface,
+        )
         .unwrap();
     (path, store)
 }
@@ -241,13 +299,24 @@ fn save_as_never_overwrites_without_consent() {
     std::fs::write(&other, b"precious").unwrap();
     let err = run_save(
         &mut store,
-        SaveTarget::SaveAs { path: other.clone(), replace: false },
+        SaveTarget::SaveAs {
+            path: other.clone(),
+            replace: false,
+        },
         SaveOptions::default(),
     )
     .unwrap_err();
     assert!(matches!(err, ProjectIoError::DestinationExists(_)), "{err}");
     assert_eq!(read(&other), b"precious");
-    save(&mut store, SaveTarget::SaveAs { path: other.clone(), replace: true }, SaveOptions::default()).unwrap();
+    save(
+        &mut store,
+        SaveTarget::SaveAs {
+            path: other.clone(),
+            replace: true,
+        },
+        SaveOptions::default(),
+    )
+    .unwrap();
     assert_eq!(opacity_of(&open_store(&other), "a"), Some(25.0));
 }
 
@@ -263,7 +332,11 @@ fn a_vanished_media_source_fails_the_save_cleanly() {
         id: "m".into(),
         media_type: "application/octet-stream".into(),
         revision: MediaEntry::fresh_revision(),
-        source: MediaSource::File { path: media.clone(), length: 100, sha256: None },
+        source: MediaSource::File {
+            path: media.clone(),
+            length: 100,
+            sha256: None,
+        },
     });
     std::fs::remove_file(&media).unwrap();
     let out = dir.path("out.pmv");
@@ -290,7 +363,9 @@ fn a_vanished_media_source_fails_the_save_cleanly() {
 fn edits_during_a_save_stay_dirty() {
     let dir = TempDir::new("during");
     let (path, mut store) = edited_copy(&dir);
-    let plan = store.prepare_save(SaveTarget::InPlace, SaveOptions::default()).unwrap();
+    let plan = store
+        .prepare_save(SaveTarget::InPlace, SaveOptions::default())
+        .unwrap();
     assert!(store.is_saving());
     assert!(matches!(
         store.prepare_save(SaveTarget::InPlace, SaveOptions::default()),
@@ -299,7 +374,13 @@ fn edits_during_a_save_stay_dirty() {
     let worker = std::thread::spawn(move || plan.run());
     // The user keeps editing while the worker writes revision R.
     store
-        .execute(Command::SetStaticOpacity { layer_id: "a".into(), value: 60.0 }, Origin::Interface)
+        .execute(
+            Command::SetStaticOpacity {
+                layer_id: "a".into(),
+                value: 60.0,
+            },
+            Origin::Interface,
+        )
         .unwrap();
     let receipt = worker.join().unwrap().unwrap();
     store.finish_save(receipt).unwrap();
@@ -323,7 +404,13 @@ fn compaction_keeps_reused_media_first_and_intact() {
     std::fs::copy(ts_fixture("append.pmv"), &path).unwrap();
     let mut store = open_store(&path);
     store
-        .execute(Command::SetLayerVisible { layer_id: "b".into(), visible: false }, Origin::Interface)
+        .execute(
+            Command::SetLayerVisible {
+                layer_id: "b".into(),
+                visible: false,
+            },
+            Origin::Interface,
+        )
         .unwrap();
     let options = SaveOptions {
         compact_min_dead_bytes: Some(0),
@@ -335,14 +422,21 @@ fn compaction_keeps_reused_media_first_and_intact() {
     assert_eq!(receipt.reused_media_bytes, 3011);
     store.finish_save(receipt).unwrap();
     let bytes = read(&path);
-    let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true }).unwrap();
+    let c = pm_model::container::read_container_bytes(&bytes, ReadOptions { verify_media: true })
+        .unwrap();
     // Reused records come straight after the magic, then the document.
     assert_eq!(c.media[0].offset, 5);
     assert_eq!(c.media[1].offset, 16);
     assert!(bytes.len() < read(&ts_fixture("append.pmv")).len());
-    assert_eq!(c.media_bytes(&bytes, &c.media[0]).unwrap(), read(&ts_fixture("media-img.bin")));
-    assert_eq!(c.media_bytes(&bytes, &c.media[1]).unwrap(), read(&ts_fixture("media-clip.bin")));
-    assert_eq!(open_store(&path).layers()[1].visible, false);
+    assert_eq!(
+        c.media_bytes(&bytes, &c.media[0]).unwrap(),
+        read(&ts_fixture("media-img.bin"))
+    );
+    assert_eq!(
+        c.media_bytes(&bytes, &c.media[1]).unwrap(),
+        read(&ts_fixture("media-clip.bin"))
+    );
+    assert!(!open_store(&path).layers()[1].visible);
 }
 
 #[test]
@@ -351,22 +445,48 @@ fn backups_keep_the_replaced_version() {
     let (path, mut store) = edited_copy(&dir);
     let original = read(&path);
     let policy = BackupPolicy::new(dir.path("Backups"));
-    let options = SaveOptions { backups: Some(policy.clone()), ..SaveOptions::default() };
+    let options = SaveOptions {
+        backups: Some(policy.clone()),
+        ..SaveOptions::default()
+    };
     let receipt = run_save(&mut store, SaveTarget::InPlace, options.clone()).unwrap();
     let backup = receipt.backup.clone().unwrap();
     store.finish_save(receipt).unwrap();
     assert_eq!(read(&backup), original);
     for value in [1.0, 2.0, 3.0] {
         store
-            .execute(Command::SetStaticOpacity { layer_id: "a".into(), value }, Origin::Interface)
+            .execute(
+                Command::SetStaticOpacity {
+                    layer_id: "a".into(),
+                    value,
+                },
+                Origin::Interface,
+            )
             .unwrap();
         save(&mut store, SaveTarget::InPlace, options.clone()).unwrap();
     }
-    let small = BackupPolicy { max_versions: 2, ..policy.clone() };
+    let small = BackupPolicy {
+        max_versions: 2,
+        ..policy.clone()
+    };
     store
-        .execute(Command::SetStaticOpacity { layer_id: "a".into(), value: 4.0 }, Origin::Interface)
+        .execute(
+            Command::SetStaticOpacity {
+                layer_id: "a".into(),
+                value: 4.0,
+            },
+            Origin::Interface,
+        )
         .unwrap();
-    save(&mut store, SaveTarget::InPlace, SaveOptions { backups: Some(small), ..SaveOptions::default() }).unwrap();
+    save(
+        &mut store,
+        SaveTarget::InPlace,
+        SaveOptions {
+            backups: Some(small),
+            ..SaveOptions::default()
+        },
+    )
+    .unwrap();
     assert_eq!(list_backups(&policy).unwrap().len(), 2);
 }
 
@@ -384,15 +504,42 @@ fn structural_history_survives_save_and_reopen() {
         .and_then(Value::as_array_mut)
         .unwrap();
     layers.reverse();
-    store.restore_project(project, "Reorder Layers", Origin::Interface).unwrap().unwrap();
-    assert_eq!(store.layers().iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+    store
+        .restore_project(project, "Reorder Layers", Origin::Interface)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .layers()
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
     save(&mut store, SaveTarget::InPlace, SaveOptions::default()).unwrap();
     let mut reopened = open_store(&path);
-    assert_eq!(reopened.history().labels(), ["Change Opacity", "Reorder Layers"]);
+    assert_eq!(
+        reopened.history().labels(),
+        ["Change Opacity", "Reorder Layers"]
+    );
     reopened.undo().unwrap();
-    assert_eq!(reopened.layers().iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    assert_eq!(
+        reopened
+            .layers()
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
     reopened.redo().unwrap();
-    assert_eq!(reopened.layers().iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+    assert_eq!(
+        reopened
+            .layers()
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
 }
 
 trait PathMut {

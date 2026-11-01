@@ -267,7 +267,9 @@ impl History {
     ) -> u64 {
         self.discard_redo();
         let bytes = match &saved {
-            Some((f, b)) => patches_bytes(f) + patches_bytes(b) + ops_bytes(&forward) + ops_bytes(&inverse),
+            Some((f, b)) => {
+                patches_bytes(f) + patches_bytes(b) + ops_bytes(&forward) + ops_bytes(&inverse)
+            }
             None => ops_bytes(&forward) + ops_bytes(&inverse),
         };
         let id = next_token();
@@ -321,8 +323,15 @@ impl History {
             self.total_bytes -= r.bytes;
         }
         self.cursor = self.entries.len();
-        let forward: Vec<Op> = tail.iter().flat_map(|r| r.forward.iter().cloned()).collect();
-        let inverse: Vec<Op> = tail.iter().rev().flat_map(|r| r.inverse.iter().cloned()).collect();
+        let forward: Vec<Op> = tail
+            .iter()
+            .flat_map(|r| r.forward.iter().cloned())
+            .collect();
+        let inverse: Vec<Op> = tail
+            .iter()
+            .rev()
+            .flat_map(|r| r.inverse.iter().cloned())
+            .collect();
         let saved = tail.iter().any(|r| r.saved.is_some()).then(|| {
             let mut f = Vec::new();
             let mut b = Vec::new();
@@ -335,7 +344,14 @@ impl History {
             (f, b)
         });
         let revision = tail.last().map_or(0, |r| r.revision);
-        Some(self.push(label.to_owned(), tail[0].origin, forward, inverse, saved, revision))
+        Some(self.push(
+            label.to_owned(),
+            tail[0].origin,
+            forward,
+            inverse,
+            saved,
+            revision,
+        ))
     }
 
     /// A copy for a save on another thread (records are shared, not copied).
@@ -352,7 +368,10 @@ impl History {
 const DICTIONARY_FORMAT: &str = "powermove-history-dictionary";
 
 fn forbidden(key: &JsString) -> bool {
-    matches!(key.as_str(), Some("__proto__" | "prototype" | "constructor"))
+    matches!(
+        key.as_str(),
+        Some("__proto__" | "prototype" | "constructor")
+    )
 }
 
 /// `validPatches` for one patch: string parts other than the prototype keys,
@@ -366,11 +385,13 @@ fn valid_patch(patch: &Patch) -> bool {
 
 /// `isHistoryRecordArrayPath`.
 fn is_record_array_path(path: &[Value]) -> bool {
-    matches!(path.last().and_then(Value::as_str), Some("layers" | "edits"))
-        && (path.len() == 1
-            || path.len() == 3
-                && path[0].as_str() == Some("comps")
-                && path[1].as_str().is_some_and(|s| !s.is_empty()))
+    matches!(
+        path.last().and_then(Value::as_str),
+        Some("layers" | "edits")
+    ) && (path.len() == 1
+        || path.len() == 3
+            && path[0].as_str() == Some("comps")
+            && path[1].as_str().is_some_and(|s| !s.is_empty()))
 }
 
 /// `unpackHistory`. `None` when the dictionary is malformed.
@@ -470,7 +491,11 @@ impl History {
                 label,
                 origin: Origin::Interface,
                 forward: forward.into_iter().map(Op::Leaf).collect::<Vec<_>>().into(),
-                inverse: backward.into_iter().map(Op::Leaf).collect::<Vec<_>>().into(),
+                inverse: backward
+                    .into_iter()
+                    .map(Op::Leaf)
+                    .collect::<Vec<_>>()
+                    .into(),
                 saved: None,
                 revision: 0,
                 bytes,
@@ -525,7 +550,14 @@ mod tests {
 
     fn record(h: &mut History, label: &str) -> u64 {
         let p = Patch::set(vec![PathPart::from("x")], Value::Number(1.0));
-        h.push(label.into(), Origin::Interface, vec![Op::Leaf(p.clone())], vec![Op::Leaf(p)], None, 1)
+        h.push(
+            label.into(),
+            Origin::Interface,
+            vec![Op::Leaf(p.clone())],
+            vec![Op::Leaf(p)],
+            None,
+            1,
+        )
     }
 
     #[test]
@@ -580,7 +612,10 @@ mod tests {
         let h = History::from_saved(&saved, Some("C1")).unwrap();
         assert_eq!(h.labels(), ["Rename Layer"]);
         assert_eq!(h.applied(), 1);
-        assert_eq!(pm_model::json::to_canonical_string(&h.snapshot().to_saved()), text);
+        assert_eq!(
+            pm_model::json::to_canonical_string(&h.snapshot().to_saved()),
+            text
+        );
     }
 
     #[test]
@@ -588,7 +623,10 @@ mod tests {
         let text = r#"{"entries":[{"backward":[{"exists":true,"path":["layers",0,"name"],"value":"a"}],"forward":[{"exists":true,"path":["layers",0,"name"],"value":"b"}],"label":"x"}],"index":0,"version":1}"#;
         let h = History::from_saved(&parse(text).unwrap(), Some("C1")).unwrap();
         let saved = pm_model::json::to_canonical_string(&h.snapshot().to_saved());
-        assert!(saved.contains(r#""path":["comps","C1","layers",0,"name"]"#), "{saved}");
+        assert!(
+            saved.contains(r#""path":["comps","C1","layers",0,"name"]"#),
+            "{saved}"
+        );
     }
 
     #[test]
@@ -600,9 +638,18 @@ mod tests {
             r#"{"entries":[{"label":"x","forward":[{"path":[1.5],"exists":true}],"backward":[]}],"index":0,"version":1}"#,
             r#"{"entries":[{"label":3,"forward":[],"backward":[]}],"index":0,"version":1}"#,
         ] {
-            assert!(History::from_saved(&parse(text).unwrap(), None).is_none(), "{text}");
+            assert!(
+                History::from_saved(&parse(text).unwrap(), None).is_none(),
+                "{text}"
+            );
         }
-        assert!(History::from_saved(&parse(r#"{"entries":[],"index":-1,"version":1}"#).unwrap(), None).is_some());
+        assert!(
+            History::from_saved(
+                &parse(r#"{"entries":[],"index":-1,"version":1}"#).unwrap(),
+                None
+            )
+            .is_some()
+        );
     }
 
     #[test]

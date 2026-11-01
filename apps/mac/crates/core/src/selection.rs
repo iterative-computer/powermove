@@ -93,7 +93,11 @@ impl Selection {
 
     /// Drops layer ids not in `layers` and key ids not in `keys` (when
     /// given). Returns whether anything went.
-    pub(crate) fn prune(&mut self, layers: &HashSet<String>, keys: Option<&HashSet<String>>) -> bool {
+    pub(crate) fn prune(
+        &mut self,
+        layers: &HashSet<String>,
+        keys: Option<&HashSet<String>>,
+    ) -> bool {
         let before = (self.layers.len(), self.keys.len());
         self.layers.retain(|id| layers.contains(id));
         if let Some(keys) = keys {

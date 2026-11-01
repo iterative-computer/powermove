@@ -12,8 +12,8 @@
 //! test checks the bytes equal `to_canonical_string(realize_project(..))`.
 
 use pm_model::canonical::COMP_FIELDS;
-use pm_model::json::write::{Sink, push_quoted, write_canonical};
 use pm_model::json::ObjectMap;
+use pm_model::json::write::{Sink, push_quoted, write_canonical};
 use pm_model::{JsString, Map, Node, NodeKind, Value};
 
 /// The envelope members around the project.
@@ -51,9 +51,18 @@ fn object_of(node: &Node) -> Option<&ObjectMap<Node>> {
     }
 }
 
+/// The root's members, the open composition id, `comps`, and the open
+/// composition.
+type Realizable<'a> = (
+    &'a ObjectMap<Node>,
+    &'a JsString,
+    &'a ObjectMap<Node>,
+    &'a ObjectMap<Node>,
+);
+
 /// `realize_project` applies only with a non-empty string `compId` naming an
 /// object in a `comps` object.
-fn realizable(root: &Node) -> Option<(&ObjectMap<Node>, &JsString, &ObjectMap<Node>, &ObjectMap<Node>)> {
+fn realizable(root: &Node) -> Option<Realizable<'_>> {
     let members = object_of(root)?;
     let id = match members.get("compId".as_bytes()).map(Node::kind) {
         Some(NodeKind::String(s)) if !s.as_bytes().is_empty() => s,
@@ -183,12 +192,13 @@ mod tests {
         let mut streamed = String::new();
         write_project(&root, had_comps, &mut streamed);
         let mut expected = realize_project(canonical);
-        if !had_comps {
-            if let Value::Object(m) = &mut expected {
-                if m.get("comps").and_then(Value::as_object).is_some_and(Map::is_empty) {
-                    m.remove("comps");
-                }
-            }
+        if !had_comps
+            && let Value::Object(m) = &mut expected
+            && m.get("comps")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty)
+        {
+            m.remove("comps");
         }
         (streamed, to_canonical_string(&expected))
     }
@@ -196,12 +206,24 @@ mod tests {
     #[test]
     fn streams_exactly_the_realized_project() {
         for (text, had) in [
-            (r#"{"id":"P","compId":"C1","compName":"Main","w":4,"h":3,"layers":[{"id":"a"}],"comps":{"C2":{"id":"C2","layers":[]}},"zz":1,"assets":{}}"#, true),
-            (r#"{"id":"P","compId":"C1","w":4,"h":3,"layers":[],"fps":30}"#, false),
-            (r#"{"id":"P","compId":"C1","w":4,"h":3,"layers":[],"comps":{}}"#, true),
+            (
+                r#"{"id":"P","compId":"C1","compName":"Main","w":4,"h":3,"layers":[{"id":"a"}],"comps":{"C2":{"id":"C2","layers":[]}},"zz":1,"assets":{}}"#,
+                true,
+            ),
+            (
+                r#"{"id":"P","compId":"C1","w":4,"h":3,"layers":[],"fps":30}"#,
+                false,
+            ),
+            (
+                r#"{"id":"P","compId":"C1","w":4,"h":3,"layers":[],"comps":{}}"#,
+                true,
+            ),
             (r#"{"id":"P","w":4,"h":3,"layers":[]}"#, true),
             (r#"{"id":"P","compId":"","w":4,"h":3,"layers":[]}"#, true),
-            (r#"{"":1,"😀":2,"compId":"C1","w":4,"h":3,"layers":[],"comps":{"x":{},"😀y":{}}}"#, true),
+            (
+                r#"{"":1,"😀":2,"compId":"C1","w":4,"h":3,"layers":[],"comps":{"x":{},"😀y":{}}}"#,
+                true,
+            ),
         ] {
             let (streamed, expected) = realized(text, had);
             assert_eq!(streamed, expected, "{text}");

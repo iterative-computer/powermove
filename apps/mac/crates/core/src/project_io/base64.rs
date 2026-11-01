@@ -4,7 +4,7 @@
 
 pub fn decode(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let pad = bytes.iter().rev().take_while(|b| **b == b'=').count();

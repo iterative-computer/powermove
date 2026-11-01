@@ -44,7 +44,10 @@ fn store() -> DocumentStore {
 }
 
 fn opacity(id: &str, value: f64) -> Command {
-    Command::SetStaticOpacity { layer_id: id.into(), value }
+    Command::SetStaticOpacity {
+        layer_id: id.into(),
+        value,
+    }
 }
 
 fn events(store: &mut DocumentStore) -> Arc<Mutex<Vec<StoreEvent>>> {
@@ -55,7 +58,12 @@ fn events(store: &mut DocumentStore) -> Arc<Mutex<Vec<StoreEvent>>> {
 }
 
 fn name(store: &DocumentStore, id: &str) -> String {
-    store.layers().into_iter().find(|l| l.id == id).unwrap().name
+    store
+        .layers()
+        .into_iter()
+        .find(|l| l.id == id)
+        .unwrap()
+        .name
 }
 
 #[test]
@@ -64,7 +72,10 @@ fn a_command_publishes_one_revision_and_one_undo_step() {
     let log = events(&mut store);
     let before = store.snapshot();
     assert_eq!(before.revision, 1);
-    let committed = store.execute(opacity("s1", 40.0), Origin::Interface).unwrap().unwrap();
+    let committed = store
+        .execute(opacity("s1", 40.0), Origin::Interface)
+        .unwrap()
+        .unwrap();
     assert_eq!(committed.revision, 2);
     assert_eq!(store.revision(), 2);
     assert_eq!(opacity_of(&store, "s1"), Some(40.0));
@@ -73,26 +84,57 @@ fn a_command_publishes_one_revision_and_one_undo_step() {
     let loc = pm_mac_core::model::find_layer(root, "s1").unwrap();
     let old = pm_mac_core::model::layer_at(root, &loc).unwrap();
     assert_eq!(
-        old.get("p").unwrap().get("opacity").unwrap().get("v").unwrap().kind(),
+        old.get("p")
+            .unwrap()
+            .get("opacity")
+            .unwrap()
+            .get("v")
+            .unwrap()
+            .kind(),
         &pm_model::NodeKind::Number(100.0)
     );
     assert_eq!(store.history().labels(), ["Change Opacity"]);
     assert!(store.is_dirty());
     let log = log.lock().unwrap();
-    let StoreEvent::Changed(change) = &log[0] else { panic!("{log:?}") };
-    assert_eq!((change.base_revision, change.revision, change.ops.len()), (1, 2, 1));
-    assert!(matches!(change.cause, ChangeCause::Edit { origin: Origin::Interface, .. }));
-    assert!(log.iter().any(|e| matches!(e, StoreEvent::DirtyChanged(true))));
+    let StoreEvent::Changed(change) = &log[0] else {
+        panic!("{log:?}")
+    };
+    assert_eq!(
+        (change.base_revision, change.revision, change.ops.len()),
+        (1, 2, 1)
+    );
+    assert!(matches!(
+        change.cause,
+        ChangeCause::Edit {
+            origin: Origin::Interface,
+            ..
+        }
+    ));
+    assert!(
+        log.iter()
+            .any(|e| matches!(e, StoreEvent::DirtyChanged(true)))
+    );
     assert!(log.iter().any(|e| matches!(e, StoreEvent::HistoryChanged)));
 }
 
 #[test]
 fn a_command_that_changes_nothing_publishes_nothing() {
     let mut store = store();
-    assert_eq!(store.execute(opacity("s1", 100.0), Origin::Interface).unwrap(), None);
     assert_eq!(
         store
-            .execute(Command::SetLayerName { layer_id: "s1".into(), name: "  \u{feff} ".into() }, Origin::Interface)
+            .execute(opacity("s1", 100.0), Origin::Interface)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .execute(
+                Command::SetLayerName {
+                    layer_id: "s1".into(),
+                    name: "  \u{feff} ".into()
+                },
+                Origin::Interface
+            )
             .unwrap(),
         None,
         "a blank name keeps the old one"
@@ -102,28 +144,60 @@ fn a_command_that_changes_nothing_publishes_nothing() {
     assert!(!store.is_dirty());
 }
 
+type Check = fn(&CommandError) -> bool;
+
 #[test]
 fn invalid_commands_change_nothing() {
-    let cases: Vec<(Command, Origin, fn(&CommandError) -> bool)> = vec![
-        (opacity("nope", 1.0), Origin::Interface, |e| matches!(e, CommandError::LayerNotFound(_))),
-        (opacity("locked", 1.0), Origin::Interface, |e| matches!(e, CommandError::Locked { .. })),
-        (opacity("child", 1.0), Origin::Interface, |e| matches!(e, CommandError::Locked { .. })),
-        (opacity("anim", 1.0), Origin::Interface, |e| matches!(e, CommandError::Animated { .. })),
-        (opacity("expr", 1.0), Origin::Interface, |e| matches!(e, CommandError::Animated { .. })),
-        (opacity("s1", 100.5), Origin::Interface, |e| matches!(e, CommandError::InvalidValue { .. })),
-        (opacity("s1", -1.0), Origin::Interface, |e| matches!(e, CommandError::InvalidValue { .. })),
-        (opacity("s1", f64::NAN), Origin::Interface, |e| matches!(e, CommandError::InvalidValue { .. })),
-        (opacity("s1", f64::INFINITY), Origin::Interface, |e| matches!(e, CommandError::InvalidValue { .. })),
-        (opacity("bare", 1.0), Origin::Interface, |e| matches!(e, CommandError::PropertyNotFound { .. })),
-        (opacity("marked", 1.0), Origin::Agent, |e| matches!(e, CommandError::PreservedHandEdit { .. })),
-        (opacity("marked", 1.0), Origin::Mcp, |e| matches!(e, CommandError::PreservedHandEdit { .. })),
+    let cases: Vec<(Command, Origin, Check)> = vec![
+        (opacity("nope", 1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::LayerNotFound(_))
+        }),
+        (opacity("locked", 1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::Locked { .. })
+        }),
+        (opacity("child", 1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::Locked { .. })
+        }),
+        (opacity("anim", 1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::Animated { .. })
+        }),
+        (opacity("expr", 1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::Animated { .. })
+        }),
+        (opacity("s1", 100.5), Origin::Interface, |e| {
+            matches!(e, CommandError::InvalidValue { .. })
+        }),
+        (opacity("s1", -1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::InvalidValue { .. })
+        }),
+        (opacity("s1", f64::NAN), Origin::Interface, |e| {
+            matches!(e, CommandError::InvalidValue { .. })
+        }),
+        (opacity("s1", f64::INFINITY), Origin::Interface, |e| {
+            matches!(e, CommandError::InvalidValue { .. })
+        }),
+        (opacity("bare", 1.0), Origin::Interface, |e| {
+            matches!(e, CommandError::PropertyNotFound { .. })
+        }),
+        (opacity("marked", 1.0), Origin::Agent, |e| {
+            matches!(e, CommandError::PreservedHandEdit { .. })
+        }),
+        (opacity("marked", 1.0), Origin::Mcp, |e| {
+            matches!(e, CommandError::PreservedHandEdit { .. })
+        }),
         (
-            Command::SetLayerName { layer_id: "locked".into(), name: "x".into() },
+            Command::SetLayerName {
+                layer_id: "locked".into(),
+                name: "x".into(),
+            },
             Origin::Interface,
             |e| matches!(e, CommandError::Locked { .. }),
         ),
         (
-            Command::SetLayerLocked { layer_id: "locked".into(), locked: false },
+            Command::SetLayerLocked {
+                layer_id: "locked".into(),
+                locked: false,
+            },
             Origin::Agent,
             |e| matches!(e, CommandError::Locked { .. }),
         ),
@@ -132,7 +206,9 @@ fn invalid_commands_change_nothing() {
         let mut store = store();
         let log = events(&mut store);
         let err = store.execute(command.clone(), origin).unwrap_err();
-        let TransactionError::Command(inner) = &err else { panic!("{command:?}: {err:?}") };
+        let TransactionError::Command(inner) = &err else {
+            panic!("{command:?}: {err:?}")
+        };
         assert!(check(inner), "{command:?}: {err:?}");
         assert_eq!(store.revision(), 1, "{command:?}");
         assert!(store.history().is_empty());
@@ -140,65 +216,143 @@ fn invalid_commands_change_nothing() {
         assert!(log.lock().unwrap().is_empty(), "{command:?}");
     }
     let mut s = store();
-    let err = s.execute(opacity("locked", 1.0), Origin::Interface).unwrap_err();
+    let err = s
+        .execute(opacity("locked", 1.0), Origin::Interface)
+        .unwrap_err();
     assert_eq!(err.to_string(), "Layer “Locked” is locked");
-    let err = s.execute(opacity("bare", 1.0), Origin::Interface).unwrap_err();
-    assert_eq!(err.to_string(), "Property “opacity” was not found on “No props”");
+    let err = s
+        .execute(opacity("bare", 1.0), Origin::Interface)
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Property “opacity” was not found on “No props”"
+    );
 }
 
 #[test]
 fn lock_policy_follows_the_old_app() {
     let mut store = store();
     // A layer in a group made of a non-group layer is not inside a group.
-    store.execute(opacity("member", 10.0), Origin::Interface).unwrap().unwrap();
+    store
+        .execute(opacity("member", 10.0), Origin::Interface)
+        .unwrap()
+        .unwrap();
     // A human may unlock; an agent may lock but not unlock.
     store
-        .execute(Command::SetLayerLocked { layer_id: "locked".into(), locked: false }, Origin::Interface)
+        .execute(
+            Command::SetLayerLocked {
+                layer_id: "locked".into(),
+                locked: false,
+            },
+            Origin::Interface,
+        )
         .unwrap()
         .unwrap();
-    store.execute(opacity("locked", 10.0), Origin::Agent).unwrap().unwrap();
     store
-        .execute(Command::SetLayerLocked { layer_id: "s1".into(), locked: true }, Origin::Agent)
+        .execute(opacity("locked", 10.0), Origin::Agent)
         .unwrap()
         .unwrap();
-    assert!(store.execute(opacity("s1", 5.0), Origin::Interface).is_err());
+    store
+        .execute(
+            Command::SetLayerLocked {
+                layer_id: "s1".into(),
+                locked: true,
+            },
+            Origin::Agent,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .execute(opacity("s1", 5.0), Origin::Interface)
+            .is_err()
+    );
     // A human edit may overwrite a hand-edit marker.
-    store.execute(opacity("marked", 10.0), Origin::Interface).unwrap().unwrap();
+    store
+        .execute(opacity("marked", 10.0), Origin::Interface)
+        .unwrap()
+        .unwrap();
     // Layers of another composition are found by id.
     store
-        .execute(Command::SetLayerName { layer_id: "inner".into(), name: " Inside ".into() }, Origin::Interface)
+        .execute(
+            Command::SetLayerName {
+                layer_id: "inner".into(),
+                name: " Inside ".into(),
+            },
+            Origin::Interface,
+        )
         .unwrap()
         .unwrap();
     let snapshot = store.snapshot();
     let inner = snapshot.layers(Some("C2"));
     assert_eq!(inner[0].name, "Inside");
     store
-        .execute(Command::SetLayerVisible { layer_id: "s1".into(), visible: false }, Origin::Interface)
+        .execute(
+            Command::SetLayerVisible {
+                layer_id: "s1".into(),
+                visible: false,
+            },
+            Origin::Interface,
+        )
         .unwrap_err(); // locked now
     store
-        .execute(Command::SetLayerVisible { layer_id: "member".into(), visible: false }, Origin::Interface)
+        .execute(
+            Command::SetLayerVisible {
+                layer_id: "member".into(),
+                visible: false,
+            },
+            Origin::Interface,
+        )
         .unwrap()
         .unwrap();
-    assert!(!store.layers().iter().find(|l| l.id == "member").unwrap().visible);
+    assert!(
+        !store
+            .layers()
+            .iter()
+            .find(|l| l.id == "member")
+            .unwrap()
+            .visible
+    );
 }
 
 #[test]
 fn transactions_are_all_or_nothing() {
     let mut store = store();
-    let rename = Command::SetLayerName { layer_id: "s1".into(), name: "Renamed".into() };
+    let rename = Command::SetLayerName {
+        layer_id: "s1".into(),
+        name: "Renamed".into(),
+    };
     let err = store
-        .transact("Two Things", Origin::Interface, &[rename.clone(), opacity("s1", 500.0)])
+        .transact(
+            "Two Things",
+            Origin::Interface,
+            &[rename.clone(), opacity("s1", 500.0)],
+        )
         .unwrap_err();
-    assert!(matches!(err, TransactionError::Command(CommandError::InvalidValue { .. })));
+    assert!(matches!(
+        err,
+        TransactionError::Command(CommandError::InvalidValue { .. })
+    ));
     assert_eq!(name(&store, "s1"), "Box");
     assert_eq!(store.revision(), 1);
     // A later command sees an earlier one's effect: lock, then edit fails.
-    let lock = Command::SetLayerLocked { layer_id: "s1".into(), locked: true };
-    assert!(store.transact("x", Origin::Interface, &[lock, opacity("s1", 1.0)]).is_err());
+    let lock = Command::SetLayerLocked {
+        layer_id: "s1".into(),
+        locked: true,
+    };
+    assert!(
+        store
+            .transact("x", Origin::Interface, &[lock, opacity("s1", 1.0)])
+            .is_err()
+    );
     assert_eq!(store.revision(), 1);
 
     let done = store
-        .transact("Two Things", Origin::Interface, &[rename, opacity("s1", 30.0)])
+        .transact(
+            "Two Things",
+            Origin::Interface,
+            &[rename, opacity("s1", 30.0)],
+        )
         .unwrap()
         .unwrap();
     assert_eq!(done.revision, 2);
@@ -210,17 +364,28 @@ fn transactions_are_all_or_nothing() {
     let err = store
         .transact_with(
             &[opacity("s1", 1.0)],
-            pm_mac_core::TransactOptions { expected_revision: Some(1), ..Default::default() },
+            pm_mac_core::TransactOptions {
+                expected_revision: Some(1),
+                ..Default::default()
+            },
         )
         .unwrap_err();
-    assert!(matches!(err, TransactionError::Stale { expected: 1, current: 3 }));
+    assert!(matches!(
+        err,
+        TransactionError::Stale {
+            expected: 1,
+            current: 3
+        }
+    ));
 }
 
 #[test]
 fn undo_and_redo_publish_new_revisions() {
     let mut store = store();
     let log = events(&mut store);
-    store.execute(opacity("s1", 40.0), Origin::Interface).unwrap();
+    store
+        .execute(opacity("s1", 40.0), Origin::Interface)
+        .unwrap();
     assert_eq!(store.undo().unwrap(), 3);
     assert_eq!(opacity_of(&store, "s1"), Some(100.0));
     assert!(!store.is_dirty());
@@ -232,7 +397,13 @@ fn undo_and_redo_publish_new_revisions() {
     store.undo().unwrap();
     // A new edit discards redo.
     store
-        .execute(Command::SetLayerName { layer_id: "s1".into(), name: "New".into() }, Origin::Interface)
+        .execute(
+            Command::SetLayerName {
+                layer_id: "s1".into(),
+                name: "New".into(),
+            },
+            Origin::Interface,
+        )
         .unwrap();
     assert!(!store.can_redo());
     assert_eq!(store.history().labels(), ["Rename Layer"]);
@@ -248,7 +419,10 @@ fn undo_and_redo_publish_new_revisions() {
     assert_eq!(revisions, [2, 3, 4, 5, 6], "revisions only increase");
     // Readers that lag catch up from the change log.
     let since = store.changes_since(3).unwrap();
-    assert_eq!(since.iter().map(|c| c.revision).collect::<Vec<_>>(), [4, 5, 6]);
+    assert_eq!(
+        since.iter().map(|c| c.revision).collect::<Vec<_>>(),
+        [4, 5, 6]
+    );
     assert!(matches!(since[0].cause, ChangeCause::Redo { .. }));
     assert!(store.changes_since(0).is_none());
     assert!(store.changes_since(6).unwrap().is_empty());
@@ -257,10 +431,21 @@ fn undo_and_redo_publish_new_revisions() {
 #[test]
 fn a_scrub_gesture_is_one_undo_step() {
     let mut store = store();
-    let g = store.begin_gesture("Scrub Opacity", Origin::Interface).unwrap();
+    let g = store
+        .begin_gesture("Scrub Opacity", Origin::Interface)
+        .unwrap();
     for v in [90.0, 70.0, 50.0, 30.0, 10.0] {
-        store.update_gesture(g, &[opacity("s1", v)]).unwrap().unwrap();
-        assert_eq!(store.queries().evaluate(None, "s1", "opacity", 0.0).unwrap(), Value::Number(v));
+        store
+            .update_gesture(g, &[opacity("s1", v)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .queries()
+                .evaluate(None, "s1", "opacity", 0.0)
+                .unwrap(),
+            Value::Number(v)
+        );
     }
     assert_eq!(store.revision(), 6);
     assert!(store.history().is_empty());
@@ -268,7 +453,10 @@ fn a_scrub_gesture_is_one_undo_step() {
         store.execute(opacity("s1", 1.0), Origin::Interface),
         Err(TransactionError::GestureInProgress)
     ));
-    assert!(matches!(store.undo(), Err(TransactionError::GestureInProgress)));
+    assert!(matches!(
+        store.undo(),
+        Err(TransactionError::GestureInProgress)
+    ));
     assert!(store.begin_gesture("again", Origin::Interface).is_err());
     // A failing step changes nothing and the gesture continues.
     assert!(store.update_gesture(g, &[opacity("s1", 300.0)]).is_err());
@@ -282,7 +470,10 @@ fn a_scrub_gesture_is_one_undo_step() {
     assert!(!store.is_dirty());
     store.redo().unwrap();
     assert_eq!(opacity_of(&store, "s1"), Some(10.0));
-    assert!(matches!(store.commit_gesture(g), Err(TransactionError::NoSuchGesture)));
+    assert!(matches!(
+        store.commit_gesture(g),
+        Err(TransactionError::NoSuchGesture)
+    ));
 }
 
 #[test]
@@ -291,7 +482,13 @@ fn a_cancelled_or_net_zero_gesture_leaves_no_step() {
     let g = store.begin_gesture("Drag", Origin::Interface).unwrap();
     store.update_gesture(g, &[opacity("s1", 20.0)]).unwrap();
     store
-        .update_gesture(g, &[Command::SetLayerName { layer_id: "s1".into(), name: "During".into() }])
+        .update_gesture(
+            g,
+            &[Command::SetLayerName {
+                layer_id: "s1".into(),
+                name: "During".into(),
+            }],
+        )
         .unwrap();
     assert!(store.is_dirty());
     store.cancel_gesture(g).unwrap();
@@ -313,7 +510,11 @@ fn selection_is_by_id_and_survives_reorder() {
     let mut store = store();
     let log = events(&mut store);
     store.select_layers(["s1", "nope", "child", "inner"], false);
-    assert_eq!(store.selection().layers(), ["s1", "child"], "only open-composition layers");
+    assert_eq!(
+        store.selection().layers(),
+        ["s1", "child"],
+        "only open-composition layers"
+    );
     assert_eq!(store.selection().primary(), Some("s1"));
     store.select_keys(["k1", "gone"]);
     store.toggle_layer("child");
@@ -339,10 +540,24 @@ fn selection_is_by_id_and_survives_reorder() {
         .unwrap();
     layers.reverse();
     let reversed = project.clone();
-    store.restore_project(project, "Reverse", Origin::Interface).unwrap().unwrap();
+    store
+        .restore_project(project, "Reverse", Origin::Interface)
+        .unwrap()
+        .unwrap();
     let change = store.changes_since(1).unwrap().pop().unwrap();
-    assert!(change.ops.iter().all(|op| matches!(op, pm_model::Op::Order { .. })), "{:?}", change.ops);
-    assert_eq!(store.selection().layers(), ["s1", "anim"], "ids, not indices");
+    assert!(
+        change
+            .ops
+            .iter()
+            .all(|op| matches!(op, pm_model::Op::Order { .. })),
+        "{:?}",
+        change.ops
+    );
+    assert_eq!(
+        store.selection().layers(),
+        ["s1", "anim"],
+        "ids, not indices"
+    );
     assert_eq!(store.selection().keys(), ["k1"], "dead keys pruned");
 
     // Deleting a selected layer prunes it.
@@ -363,25 +578,41 @@ fn selection_is_by_id_and_survives_reorder() {
         .as_array_mut()
         .unwrap();
     layers.retain(|l| l.get("id").and_then(Value::as_str) != Some("anim"));
-    store.restore_project(without, "Delete", Origin::Interface).unwrap().unwrap();
+    store
+        .restore_project(without, "Delete", Origin::Interface)
+        .unwrap()
+        .unwrap();
     assert_eq!(store.selection().layers(), ["s1"]);
     assert!(store.selection().keys().is_empty());
     store.undo().unwrap();
     assert!(store.layers().iter().any(|l| l.id == "anim"));
     assert_eq!(store.selection().layers(), ["s1"], "undo does not reselect");
-    assert!(log.lock().unwrap().iter().any(|e| matches!(e, StoreEvent::SelectionChanged)));
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, StoreEvent::SelectionChanged))
+    );
 }
 
 #[test]
 fn squash_combines_an_agent_run() {
     let mut store = store();
-    store.execute(opacity("s1", 90.0), Origin::Interface).unwrap();
+    store
+        .execute(opacity("s1", 90.0), Origin::Interface)
+        .unwrap();
     let mark = store.history_mark();
     for v in [80.0, 70.0, 60.0] {
         store.execute(opacity("s1", v), Origin::Agent).unwrap();
     }
     store
-        .execute(Command::SetLayerName { layer_id: "s1".into(), name: "Agent".into() }, Origin::Agent)
+        .execute(
+            Command::SetLayerName {
+                layer_id: "s1".into(),
+                name: "Agent".into(),
+            },
+            Origin::Agent,
+        )
         .unwrap();
     assert!(store.squash_since(&mark, "Agent change").is_some());
     assert_eq!(store.history().labels(), ["Change Opacity", "Agent change"]);
@@ -396,11 +627,19 @@ fn squash_combines_an_agent_run() {
 #[test]
 fn snapshots_cross_threads() {
     let mut store = store();
-    store.execute(opacity("s1", 12.0), Origin::Interface).unwrap();
-    let snapshot = store.snapshot();
-    let ids = std::thread::spawn(move || snapshot.layers(None).into_iter().map(|l| l.id).collect::<Vec<_>>())
-        .join()
+    store
+        .execute(opacity("s1", 12.0), Origin::Interface)
         .unwrap();
+    let snapshot = store.snapshot();
+    let ids = std::thread::spawn(move || {
+        snapshot
+            .layers(None)
+            .into_iter()
+            .map(|l| l.id)
+            .collect::<Vec<_>>()
+    })
+    .join()
+    .unwrap();
     assert_eq!(ids.len(), 10);
 }
 
@@ -408,11 +647,18 @@ fn snapshots_cross_threads() {
 /// follow edits and undo at the committed revision.
 #[test]
 fn queries_follow_the_committed_revision() {
-    let text = std::fs::read_to_string(engine_fixture("corpus/compositing-blend-modes.json")).unwrap();
+    let text =
+        std::fs::read_to_string(engine_fixture("corpus/compositing-blend-modes.json")).unwrap();
     let mut store = DocumentStore::new_untitled(parse(&text).unwrap());
     let q = store.queries();
-    assert_eq!(q.evaluate(None, "L00a", "opacity", 0.0).unwrap(), Value::Number(85.0));
-    let bounds = q.bounds(None, "L00a", 0.0).unwrap().expect("a shape has bounds");
+    assert_eq!(
+        q.evaluate(None, "L00a", "opacity", 0.0).unwrap(),
+        Value::Number(85.0)
+    );
+    let bounds = q
+        .bounds(None, "L00a", 0.0)
+        .unwrap()
+        .expect("a shape has bounds");
     assert!(bounds.w > 0.0 && bounds.h > 0.0, "{bounds:?}");
     let [_, _, _, _, cx, cy] = q.world_matrix(None, "L00a", 0.0).unwrap();
     // The top layer is text: without fonts the pick must say so, not "miss".
@@ -420,24 +666,48 @@ fn queries_follow_the_committed_revision() {
         Err(pm_mac_core::QueryError::NeedsFonts) => {}
         other => assert!(other.is_ok(), "{other:?}"),
     }
-    assert!(matches!(q.evaluate(None, "missing", "opacity", 0.0), Err(pm_mac_core::QueryError::LayerNotFound(_))));
+    assert!(matches!(
+        q.evaluate(None, "missing", "opacity", 0.0),
+        Err(pm_mac_core::QueryError::LayerNotFound(_))
+    ));
     assert_eq!(q.layers(None).len(), store.layers().len());
 
-    store.execute(opacity("L00a", 30.0), Origin::Interface).unwrap();
+    store
+        .execute(opacity("L00a", 30.0), Origin::Interface)
+        .unwrap();
     assert_eq!(store.queries().revision(), 2);
-    assert_eq!(store.queries().evaluate(None, "L00a", "opacity", 0.0).unwrap(), Value::Number(30.0));
+    assert_eq!(
+        store
+            .queries()
+            .evaluate(None, "L00a", "opacity", 0.0)
+            .unwrap(),
+        Value::Number(30.0)
+    );
     store.undo().unwrap();
     assert_eq!(store.queries().revision(), 3);
-    assert_eq!(store.queries().evaluate(None, "L00a", "opacity", 0.0).unwrap(), Value::Number(85.0));
+    assert_eq!(
+        store
+            .queries()
+            .evaluate(None, "L00a", "opacity", 0.0)
+            .unwrap(),
+        Value::Number(85.0)
+    );
     let world = store.queries().world_opacity(None, "L00a", 0.0).unwrap();
     assert!((0.0..=100.0).contains(&world));
 }
 
 #[test]
 fn pick_binds_the_hit_to_a_stable_id() {
-    let text = std::fs::read_to_string(engine_fixture("corpus/compositing-blend-modes.json")).unwrap();
+    let text =
+        std::fs::read_to_string(engine_fixture("corpus/compositing-blend-modes.json")).unwrap();
     let mut project = parse(&text).unwrap();
-    let layers = project.as_object_mut().unwrap().get_mut("layers").unwrap().as_array_mut().unwrap();
+    let layers = project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
     layers.retain(|l| l.get("type").and_then(Value::as_str) == Some("shape"));
     let mut store = DocumentStore::new_untitled(project);
     let q = store.queries();
@@ -456,14 +726,31 @@ fn pick_binds_the_hit_to_a_stable_id() {
     let hb = q.bounds(None, &id, 0.0).unwrap().unwrap();
     let (x0, y0) = to_comp(q, &id, hb.x0, hb.y0);
     let (x1, y1) = to_comp(q, &id, hb.x1, hb.y1);
-    assert!(x0.min(x1) <= cx && cx <= x0.max(x1) && y0.min(y1) <= cy && cy <= y0.max(y1), "{hb:?}");
-    assert_eq!(q.pick(None, -5000.0, -5000.0, 0.0, &Default::default()).unwrap().layer_id, None);
+    assert!(
+        x0.min(x1) <= cx && cx <= x0.max(x1) && y0.min(y1) <= cy && cy <= y0.max(y1),
+        "{hb:?}"
+    );
+    assert_eq!(
+        q.pick(None, -5000.0, -5000.0, 0.0, &Default::default())
+            .unwrap()
+            .layer_id,
+        None
+    );
     // Hidden layers are not hit: hide the one that was, pick again.
     store
-        .execute(Command::SetLayerVisible { layer_id: id.clone(), visible: false }, Origin::Interface)
+        .execute(
+            Command::SetLayerVisible {
+                layer_id: id.clone(),
+                visible: false,
+            },
+            Origin::Interface,
+        )
         .unwrap()
         .unwrap();
-    let again = store.queries().pick(None, cx, cy, 0.0, &Default::default()).unwrap();
+    let again = store
+        .queries()
+        .pick(None, cx, cy, 0.0, &Default::default())
+        .unwrap();
     assert_eq!(again.revision, 2);
     assert_ne!(again.layer_id.as_deref(), Some(id.as_str()));
 }

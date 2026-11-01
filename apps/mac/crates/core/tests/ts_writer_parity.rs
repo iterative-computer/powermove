@@ -46,7 +46,11 @@ fn in_place_save_appends_like_the_typescript_writer() {
     store.finish_save(receipt).unwrap();
     assert_eq!(read(&path), read(&ts_fixture("append.pmv")));
     assert!(!store.is_dirty());
-    assert_eq!(dir.entries(), ["project.pmv"], "no temp file is left behind");
+    assert_eq!(
+        dir.entries(),
+        ["project.pmv"],
+        "no temp file is left behind"
+    );
 }
 
 /// Save As never reuses the destination: the fresh layout again.
@@ -79,7 +83,10 @@ fn history_written_by_either_writer_replays() {
     let path = dir.path("project.pmv");
     std::fs::copy(ts_fixture("append.pmv"), &path).unwrap();
     let mut store = open_store(&path);
-    assert_eq!(store.history().labels(), ["Change Opacity", "Change Opacity"]);
+    assert_eq!(
+        store.history().labels(),
+        ["Change Opacity", "Change Opacity"]
+    );
     assert_eq!(opacity_of(&store, "a"), Some(50.0));
     store.undo().unwrap();
     assert_eq!(opacity_of(&store, "a"), Some(80.0));

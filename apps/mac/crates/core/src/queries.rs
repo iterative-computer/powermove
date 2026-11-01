@@ -215,7 +215,9 @@ impl QueryContext {
     }
 
     fn open_comp(&self) -> String {
-        self.root().and_then(model::open_comp_id).unwrap_or_default()
+        self.root()
+            .and_then(model::open_comp_id)
+            .unwrap_or_default()
     }
 
     // ── raw ────────────────────────────────────────────────────────────────
@@ -237,7 +239,11 @@ impl QueryContext {
         if let Some(t) = map.get("throw") {
             return Err(QueryError::Thrown {
                 kind: t.get("kind").and_then(Value::as_str).unwrap_or("").into(),
-                message: t.get("message").and_then(Value::as_str).unwrap_or("").into(),
+                message: t
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
             });
         }
         if map.get("fonts").is_some() {
@@ -415,16 +421,16 @@ impl QueryContext {
 fn revive(value: Value) -> Value {
     match value {
         Value::Object(map) => {
-            if map.len() == 1 {
-                if let Some(Value::String(s)) = map.get("\u{0}") {
-                    return match s.as_str() {
-                        Some("NaN") => Value::Number(f64::NAN),
-                        Some("Infinity") => Value::Number(f64::INFINITY),
-                        Some("-Infinity") => Value::Number(f64::NEG_INFINITY),
-                        Some("-0") => Value::Number(-0.0),
-                        _ => Value::Null,
-                    };
-                }
+            if map.len() == 1
+                && let Some(Value::String(s)) = map.get("\u{0}")
+            {
+                return match s.as_str() {
+                    Some("NaN") => Value::Number(f64::NAN),
+                    Some("Infinity") => Value::Number(f64::INFINITY),
+                    Some("-Infinity") => Value::Number(f64::NEG_INFINITY),
+                    Some("-0") => Value::Number(-0.0),
+                    _ => Value::Null,
+                };
             }
             Value::Object(map.into_iter().map(|(k, v)| (k, revive(v))).collect())
         }

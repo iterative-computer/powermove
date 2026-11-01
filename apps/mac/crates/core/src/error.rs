@@ -13,17 +13,27 @@ pub enum CommandError {
     /// No layer has this id (in the open composition or any other).
     LayerNotFound(String),
     /// The layer has no such property (`Property “x” was not found on “name”`).
-    PropertyNotFound { layer_id: String, name: String, channel: &'static str },
+    PropertyNotFound {
+        layer_id: String,
+        name: String,
+        channel: &'static str,
+    },
     /// The layer, or a group above it, is locked. The text is the old app's.
     Locked { layer_id: String, name: String },
     /// A value that must be finite (and within a range) was not.
     InvalidValue { what: &'static str, reason: String },
     /// The property is animated or driven by an expression; the first command
     /// lane (static values only) refuses instead of guessing a keyframe.
-    Animated { layer_id: String, channel: &'static str },
+    Animated {
+        layer_id: String,
+        channel: &'static str,
+    },
     /// The property carries a hand-edit marker and the origin may not
     /// overwrite it (`preserveHandEdits` in the old app).
-    PreservedHandEdit { layer_id: String, channel: &'static str },
+    PreservedHandEdit {
+        layer_id: String,
+        channel: &'static str,
+    },
     /// The stored document does not have the expected shape.
     Malformed(String),
 }
@@ -67,7 +77,10 @@ pub enum TransactionError {
     /// The gesture id is unknown, already ended, or not the open gesture.
     NoSuchGesture,
     /// `expected_revision` did not match the current revision.
-    Stale { expected: u64, current: u64 },
+    Stale {
+        expected: u64,
+        current: u64,
+    },
     /// The store holds no project tree.
     NoDocument,
     /// Nothing to undo / redo.
@@ -117,7 +130,10 @@ pub enum ProjectIoError {
     /// `decodeProjectContainer`).
     Container(ContainerError),
     /// The operating system refused (path, then the OS message).
-    Io { path: String, source: std::io::Error },
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
     /// The file parsed but is not a Powermove project.
     NotAProject,
     /// The file changed on disk since it was opened or last saved by us. The
@@ -131,7 +147,10 @@ pub enum ProjectIoError {
     Invalid(String),
     /// Another writer changed the file while we published. Neither version
     /// was lost: ours is kept at `recovery_path`.
-    Conflict { message: String, recovery_path: std::path::PathBuf },
+    Conflict {
+        message: String,
+        recovery_path: std::path::PathBuf,
+    },
     /// Our file was published but the final directory sync failed. Your
     /// edits stay open (and dirty); save again to confirm.
     Finalize(String),
@@ -160,7 +179,10 @@ impl fmt::Display for ProjectIoError {
                 write!(f, "Could not save media “{id}”: {reason}")
             }
             ProjectIoError::Invalid(m) => f.write_str(m),
-            ProjectIoError::Conflict { message, recovery_path } => write!(
+            ProjectIoError::Conflict {
+                message,
+                recovery_path,
+            } => write!(
                 f,
                 "{message} The other version was preserved at {}",
                 recovery_path.display()

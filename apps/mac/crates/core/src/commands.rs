@@ -158,7 +158,10 @@ impl Command {
                         reason: format!("{value} is outside 0–100"),
                     });
                 }
-                if channel.get("v").and_then(model::number_of).map(f64::to_bits)
+                if channel
+                    .get("v")
+                    .and_then(model::number_of)
+                    .map(f64::to_bits)
                     == Some(value.to_bits())
                 {
                     return Ok(Vec::new());
@@ -170,7 +173,10 @@ impl Command {
                 if trimmed.is_empty() || layer.get("name").and_then(str_of) == Some(trimmed) {
                     return Ok(Vec::new());
                 }
-                Ok(vec![set(at(&["name"]), Value::String(JsString::from(trimmed)))])
+                Ok(vec![set(
+                    at(&["name"]),
+                    Value::String(JsString::from(trimmed)),
+                )])
             }
             Command::SetLayerVisible { visible, .. } => {
                 if layer.get("on").and_then(model::bool_of) == Some(*visible) {
@@ -226,7 +232,11 @@ fn has_intent(layer: &Node, channel: &str) -> bool {
 }
 
 /// A channel with keyframes or a non-empty expression is not static.
-fn reject_animation(channel: &Node, layer_id: &str, name: &'static str) -> Result<(), CommandError> {
+fn reject_animation(
+    channel: &Node,
+    layer_id: &str,
+    name: &'static str,
+) -> Result<(), CommandError> {
     let has_keys = matches!(
         channel.get("kf").map(Node::kind),
         Some(NodeKind::Array(items)) if !items.is_empty()
@@ -246,7 +256,12 @@ fn reject_animation(channel: &Node, layer_id: &str, name: &'static str) -> Resul
 
 /// The old lock rule: the layer, or any group above it, being locked refuses
 /// the edit (`lockedMessage`).
-pub fn check_lock(root: &Node, loc: &LayerLoc, layer: &Node, layer_id: &str) -> Result<(), CommandError> {
+pub fn check_lock(
+    root: &Node,
+    loc: &LayerLoc,
+    layer: &Node,
+    layer_id: &str,
+) -> Result<(), CommandError> {
     if model::is_locked(root, loc) {
         Err(CommandError::Locked {
             layer_id: layer_id.to_owned(),

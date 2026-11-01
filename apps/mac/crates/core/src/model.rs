@@ -96,14 +96,14 @@ pub fn layers_of<'a>(comp: &'a Node) -> impl Iterator<Item = &'a Node> + 'a {
 fn comp_ids(root: &Node) -> Vec<Option<String>> {
     let open = open_comp_id(root);
     let mut out = vec![open.clone()];
-    if open.is_some() {
-        if let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind) {
-            for (key, _) in comps.iter() {
-                if let Some(k) = key.as_str() {
-                    if Some(k) != open.as_deref() {
-                        out.push(Some(k.to_owned()));
-                    }
-                }
+    if open.is_some()
+        && let Some(NodeKind::Object(comps)) = root.get("comps").map(Node::kind)
+    {
+        for (key, _) in comps.iter() {
+            if let Some(k) = key.as_str()
+                && Some(k) != open.as_deref()
+            {
+                out.push(Some(k.to_owned()));
             }
         }
     }
@@ -157,19 +157,26 @@ pub fn is_locked(root: &Node, loc: &LayerLoc) -> bool {
 pub fn group_ancestors<'a>(comp: &'a Node, layer: &'a Node) -> Vec<&'a Node> {
     let mut out = Vec::new();
     let mut seen: Vec<&str> = layer.get("id").and_then(str_of).into_iter().collect();
-    let mut next = layer.get("group").and_then(str_of).filter(|s| !s.is_empty());
+    let mut next = layer
+        .get("group")
+        .and_then(str_of)
+        .filter(|s| !s.is_empty());
     while let Some(id) = next {
         if seen.contains(&id) {
             break;
         }
         seen.push(id);
         let Some(group) = layers_of(comp).find(|l| {
-            l.get("id").and_then(str_of) == Some(id) && l.get("type").and_then(str_of) == Some("group")
+            l.get("id").and_then(str_of) == Some(id)
+                && l.get("type").and_then(str_of) == Some("group")
         }) else {
             break;
         };
         out.push(group);
-        next = group.get("group").and_then(str_of).filter(|s| !s.is_empty());
+        next = group
+            .get("group")
+            .and_then(str_of)
+            .filter(|s| !s.is_empty());
     }
     out
 }
@@ -304,7 +311,10 @@ pub fn to_canonical(project: pm_model::Value) -> pm_model::Value {
     use pm_model::Value;
     let already = match &project {
         Value::Object(map) => {
-            let open = map.get("compId").and_then(Value::as_str).filter(|s| !s.is_empty());
+            let open = map
+                .get("compId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
             let comp = open.and_then(|id| map.get("comps")?.as_object()?.get(id)?.as_object());
             !map.contains_key("layers") && comp.is_some()
         }

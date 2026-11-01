@@ -276,7 +276,8 @@ fn hash_project_file(
         let n = {
             use std::io::{Read, Seek, SeekFrom};
             let mut f = file;
-            f.seek(SeekFrom::Start(position)).map_err(|e| io_err(path, e))?;
+            f.seek(SeekFrom::Start(position))
+                .map_err(|e| io_err(path, e))?;
             f.read(&mut buf[..want]).map_err(|e| io_err(path, e))?
         };
         if n == 0 {
@@ -327,7 +328,12 @@ pub fn open_project(path: &Path, options: OpenOptions) -> Result<OpenedProject, 
     let before = durable::stat_of(&meta);
     // Index and document checksums are always verified by the reader; media
     // checksums are verified below, in the single hashing pass.
-    let container = read_container(&file, ReadOptions { verify_media: false })?;
+    let container = read_container(
+        &file,
+        ReadOptions {
+            verify_media: false,
+        },
+    )?;
     let verify: Vec<&MediaRecord> = if options.verify_media {
         container.media.iter().collect()
     } else {
@@ -506,10 +512,12 @@ pub(crate) fn collect_patch_assets(
         0 => add_keys(value.and_then(|v| v.get("assets")), ids),
         1 if key(0) == Some("assets") => add_keys(value, ids),
         2 if key(0) == Some("assets") => {
-            if value.and_then(|v| v.get("id")).is_some_and(Value::is_truthy) {
-                if let Some(id) = key(1) {
-                    ids.insert(id.to_owned());
-                }
+            if value
+                .and_then(|v| v.get("id"))
+                .is_some_and(Value::is_truthy)
+                && let Some(id) = key(1)
+            {
+                ids.insert(id.to_owned());
             }
         }
         _ => {}
@@ -519,12 +527,23 @@ pub(crate) fn collect_patch_assets(
 /// `assertProjectDocument` on the stored project: an object with a `layers`
 /// array and finite `w` and `h`.
 pub(crate) fn validate_stored_project(project: &Value) -> Result<(), ProjectIoError> {
-    let finite = |k: &str| project.get(k).and_then(Value::as_f64).is_some_and(f64::is_finite);
+    let finite = |k: &str| {
+        project
+            .get(k)
+            .and_then(Value::as_f64)
+            .is_some_and(f64::is_finite)
+    };
     let ok = project.as_object().is_some()
-        && project.get("layers").is_some_and(|l| l.as_array().is_some())
+        && project
+            .get("layers")
+            .is_some_and(|l| l.as_array().is_some())
         && finite("w")
         && finite("h");
-    if ok { Ok(()) } else { Err(ProjectIoError::NotAProject) }
+    if ok {
+        Ok(())
+    } else {
+        Err(ProjectIoError::NotAProject)
+    }
 }
 
 /// Runs [`open_project`] on a new thread. GPUI callers usually use their

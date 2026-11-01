@@ -239,15 +239,19 @@ struct Out<'a> {
 
 impl Out<'_> {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if let Some(limit) = self.limit {
-            if self.written + bytes.len() as u64 > limit {
-                return Err(io::Error::new(
-                    io::ErrorKind::StorageFull,
-                    "No space left on device",
-                ));
-            }
+        if let Some(limit) = self.limit
+            && self.written + bytes.len() as u64 > limit
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "No space left on device",
+            ));
         }
-        if self.offset.checked_add(bytes.len() as u64).is_none_or(|end| end > (1u64 << 53)) {
+        if self
+            .offset
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|end| end > (1u64 << 53))
+        {
             return Err(io::Error::other(
                 "The project exceeds the filesystem numeric range.",
             ));
@@ -324,9 +328,9 @@ fn read_index(file: &File, size: u64) -> Result<Vec<Record>, ProjectIoError> {
     }
     let offset = f64::from_le_bytes(footer[8..16].try_into().expect("8 bytes"));
     let length = u32::from_le_bytes(footer[16..20].try_into().expect("4 bytes")) as u64;
-    if !(offset.fract() == 0.0 && offset >= 5.0 && offset < 9_007_199_254_740_992.0)
-        || length < 2
-        || length > MAX_INDEX_BYTES
+    let integral = offset.fract() == 0.0 && (5.0..9_007_199_254_740_992.0).contains(&offset);
+    if !integral
+        || !(2..=MAX_INDEX_BYTES).contains(&length)
         || offset as u64 + length != size - PMV4_FOOTER_BYTES
     {
         return Err(invalid("The project index is invalid."));
@@ -363,7 +367,9 @@ fn read_index(file: &File, size: u64) -> Result<Vec<Record>, ProjectIoError> {
             s("type"),
             int(item.get("offset")),
             int(item.get("length")),
-            item.get("sha256").and_then(Value::as_str).map(str::to_owned),
+            item.get("sha256")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         ) else {
             return Err(invalid("The project media index is invalid."));
         };
@@ -449,10 +455,11 @@ impl SavePlan {
         // `finish()`'s check, on the form that will be written.
         let root = self.document.root().ok_or(ProjectIoError::NotAProject)?;
         let comp = envelope::stored_comp_fields(root);
-        let finite = |k: &str| {
-            matches!(comp.get(k).map(pm_model::Node::kind), Some(pm_model::NodeKind::Number(n)) if n.is_finite())
-        };
-        let layers = matches!(comp.get("layers").map(pm_model::Node::kind), Some(pm_model::NodeKind::Array(_)));
+        let finite = |k: &str| matches!(comp.get(k).map(pm_model::Node::kind), Some(pm_model::NodeKind::Number(n)) if n.is_finite());
+        let layers = matches!(
+            comp.get("layers").map(pm_model::Node::kind),
+            Some(pm_model::NodeKind::Array(_))
+        );
         if !(layers && finite("w") && finite("h")) {
             return Err(ProjectIoError::NotAProject);
         }
@@ -470,7 +477,11 @@ impl SavePlan {
             Some(p) => p.clone(),
             None => match FileVersion::read(dest)? {
                 Some(v) if self.replace_existing => Publish::Replace(v),
-                Some(_) => return Err(ProjectIoError::DestinationExists(dest.display().to_string())),
+                Some(_) => {
+                    return Err(ProjectIoError::DestinationExists(
+                        dest.display().to_string(),
+                    ));
+                }
                 None => Publish::CreateNew,
             },
         };
@@ -503,21 +514,21 @@ impl SavePlan {
                 return Err(ProjectIoError::ChangedOnDisk);
             }
             let mut magic = [0u8; 5];
-            if prev.stat.size >= 5 && read_at(&file, 0, &mut magic).is_ok() && magic == *PMV4_MAGIC {
+            if prev.stat.size >= 5 && read_at(&file, 0, &mut magic).is_ok() && magic == *PMV4_MAGIC
+            {
                 index = Some(read_index(&file, prev.stat.size)?);
             }
             source = Some(file);
         }
-        let available: HashMap<&JsString, &Record> = index
-            .iter()
-            .flatten()
-            .map(|r| (&r.id, r))
-            .collect();
+        let available: HashMap<&JsString, &Record> =
+            index.iter().flatten().map(|r| (&r.id, r)).collect();
         let mut reused: Vec<Record> = Vec::new();
         let mut required: Vec<&MediaEntry> = Vec::new();
         for entry in &self.media {
             match available.get(&entry.id) {
-                Some(saved) if saved.revision == entry.revision && saved.length == entry.length() => {
+                Some(saved)
+                    if saved.revision == entry.revision && saved.length == entry.length() =>
+                {
                     reused.push(Record {
                         media_type: entry.media_type.clone(),
                         ..(*saved).clone()
@@ -528,7 +539,10 @@ impl SavePlan {
         }
         let live: u64 = reused.iter().map(|r| r.length).sum();
         let dead = previous.map_or(0, |p| p.stat.size).saturating_sub(live);
-        let floor = self.options.compact_min_dead_bytes.unwrap_or(COMPACT_MIN_DEAD_BYTES);
+        let floor = self
+            .options
+            .compact_min_dead_bytes
+            .unwrap_or(COMPACT_MIN_DEAD_BYTES);
         let compact = index.is_none() || dead > floor.max(live / 2);
 
         let mut buf = vec![0u8; CHUNK];
@@ -555,7 +569,9 @@ impl SavePlan {
             if hex(&digest.clone().finalize()) != prev.hash {
                 return Err(ProjectIoError::ChangedOnDisk);
             }
-            let end = (&file).seek(SeekFrom::End(0)).map_err(|e| io_err(&temp.path, e))?;
+            let end = (&file)
+                .seek(SeekFrom::End(0))
+                .map_err(|e| io_err(&temp.path, e))?;
             if end != prev.stat.size {
                 return Err(ProjectIoError::ChangedOnDisk);
             }
@@ -640,7 +656,9 @@ impl SavePlan {
         let doc_sha = hex(&sink.hasher.finalize());
         drop(history);
         if !(2..=u32::MAX as u64).contains(&doc_len) {
-            return Err(ProjectIoError::Invalid("Invalid project document size".into()));
+            return Err(ProjectIoError::Invalid(
+                "Invalid project document size".into(),
+            ));
         }
 
         // New media, in table order.
@@ -688,10 +706,19 @@ impl SavePlan {
         let _ = cloned_mode;
         durable::sync_file(&file).map_err(tmp_err)?;
 
-        self.verify(&file, &temp.path, &records, &written_records, &doc_sha, &mut buf)?;
+        self.verify(
+            &file,
+            &temp.path,
+            &records,
+            &written_records,
+            &doc_sha,
+            &mut buf,
+        )?;
         drop(file);
         if self.options.fault == Some(WriteFault::FailBeforePublish) {
-            return Err(ProjectIoError::Invalid("Injected failure before publishing".into()));
+            return Err(ProjectIoError::Invalid(
+                "Injected failure before publishing".into(),
+            ));
         }
 
         // Keep the version being replaced, then publish.
@@ -775,7 +802,12 @@ impl SavePlan {
                 "The saved project failed verification ({what}). Nothing was replaced."
             ))
         };
-        let container = read_container(file, ReadOptions { verify_media: false })?;
+        let container = read_container(
+            file,
+            ReadOptions {
+                verify_media: false,
+            },
+        )?;
         if container.format != ContainerFormat::Pmv4 || container.media.len() != records.len() {
             return Err(bad("record count"));
         }
@@ -794,7 +826,8 @@ impl SavePlan {
         let _ = document_sha256;
         for (i, r) in records.iter().enumerate() {
             if self.options.verify == VerifyLevel::Full || written.contains(&i) {
-                let sha = sha_of_range(file, r.offset, r.length, buf).map_err(|e| io_err(path, e))?;
+                let sha =
+                    sha_of_range(file, r.offset, r.length, buf).map_err(|e| io_err(path, e))?;
                 if sha != r.sha256 {
                     return Err(bad("media checksum"));
                 }
@@ -836,7 +869,16 @@ fn write_media(
                 )));
             }
             let src = File::open(&version.path).map_err(|e| io_err(&version.path, e))?;
-            copy_range(&src, *offset, *length, out, &mut hasher, buf, &media_err, temp)?;
+            copy_range(
+                &src,
+                *offset,
+                *length,
+                out,
+                &mut hasher,
+                buf,
+                &media_err,
+                temp,
+            )?;
             (*length, sha256.as_deref())
         }
         MediaSource::File {
@@ -844,7 +886,8 @@ fn write_media(
             length,
             sha256,
         } => {
-            let src = File::open(path).map_err(|e| media_err(format!("{} ({e})", path.display())))?;
+            let src =
+                File::open(path).map_err(|e| media_err(format!("{} ({e})", path.display())))?;
             let actual = src.metadata().map_err(|e| io_err(path, e))?.len();
             if actual != *length {
                 return Err(media_err(format!(
@@ -858,7 +901,9 @@ fn write_media(
     };
     let digest = hex(&hasher.finalize());
     if expected.is_some_and(|want| want != digest) {
-        return Err(media_err("The project media checksum does not match.".into()));
+        return Err(media_err(
+            "The project media checksum does not match.".into(),
+        ));
     }
     Ok((length, digest))
 }

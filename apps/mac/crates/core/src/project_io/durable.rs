@@ -170,10 +170,10 @@ pub fn check_version(
     expected: Option<&FileVersion>,
     verify_content: bool,
 ) -> Result<(), ProjectIoError> {
-    let current = lstat_file(destination).or_else(|e| match e {
+    let current = lstat_file(destination).map_err(|e| match e {
         // A directory or symlink where a file was is a change too.
-        ProjectIoError::Invalid(_) => Err(ProjectIoError::ChangedOnDisk),
-        other => Err(other),
+        ProjectIoError::Invalid(_) => ProjectIoError::ChangedOnDisk,
+        other => other,
     })?;
     let Some(expected) = expected else {
         return match current {
@@ -345,7 +345,11 @@ pub fn sync_file(file: &File) -> std::io::Result<()> {
 
 /// `syncDirectory`: makes a rename/link durable.
 pub fn sync_directory(dir: &Path) -> Result<(), ProjectIoError> {
-    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
     let handle = File::open(dir).map_err(|e| io_err(dir, e))?;
     handle.sync_all().map_err(|e| io_err(dir, e))
 }
@@ -387,7 +391,12 @@ fn swap_files(a: &Path, b: &Path) -> Result<bool, ProjectIoError> {
     {
         match sys::renamex(a, b, sys::RENAME_SWAP) {
             Ok(()) => Ok(true),
-            Err(e) if matches!(e.raw_os_error(), Some(45 /* ENOTSUP */) | Some(22 /* EINVAL */)) => {
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(45 /* ENOTSUP */) | Some(22 /* EINVAL */)
+                ) =>
+            {
                 Ok(false)
             }
             Err(e) => Err(io_err(b, e)),
@@ -575,7 +584,9 @@ impl BackupPolicy {
 /// `2026-10-31T21-38-05-123Z` (an ISO-8601 instant with `:` and `.` replaced,
 /// as the old app named its backups).
 fn backup_stamp(now: std::time::SystemTime) -> String {
-    let d = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let d = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Howard Hinnant's civil_from_days.
@@ -614,7 +625,8 @@ fn is_backup_name(name: &str) -> bool {
         }
     }
     let rest = &b[28..];
-    rest.is_empty() || (rest.len() > 1 && rest[0] == b'-' && rest[1..].iter().all(u8::is_ascii_digit))
+    rest.is_empty()
+        || (rest.len() > 1 && rest[0] == b'-' && rest[1..].iter().all(u8::is_ascii_digit))
 }
 
 /// Backups of the policy's directory, newest first.
@@ -631,7 +643,10 @@ pub fn list_backups(policy: &BackupPolicy) -> Result<Vec<PathBuf>, ProjectIoErro
         .filter(|n| is_backup_name(n))
         .collect();
     names.sort_by(|a, b| b.cmp(a));
-    Ok(names.into_iter().map(|n| policy.directory.join(n)).collect())
+    Ok(names
+        .into_iter()
+        .map(|n| policy.directory.join(n))
+        .collect())
 }
 
 /// Copies (clones) the current destination into the backup directory and
@@ -671,7 +686,8 @@ pub(crate) fn retain(policy: &BackupPolicy) -> Result<(), ProjectIoError> {
     for (index, file) in list_backups(policy)?.into_iter().enumerate() {
         let size = fs::symlink_metadata(&file).map(|m| m.len()).unwrap_or(0);
         bytes += size;
-        if index >= policy.min_versions && (index >= policy.max_versions || bytes > policy.max_bytes)
+        if index >= policy.min_versions
+            && (index >= policy.max_versions || bytes > policy.max_bytes)
         {
             fs::remove_file(&file).map_err(|e| io_err(&file, e))?;
         }
