@@ -8,7 +8,7 @@
   each in dark and light:
     A  Editor: Project, viewer, timeline, Properties with a colour popover
     B  Agent: Effect Controls on the left, agent panel docked right
-    C  Sheet: Composition Settings attached below the toolbar
+    C  Sheet: Composition Settings, centred by the system (macOS 26+)
   Icons approximate SF Symbols; the native app uses the real symbols.
 -->
 <style>
@@ -248,7 +248,7 @@ function viewer(w,h){
   const fw=w-56, fh=Math.round(fw*9/16), fx=28, fy=32+Math.round((h-32-fh)/2);
   const sc=fw/760;
   return `<div class="vbar"><span class="sp"></span>
-     <span class="pop">Fit (54 %)${ic('chev','s11')}</span><span class="pop">Auto${ic('chev','s11')}</span><span class="ib">${ic('guides','s13')}</span></div>
+     <span class="pop">Fit (54 %)${ic('chev','s11')}</span><span class="pop">Auto${ic('chev','s11')}</span></div>
    <div style="position:absolute;inset:32px 0 0 0;background:var(--viewer)"></div>
    <div style="position:absolute;left:${fx}px;top:${fy}px;width:${fw}px;height:${fh}px;overflow:hidden;background:radial-gradient(45% 60% at 30% 70%,rgba(160,70,30,.65),transparent 70%),radial-gradient(35% 55% at 72% 30%,rgba(140,60,25,.6),transparent 70%),radial-gradient(70% 70% at 50% 45%,#5a2a14,#24100a 75%,#140906)">
      <div style="position:absolute;inset:0;background:radial-gradient(rgba(255,255,255,.07) .6px,transparent .9px) 0 0/5px 5px;opacity:.6"></div>
@@ -333,7 +333,7 @@ function sheet(){
   const r=(l,v)=>`<div style="height:32px;display:flex;align-items:center;gap:12px"><span style="flex:1;color:var(--t2)">${l}</span><div style="width:236px;display:flex;gap:6px;align-items:center">${v}</div></div>`;
   const F=(v,u='',st='')=>`<div class="f" style="height:26px;${st}">${v}${u?`<u>${u}</u>`:''}</div>`;
   return `<div class="scrim"></div>
-  <div class="sheet glass" style="left:460px;top:60px;width:520px;height:358px"><div class="in" style="inset:6px;border-radius:17px"></div>
+  <div class="sheet glass" style="left:460px;top:271px;width:520px;height:358px"><div class="in" style="inset:6px;border-radius:17px"></div>
    <div style="position:absolute;inset:6px;padding:20px 22px">
     <div style="font-size:15px;font-weight:600">Composition Settings</div>
     <div style="font-size:13px;line-height:1.45;color:var(--t2);margin:4px 0 12px">Changes apply to “Launch Film” and every layer that follows the composition size.</div>
@@ -364,7 +364,7 @@ function editor(scheme,state){
   return h+'</div>';
 }
 
-const states=[['A','Editor — inspector focus, colour popover from the Color well, render bar, Background Tasks running'],['B','Agent — Effect Controls on the left, agent panel docked right'],['C','Sheet — Composition Settings attached below the toolbar']];
+const states=[['A','Editor — inspector focus, colour popover from the Color well, render bar, Background Tasks running'],['B','Agent — Effect Controls on the left, agent panel docked right'],['C','Sheet — Composition Settings, placed by the system (centred in the window on macOS 26 and later)']];
 let html='';
 for(const [s,label] of states) for(const scheme of ['dark','light'])
   html+=`<h2>${s} · ${scheme==='dark'?'Dark':'Light'} · ${label}</h2><div class="fit"><div class="stage">${editor(scheme,s)}</div></div>`;
