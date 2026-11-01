@@ -56,19 +56,69 @@ export interface EventPlan {
   preventDefault: boolean;
   deliveries: { id: number; capture: boolean }[];
 }
-export interface SurfaceEvent {
+/** UTF-16 code-unit offsets (Cocoa/JS), end exclusive. */
+export type TextRange = [number, number];
+export interface InputObservation {
+  value: string;
+  selection: TextRange;
+  composing: boolean;
+  composition: TextRange | null;
+  sequence: number;
+}
+export interface EventDetail {
+  key?: string;
+  code?: string;
+  repeat?: boolean;
+  value?: Json;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  pointerId?: number;
+  x?: number;
+  y?: number;
+  button?: number;
+  buttons?: number;
+  clickCount?: number;
+  deltaX?: number;
+  deltaY?: number;
+  selection?: TextRange;
+  composing?: boolean;
+  composition?: TextRange | null;
+  drag?: {
+    types: string[];
+    data: Record<string, Json>;
+    effect: "none" | "copy" | "move" | "link";
+  };
+  range?: TextRange;
+}
+export interface SurfaceEvent extends EventDetail {
   type: string;
   target: number;
   currentTarget: number;
   defaultPrevented: boolean;
-  key?: string;
-  value?: Json;
-  shiftKey?: boolean;
-  altKey?: boolean;
-  pointerId?: number;
   preventDefault(): void;
   stopPropagation(): void;
   stopImmediatePropagation(): void;
+}
+export interface SnapshotNode {
+  id: number;
+  type: string;
+  children: number[];
+  props: Props;
+  text: string;
+}
+export function textRange(range: TextRange, length: number): TextRange {
+  if (
+    !Array.isArray(range) ||
+    range.length !== 2 ||
+    !range.every(Number.isSafeInteger) ||
+    range[0] < 0 ||
+    range[0] > range[1] ||
+    range[1] > length
+  )
+    throw new RangeError("Invalid UTF-16 range");
+  return [...range];
 }
 export function json(value: unknown): Json {
   const seen = new Set<object>();
@@ -103,4 +153,57 @@ export function json(value: unknown): Json {
     return result;
   }
   return visit(value);
+}
+/** Complete native worker envelope; generation is checked before any callback. */
+export interface NativeEvent {
+  generation: number;
+  plan: EventPlan;
+  type: string;
+  detail: EventDetail;
+}
+export function eventDetail(value: EventDetail): EventDetail {
+  const detail = json(value) as unknown as EventDetail;
+  for (const key of ["key", "code"] as const)
+    if (detail[key] !== undefined && typeof detail[key] !== "string")
+      throw new TypeError(`Invalid event ${key}`);
+  for (const key of [
+    "repeat",
+    "shiftKey",
+    "altKey",
+    "ctrlKey",
+    "metaKey",
+    "composing",
+  ] as const)
+    if (detail[key] !== undefined && typeof detail[key] !== "boolean")
+      throw new TypeError(`Invalid event ${key}`);
+  for (const key of ["x", "y", "deltaX", "deltaY"] as const)
+    if (detail[key] !== undefined && typeof detail[key] !== "number")
+      throw new TypeError(`Invalid event ${key}`);
+  for (const key of ["button", "buttons", "clickCount", "pointerId"] as const)
+    if (
+      detail[key] !== undefined &&
+      (!Number.isSafeInteger(detail[key]) || detail[key]! < 0)
+    )
+      throw new TypeError(`Invalid event ${key}`);
+  for (const key of ["range", "selection", "composition"] as const)
+    if (detail[key] !== undefined && detail[key] !== null)
+      textRange(
+        detail[key],
+        typeof detail.value === "string" && key !== "range"
+          ? detail.value.length
+          : Number.MAX_SAFE_INTEGER,
+      );
+  if (detail.composition && detail.composing !== true)
+    throw new TypeError("Composition range requires composing input");
+  if (
+    detail.drag &&
+    (!Array.isArray(detail.drag.types) ||
+      !detail.drag.types.every((t) => typeof t === "string") ||
+      !detail.drag.data ||
+      Array.isArray(detail.drag.data) ||
+      typeof detail.drag.data !== "object" ||
+      !["none", "copy", "move", "link"].includes(detail.drag.effect))
+  )
+    throw new TypeError("Invalid drag data");
+  return detail;
 }

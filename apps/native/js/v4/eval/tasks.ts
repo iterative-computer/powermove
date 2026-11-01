@@ -78,8 +78,8 @@ const publicTasks: Task[] = groups.flatMap(([group, label, briefs]) =>
 );
 
 /** Owner-approved behavior abstractions. All examples and labels are invented.
- * Reads/writes describe required host services, not services implemented by the
- * surface SDK. apiGaps prevent a synthetic fixture pass certifying a full port.
+ * Reads/writes describe required host services. apiGaps retain the current
+ * production-integration gates; executable headless checks never certify a full port.
  */
 const ownerSpecs = [
   {
@@ -102,9 +102,9 @@ const ownerSpecs = [
       "Clamp horizontal coordinates; retain vertical overshoot; ignore nonfinite edits; skip protected targets; preserve exclusions until selection changes; do not edit on cancelled drag.",
     ],
     apiGaps: [
-      "No public project query/subscription or acknowledged edit service.",
-      "No public durable extension-settings service.",
-      "SurfaceEvent has no pointer position or clipboard payload.",
+      "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
+      "Production extension-scoped durable settings require state_transaction binding and restart verification.",
+      "Native pointer and clipboard delivery require application input adapters; pointer coordinates are publicly typed.",
     ],
   },
   {
@@ -127,9 +127,9 @@ const ownerSpecs = [
       "Refuse protected or already masked sources; require positive guidance; ignore completion after cancellation; invalidate results on source changes; never publish partial analysis.",
     ],
     apiGaps: [
-      "No public project query/subscription or acknowledged edit service.",
+      "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
       "No public media decoding, analysis-resource lifecycle or editable mask insertion service.",
-      "SurfaceEvent has no pointer coordinates for brush strokes.",
+      "Native brush coordinate conversion requires macOS input-adapter verification.",
     ],
   },
   {
@@ -152,7 +152,7 @@ const ownerSpecs = [
       "Denied permission has no project effect; retain a failed take; cache a successful import across retries; refuse insertion into another composition; do not pause unrelated playback.",
     ],
     apiGaps: [
-      "No public project query/subscription or acknowledged edit service.",
+      "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
       "No public audio capture, asset import, transport control or recovery-export service.",
     ],
   },
@@ -245,9 +245,9 @@ const ownerSpecs = [
       "Skip unsupported, protected or expression-driven artwork; no-op already aligned pivots; automatic edits exclude animated artwork and project-load or undo notifications.",
     ],
     apiGaps: [
-      "No public project query/subscription or acknowledged edit service.",
-      "No public durable extension-settings service.",
-      "No public evaluated-bounds or transform-query service.",
+      "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
+      "Production extension-scoped durable settings require state_transaction binding and restart verification.",
+      "Production evaluated bounds/transforms require a QueryMirror-backed KernelData adapter.",
     ],
   },
   {
@@ -270,8 +270,7 @@ const ownerSpecs = [
       "Exclude unsupported and protected layers; suppress duplicate submissions while busy; mixed selection must not duplicate effects; recover from negative acknowledgements.",
     ],
     apiGaps: [
-      "No public project query/subscription or acknowledged edit service.",
-      "SurfaceEvent lacks command/control modifiers required for additive pointer selection.",
+      "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
     ],
   },
   {
@@ -294,9 +293,8 @@ const ownerSpecs = [
       "Discard invalid saved values; cap long frame deltas; ignore key repeats; pause on focus loss; storage failure retains session score; retirement cancels ticks.",
     ],
     apiGaps: [
-      "No public durable extension-settings service.",
+      "Production extension-scoped durable settings require state_transaction binding and restart verification.",
       "No public panel visibility/focus lifecycle or native frame scheduler.",
-      "SurfaceEvent has no repeat field for suppressing held keys.",
     ],
   },
   {
@@ -319,8 +317,7 @@ const ownerSpecs = [
       "Reject whitespace-only input; preserve input on rejection; retain existing annotation identity; empty positions show an empty field; retired subscriptions cannot update the view.",
     ],
     apiGaps: [
-      "No public project query/subscription or acknowledged edit service.",
-      "Current native text is not observable through the accepted public snapshot after an input echo.",
+      "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
     ],
   },
 ];

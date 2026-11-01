@@ -1,7 +1,9 @@
+import { pathToFileURL } from "node:url";
 import { createRoot, type Commit } from "../src";
 import { tasks } from "./tasks";
 import { exercise } from "./scenarios";
 import { runExtension, runOwner } from "./extensions";
+import { nativeWire } from "./native-wire";
 export async function runTask(
   id: string,
   wire?: string,
@@ -73,11 +75,16 @@ if (import.meta.main) {
   if (args.includes("--list")) {
     console.log(JSON.stringify(selected, null, 2));
   } else {
-    const wire = args.find((a) => a.startsWith("--wire="))?.slice(7);
+    const wire =
+      args.find((a) => a.startsWith("--wire="))?.slice(7) ??
+      (args.includes("--wire") ? nativeWire().surface : undefined);
     const candidate = args.find((a) => a.startsWith("--candidate="))?.slice(12);
     const factory: typeof createRoot = candidate
-      ? (await import(new URL(candidate, `file://${process.cwd()}/`).href))
-          .createRoot
+      ? (
+          await import(
+            new URL(candidate, pathToFileURL(`${process.cwd()}/`)).href
+          )
+        ).createRoot
       : createRoot;
     if (typeof factory !== "function")
       throw new Error("Candidate must export createRoot");
@@ -103,6 +110,9 @@ if (import.meta.main) {
           passed: results.filter((r) => r.status === "pass").length,
           failed: results.filter((r) => r.status === "fail").length,
           pending: results.filter((r) => r.status === "pending-owner").length,
+          ownerProductionBlocked: results.filter(
+            (r) => "productionReady" in r && r.productionReady === false,
+          ).length,
         },
         null,
         2,
