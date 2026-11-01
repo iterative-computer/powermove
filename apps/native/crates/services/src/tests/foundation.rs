@@ -216,6 +216,7 @@ fn library_preserves_recency_and_filters_archived_missing_duplicates() {
             name: id.into(),
             modified_ms: 1,
             trashed: id == "trash",
+            summary: None,
         })
         .to_vec();
     let mut service = library::LibraryService(LibraryDouble {
@@ -410,4 +411,65 @@ fn font_registry_change_invalidates_previously_cached_family_list() {
     fonts.hook.families = Some(vec!["New Family".into()]);
     assert_eq!(fonts.families().unwrap(), Some(vec!["New Family".into()]));
     assert_eq!(fonts.hook.reads, 2);
+}
+
+#[test]
+fn library_internal_actions_keep_mac_menu_vocabulary() {
+    let mut service = library::LibraryService(LibraryDouble::default());
+    let archive = library::LibraryAction::Archive {
+        id: "synthetic".into(),
+    };
+    let restore = library::LibraryAction::Restore {
+        id: "synthetic".into(),
+    };
+    assert_eq!(archive.trash_menu_label(), Some("Move to Trash"));
+    assert_eq!(restore.trash_menu_label(), Some("Put Back"));
+    assert_eq!(library::RECENTLY_DELETED_LABEL, "Recently Deleted");
+    service.apply(archive.clone()).unwrap();
+    service.apply(restore.clone()).unwrap();
+    assert_eq!(service.0.actions, vec![archive, restore]);
+}
+
+#[test]
+fn library_old_rows_open_without_invented_summary_or_date_copy() {
+    let row =
+        json!({"id":"synthetic", "name":"Synthetic Project", "modified_ms":1234, "trashed":true});
+    let entry: library::ProjectEntry = serde_json::from_value(row.clone()).unwrap();
+    assert_eq!(entry.summary, None);
+    assert_eq!(entry.modified_ms, 1234);
+    assert_eq!(serde_json::to_value(entry).unwrap(), row);
+}
+
+#[test]
+fn library_rows_and_recents_preserve_kernel_supplied_display_facts() {
+    let summary = library::ProjectSummary {
+        thumbnail: Some("synthetic-poster".into()),
+        duration_ms: 12_345,
+        width: 1920,
+        height: 1080,
+        fps: library::FrameRate {
+            numerator: 30_000,
+            denominator: 1001,
+        },
+    };
+    let entry = library::ProjectEntry {
+        id: "synthetic".into(),
+        name: "Synthetic Project".into(),
+        modified_ms: 1_234,
+        trashed: false,
+        summary: Some(summary),
+    };
+    let roundtrip: library::ProjectEntry =
+        serde_json::from_value(serde_json::to_value(&entry).unwrap()).unwrap();
+    assert_eq!(roundtrip, entry);
+    let mut service = library::LibraryService(LibraryDouble {
+        entries: vec![roundtrip],
+        recent: vec!["synthetic".into()],
+        ..Default::default()
+    });
+    assert_eq!(service.list(false).unwrap(), vec![entry.clone()]);
+    let mut recent = service.recents().unwrap();
+    assert_eq!(recent, vec![entry.clone()]);
+    recent[0].summary.as_mut().unwrap().thumbnail = None;
+    assert_eq!(service.recents().unwrap(), vec![entry]);
 }

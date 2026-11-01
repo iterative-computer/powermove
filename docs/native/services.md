@@ -184,3 +184,15 @@ with strict crate Clippy and formatting checks. No user-facing error sentences
 were invented or renderer/theme files changed. Host adapters must now return the
 typed service result and select copy by code; `anyhow` conversion remains available
 for legacy host failures, preserving nested typed/I/O codes without text matching.
+
+| Review item | Implementation / selecting rule |
+|---|---|
+| 2 — Mac library vocabulary | Verbatim menu labels `Move to Trash` / `Put Back` and filter label `Recently Deleted` are exported; internal Archive/Restore/trashed names remain documented and keep the same kernel forwarding. Review is the copy spec; N3 preserves action meaning, N4 retains all data. |
+| 3 — library row facts | Optional `ProjectSummary` carries thumbnail asset ID, duration in milliseconds, dimensions and an exact rational fps, supplied by kernel on save. Missing old-row summaries remain unknown; list/recents preserve the facts. `modified_ms` remains an instant for the shell's system relative formatter. N1 pro library facts, N3 exact rates, N4 old indexes still open, kernel single writer. |
+
+At this step **66 tests pass**, including menu/action forwarding, old index
+round trips and saved display-fact retention through list/recents. Strict crate
+Clippy passes. The integration owner must populate summaries on kernel save and
+resolve thumbnail IDs; shell uses the system relative formatter, never a cached
+English date. Native menu presentation, date localization and thumbnail drawing
+require macOS verification. No visual values or new copy were introduced.
