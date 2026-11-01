@@ -1,6 +1,6 @@
 # `pm-mac-core`: the API panels code against
 
-Crate: `apps/mac/crates/core` (package `pm-mac-core`). Pure Rust, no GPUI.
+Crate: `apps/native/crates/core` (package `pm-mac-core`). Pure Rust, no GPUI.
 It is the single owner of the open project: every panel, the MCP server and
 extensions read and change the document only through it
 ([engine-boundary.md](engine-boundary.md), sections 1, 2.2, 5.2, 6).

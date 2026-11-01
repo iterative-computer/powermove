@@ -7,7 +7,7 @@
 //     apps/desktop/src/main/file-upload.ts apps/desktop/src/main/read-retry.ts \
 //     apps/desktop/src/shared/project-incremental.ts apps/desktop/src/shared/sha256.ts \
 //     | tar -x -C /tmp/pm-main-src
-//   bun apps/mac/crates/core/tests/fixtures/ts-writer/generate.ts /tmp/pm-main-src
+//   bun apps/native/crates/core/tests/fixtures/ts-writer/generate.ts /tmp/pm-main-src
 //
 // Every object below has its keys in canonical (code unit) order, so
 // `JSON.stringify` writes exactly the canonical serialization the Rust writer
