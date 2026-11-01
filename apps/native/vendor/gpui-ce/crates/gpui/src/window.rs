@@ -1863,7 +1863,7 @@ impl Window {
                                     // atlas tile references after a GPU device recovery.
                                     window.refresh();
                                 }
-                                let arena_clear_needed = window.draw(cx);
+                                let arena_clear_needed = measure("GPUI tree", || window.draw(cx));
                                 window.present();
                                 arena_clear_needed.clear(cx);
                             })

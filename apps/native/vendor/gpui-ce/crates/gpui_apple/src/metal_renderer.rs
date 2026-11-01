@@ -237,6 +237,7 @@ pub struct MetalRenderer {
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
+    display_link_drawable: Option<metal::MetalDrawable>,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     command_queue: CommandQueue,
@@ -504,6 +505,7 @@ impl MetalRenderer {
             device,
             layer,
             presents_with_transaction: false,
+            display_link_drawable: None,
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -668,6 +670,12 @@ impl MetalRenderer {
         // nothing to do
     }
 
+    /// A CAMetalDisplayLink update lends one available drawable for this callback.
+    /// Clear it after the callback even if GPUI did not need to paint.
+    pub fn set_display_link_drawable(&mut self, drawable: Option<metal::MetalDrawable>) {
+        self.display_link_drawable = drawable;
+    }
+
     pub fn draw(&mut self, scene: &Scene) {
         let layer = match &self.layer {
             Some(l) => l.clone(),
@@ -683,16 +691,25 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        let drawable =
-            if let Some(drawable) = measure_native("GPUI drawable", || layer.next_drawable()) {
-                drawable
-            } else {
-                log::error!(
-                    "failed to retrieve next drawable, drawable size: {:?}",
-                    viewport_size
-                );
-                return;
-            };
+        let supplied = self.display_link_drawable.take();
+        let drawable = if let Some(drawable) = measure_native("GPUI drawable", || {
+            supplied.as_deref().or_else(|| layer.next_drawable())
+        }) {
+            drawable
+        } else {
+            log::error!(
+                "failed to retrieve next drawable, drawable size: {:?}",
+                viewport_size
+            );
+            return;
+        };
+
+        // A display-link update can carry the previous size during live resize.
+        // Encode against the supplied texture, not the layer's next requested size.
+        let viewport_size = size(
+            DevicePixels(drawable.texture().width() as i32),
+            DevicePixels(drawable.texture().height() as i32),
+        );
 
         // Powermove P-120: opt-in timestamps of the actual GPUI drawable, not a sibling viewer.
         if std::env::var_os("PM_FRAME_PACING").is_some() {
@@ -717,6 +734,13 @@ impl MetalRenderer {
         if self.presents_with_transaction {
             command_buffer.commit();
             measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
+            drawable.present();
+        } else if supplied.is_some() {
+            // CAMetalDisplayLink requires present() before targetTimestamp.
+            // Queuing present on the buffer defers that call until scheduling,
+            // which can miss the CPU deadline after timely encoding.
+            // Its update tracks the committed rendering; no scheduled wait is needed.
+            command_buffer.commit();
             drawable.present();
         } else {
             command_buffer.present_drawable(drawable);
