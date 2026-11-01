@@ -301,11 +301,7 @@ fn set_composition(cx: &mut Cx<'_>, p: &CompPatch) -> Result<(), CommandError> {
     if let Some(fps) = p.fps {
         cx.set(
             at("fps"),
-            n(values::clamp(
-                values::js_round(values::finite(fps, "fps")?),
-                1.0,
-                240.0,
-            )),
+            n(values::clamp(values::finite(fps, "fps")?, 1.0, 240.0)),
         )?;
     }
     if let Some(d) = p.duration {

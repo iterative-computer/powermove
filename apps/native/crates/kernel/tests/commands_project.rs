@@ -887,3 +887,57 @@ fn library_sections() {
     assert_eq!(get(&sec, &["tags"]), &parse(r#"["text"]"#).unwrap());
     assert_eq!(get(&sec, &["versions"]).as_array().unwrap().len(), 1);
 }
+
+// N3: an authored fractional rate is not a dimension to round to pixels.
+#[test]
+fn composition_set_preserves_fractional_rates_and_undo_redo() {
+    for fps in [23.976, 29.97, 59.94, 30000.0 / 1001.0] {
+        let mut s = store();
+        run(
+            &mut s,
+            CompCommand::Set {
+                patch: Box::new(CompPatch {
+                    fps: Some(fps),
+                    ..Default::default()
+                }),
+            },
+        );
+        assert_eq!(num(&root(&s), &["comps", "C1", "fps"]), fps);
+        s.undo().unwrap();
+        assert_eq!(num(&root(&s), &["comps", "C1", "fps"]), 30.0);
+        s.redo().unwrap();
+        assert_eq!(num(&root(&s), &["comps", "C1", "fps"]), fps);
+    }
+}
+
+#[test]
+fn composition_set_fractional_rate_keeps_limits_and_rejects_nonfinite_atomically() {
+    for (given, expected) in [(0.5, 1.0), (240.5, 240.0)] {
+        let mut s = store();
+        run(
+            &mut s,
+            CompCommand::Set {
+                patch: Box::new(CompPatch {
+                    fps: Some(given),
+                    ..Default::default()
+                }),
+            },
+        );
+        assert_eq!(num(&root(&s), &["comps", "C1", "fps"]), expected);
+    }
+    for fps in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut s = store();
+        let before = root(&s);
+        refused(
+            &mut s,
+            CompCommand::Set {
+                patch: Box::new(CompPatch {
+                    name: Some("Must not leak".into()),
+                    fps: Some(fps),
+                    ..Default::default()
+                }),
+            },
+        );
+        assert_eq!(root(&s), before);
+    }
+}
