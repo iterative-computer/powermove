@@ -4,8 +4,8 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{MTLClearColor, MTLLoadAction, MTLPixelFormat, MTLStoreAction};
 use objc2::{MainThreadMarker, MainThreadOnly, class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSTextField, NSView, NSWindow, NSWindowOrderingMode,
-    NSWindowStyleMask,
+    NSAccessibility, NSAppearanceCustomization, NSBackingStoreType, NSColor, NSTextField, NSView,
+    NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -52,6 +52,10 @@ impl Host {
         let content = native_window.contentView().unwrap();
         let viewer = crate::slot_view::SlotView::new(mtm);
         viewer.setWantsLayer(true);
+        viewer.setAccessibilityElement(true);
+        viewer.setAccessibilityRole(Some(&NSString::from_str("AXImage")));
+        viewer.setAccessibilityLabel(Some(&NSString::from_str("Viewer")));
+        viewer.setAccessibilityIdentifier(Some(&NSString::from_str("s2-viewer")));
         let layer = metal::MetalLayer::new();
         layer.set_device(device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
@@ -69,7 +73,7 @@ impl Host {
             Retained::from_raw(p).unwrap()
         };
         let html = NSString::from_str(
-            "<meta name='color-scheme' content='dark'><style>body{background:transparent;color:#eee;font:14px -apple-system;margin:0}#panel{position:fixed;right:12px;top:64px;width:248px;padding:16px;height:calc(100vh - 284px);background:#23252a}button,input{font:inherit}#overlay{position:fixed;right:12px;top:304px;width:320px;height:60px;background:#4a3e75}input{width:90%}</style><section id='panel'><h3>Compat panel</h3><input placeholder='WebKit text input'><p>Resize to reflow this native WKWebView.</p><button onclick='document.querySelector(\"#overlay\").hidden=!document.querySelector(\"#overlay\").hidden'>Toggle overlay</button></section><div id='overlay'>Compat overlay hole<br><button onclick='this.textContent=\"Clicked\"'>Click inside WebKit</button></div>",
+            "<meta name='color-scheme' content='dark'><style>body{background:transparent;color:#eee;font:14px -apple-system;margin:0}#panel{position:fixed;right:12px;top:64px;width:248px;padding:16px;height:calc(100vh - 284px);background:#23252a}button,input{font:inherit}#overlay{position:fixed;right:12px;top:304px;width:320px;height:60px;background:#4a3e75}input{width:90%}</style><section id='panel'><h3>Compat panel</h3><input aria-label='WebKit text input' placeholder='WebKit text input'><p>Resize to reflow this native WKWebView.</p><button onclick='document.querySelector(\"#overlay\").hidden=!document.querySelector(\"#overlay\").hidden'>Toggle overlay</button></section><div id='overlay' role='group' aria-label='Compat overlay hole'>Compat overlay hole<br><button onclick='this.textContent=\"Clicked\"'>Click inside WebKit</button></div>",
         );
         unsafe {
             let _: *mut AnyObject = msg_send![&*web_content,loadHTMLString:&*html,baseURL:std::ptr::null::<AnyObject>()];
@@ -82,10 +86,16 @@ impl Host {
         // Autoresizing is relative to the parent's initial size. A zero-size
         // wrapper offsets fixed DOM content outside the visible clip.
         web.setFrame(web_content.frame());
+        web.setAccessibilityElement(true);
+        web.setAccessibilityRole(Some(&NSString::from_str("AXGroup")));
+        web.setAccessibilityLabel(Some(&NSString::from_str("Compat panel")));
+        web.setAccessibilityIdentifier(Some(&NSString::from_str("s2-web")));
         web.addSubview(&web_content);
         content.addSubview_positioned_relativeTo(&web, NSWindowOrderingMode::Below, Some(&gpui));
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
         field.setPlaceholderString(Some(&NSString::from_str("Native name · IME / Services")));
+        field.setAccessibilityLabel(Some(&NSString::from_str("Native name")));
+        field.setAccessibilityIdentifier(Some(&NSString::from_str("s2-field")));
         field.setEditable(true);
         field.setSelectable(true);
         content.addSubview_positioned_relativeTo(&field, NSWindowOrderingMode::Above, Some(&gpui));
@@ -101,6 +111,7 @@ impl Host {
         unsafe {
             menu.setReleasedWhenClosed(false);
         }
+        menu.setAppearance(native_window.appearance().as_deref());
         menu.setOpaque(false);
         menu.setBackgroundColor(Some(&NSColor::clearColor()));
         menu.setHasShadow(true);
@@ -182,6 +193,9 @@ impl Host {
         let field = Rect::new(214., top + 22., 250., 26.);
         let transport = Rect::new((w / 2. - 110.).max(205.), h - 246., 220., 44.);
         let timeline = Rect::new(0., h - 190., w, 190.);
+        // Match CSS right:12px, width:320px exactly; the old right.x-40
+        // clipped the overlay's leading 28 points, including its label.
+        let overlay = crate::contract::compat_overlay(w);
         // Publication is atomic: no visible intermediate list while laying out.
         self.frame = Frame {
             revision: self.frame.revision + 1,
@@ -191,7 +205,7 @@ impl Host {
                     id: 2,
                     band: Band::Below,
                     bounds: Rect::new(0., 0., w, h),
-                    clip: Clip::Union(vec![right, Rect::new(right.x - 40., 304., 320., 60.)]),
+                    clip: Clip::Union(vec![right, overlay]),
                     transform: Transform::translation(0., 0.),
                 },
                 slot(3, field, Band::Above),
@@ -200,14 +214,15 @@ impl Host {
             interactive: vec![Rect::new(0., top, 195., h - top), timeline],
             occluding: vec![Rect::new(0., 0., w, top)],
             // Fixed DOM rectangle in this synthetic fixture; S5 must publish actual rectangles.
-            compat_overlays: vec![Rect::new(right.x - 40., 304., 320., 60.)],
+            compat_overlays: vec![overlay],
             children: vec![],
             accessibility: vec![
-                Target::Gpui,
+                Target::GpuiNode("s2-navigation"),
                 Target::Slot(1),
                 Target::Slot(3),
                 Target::Slot(2),
                 Target::Slot(4),
+                Target::Gpui,
             ],
         };
     }
@@ -256,6 +271,40 @@ impl Host {
             ]),
         );
         crate::glass::finish_frame();
+        use gpui_macos::composition::{AccessibilityItem, publish_accessibility};
+        let order =
+            self.frame
+                .accessibility
+                .iter()
+                .filter_map(|entry| match entry {
+                    Target::GpuiNode(id) => Some(AccessibilityItem::Gpui((*id).into())),
+                    Target::Gpui => Some(AccessibilityItem::RemainingGpui),
+                    Target::Slot(id) => match id {
+                        1 => Some(AccessibilityItem::Native(Retained::into_super(
+                            self.viewer.clone(),
+                        ))),
+                        2 => Some(AccessibilityItem::Native(Retained::into_super(
+                            self.web.clone(),
+                        ))),
+                        3 => Some(AccessibilityItem::Native(Retained::into_super(
+                            Retained::into_super(self.field.clone()),
+                        ))),
+                        4 => crate::glass::accessibility_view("transport")
+                            .map(AccessibilityItem::Native),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+        publish_accessibility(&self.gpui, order);
+        if self.frame.revision == 1 && std::env::var_os("S2_AX_DIAGNOSTICS").is_some() {
+            println!(
+                "S2_CHROME window={} menu={}",
+                self.window.effectiveAppearance().name(),
+                self.menu.effectiveAppearance().name()
+            );
+            println!("S2_AX_ORDER {:?}", self.frame.accessibility);
+        }
         let scale = self.window.backingScaleFactor();
         let size = self.viewer.bounds().size;
         self.layer

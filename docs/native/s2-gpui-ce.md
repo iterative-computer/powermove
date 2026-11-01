@@ -247,3 +247,118 @@ input methods were disabled, fixture processes stopped and the GUI lock released
 The gate remains open principally for foreign accessibility, real IME, measured
 resize lag/fallback, native ordering coverage, complete menu behavior and headroom.
 No framework kill is inferred from a synthetic development-build timing failure.
+
+## S2b P-A11Y (2026-11-01)
+
+**P-A11Y automated gate: PASS. Spoken VoiceOver walkthrough: UNVERIFIED.**
+The earlier S2 implementation notes and unlocked rerun above are retained as the
+baseline. This section supersedes their foreign-child implementation gap; the
+**overall S2 gate remains OPEN / NOT PASSED** for its other outstanding rows.
+
+### Implementation and decisions
+
+| Decision | Rule that picked it |
+|---|---|
+| Use the documented AppKit fallback. The pinned AccessKit macOS 0.26.3 adapter has no API to attach an NSView as a foreign child. | P-A11Y's native-first selection rule, then its explicit fallback. |
+| Wrap the actual content view after AccessKit installs its subclass; preserve its real root and merge at that root. GPUIView forwards AX hit testing, and GPUIWindow/GPUIPanel forward focus to the content adapter. | P-A11Y and N3: correct AXParent, hit and focus relationships across the separate drawing/content views. |
+| Publish `Gpui(AXIdentifier)`, native slot views and `RemainingGpui` with the committed composition. Preserve GPUI subtrees and any unnamed children. | §3.1.2: reading order interleaves slots and GPUI; it is independent of z order. Hosts provide direct exposed root anchors. |
+| Insert AppKit's unignored elements, including an NSControl's cell; keep WebKit's original remote subtree, frames, focus and actions. | N3 correctness and N8: no duplicate AXUnknown control wrappers or copied DOM accessibility tree. |
+| Return native WebKit responder focus / NSControl field-editor focus; reclaim GPUIView as first responder on an AccessKit Focus action. | P-TEXT/P-A11Y: logical GPUI focus alone cannot take keyboard ownership back from a slot. |
+| Query AX while locked and leave spoken/visual checks open. | N7 inspectability and the explicit screen-free constraint; no unlock request, screenshots or VoiceOver toggle. |
+| Set the spike's application appearance through GPUI as well as its window; make the child menu follow it. Match the overlay mask to its CSS bounds. | N9 / §3.10 native appearance and N3 exact geometry. Solid work surfaces remain solid. |
+
+Vendor implementation: `composition_accessibility.rs`, its pure order planner,
+`composition.rs` publication and small window hooks. The per-instance subclasses
+add no ivars. Native parent overrides are cleared on removal/unregister; teardown
+restores both classes before dropping AccessKit. Layout notifications are queued
+after the GPUI draw lock is released. AX getters read retained publication data
+without entering the host or taking the window mutex. The proposed upstream
+foreign-child API and pin assumptions are recorded in POWERMOVE.md; nothing has
+been submitted upstream.
+
+### AX tree evidence without the screen
+
+The external client used `AXUIElementCreateApplication(spike_pid)` and walked
+`AXChildren`, roles, titles, values and frames. **AXIsProcessTrusted was true.**
+The pre-patch binary reproduced the earlier failure while locked: an empty main
+AXGroup, with toolbar/window chrome but no native slots. The patched main root
+exposes these direct children, in the published reading order:
+
+| Order | Identifier / role | Screen frame in fixture points (x, y, width, height) |
+|---|---|---|
+| 1 | `s2-navigation` / AXGroup (GPUI) | 96, 224, 160, 136 |
+| 2 | `s2-viewer` / AXImage (slot 1) | 284, 196, 670, 520 |
+| 3 | `s2-field` / AXTextField (slot 3) | 293, 205, 252, 28 |
+| 4 | `s2-web` / AXGroup (slot 2) | 80, 132, 1180, 792 |
+| 5 | `s2-transport` / AXGroup (slot 4) | 560, 678, 220, 44 |
+| 6 | `s2-timeline` / AXGroup (remaining GPUI) | 96, 754, 199, 26 |
+
+All six AXParent values match the same retained AccessKit root, and
+AXChildrenInNavigationOrder agrees with AXChildren. The native field frame
+includes AppKit's border expansion. The web slot's group covers its full-window
+view; its layer/hit mask still clips to the disjoint panel/overlay union.
+Under it, the actual WKWebView exposes **AXWebArea → AXTextField** named
+`WebKit text input`, with frame **984, 263, 223, 28**. The native transport
+exposes three AXButtons.
+
+Programmatic focus passes **GPUI → WebKit inner field → GPUI**, then
+**GPUI → native field → GPUI**. Each AXFocused setter succeeds, the node reports
+AXFocused=true, and the application's AXFocusedUIElement matches that exact
+node. Native field and web input AXValue writes/readback/restoration pass.
+The WebKit button's AXPress changes its title to `Clicked`; the native glass
+Play button accepts AXPress. Hit tests use screen points, exercising the actual
+AppKit/AccessKit bridge rather than only the composition model.
+
+### Reproduction and validation
+
+```sh
+# Builds on pinned Rust, checks contracts, then starts/stops its own fixture.
+apps/native/spikes/s2/scripts/check-ax.sh --exercise
+
+# Use an already built fixture binary, or inspect an existing spike process.
+apps/native/spikes/s2/scripts/check-ax.sh --no-build --exercise
+apps/native/spikes/s2/scripts/check-ax.sh --pid <spike-pid> --exercise
+```
+
+The Swift walker is also usable directly for a future foreground check. It never
+activates another app, synthesizes input, prompts for permission or requests an
+unlock. Its default mode checks structure; `--exercise` also tests native focus,
+hit testing, value changes and actions. It skips the system menu bar so unrelated
+Recent Items are never included in its output. A missing AX permission returns
+BLOCKED with a distinct exit code instead of opening a permission prompt.
+
+The wrapper sources `engine/env.sh`, selects Rust **1.96.1** from `apps/native`,
+and uses **only `~/Developer/pm-target`**. It monitors its own builds against the
+**4-GiB** stop threshold. Because parallel lanes are changing workspace metadata,
+it builds an isolated manifest and copied lockfile in the temporary directory,
+pointing at these exact sources/vendor paths. It never edits the shared manifest
+or lockfile. No cargo clean, alternate target directory or global setting change.
+
+- Baseline: **7/7** original S2 contracts pass on 1.96.1 before the patch.
+- After: **8/8** S2 contracts pass, including a new wide/narrow overlay-leading-edge geometry regression; **2/2** tests of the exact vendor order planner pass.
+- Required pinned-toolchain spike build and full isolated Cargo test: **PASS**, 8/8 tests.
+- Existing offscreen renderer verifier: **PASS correctness** for alpha, delayed completion/lifetime, repeat submission, clip and retired-source rejection. Loaded locked-session timing remains unsuitable as a presentation gate: 1,000-tile encode/drain p95 3.177/10.418 ms; mixed 60-Hz producer work p95 46.154 ms with 120/120 intervals over 16.667 ms. This is a diagnostic failure of the timing budget, not evidence of a comparative P-A11Y regression or a passed S2 performance gate.
+- AppKit-only probe using the exact vendored bridge: **PASS** for NSTextField, multiline NSTextView and NSButton; parent/navigation agreement, reorder/removal, an AccessKit update, unregister and retained-node teardown. Its NSWindow is never ordered on screen.
+- External AX structure/focus/value/action checks above: **PASS while locked**, including hit tests for GPUI, both text fields, viewer and glass control, plus the previously clipped overlay label's leading edge. The fixture retains its normal startup activation request behind the lock; AX access for a deliberately inactive/background window was not tested. No unlock was needed.
+
+### Visual fixes and remaining limits
+
+The overlay's CSS left edge is `window_width - 12 - 320`; the old mask began
+28 points farther right. One shared geometry helper now drives the native mask
+and hit-hole rectangle. The regression checks both the 1180- and 1032-point
+fixture widths. This addresses the clipped leading label without moving the DOM.
+The spike now sets GPUI's application appearance to Dark (or its existing explicit
+light override), applies the same appearance to the native window and child menu,
+and reports **NSAppearanceNameDarkAqua for both window and menu** in the dark
+fixture. Actual titlebar pixels and light/dark visual quality are **UNVERIFIED**.
+
+Actual spoken VoiceOver next/previous navigation, rotor behavior, focus-ring
+presentation, focus notification timing under VoiceOver, real IME/Services,
+nonrectangular/affine accessibility geometry and display/resize transitions still
+need an attended run. Programmatic focus is evidence for the bridge, not proof
+of VoiceOver speech/traversal. This patch inserts at exposed GPUI root anchors;
+it does not insert inside arbitrary nested GPUI subtrees. Existing S2 performance,
+resize-lag, menu and display gates are unchanged. No P1 approval is implied.
+
+Raw AX/build/test logs are temporary, outside Git; only synthetic fixture results
+are summarized here. No screenshots, private baseline text or user data are added.

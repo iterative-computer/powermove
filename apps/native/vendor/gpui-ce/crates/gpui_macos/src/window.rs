@@ -338,6 +338,10 @@ unsafe fn build_classes() {
     unsafe {
         WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow), false);
         PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel), true);
+        // Powermove P-A11Y: keyboard focus lives on GPUIView or a native slot,
+        // while AccessKit subclasses its separate parent content view.
+        accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow");
+        accesskit_macos::add_focus_forwarder_to_window_class("GPUIPanel");
         VIEW_CLASS = {
             let mut decl =
                 ClassBuilder::new(CString::new("GPUIView").unwrap().as_c_str(), class!(NSView))
@@ -346,6 +350,10 @@ unsafe fn build_classes() {
             decl.add_method(
                 sel!(hitTest:),
                 composition_hit_test as unsafe extern "C" fn(_, _, _) -> _,
+            );
+            decl.add_method(
+                sel!(accessibilityHitTest:),
+                composition_accessibility_hit_test as unsafe extern "C" fn(_, _, _) -> _,
             );
             decl.add_method(sel!(dealloc), dealloc_view as unsafe extern "C" fn(_, _));
 
@@ -863,7 +871,7 @@ struct MacWindowState {
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
     closed: Arc<AtomicBool>,
-    accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+    accesskit_adapter: Option<crate::composition_accessibility::Adapter>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<ObjcId>,
 }
@@ -2436,11 +2444,15 @@ impl PlatformWindow for MacWindow {
         let activation_handler = A11yActivationHandler {
             callback: callbacks.activation,
         };
-        let action_handler = A11yActionHandler(callbacks.action);
+        let action_handler = A11yActionHandler {
+            callback: callbacks.action,
+            view: unsafe { Retained::retain(lock.native_view.as_ptr().cast()).unwrap() },
+        };
 
         let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
+            crate::composition_accessibility::Adapter::for_window(
                 lock.native_window as *mut c_void,
+                lock.native_view.as_ptr() as usize,
                 activation_handler,
                 action_handler,
             )
@@ -2476,11 +2488,23 @@ impl accesskit::ActivationHandler for A11yActivationHandler {
     }
 }
 
-struct A11yActionHandler(Box<dyn Fn(accesskit::ActionRequest) + Send + 'static>);
+// Powermove P-A11Y: AccessKit focus must reclaim the real first responder
+// after a native slot owned it. GPUI's logical focus alone cannot do that.
+struct A11yActionHandler {
+    callback: Box<dyn Fn(accesskit::ActionRequest) + Send + 'static>,
+    view: Retained<Objc2NSView>,
+}
 
 impl accesskit::ActionHandler for A11yActionHandler {
     fn do_action(&mut self, request: accesskit::ActionRequest) {
-        (self.0)(request);
+        if request.action == accesskit::Action::Focus {
+            unsafe {
+                if let Some(window) = self.view.window() {
+                    let _: Bool = msg_send![&*window, makeFirstResponder: &*self.view];
+                }
+            }
+        }
+        (self.callback)(request);
     }
 }
 
@@ -4078,6 +4102,24 @@ mod tests {
                 NSCursorFrameResizeDirections::All
             ))
         );
+    }
+}
+
+// Powermove P-A11Y: AppKit hits the GPUI drawing subview, but the
+// AccessKit adapter belongs to its separate parent content view.
+unsafe extern "C" fn composition_accessibility_hit_test(
+    this: &Objc2Object,
+    _: Sel,
+    point: Objc2NSPoint,
+) -> ObjcId {
+    unsafe {
+        let window: ObjcId = msg_send![this, window];
+        let content: ObjcId = msg_send![window, contentView];
+        if crate::composition_accessibility::has_adapter(content as usize) {
+            msg_send![content, accessibilityHitTest: point]
+        } else {
+            msg_send![super(this, class!(NSView)), accessibilityHitTest: point]
+        }
     }
 }
 

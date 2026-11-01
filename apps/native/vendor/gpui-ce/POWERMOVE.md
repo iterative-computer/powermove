@@ -34,7 +34,7 @@ not WGPU emulation. All upstream intent below is proposed, not submitted.
 | P-LAYER | Main-thread RAII registration invokes a host immediately before GPUI draw/present. Explicit CATransaction and transactional drawable present enclose slot frame changes. Spike hosts a below CAMetalLayer, masked WKWebView, above native field and native glass transport. | Prototype; actual resize/display behavior unverified. Propose frame-scoped composition publication hook, replacing a process-global native overlay. |
 | P-HIT | GPUIView hitTest converts AppKit coordinates into top-left points and declines transparent regions. Above siblings and child windows win through AppKit. Host's native SlotView applies matching shape mask/hit clip. | Prototype; deterministic ordering/capture/clip tests pass, AppKit drag tests unverified. Propose host-provided frame hit/occlusion data with ordinary GPUI behavior when unregistered. |
 | P-TEXT | Actual NSTextField native slot and a menu search field; AppKit owns responder and composition. | Partial; no full text slot API, multiline field, inFields key resolver, IME/Services test. Upstream intent: native-input ownership integrated with composition slots. |
-| P-A11Y | Frame carries interleaved order, but AccessKit's content-view subclass still exposes only its nodes. | Not implemented. Must merge foreign children after adapter installation; overriding GPUIView alone is insufficient with this pinned upstream (adapter subclasses the window content view). No VoiceOver claim. Propose foreign platform-child node support; fallback merge getter on content view. |
+| P-A11Y | `composition::publish_accessibility` supplies the committed reading order. Ivar-free wrappers on AccessKit's content view and root merge its GPUI nodes with unignored native slot elements, preserving both parent chains. GPUIView forwards AX hit testing; window/panel focus forwards to the content adapter; GPUI focus reclaims the native first responder. | Implemented in S2b. External AX order, parents, frames, WebKit inner field, focus transitions, hit tests and native actions pass with the session locked. Windowless NSTextField/NSTextView/NSButton reorder, removal and teardown probes pass. Spoken VoiceOver traversal remains unverified. Upstream intent: an adapter-supported foreign-child/graft API; this pin has no such API, so the documented AppKit fallback is isolated in the macOS backend. Not submitted upstream. |
 | P-120 | Upstream display link and uniform_list retained; native action channel wakes GPUI without polling. | No new pacing/cache patch. No 120 Hz display/frame-time proof. Propose changes only after measuring actual invalidation and display moves. |
 
 ### Ownership and colour
@@ -63,8 +63,9 @@ covered in CPU tests; native placement currently supports translation only.
 Overlay geometry is a fixed synthetic DOM fixture, not an asynchronous S5 channel.
 WKWebView is clipped to panel + overlay union, never composited full-window.
 Native pointer capture is delegated to AppKit; deterministic model capture is
-separately tested. Native drag/clip, resize lag, foreign-child accessibility,
-keyboard handoff and glass appearance require live verification before the gate.
+separately tested. S2b verifies the foreign-child tree and programmatic focus/actions
+without the screen. Native drag/clip coverage, resize lag, spoken VoiceOver,
+keyboard/IME handoff and glass appearance still require live verification.
 
 The glass implementation copies NSToolbar/material/control placement from
 `apps/mac/crates/glass`, with pre-26 and Reduce Transparency material fallback.
@@ -75,3 +76,45 @@ The pooled menu uses the public CASpringAnimation duration/bounce initializer
 (0.32/0.15), scale 0.96 → 1, non-bouncing 0.12 exit and 0.15 Reduce Motion fade.
 It resumes from current presentation values; velocity continuity, keyboard/typeahead,
 glider and all transient kinds remain incomplete. See docs/native/s2-gpui-ce.md.
+
+### P-A11Y implementation and pin assumptions (S2b, 2026-11-01)
+
+The pinned `accesskit_macos` 0.26.3 `SubclassingAdapter` exposes only AccessKit
+platform nodes. It cannot accept an NSView child. We retain it, then wrap its
+**actual window content view**, which is separate from GPUIView. The adapter's
+single `Role::Window` root remains in the tree. A second, per-instance wrapper on
+that root merges `accessibilityChildren` and `accessibilityChildrenInNavigationOrder`.
+This preserves GPUI's AXParent relationships rather than flattening its root.
+Both wrappers add no ivars; weak, main-thread registries locate their state.
+Teardown restores the original classes before the upstream adapter is dropped.
+
+`AccessibilityItem::Gpui(AXIdentifier)` selects an exposed direct root child;
+`Native(NSView)` inserts that slot's unignored AppKit accessibility elements;
+`RemainingGpui` preserves all other GPUI children in their original order. A native
+control may expose its cell rather than its NSView. Using AppKit's unignored-child
+API avoids an AXUnknown wrapper and duplicate identifiers. Missing anchors cannot
+drop GPUI children; duplicate object identities are emitted once. Nested GPUI
+subtrees stay intact: a host that needs an insertion point must publish a direct,
+exposed root child with a stable identifier. Z order and reading order are distinct.
+
+The host publishes the retained order in its present callback, with slot frames.
+AX getters read that snapshot without entering the host or taking GPUI's window
+mutex. Native elements keep their own frames, actions and text interfaces; their
+AXParent is the retained AccessKit root. Removal/unregister clears overridden
+parents. Structural changes post an AppKit layout notification asynchronously,
+after the draw lock is released. Ordinary pointer-hit callbacks avoid copying the
+accessibility snapshot.
+
+The content-view AX hit test uses AppKit's ordinary composition hit test, including
+slot clipping, then delegates to the winning native slot. GPUIView forwards its AX
+hit query to the content adapter. GPUIWindow/GPUIPanel use AccessKit's standard
+focus forwarder. Native focus queries use WebKit's actual responder for a remote
+DOM element and the owning NSControl for its shared field editor. An AccessKit
+Focus action makes GPUIView first responder before updating GPUI's logical focus.
+
+Verification lives in `spikes/s2/scripts/check-ax.sh`. Its external Swift walker
+uses AXUIElementCreateApplication; its independent AppKit-only probe compiles these
+exact vendor sources and never shows a window. All artifacts stay outside Git.
+The root shape, upstream subclass implementation and native control behavior are
+pin-specific assumptions to recheck at each GPUI/AccessKit rebase. No system-wide
+method swizzle, WebKit DOM mirror or new AccessKit dependency fork was introduced.

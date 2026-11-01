@@ -1,4 +1,6 @@
 //! S2 design tokens. Keep changes here for the later product design passes.
+pub const COMPAT_OVERLAY_WIDTH: f64 = 320.;
+pub const COMPAT_OVERLAY_HEIGHT: f64 = 60.;
 pub const SIDEBAR: u32 = 0x25262b;
 pub const TIMELINE: u32 = 0x202126;
 pub const TEXT: u32 = 0xe3e5eb;

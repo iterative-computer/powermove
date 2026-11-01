@@ -380,6 +380,11 @@ pub fn place(id: &'static str, rect: Rect, radius: f64, layer: Layer, contents: 
             (h.mtm, h.target.clone(), h.content.clone(), h.gpui.clone());
         let region = h.regions.entry(id).or_insert_with(|| {
             let view = crate::native::material(mtm, frame);
+            use objc2_app_kit::NSAccessibility;
+            view.setAccessibilityElement(true);
+            view.setAccessibilityRole(Some(&NSString::from_str("AXGroup")));
+            view.setAccessibilityLabel(Some(&NSString::from_str("Transport")));
+            view.setAccessibilityIdentifier(Some(&NSString::from_str("s2-transport")));
             if let Contents::Buttons(buttons) = contents {
                 let row = button_row(mtm, &target, buttons);
                 row.setFrame(view.bounds());
@@ -403,6 +408,15 @@ pub fn place(id: &'static str, rect: Rect, radius: f64, layer: Layer, contents: 
         region.view.setHidden(false);
         region.seen = true;
     });
+}
+
+/// The native slot root, used in the committed accessibility order.
+pub fn accessibility_view(id: &str) -> Option<Retained<NSView>> {
+    HOST.with(|host| {
+        host.borrow()
+            .as_ref()
+            .and_then(|host| host.regions.get(id).map(|r| r.view.clone()))
+    })
 }
 
 /// Hide regions not placed since the last call.

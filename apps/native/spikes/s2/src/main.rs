@@ -10,6 +10,7 @@ use std::{cell::RefCell, rc::Rc};
 struct Demo {
     host: Rc<RefCell<native::Host>>,
     fixture: Option<Rc<RefCell<onscreen::Fixture>>>,
+    focus: FocusHandle,
 }
 impl Render for Demo {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -64,6 +65,11 @@ impl Render for Demo {
             .child(
                 div()
                     .absolute()
+                    .id("navigation")
+                    .role(Role::Group)
+                    .accessibility_id("s2-navigation")
+                    .aria_label("Navigation")
+                    .track_focus(&self.focus)
                     .left_4()
                     .top(px(92.))
                     .w(px(160.))
@@ -76,6 +82,10 @@ impl Render for Demo {
                 div()
                     .absolute()
                     .left_4()
+                    .id("timeline-heading")
+                    .role(Role::Group)
+                    .accessibility_id("s2-timeline")
+                    .aria_label("Timeline")
                     .bottom(px(144.))
                     .child("Timeline · 5,000 virtual rows"),
             )
@@ -116,47 +126,60 @@ fn main() -> anyhow::Result<()> {
         workspace.accessibilityDisplayShouldReduceTransparency(),
         workspace.accessibilityDisplayShouldIncreaseContrast()
     );
-    Application::with_platform(platform).run(move |cx| {
-        cx.open_window(
-            WindowOptions::new()
-                .macos_window_background(MacosWindowBackground::Transparent)
-                .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(80.), px(80.)),
-                    size(px(1180.), px(760.)),
-                )))),
-            move |window, cx| {
-                window.set_window_title("Powermove Native · S2");
-                let actions = glass::install(window);
-                let host = native::Host::install(window, &device);
-                if std::env::var_os("S2_MENU").is_some() {
-                    host.borrow_mut().toggle_menu();
-                }
-                // Event-driven: native controls wake GPUI, with no idle timer.
-                let fixture = std::env::var_os("S2_PACING")
-                    .map(|_| Rc::new(RefCell::new(onscreen::Fixture::new(&device))));
-                let demo = cx.new(|_| Demo { host, fixture });
-                let weak = demo.downgrade();
-                cx.spawn(async move |cx| {
-                    while let Ok(action) = actions.recv().await {
-                        if weak
-                            .update(cx, |demo, cx| {
-                                if action == glass::Action::ZoomIn {
-                                    demo.host.borrow_mut().toggle_menu();
-                                }
-                                cx.notify();
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
+    Application::with_platform(platform)
+        .with_accessibility_forced()
+        .run(move |cx| {
+            cx.set_window_appearance(Some(
+                if std::env::var("S2_APPEARANCE").as_deref() == Ok("light") {
+                    WindowAppearance::Light
+                } else {
+                    WindowAppearance::Dark
+                },
+            ));
+            cx.open_window(
+                WindowOptions::new()
+                    .macos_window_background(MacosWindowBackground::Transparent)
+                    .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(80.), px(80.)),
+                        size(px(1180.), px(760.)),
+                    )))),
+                move |window, cx| {
+                    window.set_window_title("Powermove Native · S2");
+                    let actions = glass::install(window);
+                    let host = native::Host::install(window, &device);
+                    if std::env::var_os("S2_MENU").is_some() {
+                        host.borrow_mut().toggle_menu();
                     }
-                })
-                .detach();
-                demo
-            },
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+                    // Event-driven: native controls wake GPUI, with no idle timer.
+                    let fixture = std::env::var_os("S2_PACING")
+                        .map(|_| Rc::new(RefCell::new(onscreen::Fixture::new(&device))));
+                    let demo = cx.new(|cx| Demo {
+                        host,
+                        fixture,
+                        focus: cx.focus_handle(),
+                    });
+                    let weak = demo.downgrade();
+                    cx.spawn(async move |cx| {
+                        while let Ok(action) = actions.recv().await {
+                            if weak
+                                .update(cx, |demo, cx| {
+                                    if action == glass::Action::ZoomIn {
+                                        demo.host.borrow_mut().toggle_menu();
+                                    }
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                    demo
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
     Ok(())
 }
