@@ -1,0 +1,18 @@
+{
+  "id": "fixture-studio",
+  "name": "Synthetic studio theme",
+  "scheme": "auto",
+  "tokens": {
+    "--accent": "#123456",
+    "--fixture-line": "var(--line)",
+    "--r-base": "3px"
+  },
+  "darkTokens": {
+    "--accent": "#abcdef"
+  },
+  "rootAttributes": {
+    "data-studio": "enabled",
+    "data-custom-attribute": "preserved"
+  },
+  "css": ":root[data-studio='enabled'] { --line: #334455; } #body { display: grid; grid-template-columns: 280px minmax(180px, 1fr) 320px; gap: var(--gap); } #dock-left { width: 280px; min-width: 72px; } .panel:has(> .panel-body) > .panel-header { height: var(--hdr-h); background: var(--bg-panel); } #tabs .project-tab[aria-selected='true'] { color: var(--accent); border-radius: var(--r-md); } .project-tab:not([hidden])::before { content: ''; background: var(--accent); } @container tabs (max-width:230px) { #tabs .project-tab { width: 64px; } } @media (prefers-reduced-motion: reduce) { .project-tab { transition-duration: 0ms; } } #dock-left .splitter:hover { cursor: col-resize; width: 6px; } .panel-move-handle { -webkit-app-region: no-drag; } @keyframes fixture-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }"
+}
