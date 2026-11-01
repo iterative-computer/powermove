@@ -139,6 +139,10 @@ impl RenderCache {
         }
         Ok(())
     }
+    /// Always query with the current semantic graph/media digest. A changed
+    /// digest immediately returns Missing (or Rendering for its own queued job),
+    /// even while old kept bytes remain on disk. Never reuse an old bar snapshot
+    /// after kernel publication; recompute it before presenting the new graph.
     pub fn state(&self, key: &RenderKey, rendering: bool) -> io::Result<BarState> {
         if self.get(key)?.is_some() {
             let keep = self.keep_path(key)?;
@@ -216,6 +220,47 @@ pub fn render_bar(segments: &[(i64, i64, BarState)]) -> io::Result<Vec<RenderBar
             end_tick,
             state,
         });
+    }
+    Ok(out)
+}
+
+/// Map half-open engine-tick segments to composition frames in one place.
+/// A frame belongs to the segment containing its exact `Rate::frame_start`;
+/// subframe intervals with no frame start disappear. End frames are exclusive.
+/// This preserves adjacent boundaries at fractional rates without float rounding
+/// or assigning two states to one frame. Views must use this helper, not convert
+/// ticks ad hoc. The input must be ordered and nonoverlapping, as in `render_bar`.
+pub fn render_bar_frames(
+    segments: &[RenderBar],
+    rate: pm_time::Rate,
+) -> io::Result<Vec<(i64, i64, BarState)>> {
+    let ticks: Vec<_> = segments
+        .iter()
+        .map(|s| (s.first_tick, s.end_tick, s.state))
+        .collect();
+    let segments = render_bar(&ticks)?;
+    let boundary = |tick| -> io::Result<i64> {
+        let frame = rate.frame_of(tick);
+        let start = rate
+            .frame_start(frame)
+            .map_err(|_| invalid("frame boundary overflow"))?;
+        Ok(frame + i64::from(start < tick))
+    };
+    let mut out: Vec<(i64, i64, BarState)> = Vec::new();
+    for segment in segments {
+        let first = boundary(segment.first_tick)?;
+        let end = boundary(segment.end_tick)?;
+        if first == end {
+            continue;
+        }
+        if let Some(last) = out.last_mut()
+            && last.1 == first
+            && last.2 == segment.state
+        {
+            last.1 = end;
+        } else {
+            out.push((first, end, segment.state));
+        }
     }
     Ok(out)
 }

@@ -345,3 +345,78 @@ fn failed_archive_publication_leaves_original_intact() {
     assert!(store.purge(StorageClass::Originals, "a", false).is_err());
     assert_eq!(fs::read(p).unwrap(), b"keep");
 }
+
+#[test]
+fn render_bar_frames_uses_exact_composition_rate_and_exclusive_end() {
+    use pm_time::Rate;
+    for rate in [Rate::FPS_24, Rate::FPS_29_97, Rate::new(17, 3).unwrap()] {
+        let segments = render_bar(&[
+            (0, rate.frame_start(12).unwrap(), BarState::Rendered),
+            (
+                rate.frame_start(12).unwrap(),
+                rate.frame_start(14).unwrap(),
+                BarState::Rendering,
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            render_bar_frames(&segments, rate).unwrap(),
+            vec![(0, 12, BarState::Rendered), (12, 14, BarState::Rendering)]
+        );
+    }
+}
+
+#[test]
+fn render_bar_frames_assigns_each_frame_start_once_even_between_boundaries() {
+    let rate = pm_time::Rate::FPS_30;
+    let segments = render_bar(&[
+        (1, 2, BarState::Missing),
+        (2, rate.frame_start(3).unwrap() + 1, BarState::Rendering),
+        (
+            rate.frame_start(3).unwrap() + 1,
+            rate.frame_start(5).unwrap(),
+            BarState::Kept,
+        ),
+    ])
+    .unwrap();
+    assert_eq!(
+        render_bar_frames(&segments, rate).unwrap(),
+        vec![(1, 4, BarState::Rendering), (4, 5, BarState::Kept)]
+    );
+    assert!(
+        render_bar_frames(
+            &[RenderBar {
+                first_tick: 2,
+                end_tick: 1,
+                state: BarState::Missing
+            }],
+            rate
+        )
+        .is_err()
+    );
+    let max = render_bar(&[(i64::MAX - 1, i64::MAX, BarState::Missing)]).unwrap();
+    assert_eq!(
+        render_bar_frames(
+            &max,
+            pm_time::Rate::new(pm_time::TICKS_PER_SECOND, 1).unwrap()
+        )
+        .unwrap(),
+        vec![(i64::MAX - 1, i64::MAX, BarState::Missing)]
+    );
+}
+
+#[test]
+fn graph_edit_invalidates_render_bar_immediately_without_trimming_kept_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = RenderCache::open(dir.path(), 4096).unwrap();
+    let old = key();
+    cache.put(&old, b"authored frame").unwrap();
+    for kept in [false, true] {
+        cache.keep_rendered(&old, kept).unwrap();
+        let mut edited = old.clone();
+        edited.graph[0] ^= 1;
+        assert_eq!(cache.state(&edited, false).unwrap(), BarState::Missing);
+        assert_eq!(cache.state(&edited, true).unwrap(), BarState::Rendering);
+        assert_eq!(cache.get(&old).unwrap(), Some(b"authored frame".to_vec()));
+    }
+}

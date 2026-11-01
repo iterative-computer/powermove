@@ -6,6 +6,15 @@ validation_root=$(mktemp -d "${TMPDIR:-/tmp}/pm-promedia.XXXXXXXX")
 mkdir -p "$validation_root/apps/native/crates" "$validation_root/engine/crates/pm-color/src"
 cp -R "$repo/apps/native/crates/promedia" "$validation_root/apps/native/crates/"
 cp "$repo/engine/crates/pm-color/src/lut.rs" "$repo/engine/crates/pm-color/src/scopes.rs" "$validation_root/engine/crates/pm-color/src/"
+# Reuse the exact engine time sources without importing the platform workspace.
+mkdir -p "$validation_root/engine/crates/pm-time"
+cp -R "$repo/engine/crates/pm-time/src" "$validation_root/engine/crates/pm-time/"
+cat > "$validation_root/engine/crates/pm-time/Cargo.toml" <<'TIME'
+[package]
+name = "pm-time"
+version = "0.1.0"
+edition = "2024"
+TIME
 cp "$repo/apps/native/Cargo.lock" "$validation_root/apps/native/Cargo.lock"
 cat > "$validation_root/apps/native/Cargo.toml" <<'MANIFEST'
 [workspace]

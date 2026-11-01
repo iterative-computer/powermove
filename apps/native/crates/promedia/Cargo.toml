@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pm-time = { path = "../../../../engine/crates/pm-time" }
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

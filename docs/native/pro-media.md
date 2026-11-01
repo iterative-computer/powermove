@@ -104,7 +104,19 @@ with path tie-breaking. It refuses when kept bytes exceed the target. Kept frame
 remain readable after reducing quota. Capacity counts frame headers and payloads;
 small pin/marker metadata and preserved partials are outside cache capacity.
 `render_bar` produces coalesced exact half-open tick ranges and rejects overlap.
-The host supplies rendering state for outstanding jobs.
+`render_bar_frames(segments, rate)` is the shared display conversion: pass the
+composition's `pm_time::Rate`, never the source or nominal rounded frame rate.
+Each frame belongs to the segment containing its exact engine frame-start tick;
+end frames are exclusive and intervals containing no frame start disappear.
+Views must use this helper rather than convert ticks ad hoc.
+
+`state()` must receive the **current** complete graph/media key. Changing the
+semantic graph digest immediately reports `Missing` (or `Rendering` for a job
+for that new key), even before old frames are trimmed and while old pins remain.
+The kernel/host must recompute the bar on graph publication before presenting it;
+a previous bar snapshot is not valid for a new graph. The host supplies rendering
+state only for outstanding jobs matching the current key. This implements review
+item 2's immediate-`Missing` alternative without a redundant stale state.
 
 `StorageSettings` has separate absolute, nonoverlapping originals/proxies/
 optimized/renders locations and an archive location, with per-class active byte
@@ -181,3 +193,19 @@ Integration required outside owned paths:
    compare LUT/scopes against trusted reference vectors at the chosen colour stage
    and verify responsive native controls/accessibility. No Metal, AppKit, GPUI,
    WebKit, screen or VideoToolbox validation ran on Linux.
+
+## Design review follow-up: render-bar model
+
+Review: `design/reviews/na-cloud-promedia.md`, must-fix items 1 and 2.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Centralize half-open display ranges with `pm-time`'s exact composition rate and frame-start semantics; no view-specific float conversion. | N1/N3: one exact time-base interpretation preserves authored timing, including fractional rates. |
+| Use the review's immediate-`Missing` alternative; old graph frames and Keep Rendered pins remain stored but cannot be hits for the edited graph. | N3 correctness and N4 retention: invalidate identity immediately without destroying retained bytes. |
+
+Three regression tests cover integer/fractional/non-flick-dividing rates,
+subframe ranges, invalid ranges, maximum tick bounds, and changed graphs with
+both kept and unkept old bytes. The Linux harness now copies the unchanged
+`pm-time` sources into its disposable dependency workspace. Native painter,
+pattern, Reduce Motion and VoiceOver verification remain with the macOS host;
+this change introduces no visual literals or UI copy.
