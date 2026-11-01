@@ -73,7 +73,7 @@ fn blocker(workflow: &str) -> (&'static str, &'static str, bool) {
         ),
         "W019" | "W020" | "W021" | "W022" | "W023" | "W031" => (
             "media-service",
-            "Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending",
+            "MCP metadata/list/manage/check and portable services/promedia run; durable import/relink byte-version coordination, native picker/source-preview wiring and real decoded media remain open",
             true,
         ),
         "W024" | "W025" | "W026" | "W027" | "W028" | "W029" => (
@@ -93,22 +93,22 @@ fn blocker(workflow: &str) -> (&'static str, &'static str, bool) {
         ),
         "W035" | "W036" => (
             "store-service",
-            "Store/account lifecycle adapters and explicit-action synthetic service fixtures are pending",
+            "Store-host admission/identity/recovery models exist; remote Store catalog/releases/account APIs, install-to-kernel/runtime wiring and real permission/action UI remain open",
             false,
         ),
         "W037" | "W038" | "W039" | "W040" => (
             "compat-runtime",
-            "V8 lifecycle and compat service/recorder probes run with the optional native backing; full corpus, host services, WebKit remote DOM and native raster pixels still need macOS; no extension is excluded",
+            "V8 lifecycle, compat services/recorder and portable native raster/router/Store-view probes run; full PM-to-kernel/canvas binding, WebKit page adapter and unchanged v1–3 corpus remain open",
             true,
         ),
         "W041" => (
             "transcription-service",
-            "Speech-model download/resume/transcription adapters are pending",
+            "No native transcription service/model-download/inference crate is merged; kernel caption mutation commands still return NotImplemented; model picker and actual word timing remain open",
             false,
         ),
         "W057" | "W058" => (
             "video-domain-adapter",
-            "Typed timing probe is supporting evidence; edit_video and decoded start/end frame oracles remain pending",
+            "All nine MCP edit_video operations and source-handle/persisted-history probes run; native trim/speed interaction, remapped source evaluation and decoded start/end frame oracles remain open",
             true,
         ),
         "W059" | "W068" => (
@@ -118,7 +118,7 @@ fn blocker(workflow: &str) -> (&'static str, &'static str, bool) {
         ),
         "W069" | "W070" | "W071" => (
             "export-service",
-            "MCP export jobs, codec/media adapters, cancellation and frame-rate output verification are pending",
+            "MCP export_video adapter exists; actual ExportChild codec worker, cancellation/resource release, queued exports and exact encoded timestamps/audio/frame-rate output remain open",
             true,
         ),
         "W072" => (
@@ -159,6 +159,64 @@ fn blocked(id: &str, workflow: &str, kind: &str) -> CaseResult {
         blocked_by: Some(backing.into()),
         needs_macos: mac,
     }
+}
+
+/// A case names the unverified assertion and its actual backing, rather than
+/// treating every member of a workflow as blocked on the same missing crate.
+fn blocked_original(c: &crate::catalog::Contract, workflow: &str) -> CaseResult {
+    let mut result = blocked(&c.id, workflow, "original");
+    if matches!(c.id.as_str(), "A511" | "A512") {
+        result.blocked_by = Some("project-memory-contract".into());
+        result.needs_macos = false;
+        result.reason = format!(
+            "W1 requires a project memory index/details, but the frozen v1.2.0 get_project_state specification and 67-tool union contain no project_memory tool; the native digest has no memory index. Reconcile the inventory/contract before claiming closure; unverified case: {}",
+            c.expected
+        );
+        return result;
+    }
+    if let Some(name) = c
+        .expected
+        .strip_prefix("MCP &#96;")
+        .and_then(|s| s.split_once("&#96;").map(|(name, _)| name))
+        && pm_mcp::catalog::spec(name).is_some()
+    {
+        let implemented = pm_mcp::catalog::IMPLEMENTED.contains(&name);
+        result.blocked_by = Some(format!("mcp:{name}"));
+        result.needs_macos = matches!(
+            name,
+            "render_frames"
+                | "probe_media"
+                | "sample_media_frames"
+                | "media_contact_sheet"
+                | "media_waveform"
+                | "export_video"
+                | "get_workspace_state"
+                | "open_panel"
+                | "get_panel_state"
+                | "interact_panel"
+                | "capture_panel"
+                | "computer_use_panel"
+                | "inspect_creative_workspace"
+                | "inspect_creative_extension"
+        );
+        result.reason = format!(
+            "{}: {}; {}",
+            if implemented {
+                "Adapter/body merged; remaining full-case verification"
+            } else {
+                "Public tool body unavailable"
+            },
+            pm_mcp::catalog::backing(name),
+            c.expected
+        );
+        if name == "save_project" {
+            result.reason.push_str("; kernel container-copy probes preserve embedded media, but Automation exposes neither file-open/adopt nor durable media byte admission to seed this MCP case. Needs that host ingress and byte-for-byte packed media verification");
+        }
+    } else {
+        result.reason.push_str("; unverified case: ");
+        result.reason.push_str(&c.expected);
+    }
+    result
 }
 pub fn execute(
     id: &str,
@@ -201,6 +259,41 @@ const KEY_CONTEXTS: &[&str] = &[
     "prior-decline",
     "menu-once",
 ];
+fn runtime_case(
+    case: (&str, &str, &str, bool),
+    kind: &str,
+    title: &str,
+    runtime: Option<&dyn crate::runtime::RuntimeHook>,
+) -> CaseResult {
+    let (id, workflow, _, requires_bundle) = case;
+    if let Some(runtime) = runtime.filter(|r| !requires_bundle || r.has_compat_bundle()) {
+        execute(id, workflow, kind, title, || runtime.check(id))
+    } else {
+        CaseResult {
+            id: id.into(),
+            workflow: workflow.into(),
+            kind: kind.into(),
+            status: Status::BlockedBy,
+            reason: format!(
+                "{title}; supply --runtime-runner{}",
+                if requires_bundle {
+                    " and --compat-bundle"
+                } else {
+                    ""
+                }
+            ),
+            blocked_by: Some(
+                if requires_bundle {
+                    "compat-bundle"
+                } else {
+                    "native-v8-backing"
+                }
+                .into(),
+            ),
+            needs_macos: false,
+        }
+    }
+}
 pub fn run(catalog: &Catalog, filter: &Filter, corpus: &[PathBuf]) -> Result<Report, String> {
     run_with_runtime(catalog, filter, corpus, None)
 }
@@ -228,8 +321,10 @@ pub fn run_with_runtime(
             }
             if let Some(s) = scenarios.iter().find(|s| s.id == c.id) {
                 cases.push(execute(s.id, s.workflow, "original", s.title, s.run));
+            } else if let Some(s) = crate::runtime::CASES.iter().find(|s| s.0 == c.id) {
+                cases.push(runtime_case(*s, "original", &c.expected, runtime));
             } else {
-                cases.push(blocked(&c.id, &w.id, "original"));
+                cases.push(blocked_original(c, &w.id));
             }
         }
     }
@@ -277,37 +372,17 @@ pub fn run_with_runtime(
         }
     }
     for &(id, workflow, title, requires_bundle) in crate::runtime::CASES {
+        if id.starts_with(['A', 'B']) {
+            continue;
+        }
         known.insert(id.into());
         if filter.accepts(id, workflow) {
-            if let Some(runtime) = runtime.filter(|r| !requires_bundle || r.has_compat_bundle()) {
-                cases.push(execute(id, workflow, "runtime-probe", title, || {
-                    runtime.check(id)
-                }));
-            } else {
-                cases.push(CaseResult {
-                    id: id.into(),
-                    workflow: workflow.into(),
-                    kind: "runtime-probe".into(),
-                    status: Status::BlockedBy,
-                    reason: format!(
-                        "{title}; supply --runtime-runner{}",
-                        if requires_bundle {
-                            " and --compat-bundle"
-                        } else {
-                            ""
-                        }
-                    ),
-                    blocked_by: Some(
-                        if requires_bundle {
-                            "compat-bundle"
-                        } else {
-                            "native-v8-backing"
-                        }
-                        .into(),
-                    ),
-                    needs_macos: false,
-                });
-            }
+            cases.push(runtime_case(
+                (id, workflow, title, requires_bundle),
+                "runtime-probe",
+                title,
+                runtime,
+            ));
         }
     }
     for (name, _) in crate::fixture::CORPUS {
@@ -480,6 +555,25 @@ impl Report {
         }
         out
     }
+    /// Exact per-case open work, generated from this run (including filters).
+    pub fn blockers_csv(&self) -> String {
+        fn quote(s: &str) -> String {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        }
+        let mut text = "case_id,workflow,kind,needs_macos,blocked_by,reason\n".to_owned();
+        for case in self.cases.iter().filter(|c| c.status == Status::BlockedBy) {
+            text.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                quote(&case.id),
+                quote(&case.workflow),
+                quote(&case.kind),
+                case.needs_macos,
+                quote(case.blocked_by.as_deref().unwrap_or("")),
+                quote(&case.reason)
+            ));
+        }
+        text
+    }
 }
 fn status_name(status: &Status) -> &'static str {
     match status {
@@ -506,6 +600,19 @@ fn validate_scenarios(catalog: &Catalog) -> Result<(), String> {
                 "scenario {} does not match authoritative workflow",
                 s.id
             ));
+        }
+    }
+    for &(id, workflow, _, _) in crate::runtime::CASES {
+        if !ids.insert(id) {
+            return Err(format!("duplicate native case {id}"));
+        }
+        let group = catalog
+            .workflows
+            .iter()
+            .find(|w| w.id == workflow)
+            .ok_or("native case has unknown workflow")?;
+        if id.starts_with(['A', 'B']) && !group.cases.iter().any(|c| c.id == id) {
+            return Err(format!("native case {id} has no authoritative contract"));
         }
     }
     Ok(())

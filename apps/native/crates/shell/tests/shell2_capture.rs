@@ -40,7 +40,7 @@ fn drag_to_dock_preview_and_result_render() {
         let scale = before.width() / m.window_width as u32;
         let rgb = |v: u32| [(v >> 16) as u8, (v >> 8) as u8, v as u8];
 
-        // Drag Effects & Presets to the window's bottom edge, over the timeline.
+        // Drag Effects to the window's bottom edge, over the timeline.
         let (x, y) = (700., m.window_height - m.status - m.gap - 2.);
         window
             .update(&mut cx, |v, _, cx| {
