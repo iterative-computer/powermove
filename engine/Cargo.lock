@@ -2192,6 +2192,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-cache"
+version = "0.1.0"
+
+[[package]]
 name = "pm-captions"
 version = "0.1.0"
 dependencies = [
@@ -2501,6 +2505,22 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "ts-rs",
+]
+
+[[package]]
+name = "pm-proxy"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "pm-color",
+ "pm-media",
+ "pm-protocol",
+ "png",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

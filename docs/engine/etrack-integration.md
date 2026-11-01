@@ -58,3 +58,72 @@ modules. Adapt the L4 bitmap oracle to L5's independent standards conversion.
 N2/N3: source precision, transfer, ICC and orientation follow the file, with no
 Blink upload emulation. Prune rule: the replaced helper has no consumers.
 No out-of-lane files were imported.
+
+## Merge 3: feat/ne-phase4a (`ef5cbce3a`)
+
+44 conflicts, listed below. The branch was built for an older Electron
+renderer and contains obsolete Chromium SVG, gamma, video and RGBA8 viewer
+paths. Preserve current engine consumer contracts and import the independently
+consumable pm-proxy and pm-cache backends. The old whole-app wiring is retained
+in merge ancestry, not installed over the native service (N3/N6/N8). This merge
+does **not** complete Phase 4a viewer/job integration.
+
+- Reintroduce pm-proxy/pm-cache as implemented crates: the base removed them
+  only when they were empty. The prune rule no longer justifies that deletion.
+- pm-proxy generation remains the default feature for Mac consumers. With
+  `--no-default-features`, its policy, content-addressed store, disk guard and
+  sequence identity compile without Apple media. Sequence generation adapts to
+  L5 native PNG gamma metadata instead of removed ImageIO emulation (N3).
+- Preserve base protocol, renderer, media, presenter and job wiring. A native
+  service must bind the backend through its own worker/job interfaces. Until
+  those owned native paths are changed, Gate E marks that integration blocked.
+- Do not import the Electron UI/copy changes (ownership; Opus owns design).
+- Author measurements in proxy.md, representations.md and phase4a-gate.md are
+  historical branch evidence, not measurements of this merged native app.
+
+Conflicted paths:
+
+- `apps/desktop/e2e/ae-audit-implementation.spec.ts`
+- `apps/desktop/e2e/automatic-preview-memory.spec.ts`
+- `apps/desktop/scripts/engine-writers.json`
+- `apps/desktop/src/extensions/.builtin-versions.json`
+- `apps/desktop/src/extensions/viewer/engine-present/presenter.ts`
+- `apps/desktop/src/extensions/viewer/engine-present/view-params.ts`
+- `apps/desktop/src/extensions/viewer/manifest.json`
+- `apps/desktop/src/extensions/viewer/viewer.ts`
+- `apps/desktop/src/main/engine/index.ts`
+- `apps/desktop/src/main/engine/native-engine.test.ts`
+- `apps/desktop/src/main/engine/native-engine.ts`
+- `apps/desktop/src/main/media-proxy.ts`
+- `apps/desktop/src/main/render-encoder.ts`
+- `apps/desktop/src/preload/index.ts`
+- `apps/desktop/src/renderer/src/engine-connection/install.ts`
+- `apps/desktop/src/renderer/src/engine-connection/session.ts`
+- `apps/desktop/src/renderer/src/legacy/core/engine.ts`
+- `apps/desktop/src/shared/engine-ipc.ts`
+- `apps/desktop/src/shared/engine-protocol/Event.ts`
+- `apps/desktop/src/shared/engine-protocol/index.ts`
+- `engine/Cargo.lock`
+- `engine/crates/pm-cache/src/lib.rs`
+- `engine/crates/pm-media/Cargo.toml`
+- `engine/crates/pm-media/src/decode/scrub.rs`
+- `engine/crates/pm-media/src/image/mod.rs`
+- `engine/crates/pm-node-addon/Cargo.toml`
+- `engine/crates/pm-node/Cargo.toml`
+- `engine/crates/pm-node/src/jobs/mod.rs`
+- `engine/crates/pm-node/src/present/compose.rs`
+- `engine/crates/pm-node/src/present/mod.rs`
+- `engine/crates/pm-node/src/present/render.rs`
+- `engine/crates/pm-node/src/present/schedule.rs`
+- `engine/crates/pm-node/tests/compose.rs`
+- `engine/crates/pm-protocol/src/envelope.rs`
+- `engine/crates/pm-protocol/src/samples.rs`
+- `engine/crates/pm-proxy/Cargo.toml`
+- `engine/crates/pm-proxy/src/lib.rs`
+- `engine/crates/pm-render/Cargo.toml`
+- `engine/crates/pm-render/src/assets.rs`
+- `engine/crates/pm-render/src/exec.rs`
+- `engine/crates/pm-render/src/media.rs`
+- `engine/crates/pm-render/src/plan.rs`
+- `engine/crates/pm-render/src/renderer.rs`
+- `engine/crates/pm-render/src/shaders/source.wgsl`
