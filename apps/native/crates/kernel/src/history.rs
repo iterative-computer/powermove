@@ -578,7 +578,9 @@ impl History {
         let root_relative = map.get("paths").and_then(Value::as_str) != Some("composition");
         let mut history = History::new();
         for entry in entries {
-            let e = entry.as_object().ok_or("a history entry is not an object")?;
+            let e = entry
+                .as_object()
+                .ok_or("a history entry is not an object")?;
             let label = e
                 .get("label")
                 .and_then(Value::as_str)

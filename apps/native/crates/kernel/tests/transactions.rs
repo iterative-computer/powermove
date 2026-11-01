@@ -8,9 +8,9 @@ use pm_kernel::tx::{
     Notice, Project, RealmMessage, Reply, Request, TxId, WorkspaceCall, Writer,
 };
 use pm_kernel::{Command, DocumentStore, Origin, WriteBody};
+use pm_model::Op;
 use pm_model::json::{Value, parse};
 use pm_model::patch::{Patch, PathPart};
-use pm_model::Op;
 
 const PROJECT: &str = r##"{
   "id": "P", "name": "Fixture", "compId": "C1", "compName": "Main",
@@ -46,7 +46,9 @@ fn agent() -> Caller {
 }
 
 fn call(p: &mut Project, caller: Caller, call: impl Into<Call>) -> Ack {
-    p.handle(Request::new(caller, call)).reply.expect("immediate reply")
+    p.handle(Request::new(caller, call))
+        .reply
+        .expect("immediate reply")
 }
 
 fn call_tx(p: &mut Project, caller: Caller, txid: u64, call: impl Into<Call>) -> Ack {
@@ -182,7 +184,10 @@ fn s5_lost_ack_dedup_query() {
         },
     );
     assert_eq!(ack.revision, rev + 1);
-    assert_eq!(retry.revision, ack.revision, "the retry is the stored answer");
+    assert_eq!(
+        retry.revision, ack.revision,
+        "the retry is the stored answer"
+    );
     assert_eq!(retry.txid, ack.txid);
     let Reply::Ack(Some(stored)) = queried.reply else {
         panic!("query answers the stored ack")
@@ -215,12 +220,23 @@ fn s5_rejection_after_optimistic_mutation_and_deleted_path_resync() {
             ))],
         },
     );
-    assert!(matches!(bad.reply, Reply::Throw(KernelError::DirectWrite { .. })));
+    assert!(matches!(
+        bad.reply,
+        Reply::Throw(KernelError::DirectWrite { .. })
+    ));
     assert_eq!(p.store().revision(), rev);
     // The native UI deletes the layer; the page's stale flush is refused
     // and resynced with "no longer exists".
-    assert!(applied(&call(&mut p, native(), transact(delete_layer("layer0")))));
-    assert!(applied(&call(&mut p, native(), transact(delete_layer("layer1")))));
+    assert!(applied(&call(
+        &mut p,
+        native(),
+        transact(delete_layer("layer0"))
+    )));
+    assert!(applied(&call(
+        &mut p,
+        native(),
+        transact(delete_layer("layer1"))
+    )));
     let path: Vec<PathPart> = vec![
         "comps".into(),
         "C1".into(),
@@ -244,7 +260,14 @@ fn s5_rejection_after_optimistic_mutation_and_deleted_path_resync() {
 #[test]
 fn s5_native_drag_with_folded_page_write_cancels_selectively() {
     let mut p = project();
-    let Reply::Gesture(g) = call(&mut p, native(), GestureCall::Begin { label: "Drag".into() }).reply
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "Drag".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
@@ -261,24 +284,50 @@ fn s5_native_drag_with_folded_page_write_cancels_selectively() {
     assert!(fold.folded.is_some(), "the page write folds immediately");
     assert_eq!(name_of(&p, "layer0"), "y", "and is visible at once");
     let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
-    assert!(matches!(notice(&cancel), Some(Notice::ForeignSplit { writes: 1, .. })));
+    assert!(matches!(
+        notice(&cancel),
+        Some(Notice::ForeignSplit { writes: 1, .. })
+    ));
     assert_eq!(opacity_of(&p, "layer0"), 100.0, "the owner's drag reverted");
-    assert_eq!(name_of(&p, "layer0"), "y", "the acknowledged page write stays");
+    assert_eq!(
+        name_of(&p, "layer0"),
+        "y",
+        "the acknowledged page write stays"
+    );
     assert_eq!(entries(&p), 1, "in its own undoable entry");
-    assert!(matches!(call(&mut p, native(), HistoryCall::Undo).reply, Reply::Bool(true)));
+    assert!(matches!(
+        call(&mut p, native(), HistoryCall::Undo).reply,
+        Reply::Bool(true)
+    ));
     assert_eq!(name_of(&p, "layer0"), "Layer");
 }
 
 #[test]
 fn s5_overlapping_properties_commit_with_notice() {
     let mut p = project();
-    call(&mut p, page(), EditCall::Begin { label: "Edit".into() });
-    call(&mut p, page(), EditCall::Dispatch { body: opacity("layer0", 10.0) });
+    call(
+        &mut p,
+        page(),
+        EditCall::Begin {
+            label: "Edit".into(),
+        },
+    );
+    call(
+        &mut p,
+        page(),
+        EditCall::Dispatch {
+            body: opacity("layer0", 10.0),
+        },
+    );
     call(&mut p, mcp(), transact(opacity("layer0", 20.0)));
     let cancel = call(&mut p, page(), EditCall::Cancel);
     assert!(matches!(cancel.reply, Reply::Bool(true)));
     assert!(is_commit_with_notice(&cancel));
-    assert_eq!(opacity_of(&p, "layer0"), 20.0, "the acknowledged MCP value is kept");
+    assert_eq!(
+        opacity_of(&p, "layer0"),
+        20.0,
+        "the acknowledged MCP value is kept"
+    );
     assert_eq!(entries(&p), 1, "the whole entry is kept and undoable");
     call(&mut p, native(), HistoryCall::Undo);
     assert_eq!(opacity_of(&p, "layer0"), 100.0);
@@ -287,8 +336,20 @@ fn s5_overlapping_properties_commit_with_notice() {
 #[test]
 fn s5_owner_create_then_foreign_edit_keeps_the_layer() {
     let mut p = project();
-    call(&mut p, page(), EditCall::Begin { label: "Add".into() });
-    call(&mut p, page(), EditCall::Dispatch { body: add_layer("new") });
+    call(
+        &mut p,
+        page(),
+        EditCall::Begin {
+            label: "Add".into(),
+        },
+    );
+    call(
+        &mut p,
+        page(),
+        EditCall::Dispatch {
+            body: add_layer("new"),
+        },
+    );
     call(&mut p, agent(), transact(opacity("new", 7.0)));
     let cancel = call(&mut p, page(), EditCall::Cancel);
     assert!(is_commit_with_notice(&cancel));
@@ -298,8 +359,20 @@ fn s5_owner_create_then_foreign_edit_keeps_the_layer() {
 #[test]
 fn s5_history_cancel_keeps_edits_and_drops_the_entry() {
     let mut p = project();
-    call(&mut p, page(), HistoryCall::Begin { label: "keep".into() });
-    call(&mut p, page(), Call::DirectWrite { ops: rename_ops("kept") });
+    call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "keep".into(),
+        },
+    );
+    call(
+        &mut p,
+        page(),
+        Call::DirectWrite {
+            ops: rename_ops("kept"),
+        },
+    );
     let cancel = call(&mut p, page(), HistoryCall::Cancel);
     assert!(matches!(cancel.reply, Reply::Unit));
     assert_eq!(name_of(&p, "layer0"), "kept");
@@ -311,7 +384,13 @@ fn s5_history_cancel_keeps_edits_and_drops_the_entry() {
 fn s5_open_begin_never_blocks_live_mutate_refuses_owner_failure_seals() {
     let mut p = project();
     let rev = p.store().revision();
-    call(&mut p, page(), EditCall::Begin { label: "Live".into() });
+    call(
+        &mut p,
+        page(),
+        EditCall::Begin {
+            label: "Live".into(),
+        },
+    );
     let refused = call(
         &mut p,
         mcp(),
@@ -328,14 +407,23 @@ fn s5_open_begin_never_blocks_live_mutate_refuses_owner_failure_seals() {
             revision: rev,
         }
     );
-    call(&mut p, page(), EditCall::Dispatch { body: opacity("layer0", 1.0) });
+    call(
+        &mut p,
+        page(),
+        EditCall::Dispatch {
+            body: opacity("layer0", 1.0),
+        },
+    );
     let folded = call(&mut p, mcp(), transact(rename("layer0", "mcp")));
     call(&mut p, native(), transact(opacity("layer0", 3.0)));
     call(&mut p, agent(), transact(rename("layer1", "agent")));
     assert!(folded.folded.is_some());
     assert_eq!(p.store().revision(), rev + 4, "nobody waited");
     let failed = call(&mut p, page(), Call::RealmFailed);
-    assert!(matches!(notice(&failed), Some(Notice::Sealed { writes: 4, .. })));
+    assert!(matches!(
+        notice(&failed),
+        Some(Notice::Sealed { writes: 4, .. })
+    ));
     assert_eq!(entries(&p), 1);
     assert!(p.open_entry().is_none());
     assert_eq!(opacity_of(&p, "layer0"), 3.0);
@@ -343,16 +431,34 @@ fn s5_open_begin_never_blocks_live_mutate_refuses_owner_failure_seals() {
     assert_eq!(name_of(&p, "layer1"), "agent");
     // Never-acknowledged work from the dead generation is refused.
     let late = call(&mut p, page(), transact(opacity("layer0", 50.0)));
-    assert!(matches!(late.reply, Reply::Throw(KernelError::StaleGeneration)));
-    assert!(matches!(call(&mut p, native(), HistoryCall::Undo).reply, Reply::Bool(true)));
+    assert!(matches!(
+        late.reply,
+        Reply::Throw(KernelError::StaleGeneration)
+    ));
+    assert!(matches!(
+        call(&mut p, native(), HistoryCall::Undo).reply,
+        Reply::Bool(true)
+    ));
     assert_eq!(opacity_of(&p, "layer0"), 100.0);
 }
 
 #[test]
 fn s5_owner_delete_then_foreign_recreate_keeps_it() {
     let mut p = project();
-    call(&mut p, page(), EditCall::Begin { label: "Delete".into() });
-    call(&mut p, page(), EditCall::Dispatch { body: delete_layer("layer0") });
+    call(
+        &mut p,
+        page(),
+        EditCall::Begin {
+            label: "Delete".into(),
+        },
+    );
+    call(
+        &mut p,
+        page(),
+        EditCall::Dispatch {
+            body: delete_layer("layer0"),
+        },
+    );
     call(&mut p, agent(), transact(add_layer("layer0")));
     call(&mut p, agent(), transact(opacity("layer0", 9.0)));
     let cancel = call(&mut p, page(), EditCall::Cancel);
@@ -378,15 +484,32 @@ fn rename_ops(name: &str) -> Vec<Op> {
 #[test]
 fn history_begin_nests_and_do_folds() {
     let mut p = project();
-    let Reply::Before(Some(outer)) = call(&mut p, page(), HistoryCall::Begin { label: "outer".into() }).reply
+    let Reply::Before(Some(outer)) = call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "outer".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
-    let Reply::Before(Some(inner)) = call(&mut p, page(), HistoryCall::Begin { label: "inner".into() }).reply
+    let Reply::Before(Some(inner)) = call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "inner".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
-    assert!(std::sync::Arc::ptr_eq(&outer.document, &inner.document), "nested begin reuses the snapshot");
+    assert!(
+        std::sync::Arc::ptr_eq(&outer.document, &inner.document),
+        "nested begin reuses the snapshot"
+    );
     let done = call(
         &mut p,
         page(),
@@ -396,44 +519,94 @@ fn history_begin_nests_and_do_folds() {
         },
     );
     assert!(done.folded.is_some());
-    assert!(matches!(call(&mut p, page(), HistoryCall::Commit { label: None }).reply, Reply::Bool(false)));
-    assert!(matches!(call(&mut p, page(), HistoryCall::Commit { label: None }).reply, Reply::Bool(true)));
+    assert!(matches!(
+        call(&mut p, page(), HistoryCall::Commit { label: None }).reply,
+        Reply::Bool(false)
+    ));
+    assert!(matches!(
+        call(&mut p, page(), HistoryCall::Commit { label: None }).reply,
+        Reply::Bool(true)
+    ));
     assert_eq!(entries(&p), 1);
-    assert!(matches!(call(&mut p, page(), HistoryCall::Undo).reply, Reply::Bool(true)));
+    assert!(matches!(
+        call(&mut p, page(), HistoryCall::Undo).reply,
+        Reply::Bool(true)
+    ));
     assert_eq!(name_of(&p, "layer0"), "Layer");
-    assert!(matches!(call(&mut p, page(), HistoryCall::Redo).reply, Reply::Bool(true)));
+    assert!(matches!(
+        call(&mut p, page(), HistoryCall::Redo).reply,
+        Reply::Bool(true)
+    ));
     assert_eq!(name_of(&p, "layer0"), "folded");
     // A throwing realm callback: Begin, write, Rollback.
-    call(&mut p, page(), HistoryCall::Begin { label: "throw".into() });
+    call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "throw".into(),
+        },
+    );
     call(&mut p, page(), transact(rename("layer0", "bad")));
     call(&mut p, page(), HistoryCall::Rollback);
     assert_eq!(name_of(&p, "layer0"), "folded", "throw rolls back");
-    assert!(matches!(call(&mut p, page(), HistoryCall::Commit { label: None }).reply, Reply::Bool(false)));
+    assert!(matches!(
+        call(&mut p, page(), HistoryCall::Commit { label: None }).reply,
+        Reply::Bool(false)
+    ));
     assert_eq!(entries(&p), 1);
 }
 
 #[test]
 fn unchanged_commit_records_nothing() {
     let mut p = project();
-    call(&mut p, page(), HistoryCall::Begin { label: "noop".into() });
+    call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "noop".into(),
+        },
+    );
     call(&mut p, page(), transact(opacity("layer0", 5.0)));
     call(&mut p, page(), transact(opacity("layer0", 100.0)));
-    assert!(matches!(call(&mut p, page(), HistoryCall::Commit { label: None }).reply, Reply::Bool(false)));
+    assert!(matches!(
+        call(&mut p, page(), HistoryCall::Commit { label: None }).reply,
+        Reply::Bool(false)
+    ));
     assert_eq!(entries(&p), 0);
 }
 
 #[test]
 fn rollback_by_a_foreign_caller_keeps_the_owner_writes() {
     let mut p = project();
-    call(&mut p, page(), HistoryCall::Begin { label: "page".into() });
+    call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "page".into(),
+        },
+    );
     call(&mut p, page(), transact(opacity("layer0", 10.0)));
     // MCP's own history.do callback throws inside the page's entry.
-    call(&mut p, mcp(), HistoryCall::Begin { label: "mcp do".into() });
+    call(
+        &mut p,
+        mcp(),
+        HistoryCall::Begin {
+            label: "mcp do".into(),
+        },
+    );
     call(&mut p, mcp(), transact(rename("layer0", "half")));
     let rolled = call(&mut p, mcp(), HistoryCall::Rollback);
     assert!(matches!(notice(&rolled), Some(Notice::ForeignSplit { .. })));
-    assert_eq!(name_of(&p, "layer0"), "Layer", "the thrower's write is gone");
-    assert_eq!(opacity_of(&p, "layer0"), 10.0, "the page's acknowledged write stays");
+    assert_eq!(
+        name_of(&p, "layer0"),
+        "Layer",
+        "the thrower's write is gone"
+    );
+    assert_eq!(
+        opacity_of(&p, "layer0"),
+        10.0,
+        "the page's acknowledged write stays"
+    );
     assert_eq!(entries(&p), 1);
 }
 
@@ -442,7 +615,10 @@ fn edit_api_return_forms() {
     let mut p = project();
     let rev = p.store().revision();
     assert!(!edit_result(&call(&mut p, page(), EditCall::Commit { label: None })).ok);
-    assert!(matches!(call(&mut p, page(), EditCall::Cancel).reply, Reply::Bool(false)));
+    assert!(matches!(
+        call(&mut p, page(), EditCall::Cancel).reply,
+        Reply::Bool(false)
+    ));
     let empty = call(
         &mut p,
         page(),
@@ -452,7 +628,10 @@ fn edit_api_return_forms() {
             label: None,
         },
     );
-    assert_eq!(edit_result(&empty).message.as_deref(), Some("No source edits supplied"));
+    assert_eq!(
+        edit_result(&empty).message.as_deref(),
+        Some("No source edits supplied")
+    );
     let stale = call(
         &mut p,
         page(),
@@ -464,7 +643,9 @@ fn edit_api_return_forms() {
     );
     assert_eq!(
         edit_result(&stale).message,
-        Some(format!("Project changed: expected revision 999, found {rev}"))
+        Some(format!(
+            "Project changed: expected revision 999, found {rev}"
+        ))
     );
     let non_tree = call(
         &mut p,
@@ -475,23 +656,59 @@ fn edit_api_return_forms() {
         },
     );
     assert!(!edit_result(&non_tree).ok);
-    let noop = call(&mut p, page(), EditCall::Mutate { label: "noop".into(), ops: vec![] });
-    assert_eq!(edit_result(&noop).message.as_deref(), Some("No source changes"));
-    call(&mut p, page(), EditCall::Begin { label: "live".into() });
+    let noop = call(
+        &mut p,
+        page(),
+        EditCall::Mutate {
+            label: "noop".into(),
+            ops: vec![],
+        },
+    );
+    assert_eq!(
+        edit_result(&noop).message.as_deref(),
+        Some("No source changes")
+    );
+    call(
+        &mut p,
+        page(),
+        EditCall::Begin {
+            label: "live".into(),
+        },
+    );
     assert!(matches!(
-        call(&mut p, page(), EditCall::Begin { label: "nested".into() }).reply,
+        call(
+            &mut p,
+            page(),
+            EditCall::Begin {
+                label: "nested".into()
+            }
+        )
+        .reply,
         Reply::Throw(KernelError::SourceEditActive)
     ));
     // history.begin inside a scoped (edit) entry returns null.
     assert!(matches!(
-        call(&mut p, page(), HistoryCall::Begin { label: "raw".into() }).reply,
+        call(
+            &mut p,
+            page(),
+            HistoryCall::Begin {
+                label: "raw".into()
+            }
+        )
+        .reply,
         Reply::Before(None)
     ));
     call(&mut p, page(), HistoryCall::Commit { label: None });
     // Empty cancel keeps the project reference (no revision).
     let before = p.store().snapshot();
-    assert!(matches!(call(&mut p, page(), EditCall::Cancel).reply, Reply::Bool(true)));
-    assert!(std::sync::Arc::ptr_eq(&before.document, &p.store().snapshot().document));
+    assert!(matches!(
+        call(&mut p, page(), EditCall::Cancel).reply,
+        Reply::Bool(true)
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &before.document,
+        &p.store().snapshot().document
+    ));
     assert_eq!(p.store().revision(), rev);
     assert_eq!(entries(&p), 0);
 }
@@ -500,8 +717,20 @@ fn edit_api_return_forms() {
 fn edit_cancel_reverts_and_restores_selection() {
     let mut p = project();
     p.store_mut().select_layers(["layer1"], false);
-    call(&mut p, page(), EditCall::Begin { label: "changed".into() });
-    call(&mut p, page(), EditCall::Dispatch { body: add_layer("added") });
+    call(
+        &mut p,
+        page(),
+        EditCall::Begin {
+            label: "changed".into(),
+        },
+    );
+    call(
+        &mut p,
+        page(),
+        EditCall::Dispatch {
+            body: add_layer("added"),
+        },
+    );
     p.store_mut().select_layers(["added"], false);
     call(&mut p, page(), EditCall::Cancel);
     assert!(layer(&p, "added").is_none());
@@ -512,7 +741,14 @@ fn edit_cancel_reverts_and_restores_selection() {
 #[test]
 fn index_hazard_turns_cancel_into_commit_with_notice() {
     let mut p = project();
-    let Reply::Gesture(g) = call(&mut p, native(), GestureCall::Begin { label: "Drag".into() }).reply
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "Drag".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
@@ -540,7 +776,14 @@ fn index_hazard_turns_cancel_into_commit_with_notice() {
 fn gesture_replace_steps_supersede_and_commit_one_entry() {
     let mut p = project();
     let rev = p.store().revision();
-    let Reply::Gesture(g) = call(&mut p, native(), GestureCall::Begin { label: "Scrub".into() }).reply
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "Scrub".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
@@ -557,16 +800,30 @@ fn gesture_replace_steps_supersede_and_commit_one_entry() {
     }
     assert_eq!(opacity_of(&p, "layer0"), 30.0);
     assert_eq!(p.store().revision(), rev + 3, "one live revision per step");
-    assert!(matches!(call(&mut p, native(), GestureCall::Commit { gesture: g }).reply, Reply::Bool(true)));
+    assert!(matches!(
+        call(&mut p, native(), GestureCall::Commit { gesture: g }).reply,
+        Reply::Bool(true)
+    ));
     assert_eq!(entries(&p), 1);
     call(&mut p, native(), HistoryCall::Undo);
-    assert_eq!(opacity_of(&p, "layer0"), 100.0, "one step from start to end");
+    assert_eq!(
+        opacity_of(&p, "layer0"),
+        100.0,
+        "one step from start to end"
+    );
 }
 
 #[test]
 fn gesture_replace_never_clobbers_a_foreign_write() {
     let mut p = project();
-    let Reply::Gesture(g) = call(&mut p, native(), GestureCall::Begin { label: "Scrub".into() }).reply
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "Scrub".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
@@ -586,18 +843,31 @@ fn gesture_replace_never_clobbers_a_foreign_write() {
     step(&mut p, 20.0);
     assert_eq!(opacity_of(&p, "layer0"), 20.0);
     let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
-    assert!(is_commit_with_notice(&cancel), "the MCP value sits between owner steps");
+    assert!(
+        is_commit_with_notice(&cancel),
+        "the MCP value sits between owner steps"
+    );
 }
 
 #[test]
 fn gesture_ids_are_owned() {
     let mut p = project();
-    let Reply::Gesture(g) = call(&mut p, native(), GestureCall::Begin { label: "Drag".into() }).reply
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "Drag".into(),
+        },
+    )
+    .reply
     else {
         panic!()
     };
     let stolen = call(&mut p, page(), GestureCall::Commit { gesture: g });
-    assert!(matches!(stolen.reply, Reply::Throw(KernelError::NoSuchGesture)));
+    assert!(matches!(
+        stolen.reply,
+        Reply::Throw(KernelError::NoSuchGesture)
+    ));
 }
 
 // ── external entries ────────────────────────────────────────────────────────
@@ -623,7 +893,13 @@ fn external(p: &mut Project, caller: Caller, handle: u64, cleanup: bool) -> u64 
 #[test]
 fn external_entries_push_independently_and_undo_inline() {
     let mut p = project();
-    call(&mut p, page(), HistoryCall::Begin { label: "pending".into() });
+    call(
+        &mut p,
+        page(),
+        HistoryCall::Begin {
+            label: "pending".into(),
+        },
+    );
     call(&mut p, page(), transact(rename("layer0", "pending")));
     external(&mut p, page(), 7, true);
     assert!(p.open_entry().is_some(), "independent of the pending entry");
@@ -657,11 +933,17 @@ fn external_entries_push_independently_and_undo_inline() {
             message: Some("synthetic external failure".into()),
         },
     );
-    assert!(matches!(failed.reply, Reply::Throw(KernelError::ExternalFailed(_))));
+    assert!(matches!(
+        failed.reply,
+        Reply::Throw(KernelError::ExternalFailed(_))
+    ));
     assert!(p.store().history().can_undo() && !p.store().history().can_redo());
     // Not exported (closure entries never persisted).
     let saved = p.store().history().snapshot().to_saved();
-    assert_eq!(saved.get("entries").and_then(Value::as_array).map(Vec::len), Some(0));
+    assert_eq!(
+        saved.get("entries").and_then(Value::as_array).map(Vec::len),
+        Some(0)
+    );
 }
 
 #[test]
@@ -672,10 +954,22 @@ fn external_undo_from_another_realm_is_deferred_until_the_realm_runs_it() {
     assert!(handled.reply.is_none());
     let ticket = handled.deferred.unwrap();
     let outbox = p.take_outbox();
-    let [RealmMessage::RunExternal { writer, continuation }] = outbox.as_slice() else {
+    let [
+        RealmMessage::RunExternal {
+            writer,
+            continuation,
+        },
+    ] = outbox.as_slice()
+    else {
         panic!("{outbox:?}")
     };
-    assert_eq!(*writer, Writer { realm: PAGE, generation: 1 });
+    assert_eq!(
+        *writer,
+        Writer {
+            realm: PAGE,
+            generation: 1
+        }
+    );
     assert_eq!(continuation.ticket, ticket);
     let done = p.handle(Request::new(
         page(),
@@ -686,7 +980,9 @@ fn external_undo_from_another_realm_is_deferred_until_the_realm_runs_it() {
         },
     ));
     assert!(matches!(done.reply.unwrap().reply, Reply::Unit));
-    let [(t, ack)] = done.resolved.as_slice() else { panic!() };
+    let [(t, ack)] = done.resolved.as_slice() else {
+        panic!()
+    };
     assert_eq!(*t, ticket);
     assert!(matches!(ack.reply, Reply::Bool(true)));
     assert_eq!(ack.txid.map(|t| t.txid), Some(5));
@@ -700,15 +996,23 @@ fn failed_realm_externals_become_barriers_and_pending_runs_fail() {
     let handled = p.handle(Request::new(native(), HistoryCall::Undo));
     let ticket = handled.deferred.unwrap();
     let failed = p.handle(Request::new(page(), Call::RealmFailed));
-    let [(t, ack)] = failed.resolved.as_slice() else { panic!() };
+    let [(t, ack)] = failed.resolved.as_slice() else {
+        panic!()
+    };
     assert_eq!(*t, ticket);
-    assert!(matches!(ack.reply, Reply::Throw(KernelError::ExternalFailed(_))));
+    assert!(matches!(
+        ack.reply,
+        Reply::Throw(KernelError::ExternalFailed(_))
+    ));
     // Redo of the dead realm's entry: a barrier, the cursor stays.
     let redo = call(&mut p, native(), HistoryCall::Redo);
     assert!(matches!(redo.reply, Reply::Bool(false)));
     assert!(matches!(notice(&redo), Some(Notice::Barrier { .. })));
     // Undo of the document entry below still works.
-    assert!(matches!(call(&mut p, native(), HistoryCall::Undo).reply, Reply::Bool(true)));
+    assert!(matches!(
+        call(&mut p, native(), HistoryCall::Undo).reply,
+        Reply::Bool(true)
+    ));
 }
 
 #[test]
@@ -720,7 +1024,10 @@ fn retired_externals_ask_their_realm_for_cleanup() {
     assert_eq!(
         p.take_outbox(),
         vec![RealmMessage::Cleanup {
-            writer: Writer { realm: PAGE, generation: 1 },
+            writer: Writer {
+                realm: PAGE,
+                generation: 1
+            },
             handle: 3
         }]
     );
@@ -730,7 +1037,14 @@ fn retired_externals_ask_their_realm_for_cleanup() {
 fn workspace_mutate_returns_or_throws_keeping_partial_writes() {
     let mut p = project();
     let next = parse(r#"{"name":"W"}"#).unwrap();
-    let ok = call(&mut p, page(), WorkspaceCall::Mutate { next: next.clone(), threw: None });
+    let ok = call(
+        &mut p,
+        page(),
+        WorkspaceCall::Mutate {
+            next: next.clone(),
+            threw: None,
+        },
+    );
     assert!(matches!(ok.reply, Reply::Workspace(ref v) if *v == next));
     let partial = parse(r#"{"name":"Partial"}"#).unwrap();
     let threw = call(
@@ -741,7 +1055,10 @@ fn workspace_mutate_returns_or_throws_keeping_partial_writes() {
             threw: Some("synthetic workspace failure".into()),
         },
     );
-    assert!(matches!(threw.reply, Reply::Throw(KernelError::Callback(_))));
+    assert!(matches!(
+        threw.reply,
+        Reply::Throw(KernelError::Callback(_))
+    ));
     assert_eq!(p.workspace(), &partial);
     assert_eq!(entries(&p), 0, "no document history");
 }
@@ -760,6 +1077,8 @@ fn transact_refuses_stale_expected_revision() {
     );
     assert!(matches!(
         stale.reply,
-        Reply::Throw(KernelError::Transaction(pm_kernel::TransactionError::Stale { .. }))
+        Reply::Throw(KernelError::Transaction(
+            pm_kernel::TransactionError::Stale { .. }
+        ))
     ));
 }

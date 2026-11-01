@@ -196,8 +196,12 @@ pub(crate) enum Tap {
     Push(crate::history::HistoryRecord),
     /// An external record pushed.
     PushExternal(crate::history::HistoryRecord),
-    Undo { external: bool },
-    Redo { external: bool },
+    Undo {
+        external: bool,
+    },
+    Redo {
+        external: bool,
+    },
     /// `count` records from the top replaced by `record`.
     Squash {
         count: usize,
@@ -1192,7 +1196,10 @@ pub(crate) enum Step {
         label: String,
     },
     /// An external entry: the cursor moved; its realm must run the closure.
-    External { external: crate::history::ExternalRef, label: String },
+    External {
+        external: crate::history::ExternalRef,
+        label: String,
+    },
 }
 
 /// What a kernel write carries.
@@ -1241,9 +1248,8 @@ impl DocumentStore {
     }
 
     fn tap(&mut self, event: impl FnOnce(&History) -> Tap) {
-        if self.tap.is_some() {
-            let e = event(&self.history);
-            self.tap.as_mut().expect("enabled").push(e);
+        if let Some(tap) = &mut self.tap {
+            tap.push(event(&self.history));
         }
     }
 
@@ -1324,7 +1330,9 @@ impl DocumentStore {
             root = apply_one(root, op, revision)?.0;
         }
         let staged = match body {
-            WriteBody::Commands(commands) => self.stage_commands_on(root.as_ref(), commands, origin)?,
+            WriteBody::Commands(commands) => {
+                self.stage_commands_on(root.as_ref(), commands, origin)?
+            }
             WriteBody::Ops(ops) => self.stage_ops_from(root, ops, true)?,
         };
         let mut ops = prev_inverse.to_vec();
@@ -1365,8 +1373,7 @@ impl DocumentStore {
             .iter()
             .chain(inverse.iter())
             .any(|op| !matches!(op, Op::Leaf(_)));
-        let saved =
-            structural.then(|| scoped_patches(before.root(), self.current.root(), scopes));
+        let saved = structural.then(|| scoped_patches(before.root(), self.current.root(), scopes));
         let record = self
             .history
             .push(label, origin, forward, inverse, saved, self.revision());
@@ -1491,12 +1498,10 @@ impl DocumentStore {
     /// A store adopting recovered state (journal recovery): dirty, since
     /// the recovered work is not in any saved file.
     pub(crate) fn recovered(document: Document, history: History) -> DocumentStore {
-        let mut store =
-            DocumentStore::from_parts(ProjectFile::untitled(), document, history, true);
+        let mut store = DocumentStore::from_parts(ProjectFile::untitled(), document, history, true);
         store.saved_token = next_token();
         store
     }
-
 }
 
 // ── staging helpers ─────────────────────────────────────────────────────────

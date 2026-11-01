@@ -8,8 +8,8 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use pm_kernel::{
-    Call, Caller, Command, HistoryCall, KernelActor, KernelConfig, KernelEvent, OpenSource,
-    Origin, QueryMirror, RealmMessage, Reply, Request, WriteBody, Writer,
+    Call, Caller, Command, HistoryCall, KernelActor, KernelConfig, KernelEvent, OpenSource, Origin,
+    QueryMirror, RealmMessage, Reply, Request, WriteBody, Writer,
 };
 use pm_model::json::parse;
 
@@ -85,9 +85,11 @@ fn calls_are_futures_and_publication_precedes_events() {
     }
     assert!(saw.contains(&ack.revision));
     // Unknown project: an error, not a hang.
-    assert!(block_on(kernel.call("nope", Request::new(Caller::native(), opacity(1.0))))
-        .unwrap()
-        .is_err());
+    assert!(
+        block_on(kernel.call("nope", Request::new(Caller::native(), opacity(1.0))))
+            .unwrap()
+            .is_err()
+    );
 }
 
 #[test]
@@ -113,7 +115,11 @@ fn the_ui_query_mirror_follows_published_changes() {
     }
     let published = kernel.published("P").unwrap();
     assert_eq!(mirror.sync(&published), published.revision());
-    assert_eq!(opacity_now(&mut mirror), 30.0, "synchronous, on the caller's thread");
+    assert_eq!(
+        opacity_now(&mut mirror),
+        30.0,
+        "synchronous, on the caller's thread"
+    );
 }
 
 #[test]
@@ -177,5 +183,8 @@ fn shutdown_closes_pending_handles() {
     let kernel = actor.handle();
     actor.shutdown();
     let after = kernel.call("P", Request::new(Caller::native(), opacity(1.0)));
-    assert!(after.wait().is_none(), "a stopped kernel answers None, never hangs");
+    assert!(
+        after.wait().is_none(),
+        "a stopped kernel answers None, never hangs"
+    );
 }

@@ -149,9 +149,13 @@ pub enum Call {
     /// The write barrier's flush of direct `PM.proj` writes (per-path last
     /// writer wins plus validation). Never an undo step of its own; folds
     /// into an open entry, as today's snapshot diff picks it up.
-    DirectWrite { ops: Vec<Op> },
+    DirectWrite {
+        ops: Vec<Op>,
+    },
     /// Lost acknowledgement: the stored ack of `txid`, if any.
-    QueryTx { txid: TxId },
+    QueryTx {
+        txid: TxId,
+    },
     /// The caller's realm generation crashed, hung or was disposed.
     RealmFailed,
     /// A realm finished running an external closure the kernel asked for.
@@ -165,9 +169,16 @@ pub enum Call {
 #[derive(Clone, Debug)]
 pub enum HistoryCall {
     /// `history.do` with a native body: atomic, nests into an open entry.
-    Do { label: String, body: WriteBody },
-    Begin { label: String },
-    Commit { label: Option<String> },
+    Do {
+        label: String,
+        body: WriteBody,
+    },
+    Begin {
+        label: String,
+    },
+    Commit {
+        label: Option<String>,
+    },
     /// Drops the pending entry, keeps the edits.
     Cancel,
     /// `history.do`'s throw path (the realm-run callback threw): reverts the
@@ -182,29 +193,42 @@ pub enum HistoryCall {
     Undo,
     Redo,
     /// `PM.hist.undoIfTop(id)`.
-    UndoIfTop { entry: u64 },
+    UndoIfTop {
+        entry: u64,
+    },
     /// `PM.hist.clear()`.
     Clear,
 }
 
 #[derive(Clone, Debug)]
 pub enum EditCall {
-    Begin { label: String },
-    Dispatch { body: WriteBody },
+    Begin {
+        label: String,
+    },
+    Dispatch {
+        body: WriteBody,
+    },
     Apply {
         body: WriteBody,
         base_revision: Option<u64>,
         label: Option<String>,
     },
     /// `edit.mutate`: the operations the realm's structural action produced.
-    Mutate { label: String, ops: Vec<Op> },
-    Commit { label: Option<String> },
+    Mutate {
+        label: String,
+        ops: Vec<Op>,
+    },
+    Commit {
+        label: Option<String>,
+    },
     Cancel,
 }
 
 #[derive(Clone, Debug)]
 pub enum GestureCall {
-    Begin { label: String },
+    Begin {
+        label: String,
+    },
     /// A provisional step. `replace`: supersede the previous step (from-start
     /// semantics for relative drags); otherwise accumulate.
     Step {
@@ -212,8 +236,12 @@ pub enum GestureCall {
         body: WriteBody,
         replace: bool,
     },
-    Commit { gesture: u64 },
-    Cancel { gesture: u64 },
+    Commit {
+        gesture: u64,
+    },
+    Cancel {
+        gesture: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -222,7 +250,10 @@ pub enum WorkspaceCall {
     /// `workspace.mutate`: the workspace after the realm's callback ran.
     /// `threw`: the callback threw after writing (partial writes are kept,
     /// and the throw is returned, as today).
-    Mutate { next: Value, threw: Option<String> },
+    Mutate {
+        next: Value,
+        threw: Option<String>,
+    },
 }
 
 macro_rules! into_call {
@@ -274,7 +305,10 @@ pub enum Reply {
     Edit(EditResult),
     /// A short native edit or `history.do`: the revision, and whether the
     /// document changed.
-    Applied { revision: u64, changed: bool },
+    Applied {
+        revision: u64,
+        changed: bool,
+    },
     /// The caller's realm runs the closure inline, then reports.
     Continuation(Continuation),
     Workspace(Value),
@@ -766,7 +800,13 @@ impl Project {
 
     /// Records an entry's operations as one step (if they changed
     /// anything overall). Returns whether a record was pushed.
-    fn record_ops(&mut self, label: String, origin: Origin, before: &Document, ops: Vec<EntryOp>) -> bool {
+    fn record_ops(
+        &mut self,
+        label: String,
+        origin: Origin,
+        before: &Document,
+        ops: Vec<EntryOp>,
+    ) -> bool {
         if ops.is_empty() {
             return false;
         }
@@ -871,7 +911,13 @@ impl Project {
         let (owner, start, label, selection, lease) = match scope {
             Scope::Lease(id) => {
                 let l = entry.leases.iter().find(|l| l.id == id)?;
-                (l.owner, l.start, l.label.clone(), Some(l.selection.clone()), Some(id))
+                (
+                    l.owner,
+                    l.start,
+                    l.label.clone(),
+                    Some(l.selection.clone()),
+                    Some(id),
+                )
             }
             Scope::Writer(writer) => (writer, 0, entry.label.clone(), None, None),
         };
@@ -916,7 +962,8 @@ impl Project {
                     .iter()
                     .find(|o| o.writer != owner)
                     .map_or_else(|| entry.label.clone(), |o| o.label.clone());
-                let recorded = self.record_ops(split_label.clone(), kept[0].origin, &entry.before, kept);
+                let recorded =
+                    self.record_ops(split_label.clone(), kept[0].origin, &entry.before, kept);
                 recorded.then_some(Notice::ForeignSplit {
                     label: split_label,
                     writes,
@@ -1114,7 +1161,12 @@ impl Project {
         message: Option<String>,
     ) -> Handled {
         let Some(t) = self.tickets.remove(&ticket) else {
-            return Handled::reply(self.ack(txid, None, None, Reply::Throw(KernelError::UnknownTicket)));
+            return Handled::reply(self.ack(
+                txid,
+                None,
+                None,
+                Reply::Throw(KernelError::UnknownTicket),
+            ));
         };
         // The cursor already moved (as `idx--` ran before `entry.undo()`).
         let result = if ok {
@@ -1173,10 +1225,11 @@ impl Project {
     }
 
     fn open_lease(&mut self, caller: Caller, kind: LeaseKind, label: &str) -> u64 {
-        if self.entry.is_none() {
-            self.open(caller.writer, label, caller.origin, true);
-        } else {
-            self.entry.as_mut().expect("open").holders.push(caller.writer);
+        match &mut self.entry {
+            Some(entry) => entry.holders.push(caller.writer),
+            None => {
+                self.open(caller.writer, label, caller.origin, true);
+            }
         }
         let id = self.next();
         let selection = self.store.selection().clone();
@@ -1215,18 +1268,27 @@ impl Project {
         match call {
             EditCall::Begin { label } => {
                 if self.live_lease().is_some() {
-                    return self.ack(txid, None, None, Reply::Throw(KernelError::SourceEditActive));
+                    return self.ack(
+                        txid,
+                        None,
+                        None,
+                        Reply::Throw(KernelError::SourceEditActive),
+                    );
                 }
-                let label = if label.is_empty() { "Edit source".to_owned() } else { label };
+                let label = if label.is_empty() {
+                    "Edit source".to_owned()
+                } else {
+                    label
+                };
                 self.open_lease(caller, LeaseKind::Edit, &label);
                 self.ack(txid, self.entry.as_ref().map(|e| e.id), None, Reply::Unit)
             }
             EditCall::Dispatch { body } => {
                 let (label, origin) = match self.live_lease() {
-                    Some(l) => (l.label.clone(), l.origin),
-                    None => ("Edit source".to_owned(), caller.origin),
+                    Some(l) => (Some(l.label.clone()), l.origin),
+                    None => (None, caller.origin),
                 };
-                self.edit_apply(Caller { origin, ..caller }, txid, body, None, Some(label))
+                self.edit_apply(Caller { origin, ..caller }, txid, body, None, label)
             }
             EditCall::Apply {
                 body,
@@ -1235,13 +1297,29 @@ impl Project {
             } => self.edit_apply(caller, txid, body, base_revision, label),
             EditCall::Mutate { label, ops } => {
                 if self.live_lease().is_some() {
-                    return self.edit_fail(txid, "Finish the active source edit before changing structure");
+                    return self.edit_fail(
+                        txid,
+                        "Finish the active source edit before changing structure",
+                    );
                 }
                 if ops.iter().any(|op| !structural_path(op.path())) {
-                    return self.edit_fail(txid, "Structural edits may only change the project layer tree");
+                    return self.edit_fail(
+                        txid,
+                        "Structural edits may only change the project layer tree",
+                    );
                 }
-                let label = if label.is_empty() { "Edit source".to_owned() } else { label };
-                match self.write(caller.writer, caller.origin, &label, &WriteBody::Ops(ops), true) {
+                let label = if label.is_empty() {
+                    "Edit source".to_owned()
+                } else {
+                    label
+                };
+                match self.write(
+                    caller.writer,
+                    caller.origin,
+                    &label,
+                    &WriteBody::Ops(ops),
+                    true,
+                ) {
                     Ok((false, folded)) => self.edit_ok(txid, folded, "No source changes"),
                     Ok((true, folded)) => self.edit_ok(txid, folded, &label),
                     Err(e) => self.edit_fail(txid, e.to_string()),
@@ -1252,13 +1330,18 @@ impl Project {
                     return self.edit_fail(txid, "No source edit is active");
                 };
                 let entry_id = self.entry.as_ref().map(|e| e.id);
-                let changed = self
-                    .entry
-                    .as_ref()
-                    .is_some_and(|e| e.ops[lease.start.min(e.ops.len())..].iter().any(|o| !o.navigation));
+                let changed = self.entry.as_ref().is_some_and(|e| {
+                    e.ops[lease.start.min(e.ops.len())..]
+                        .iter()
+                        .any(|o| !o.navigation)
+                });
                 let label = label.unwrap_or_else(|| lease.label.clone());
                 let recorded = self.end_lease(lease.id, Some(label.clone()));
-                let message = if changed || recorded { label.as_str() } else { "No source changes" };
+                let message = if changed || recorded {
+                    label.as_str()
+                } else {
+                    "No source changes"
+                };
                 self.edit_ok(txid, entry_id, message)
             }
             EditCall::Cancel => {
@@ -1287,12 +1370,22 @@ impl Project {
         {
             return self.edit_fail(
                 txid,
-                format!("Project changed: expected revision {base}, found {}", self.revision()),
+                format!(
+                    "Project changed: expected revision {base}, found {}",
+                    self.revision()
+                ),
             );
         }
+        // Today's pass message: "Source updated" inside a live edit, else
+        // the label or "Source updated" (notices are the adapter's).
+        let live = self.live_lease().is_some();
+        let message = match (&label, live) {
+            (Some(l), false) => l.clone(),
+            _ => "Source updated".to_owned(),
+        };
         let label = label.unwrap_or_else(|| "Edit source".to_owned());
         match self.write(caller.writer, caller.origin, &label, &body, true) {
-            Ok((_, folded)) => self.edit_ok(txid, folded, &label),
+            Ok((_, folded)) => self.edit_ok(txid, folded, &message),
             // Atomic: a failed batch applied nothing, so there is nothing to
             // roll back (today's rollback of the whole pending entry would
             // remove acknowledged writes; the kernel never does).
@@ -1306,7 +1399,12 @@ impl Project {
         match call {
             GestureCall::Begin { label } => {
                 let id = self.open_lease(caller, LeaseKind::Gesture, &label);
-                self.ack(txid, self.entry.as_ref().map(|e| e.id), None, Reply::Gesture(id))
+                self.ack(
+                    txid,
+                    self.entry.as_ref().map(|e| e.id),
+                    None,
+                    Reply::Gesture(id),
+                )
             }
             GestureCall::Step {
                 gesture,
@@ -1371,40 +1469,29 @@ impl Project {
         // Supersede the previous step only while it is still the newest
         // write and its after-images hold; otherwise accumulate (a foreign
         // write landed in between and must not be clobbered).
-        let previous = replace
-            .then_some(lease.last_step)
-            .flatten()
-            .filter(|&i| {
-                let entry = self.entry.as_ref().expect("open");
-                i + 1 == entry.ops.len() && {
-                    let root = self.store.current().root().cloned();
-                    entry.ops[i]
-                        .probes
-                        .iter()
-                        .all(|p| probe_holds(root.as_ref(), p))
-                }
-            });
+        let previous = replace.then_some(lease.last_step).flatten().filter(|&i| {
+            let entry = self.entry.as_ref().expect("open");
+            i + 1 == entry.ops.len() && {
+                let root = self.store.current().root().cloned();
+                entry.ops[i]
+                    .probes
+                    .iter()
+                    .all(|p| probe_holds(root.as_ref(), p))
+            }
+        });
         let applied = match previous {
             Some(i) => {
                 let prev_inverse = self.entry.as_ref().expect("open").ops[i].inverse.clone();
-                let applied = self
-                    .store
-                    .kernel_replace(&prev_inverse, body, lease.origin, cause)?;
+                let applied =
+                    self.store
+                        .kernel_replace(&prev_inverse, body, lease.origin, cause)?;
                 self.entry.as_mut().expect("open").ops.remove(i);
                 applied
             }
             None => self.store.kernel_apply(body, lease.origin, cause)?,
         };
-        let index = match applied {
-            Some(applied) => Some(self.fold(
-                caller.writer,
-                lease.origin,
-                &lease.label,
-                applied,
-                false,
-            )),
-            None => None,
-        };
+        let index = applied
+            .map(|applied| self.fold(caller.writer, lease.origin, &lease.label, applied, false));
         let entry = self.entry.as_mut().expect("open");
         if let Some(l) = entry.leases.iter_mut().find(|l| l.id == lease.id) {
             l.last_step = index;
@@ -1416,13 +1503,20 @@ impl Project {
 
     fn workspace_call(&mut self, txid: Option<TxId>, call: WorkspaceCall) -> Ack {
         match call {
-            WorkspaceCall::Get => self.ack(txid, None, None, Reply::Workspace(self.workspace.clone())),
+            WorkspaceCall::Get => {
+                self.ack(txid, None, None, Reply::Workspace(self.workspace.clone()))
+            }
             WorkspaceCall::Mutate { next, threw } => {
                 // No document history and no source-edit admission, as
                 // today; a throwing callback keeps its partial writes.
                 self.workspace = next;
                 match threw {
-                    Some(message) => self.ack(txid, None, None, Reply::Throw(KernelError::Callback(message))),
+                    Some(message) => self.ack(
+                        txid,
+                        None,
+                        None,
+                        Reply::Throw(KernelError::Callback(message)),
+                    ),
                     None => self.ack(txid, None, None, Reply::Workspace(self.workspace.clone())),
                 }
             }
@@ -1498,7 +1592,13 @@ impl Project {
                 }),
             );
         }
-        match self.write(caller.writer, caller.origin, "Direct edit", &WriteBody::Ops(ops.clone()), false) {
+        match self.write(
+            caller.writer,
+            caller.origin,
+            "Direct edit",
+            &WriteBody::Ops(ops.clone()),
+            false,
+        ) {
             Ok((changed, folded)) => self.ack(
                 txid,
                 folded,
@@ -1551,7 +1651,9 @@ impl Project {
         let waiting: Vec<u64> = self
             .tickets
             .iter()
-            .filter(|(_, t)| t.external.realm == failed.realm && t.external.generation == failed.generation)
+            .filter(|(_, t)| {
+                t.external.realm == failed.realm && t.external.generation == failed.generation
+            })
             .map(|(k, _)| *k)
             .collect();
         let mut resolved = Vec::new();
@@ -1635,9 +1737,11 @@ fn hazard(earlier: &EntryOp, later: &EntryOp) -> bool {
     let arrays = restructured(earlier);
     later.forward.iter().any(|f| {
         let path = f.path();
-        arrays
-            .iter()
-            .any(|a| path.len() > a.len() && is_prefix(a, path) && matches!(path[a.len()], PathPart::Index(_)))
+        arrays.iter().any(|a| {
+            path.len() > a.len()
+                && is_prefix(a, path)
+                && matches!(path[a.len()], PathPart::Index(_))
+        })
     })
 }
 
@@ -1716,7 +1820,8 @@ fn same(a: Option<&Node>, b: Option<&Node>) -> bool {
 fn same_node(a: &Node, b: &Node) -> bool {
     match (a.kind(), b.kind()) {
         (NodeKind::Array(x), NodeKind::Array(y)) => {
-            Arc::ptr_eq(x, y) || x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| same_node(p, q))
+            Arc::ptr_eq(x, y)
+                || x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| same_node(p, q))
         }
         (NodeKind::Object(x), NodeKind::Object(y)) => {
             Arc::ptr_eq(x, y)

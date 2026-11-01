@@ -154,7 +154,10 @@ fn assert_not_main_thread() {
     {
         // SAFETY: a libSystem query with no arguments.
         let main = unsafe { pthread_main_np() } == 1;
-        assert!(!main, "never block the main thread on the kernel; await `Pending` instead");
+        assert!(
+            !main,
+            "never block the main thread on the kernel; await `Pending` instead"
+        );
     }
 }
 
@@ -203,12 +206,24 @@ impl Published {
 /// What subscribers hear, after publication.
 #[derive(Clone, Debug)]
 pub enum KernelEvent {
-    Published { project: String, revision: u64 },
-    Notice { project: String, notice: Notice },
-    Opened { project: String },
-    Closed { project: String },
+    Published {
+        project: String,
+        revision: u64,
+    },
+    Notice {
+        project: String,
+        notice: Notice,
+    },
+    Opened {
+        project: String,
+    },
+    Closed {
+        project: String,
+    },
     /// A background journal error (disk full, ...).
-    Durability { message: String },
+    Durability {
+        message: String,
+    },
 }
 
 /// A realm's mailbox entry.
@@ -345,7 +360,11 @@ impl KernelHandle {
             .unwrap_or_else(|| Err(KernelFailure::NoProject(project.to_owned())))
     }
 
-    pub fn open(&self, project: &str, source: OpenSource) -> Pending<Result<OpenInfo, KernelFailure>> {
+    pub fn open(
+        &self,
+        project: &str,
+        source: OpenSource,
+    ) -> Pending<Result<OpenInfo, KernelFailure>> {
         let (r, p) = oneshot();
         self.send(Msg::Open {
             project: project.to_owned(),
@@ -402,14 +421,22 @@ impl KernelHandle {
     /// Events after every publication.
     pub fn subscribe(&self) -> mpsc::Receiver<KernelEvent> {
         let (tx, rx) = mpsc::channel();
-        self.shared.subscribers.lock().expect("subscribers").push(tx);
+        self.shared
+            .subscribers
+            .lock()
+            .expect("subscribers")
+            .push(tx);
         rx
     }
 
     /// A realm generation's mailbox.
     pub fn register_realm(&self, writer: Writer) -> mpsc::Receiver<RealmEnvelope> {
         let (tx, rx) = mpsc::channel();
-        self.shared.realms.lock().expect("realms").insert(writer, tx);
+        self.shared
+            .realms
+            .lock()
+            .expect("realms")
+            .insert(writer, tx);
         rx
     }
 }
@@ -496,7 +523,8 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                     let realms = shared.realms.lock().expect("realms");
                     for message in outbox {
                         let writer = match &message {
-                            RealmMessage::RunExternal { writer, .. } | RealmMessage::Cleanup { writer, .. } => *writer,
+                            RealmMessage::RunExternal { writer, .. }
+                            | RealmMessage::Cleanup { writer, .. } => *writer,
                         };
                         if let Some(mailbox) = realms.get(&writer) {
                             let _ = mailbox.send(RealmEnvelope {
@@ -507,10 +535,22 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                     }
                 }
                 if let Some(revision) = revision {
-                    emit(&shared, KernelEvent::Published { project: project.clone(), revision });
+                    emit(
+                        &shared,
+                        KernelEvent::Published {
+                            project: project.clone(),
+                            revision,
+                        },
+                    );
                 }
                 for notice in notices {
-                    emit(&shared, KernelEvent::Notice { project: project.clone(), notice });
+                    emit(
+                        &shared,
+                        KernelEvent::Notice {
+                            project: project.clone(),
+                            notice,
+                        },
+                    );
                 }
                 if let Some(d) = kernel.durability() {
                     for message in d.take_errors() {
@@ -601,7 +641,8 @@ impl QueryMirror {
                 self.revision = change.revision;
             }
         }
-        if self.revision != published.revision() || self.queries.revision() != published.revision() {
+        if self.revision != published.revision() || self.queries.revision() != published.revision()
+        {
             self.queries.resync(&published.snapshot.document);
             self.revision = published.revision();
         }

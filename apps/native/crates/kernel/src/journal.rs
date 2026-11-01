@@ -177,7 +177,11 @@ impl Durability {
                             shared.targets.lock().expect("targets").clone();
                         for t in &targets {
                             if let Err(e) = t.sync() {
-                                shared.errors.lock().expect("errors").push_back(e.to_string());
+                                shared
+                                    .errors
+                                    .lock()
+                                    .expect("errors")
+                                    .push_back(e.to_string());
                             }
                         }
                         // Forget rotated-away files once synced.
@@ -274,7 +278,12 @@ impl Durability {
     /// Background errors since the last call (shown as a notice, never
     /// silently dropped).
     pub fn take_errors(&self) -> Vec<String> {
-        self.shared.errors.lock().expect("errors").drain(..).collect()
+        self.shared
+            .errors
+            .lock()
+            .expect("errors")
+            .drain(..)
+            .collect()
     }
 }
 
@@ -318,7 +327,10 @@ fn numbered(dir: &Path, prefix: &str, suffix: &str) -> Vec<u64> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            name.strip_prefix(prefix)?.strip_suffix(suffix)?.parse().ok()
+            name.strip_prefix(prefix)?
+                .strip_suffix(suffix)?
+                .parse()
+                .ok()
         })
         .collect();
     out.sort_unstable();
@@ -903,7 +915,10 @@ impl Replay {
             _ => None,
         };
         self.history.push(
-            m.get("label").and_then(Value::as_str).unwrap_or("Edit").to_owned(),
+            m.get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("Edit")
+                .to_owned(),
             origin_from(m.get("origin").and_then(Value::as_str)),
             decode_ops(m.get("f"))?,
             decode_ops(m.get("i"))?,
@@ -921,7 +936,10 @@ impl Replay {
                 let base = m.get("b").and_then(Value::as_f64).ok_or("no base")? as u64;
                 let revision = m.get("r").and_then(Value::as_f64).ok_or("no revision")? as u64;
                 if base != self.revision {
-                    return Err(format!("revision gap: at {}, record on {base}", self.revision));
+                    return Err(format!(
+                        "revision gap: at {}, record on {base}",
+                        self.revision
+                    ));
                 }
                 let ops = decode_ops(m.get("ops"))?;
                 self.document

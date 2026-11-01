@@ -4,9 +4,7 @@
 mod common;
 
 use pm_kernel::library::{LibraryStore, StoreKey, legacy_apply_patches, parse_key};
-use pm_kernel::{
-    Caller, History, HistoryCall, Kernel, KernelConfig, OpenSource, Reply, Request,
-};
+use pm_kernel::{Caller, History, HistoryCall, Kernel, KernelConfig, OpenSource, Reply, Request};
 use pm_model::json::{Value, parse, to_canonical_string};
 
 fn store() -> LibraryStore {
@@ -27,7 +25,10 @@ fn layers(v: &Value) -> Vec<String> {
 
 #[test]
 fn keys_follow_the_registry() {
-    assert_eq!(parse_key("projects"), Some(StoreKey::Static("projects".into())));
+    assert_eq!(
+        parse_key("projects"),
+        Some(StoreKey::Static("projects".into()))
+    );
     assert_eq!(
         parse_key("projectHistory.ab_C-9"),
         Some(StoreKey::Dynamic {
@@ -51,7 +52,10 @@ fn summary_counts_families_orphans_and_quarantine() {
     assert_eq!(s.unregistered, 1);
     assert_eq!(s.quarantined, 1);
     assert_eq!((s.index_rows, s.trash_rows), (2, 1));
-    assert_eq!(s.orphan_slots, 3, "orphan, broken and delta are kept, never dropped");
+    assert_eq!(
+        s.orphan_slots, 3,
+        "orphan, broken and delta are kept, never dropped"
+    );
     assert_eq!(s.missing_slots, 0);
     let index = store().projects().unwrap();
     assert!(index[1].has_thumb && !index[0].has_thumb);
@@ -61,10 +65,19 @@ fn summary_counts_families_orphans_and_quarantine() {
 fn load_applies_the_journal_like_get_async_and_overlays_session() {
     let p = store().load("alpha").unwrap().unwrap();
     assert_eq!((p.journal_applied, p.journal_skipped), (2, 1));
-    assert_eq!(p.project.get("name").and_then(Value::as_str), Some("Alpha journalled"));
+    assert_eq!(
+        p.project.get("name").and_then(Value::as_str),
+        Some("Alpha journalled")
+    );
     assert_eq!(layers(&p.project), ["Renamed", "Two"]);
-    assert!(p.project.get("missing").is_none(), "a patch with no parent is skipped");
-    assert!(p.project.get("futureField").is_some(), "unknown fields are kept");
+    assert!(
+        p.project.get("missing").is_none(),
+        "a patch with no parent is skipped"
+    );
+    assert!(
+        p.project.get("futureField").is_some(),
+        "unknown fields are kept"
+    );
     // projectMeta and projectHistory both exist: the legacy state is not read.
     let session = p.session.unwrap();
     assert_eq!(session.get("time").and_then(Value::as_f64), Some(1.5));
@@ -84,7 +97,11 @@ fn load_reads_stringified_slots_legacy_state_history_and_autosave() {
     assert_eq!(session.get("time").and_then(Value::as_f64), Some(2.0));
     assert!(session.get("history").is_none());
     assert_eq!(
-        beta.history.unwrap().get("entries").and_then(Value::as_array).map(Vec::len),
+        beta.history
+            .unwrap()
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(Vec::len),
         Some(1)
     );
     let legacy = store().load("legacy").unwrap().unwrap();
@@ -123,14 +140,28 @@ fn library_projects_open_in_the_kernel_with_undo_and_export_round_trips() {
             .unwrap()
             .reply
     };
-    let doc = |k: &Kernel| k.project("alpha").unwrap().store().snapshot().document.to_value().unwrap();
+    let doc = |k: &Kernel| {
+        k.project("alpha")
+            .unwrap()
+            .store()
+            .snapshot()
+            .document
+            .to_value()
+            .unwrap()
+    };
     assert!(matches!(undo(&mut k), Reply::Bool(true)));
     assert_eq!(layers(&doc(&k)), ["One", "Two"]);
     assert!(matches!(undo(&mut k), Reply::Bool(true)));
     assert_eq!(layers(&doc(&k)), ["One"]);
     assert!(matches!(undo(&mut k), Reply::Bool(false)));
     // The exported cursor after undo (index -1) re-imports as all-redo.
-    let saved = k.project("alpha").unwrap().store().history().snapshot().to_saved();
+    let saved = k
+        .project("alpha")
+        .unwrap()
+        .store()
+        .history()
+        .snapshot()
+        .to_saved();
     assert_eq!(saved.get("index").and_then(Value::as_f64), Some(-1.0));
 }
 
@@ -148,10 +179,19 @@ fn v1_3_gzip_disk_envelopes_are_decoded() {
         .reply
         .unwrap();
     assert!(matches!(ack.reply, Reply::Bool(true)));
-    let doc = k.project("delta").unwrap().store().snapshot().document.to_value().unwrap();
+    let doc = k
+        .project("delta")
+        .unwrap()
+        .store()
+        .snapshot()
+        .document
+        .to_value()
+        .unwrap();
     assert_eq!(layers(&doc), ["Before"]);
     // A truncated or oversized envelope is refused, never half-read.
-    let bad = parse(r#"{"__powermoveDiskValue":1,"encoding":"gzip","bytes":999,"data":"H4sIAAAAAAAA"}"#).unwrap();
+    let bad =
+        parse(r#"{"__powermoveDiskValue":1,"encoding":"gzip","bytes":999,"data":"H4sIAAAAAAAA"}"#)
+            .unwrap();
     assert!(pm_kernel::library::decode_disk_value(bad.clone(), 1 << 20).is_err());
     assert!(pm_kernel::library::decode_disk_value(bad, 10).is_err());
 }
@@ -183,7 +223,10 @@ fn legacy_apply_patches_matches_projects_ts() {
         to_canonical_string(root.as_ref().unwrap()),
         r#"{"a":[1,3,null,null,9],"o":{"n":{"x":1}}}"#
     );
-    legacy_apply_patches(&mut root, &parse(r#"[{"path":[],"exists":false}]"#).unwrap());
+    legacy_apply_patches(
+        &mut root,
+        &parse(r#"[{"path":[],"exists":false}]"#).unwrap(),
+    );
     assert!(root.is_none());
 }
 
@@ -208,7 +251,9 @@ fn smoke_real_store_copy_counts_only() {
     let mut k = Kernel::new(KernelConfig::default());
     let keys = store.keys().unwrap();
     for key in &keys {
-        let StoreKey::Dynamic { prefix, id } = key else { continue };
+        let StoreKey::Dynamic { prefix, id } = key else {
+            continue;
+        };
         if prefix != "project" {
             continue;
         }

@@ -93,7 +93,10 @@ pub const DYNAMIC_PREFIXES: [&str; 10] = [
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StoreKey {
     Static(String),
-    Dynamic { prefix: String, id: String },
+    Dynamic {
+        prefix: String,
+        id: String,
+    },
     /// A `.json` file whose key is not registered (kept as opaque input).
     Unregistered(String),
     /// `<key>.json.corrupt-<timestamp>`: quarantined, recoverable input.
@@ -123,7 +126,10 @@ pub fn parse_key(key: &str) -> Option<StoreKey> {
 pub enum LibraryError {
     Io(io::Error),
     /// A key's file is not valid JSON (the app would quarantine it).
-    Json { key: String, message: String },
+    Json {
+        key: String,
+        message: String,
+    },
     InvalidKey(String),
 }
 
@@ -201,7 +207,11 @@ impl LibraryStore {
     pub fn open(path: &Path) -> LibraryStore {
         let store = path.join("store");
         LibraryStore {
-            dir: if store.is_dir() { store } else { path.to_path_buf() },
+            dir: if store.is_dir() {
+                store
+            } else {
+                path.to_path_buf()
+            },
         }
     }
 
@@ -245,10 +255,12 @@ impl LibraryStore {
             key: key.to_owned(),
             message: e.to_string(),
         })?;
-        decode_disk_value(value, value_limit(key)).map(Some).map_err(|message| LibraryError::Json {
-            key: key.to_owned(),
-            message,
-        })
+        decode_disk_value(value, value_limit(key))
+            .map(Some)
+            .map_err(|message| LibraryError::Json {
+                key: key.to_owned(),
+                message,
+            })
     }
 
     fn rows(&self, key: &str) -> Result<Vec<LibraryEntry>, LibraryError> {
@@ -390,8 +402,11 @@ impl LibraryStore {
         let trash = self.trash()?;
         s.index_rows = index.len();
         s.trash_rows = trash.len();
-        let listed: std::collections::BTreeSet<String> =
-            index.iter().chain(trash.iter()).map(|e| e.id.clone()).collect();
+        let listed: std::collections::BTreeSet<String> = index
+            .iter()
+            .chain(trash.iter())
+            .map(|e| e.id.clone())
+            .collect();
         s.orphan_slots = slots.difference(&listed).count();
         s.missing_slots = index.iter().filter(|e| !slots.contains(&e.id)).count();
         Ok(s)
@@ -422,7 +437,10 @@ pub fn decode_disk_value(value: Value, limit: usize) -> Result<Value, String> {
         return Ok(value);
     }
     let invalid = || "Invalid compressed recovery record.".to_owned();
-    let bytes = map.get("bytes").and_then(Value::as_f64).ok_or_else(invalid)?;
+    let bytes = map
+        .get("bytes")
+        .and_then(Value::as_f64)
+        .ok_or_else(invalid)?;
     if map.get("__powermoveDiskValue") != Some(&Value::Number(1.0))
         || map.get("encoding").and_then(Value::as_str) != Some("gzip")
         || bytes.fract() != 0.0
@@ -431,7 +449,10 @@ pub fn decode_disk_value(value: Value, limit: usize) -> Result<Value, String> {
     {
         return Err(invalid());
     }
-    let data = map.get("data").and_then(Value::as_str).ok_or_else(invalid)?;
+    let data = map
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
     let compressed = crate::project_io::base64::decode(data).ok_or_else(invalid)?;
     let expected = bytes as usize;
     let mut out = Vec::with_capacity(expected);
@@ -474,10 +495,17 @@ pub fn legacy_apply_patches(root: &mut Option<Value>, patches: &Value) {
         let Some(path) = patch.get("path").and_then(Value::as_array) else {
             continue;
         };
-        let exists = patch.get("exists").and_then(Value::as_bool).unwrap_or(false);
+        let exists = patch
+            .get("exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let value = patch.get("value").cloned();
         if path.is_empty() {
-            *root = if exists { Some(value.unwrap_or(Value::Null)) } else { None };
+            *root = if exists {
+                Some(value.unwrap_or(Value::Null))
+            } else {
+                None
+            };
             continue;
         }
         let Some(parent) = root.as_mut().and_then(|r| walk(r, &path[..path.len() - 1])) else {

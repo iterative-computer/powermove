@@ -84,7 +84,10 @@ fn recovery_restores_document_history_cursor_and_workspace() {
     for name in ["a", "b", "c"] {
         handle(&mut k, rename(name));
     }
-    assert!(matches!(handle(&mut k, HistoryCall::Undo), Reply::Bool(true)));
+    assert!(matches!(
+        handle(&mut k, HistoryCall::Undo),
+        Reply::Bool(true)
+    ));
     handle(
         &mut k,
         WorkspaceCall::Mutate {
@@ -92,8 +95,20 @@ fn recovery_restores_document_history_cursor_and_workspace() {
             threw: None,
         },
     );
-    let expected_doc = k.project("P").unwrap().store().snapshot().document.to_value();
-    let expected_history = k.project("P").unwrap().store().history().snapshot().to_saved();
+    let expected_doc = k
+        .project("P")
+        .unwrap()
+        .store()
+        .snapshot()
+        .document
+        .to_value();
+    let expected_history = k
+        .project("P")
+        .unwrap()
+        .store()
+        .history()
+        .snapshot()
+        .to_saved();
     k.sync_all();
     drop(k);
 
@@ -117,21 +132,37 @@ fn recovery_restores_document_history_cursor_and_workspace() {
         },
     )
     .unwrap();
-    assert!(k.project("P").unwrap().store().is_dirty(), "recovered work is unsaved");
-    assert!(matches!(handle(&mut k, HistoryCall::Redo), Reply::Bool(true)));
-    assert_eq!(layer_name(&k.project("P").unwrap().store().snapshot().document), "c");
+    assert!(
+        k.project("P").unwrap().store().is_dirty(),
+        "recovered work is unsaved"
+    );
+    assert!(matches!(
+        handle(&mut k, HistoryCall::Redo),
+        Reply::Bool(true)
+    ));
+    assert_eq!(
+        layer_name(&k.project("P").unwrap().store().snapshot().document),
+        "c"
+    );
     handle(&mut k, HistoryCall::Undo);
     handle(&mut k, HistoryCall::Undo);
-    assert_eq!(layer_name(&k.project("P").unwrap().store().snapshot().document), "a");
+    assert_eq!(
+        layer_name(&k.project("P").unwrap().store().snapshot().document),
+        "a"
+    );
     k.sync_all();
-    assert!(!session.exists(), "the superseded session goes once the new checkpoint is durable");
+    assert!(
+        !session.exists(),
+        "the superseded session goes once the new checkpoint is durable"
+    );
 }
 
 #[test]
 fn checkpoints_rotate_and_prune_and_recovery_matches() {
     let dir = TempDir::new("journal-rotate");
     let mut k = Kernel::new(config(&dir.0, 5));
-    k.open("P", OpenSource::Untitled(parse(PROJECT).unwrap())).unwrap();
+    k.open("P", OpenSource::Untitled(parse(PROJECT).unwrap()))
+        .unwrap();
     for i in 0..23 {
         handle(&mut k, rename(&format!("n{i}")));
     }
@@ -143,18 +174,29 @@ fn checkpoints_rotate_and_prune_and_recovery_matches() {
         .collect();
     files.sort();
     assert_eq!(files, ["checkpoint-00000004.json", "journal-00000004.log"]);
-    let expected = k.project("P").unwrap().store().snapshot().document.to_value();
+    let expected = k
+        .project("P")
+        .unwrap()
+        .store()
+        .snapshot()
+        .document
+        .to_value();
     let r = recovered(&dir.0, None);
     assert_eq!(r.document.to_value(), expected);
     assert_eq!(r.history.len(), 23);
-    assert_eq!(r.replayed, 3 * 2, "3 renames after the last checkpoint (rev + push)");
+    assert_eq!(
+        r.replayed,
+        3 * 2,
+        "3 renames after the last checkpoint (rev + push)"
+    );
 }
 
 #[test]
 fn a_torn_tail_is_ignored() {
     let dir = TempDir::new("journal-torn");
     let mut k = Kernel::new(config(&dir.0, 50));
-    k.open("P", OpenSource::Untitled(parse(PROJECT).unwrap())).unwrap();
+    k.open("P", OpenSource::Untitled(parse(PROJECT).unwrap()))
+        .unwrap();
     handle(&mut k, rename("kept"));
     k.sync_all();
     drop(k);
@@ -163,7 +205,8 @@ fn a_torn_tail_is_ignored() {
         .append(true)
         .open(session.join("journal-00000000.log"))
         .unwrap();
-    f.write_all(b"0123456789abcdef {\"t\":\"rev\",\"b\":2,\"r\":3,\"op").unwrap();
+    f.write_all(b"0123456789abcdef {\"t\":\"rev\",\"b\":2,\"r\":3,\"op")
+        .unwrap();
     let r = recovered(&dir.0, None);
     assert!(r.truncated);
     assert_eq!(layer_name(&r.document), "kept");
@@ -173,7 +216,8 @@ fn a_torn_tail_is_ignored() {
 fn recovery_refuses_a_different_base_and_offers_a_copy() {
     let dir = TempDir::new("journal-base");
     let mut k = Kernel::new(config(&dir.0, 50));
-    k.open("P", OpenSource::Untitled(parse(PROJECT).unwrap())).unwrap();
+    k.open("P", OpenSource::Untitled(parse(PROJECT).unwrap()))
+        .unwrap();
     handle(&mut k, rename("journalled"));
     k.sync_all();
     drop(k);
@@ -208,7 +252,10 @@ fn without_a_checkpoint_only_the_true_base_replays() {
         other => panic!("{other:?}"),
     }
     let mut wrong = canonical.clone();
-    wrong.as_object_mut().unwrap().insert("name", Value::from("other"));
+    wrong
+        .as_object_mut()
+        .unwrap()
+        .insert("name", Value::from("other"));
     assert!(matches!(
         journal::recover(&dir.0.join("P"), None, Some(&wrong)),
         Recovery::Unrecoverable { .. }
@@ -232,7 +279,10 @@ fn child(dir: PathBuf) {
     let stdout = std::io::stdout();
     for i in 1.. {
         let ack = kernel
-            .call_blocking("P", Request::new(Caller::native(), rename(&format!("w{i}"))))
+            .call_blocking(
+                "P",
+                Request::new(Caller::native(), rename(&format!("w{i}"))),
+            )
             .unwrap();
         assert!(matches!(ack.reply, Reply::Applied { changed: true, .. }));
         let mut out = stdout.lock();
@@ -291,7 +341,11 @@ fn kill_test_sigkill_loses_no_acknowledged_write() {
         recovered_n >= last,
         "acknowledged w{last} but recovered only {name}"
     );
-    assert_eq!(r.history.len() as u64, recovered_n, "every acknowledged step is undoable");
+    assert_eq!(
+        r.history.len() as u64,
+        recovered_n,
+        "every acknowledged step is undoable"
+    );
     eprintln!(
         "kill test: {last} acknowledged, {recovered_n} recovered, {} lines replayed, torn tail: {}",
         r.replayed, r.truncated
@@ -307,7 +361,10 @@ fn kill_test_sigkill_loses_no_acknowledged_write() {
         },
     )
     .unwrap();
-    assert!(matches!(handle(&mut k, HistoryCall::Undo), Reply::Bool(true)));
+    assert!(matches!(
+        handle(&mut k, HistoryCall::Undo),
+        Reply::Bool(true)
+    ));
     assert_eq!(
         layer_name(&k.project("P").unwrap().store().snapshot().document),
         format!("w{}", recovered_n - 1)

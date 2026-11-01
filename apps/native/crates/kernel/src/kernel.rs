@@ -12,12 +12,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use pm_model::json::Value;
 use pm_model::Document;
+use pm_model::json::Value;
 
 use crate::document::DocumentStore;
 use crate::history::History;
-use crate::journal::{self, CheckpointState, Durability, Journal, JournalConfig, Recovered, Recovery};
+use crate::journal::{
+    self, CheckpointState, Durability, Journal, JournalConfig, Recovered, Recovery,
+};
 use crate::library::LibraryProject;
 use crate::model;
 use crate::project_io::OpenedProject;
@@ -78,7 +80,9 @@ impl std::fmt::Display for KernelFailure {
         match self {
             KernelFailure::NoProject(id) => write!(f, "No open project {id}"),
             KernelFailure::AlreadyOpen(id) => write!(f, "Project {id} is already open"),
-            KernelFailure::Journal(m) => write!(f, "The recovery journal could not be started: {m}"),
+            KernelFailure::Journal(m) => {
+                write!(f, "The recovery journal could not be started: {m}")
+            }
         }
     }
 }
@@ -150,10 +154,12 @@ impl Kernel {
                     .map(str::to_owned);
                 let history = match &lib.history {
                     None => History::new(),
-                    Some(saved) => History::import(saved, open_comp.as_deref()).unwrap_or_else(|e| {
-                        history_error = Some(e);
-                        History::new()
-                    }),
+                    Some(saved) => {
+                        History::import(saved, open_comp.as_deref()).unwrap_or_else(|e| {
+                            history_error = Some(e);
+                            History::new()
+                        })
+                    }
                 };
                 if let Some(ws) = lib.workspace {
                     workspace = ws;
@@ -233,7 +239,12 @@ impl Kernel {
     }
 
     /// Recovers `id`'s newest journal session (see [`journal::recover`]).
-    pub fn recover(&self, id: &str, current_base: Option<&str>, base_document: Option<&Value>) -> Recovery {
+    pub fn recover(
+        &self,
+        id: &str,
+        current_base: Option<&str>,
+        base_document: Option<&Value>,
+    ) -> Recovery {
         match self.project_dir(id) {
             Some(dir) => journal::recover(&dir, current_base, base_document),
             None => Recovery::Nothing,
