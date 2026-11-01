@@ -96,3 +96,11 @@ def delta(before, after, seconds):
             "package_idle_wakeups_s": sum(after[p]["pkg_idle_wkups"] - before[p]["pkg_idle_wkups"] for p in before) / seconds,
             "family_phys_footprint_mb": sum(p["phys_footprint"] for p in after.values()) / 1e6,
             "processes": len(after)}
+
+
+def host_seconds():
+    """Quartz host clock shared by NSEvent/presentedTime (not Python 3.9's origin)."""
+    quartz = C.CDLL('/System/Library/Frameworks/QuartzCore.framework/QuartzCore')
+    clock = quartz.CACurrentMediaTime
+    clock.restype = C.c_double
+    return clock()

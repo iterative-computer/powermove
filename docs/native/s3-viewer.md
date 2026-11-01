@@ -538,3 +538,58 @@ These values verify texture output, not physical EDR headroom. The spike's
 isolated policy/colour/mailbox suite passes **11/11** tests. Shell/Python syntax
 and formatting checks pass. No release build was needed for this diagnostic
 pass; no private data, reports or screenshots were committed.
+
+
+## Unlocked foreground verification (2026-11-01)
+
+This supersedes the earlier locked-session on-screen rows for the cases listed
+here. **S3 / Gate P1 remain NOT PASSED.** The spike used its existing pinned-toolchain
+development binary and unchanged public shape fixture, 1280×720. No product
+source changed. Physical built-in display modes 120 Hz and 60 Hz were
+set and checked with CoreGraphics; `maximumFramesPerSecond=120` is hardware
+capability, not evidence that a 60-Hz case ran at 120 Hz.
+
+App set A, present and untouched: Finder, Aside, Grok Bot, Notion, Mail,
+Claude, T3 Code (Nightly), installed Powermove/helpers, RobloxPlayer,
+RobloxMenuBar and figma_agent. Every result below retains this app-presence
+caveat; load is the observed one-minute average before → after the case.
+Existing Powermove process count changed from seven to five without this lane
+closing them. No owned benchmark instance remains. All projects and profiles
+were disposable public/synthetic fixtures under `/tmp`.
+
+| Check | Observation | Verdict | Conditions |
+|---|---|---|---|
+| Cached AppKit scrub, 120 Hz | n=112; p50/p95 21.815/30.241 ms; bound 9.333 ms | FAIL absolute latency; paired Electron absent | A; 4.54 → 4.69 |
+| 60 s playback, 120 Hz | 7,196 frames; 4 scanout gaps; zero missing/zero presentation callbacks and GPU failures | FAIL zero-gap continuity | A; 5.37 → 4.54 |
+| Worker → GPU completion headroom, 120 Hz | p95 9.029 ms; bound 4.167 ms | FAIL local bound | A; 5.37 → 4.54 |
+| Cached AppKit scrub, 60 Hz | n=112; p50/p95 26.063/33.069 ms; bound 17.667 ms | FAIL absolute latency; paired Electron absent | A; 4.10 → 4.38 |
+| 60 s playback, 60 Hz | 3,600 frames; 1 scanout gaps; zero missing/zero presentation callbacks and GPU failures | FAIL zero-gap continuity | A; 4.69 → 4.10 |
+| Worker → GPU completion headroom, 60 Hz | p95 6.857 ms; bound 8.333 ms | PASS local bound only | A; 4.69 → 4.10 |
+
+Input used the runbook's 120 externally posted, timestamped AppKit mouse clicks;
+112 exact-cache samples survived in each repeated-position run. These are real
+AppKit-to-drawable presentation measurements, not stdin seek completion. They
+are synthesized HID events, not human trackpad timing. Sparse paused scrub
+presentations are not a playback drop census. Scanout gaps above 1.5 output
+intervals are reported only from the separate continuous playback soaks.
+Worker-to-GPU-completion includes worker/drawable/submission waits; it is not
+GPU-only execution. One run at each rate is not ≥30 accepted paired runs.
+
+The built-in display reported current EDR headroom rising from approximately
+1.2 to **2.667**, potential **16**, with extended-linear P3/RGBA16Float. This
+passes an API/output-configuration observation only; PQ/HLG emission, photometer
+accuracy and physical mixed-display colour/placement remain UNVERIFIED. The
+initial external SDR display was disconnected and later reconnected by an
+external action; its original mode **150, 2560×1440 at 240 Hz** was restored and
+verified at session end. The built-in panel was returned to its initial 120-Hz
+mode before disconnection. Brightness/contrast/transparency were not changed.
+
+Real-app playback and a linked public audio/video clip were also run; see the
+new engine-service section. These service results are not spike measurements.
+No matching Electron physical presentation stream exists, so the relative scrub
+clause remains unverified despite the measured absolute failures above.
+
+Cases were bounded to 180 s per spike run; the S3/service phase had an 840 s guard.
+The session retained one exclusive GUI-lock inode throughout.
+Screenshots were window-only, frontmost first, and remain under
+`/tmp/pm-shots/onscreen-*.png`; no desktop or private artifact is tracked.

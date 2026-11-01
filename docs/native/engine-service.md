@@ -272,7 +272,7 @@ source engine/env.sh
 export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
 cargo +1.96.1 build --manifest-path apps/native/Cargo.toml -p pm-native-app
 bun apps/native/crates/app/tools/prepare-corpus.ts /tmp/es2-corpus
-python3 apps/native/crates/engine-service/tools/foreground.py \
+python3 tools/perf-gate/foreground.py \
   /tmp/es2-corpus/projects/shapes/primitives/document.json --hz 120 --seconds 60
 # Repeat at --hz 60; use the audio corpus document for the A/V row.
 # For physical scrub, add --scrub and click/drag the real timeline strip.
@@ -345,3 +345,61 @@ Still required: physical frame continuity/headroom under export, calibrated HDR
 output and mastering metadata/export parity, macOS 13 CoreVideo phase, resource
 activation rather than rejection stubs, actual mixed-display transaction checks,
 and all paired §5 gates. No release, tag or push was produced.
+
+
+### Unlocked real-app verification (2026-11-01)
+
+**Gate P1 remains NOT PASSED.** These foreground observations supersede the
+earlier locked-session table only for the listed cases. Pinned native dev binary,
+real `powermove-native`, public shape composition, explicit disposable profiles,
+physical built-in Retina display modes 120/60 Hz, AC power. The source audio
+project was a disposable copy of the public corpus audio composition, with linked
+asset descriptors resolving the six shipped tone/AAC-video files; no personal
+media or installed profile was read.
+
+App set A, present and untouched: Finder, Aside, Grok Bot, Notion, Mail,
+Claude, T3 Code (Nightly), installed Powermove/helpers, RobloxPlayer,
+RobloxMenuBar and figma_agent. Every result below retains this app-presence
+caveat; load is the observed one-minute average before → after the case.
+Existing Powermove process count changed from seven to five without this lane
+closing them. No owned benchmark instance remains. All projects and profiles
+were disposable public/synthetic fixtures under `/tmp`.
+
+| Check | Observation | Verdict | Conditions |
+|---|---|---|---|
+| Real app, 60 s, 120 Hz | 4,787 positive / 3 missing-or-zero; span 59.974 s; 2,394 observed gaps | FAIL zero-gap observation; full census unverified | A; 4.38 → 4.22 |
+| Worker → completion, 120 Hz | p50/p95 1.218/7.019 ms; bound 4.167 ms | FAIL local bound | A; 4.38 → 4.22 |
+| Real app, 60 s, 60 Hz | 3,579 positive / 337 missing-or-zero; span 59.983 s; 5 observed gaps | FAIL zero-gap observation; full census unverified | A; 4.05 → 3.75 |
+| Worker → completion, 60 Hz | p50/p95 1.592/7.559 ms; bound 8.333 ms | PASS local bound only | A; 4.05 → 3.75 |
+| Real clip, 20 s loop at 120 Hz | 1,596 matched-device API samples; mean absolute offset **8996.517 ms**, p95 jitter **9047.986 ms** | FAIL reported offset/jitter bounds; epoch mapping requires investigation | A; 3.75 → 3.74 |
+| Physical cached scrub | P1's paused native seek attempts did not yield usable presentation results; no physical service scrub distribution collected | UNVERIFIED | A; paired-run load 3.89–9.62 |
+| EDR API/configuration | Built-in current headroom ~1.2 → 2.667, potential 16; RGBA16Float extended-linear P3 | PASS API observation only; physical PQ/HLG/colour unverified | A; foreground-case loads above |
+
+The audio offset grows across the repeated two-second clip. The first-second
+mean signed offset was **−14.052 ms**, the last-second mean **18,035.612 ms**.
+This is an observed failure of the exposed matched-device timeline in the loop
+case, not proof that audible output is nine seconds late. Loop/device epoch
+mapping needs investigation before treating the API as a calibrated physical
+A/V oracle. No paired Electron audio stamps or acoustic/photometric capture
+exists; no A/V pass is claimed.
+
+The 60-s host acknowledgement windows were **60.013 / 60.012 s**. The original
+foreground script's Python 3.9 monotonic origin was process-relative, excluding
+all host-clock trace rows. Reanalysis uses the recorded native play/pause
+acknowledgements, not a guessed offset or fabricated timestamp. Positive trace
+spans are shorter than 60 seconds, and missing presentations remain missing;
+counts/scanout gaps do not establish complete content-frame delivery. The public
+shape project is 30 fps, so it cannot certify P1's 60-fps workload either.
+
+Future runs should use `python3 tools/perf-gate/foreground.py` with the documented
+arguments. Its small clock adapter uses Quartz host seconds while preserving the
+original temporary-profile, lock and timeout guards. The host clock is checked
+against independent Mach absolute ticks in the **21/21 passing** harness suite.
+Only harness code changed. Native trace NDJSON now parses without promoting
+missing display timestamps to zero. Traces and window markers remain in `/tmp`.
+
+Window-specific screenshots (outside Git): `onscreen-engine-120.png`,
+`onscreen-engine-60.png` and `onscreen-engine-audio.png` under `/tmp/pm-shots`.
+They show the actual app and were taken before their playback windows. Remaining:
+paired/repeated physical gates, real service input scrub, resize/export-load
+protection, mixed-display alignment and calibrated HDR output.

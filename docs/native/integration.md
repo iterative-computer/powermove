@@ -265,3 +265,48 @@ Still open: broader corpus playback/scrub/export coverage, GUI drop/zoom/readout
 and keymap edge cases, library media fixtures, journal kill tests,
 full-resolution export/visual checks, migration gates, and every §5 paired
 latency/playback/A-V/CPU/GPU/energy/idle/memory budget. No release, tag or push.
+
+
+## Unlocked lifecycle UI verification (2026-11-01)
+
+Disposable `check-lifecycle-ui.sh` close and recovery fixtures ran on the actual
+AppKit/GPUI app with isolated `/tmp` profiles. Dirty work was created through the
+owned fixture's native MCP connection; the decisions, shortcuts and close buttons
+below were operated on screen. No installed app/profile was controlled.
+
+App set A, present and untouched: Finder, Aside, Grok Bot, Notion, Mail,
+Claude, T3 Code (Nightly), installed Powermove/helpers, RobloxPlayer,
+RobloxMenuBar and figma_agent. Every result below retains this app-presence
+caveat; load is the observed one-minute average before → after the case.
+Existing Powermove process count changed from seven to five without this lane
+closing them. No owned benchmark instance remains. All projects and profiles
+were disposable public/synthetic fixtures under `/tmp`.
+
+| Check | Result | Conditions |
+|---|---|---|
+| Command-W, dirty close sheet | PASS Save / Don’t Save / Cancel shown | A; lifecycle observed load range 5.75–16.67 |
+| Escape / cancel focus | PASS sheet cancelled; editor remained dirty; native sheet exposed Cancel as focused | A; same lifecycle load range |
+| Command-Q + Command-D | PASS quit sheet, Don’t Save and final process exit | A; discard checkpoint load 16.67; high-load caveat retained |
+| Don’t Save durability | PASS original SHA-256 unchanged after quit; discarded journal/checkpoint archive exists | A; same discard checkpoint |
+| Return / Save | PASS wrote PMV4 and closed editor | A; same lifecycle load range |
+| Saved file reopen | PASS fresh isolated profile opened saved PMV; edited layer present in live app state and screenshot | A; ending load 6.67 |
+| Red traffic-light close | PASS native close-button AXPress opened dirty sheet; Don’t Save closed editor | A; ending load 6.67 |
+| Recover | PASS sheet choice restored “Recovered work” in the window-bound app state | A; same lifecycle load range |
+| Open as Copy | PASS restored recovered layer; original JSON still contains only base layer | A; same lifecycle load range |
+| Discard recovery | PASS recovered layer absent; discarded archive exists | A; same lifecycle load range |
+| Quit with no editor + connected MCP helper | PASS helper initialized while last editor was closed; native Command-Q exited with that client connected | A; final load 5.75 |
+| Save-in-flight refusal/progress note | UNVERIFIED; the tiny fixture saved too quickly for a deterministic busy-window check | A; same lifecycle load range |
+
+Native keyboard shortcuts were sent through System Events to the explicitly
+frontmost owned process; direct process-posted modifier events were not used as
+passing shortcut evidence. Fresh AX button titles/close subroles were resolved
+for each action. Saved reopen used a fresh disposable profile.
+
+Window-only captures outside Git: `/tmp/pm-shots/onscreen-lifecycle-close-sheet.png`,
+`onscreen-lifecycle-recovery-sheet.png` and `onscreen-lifecycle-saved-reopen.png`.
+No GUI app owned by the user was quit. The owned native/VoiceOver/Quickstart
+processes are gone, U.S. input is restored, and the external display's original
+mode 150 / 240 Hz is verified. Reference worktrees/node_modules and the shared
+release directory are absent; approximately 15 GiB is free. Multi-window ownership,
+save-flight feedback, broader shortcut/focus coverage and P1's physical gates
+remain open. No product code, push, tag, release or workflow dispatch.
