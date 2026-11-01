@@ -1,4 +1,5 @@
-//! Powermove's GPUI component kit. Ports `apps/desktop/src/renderer/src/controls`
-//! (on `main`) control for control; see docs/gpui/parity-b-editor.md section 7.
-
+//! Powermove native controls. Values in; transactional edit events out.
+pub mod arith;
+pub mod color;
+pub mod logic;
 pub mod theme;
