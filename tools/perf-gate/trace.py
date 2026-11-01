@@ -11,12 +11,30 @@ def analyze(rows):
     def positive(value):
         return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
     displayed, work, inputs, offsets = [], [], [], []
+    spans = {name: [] for name in [
+        "event_to_service_ms", "service_to_worker_ms", "render_ms", "drawable_wait_ms",
+        "commit_to_display_ms", "actor_ms", "publication_ms"]}
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError('Malformed engine trace row')
-        if row.get('gpu_ok') is not True or not positive(row.get('display')):
+        if row.get('gpu_ok') is not True:
             continue
-        display = row['display']
+        display = row.get('display')
+        for name, a, b in [
+            ('event_to_service_ms', 'input', 'request'),
+            ('service_to_worker_ms', 'request', 'worker'),
+            ('render_ms', 'render_start', 'render_submitted'),
+            ('drawable_wait_ms', 'drawable_asked', 'drawable_acquired'),
+            ('commit_to_display_ms', 'commit', 'display')]:
+            if positive(row.get(a)) and positive(row.get(b)) and row[b] >= row[a]:
+                if name != 'service_to_worker_ms' or positive(row.get('input')):
+                    spans[name].append((row[b] - row[a]) * 1000)
+        if positive(row.get('input')):
+            for name in ['actor_ms', 'publication_ms']:
+                if positive(row.get(name)):
+                    spans[name].append(row[name])
+        if not positive(display):
+            continue
         displayed.append(display)
         worker, completed = row.get('worker'), row.get('completed')
         if positive(worker) and positive(completed) and completed >= worker:
@@ -32,6 +50,7 @@ def analyze(rows):
     mean = fmean(offsets) if offsets else None
     ordered = sorted(displayed)
     return {
+        'stages_ms': {name: distribution(values) for name, values in spans.items()},
         'rows':len(rows), 'positive_display_rows':len(displayed),
         'worker_to_completion_ms':distribution(work),
         'input_to_display_ms':distribution(inputs),

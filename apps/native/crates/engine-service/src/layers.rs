@@ -19,7 +19,7 @@ pub fn configure_layer(
     unsafe {
         let p = layer.as_ptr() as *mut AnyObject;
         let _: () = msg_send![p,setWantsExtendedDynamicRangeContent:true];
-        let _: () = msg_send![p,setMaximumDrawableCount:2_u64];
+        let _: () = msg_send![p,setMaximumDrawableCount:3_u64];
         let _: () = msg_send![p,setAllowsNextDrawableTimeout:true];
         let space = objc2_core_graphics::CGColorSpace::with_name(Some(
             objc2_core_graphics::kCGColorSpaceExtendedLinearDisplayP3,

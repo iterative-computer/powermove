@@ -58,13 +58,16 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             anyhow::ensure!(temporary(&path), "temporary corpus copy required");
                             v.open_file(path, cx);
                         },
-                        "seek" => v.seek(r["seconds"].as_f64().ok_or_else(|| anyhow::anyhow!("missing seconds"))?),
+                        "seek" => v.seek_at(r["seconds"].as_f64().ok_or_else(|| anyhow::anyhow!("missing seconds"))?, now),
                         "edit" => {
                             let layer = v.layers.iter().find(|l| !l.effectively_locked && l.kind != "audio").ok_or_else(|| anyhow::anyhow!("no editable layer"))?;
-                            v.edit(pm_kernel::Command::SetStaticOpacity {
+                            v.call_at(pm_kernel::Call::Transact {
+                                label: None, expected_revision: None,
+                                body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::SetStaticOpacity {
                                 layer_id: layer.id.clone(),
                                 value: r["value"].as_f64().ok_or_else(|| anyhow::anyhow!("missing value"))?,
-                            }, cx);
+                            }]),
+                            }, now, cx);
                         },
                         "play" | "pause" => {
                             let viewer = v.viewer.as_ref().ok_or_else(|| anyhow::anyhow!("no viewer"))?;
@@ -87,7 +90,8 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         "accepted_host_s":now, "opening":v.opening,
                         "opened":v.session.is_some(), "message":v.message,
                         "revision":v.published.as_ref().map(|p| p.revision()),
-                        "frame":frame.map(|f| json!({"ticks":f.time.get(),"stamp":format!("{:?}",f.stamp),
+                        "viewer_id":v.viewer.as_ref().map(|v| v.identity()),
+                        "frame":frame.map(|f| json!({"input_host_s":f.input_host_seconds,"revision":f.stamp.revision,"doc_id":f.stamp.doc_id,"ticks":f.time.get(),"stamp":format!("{:?}",f.stamp),
                             "cache_hit":f.cache_hit,"gpu_ok":f.gpu_ok,
                             "display_host_s":f.display_host_seconds,"completion_host_s":f.completion_host_seconds})),
                         "error":status.as_ref().and_then(|s| s.error.as_ref()),

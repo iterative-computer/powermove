@@ -228,10 +228,20 @@ impl Controller {
         cx.notify();
     }
     pub fn call(&mut self, call: Call, cx: &mut Context<Self>) {
+        self.call_at(call, Self::event_time(), cx);
+    }
+    pub fn call_at(&mut self, call: Call, input: f64, cx: &mut Context<Self>) {
         if self.close_pending {
             return;
         }
         let Some(session) = &self.session else { return };
+        if matches!(
+            call,
+            Call::Transact { .. } | Call::Gesture(GestureCall::Step { .. })
+        ) && let Some(viewer) = &self.viewer
+        {
+            viewer.input_event(input);
+        }
         let pending = self
             .kernel
             .call(&session.project, Request::new(Caller::native(), call));
@@ -277,20 +287,23 @@ impl Controller {
             .and_then(|v| v.status().clock)
             .map_or(0., |c| c.media_time.get() as f64 / TICKS_PER_SECOND as f64)
     }
+    fn event_time() -> f64 {
+        objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap())
+            .currentEvent()
+            .map(|e| e.timestamp())
+            .filter(|t| t.is_finite() && *t > 0.)
+            .unwrap_or_else(pm_engine_service::trace::now)
+    }
     pub fn seek(&mut self, seconds: f64) {
+        self.seek_at(seconds, Self::event_time());
+    }
+    pub fn seek_at(&mut self, seconds: f64, input: f64) {
         if let Some(v) = &self.viewer {
             let frame = self
                 .rate
                 .frame_of((seconds.clamp(0., self.duration) * TICKS_PER_SECOND as f64) as i64);
             if let Ok(time) = self.rate.frame_start(frame)
-                && let Err(e) = v.scrub_at(
-                    Ticks::new(time).unwrap_or(Ticks::ZERO),
-                    objc2_app_kit::NSApplication::sharedApplication(
-                        objc2::MainThreadMarker::new().unwrap(),
-                    )
-                    .currentEvent()
-                    .map_or_else(pm_engine_service::trace::now, |e| e.timestamp()),
-                )
+                && let Err(e) = v.scrub_at(Ticks::new(time).unwrap_or(Ticks::ZERO), input)
             {
                 self.message = e.to_string();
             }

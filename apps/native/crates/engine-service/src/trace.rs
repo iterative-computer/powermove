@@ -3,6 +3,7 @@
 #[derive(Default, Debug)]
 pub struct Trace {
     pub worker_start: f64,
+    pub target: f64,
     pub render_start: f64,
     pub render_submitted: f64,
     pub drawable_asked: f64,
@@ -68,4 +69,11 @@ impl Drop for Recorder {
             let _ = thread.join();
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Pipeline {
+    pub request: f64,
+    pub actor_ms: f64,
+    pub publication_ms: f64,
 }

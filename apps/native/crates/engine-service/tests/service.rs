@@ -337,3 +337,55 @@ fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
     wait_frame(&v, v.stamp().unwrap());
     assert_eq!(rx.len(), 1, "notifications must stay bounded");
 }
+
+#[test]
+fn pending_edit_origin_belongs_to_the_new_revision() {
+    let s = snapshot();
+    let engine = EngineService::start(pm_gpu::Gpu::new("edit-origin-test").unwrap()).unwrap();
+    let v = engine.viewer(config(s.clone())).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    let input = pm_engine_service::trace::now();
+    v.input_event(input);
+    // An old-revision frame may complete while the kernel processes the edit.
+    v.capture_next().unwrap();
+    assert!(
+        wait_frame(&v, v.stamp().unwrap())
+            .input_host_seconds
+            .is_none()
+    );
+    v.snapshot(Snapshot {
+        revision: s.revision + 1,
+        document: Arc::new(pm_model::Document::new(
+            s.document.to_value(),
+            s.revision + 1,
+        )),
+        ..s
+    })
+    .unwrap();
+    assert_eq!(
+        wait_frame(&v, v.stamp().unwrap()).input_host_seconds,
+        Some(input)
+    );
+}
+
+#[test]
+fn telemetry_headroom_does_not_invalidate_identical_pixels() {
+    let engine =
+        EngineService::start(pm_gpu::Gpu::new("headroom-telemetry-test").unwrap()).unwrap();
+    let c = config(snapshot());
+    let output = c.output;
+    let v = engine.viewer(c).unwrap();
+    let stamp = v.stamp().unwrap();
+    v.configure(Output {
+        headroom: 2.,
+        ..output
+    })
+    .unwrap();
+    assert_eq!(v.stamp().unwrap(), stamp);
+    v.configure(Output {
+        display: output.display + 1,
+        ..output
+    })
+    .unwrap();
+    assert_ne!(v.stamp().unwrap(), stamp);
+}

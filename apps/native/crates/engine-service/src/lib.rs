@@ -42,7 +42,7 @@ pub use policy::{Output, Stamp};
 pub use render::{Scene, metal_device};
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Duration,
 };
@@ -168,6 +168,8 @@ struct View {
     status: ViewerStatus,
     phase: Option<(f64, f64)>,
     input: Option<f64>,
+    pending_input: Option<f64>,
+    pipeline: trace::Pipeline,
     mastering: color::Mastering,
     resources: Arc<resources::ResourceSnapshot>,
 }
@@ -205,7 +207,7 @@ struct State {
 }
 struct Shared {
     state: Mutex<State>,
-    wake: Condvar,
+    wake: std::sync::mpsc::SyncSender<()>,
     interactive: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     before_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -234,16 +236,33 @@ impl Viewer {
         self.shared
             .interactive
             .store(true, std::sync::atomic::Ordering::Release);
-        self.shared.wake.notify_one();
+        self.shared.wake.try_send(()).ok();
         Ok(())
     }
     /// Immutable publication input, cheap COW tree clone. The snapshot is the
     /// authoritative fallback if the consumer missed any change events.
     #[cfg(feature = "kernel")]
     pub fn publish(&self, p: &Published) -> Result<()> {
-        self.snapshot(p.snapshot.clone())
+        self.snapshot_traced(
+            p.snapshot.clone(),
+            Some((
+                p.actor_work.as_secs_f64() * 1000.,
+                p.publication_work.as_secs_f64() * 1000.,
+            )),
+        )
+    }
+    /// Attach an event origin before dispatching an asynchronous kernel edit.
+    /// Keep it pending until a new revision; playback of the old revision
+    /// must not consume the edit's measurement token.
+    pub fn input_event(&self, input: f64) {
+        if let Some(v) = self.shared.state.lock().unwrap().views.get_mut(&self.id) {
+            v.pending_input = Some(input);
+        }
     }
     pub fn snapshot(&self, snapshot: Snapshot) -> Result<()> {
+        self.snapshot_traced(snapshot, None)
+    }
+    fn snapshot_traced(&self, snapshot: Snapshot, spans: Option<(f64, f64)>) -> Result<()> {
         self.edit(|v| {
             ensure!(
                 snapshot.doc_id == v.stamp.doc_id,
@@ -254,6 +273,13 @@ impl Viewer {
                 "stale kernel publication"
             );
             if snapshot.revision > v.stamp.revision {
+                v.input = v.pending_input.take();
+                let (actor_ms, publication_ms) = spans.unwrap_or_default();
+                v.pipeline = trace::Pipeline {
+                    request: trace::now(),
+                    actor_ms,
+                    publication_ms,
+                };
                 v.config.snapshot = snapshot;
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
@@ -276,7 +302,7 @@ impl Viewer {
         v.content = content;
         v.stamp.sequence += 1;
         v.dirty = true;
-        self.shared.wake.notify_one();
+        self.shared.wake.try_send(()).ok();
         Ok(())
     }
     /// Interactive scrubbing pauses and immediately requests the exact frame.
@@ -288,6 +314,7 @@ impl Viewer {
         ensure!(input.is_finite() && input > 0., "invalid input timestamp");
         self.edit(|v| {
             v.input = Some(input);
+            v.pipeline.request = trace::now();
             // Replace an unconsumed scrub pair atomically, even under a burst
             // of HID input. A pause can never be accepted without its seek.
             if matches!(
@@ -313,8 +340,14 @@ impl Viewer {
     pub fn configure(&self, output: Output) -> Result<()> {
         output.validate()?;
         self.edit(|v| {
-            if output != v.config.output {
-                v.config.output = output;
+            let previous = v.config.output;
+            v.config.output = output;
+            // Headroom is display telemetry. The shader preserves extended
+            // values and WindowServer adapts them; it does not change pixels.
+            if output.width != previous.width
+                || output.height != previous.height
+                || output.display != previous.display
+            {
                 v.stamp.generation += 1;
                 v.stamp.sequence += 1;
                 v.dirty = true;
@@ -411,7 +444,7 @@ impl Viewer {
             self.shared
                 .interactive
                 .store(true, std::sync::atomic::Ordering::Release);
-            self.shared.wake.notify_one();
+            self.shared.wake.try_send(()).ok();
         }
         Ok(())
     }
@@ -465,7 +498,7 @@ impl Viewer {
         let mut state = self.shared.state.lock().unwrap();
         state.views.remove(&self.id);
         state.notify();
-        self.shared.wake.notify_one();
+        self.shared.wake.try_send(()).ok();
     }
 }
 
@@ -491,9 +524,10 @@ impl EngineService {
         Self::start_engine(device, engine)
     }
     fn start_engine(device: metal::Device, engine: render::Engine) -> Result<Self> {
+        let (wake, wakes) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
-            wake: Condvar::new(),
+            wake,
             interactive: Arc::default(),
             #[cfg(test)]
             before_submit: Mutex::new(None),
@@ -501,7 +535,7 @@ impl EngineService {
         let worker = shared.clone();
         let thread = std::thread::Builder::new()
             .name("pm-engine-service".into())
-            .spawn(move || run(engine, worker))?;
+            .spawn(move || run(engine, worker, wakes))?;
         Ok(Self {
             shared,
             thread: Some(thread),
@@ -515,7 +549,7 @@ impl EngineService {
             v.stamp.sequence += 1;
             v.dirty = true;
         }
-        self.shared.wake.notify_one();
+        self.shared.wake.try_send(()).ok();
     }
     /// Share with ExportHandle::start_scheduled; true defers new export bands.
     pub fn export_activity(&self) -> Arc<std::sync::atomic::AtomicBool> {
@@ -583,12 +617,14 @@ impl EngineService {
                 status: ViewerStatus::default(),
                 phase: None,
                 input: None,
+                pending_input: None,
+                pipeline: Default::default(),
                 mastering: Default::default(),
                 resources: Arc::default(),
             },
         );
         state.notify();
-        self.shared.wake.notify_one();
+        self.shared.wake.try_send(()).ok();
         Ok(Viewer {
             id,
             shared: self.shared.clone(),
@@ -601,7 +637,7 @@ impl Drop for EngineService {
         self.shared
             .interactive
             .store(false, std::sync::atomic::Ordering::Release);
-        self.shared.wake.notify_one();
+        self.shared.wake.try_send(()).ok();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -621,8 +657,15 @@ struct Flight {
     submission: render::Submission,
     input: Option<f64>,
     audio_host: Option<f64>,
+    pipeline: trace::Pipeline,
 }
-fn run(mut engine: render::Engine, shared: Arc<Shared>) {
+fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::Receiver<()>) {
+    // Same interactive class as pm-node/present; export remains separately
+    // governed. A default-class worker can miss display deadlines under load.
+    objc2::rc::autoreleasepool(|_| {
+        objc2_foundation::NSThread::currentThread()
+            .setQualityOfService(objc2_foundation::NSQualityOfService::UserInteractive);
+    });
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
     let recorder =
@@ -658,15 +701,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                 engine.clear_cache();
             }
             if let Some(v) = state.views.get_mut(&f.id) {
-                if v.stamp != f.stamp {
-                    v.status.stale_rejections += 1;
-                    continue;
-                }
                 let t = f.submission.trace.lock().unwrap();
                 if let Some(recorder) = &recorder && !recorder.record(serde_json::json!({"display":t.display,"worker":t.worker_start,"completed":t.completed,"commit":t.commit,
                         "input":f.input,"audio_host":f.audio_host,"time":f.time.get(),"cache_hit":t.cache_hit,
-                        "generation":f.stamp.generation,"gpu_ok":t.gpu_ok})) {
+                        "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
+                        "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
+                        "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
+                }
+                if v.stamp != f.stamp {
+                    v.status.stale_rejections += 1;
+                    continue;
                 }
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
@@ -770,7 +816,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
             if let Some((phase, _)) = v.phase.take()
                 && phase > now
             {
-                r.next = phase;
+                // A late/repeated link tick must never rewind a submitted target.
+                r.next = r.next.max(phase);
             }
             let due = if r.transport.clock.is_playing() {
                 let mut due = r.next;
@@ -783,7 +830,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
             } else {
                 None
             };
-            if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 2 {
+            if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 3 {
                 continue;
             }
             if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - interval) {
@@ -824,11 +871,9 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                 due,
                 v.mastering,
                 v.input.take(),
+                v.pipeline,
                 r.transport
-                    .clock
-                    .following()
-                    .then(|| r.transport.clock.host_at(time.get()))
-                    .flatten()
+                    .audio_host_for(time, (due.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
             ));
             break;
@@ -859,12 +904,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
             due,
             mastering,
             input,
+            pipeline,
             audio_host,
         )) = work
         {
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
+                target: due.unwrap_or(0.),
                 ..Default::default()
             }));
             engine.mastering = mastering;
@@ -895,7 +942,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                 }
                 match result {
                     Ok(Some(s)) => {
-                        s.submit(due);
+                        let completed = Arc::downgrade(&shared);
+                        s.submit_notifying(
+                            due,
+                            Some(Arc::new(move || {
+                                // Bounded tokens cannot lose a wake; callbacks
+                                // never acquire the service state lock.
+                                if let Some(completed) = completed.upgrade() {
+                                    completed.wake.try_send(()).ok();
+                                }
+                            })),
+                        );
                         flights.push_back(Flight {
                             id,
                             stamp,
@@ -903,6 +960,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
                             submission: s,
                             input,
                             audio_host,
+                            pipeline,
                         });
                     }
                     Ok(None) => {
@@ -918,17 +976,28 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>) {
             state.notify();
         } else {
             let busy = !flights.is_empty() || runtime.values().any(|r| r.transport.running());
-            let _ = shared
-                .wake
-                .wait_timeout(
-                    state,
-                    if busy {
-                        Duration::from_millis(1)
-                    } else {
-                        Duration::from_secs(3600)
-                    },
-                )
-                .unwrap();
+            let timeout = if busy {
+                let now = trace::now();
+                let next = runtime
+                    .iter()
+                    .filter_map(|(id, r)| {
+                        let room =
+                            flights.len() < 3 && flights.iter().filter(|f| f.id == *id).count() < 3;
+                        if r.transport.clock.is_playing() && room {
+                            Some((r.next - r.interval - now).max(0.0001))
+                        } else if r.transport.running() && !r.transport.clock.is_playing() {
+                            Some(0.001) // waiting for the first audio epoch
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(0.25_f64, f64::min);
+                Duration::from_secs_f64(next)
+            } else {
+                Duration::from_secs(3600)
+            };
+            drop(state);
+            let _ = wakes.recv_timeout(timeout);
         }
     }
     drop(flights); // Command completion handlers hold their source leases.

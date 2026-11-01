@@ -41,6 +41,44 @@ class GateTests(unittest.TestCase):
             self.assertEqual(check('playback', changed, metrics)['status'], 'FAIL')
         self.assertEqual(check('playback', metrics, {})['status'], 'INCOMPLETE')
 
+    def test_native_seek_rejects_frame_from_another_input(self):
+        app = driver.App.__new__(driver.App)
+        app.kind = 'native'
+        frame = dict(gpu_ok=True, display_host_s=11., ticks=driver.TICKS, cache_hit=True,
+                     input_host_s=9., stamp='new', revision=2)
+        state = dict(frame=frame, opened=True, opening=False, metal_allocated_bytes=1)
+        answers = iter([{}, {'accepted_host_s':10.}, state,
+                        dict(state, frame=dict(frame, input_host_s=10.))])
+        app.request = Mock(side_effect=lambda *a, **k: next(answers))
+        with patch.object(driver.time, 'sleep'):
+            self.assertEqual(app.action('seek', seconds=1.)['ms'],1000.)
+        self.assertEqual(app.request.call_count,4)
+
+    def test_native_edit_requires_the_presented_revision(self):
+        app = driver.App.__new__(driver.App)
+        app.kind = 'native'
+        frame = dict(gpu_ok=True, display_host_s=11., cache_hit=False,
+                     input_host_s=10., stamp='new', revision=1)
+        state = dict(frame=frame, opened=True, opening=False, revision=2, metal_allocated_bytes=1)
+        answers = iter([{'revision':1}, {'accepted_host_s':10.}, state,
+                        dict(state, frame=dict(frame, revision=2))])
+        app.request = Mock(side_effect=lambda *a, **k: next(answers))
+        with patch.object(driver.time, 'sleep'):
+            app.action('edit', value=37)
+        self.assertEqual(app.request.call_count,4)
+
+    def test_native_open_requires_the_new_viewer(self):
+        app = driver.App.__new__(driver.App)
+        app.kind = 'native'
+        frame = dict(gpu_ok=True, display_host_s=11., cache_hit=False)
+        state = dict(frame=frame, viewer_id=1, opened=True, opening=False, metal_allocated_bytes=1)
+        answers = iter([{'viewer_id':1}, {'accepted_host_s':10.}, state,
+                        dict(state, viewer_id=2)])
+        app.request = Mock(side_effect=lambda *a, **k: next(answers))
+        with patch.object(driver.time, 'sleep'):
+            app.action('open', path='/tmp/project.json')
+        self.assertEqual(app.request.call_count,4)
+
     def test_wrong_endpoint_or_machine_never_passes(self):
         metrics = {'latency_ms':[100]*30}
         for settings in [dict(endpoints=False), dict(conditions=False)]:
@@ -72,6 +110,14 @@ class GateTests(unittest.TestCase):
         self.assertAlmostEqual(result['av_mean_abs_offset_ms'],2.)
         self.assertAlmostEqual(result['input_to_display_ms']['p95'],4.)
         self.assertFalse(result['gate_eligible'])
+
+    def test_missing_display_still_exposes_processing_but_not_physical_latency(self):
+        result = analyze([dict(gpu_ok=True, display=None, worker=10.002, completed=10.004,
+                               input=10., request=10.001, actor_ms=.2, publication_ms=.01)])
+        self.assertEqual(result['positive_display_rows'],0)
+        self.assertIsNone(result['input_to_display_ms'])
+        self.assertIsNone(result['av_mean_abs_offset_ms'])
+        self.assertAlmostEqual(result['stages_ms']['service_to_worker_ms']['p95'],1.)
 
     def test_nonfinite_or_negative_counter_can_never_pass(self):
         metrics={'drops':[0]*30, 'frame_work_p95_ms':[8]*30, 'duration_s':[60]*30, 'fps':[60]*30}

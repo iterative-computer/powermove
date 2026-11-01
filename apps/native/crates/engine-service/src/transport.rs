@@ -220,6 +220,31 @@ impl Transport {
         self.clock.stop_at_end(now);
         self.clock.sample(now)
     }
+    /// Lift a wrapped frame time onto this audio epoch's unwrapped line near
+    /// its intended presentation. Loops are continuous; seek/play/device
+    /// discontinuities are fenced by poll() before this line is followed.
+    pub fn audio_host_for(
+        &self,
+        time: pm_protocol::common::Ticks,
+        near_host_us: i64,
+    ) -> Option<f64> {
+        if !self.clock.following() {
+            return None;
+        }
+        let predicted = self.clock.unwrapped_at(near_host_us);
+        let mut media = time.get();
+        if let Some(range) = self.clock.loop_range().filter(|r| r.is_valid()) {
+            let wrapped = self.clock.wrap(predicted);
+            if (wrapped != predicted || (range.start.get()..range.end.get()).contains(&predicted))
+                && (range.start.get()..range.end.get()).contains(&media)
+            {
+                let length = range.end.get() - range.start.get();
+                let passes = ((predicted - media) as f64 / length as f64).round() as i64;
+                media = media.saturating_add(passes.saturating_mul(length));
+            }
+        }
+        self.clock.host_at(media)
+    }
     pub fn running(&self) -> bool {
         self.clock.is_playing() || self.awaiting.is_some()
     }

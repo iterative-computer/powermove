@@ -99,3 +99,155 @@ matching file-open boundaries/main-thread stalls, physical cached/random seek,
 4K long-GOP hydration, full physical frame census, matched Electron device A/V,
 per-frame work, GPU/energy cost, shell repaint/main work and deduplicated memory.
 The separate foreground S3/service observations do not fill these paired gaps.
+
+## Fix pass — 2026-11-01
+
+**Partial fix; Gate P1 remains NOT PASSED.** Measurements below use optimized
+Rust 1.96.1 builds on the same M5/16 GiB machine and OS as the initial run.
+The built-in panel was explicitly set to 120/60 Hz with CoreGraphics and its
+original mode restored after each completed batch. AC power, existing apps
+retained, disposable public-project copies and profiles only. Each batch owned
+an inode-checked `perffix` GUI lock, had a nine-minute alarm and bounded teardown.
+Raw conditions, profiles, traces and screenshots are outside Git. No required
+M4 Max/base-M-series rig or settled-machine acceptance is claimed. No new paired
+Electron runs were made; the original Electron numbers remain context only.
+
+### Instrumentation and findings
+
+The trace now connects input origin, kernel actor work, COW publication work,
+service request, worker start, render submission, drawable acquisition, command
+commit, GPU execution/completion and actual drawable presentation. Missing display
+callbacks remain missing. Already-submitted stale frames are recorded before
+status rejection, rather than silently disappearing from diagnostics.
+
+An instrumented release baseline reproduced the real-app bottleneck: render
+p95 **0.763 ms**, drawable acquisition p95 **0.514 ms**, worker → completion
+p95 **2.450 ms**, but commit → display p95 **24.530 ms** at 120 Hz. Its 60-second
+window contained **4,929 positive presentations and 2,266 gaps** above 1.5 refresh
+intervals. Kernel actor work for tagged edits was sub-millisecond and publication
+was tens of microseconds. Snapshot serialization or full graph preparation was
+not the dominant delay for this small fixture. This real-app baseline is
+separate from S3's earlier **4/1 gaps**: those spike observations are not an
+interchangeable before measurement.
+
+The two-frame limit remained occupied until presentation, even after GPU work
+completed. At approximately three refresh intervals of presentation delay that
+limit cannot sustain 120 Hz. The worker also rewound its next target on repeated
+link ticks and polled completion at 1 ms. The fix uses three bounded drawables,
+forward-only targets, a bounded wake token from completion/presentation callbacks,
+deadline waits and interactive worker QoS. Callbacks never take the service state
+lock. Existing revision, resize and display rejection remains in force.
+Dynamic headroom alone no longer retires identical extended-linear pixels;
+explicit mastering transforms, size and display changes still retire them.
+The existing engine draw-reuse switch is enabled; no new render-graph cache or
+engine/vendor changes were introduced. An unsynchronized-presentation experiment
+was rejected and removed; display synchronization remains enabled.
+
+A/V used wrapped media time as input to `TransportClock::host_at`, which expects
+an unwrapped coordinate. Each loop therefore selected an earlier pass. The
+service now lifts the frame onto the current audio epoch's line near its intended
+presentation; seek/play/device discontinuities retain the presenter's epoch
+fence. A decoded, audible PCM WAV test crosses repeated wraps and a seek with
+160 ms simulated device latency. Before the fix it measured **350 ms mean /
+450 ms p95 jitter**; after the fix both are **0.000 ms**. This is an arithmetic
+regression test, not a physical A/V pass. The on-screen loop no longer accumulates
+seconds of offset, but presentation delay and repeated 30-fps picture sampling
+remain in the physical result below.
+
+The native command seam now supplies an explicit monotonic seek/edit origin,
+presented revision and viewer identity. A cached seek must match its own origin
+and exact ticks; an edit must match the **presented** revision; open must match
+the first positive presentation of the new viewer. A pending edit token cannot
+be consumed by playback of an older revision. This removes stale AppKit-event
+origins from automated seeks. Electron's endpoint remains GPU completion + rAF,
+so matching logical boundaries do not establish matching physical endpoints.
+
+### Before / after
+
+| Row | First gate / release baseline | Final fix-pass observation | Result |
+|---|---|---|---|
+| Edit → presentation, 120 Hz (ms) | First gate 47.231 (n=1); release baseline 22.921 / 23.659 (n=3) | **23.429 / 30.545**, n=30 | FAIL ≤9.333 ms; no new paired ratio; main work unverified |
+| Edit → presentation, 60 Hz (ms) | No matching first-gate row | **23.588 / 32.110**, n=30 | FAIL ≤17.667 ms |
+| Cached scrub, 120 / 60 Hz (ms) | Missing native samples in paired gate | **22.958 / 24.249** and **23.250 / 24.506**, n=30 each | Measurement repaired; both absolute latency bounds FAIL |
+| Open → first new-viewer presentation (ms) | First gate 574.760 / 636.730, different boundary | **415.883** at 120 Hz; **330.845** at 60 Hz, n=1 each | INCOMPLETE; corrected endpoint, no paired ratio or main-stall data |
+| 60 s real-app scanout gaps, 120 Hz | Release baseline **2,266**, 4,929 positive presentations | **34**, 7,141 positive presentations | FAIL zero gaps |
+| 60 s real-app scanout gaps, 60 Hz | Earlier service dev run **5**; S3 independently **1** | **3**, 3,598 positive presentations | FAIL zero gaps; no matched release-before row |
+| Worker → completion p95, 120 / 60 Hz (ms) | Release baseline **2.450** at 120 Hz; earlier dev 7.019 / 7.559 | **1.511 / 1.725** | PASS local 4.167 / 8.333 ms bounds only |
+| Device A/V mean absolute / p95 jitter (ms) | **8,996.517 / 9,047.986**, earlier 20 s loop | **34.634 / 12.558**, 2,397 matched samples in final 20 s loop | Epoch accumulation fixed; physical bounds still FAIL |
+| Post-loop paused seek/restart | No comparable row | **27.329 ms** seek; positive subsequent playback timestamps | Functional observation only |
+
+Final one-minute load before → after: **8.508 → 8.829** (120 Hz),
+**8.829 → 6.317** (60 Hz), **6.317 → 5.978** (audio). Existing applications
+were left running. Earlier retained fix iterations varied: 120-Hz edit p95
+31.360–44.916 ms, gaps 45–107 and work p95 1.737–4.224 ms; 60-Hz work p95
+4.562 ms; audio mean 30.032 ms. The table uses the last completed run of the
+final source, not the fastest attempt. A display disconnect invalidated the
+first exploratory batch's restoration; it is excluded. Subsequent listed
+batches all restored the original display mode successfully.
+
+In the final 120-Hz trace, tagged actor work p95 was **0.483 ms**, publication
+**0.011 ms**, request → worker **0.035 ms**, while commit → display remained
+**24.706 ms**. These spans do not include all GPUI/main-thread frame work.
+
+Thirty command-driven cached seeks and edits were attempted at each refresh
+rate. Open is one observation per side/rate; playback is one full 60-second
+window per rate; audio is one 20-second loop followed by a paused seek and a
+three-second restart. Quantiles use nearest rank. Positive timestamp gaps are
+not a complete content-frame census; the public shape fixture is 30 fps, not
+P1's 60-fps workload. Main-thread frame work, shell repaint, paired ratios and
+random 4K long-GOP seek remain **UNVERIFIED**.
+
+A separate real inspector interaction selected a layer and applied four numeric
+opacity values in the native editor. The values and viewer changed on screen;
+the trace reached GPU completion, but the edit drawables had no positive
+presentation timestamps. No input → physical-presentation number is assigned to
+those missing callbacks. Coordinate/AX input in this check is not a calibrated
+HID latency distribution. This still needs a reliable foreground presentation
+endpoint before the edit row can pass.
+
+### Validation and decisions
+
+- **248 Rust tests pass:** kernel 209, service 23, app 16. This includes the new
+  decoded-audio loop/seek, old-revision input-token and headroom telemetry tests.
+  The audio test drives a callback after seek to retire old-epoch ring slots
+  before waiting for current-epoch PCM; otherwise the test itself can deadlock.
+- **25 harness tests pass**, including rejection of another seek's origin, an
+  unpresented edit revision and an old viewer after open. Clippy for app/service
+  (`--no-deps --all-targets -- -D warnings`) passes. Release builds pass.
+- **Every kernel change:** only `crates/kernel/src/actor.rs`; two diagnostic
+  `Duration` fields on `Published`, timing around actor handling and publication,
+  and a private timed-publication wrapper. No transaction, document, journal,
+  persistence or history semantics changed. No Cargo.lock entries changed.
+- **Picking rules:** COW authority and asynchronous hosts (§3.2) keep document
+  work on the kernel; bounded presentation and stale rejection (§3.3) select the
+  three-drawable/token design; authored timing/extended light (N3) selects epoch
+  lifting and telemetry-only headroom; reuse/prune (N5) selects the existing
+  planner switch; measured physical endpoints and all budget clauses (N2/§5)
+  prohibit claiming a gate pass from GPU completion or corrected clock algebra.
+
+Remaining implementation: reduce the measured compositor/presentation queue,
+schedule picture onsets against the device audio line, explain every physical
+scanout gap and missing foreground callback, and measure total main-thread work.
+No engine change is justified by this small fixture's render timings; a broader
+native presentation/layer investigation is needed before changing engine or
+vendor code. S3's independent spike failure is still open. Paired Electron,
+required machines/corpora and repetitions still gate acceptance.
+
+Reproduce with a prepared disposable public shape document and linked public
+audio project (build before the GUI batch):
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+export DYLD_LIBRARY_PATH="$PM_FFMPEG_DIR/lib"
+cargo +1.96.1 build --manifest-path apps/native/Cargo.toml --release -p pm-native-app
+python3 tools/perf-gate/native.py --project /tmp/public-shape.json --output /tmp/fix-120.json --hz 120 --runs 30 --seconds 60
+python3 tools/perf-gate/native.py --project /tmp/public-shape.json --output /tmp/fix-60.json --hz 60 --runs 30 --seconds 60
+python3 tools/perf-gate/native.py --project /tmp/public-audio.pmv --output /tmp/fix-audio.json --hz 120 --runs 1 --seconds 20 --audio
+python3 tools/perf-gate/native.py --project /tmp/public-shape.json --output /tmp/fix-inspector.json --hz 120 --runs 1 --seconds 120 --interact
+```
+
+The runner refuses locked sessions, active builds, insufficient disk and battery
+power. It retains existing-app/high-load caveats as diagnostics, restores display
+mode and reaps only its own process group. Release artifacts are removed after
+measurement. No push, tag, release or workflow dispatch.

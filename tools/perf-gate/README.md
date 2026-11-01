@@ -121,3 +121,32 @@ For real-app service foreground runs use `python3 tools/perf-gate/foreground.py`
 with the original runbook arguments. It retains the service harness's guards and
 uses Quartz host seconds for window markers. Python 3.9 process-relative
 monotonic origins must not be joined directly to NSEvent/Metal host timestamps.
+
+## Native fix diagnostics
+
+`native.py` uses only the release app, disposable `/tmp` documents/profiles and
+an owned `perffix` GUI lock. It pins 60/120 Hz through `display.swift`, restores
+the exact original display/mode, bounds each batch to nine minutes plus teardown,
+and preserves restore failures in the raw result. Existing app/load caveats are
+retained; these native-only runs never certify the paired gate.
+
+```sh
+source engine/env.sh
+export DYLD_LIBRARY_PATH="$PM_FFMPEG_DIR/lib"
+python3 tools/perf-gate/native.py --project /tmp/public-shape.json --output /tmp/fix-120.json --hz 120 --runs 30 --seconds 60
+```
+
+Use `--audio --runs 1 --seconds 20` with an already linked public audio project
+for a loop followed by seek/restart. `--interact --runs 1 --seconds 120` creates
+a disposable registered app for manual inspector input; it does not start
+playback. It leaves no installed bundle or user profile. Its trace records
+missing presentation callbacks without substituting GPU completion.
+
+Native automation origins are explicit command-acceptance host times; real
+editor calls retain valid NSEvent origins, with a dispatch-time fallback when
+there is no positive native event timestamp. Presented input/revision/viewer
+identity must match before a seek, edit or open observation is accepted.
+`trace.py` reports processing stages even for GPU-complete rows lacking physical
+presentation; latency/A-V/display distributions still require positive display
+stamps. The detailed service pipeline is diagnostic and does not establish total
+GPUI/main-thread frame work.
