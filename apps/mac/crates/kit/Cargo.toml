@@ -8,3 +8,12 @@ publish = false
 
 [dependencies]
 gpui.workspace = true
+unicode-segmentation = "1.12"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true

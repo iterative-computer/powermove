@@ -1,7 +1,7 @@
 //! Pure gesture math, shared by inspector and timeline readouts.
 pub fn round(n: f64, places: i32) -> f64 {
     let m = 10_f64.powi(places);
-    (n * m).round() / m
+    (n * m + 0.5).floor() / m
 }
 #[derive(Clone, Debug)]
 pub struct NumberOptions {
@@ -46,7 +46,7 @@ impl NumberOptions {
                 0
             })
             .min(12);
-        let mut s = format!("{n:.p$}");
+        let mut s = fixed_decimal(n, p);
         if p > 0 {
             s = s.trim_end_matches('0').trim_end_matches('.').to_string();
         }
@@ -244,7 +244,7 @@ mod tests {
         let mut o = NumberOptions::default();
         o.unit = "°".into();
         assert_eq!(o.format(2.), "2°");
-        assert_eq!(o.format(2.25), "2.2°");
+        assert_eq!(o.format(2.25), "2.3°");
         o.precision = Some(3);
         assert_eq!(o.format(2.25), "2.25°");
     }
@@ -297,4 +297,84 @@ mod tests {
         assert_eq!(snap(0.32, 0.1, 1., 0.2), 0.3);
         assert_eq!(dial_value(-90., 250., 0., 360.), 270.);
     }
+}
+
+/// Playback rendering reads at 15 Hz; edits and paused scrubbing read immediately.
+/// The host owns the playback clock and invalidation cadence.
+#[derive(Clone, Debug)]
+pub struct PlaybackReadout<T> {
+    sample: Option<T>,
+    last_ms: f64,
+}
+impl<T> Default for PlaybackReadout<T> {
+    fn default() -> Self {
+        Self {
+            sample: None,
+            last_ms: f64::NEG_INFINITY,
+        }
+    }
+}
+impl<T: Clone> PlaybackReadout<T> {
+    pub fn read(
+        &mut self,
+        now_ms: f64,
+        playing: bool,
+        editing: bool,
+        live: impl FnOnce() -> T,
+    ) -> T {
+        if !playing
+            || editing
+            || self.sample.is_none()
+            || now_ms - self.last_ms >= 1000. / 15.
+            || now_ms < self.last_ms
+        {
+            self.sample = Some(live());
+            self.last_ms = now_ms;
+        }
+        self.sample.as_ref().unwrap().clone()
+    }
+}
+
+/// ECMAScript toFixed rounds an exact binary halfway case away from zero.
+/// Compute the scaled binary fraction exactly, avoiding ties-to-even formatting.
+pub fn fixed_decimal(n: f64, places: usize) -> String {
+    if !n.is_finite() || n.abs() >= 1e21 {
+        return n.to_string();
+    }
+    let places = places.min(12);
+    let bits = n.abs().to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = if raw_exp == 0 {
+        bits & ((1u64 << 52) - 1)
+    } else {
+        (bits & ((1u64 << 52) - 1)) | (1u64 << 52)
+    };
+    let exponent = if raw_exp == 0 {
+        -1074
+    } else {
+        raw_exp - 1023 - 52
+    };
+    let scaled = mantissa as u128 * 5u128.pow(places as u32);
+    let shift = exponent + places as i32;
+    let integer = if shift >= 0 {
+        let Some(value) = scaled.checked_shl(shift as u32) else {
+            return format!("{n:.places$}");
+        };
+        value
+    } else {
+        let denominator = (-shift) as u32;
+        if denominator >= 128 {
+            0
+        } else {
+            let q = scaled >> denominator;
+            let remainder = scaled - (q << denominator);
+            q + u128::from(remainder >= (1u128 << (denominator - 1)))
+        }
+    };
+    let sign = if n < 0. { "-" } else { "" };
+    if places == 0 {
+        return format!("{sign}{integer}");
+    }
+    let base = 10u128.pow(places as u32);
+    format!("{sign}{}.{:0places$}", integer / base, integer % base)
 }
