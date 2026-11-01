@@ -1,6 +1,8 @@
 //! Worker-side pro media contracts. The host kernel owns and publishes models.
 //! Filesystem operations and codecs must run on workers, never on the UI thread.
 pub mod cache;
+pub mod codec;
+pub mod media;
 pub mod storage;
 pub mod tasks;
 
