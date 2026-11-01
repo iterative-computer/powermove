@@ -4957,6 +4957,8 @@ dependencies = [
 name = "pm-mac-core"
 version = "0.1.0"
 dependencies = [
+ "pm-edit",
+ "pm-eval",
  "pm-model",
  "pm-wasm",
  "sha2",

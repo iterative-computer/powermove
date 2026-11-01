@@ -14,3 +14,7 @@ publish = false
 pm-model = { path = "../../../../engine/crates/pm-model" }
 pm-wasm = { path = "../../../../engine/crates/pm-wasm" }
 sha2 = "0.10"
+# Edit kernels (groups, reparenting, anchors) and the evaluator's temporal
+# math, both already linked through pm-wasm.
+pm-edit = { path = "../../../../engine/crates/pm-edit" }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }

@@ -53,7 +53,8 @@
 //! ## Modules
 //!
 //! * [`document`]: the store, snapshots, changes, gestures, save hand-off.
-//! * [`commands`]: typed commands and their validation.
+//! * [`commands`]: the typed command catalog (one module per domain) and
+//!   its validation.
 //! * [`history`]: undo records and the saved history format.
 //! * [`selection`]: selected layers, keys and channel.
 //! * [`queries`]: the synchronous `pm-wasm` query mirror.
@@ -69,7 +70,11 @@ pub mod project_io;
 pub mod queries;
 pub mod selection;
 
-pub use commands::{Command, Origin};
+pub use commands::{
+    CaptionCommand, Command, CompCommand, ContentCommand, EffectCommand, GroupCommand,
+    KeyframeCommand, LayerCommand, LibraryCommand, MarkerCommand, MaskCommand, MediaCommand,
+    Origin, PropertyCommand, Scene3dCommand, TextCommand, TimingCommand, TransformCommand, new_id,
+};
 pub use document::{
     Change, ChangeCause, Committed, DocumentStore, GestureId, Snapshot, StoreEvent, Subscription,
     TransactOptions,

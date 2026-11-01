@@ -51,14 +51,102 @@ inputs (`queries().engine_mut()`), then ask again.
 
 ## Changing
 
-Only typed `Command`s, addressed by layer **id**:
+Only typed `Command`s, addressed by **id** (layers, keyframes `i`,
+effects, masks, markers). One `Command` type wraps a domain enum per area;
+each module in `src/commands/` owns its enum, docs and planning code, and
+`From` impls let you write `store.execute(LayerCommand::Delete { .. }.into(), origin)`.
+The rustdoc on each variant is the contract: parameters, validation, undo
+label, and the old function it ports.
 
-| Command | Old app | Notes |
+Conventions: times are composition seconds unless a field says otherwise
+(key times are layer-local); commands that depend on the playhead take it
+as `time` (the core has no playhead); ids of things a command creates are
+passed in, made with `pm_mac_core::new_id(prefix)` (`L` layers, `k` keys,
+`f` effects, `K` masks, `C` comps, `marker`), so the caller can select what
+it made; channels are the old keys (`opacity`, `position.x`, `c.size`,
+`<fxId>.<param>`, `<fxId>.$enabled`, `m.<maskId>.<param>`, `l.blend`, ...).
+
+### Catalog and status
+
+Status: **done** (ported, tested), **todo** (typed and documented, returns
+`CommandError::NotImplemented`; nothing changes).
+
+| Command | Old app | Status |
 |---|---|---|
-| `SetStaticOpacity { layer_id, value }` | `set_property` (static) | 0–100; refuses keyframed/expression channels, locks, hand-edit markers for non-interface origins |
-| `SetLayerName { layer_id, name }` | `set_layer {name}` | trimmed; blank keeps the old name |
-| `SetLayerVisible { layer_id, visible }` | `set_layer {visible}` | writes `on` |
-| `SetLayerLocked { layer_id, locked }` | `set_layer {locked}` | humans may unlock a locked layer; agents may not |
+| **Spine** (kept for existing callers) | | |
+| `SetStaticOpacity`, `SetLayerName`, `SetLayerVisible`, `SetLayerLocked` | `set_property` static, `set_layer` | done |
+| **Layers** `LayerCommand` | | |
+| `Set { layer_id, patch: LayerPatch }` | `set_layer` (name, from, duration, visible, locked, shy, solo, blend, motionBlur, parent, matteSource, color, collapsed, threeD, scaleLinked, separateDimensions, continuousRaster, effectSpace) | todo |
+| `Add(AddLayer)` | `add_layer`, `PM.mkLayer` | todo |
+| `Delete { layer_ids }` | `delete_layers`, `PM.removeLayers` | todo |
+| `Duplicate { layer_ids, new_ids }` | Cmd+D, `PM.cloneLayer` | todo |
+| `Paste { comp, layers, new_ids, index, time }` | Cmd+V layers | todo |
+| `Reorder { layer_id, index }` | `reorder_layer` | todo |
+| `Restack { layer_ids, to }` | Cmd+[ ] (Shift: front/back) | todo |
+| `TransformLayers` | `transform_layers` (generated tools) | todo |
+| **Properties** `PropertyCommand` | | |
+| `Set(SetProperty)` | `set_property` (keys at `time` when animated) | todo |
+| `SetExpression` | `set_expression` | todo |
+| `ToggleStopwatch` | stopwatch, `PM.toggleStopwatch` | todo |
+| `Reset` | channel-row Reset | todo |
+| **Keyframes** `KeyframeCommand` | | |
+| `Replace(ReplaceKeyframes)` | `replace_keyframes` | todo |
+| `SetEasing { key_ids, curve }` | `set_easing`, easing panel apply | todo |
+| `Simplify { scope }` | `simplify_keyframes` | todo |
+| `Add`, `Toggle` | Add Keyframe Here, diamond | todo |
+| `Delete { key_ids }` | Delete on keys, `PM.removeKey` | todo |
+| `ClearAll` | Clear All Keyframes / Remove Animation | todo |
+| `Move { key_ids, delta }` | key drag, Option+←/→ | todo |
+| `Edit { key_id, time, value }` | keyframe value dialog | todo |
+| `Paste` | Paste Keyframes Here | todo |
+| `EasyEase`, `SetInterpolation`, `SetHold` | F9 family, interpolation menu, hold | todo |
+| `SetHandle` | graph editor handles | todo |
+| `SetSpring` | spring easing | todo |
+| `Transform` | graph transform box | todo |
+| **Timing** `TimingCommand` | | |
+| `Move { layer_ids, delta }` | strip drag (group strips move members) | todo |
+| `TrimIn`, `TrimOut` | edge drags, Option+[ ] | todo |
+| `MoveInTo`, `MoveOutTo` | [ ], Option+Home/End | todo |
+| `Slip` | source slip | todo |
+| `Split { layer_ids, time, new_ids }` | Cmd+Shift+D / Cmd+B | todo |
+| `Stagger { layer_ids, step }` | Cmd+Option drag | todo |
+| **Groups** `GroupCommand` | | |
+| `Group`, `Ungroup`, `MoveToGroup` | `group_layers`, `ungroup_layers`, `move_to_group` | todo |
+| **Compositions** `CompCommand` | | |
+| `Set { comp, patch: CompPatch }` | `set_composition` | todo |
+| `SetWorkArea`, `ResetWorkArea` | B, N, ruler menu | todo |
+| `SetSceneParameter` | `set_scene_parameter` | todo |
+| `Create`, `Duplicate`, `Delete` | New/Duplicate/Delete Composition | todo |
+| `Precompose` | Cmd+Shift+C | todo |
+| **Effects** `EffectCommand` | | |
+| `Add(AddEffect)` | `add_effect`, effect paste | todo |
+| `Remove`, `Set { patch: EffectPatch }` | `remove_effect`, `set_effect` (toggle, open, reorder, inputs) | todo |
+| `Duplicate`, `Reset` | effect stack menu | todo |
+| `SetTransition` | `set_transition` | todo |
+| **Masks and paths** `MaskCommand` | | |
+| `Add`, `Remove`, `Set`, `Reorder` | mask rows, `PM.mkMask` | todo |
+| `SetPath` | pen tool results | todo |
+| **Text** `TextCommand` | | |
+| `SetText`, `SetBox` | in-place editor commit, paragraph resize | todo |
+| `Split`, `AddAnimator`, `RemoveAnimator`, `SetStyleRange` | Split Text, text animators, style ranges | todo |
+| **Content** `ContentCommand::Set` | `set_content` | todo |
+| **Markers** `MarkerCommand` | | |
+| `Add`, `Remove` (index), `RemoveById`, `Move`, `Rename` | `add_marker`, `remove_marker`, ruler menu | todo |
+| **Captions** `CaptionCommand` | | |
+| `Add(AddCaptions)`, `Edit { edit: CaptionEdit }` | `add_captions`, `edit_captions` | todo |
+| **3D** `Scene3dCommand` | | |
+| `SetData`, `Edit` | 3D `set_content`, MCP `edit_3d` | todo |
+| **Media** `MediaCommand` | | |
+| `Replace`, `AddAsset`, `RemoveAsset`, `RenameAsset`, `SetAssetFolder` | replace media, library | todo |
+| **Library** `LibraryCommand` | | |
+| `CreateSection`, `UpdateSection` | `create_section`, `update_section` | todo |
+| **Transform** `TransformCommand` | | |
+| `Nudge` | arrow keys | todo |
+| `CenterAnchor`, `Align`, `Distribute` | Cmd+Option+Home, alignment strip | todo |
+
+Copy is not an edit (the clipboard lane serializes `snapshot()` layers);
+Cut is Copy + `LayerCommand::Delete`; Lock All / Unlock All is a
+`transact` of `LayerCommand::Set` per layer.
 
 * `execute(cmd, origin)`: one step. `Ok(None)` means nothing changed.
 * `transact(label, origin, &[cmds])`: atomic; later commands see earlier ones.
@@ -76,7 +164,7 @@ Every change is staged on a scratch tree, validated as a whole, and
 published only if everything succeeded. On any `Err`, revision, document,
 history, selection and dirty state are exactly as before.
 
-New commands are added by the core owner only (see `src/commands.rs`).
+New commands are added by the core owner only (see `src/commands/mod.rs`).
 
 ## Observing
 

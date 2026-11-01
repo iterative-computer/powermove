@@ -16,7 +16,7 @@ pub enum CommandError {
     PropertyNotFound {
         layer_id: String,
         name: String,
-        channel: &'static str,
+        channel: String,
     },
     /// The layer, or a group above it, is locked. The text is the old app's.
     Locked { layer_id: String, name: String },
@@ -24,18 +24,24 @@ pub enum CommandError {
     InvalidValue { what: &'static str, reason: String },
     /// The property is animated or driven by an expression; the first command
     /// lane (static values only) refuses instead of guessing a keyframe.
-    Animated {
-        layer_id: String,
-        channel: &'static str,
-    },
+    Animated { layer_id: String, channel: String },
     /// The property carries a hand-edit marker and the origin may not
     /// overwrite it (`preserveHandEdits` in the old app).
-    PreservedHandEdit {
-        layer_id: String,
-        channel: &'static str,
-    },
+    PreservedHandEdit { layer_id: String, channel: String },
     /// The stored document does not have the expected shape.
     Malformed(String),
+    /// The request is invalid; the text is the old app's message where it had
+    /// one (`Unknown blend mode: x`, `Parenting would create a cycle`, ...).
+    Invalid(String),
+    /// A keyframe id that no channel holds any more.
+    KeyframeNotFound(String),
+    /// No effect on the layer has this id (or type).
+    EffectNotFound(String),
+    /// No composition has this id.
+    CompNotFound(String),
+    /// The command is in the catalog but not ported yet (see
+    /// docs/gpui/core-api.md for its status). Nothing changed.
+    NotImplemented(&'static str),
 }
 
 impl fmt::Display for CommandError {
@@ -56,6 +62,15 @@ impl fmt::Display for CommandError {
                 "Preserved hand-edited {channel}; explicitly allow overwrite to change it"
             ),
             CommandError::Malformed(m) => write!(f, "The project is malformed: {m}"),
+            CommandError::Invalid(m) => f.write_str(m),
+            CommandError::KeyframeNotFound(_) => {
+                f.write_str("The selected keyframes are no longer available")
+            }
+            CommandError::EffectNotFound(e) => write!(f, "Effect not found: {e}"),
+            CommandError::CompNotFound(_) => f.write_str("Composition not found"),
+            CommandError::NotImplemented(c) => {
+                write!(f, "“{c}” is not available in this version yet")
+            }
         }
     }
 }
