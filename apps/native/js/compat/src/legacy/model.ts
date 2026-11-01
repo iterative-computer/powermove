@@ -1,0 +1,464 @@
+// Extracted v1.2.0 legacy/core/model.ts factories, clone and serialization.
+// Composition switching/groups/index install separately through kernel-backed adapters.
+import type { Data } from "../types";
+import { normalizeColorDepth } from "./color-depth";
+import { normalizeExportDefaults } from "./export-defaults";
+import { normalizeCaptionsContent, presetStyle } from "./captions-model";
+const CHANNELS_3D = {
+  perspective: 50,
+  "position.z": 0,
+  "anchor.z": 0,
+  "scale.z": 100,
+  "rotation.x": 0,
+  "rotation.y": 0,
+  "orientation.x": 0,
+  "orientation.y": 0,
+  "orientation.z": 0,
+};
+export function installModelFactories(PM: Data): void {
+  const uid = PM.uid;
+
+  /** A property channel. v = static value, kf = sorted keyframes, expr = optional expression. */
+  const P = (v: any, o: any = {}) => ({ v, kf: [], expr: null, ...o });
+  PM.P = P;
+
+  const KF = (t: any, v: any, ease = "linear") => {
+    const { eo, ei } = PM.Ease.handles(ease);
+    return { t, v, eo, ei, hold: false, i: uid("k") };
+  };
+  PM.KF = KF;
+
+  /* ── channel schema ────────────────────────────────────── */
+  const CH = {
+    ...Object.fromEntries(
+      Object.keys(CHANNELS_3D).map((key) => [
+        key,
+        {
+          label: key
+            .split(".")
+            .map((v) => v.charAt(0).toUpperCase() + v.slice(1))
+            .join(" "),
+          group: "Transform",
+          unit: key.startsWith("scale")
+            ? "%"
+            : key.startsWith("position") || key.startsWith("anchor")
+              ? "px"
+              : "°",
+          step: 1,
+        },
+      ]),
+    ),
+    perspective: {
+      label: "Perspective",
+      group: "Transform",
+      unit: "mm",
+      step: 1,
+      min: 0.001,
+    },
+    "anchor.x": { label: "Anchor X", group: "Transform", unit: "px", step: 1 },
+    "anchor.y": { label: "Anchor Y", group: "Transform", unit: "px", step: 1 },
+    "position.x": {
+      label: "Position X",
+      group: "Transform",
+      unit: "px",
+      step: 1,
+    },
+    "position.y": {
+      label: "Position Y",
+      group: "Transform",
+      unit: "px",
+      step: 1,
+    },
+    "scale.x": { label: "Scale X", group: "Transform", unit: "%", step: 0.5 },
+    "scale.y": { label: "Scale Y", group: "Transform", unit: "%", step: 0.5 },
+    rotation: { label: "Rotation", group: "Transform", unit: "°", step: 1 },
+    opacity: {
+      label: "Opacity",
+      group: "Transform",
+      unit: "%",
+      step: 1,
+      min: 0,
+      max: 100,
+    },
+    skew: {
+      label: "Skew",
+      group: "Transform",
+      unit: "°",
+      step: 0.5,
+      min: -80,
+      max: 80,
+    },
+  };
+  /* UI grouping: rows that pair two channels behind one label. */
+  const PAIRS = [
+    ["Anchor Point", ["anchor.x", "anchor.y"], "anchor"],
+    ["Position", ["position.x", "position.y"], "position"],
+    ["Scale", ["scale.x", "scale.y"], "scale"],
+    ["Rotation", ["rotation"], "rotation"],
+    ["Opacity", ["opacity"], "opacity"],
+    ["Skew", ["skew"], "skew"],
+  ];
+  PM.CH = CH;
+  PM.PAIRS = PAIRS;
+
+  const BLENDS = [
+    "normal",
+    "add",
+    "screen",
+    "multiply",
+    "overlay",
+    "softlight",
+    "difference",
+    "lighten",
+    "darken",
+  ];
+  PM.BLENDS = BLENDS;
+
+  const TYPE_META: any = {
+    solid: { icon: "grid", color: "#4C8DFF", label: "Solid" },
+    text: { icon: "code", color: "#E8E2CF", label: "Text" },
+    shape: { icon: "grid", color: "#6C7BE8", label: "Shape" },
+    image: { icon: "layers", color: "#A9A9AE", label: "Image" },
+    video: { icon: "cam", color: "#3B62E8", label: "Video" },
+    audio: {
+      icon: "clock",
+      color: "#4C8DFF",
+      label: "Audio",
+      visual: false,
+      transform: false,
+      effects: false,
+      masks: false,
+      pickable: false,
+    },
+    adjustment: {
+      icon: "wand",
+      color: "#A78BFA",
+      label: "Adjustment",
+      pickable: false,
+    },
+    shader: { icon: "wand", color: "#FF6B1A", label: "Shader" },
+    extension: { icon: "layers", color: "#9B8CFF", label: "Extension" },
+    null: {
+      icon: "dot",
+      color: "#6a6a70",
+      label: "Null",
+      visual: false,
+      pickable: true,
+    },
+    group: {
+      icon: "layers",
+      color: "#3FCF8E",
+      label: "Group",
+      visual: false,
+      transform: true,
+      pickable: false,
+    },
+    precomp: { icon: "layers", color: "#3FCF8E", label: "Precomp" },
+    captions: { icon: "captions", color: "#F2C14E", label: "Captions" },
+  };
+  PM.TYPE_META = TYPE_META;
+
+  /* ── masks ─────────────────────────────────────────────── */
+  /* Parametric layer masks (rect / ellipse) living in layer space, fully animatable.
+   Geometry follows the layer transform; feather is a signed-distance falloff. */
+  PM.MASK_SHAPES = ["rect", "ellipse"];
+  PM.mkMask = (shape = "rect", comp: any) => {
+    comp = comp || PM.proj;
+    const s = Math.round(Math.min(comp.w, comp.h) * 0.5);
+    return {
+      id: uid("K"),
+      shape,
+      mode: "add",
+      on: true,
+      p: { x: P(0), y: P(0), w: P(s), h: P(s), rotation: P(0), feather: P(24) },
+    };
+  };
+
+  /* ── layer factory ─────────────────────────────────────── */
+  function baseLayer(type: any, name: any, comp: any) {
+    const w = comp ? comp.w : 1920,
+      hgt = comp ? comp.h : 1080;
+    const transformable = TYPE_META[type].transform !== false;
+    const L: any = {
+      id: uid("L"),
+      type,
+      name,
+      from: 0,
+      dur: comp ? comp.dur : 5,
+      on: true,
+      lock: false,
+      shy: false,
+      collapsed: true,
+      color: TYPE_META[type].color,
+      blend: "normal",
+      mblur: false,
+      parent: null,
+      p: transformable
+        ? {
+            ...Object.fromEntries(
+              Object.entries(CHANNELS_3D).map(([key, value]) => [
+                key,
+                P(value),
+              ]),
+            ),
+            "anchor.x": P(0),
+            "anchor.y": P(0),
+            "position.x": P(w / 2),
+            "position.y": P(hgt / 2),
+            "scale.x": P(100),
+            "scale.y": P(100),
+            rotation: P(0),
+            opacity: P(100),
+            skew: P(0),
+          }
+        : {},
+      fx: [],
+      transitionIn: null,
+      transitionOut: null,
+      masks: [],
+      d: {},
+      locked_intent: {}, // hand edits the agent must preserve
+    };
+    return L;
+  }
+
+  const DEFAULTS: any = {
+    solid: (L: any, c: any) => {
+      L.d = { color: "#1b1b1f", w: c.w, h: c.h, radius: 0 };
+      L.p["anchor.x"].v = 0;
+      L.p["anchor.y"].v = 0;
+    },
+    shape: (L: any, c: any) => {
+      L.d = {
+        shape: "rect",
+        color: "#E8E2CF",
+        w: 480,
+        h: 480,
+        radius: 24,
+        stroke: 0,
+        strokeColor: "#ffffff",
+        points: 5,
+      };
+    },
+    text: (L: any, c: any) => {
+      L.d = {
+        text: "Powermove",
+        boxWidth: P(0),
+        boxHeight: P(0),
+        font: "SF Pro Display",
+        weight: 600,
+        size: 128,
+        tracking: -2,
+        leading: 1.1,
+        color: "#F2F2F2",
+        align: "center",
+        italic: false,
+      };
+    },
+    image: (L: any) => {
+      L.d = { asset: null, fit: "cover", w: 1920, h: 1080 };
+    },
+    video: (L: any) => {
+      L.d = {
+        asset: null,
+        fit: "cover",
+        trim: 0,
+        speed: 1,
+        embeddedAudio: false,
+        w: 1920,
+        h: 1080,
+      };
+    },
+    audio: (L: any) => {
+      L.d = { asset: null, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 };
+      L.color = "#4C8DFF";
+    },
+    adjustment: (L: any) => {
+      L.d = {};
+      L.p["anchor.x"].v = 0;
+      L.p["anchor.y"].v = 0;
+      L.p["position.x"].v = 0;
+      L.p["position.y"].v = 0;
+    },
+    shader: (L: any, c: any) => {
+      L.d = { code: PM.SHADER_TEMPLATE, w: c.w, h: c.h, uniforms: {} };
+      L.p["anchor.x"].v = 0;
+      L.p["anchor.y"].v = 0;
+    },
+    extension: (L: any, c: any) => {
+      L.d = {
+        definition: "",
+        version: 1,
+        w: c.w,
+        h: c.h,
+        params: {},
+        data: {},
+      };
+      L.p["anchor.x"].v = 0;
+      L.p["anchor.y"].v = 0;
+    },
+    null: (L: any) => {
+      L.d = { color: "#6A6A70", w: 100, h: 100, radius: 0 };
+      L.p["anchor.x"].v = 50;
+      L.p["anchor.y"].v = 50;
+      L.p.opacity.v = 0;
+    },
+    group: (L: any) => {
+      L.d = {};
+      L.p["position.x"].v = 0;
+      L.p["position.y"].v = 0;
+      L.scaleLinked = true;
+    },
+    precomp: (L: any, c: any) => {
+      L.d = { comp: null, w: c.w, h: c.h };
+      L.p["anchor.x"].v = 0;
+      L.p["anchor.y"].v = 0;
+    },
+    /* Captions draw in a space centred on the composition: the layer origin is
+     the frame centre, so scale and rotation pivot where a viewer expects. */
+    captions: (L: any, c: any) => {
+      L.d = { cues: [], style: presetStyle("classic", c.h) };
+    },
+  };
+
+  PM.mkLayer = (type: any, opts: any = {}, comp: any) => {
+    comp = comp || PM.proj;
+    const L = baseLayer(type, opts.name || TYPE_META[type].label, comp);
+    DEFAULTS[type] && DEFAULTS[type](L, comp);
+    if (opts.d) Object.assign(L.d, opts.d);
+    if (type === "captions") {
+      // A partial style fills in from its preset, sized for this composition.
+      const requested: any = opts.d && typeof opts.d === "object" ? opts.d : {};
+      const style: any =
+        requested.style && typeof requested.style === "object"
+          ? requested.style
+          : {};
+      const base = presetStyle(
+        typeof style.preset === "string" ? style.preset : "classic",
+        comp ? comp.h : 1080,
+      );
+      L.d = normalizeCaptionsContent({ ...L.d, style: { ...base, ...style } });
+    }
+    if (opts.from != null) L.from = opts.from;
+    if (opts.dur != null) L.dur = opts.dur;
+    if (opts.color) L.color = opts.color;
+    if (opts.p) for (const k in opts.p) if (L.p[k]) L.p[k].v = opts.p[k];
+    if (
+      ["solid", "adjustment", "shader", "extension", "precomp"].includes(type)
+    ) {
+      L.p["position.x"].v = 0;
+      L.p["position.y"].v = 0;
+    }
+    return L;
+  };
+
+  /* ── project factory ───────────────────────────────────── */
+  PM.normalizeFill = (value: any, fallback = "#000000") => {
+    const color = (v: any) =>
+      typeof v === "string" && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v)
+        ? v.toUpperCase()
+        : fallback;
+    const raw = value && typeof value === "object" ? value : {};
+    const type = ["solid", "linear", "radial", "none"].includes(raw.type)
+      ? raw.type
+      : "solid";
+    let stops = (Array.isArray(raw.stops) ? raw.stops : [])
+      .slice(0, 8)
+      .map((stop: any, index: any) => ({
+        id:
+          typeof stop?.id === "string" && stop.id
+            ? stop.id
+            : `stop-${index + 1}`,
+        color: color(stop?.color),
+        position: PM.clamp(Number(stop?.position) || 0, 0, 100),
+      }))
+      .sort((a: any, b: any) => a.position - b.position);
+    if (!stops.length)
+      stops = [
+        { id: "stop-1", color: color(raw.color || fallback), position: 0 },
+      ];
+    if (!["solid", "none"].includes(type) && stops.length < 2)
+      stops.push({ id: "stop-2", color: stops[0].color, position: 100 });
+    if (["solid", "none"].includes(type))
+      stops = [{ ...stops[0], position: 0 }];
+    return { type, angle: PM.clamp(Number(raw.angle) || 0, -180, 180), stops };
+  };
+
+  PM.mkProject = (o: any = {}) => ({
+    id: uid("P"),
+    colorDepth: normalizeColorDepth(o.colorDepth),
+    name: o.name || "Untitled",
+    w: o.w || 1920,
+    h: o.h || 1080,
+    fps: o.fps || 30,
+    dur: o.dur || 10,
+    bg: o.bg || "#000000",
+    backgroundFill: PM.normalizeFill(o.backgroundFill, o.bg || "#000000"),
+    /* The composition open in the Timeline; the others live in `comps`. */
+    compId: uid("C"),
+    compName: o.compName || o.name || "Comp 1",
+    layers: [],
+    comps: {}, // every other composition, referenced by precomp layers (d.comp = comp id)
+    assets: {},
+    markers: [],
+    work: [0, o.dur || 10],
+    /* Delivery settings travel with the project: the Export dialog and the
+     Settings › Project tab both read and write this. */
+    exportDefaults: normalizeExportDefaults(o.exportDefaults, o.fps || 30),
+    params: {}, // agent/workspace-exposed scene parameters
+    revision: 0,
+    edits: [], // shared UI/agent transaction provenance
+    created: Date.now(),
+  });
+
+  /* Deep clone that also refreshes ids. */
+  PM.cloneLayer = (L: any) => {
+    const c = JSON.parse(JSON.stringify(L));
+    c.id = uid("L");
+    c.name =
+      L.name.replace(/ (\d+)$/, "") +
+      " " +
+      (PM.proj.layers.filter((x: any) =>
+        x.name.startsWith(L.name.replace(/ \d+$/, "")),
+      ).length +
+        1);
+    const renew = (prop: any) =>
+      (prop?.kf || []).forEach((kf: any) => {
+        kf.i = uid("k");
+      });
+    Object.values(c.p || {}).forEach(renew);
+    (c.fx || []).forEach((fx: any) => {
+      renew(fx.on);
+      Object.values(fx.p || {}).forEach(renew);
+    });
+    (c.masks || []).forEach((mask: any) =>
+      Object.values(mask.p || {}).forEach(renew),
+    );
+    Object.values(c.d || {}).forEach(renew);
+    renew(c.blend);
+    renew(c.mblur);
+    renew(c.on);
+    (c.masks || []).forEach((mask: any) => {
+      renew(mask.shape);
+      renew(mask.mode);
+      renew(mask.on);
+    });
+    Object.values(c.d?.uniforms || {}).forEach(renew);
+    Object.values(c.d?.params || {}).forEach(renew);
+    for (const field of ["transitionIn", "transitionOut"])
+      Object.values(c[field]?.p || {}).forEach(renew);
+    return c;
+  };
+
+  /* ── serialization ─────────────────────────────────────── */
+  PM.serialize = () =>
+    JSON.stringify(
+      { v: PM.version, proj: PM.proj, ws: PM.WS && PM.WS.current },
+      null,
+      1,
+    );
+  PM.deserialize = (json: any) => {
+    const o = typeof json === "string" ? JSON.parse(json) : json;
+    return o.proj || o;
+  };
+}
