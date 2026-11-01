@@ -6,9 +6,21 @@ export function nativeWire() {
   const manifest = fileURLToPath(
     new URL("../../../crates/surface/standalone/Cargo.toml", import.meta.url),
   );
+  const target = fileURLToPath(
+    new URL("../../../crates/surface/standalone/target", import.meta.url),
+  );
   if (!built) {
     const result = Bun.spawnSync(
-      ["cargo", "build", "--locked", "--manifest-path", manifest, "--examples"],
+      [
+        "cargo",
+        "build",
+        "--locked",
+        "--manifest-path",
+        manifest,
+        "--target-dir",
+        target,
+        "--examples",
+      ],
       { stderr: "pipe", stdout: "pipe" },
     );
     if (result.exitCode !== 0)
@@ -22,5 +34,6 @@ export function nativeWire() {
   return {
     surface: fileURLToPath(new URL("wire", base)),
     kit: fileURLToPath(new URL("ui_kit_wire", base)),
+    host: fileURLToPath(new URL("host_wire", base)),
   };
 }

@@ -335,7 +335,7 @@ test("host rejects late/wrong/declined acknowledgements and stale publications",
   );
   await unsubscribe();
   expect(client.publish({ ...publication, sequence: 3 })).toBe(false);
-  expect(received).toEqual([["synthetic"]]);
+  expect(received).toEqual([false, ["synthetic"]]);
 });
 test("host rejects in-flight ack after retirement", async () => {
   let resolve!: (ack: HostAck) => void;
@@ -347,6 +347,7 @@ test("host rejects in-flight ack after retirement", async () => {
     });
   });
   const pending = client.query("selection");
+  await Promise.resolve();
   client.retire();
   resolve(ack(request));
   await expect(pending).rejects.toThrow("Stale");

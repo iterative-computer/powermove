@@ -1,6 +1,11 @@
 import { json, type Json } from "./protocol";
 
 export const HOST_API_VERSION = 1 as const;
+export type HostQuery = "project" | "selection" | "time" | "evaluated";
+export interface EditCommand {
+  command: string;
+  args: Json;
+}
 export interface HostIdentity {
   realm: string;
   generation: number;
@@ -11,18 +16,19 @@ export type HostOperation =
   | { type: "binding.dispose"; handle: string }
   | {
       type: "query";
-      query: "selection" | "time" | "evaluated";
+      query: HostQuery;
       channels?: string[];
       time?: number;
     }
   | {
       type: "subscribe";
       subscription: string;
-      query: "selection" | "time" | "evaluated";
+      query: HostQuery;
       channels?: string[];
     }
   | { type: "unsubscribe"; subscription: string }
   | { type: "command"; command: string; args: Json }
+  | { type: "edit"; label: string; commands: EditCommand[] }
   | { type: "settings.get"; key: string }
   | { type: "settings.set"; key: string; value: Json };
 export interface HostRequest extends HostIdentity {
@@ -56,9 +62,17 @@ export class HostClient {
   private stateRevision = 0;
   private retired = false;
   private fenced = false;
+  private queue: Promise<unknown> = Promise.resolve();
+  private usedSubscriptions = new Set<string>();
   private subscriptions = new Map<
     string,
-    { revision: number; sequence: number; callback: (value: Json) => void }
+    {
+      revision: number;
+      sequence: number;
+      callback: (value: Json) => void;
+      ready: boolean;
+      pending?: Json;
+    }
   >();
   constructor(
     readonly identity: HostIdentity,
@@ -78,6 +92,14 @@ export class HostClient {
     this.revision = revision;
   }
   async request(operation: HostOperation): Promise<HostAck> {
+    // Copy at submission; execute in order so concurrent callers cannot submit
+    // two edits against the same obsolete acknowledged revision.
+    const data = json(operation) as unknown as HostOperation;
+    const job = this.queue.then(() => this.send(data));
+    this.queue = job.catch(() => undefined);
+    return job;
+  }
+  private async send(operation: HostOperation): Promise<HostAck> {
     if (this.retired) throw new Error("Host generation retired");
     if (this.fenced)
       throw new Error("Host acknowledgement ambiguous; reset generation");
@@ -113,8 +135,11 @@ export class HostClient {
       this.fenced = true;
       throw new Error("Stale or mismatched host acknowledgement");
     }
-    if (!ack.accepted) throw new Error(ack.error ?? "Host request rejected");
-    if (request.expectedStateRevision !== undefined) {
+    this.revision = Math.max(this.revision, ack.revision);
+    if (
+      request.expectedStateRevision !== undefined &&
+      (ack.accepted || ack.stateRevision !== undefined)
+    ) {
       if (
         !Number.isSafeInteger(ack.stateRevision) ||
         ack.stateRevision! < request.expectedStateRevision
@@ -124,8 +149,8 @@ export class HostClient {
       }
       this.stateRevision = Math.max(this.stateRevision, ack.stateRevision!);
     }
+    if (!ack.accepted) throw new Error(ack.error ?? "Host request rejected");
     if (ack.value !== undefined) json(ack.value);
-    this.revision = Math.max(this.revision, ack.revision);
     return structuredClone(ack);
   }
   registerBinding(handle: string, channels: string[]) {
@@ -134,15 +159,30 @@ export class HostClient {
   disposeBinding(handle: string) {
     return this.request({ type: "binding.dispose", handle });
   }
-  query(
-    query: "selection" | "time" | "evaluated",
-    channels?: string[],
-    time?: number,
-  ) {
+  query(query: HostQuery, channels?: string[], time?: number) {
     return this.request({ type: "query", query, channels, time });
   }
   command(command: string, args: Json) {
     return this.request({ type: "command", command, args });
+  }
+  /** One undoable pm-kernel transaction; acknowledgement is never optimistic. */
+  async edit(label: string, commands: EditCommand[]) {
+    const data = json({ type: "edit", label, commands }) as unknown as Extract<
+      HostOperation,
+      { type: "edit" }
+    >;
+    if (
+      typeof data.label !== "string" ||
+      !data.label ||
+      !Array.isArray(data.commands) ||
+      !data.commands.length ||
+      data.commands.length > 256 ||
+      data.commands.some(
+        (c) => !c || typeof c.command !== "string" || !c.command,
+      )
+    )
+      return Promise.reject(new TypeError("Invalid edit transaction"));
+    return this.request(data);
   }
   getSetting(key: string) {
     return this.request({ type: "settings.get", key });
@@ -152,16 +192,39 @@ export class HostClient {
   }
   async subscribe(
     subscription: string,
-    query: "selection" | "time" | "evaluated",
+    query: HostQuery,
     callback: (value: Json) => void,
     channels?: string[],
   ) {
-    if (this.subscriptions.has(subscription))
-      throw new Error("Duplicate subscription");
-    const entry = { revision: this.revision, sequence: -1, callback };
+    if (
+      this.subscriptions.has(subscription) ||
+      this.usedSubscriptions.has(subscription)
+    )
+      throw new Error("Duplicate or retired subscription ID");
+    const entry: {
+      revision: number;
+      sequence: number;
+      callback: (value: Json) => void;
+      ready: boolean;
+      pending?: Json;
+    } = { revision: this.revision, sequence: -1, callback, ready: false };
     this.subscriptions.set(subscription, entry);
     try {
-      await this.request({ type: "subscribe", subscription, query, channels });
+      const ack = await this.request({
+        type: "subscribe",
+        subscription,
+        query,
+        channels,
+      });
+      this.usedSubscriptions.add(subscription);
+      entry.ready = true;
+      // A publication delivered before the ack wins over its initial snapshot.
+      if (entry.pending !== undefined && entry.revision >= ack.revision)
+        callback(entry.pending);
+      else if (ack.value !== undefined) callback(ack.value);
+      entry.revision = Math.max(entry.revision, ack.revision);
+      entry.sequence = Math.max(entry.sequence, 0);
+      delete entry.pending;
     } catch (error) {
       this.subscriptions.delete(subscription);
       throw error;
@@ -172,6 +235,7 @@ export class HostClient {
     };
   }
   publish(publication: HostPublication): boolean {
+    publication = json(publication) as unknown as HostPublication;
     const entry = this.subscriptions.get(publication.subscription);
     if (
       this.retired ||
@@ -180,6 +244,7 @@ export class HostClient {
       !Number.isSafeInteger(publication.revision) ||
       publication.revision < entry.revision ||
       !Number.isSafeInteger(publication.sequence) ||
+      publication.sequence < 1 ||
       publication.sequence <= entry.sequence
     )
       return false;
@@ -187,13 +252,15 @@ export class HostClient {
     entry.revision = publication.revision;
     entry.sequence = publication.sequence;
     this.revision = Math.max(this.revision, publication.revision);
-    entry.callback(value);
+    if (entry.ready) entry.callback(value);
+    else entry.pending = value;
     return true;
   }
   /** Native realm retirement releases bindings/subscriptions independently of a tree commit. */
   retire() {
     this.retired = true;
     this.subscriptions.clear();
+    this.usedSubscriptions.clear();
   }
   private matches(value: HostIdentity & { version: number }) {
     return (

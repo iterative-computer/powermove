@@ -39,6 +39,12 @@ pub enum HostOperation {
     Unsubscribe { subscription: String },
     #[serde(rename = "command")]
     Command { command: String, args: Value },
+    /// One actor-admitted, undoable transaction, never a sequence of local writes.
+    #[serde(rename = "edit")]
+    Edit {
+        label: String,
+        commands: Vec<EditCommand>,
+    },
     #[serde(rename = "settings.get")]
     GetSetting { key: String },
     #[serde(rename = "settings.set")]
@@ -47,9 +53,28 @@ pub enum HostOperation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Query {
+    Project,
     Selection,
     Time,
     Evaluated,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditCommand {
+    pub command: String,
+    pub args: Value,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostPublication {
+    pub version: u32,
+    pub realm: String,
+    pub generation: u64,
+    pub project: String,
+    pub subscription: String,
+    pub revision: u64,
+    pub sequence: u64,
+    pub value: Value,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -194,7 +219,15 @@ impl<Q: KernelQueue> HostRouter<Q> {
         Ok(())
     }
 }
-fn validate_operation(operation: &HostOperation) -> Result<(), String> {
+impl<K: crate::host_data::KernelData> HostRouter<crate::host_data::HostDataService<K>> {
+    pub fn publications(&mut self) -> Result<Vec<HostPublication>, String> {
+        if self.retired || self.fenced {
+            return Err("host generation retired/fenced".into());
+        }
+        self.queue.publications()
+    }
+}
+pub(crate) fn validate_operation(operation: &HostOperation) -> Result<(), String> {
     let valid = match operation {
         HostOperation::RegisterBinding { handle, channels } => {
             !handle.is_empty() && !channels.is_empty() && channels.iter().all(|s| !s.is_empty())
@@ -204,6 +237,12 @@ fn validate_operation(operation: &HostOperation) -> Result<(), String> {
         HostOperation::Subscribe { subscription, .. }
         | HostOperation::Unsubscribe { subscription } => !subscription.is_empty(),
         HostOperation::Command { command, .. } => !command.is_empty(),
+        HostOperation::Edit { label, commands } => {
+            !label.is_empty()
+                && !commands.is_empty()
+                && commands.len() <= 256
+                && commands.iter().all(|c| !c.command.is_empty())
+        }
         HostOperation::GetSetting { key } | HostOperation::SetSetting { key, .. } => {
             !key.is_empty()
         }

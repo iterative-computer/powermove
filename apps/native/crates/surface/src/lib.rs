@@ -27,4 +27,5 @@ impl NativeHost for InspectHost {
 
 pub mod events;
 pub mod host_api;
+pub mod host_data;
 pub mod schema;
