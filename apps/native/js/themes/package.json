@@ -1,0 +1,9 @@
+{
+  "name": "@powermove/native-themes",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "catalog": "node scripts/catalog.mjs --check"
+  }
+}
