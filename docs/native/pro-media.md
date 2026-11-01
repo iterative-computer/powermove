@@ -319,3 +319,57 @@ changed sources, late cancellation and pause/restart. The exact executable build
 is a host-supplied deployment dependency; Linux validation does not establish
 VideoToolbox, AVFoundation, Metal, GPUI or macOS UI acceptance. No visual design
 or new UI copy is introduced.
+
+## Pro media integration, slice 2: engine frame render path
+
+`pm-media/src/cache_frame.rs` defines worker `FrameSource`, `GraphIdentity`,
+`FrameRequest` and validated `EngineFrame` readback. The port carries exact
+engine ticks, complete graph/media digests, renderer version and an explicit
+colour encoding. Pixels are straight float RGBA at that declared stage. The
+macOS renderer adapter must decode engine E and handle premultiplication through
+`pm-color`; labelling raw E/premultiplied data as RGB violates this contract.
+
+`render::RenderWork` routes those frames through the real engine
+`pm-color/src/lut.rs` implementation before immutable cache publication. The key
+combines the supplied complete graph digest with LUT content bytes, colour stage
+and the versioned readback representation; media digest, dimensions, exact ticks
+and renderer version remain separate key fields. A changed graph/LUT/media key
+is immediately Missing while old Keep Rendered frames remain readable.
+`FrameSource::identity` is checked before rendering and again before publication.
+`RenderWork::accept` is the actor receipt fence: call it on the **current** work
+and current identity, including the current LUT selection, to reject late results.
+A concurrent graph publication can leave an old-key cache entry; it can never
+make that old entry a hit under the new key.
+
+Scopes consume validated engine float frames, before or after the LUT as
+explicitly requested. After-LUT scopes use exactly the cached/rendered picture;
+Before-LUT scopes request original engine readback even when the transformed
+picture is already cached. Matrix, range and analysis stage are caller inputs;
+there is no implicit display transform or tone map. Alpha and extended/negative
+RGB survive the path; LUT domains clamp only as the existing LUT contract states.
+Nonfinite values, f32 overflow, bad frame shapes, mismatched frame identities,
+invalid scope configurations and overlarge readbacks refuse before cache fill.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Require the engine's complete graph/media identity; derive only the additional LUT/readback-stage identity in this lane. | N1/N3: document revision is not a semantic graph hash. |
+| Verify frame identity around worker rendering and again at actor receipt. Keep old bytes under old keys. | N3/N4/N7: no stale presentation or destructive invalidation. |
+| Apply the actual pm-color LUT source and compute scopes from the selected engine RGB stage on both cache misses and hits. | N1/N3: one numerical implementation; picture and analysis share authored colour intent. |
+| Keep the renderer/readback port platform independent and inject native frames. | N7/N8: Linux test double and headless operation, no UI/JS wait. |
+
+The native locked crate command now passes **102 tests** (83 existing, nine real
+encode integrations and ten render-path regressions). Strict crate Clippy with
+`--all-targets -- -D warnings` and package formatting pass; unchanged
+`cd engine && cargo test --locked -p pm-color` passes **61 tests**. The isolation
+harness copies both new engine files as well as the existing LUT/scopes sources.
+
+Remaining out-of-lane changes: export `cache_frame` alongside `proxy` from
+pm-media; export `lut`/`scopes` from pm-color; replace temporary source exports
+with normal dependencies when those owners provide portable build boundaries.
+The engine-service owner implements `FrameSource` around actual renderer graph
+hashes and E-to-straight readback at the declared stage, wires task dispatch and
+actor receipt, and supplies the source lease/archive/persistence route. macOS
+must verify actual GPU readback, LUT/scopes reference vectors, graph publication
+races, native encoder cancellation, HDR/alpha/audio tags, APFS publication and
+real playback/seek performance. No visual surface or unprovided UX copy is added;
+there are no new `DESIGN-TODO(opus)` placeholders in this slice.

@@ -8,7 +8,7 @@ mkdir -p "$validation_root/apps/native/crates" "$validation_root/engine/crates/p
 cp -R "$repo/apps/native/crates/promedia" "$validation_root/apps/native/crates/"
 cp "$repo/engine/crates/pm-color/src/lut.rs" "$repo/engine/crates/pm-color/src/scopes.rs" "$validation_root/engine/crates/pm-color/src/"
 mkdir -p "$validation_root/engine/crates/pm-media/src"
-cp "$repo/engine/crates/pm-media/src/proxy.rs" "$validation_root/engine/crates/pm-media/src/"
+cp "$repo/engine/crates/pm-media/src/cache_frame.rs" "$repo/engine/crates/pm-media/src/proxy.rs" "$validation_root/engine/crates/pm-media/src/"
 # Reuse the exact engine time sources without importing the platform workspace.
 mkdir -p "$validation_root/engine/crates/pm-time"
 cp -R "$repo/engine/crates/pm-time/src" "$validation_root/engine/crates/pm-time/"

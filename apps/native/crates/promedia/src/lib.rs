@@ -1,8 +1,11 @@
 //! Worker-side pro media contracts. The host kernel owns and publishes models.
 //! Filesystem operations and codecs must run on workers, never on the UI thread.
 pub mod cache;
+#[path = "../../../../../engine/crates/pm-media/src/cache_frame.rs"]
+pub mod cache_frame;
 pub mod codec;
 pub mod media;
+pub mod render;
 pub mod storage;
 pub mod tasks;
 pub mod worker;
