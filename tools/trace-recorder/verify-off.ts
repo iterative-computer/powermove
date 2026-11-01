@@ -9,6 +9,8 @@ const probe=()=>{
   const PM=(window as any).PM;
   const project=PM.mkProject({name:'Synthetic off-mode fixture'});project.created=0;
   PM.replaceProject(project);PM.hist.clear();
+  const trace=(window as any).__PMTrace;
+  if(trace)trace.start({synthetic:true,eventScope:'synchronous-calls'});
   const output:any[]=[];
   const held=PM.proj;
   output.push(PM.hist.begin('outer')===PM.hist.begin('inner'));
@@ -19,6 +21,10 @@ const probe=()=>{
   PM.Edit.begin('live');let ran=false;
   output.push(PM.Edit.mutate('refused',()=>{ran=true;}),ran,PM.Edit.cancel());
   const sentinel={};output.push(PM.hist.do('identity',()=>sentinel)===sentinel);
+  output.push(PM.WS.mutate((w:any)=>{w.name='Synthetic off-mode workspace';},{inPlace:true}).name);
+  const boom=new Error('Synthetic off-mode failure');
+  try{PM.WS.mutate((w:any)=>{w.name='Partial off-mode workspace';throw boom;},{inPlace:true});}catch(error){output.push(error===boom,PM.WS.current.name);}
+  if(trace){const rows=trace.finish().trim().split('\n').map((line:string)=>JSON.parse(line));if(!rows.at(-1).valid)throw new Error('Invalid enabled probe trace');}
   return {output,projectRetained:held===PM.proj,history:PM.hist.list(),tracePresent:!!(window as any).__PMTrace};
 };
 const results:any[]=[];

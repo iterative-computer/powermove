@@ -22,6 +22,10 @@ test('synthetic goldens are complete, balanced, current and cover write/key/menu
     expect(header.recorder).toBe(expected);expect(header.adapter).toBe(expectedAdapter);
     expect(header.eventScope).toBe('synchronous-calls');
     for(const row of rows)if(row.type==='call')calls.add(row.name);
+    if(file==='workspace-direct.jsonl'){
+      const failure=rows.find(x=>x.type==='throw'&&x.state?.props.workspace);
+      expect(failure.state.props.workspace.props.name).toBe('Partial synthetic workspace');
+    }
     if(file==='menu-equivalents.jsonl'){
       expect(rows.filter(x=>x.type==='menu.received').length).toBe(2);
       const main=rows.find(x=>x.type==='main.observations').data.props.observations.values;

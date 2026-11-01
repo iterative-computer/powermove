@@ -24,7 +24,7 @@ node tools/trace-recorder/verify-off.ts /tmp/pm-ref-v1.2.0
 
 Stop if free disk falls below 3 GB. Do not use an installed application profile or a user project. The runner creates synthetic projects and disposable DOM only. Build output, profiles, diagnostic logs and ordinary captures stay outside the implementation checkout. Dependencies and Electron require substantial disk space.
 
-`run.ts` sets **`POWERMOVE_TRACE_RECORDER=1` at build time** and normally rebuilds. Both Vite adapters return no transformation when this flag is absent or `0`; the resulting application has no trace-controller global. `verify-off.ts` builds both modes, launches both hidden, compares history/edit behaviour and checks that the disabled build has no controller. It leaves a disabled build. Rebuild before recording again.
+`run.ts` sets **`POWERMOVE_TRACE_RECORDER=1` at build time** and normally rebuilds. Both Vite adapters return no transformation when this flag is absent or `0`; the resulting application has no trace-controller global. `verify-off.ts` builds both modes, launches both hidden, compares history/edit/workspace behaviour with recording active in the enabled build and checks that the disabled build has no controller. It leaves a disabled build. Rebuild before recording again.
 
 The overlay modifies only the reference checkout's Vite config, copies the adapter/runtime there and creates `e2e/helpers/app.trace.mjs`. It never commits in that checkout. Renderer instrumentation is applied during the enabled build, leaving original renderer source files untouched. It inserts method-body probes, not proxy objects or replacements for public API functions, callback closures, project objects or returned values. It adds no Promise handlers to application results, and rethrows the same error object. Instrumentation has observation overhead and changes reflected function source text; these traces are not timing measurements.
 
@@ -56,7 +56,7 @@ Removal restores the checked-out revision's Vite config and deletes only this ov
 | `EditGesture` | `begin`, `write`, `commit`, `cancel`, `once`, with gesture/binding identity and command/set/local mode |
 | Workspace | Public `workspace.mutate` and underlying `WS.mutate`, including thrown callbacks and returned workspace identities |
 | Events | Legacy and kernel bus emissions in original order, before delivery to existing listeners; nested emissions retain their enclosing call id |
-| State | Live project and selection identity/structure, pending history depth/snapshot/scopes, stack cursor, document patches, external closure handles, cleanup handles and byte count, before/after each call and at explicit checkpoints |
+| State | Live project and selection identity/structure, pending history depth/snapshot/scopes, stack cursor, document patches, external closure handles, cleanup handles and byte count, before/after each call and at explicit checkpoints; full workspace state at workspace mutation boundaries |
 | DOM/keymap | Window capture; the real `registries.ts` window bubble handler; ordered candidates, owner/priority/chord, field/repeat exclusions, pre-dispatch cancellation, actual command result, key-up; synthetic target/ancestor and later-window listeners show DOM order |
 | Menus | Real MenuItem undo/redo → existing IPC → renderer command path; trusted Chromium Cmd-Z via `webContents.sendInputEvent`; main-process `before-input-event` routing and ignore-menu-shortcuts decisions |
 | Direct writes/touch | Project identity/value snapshots at observed boundaries; `PM.touch`; explicit `PM.proj.direct` operation probes in synthetic scenarios |
@@ -129,7 +129,7 @@ The committed set contains **11 traces / 1,093 rows**. Each was produced twice i
 | `edit-admission` | Nested source begin throws; mutate refuses before action during live edit; scoped begin returns null; malformed/no-op/non-tree/stale/empty cases | 96 |
 | `external-history` | Invalid callbacks, independent push during begin, inline undo/redo, cleanup, cursor movement before external throw | 55 |
 | `gesture-modes` | Command/set/local paths; set cancel keeps writes; command cancel reverts; once returns; commit | 212 |
-| `workspace-direct` | Workspace return/throw, partial write path, direct assignment result/identity, touch without undo | 23 |
+| `workspace-direct` | Workspace return/throw with retained partial state, direct assignment result/identity, touch without undo | 23 |
 | `keymap-fields` | Field exclusion, inFields decline/handle, ordinary pre-cancellation, Escape and Cmd-period | 105 |
 | `keymap-order` | Target/window order, decline→next, repeat filtering/handling, Promise-false treated as handled, pending Promise followed by Escape/Cmd-period, stop vs prevent propagation | 187 |
 | `menu-equivalents` | Real menu undo/redo and trusted Cmd-Z, routing decision, renderer receipt and key-up | 141 |

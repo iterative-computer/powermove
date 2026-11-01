@@ -11,6 +11,14 @@ export function runScenario({name, metadata}: {name:string; metadata:Record<stri
   PM.replaceProject(fresh);
   PM.hist.clear();
   PM.sel.layers = []; PM.sel.keys = [];
+  if(name==='workspace-direct') {
+    // Recreate a synthetic workspace fixture before each capture; never reuse a prior mutation.
+    trace.workspaceFixture ??= JSON.parse(JSON.stringify(PM.WS.current));
+    const current=JSON.parse(JSON.stringify(trace.workspaceFixture));
+    PM.WS.current=current;
+    const index=PM.WS.all.findIndex((w:any)=>w.id===current.id);
+    if(index>=0)PM.WS.all[index]=current;
+  }
   trace.start({...metadata, scenario:name, role:'trusted', apiVersions:[1,2,3], synthetic:true});
   try {
     if (name === 'history-async') {
@@ -103,6 +111,7 @@ export function runScenario({name, metadata}: {name:string; metadata:Record<stri
       workspace.mutate((w:any)=>{w.name='Synthetic workspace';},{inPlace:true});
       const boom=new Error('synthetic workspace failure');
       assert(expectThrow(()=>workspace.mutate((w:any)=>{w.name='Partial synthetic workspace';throw boom;},{inPlace:true}))===boom,'workspace rethrows');
+      assert(PM.WS.current.name==='Partial synthetic workspace','workspace retains partial writes on throw');
       const held=PM.proj;
       // This explicit operation boundary observes the assignment without proxying PM.proj.
       const result=trace.call('PM.proj.direct',['name','raw synthetic'],()=>PM.proj.name='raw synthetic');

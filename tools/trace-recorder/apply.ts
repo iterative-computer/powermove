@@ -11,8 +11,7 @@ const original = execFileSync('git', ['-C', ref, 'show', 'HEAD:apps/desktop/elec
 const edited = `import { traceRecorderPlugin, traceRecorderMainPlugin } from './scripts/trace-recorder/transform.mjs';\n${original.replace('plugins: [svelte(),', 'plugins: [traceRecorderPlugin(), svelte(),').replace('main: {', 'main: { plugins: [traceRecorderMainPlugin()],')}`;
 if(!original.includes('plugins: [svelte(),')||!original.includes('main: {')) throw new Error('Unsupported Vite config; update the overlay adapter for this reference');
 const current = await readFile(config, 'utf8');
-const previous = `import { traceRecorderPlugin } from './scripts/trace-recorder/transform.mjs';\n${original.replace('plugins: [svelte(),', 'plugins: [traceRecorderPlugin(), svelte(),')}`;
-if (current !== original && current !== edited && current !== previous) throw new Error('Refusing to overwrite an unrelated Vite config edit');
+if (current !== original && current !== edited) throw new Error('Refusing to overwrite an unrelated Vite config edit');
 if (remove) {
   await writeFile(config, original);
   await rm(path.join(ref,'apps/desktop/e2e/helpers/app.trace.mjs'),{force:true});
@@ -28,7 +27,11 @@ if (remove) {
   await writeFile(config,edited);
   const helper=path.join(ref,'apps/desktop/e2e/helpers/app.ts');
   // Reuse the existing harness, adding finite startup waits and cleanup for direct CLI use.
-  const helperSource=(await readFile(helper,'utf8'))
+  const helperOriginal=await readFile(helper,'utf8');
+  for(const anchor of ['_electron.launch({','// Native dialogs are substituted','return { app, page };']) {
+    if(helperOriginal.indexOf(anchor)<0||helperOriginal.indexOf(anchor)!==helperOriginal.lastIndexOf(anchor))throw new Error(`Unsupported harness anchor: ${anchor}`);
+  }
+  const helperSource=helperOriginal
     .replace('_electron.launch({','_electron.launch({ timeout: 30_000,')
     .replace('// Native dialogs are substituted', 'app.context().setDefaultTimeout(30_000);\n  try {\n  // Native dialogs are substituted')
     .replace('return { app, page };','return { app, page };\n  } catch(error) { await app.close().catch(()=>{}); throw error; }');

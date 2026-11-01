@@ -6,6 +6,7 @@ class TraceController {
   apis: Record<string, any> = {};
   gesture: any;
   private PM: any;
+  private scope = '';
   private history: () => unknown = () => null;
   private generated = new Map<string, string>();
   attach(PM: any, history: () => unknown) { this.PM = PM; this.history = history; }
@@ -19,7 +20,7 @@ class TraceController {
   }
   start(metadata: Row) {
     if (this.recorder) throw new Error('Trace already active');
-    this.recorder = new Recorder(() => ({ project: this.PM.proj, selection: this.PM.sel, history: this.history() }), metadata);
+    this.recorder = new Recorder(() => ({ project: this.PM.proj, selection: this.PM.sel, history: this.history(), ...(this.scope.includes('workspace') ? {workspace:this.PM.WS?.current} : {}) }), metadata);
     // Only ids reachable in this synthetic fixture are admitted as aliases.
     const visit = (x: any, seen = new Set()) => {
       if (!x || typeof x !== 'object' || seen.has(x)) return;
@@ -33,7 +34,11 @@ class TraceController {
     visit(this.PM.proj);
     this.recorder.checkpoint('initial');
   }
-  call<T>(name: string, args: unknown[], fn: () => T): T { return this.recorder ? this.recorder.call(name, args, fn) : fn(); }
+  call<T>(name: string, args: unknown[], fn: () => T): T {
+    if (!this.recorder) return fn();
+    const previous=this.scope; this.scope=name;
+    try {return this.recorder.call(name,args,fn);} finally {this.scope=previous;}
+  }
   point(type: string, data?: unknown) { this.recorder?.point(type, data); }
   checkpoint(label: string) { this.recorder?.checkpoint(label); }
   finish() { const result = this.recorder!.finish(); this.recorder = null; return result; }
