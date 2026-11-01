@@ -210,8 +210,7 @@ impl DocumentStore {
 
     /// A never-saved project from a project value (stored or canonical form).
     pub fn new_untitled(project: Value) -> DocumentStore {
-        let canonical = pm_model::canonical::canonical_project(project);
-        let document = Document::new(Some(canonical), 1);
+        let document = Document::new(Some(model::to_canonical(project)), 1);
         DocumentStore::from_parts(ProjectFile::untitled(), document, History::new(), true)
     }
 
@@ -507,11 +506,9 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return Err(TransactionError::GestureInProgress);
         }
-        project_io::validate_stored_project(&pm_model::canonical::realize_project(
-            pm_model::canonical::canonical_project(project.clone()),
-        ))
-        .map_err(|e| TransactionError::Invalid(e.to_string()))?;
-        let canonical = pm_model::canonical::canonical_project(project);
+        let canonical = model::to_canonical(project);
+        project_io::validate_stored_project(&pm_model::canonical::realize_project(canonical.clone()))
+            .map_err(|e| TransactionError::Invalid(e.to_string()))?;
         let after = Node::from_value(canonical, self.revision() + 1);
         let ops = diff_node_ops(self.current.root(), Some(&after));
         let staged = self.stage_ops(&ops, true)?;

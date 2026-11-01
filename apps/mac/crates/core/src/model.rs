@@ -294,3 +294,25 @@ pub fn layer_ids(root: &Node, comp_id: Option<&str>) -> std::collections::HashSe
         })
         .unwrap_or_default()
 }
+
+/// The canonical form of a project given in either form. A stored project
+/// (the open composition's `layers` at the top level) is canonicalized; a
+/// value that is already canonical is returned unchanged
+/// (`canonical_project` is not idempotent: it would replace the open
+/// composition with an empty one).
+pub fn to_canonical(project: pm_model::Value) -> pm_model::Value {
+    use pm_model::Value;
+    let already = match &project {
+        Value::Object(map) => {
+            let open = map.get("compId").and_then(Value::as_str).filter(|s| !s.is_empty());
+            let comp = open.and_then(|id| map.get("comps")?.as_object()?.get(id)?.as_object());
+            !map.contains_key("layers") && comp.is_some()
+        }
+        _ => false,
+    };
+    if already {
+        project
+    } else {
+        pm_model::canonical::canonical_project(project)
+    }
+}

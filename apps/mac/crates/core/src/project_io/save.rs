@@ -474,11 +474,24 @@ impl SavePlan {
                 None => Publish::CreateNew,
             },
         };
+        // The version we may replace must still be on disk. A touched file
+        // whose bytes are proven identical is accepted; continue with its
+        // current identity (the old app re-read `fileVersion` here).
+        let publish = match publish {
+            Publish::Replace(v) => {
+                durable::check_version(dest, Some(&v), false)?;
+                let stat = lstat_file(dest)?.ok_or(ProjectIoError::ChangedOnDisk)?;
+                Publish::Replace(FileVersion { stat, ..v })
+            }
+            Publish::CreateNew => {
+                durable::check_version(dest, None, false)?;
+                Publish::CreateNew
+            }
+        };
         let previous = match &publish {
             Publish::Replace(v) => Some(v),
             Publish::CreateNew => None,
         };
-        durable::check_version(dest, previous, false)?;
 
         // Which records of the previous file can be kept (`ProjectSave.create`).
         let mut source: Option<File> = None;
