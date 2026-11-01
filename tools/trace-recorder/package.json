@@ -1,0 +1,10 @@
+{
+  "name": "powermove-reference-trace-recorder",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests",
+    "capture": "node run.ts",
+    "check": "node run.ts --check"
+  }
+}
