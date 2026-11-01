@@ -56,3 +56,21 @@ fn invalid_references_and_duplicates_fail_closed() {
     c.specs.push(c.specs[0].clone());
     assert!(c.validate().is_err());
 }
+
+#[test]
+fn every_legacy_spec_has_explicit_triage_and_cannot_be_silently_retired() {
+    let c = Catalog::embedded().unwrap();
+    for s in &c.specs {
+        assert_eq!(s.native_triage.status, "blocked-by");
+        assert!(!s.native_triage.acceptance_ids.is_empty());
+        assert!(!s.native_triage.blocked_by.is_empty());
+    }
+    for bad in ["untriaged", "pass"] {
+        let mut changed = c.clone();
+        changed.specs[0].native_triage.status = bad.into();
+        assert!(changed.validate().is_err());
+    }
+    let mut changed = c;
+    changed.specs[0].native_triage.acceptance_ids.clear();
+    assert!(changed.validate().is_err());
+}

@@ -98,7 +98,7 @@ fn blocker(workflow: &str) -> (&'static str, &'static str, bool) {
         ),
         "W037" | "W038" | "W039" | "W040" => (
             "compat-runtime",
-            "Production V8 v1–3 logic/PM/services/recorder canvas and WebKit remote DOM are pending; no extension is excluded",
+            "V8 lifecycle and compat service/recorder probes run with the optional native backing; full corpus, host services, WebKit remote DOM and native raster pixels still need macOS; no extension is excluded",
             true,
         ),
         "W041" => (
@@ -137,9 +137,9 @@ fn blocker(workflow: &str) -> (&'static str, &'static str, bool) {
             true,
         ),
         "W080" | "W081" | "W082" | "W083" => (
-            "pro-edit-domain",
-            "Required cutover addition: ripple/roll/slide/three-point/persistent A/V domain and UI integration is pending",
-            false,
+            "pro-edit-integration",
+            "Actor-backed pro domain edits, saved history and refusal probes run; source-monitor UI, gestures, decoded A/V and engine integration still need macOS",
+            true,
         ),
         _ => (
             "shell-integration",
@@ -202,6 +202,14 @@ const KEY_CONTEXTS: &[&str] = &[
     "menu-once",
 ];
 pub fn run(catalog: &Catalog, filter: &Filter, corpus: &[PathBuf]) -> Result<Report, String> {
+    run_with_runtime(catalog, filter, corpus, None)
+}
+pub fn run_with_runtime(
+    catalog: &Catalog,
+    filter: &Filter,
+    corpus: &[PathBuf],
+    runtime: Option<&dyn crate::runtime::RuntimeHook>,
+) -> Result<Report, String> {
     catalog.validate()?;
     let scenarios = scenarios::all();
     validate_scenarios(catalog)?;
@@ -266,6 +274,40 @@ pub fn run(catalog: &Catalog, filter: &Filter, corpus: &[PathBuf]) -> Result<Rep
                 result.reason.push_str("; needs macOS: replace double with real engine/surface adapter and verify pixels/input");
             }
             cases.push(result);
+        }
+    }
+    for &(id, workflow, title, requires_bundle) in crate::runtime::CASES {
+        known.insert(id.into());
+        if filter.accepts(id, workflow) {
+            if let Some(runtime) = runtime.filter(|r| !requires_bundle || r.has_compat_bundle()) {
+                cases.push(execute(id, workflow, "runtime-probe", title, || {
+                    runtime.check(id)
+                }));
+            } else {
+                cases.push(CaseResult {
+                    id: id.into(),
+                    workflow: workflow.into(),
+                    kind: "runtime-probe".into(),
+                    status: Status::BlockedBy,
+                    reason: format!(
+                        "{title}; supply --runtime-runner{}",
+                        if requires_bundle {
+                            " and --compat-bundle"
+                        } else {
+                            ""
+                        }
+                    ),
+                    blocked_by: Some(
+                        if requires_bundle {
+                            "compat-bundle"
+                        } else {
+                            "native-v8-backing"
+                        }
+                        .into(),
+                    ),
+                    needs_macos: false,
+                });
+            }
         }
     }
     for (name, _) in crate::fixture::CORPUS {
@@ -350,8 +392,9 @@ pub fn run(catalog: &Catalog, filter: &Filter, corpus: &[PathBuf]) -> Result<Rep
         for w in catalog.workflows.iter().filter(|w|spec.workflows.contains(&w.id)) {
             acceptance_ids.push(format!("{}.contract",w.id));
             let basename=spec.file.rsplit('/').next().unwrap();
-            for c in w.cases.iter().filter(|c|c.source.contains(basename)) {acceptance_ids.push(c.id.clone());}
+            for c in w.cases.iter().filter(|c|c.source.contains(&format!("/{basename}"))) {acceptance_ids.push(c.id.clone());}
             for s in scenarios.iter().filter(|s|s.workflow==w.id) {supporting_probe_ids.push(s.id.into());}
+            supporting_probe_ids.extend(crate::runtime::CASES.iter().filter(|(_,workflow,_,_)|*workflow==w.id).map(|(id,_,_,_)|id.to_string()));
             if w.id=="W007" {supporting_probe_ids.extend(crate::fixture::CORPUS.iter().map(|(id,_)|format!("W007.public-{id}")));}
         }
         acceptance_ids.sort();acceptance_ids.dedup();

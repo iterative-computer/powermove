@@ -20,6 +20,72 @@ pub struct Scenario {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            id: "A494",
+            workflow: "W033",
+            title: "MCP union exposes frozen tools and implemented catalog members",
+            run: crate::mcp_cases::union,
+        },
+        Scenario {
+            id: "A503",
+            workflow: "W033",
+            title: "MCP timeline source ranges, stack order, flags, selection and paging",
+            run: crate::mcp_cases::timeline,
+        },
+        Scenario {
+            id: "A505",
+            workflow: "W033",
+            title: "MCP library list/create/open/rename/duplicate/save/trash/restore",
+            run: crate::mcp_cases::manage,
+        },
+        Scenario {
+            id: "A520",
+            workflow: "W032",
+            title: "MCP saved panel layout reads preserve project and app context",
+            run: crate::mcp_cases::layout,
+        },
+        Scenario {
+            id: "W079.shuttle",
+            workflow: "W079",
+            title: "State-dependent J/K/L and actor transport facts",
+            run: crate::pro::shuttle,
+        },
+        Scenario {
+            id: "W080.ripple-delete",
+            workflow: "W080",
+            title: "Ripple delete preserves untargeted tracks; locked refusal and persisted Undo",
+            run: crate::pro::ripple_delete,
+        },
+        Scenario {
+            id: "W080.ripple-trim",
+            workflow: "W080",
+            title: "Ripple trim exact deltas, locks and persisted Undo",
+            run: crate::pro::ripple_trim,
+        },
+        Scenario {
+            id: "W081.roll",
+            workflow: "W081",
+            title: "Roll source continuity, handles and persisted Undo",
+            run: crate::pro::roll,
+        },
+        Scenario {
+            id: "W081.slide",
+            workflow: "W081",
+            title: "Slide compensates neighbors without changing middle source",
+            run: crate::pro::slide,
+        },
+        Scenario {
+            id: "W082.source",
+            workflow: "W082",
+            title: "Three-point insert/overwrite splits preserve source, other tracks and persisted Undo",
+            run: crate::pro::source,
+        },
+        Scenario {
+            id: "W083.links",
+            workflow: "W083",
+            title: "Persistent A/V link, move, bypass, split and unlink",
+            run: crate::pro::links,
+        },
+        Scenario {
             id: "W071.fractional-rate",
             workflow: "W071",
             title: "N3: an authored 29.97 composition rate must remain 29.97",
