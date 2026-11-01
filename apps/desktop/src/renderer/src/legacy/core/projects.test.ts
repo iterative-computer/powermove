@@ -1,3 +1,4 @@
+import { sha256Hex } from '../../../../shared/sha256';
 import { describe, expect, it, vi } from 'vitest';
 
 import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
@@ -63,7 +64,7 @@ describe('legacy project registry install', () => {
     memory.set('projectJournal.P1', [patch(50, 'one'), patch(51, 'two')]);
     finish(); expect(await recovering).toBe(true);
     expect(get.mock.calls.some(([key]) => key === 'project.P1')).toBe(false);
-    expect(memory.get('projectJournal.P1')).toEqual([patch(51, 'two')]);
+    expect(memory.get('projectJournal.P1')).toEqual([{ ...patch(51, 'two'), baseRevisionHash: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
     expect(PM.Projects.get('P1')).toEqual(project);
   });
 
@@ -79,6 +80,34 @@ describe('legacy project registry install', () => {
     PM.store.setSnapshotAsync.mockRejectedValue(new Error('Disk full'));
     await expect(PM.Projects.recoverAsync(project, undefined, () => true)).rejects.toThrow('Disk full');
     expect(memory.get('projectJournal.P1')).toEqual(entries);
+  });
+  it('rejects journal replay on a different checkpoint in both opening paths without altering stored work', async () => {
+    const { PM, memory } = projectsRegistry();
+    const project = { id: 'P1', name: 'Authored intent', layers: [] };
+    const hash = sha256Hex(new TextEncoder().encode(JSON.stringify(project)));
+    const entries = [{ sequence: 1, baseRevisionHash: hash, patches: [{ path: ['name'], exists: true, value: 'Recovered intent' }] }];
+    memory.set('project.P1', { proj: project, recoverySequence: 0 }); memory.set('projectJournal.P1', entries);
+    PM.store.getAsync = async (key: string, fallback: any) => structuredClone(memory.has(key) ? memory.get(key) : fallback);
+    expect(PM.Projects.get('P1').name).toBe('Recovered intent');
+    expect((await PM.Projects.getAsync('P1')).name).toBe('Recovered intent');
+    memory.set('project.P1', { proj: { ...project, name: 'A different base' }, recoverySequence: 0 });
+    expect(() => PM.Projects.get('P1')).toThrow('different project checkpoint');
+    await expect(PM.Projects.getAsync('P1')).rejects.toThrow('different project checkpoint');
+    expect(memory.get('projectJournal.P1')).toBe(entries);
+    expect(memory.get('project.P1').proj.name).toBe('A different base');
+  });
+  it('seals a checkpoint once rather than loading the whole document for every edit', () => {
+    const { PM } = projectsRegistry();
+    const handlers = new Map<string, (entry: any) => void>();
+    PM.bus = { on: (name: string, handler: (entry: any) => void) => handlers.set(name, handler) };
+    install(PM);
+    PM.proj = { id: 'P1', name: 'Before', revision: 0, layers: [] };
+    PM.Projects.put(PM.proj);
+    const get = vi.spyOn(PM.store, 'get');
+    for (let i = 0; i < 20; i++) handlers.get('history:project-patch')!({ projectId: 'P1', revision: i + 1,
+      patches: [{ path: ['name'], exists: true, value: `Edit ${i}` }] });
+    expect(get.mock.calls.filter(([key]) => key === 'project.P1')).toHaveLength(0);
+    expect(PM.Projects.get('P1').name).toBe('Edit 19');
   });
   it('removes the agent workspace when a project is destroyed, not when trashed', () => {
     const forget = vi.fn(async () => undefined);

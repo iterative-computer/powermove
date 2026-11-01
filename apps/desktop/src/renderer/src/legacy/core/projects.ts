@@ -1,3 +1,4 @@
+import { sha256Hex } from '../../../../shared/sha256';
 /* Ported from js/core/projects.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
@@ -18,10 +19,12 @@ const R: any = {
   JOURNAL: 'projectJournal.',
 };
 const sequences = new Map<string, number>();
+const baseHashes = new Map<string, string>();
 const sequence = (id: string) => journal(id).reduce((latest: number, entry: any) => Math.max(latest, Number(entry.sequence) || 0), sequences.get(id) || 0);
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
 const CHECKPOINT_REVISIONS = 50;
 const journalBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+const baseHash = (project: any): string => sha256Hex(new TextEncoder().encode(JSON.stringify(project)));
 const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
 function applyPatches(root: any, patches: any[]) {
@@ -71,7 +74,9 @@ R.put = (proj: any, thumb: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
+  const hash = baseHash(proj);
   if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', recoverySequence: sequence(proj.id), proj }) === false) throw new Error('Project storage is unavailable or full');
+  baseHashes.set(proj.id, hash);
   // Keep the journal until a durable asynchronous checkpoint retires its prefix.
   return meta;
 };
@@ -104,11 +109,13 @@ R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
   const entries = journal(proj.id);
   if (PM.store.has(R.SLOT + proj.id) && entries.length && journalBytes(entries) <= MAX_JOURNAL_BYTES
       && Number(proj.revision || 0) % CHECKPOINT_REVISIONS !== 0) return true;
+  const checkpointHash = baseHash(proj);
   const saved = await PM.store.setSnapshotAsync(R.SLOT + proj.id, { v: PM.version || '1.0.0', recoverySequence: sequence(proj.id), proj }, isCurrent);
   if (!saved) return false;
+  baseHashes.set(proj.id, checkpointHash);
   // Edits can arrive while native storage commits. Retain patches newer than
   // the captured prefix instead of deleting their recovery journal.
-  const remaining = journal(proj.id).slice(entries.length);
+  const remaining = journal(proj.id).slice(entries.length).map((entry: any) => ({ ...entry, baseRevisionHash: checkpointHash }));
   if (remaining.length) PM.store.set(R.JOURNAL + proj.id, remaining);
   else PM.store.del(R.JOURNAL + proj.id);
   return true;
@@ -172,12 +179,15 @@ R.get = (id: any) => {
   const checkpointSequence = Number(envelope.recoverySequence) || 0;
   sequences.set(id, Math.max(checkpointSequence, sequence(id)));
   project = clone(project);
+  const expectedBase = baseHash(project);
+  baseHashes.set(id, expectedBase);
   for (const entry of journal(id)) {
     if (Number.isFinite(entry.sequence) && entry.sequence <= checkpointSequence) continue;
     // Only old envelopes used edit revisions. New checkpoints use an independent
     // sequence because Undo, Redo and legacy transactions can rewind revisions.
     if (envelope?.recoverySequence === undefined && entry.sequence === undefined
       && Number.isFinite(entry.revision) && Number.isFinite(project.revision) && entry.revision <= project.revision) continue;
+    if (entry.baseRevisionHash && entry.baseRevisionHash !== expectedBase) throw new Error('Recovery edits belong to a different project checkpoint. The checkpoint and journal have been preserved.');
     project = applyPatches(project, entry.patches);
   }
   return project;
@@ -199,6 +209,8 @@ R.getAsync = async (id: string) => {
   if (!project) return null;
   const checkpointSequence = Number(envelope?.recoverySequence) || 0;
   sequences.set(id, (Array.isArray(entries) ? entries : []).reduce((latest: number, entry: any) => Math.max(latest, Number(entry.sequence) || 0), checkpointSequence));
+  const expectedBase = baseHash(project);
+  baseHashes.set(id, expectedBase);
   let deadline = performance.now() + 4;
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (Number.isFinite(entry.sequence) && entry.sequence <= checkpointSequence) continue;
@@ -206,6 +218,7 @@ R.getAsync = async (id: string) => {
     // sequence because Undo, Redo and legacy transactions can rewind revisions.
     if (envelope?.recoverySequence === undefined && entry.sequence === undefined
       && Number.isFinite(entry.revision) && Number.isFinite(project.revision) && entry.revision <= project.revision) continue;
+    if (entry.baseRevisionHash && entry.baseRevisionHash !== expectedBase) throw new Error('Recovery edits belong to a different project checkpoint. The checkpoint and journal have been preserved.');
     project = applyPatches(project, entry.patches);
     if (performance.now() >= deadline) { await yieldTask(); deadline = performance.now() + 4; }
   }
@@ -333,7 +346,12 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
   const entries = journal(entry.projectId);
   const next = sequence(entry.projectId) + 1;
   sequences.set(entry.projectId, next);
-  entries.push({ sequence: next, revision: Number(entry.revision) || 0, patches: entry.patches });
+  let checkpointHash = baseHashes.get(entry.projectId);
+  if (!checkpointHash) {
+    const checkpoint = R.unwrap(PM.store.get(R.SLOT + entry.projectId, null));
+    if (checkpoint) { checkpointHash = baseHash(checkpoint); baseHashes.set(entry.projectId, checkpointHash); }
+  }
+  entries.push({ ...(checkpointHash ? { baseRevisionHash: checkpointHash } : {}), sequence: next, revision: Number(entry.revision) || 0, patches: entry.patches });
   /* Keep the journal bounded even before the next debounced checkpoint. */
   if (journalBytes(entries) > MAX_JOURNAL_BYTES) {
     if (PM.proj?.id === entry.projectId) R.put(PM.proj);
