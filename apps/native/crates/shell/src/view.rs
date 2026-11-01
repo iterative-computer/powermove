@@ -11,6 +11,7 @@ enum Gesture {
     Panel(String, Point<Pixels>, Layout),
 }
 pub struct Editor {
+    pub integration: Option<Rc<dyn crate::integration::Integration>>,
     pub layout: Layout,
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
@@ -55,6 +56,7 @@ impl Editor {
             store.active.get(&project).map_or("design", String::as_str),
         );
         Self {
+            integration: None,
             layout,
             tokens,
             host,
@@ -136,6 +138,17 @@ impl Editor {
             "shell command={} args={:?} token={:?}",
             cmd.name, cmd.args, cmd.token
         );
+        if self
+            .integration
+            .clone()
+            .is_some_and(|i| i.command(&cmd, window, cx))
+        {
+            if let (Some(token), Some(host)) = (cmd.token, &self.host) {
+                host.borrow_mut().resolve(token, true);
+            }
+            cx.notify();
+            return;
+        }
         let mut handled = true;
         match cmd.name.as_str() {
             "palette" => {
@@ -205,6 +218,11 @@ fn positioned(r: Rect) -> Div {
 }
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.integration.as_ref().and_then(|i| i.project_id(cx))
+            && self.project != id
+        {
+            self.bind_project(id);
+        }
         let t = self.tokens.clone();
         let m = t.metrics;
         let c = t.colors.clone();
@@ -248,6 +266,11 @@ impl Render for Editor {
             .text_size(px(t.typography.body))
             .text_color(rgb(c.text))
             .track_focus(&self.focus)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                if let Some(i) = &this.integration {
+                    i.drop_paths(paths.paths().to_vec(), cx);
+                }
+            }))
             .child(
                 canvas(
                     move |_, _, _| (),
@@ -469,7 +492,13 @@ impl Render for Editor {
                 );
             }
             panel = panel.child(header);
-            if !is_viewer {
+            let content = self
+                .integration
+                .as_ref()
+                .and_then(|i| i.panel(&id, p.rect, w, cx));
+            if let Some(content) = content {
+                panel = panel.child(content);
+            } else if !is_viewer {
                 panel = panel.child(
                     div()
                         .flex()
@@ -535,8 +564,16 @@ impl Render for Editor {
             .px(px(m.inset))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(c.muted))
-            .child(self.status.clone())
-            .child(div().ml_auto().child("Shell preview · Paused")),
+            .child(
+                self.integration
+                    .as_ref()
+                    .map_or_else(|| self.status.clone(), |i| i.status(cx)),
+            )
+            .child(div().ml_auto().child(if self.integration.is_none() {
+                "Shell preview · Paused"
+            } else {
+                ""
+            })),
         )
     }
 }
