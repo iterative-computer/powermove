@@ -1,6 +1,6 @@
 # Transition Release preparation (P1 package 7)
 
-Review branch: `feat/tr-prep`, based on `main` at `70ffd6494`. This branch must
+Review branch: `feat/tr-prep`, updated through `main` at `5458b5449`. This branch must
 not be merged or released as a cutover. Reference behavior is `v1.2.0`; the
 implementation preserves the current Electron editing, extension and playback
 paths. Native docs were read from `origin/feat/native-engine`: P0 decisions,
@@ -16,9 +16,13 @@ No installed profile or real Keychain was read in the Linux implementation/tests
 | Retain IndexedDB, immutable objects, key history, record history, encrypted sources and interrupted imports | N4 archive rather than delete; prune rule: the Electron playback library still has consumers |
 | Migration conflicts retain both byte revisions and block completion; corrupt checkpoints fail closed | N3 correctness over imitation; N4 no silent replacement |
 | Proxy provenance comes from source/project metadata, never a storage key or MIME guess; unknowns remain unclassified | N3 authored original identity; N4 no proxy promotion |
+| Lease new imports before their IndexedDB transaction; block passes until every import/upload ends and then require a fresh delta | N4 prevents stale cutover readiness during source hashing or an in-flight write |
+| Preserve negative zero, sparse array holes and custom array fields/Blobs in logical JSON | N3 exact authored values; N4 unknown data retention; N6 extension-owned records |
+| Package a disabled, unset HTTPS cutover feed with independent OS, preparation, signing and owner gates | N1/N4 no update staging before verification and owner approval |
 | Require 4 GiB free reserve plus the next staged payload before copying | N1 professional recovery; N4 no pruning to make room |
 | Re-read the IDB inventory and Blob hashes before finishing; invalidate a pass if new TR imports arrive | N4 concurrent edits must not be certified as migrated |
 | Native-compatible stable-inode `flock`, PID and heartbeat leases; locked external projects open as independent copies | N3/N4 multiple editors cannot overwrite one another; N7 inspectable ownership |
+| Project locks never create a missing user destination directory | N3/N6 preserve save failure semantics; N4 failed saves retain dirty work and grant no association |
 | Hash journal bases, preserve old unhashed journal support, reject replay onto a different checkpoint | N3 exact authored edits; N4 preserve both inputs; N6 legacy journal compatibility |
 | Require two pinned, independently validated designated requirements on a legacy Keychain item | N4 secret continuity and both-app access; no decrypted profile/log files |
 | Keep the actual switch offer disabled in this review build | N1/N2 cutover proofs and signing verification remain required, even after preparation completes |
@@ -108,6 +112,14 @@ origin delta. Each pass:
    survive. Logical snapshots are immutable; changed/deleted values leave prior
    versions available. No key is cleared or interpreted as a native feature flag.
 
+New imports acquire a window-owned lease **before** their IndexedDB transaction,
+and release it only after CAS/playback persistence has returned. A pass started
+while that write or source hashing is pending cannot complete. Ending an import
+invalidates its generation too; a new pass must see the final committed records.
+Direct uploads already active when a pass begins also block completion. Renderer
+death releases the lease while leaving readiness paused and all bytes intact.
+Proxy joins include both `storageKey` and the old bare `id` fallback.
+
 `transition:request` is a trusted-frame-only, asynchronous preload bridge with
 status/start/reuse/begin/chunk/finish/abort/record/complete/localStorage/secrets
 operations. Upload and pass IDs are main-owned and window-bound. Chunks are at
@@ -156,7 +168,9 @@ Electron owns a pipe to it. It never reads project content or starts a runtime.
   process even if it observes a stale or released JSON record.
 - Parent EOF/exit releases the helper lock; normal release records PID zero.
   A lost helper prevents subsequent writes. Closing a project releases its
-  lease after queued file operations. Locked/read-only projects open as copies
+  lease after queued file operations. Profile locks may create app-owned parent
+  directories; project locks may not create a missing destination folder. A failed
+  lock/save retains dirty work and no overwrite association. Locked/read-only projects open as copies
   without an overwrite association. Saving them requires Save As.
 
 Both external-file pending-publication journals and logical recovery patches now
@@ -219,29 +233,82 @@ ACL mismatch or failed receipts block secret completion. "Prepare Sign-ins" is
 an explicit user action. No native app is launched or downloaded by this button.
 Even if the preparation status is complete, "Switch to Native" remains disabled
 until a separately reviewed release wires the signed native availability and
-cutover gates. There is no update-feed or release-workflow change here.
+cutover gates. The maintenance updater and release workflows remain unchanged.
+
+## Cutover feed configuration only
+
+`apps/desktop/resources/transition/cutover.json` is packaged at
+`transition/cutover.json`. It ships as `{version: 1, enabled: false, feedURL: null}`.
+The owner has not supplied the separate production endpoint; no endpoint is
+invented, contacted or published. The signed bundle is its source, never a
+renderer IPC argument or a runtime environment override. `readCutoverConfig`
+rejects malformed configurations, enabled-without-URL, HTTP, URL credentials,
+queries and fragments. The URL must be the dedicated generic HTTPS feed from S6,
+not the maintenance GitHub `latest-mac.yml`/`beta-mac.yml` feed.
+
+`cutoverFeed` is an advisory eligibility function only: it requires enabled
+configuration, macOS 14+ (Darwin 23+), a complete current media/localStorage/secret
+checkpoint, signed migration verification and owner approval. Nothing calls
+`setFeedURL`, checks, downloads, stages or installs from it. A subsequent reviewed
+release must wire the final state/reference-closure, fresh delta, restore and
+signed updater proofs before activating this path. macOS 13 retains maintenance
+updates. No tags, releases or merges to `main` are authorized by this preparation.
+
+`DESIGN-TODO(opus)`: the existing provisional TR section, progress presentation,
+sign-in action and disabled cutover copy need Opus review. This lane only adds
+the review marker and uses the existing Settings and task-toast components.
+All visual output remains provisional.
 
 ## Validation and remaining macOS proof
 
-Linux validation: **275 tests pass across 27 focused regression files**. This
-covers TR migration/structured-clone export, native-store BLAKE3 vectors, all
-related storage/save/media/preload tests, checkpoint rebasing, PID/flock leases,
-publication interruption/resume, low space, corruption/conflicts, dual-write
-failure retention and all four secret families. Separate journal/history regression
-runs pass too. Main TypeScript checking passes with the cloud route declarations
-emitted into scratch space; renderer Svelte checking has zero errors and two
-existing warnings. `electron-vite build` passes, including the POSIX helper and
-hash worker. The full-suite attempt found **6,765 tests: 6,706 passed, 21 failed, 38 skipped**.
-One result came from Vite's cached pre-edit polling implementation; a fresh run of
-all failed files clears that test. The **remaining 20 failures reproduce by exact
-test name on an isolated `origin/main` (`70ffd6494`) checkout** under the same
-Linux dependencies: media range/network checks, process-family cleanup, one
-encoder case, media-tool output, audio/effect vocabulary, thumbnails, asset-delete
-copy and status contributions. There are no current-only failures in that paired
-rerun (139 passing on this branch versus 133 on main; both have 20 failures and
-three skipped tests). The final 275-test lane run is fresh, after the last source
-edit; all 27 files pass. The complete Electron suite is therefore **not green**,
-and these baseline failures are not hidden or fixed by this lane.
+Current Linux validation (2026-11-01): **107 focused tests pass across 13 files**.
+This includes all transition/Keychain-double/lock/feed tests, actual renderer-to-
+main transfer integration, CAS/BLAKE3, import retention and base-hash recovery.
+The desktop build passes. Main TypeScript checking passes after generating cloud
+route declarations/bindings into ignored scratch space; no cloud source changed.
+Svelte checking has **zero errors and two existing warnings**.
+
+The full desktop unit attempt found **6,770 tests: 6,710 passed, 22 failed,
+38 skipped**. It began before the source edits finished; fresh runs clear its
+two TR transformation/cache failures. Rerunning all 13 failed files after the
+edits gives **150 passed, 20 failed, 3 skipped**. Every remaining failure matches
+an exact test name failing on isolated `origin/main` (`5458b5449`), using the same
+Linux dependencies. Main's paired 11-file run has **132 passed, 21 failed,
+3 skipped**: the same 20 failures plus a concurrent-load encoder timeout not
+observed in the final TR recheck. The baseline failures concern media ranges/
+network, process-family cleanup, encoding, media tools, audio/effect vocabulary,
+thumbnails, asset-delete copy and status contributions. The complete unit suite
+is **not green**; no current-only failure remains in the paired recheck.
+
+Electron tests explicitly unset `ELECTRON_RUN_AS_NODE`. Cloud Linux uses an
+opt-in harness flag, `POWERMOVE_E2E_SOFTWARE_GPU=1`, with SwiftShader under a
+virtual X server. The initial no-GPU runs hit WebGL2-blocklisted startup alerts;
+those are not storage failures and are not counted as passing tests. This mode
+changes no shipped app preference or macOS harness behavior. It establishes
+Electron/IndexedDB behavior, not macOS visual, timing, signing or OS integration.
+
+The final targeted Electron run is **6/6 passing**: the four TR import/all-store/
+retention/interruption cases, Storage Settings in both themes, and cancelled/
+failed/conflicting saves after correcting the project-lock parent creation.
+Across 22 relevant e2e cases, **17 pass** after that fix. The broader 19-case
+save/media/recovery pass initially had 13 passing and six failing; the sixth,
+missing-parent save failure, was a real TR regression and is now fixed in both
+unit and e2e tests. The five remaining failure cases also fail in an isolated
+`main` checkout: macOS fullSync injection, original-file linking, video PMV restore,
+Finder reveal, and the obsolete native-menu Projects fixture. The broad baseline
+attempt was stopped after the video/audio fixture timeouts; a separate focused
+baseline run reproduces Finder and Projects-menu failures. No claim of a complete
+green main e2e run is made. These remain open platform/test limits, not waived
+release gates. The boundary check also passes (10 built-in extensions).
+
+Reproduction (with an available display or Linux virtual X server):
+
+```sh
+cd apps/desktop
+unset ELECTRON_RUN_AS_NODE
+POWERMOVE_E2E_SOFTWARE_GPU=1 bun run test:e2e transition-preparation.spec.ts storage-upgrade.spec.ts storage-settings.spec.ts project-save.spec.ts --grep 'TR|Storage previews|cancel, disk-write'
+```
+
 Tests use synthetic temporary directories and fake secrets only. Rust `cargo fmt`,
 Cargo tests and Clippy do not apply: this lane changes Electron TypeScript,
 Svelte, C and Objective-C, and no Rust files.

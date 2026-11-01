@@ -105,7 +105,10 @@ async function startElectron(
   // Chromium debugging flag Playwright needs before our app can even start.
   delete launchEnv.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({
-    args: ['.'],
+    // Cloud Linux has no hardware GPU. Explicit software rendering keeps the
+    // real Electron/IndexedDB tests runnable; it is not macOS visual evidence.
+    args: ['.', ...(process.platform === 'linux' && process.env.POWERMOVE_E2E_SOFTWARE_GPU === '1'
+      ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] : [])],
     cwd: repoRoot,
     env: launchEnv
   });

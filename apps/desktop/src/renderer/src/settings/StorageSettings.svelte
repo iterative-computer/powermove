@@ -60,6 +60,7 @@
   <p class="settings-note">Storage management is available in the desktop app.</p>
 {:else}
   {#if transition}
+    <!-- DESIGN-TODO(opus): review provisional TR section, progress and sign-in/cutover copy. -->
     <section class="sg-section">
       <h3 class="sg-section-title">Native transition</h3>
       <div class="sg-group">

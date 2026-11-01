@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -50,66 +51,71 @@ async function seedBrowser(session: LaunchedApp, png: number[]) {
   }, png);
 }
 
-test('first launch automatically optimizes old data, notifies, preserves unique work and stays finished after relaunch', async () => {
-  test.setTimeout(90_000);
-  const f = await fixture(); let session: LaunchedApp | undefined;
-  try {
-    session = await launchApp({ userData: f.profile });
-    await seedBrowser(session, f.png);
-    const notice = session.page.locator('.toast').filter({ hasText: 'Storage optimized' });
-    await expect(notice).toBeVisible({ timeout: 30_000 }); await expect(notice).toContainText('Freed about');
-    const journal = JSON.parse(await readFile(f.marker, 'utf8'));
-    expect(journal.origins['app://powermove'].steps).toEqual(['recovery', 'browser', 'sources', 'cleanup']);
-    expect(journal.origins['app://powermove'].freedBytes).toBeGreaterThan(500_000);
-    expect((await stat(path.join(f.profile, 'store', 'project.legacy.json'))).size).toBeLessThan(20_000);
-    expect(await readdir(f.backups)).toEqual(['2026-10-02T00-00-00-000Z.pmv', '2026-10-03T00-00-00-000Z.pmv', 'uncertain.recovery.pmv']);
-    expect(await readFile(path.join(f.workspace, 'artifacts', 'keep.wav'), 'utf8')).toBe('unique generated media');
-    await expect(stat(path.join(f.workspace, 'node_modules'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await readFile(f.original)).toEqual(Buffer.from(f.png));
-    const remaining = await session.page.evaluate(async () => {
-      const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open('powermove-media', 2); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
-      try { return await new Promise<IDBValidKey[]>((resolve, reject) => { const r = db.transaction('assets').objectStore('assets').getAllKeys(); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); }
-      finally { db.close(); }
-    });
-    expect(remaining).toEqual(['media:conflict']);
-    const native = new LibraryMedia(path.join(f.profile, 'Media Store'));
-    expect(await native.fileFor('media:legacy')).toBe(f.original);
-    expect(await readFile((await native.fileFor('browser-only'))!, 'utf8')).toBe('unique pasted media');
-
-    // The notice uses the native toast styling in both themes.
-    await session.page.evaluate(() => (window as any).PM.SettingsUI.open('general'));
-    for (const theme of ['light', 'dark']) {
-      await session.page.locator('select[aria-label="Appearance"]').selectOption(theme);
-      await session.page.screenshot({ path: `/tmp/powermove-storage-upgrade-${theme}.png` });
-    }
-    await notice.getByRole('button', { name: 'View Storage', exact: true }).click();
-    await expect(session.page.getByRole('region', { name: 'Storage', exact: true }).getByRole('heading', { name: 'Storage', exact: true })).toBeVisible();
-    await expect.poll(async () => JSON.parse(await readFile(f.marker, 'utf8')).origins['app://powermove'].notified).toBe(true);
-    const before = await readFile(f.marker, 'utf8');
-    await session.relaunch();
-    await session.page.waitForTimeout(6500);
-    await expect(session.page.locator('.toast').filter({ hasText: 'Storage optimized' })).toHaveCount(0);
-    expect(await readFile(f.marker, 'utf8')).toBe(before);
-    expect(session.diagnostics.pageErrors).toEqual([]);
-  } finally { await session?.close(); await rm(f.root, { recursive: true, force: true }); }
-});
-
-test('an interrupted browser pass resumes next launch and completion remains visible until acknowledged', async () => {
+test('TR preparation retains old browser copies, playback files, authored data and recovery copies', async () => {
   test.setTimeout(90_000);
   const f = await fixture(); let session: LaunchedApp | undefined;
   try {
     session = await launchApp({ userData: f.profile }); await seedBrowser(session, f.png);
-    await session.page.evaluate(() => { (window as any).PM.MediaStore.optimizeLegacy = () => new Promise<void>(() => {}); });
-    await expect(session.page.getByRole('button', { name: /^Optimizing storage/ })).toBeVisible({ timeout: 20_000 });
-    await expect.poll(async () => JSON.parse(await readFile(f.marker, 'utf8')).origins['app://powermove'].steps).toEqual(['recovery']);
     await session.relaunch();
-    await expect(session.page.locator('.toast').filter({ hasText: 'Storage optimized' })).toBeVisible({ timeout: 30_000 });
-    expect(JSON.parse(await readFile(f.marker, 'utf8')).origins['app://powermove'].notified).toBeUndefined();
+    const checkpoint = path.join(f.profile, 'Media Store', 'migration.json');
+    await expect.poll(async () => JSON.parse(await readFile(checkpoint, 'utf8')).state, { timeout: 30_000 }).toBe('complete');
+    const journal = JSON.parse(await readFile(checkpoint, 'utf8'));
+    expect(journal.completed).toHaveLength(3);
+    expect(existsSync(f.marker)).toBe(false);
+    expect((await stat(path.join(f.profile, 'store', 'project.legacy.json'))).size).toBeGreaterThan(500_000);
+    expect(await readdir(f.backups)).toHaveLength(4);
+    expect(await readFile(path.join(f.workspace, 'artifacts', 'keep.wav'), 'utf8')).toBe('unique generated media');
+    expect(await readFile(path.join(f.workspace, 'node_modules', 'generated.js'), 'utf8')).toBe('disposable dependency');
+    expect(await readFile(f.original)).toEqual(Buffer.from(f.png));
+    const remaining = await session.page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open('powermove-media'); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+      try { return await new Promise<IDBValidKey[]>((resolve, reject) => { const r = db.transaction('assets').objectStore('assets').getAllKeys(); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); }
+      finally { db.close(); }
+    });
+    expect(remaining).toEqual(['browser-only', 'media:conflict', 'media:legacy']);
+    const library = new LibraryMedia(path.join(f.profile, 'Media Store'));
+    expect(await readFile((await library.fileFor('media:legacy'))!)).toEqual(Buffer.from(f.png));
+    expect(await readFile((await library.fileFor('media:conflict'))!, 'utf8')).toBe('new native version');
+    for (const receipt of Object.values<any>(journal.payloads)) {
+      expect(await stat(path.join(f.profile, 'Media Store', 'objects', receipt.hash.slice(0, 2), receipt.hash))).toMatchObject({ size: receipt.payload.size });
+    }
+    await expect(session.page.locator('.toast').filter({ hasText: 'Storage optimized' })).toHaveCount(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally { await session?.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('TR resumes an interrupted record pass without replacing earlier copied bytes', async () => {
+  test.setTimeout(120_000);
+  const f = await fixture(); let session: LaunchedApp | undefined;
+  try {
+    session = await launchApp({ userData: f.profile }); await seedBrowser(session, f.png);
+    await session.page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open('powermove-media'); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction('assets', 'readwrite');
+          for (let i = 0; i < 80; i++) tx.objectStore('assets').put({ id: `resume-${i}`, blob: new Blob([new Uint8Array(128 * 1024).fill(i)]), revision: `synthetic-${i}` });
+          tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+        });
+      } finally { db.close(); }
+    });
+    const checkpoint = path.join(f.profile, 'Media Store', 'migration.json');
     await session.relaunch();
-    await expect(session.page.locator('.toast').filter({ hasText: 'Storage optimized' })).toBeVisible({ timeout: 20_000 });
-    const notice = session.page.locator('.toast').filter({ hasText: 'Storage optimized' });
-    await notice.getByRole('button', { name: /dismiss/i }).click();
-    await expect.poll(async () => JSON.parse(await readFile(f.marker, 'utf8')).origins['app://powermove'].notified).toBe(true);
-    expect(await readFile(f.original)).toEqual(Buffer.from(f.png)); expect(session.diagnostics.pageErrors).toEqual([]);
+    await expect.poll(async () => {
+      const value = JSON.parse(await readFile(checkpoint, 'utf8'));
+      return value.state === 'copying' && value.completed.length > 0 && value.completed.length < 83;
+    }, { timeout: 30_000, intervals: [50] }).toBe(true);
+    const before = JSON.parse(await readFile(checkpoint, 'utf8'));
+    const receipts = Object.keys(before.payloads);
+    expect(receipts.length).toBeGreaterThan(0);
+    await session.relaunch();
+    await expect.poll(async () => JSON.parse(await readFile(checkpoint, 'utf8')).state, { timeout: 60_000 }).toBe('complete');
+    const after = JSON.parse(await readFile(checkpoint, 'utf8'));
+    expect(after.completed).toHaveLength(83);
+    expect(Object.keys(after.payloads)).toEqual(expect.arrayContaining(receipts));
+    for (const id of receipts) expect(after.payloads[id]).toEqual(before.payloads[id]);
+    expect(await readFile(f.original)).toEqual(Buffer.from(f.png));
+    expect(existsSync(f.marker)).toBe(false);
+    expect(session.diagnostics.pageErrors).toEqual([]);
   } finally { await session?.close(); await rm(f.root, { recursive: true, force: true }); }
 });
