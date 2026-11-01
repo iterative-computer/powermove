@@ -6,7 +6,14 @@ import type { Json, SurfaceEvent } from "../protocol";
 
 export const token = (name: string) => ({ token: name });
 type Style = NonNullable<SurfaceProps["style"]>;
-type Common = SurfaceProps & { label: string };
+// Component callbacks/options override primitive event/JSON props; intersecting
+// them would require a callback accepting both an event and a component value.
+type Common = Omit<
+  SurfaceProps,
+  "options" | "selected" | "onChange" | "onSelect"
+> & {
+  label: string;
+};
 type Bound<T extends Json> = SurfaceProps & {
   label?: string;
   value: T;
