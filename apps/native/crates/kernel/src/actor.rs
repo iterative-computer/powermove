@@ -560,6 +560,24 @@ fn publish_timed(
     project: &str,
     started: Option<std::time::Instant>,
 ) -> Option<u64> {
+    for trimmed in std::mem::take(&mut kernel.trimmed_projects) {
+        if trimmed != project {
+            if let Some(revision) = publish(kernel, shared, &trimmed) {
+                emit(shared, KernelEvent::Published { project: trimmed.clone(), revision });
+            }
+            if let Some(p) = kernel.project_mut(&trimmed) {
+                let realms = shared.realms.lock().expect("realms");
+                for message in p.take_outbox() {
+                    let writer = match &message {
+                        RealmMessage::RunExternal { writer, .. } | RealmMessage::Cleanup { writer, .. } => writer,
+                    };
+                    if let Some(mailbox) = realms.get(writer) {
+                        let _ = mailbox.send(RealmEnvelope { project: trimmed.clone(), message });
+                    }
+                }
+            }
+        }
+    }
     let publication_started = std::time::Instant::now();
     let p = kernel.project(project)?;
     let store = p.store();

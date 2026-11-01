@@ -205,6 +205,8 @@ impl From<SelectionCall> for Call {
 
 #[derive(Clone, Debug)]
 pub enum HistoryCall {
+    /// Explicit navigation record, suppressed inside an entry or after undo.
+    Selection { before: Selection, after: Selection },
     Mark,
     Squash {
         mark: ActorHistoryMark,
@@ -763,15 +765,7 @@ impl Project {
                 self.mutations.pop_front();
             }
         }
-        for retired in self.store.take_retired() {
-            self.outbox.push(RealmMessage::Cleanup {
-                writer: Writer {
-                    realm: retired.realm,
-                    generation: retired.generation,
-                },
-                handle: retired.handle,
-            });
-        }
+        self.collect_retired();
         if let (Some(key), Some(ack)) = (txid, &handled.reply) {
             self.remember(key, ack.clone());
         }
@@ -809,6 +803,18 @@ impl Project {
             SelectionCall::Clear => self.store.clear_selection(),
         }
         Reply::Selection(self.store.selection().clone())
+    }
+
+    pub(crate) fn collect_retired(&mut self) {
+        for retired in self.store.take_retired() {
+            self.outbox.push(RealmMessage::Cleanup {
+                writer: Writer {
+                    realm: retired.realm,
+                    generation: retired.generation,
+                },
+                handle: retired.handle,
+            });
+        }
     }
 
     fn remember(&mut self, key: TxId, ack: Ack) {
@@ -1100,6 +1106,7 @@ impl Project {
     fn history(&mut self, caller: Caller, txid: Option<TxId>, call: HistoryCall) -> Handled {
         let writer = caller.writer;
         let reply = match call {
+            HistoryCall::Selection { before, after } => Reply::Entry(if self.entry.is_none() { self.store.kernel_selection(before, after) } else { None }),
             HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
                 document: self.store.doc_id(),
                 writer,
@@ -1235,6 +1242,7 @@ impl Project {
                 Handled::reply(self.ack(txid, None, None, Reply::Bool(false)))
             }
             Err(e) => Handled::reply(self.ack(txid, None, None, Reply::Throw(e.into()))),
+            Ok(Step::Selection) => Handled::reply(self.ack(txid, None, None, Reply::Bool(true))),
             Ok(Step::Document {
                 ops,
                 reverse,

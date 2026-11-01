@@ -256,7 +256,7 @@ sometimes one more, and undo works), 8 library, 1 trace replay.
 * `edit.commit` with no changes lowers the depth by one; the tag's
   `PM.hist.cancel()` there also dropped an enclosing pending entry.
 * Revisions are the kernel's monotonic counter (undo is a new revision).
-* `history.selection` entries are not ported yet (selection is not history).
+* Explicit `history.selection` navigation now matches the tag: no entries during pending history or after undo; entries stay out of persisted history and dirty state. Restoring selection uses the existing native pruning of missing layer/key IDs.
 
 ## Engine needs (not changed here)
 
@@ -266,11 +266,24 @@ sometimes one more, and undo works), 8 library, 1 trace replay.
   use `canonical_digest_parallel` or the file/slot hash computed while
   reading, off the actor thread.
 
+## Cloud history retention and selection
+
+The kernel shares the 1,000-entry / 256 MiB budget across all open projects.
+`set_history_budget` applies memory-pressure limits. Oldest recently active
+background histories trim before the active history; distant redo goes before
+old undo, and each project retains at least its latest entry, even over budget.
+Retired external entries still queue cleanup to their owning realm, and the
+actor republishes changed background histories. This extends the tag's shared
+byte rule to the requested shared entry limit; the tag's count limit was per stack.
+
+`HistoryCall::Selection { before, after }` is the explicit v1.2 navigation
+record (ordinary selection calls remain unrecorded). Equal selections, pending
+entries and redo navigation return `Entry(None)`. Undo/redo restores/prunes IDs,
+without changing the document revision, persisted history or dirty state.
+
 ## Remaining for P1
 
-* History: parked histories sharing one global budget (`history.ts:460–480`),
-  `history.selection`, export pinning
-  of extension generations, v4 hot-reload staging (§3.2.1).
+* History: export pinning of extension generations, v4 hot-reload staging (§3.2.1).
 * Index hazards: rebase index paths by id so more cancels revert instead of
   committing with notice.
 * Realm adapters: the compat page's write barrier (dirty-path diffing, resync

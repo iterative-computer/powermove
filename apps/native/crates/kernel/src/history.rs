@@ -16,7 +16,7 @@
 //! | New entry discards redo | Same |
 //! | `squash(mark)` combines an agent run | [`DocumentStore::squash_since`](crate::DocumentStore::squash_since) |
 //! | `export()`/`import()` as `{ version: 1, paths: 'composition', index, entries }` | [`HistorySnapshot::to_saved`] / [`History::from_saved`], same format (root-relative histories are canonicalized on import, dictionary-packed ones unpacked) |
-//! | "Selection" entries while at the top of the stack | Not ported: selection is not history (see `docs/gpui/core-api.md`) |
+//! | "Selection" entries while at the top of the stack | Selection-only entries, excluded from persistence |
 //! | `external` closure entries | [`HistoryRecord::external`]: `(realm, generation, handle)`, undone by the realm through a kernel continuation (`docs/native/kernel.md`); not exported, as before |
 //! | Cleanup closures when entries fall off | [`History::take_retired`] hands the kernel every retired external entry with a cleanup |
 //! | Nested `begin`/`commit` depth | The kernel's open entry (`crate::tx`); [`transact`](crate::DocumentStore::transact) takes the whole command list |
@@ -71,11 +71,12 @@ pub struct HistoryRecord {
     /// `Some` for an external (closure) entry: no operations, undone by its
     /// realm. Never exported (the old `export()` kept document entries only).
     pub external: Option<ExternalRef>,
+    pub selection: Option<Arc<(crate::selection::Selection, crate::selection::Selection)>>,
 }
 
 impl HistoryRecord {
     pub fn is_document(&self) -> bool {
-        self.external.is_none()
+        self.external.is_none() && self.selection.is_none()
     }
 
     /// The patches the file stores for this record (`forward`, `backward`).
@@ -234,7 +235,11 @@ impl History {
     /// applied record, or the base token. Two moments with the same token
     /// hold the same document content (that is how "dirty" is decided).
     pub fn state_token(&self) -> u64 {
-        self.peek_undo().map_or(self.base_token, |r| r.id)
+        self.entries[..self.cursor]
+            .iter()
+            .rev()
+            .find(|r| r.selection.is_none())
+            .map_or(self.base_token, |r| r.id)
     }
 
     /// Lowers (or raises) the byte budget and trims to it (`Memory.trim`):
@@ -284,7 +289,9 @@ impl History {
         if self.cursor > 0 {
             self.cursor -= 1;
             // "No record applied" now means "after the removed one".
-            self.base_token = removed.id;
+            if removed.selection.is_none() {
+                self.base_token = removed.id;
+            }
         } else {
             // A redo record went; the base state is unchanged.
         }
@@ -337,6 +344,7 @@ impl History {
             revision,
             bytes,
             external: None,
+            selection: None,
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
@@ -367,11 +375,56 @@ impl History {
             revision,
             bytes,
             external: Some(external),
+            selection: None,
         });
         self.total_bytes += bytes;
         self.cursor = self.entries.len();
         self.trim();
         id
+    }
+
+    pub(crate) fn push_selection(
+        &mut self,
+        before: crate::selection::Selection,
+        after: crate::selection::Selection,
+    ) -> Option<u64> {
+        if before == after || self.can_redo() {
+            return None;
+        }
+        let bytes = before.encoded_bytes() + after.encoded_bytes();
+        let id = next_token();
+        self.entries.push(HistoryRecord {
+            id,
+            label: "Selection".into(),
+            origin: Origin::Interface,
+            forward: Vec::new().into(),
+            inverse: Vec::new().into(),
+            saved: None,
+            revision: 0,
+            bytes,
+            external: None,
+            selection: Some(Arc::new((before, after))),
+        });
+        self.total_bytes += bytes;
+        self.cursor = self.entries.len();
+        self.trim();
+        Some(id)
+    }
+
+    /// Shared retention: distant redo first, then the oldest undo; keep
+    /// the latest edit in every project even when it exceeds the budget.
+    pub(crate) fn trim_one_shared(&mut self) -> bool {
+        if self.entries.len() <= 1 {
+            return false;
+        }
+        if self.can_redo() {
+            let removed = self.entries.pop().expect("non-empty");
+            self.retire(&removed);
+            self.total_bytes -= removed.bytes;
+        } else {
+            self.drop_oldest();
+        }
+        true
     }
 
     /// Removes `n` records from the top (journal replay of a squash).
@@ -621,6 +674,7 @@ impl History {
                 revision: 0,
                 bytes,
                 external: None,
+                selection: None,
             });
             history.total_bytes += bytes;
         }

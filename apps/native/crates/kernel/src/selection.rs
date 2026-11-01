@@ -4,7 +4,7 @@
 //! document change the store prunes ids that no longer exist, like the old
 //! `PM.replaceProject` (`legacy/core/selection.ts`): layers must be in the
 //! open composition, keys must still exist. Selection is editor state: it
-//! is never saved and never an undo step.
+//! is never saved; explicit history.selection calls can record navigation.
 
 use std::collections::HashSet;
 
@@ -19,6 +19,24 @@ pub struct Selection {
 }
 
 impl Selection {
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        use pm_model::{Map, Value};
+        let mut value = Map::new();
+        value.insert(
+            "layers",
+            Value::Array(self.layers.iter().cloned().map(Value::from).collect()),
+        );
+        value.insert(
+            "keys",
+            Value::Array(self.keys.iter().cloned().map(Value::from).collect()),
+        );
+        value.insert(
+            "chan",
+            self.channel.clone().map(Value::from).unwrap_or(Value::Null),
+        );
+        pm_model::json::to_canonical_string(&Value::Object(value)).len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty() && self.keys.is_empty()
     }
