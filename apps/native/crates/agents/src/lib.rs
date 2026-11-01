@@ -5,9 +5,12 @@ pub mod claude;
 pub mod codex;
 pub mod codex_exec;
 pub mod conversation;
+pub mod persistence;
 pub mod protocol;
+pub mod runtime;
 pub mod trace;
 pub mod transport;
+pub mod workspace;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
