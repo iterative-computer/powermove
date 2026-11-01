@@ -331,6 +331,14 @@ pub fn convert_tagged(
 ) -> Result<EncoderInput, Error> {
     if tags.is_hdr() {
         crate::hdr::validate(tags)?;
+        if !matches!(
+            format,
+            InputFormat::Y416 | InputFormat::V216 | InputFormat::X420
+        ) {
+            return Err(Error::InvalidSpec(
+                "HDR conversion needs a 10-bit or higher video input".into(),
+            ));
+        }
     }
     let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(

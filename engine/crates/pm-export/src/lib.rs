@@ -9,32 +9,39 @@
 //! * `mac` (macOS): VideoToolbox ProRes, H.264, and HEVC with session-property color
 //!   tags, AVAssetWriter MOV/MP4 with section 17 timescales and a `tmcd` track, then
 //!   [`verify`] and an [`atomic`] move into place.
-//! * [`webm`]: VP9 and VP8 (with alpha) through libvpx and Opus through libopus,
+//! * `webm` (macOS engine integration): VP9 and VP8 (with alpha) through libvpx and Opus through libopus,
 //!   muxed by FFmpeg, verified by demuxing and decoding.
 //! * [`png`]: PNG sequences and stills, 8 or 16-bit, verified losslessly.
-//! * [`export`]: one entry point for every format ([`OutputSink`]).
+//! * [`software`]: headless FFmpeg software codecs through the same [`Sink`] trait.
+//! * [`export`]: platform delivery for every format ([`OutputSink`]).
 //! * [`mp4box`]: the container reader verification uses.
-//! * [`render`]: the job engine's export and agent-still pipeline: capability
+//! * `render` (macOS engine integration): the job engine's export and agent-still pipeline: capability
 //!   routing, pm-render frames (sliced through a [`render::GpuGate`]), pm-audio's
 //!   offline mix, and the encoder above.
 
 pub mod atomic;
 pub mod convert;
 pub mod dither;
+#[cfg(all(feature = "engine", target_os = "macos"))]
 pub mod gpu_time;
 pub mod hdr;
 pub mod mp4box;
 pub(crate) mod par;
 pub mod pipeline;
 pub mod png;
+#[cfg(all(feature = "engine", target_os = "macos"))]
 mod readback;
+#[cfg(all(feature = "engine", target_os = "macos"))]
 pub mod render;
+pub mod schedule;
 pub mod settings;
+pub mod software;
 pub mod timescale;
 pub mod verify;
+#[cfg(all(feature = "engine", target_os = "macos"))]
 pub mod webm;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "engine", target_os = "macos"))]
 pub mod mac;
 
 use std::path::PathBuf;
@@ -54,11 +61,13 @@ pub struct Delivered {
 
 /// The sink of one export, by container.
 pub enum OutputSink {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "engine", target_os = "macos"))]
     VideoToolbox(Box<mac::VideoToolboxSink>),
     /// libvpx encodes on the calling thread, so it runs one frame behind
     /// the conversion.
+    #[cfg(all(feature = "engine", target_os = "macos"))]
     Webm(Box<pipeline::Overlapped<webm::WebmSink>>),
+    Software(Box<software::SoftwareSink>),
     Png(Box<png::PngSink>),
 }
 
@@ -69,22 +78,33 @@ impl OutputSink {
     pub fn new(spec: &ExportSpec) -> Result<OutputSink, Error> {
         match spec.container {
             Container::Mov | Container::Mp4 => {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(feature = "engine", target_os = "macos"))]
                 {
                     Ok(OutputSink::VideoToolbox(Box::new(
                         mac::VideoToolboxSink::new(spec)?,
                     )))
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(all(feature = "engine", target_os = "macos")))]
                 {
-                    Err(Error::InvalidSpec(
-                        "MOV and MP4 exports need VideoToolbox (macOS)".into(),
-                    ))
+                    Ok(OutputSink::Software(Box::new(software::SoftwareSink::new(
+                        spec,
+                    )?)))
                 }
             }
-            Container::Webm => Ok(OutputSink::Webm(Box::new(pipeline::Overlapped::new(
-                webm::WebmSink::new(spec)?,
-            )?))),
+            Container::Webm => {
+                #[cfg(all(feature = "engine", target_os = "macos"))]
+                {
+                    Ok(OutputSink::Webm(Box::new(pipeline::Overlapped::new(
+                        webm::WebmSink::new(spec)?,
+                    )?)))
+                }
+                #[cfg(not(all(feature = "engine", target_os = "macos")))]
+                {
+                    Ok(OutputSink::Software(Box::new(software::SoftwareSink::new(
+                        spec,
+                    )?)))
+                }
+            }
             Container::PngSequence | Container::PngStill => {
                 Ok(OutputSink::Png(Box::new(png::PngSink::new(spec)?)))
             }
@@ -97,46 +117,56 @@ impl Sink for OutputSink {
 
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error> {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::VideoToolbox(s) => s.video(index, input),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::Webm(s) => s.video(index, input),
+            OutputSink::Software(s) => s.video(index, input),
             OutputSink::Png(s) => s.video(index, input),
         }
     }
 
     fn video_owned(&mut self, index: u64, input: EncoderInput) -> Result<(), Error> {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::VideoToolbox(s) => s.video(index, &input),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::Webm(s) => s.video_owned(index, input),
+            OutputSink::Software(s) => s.video_owned(index, input),
             OutputSink::Png(s) => s.video(index, &input),
         }
     }
 
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::VideoToolbox(s) => s.audio(interleaved),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::Webm(s) => s.audio(interleaved),
+            OutputSink::Software(s) => s.audio(interleaved),
             OutputSink::Png(s) => s.audio(interleaved),
         }
     }
 
     fn finish(self) -> Result<Delivered, Error> {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::VideoToolbox(s) => s.finish(),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::Webm(s) => s.finish(),
+            OutputSink::Software(s) => s.finish(),
             OutputSink::Png(s) => s.finish(),
         }
     }
 
     fn finish_with_cancel(self, cancel: &AtomicBool) -> Result<Delivered, Error> {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::VideoToolbox(s) => s.finish_with_cancel(cancel),
+            #[cfg(all(feature = "engine", target_os = "macos"))]
             OutputSink::Webm(s) => s.finish_with_cancel(cancel),
-            OutputSink::Png(s) => s.finish(),
+            OutputSink::Software(s) => s.finish_with_cancel(cancel),
+            OutputSink::Png(s) => s.finish_with_cancel(cancel),
         }
     }
 }
