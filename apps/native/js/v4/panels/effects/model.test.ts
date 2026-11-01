@@ -97,6 +97,24 @@ test("slow search retains previous rows and ignores a late answer", async () => 
   expect(itemRow(model, "glow").item.id).toBe("glow");
   expect(model.rows()).toHaveLength(1);
 });
+
+test("search highlighting maps case-expanded Unicode offsets back to authored text", () => {
+  expect(labelParts("İ Glow", "glow")).toEqual({
+    before: "İ ",
+    match: "Glow",
+    after: "",
+  });
+  expect(labelParts("İ Glow", "i")).toEqual({
+    before: "",
+    match: "İ",
+    after: " Glow",
+  });
+  expect(labelParts("🎨 ΟΣ Glow", "ος")).toEqual({
+    before: "🎨 ",
+    match: "ΟΣ",
+    after: " Glow",
+  });
+});
 test("clearing search and picking a scope fence pending worker answers", async () => {
   const pending = deferred<readonly string[]>();
   const { model } = fixture({ search: () => pending.promise });
@@ -402,4 +420,19 @@ test("retirement fences pending search, apply, registry and setting observations
   expect(model.installedCount()).toBe(2);
   expect(model.recent).toEqual([]);
   expect(saved).toEqual([]);
+});
+
+test("published row indices are immutable and late target/settings failure cannot mutate a retired model", async () => {
+  const pending = deferred<void>();
+  const { model, errors } = fixture({ persist: () => pending.promise });
+  expect(Object.isFrozen(model.rows())).toBe(true);
+  expect(Object.isFrozen(model.rows()[0])).toBe(true);
+  model.toggle(model.rows()[0].key, false);
+  await Promise.resolve();
+  model.dispose();
+  model.setTarget({ id: "late-layer", effects: [] });
+  pending.reject(new Error("late disk failure"));
+  await model.settingsSettled();
+  expect(model.target).toBeNull();
+  expect(errors).toEqual([]);
 });

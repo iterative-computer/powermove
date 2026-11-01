@@ -47,6 +47,8 @@ export interface ModelPorts {
     value: string[],
   ): Promise<void>;
   search: Search;
+  // DESIGN-TODO(opus): failure presentation/copy/retry/focus for apply, search
+  // and settings is unspecified. Keep errors observable without invented UI.
   report(error: unknown): void;
 }
 export const ids = {
@@ -77,13 +79,30 @@ export function readIds(value: unknown): string[] {
 export function labelParts(label: string, query: string) {
   const needle = query.trim().toLowerCase();
   const index = needle ? label.toLowerCase().indexOf(needle) : -1;
-  return index < 0
-    ? { before: label, match: "", after: "" }
-    : {
-        before: label.slice(0, index),
-        match: label.slice(index, index + needle.length),
-        after: label.slice(index + needle.length),
-      };
+  if (index < 0) return { before: label, match: "", after: "" };
+  // Case conversion can expand a character (İ → i + combining dot). Map folded
+  // UTF-16 offsets back to authored character boundaries instead of slicing the
+  // original at an offset in a different string. Whole-label folding also keeps
+  // context-sensitive Greek sigma matching consistent with workerSearch.
+  let foldedOffset = 0,
+    authoredOffset = 0,
+    start: number | undefined,
+    end = label.length;
+  for (const character of label) {
+    const next = foldedOffset + character.toLowerCase().length;
+    if (start === undefined && next > index) start = authoredOffset;
+    if (next >= index + needle.length) {
+      end = authoredOffset + character.length;
+      break;
+    }
+    foldedOffset = next;
+    authoredOffset += character.length;
+  }
+  return {
+    before: label.slice(0, start),
+    match: label.slice(start, end),
+    after: label.slice(end),
+  };
 }
 export class EffectsModel {
   private items: readonly EffectItem[] = [];
@@ -176,7 +195,7 @@ export class EffectsModel {
       for (const name of this.groups)
         section(name, this.grouped.get(name) ?? [], groupKey(name));
     }
-    this.cachedRows = rows;
+    this.cachedRows = Object.freeze(rows.map((row) => Object.freeze(row)));
     const anchored = anchor ? rows.findIndex((row) => row.key === anchor) : -1;
     this.viewport.start =
       anchored >= 0
@@ -234,7 +253,9 @@ export class EffectsModel {
       .then(async () => {
         if (!this.retired) await this.ports.persist(key, copy);
       })
-      .catch((error: unknown) => this.ports.report(error));
+      .catch((error: unknown) => {
+        if (!this.retired) this.ports.report(error);
+      });
   }
   async settingsSettled() {
     await this.settingsQueue;
@@ -306,6 +327,7 @@ export class EffectsModel {
     this.changed();
   }
   setTarget(target: Target | null) {
+    if (this.retired) return;
     this.target = target
       ? Object.freeze({
           ...target,
