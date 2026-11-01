@@ -34,6 +34,12 @@ pub struct CrashRecord {
     pub process: String,
     pub reason: String,
     pub recovered: bool,
+    /// Local-only display name for the next-launch recovery notice (review item 6).
+    /// Shell substitutes it in: Powermove recovered “Launch Film” after an unexpected quit.
+    /// Render with pm-design's reading style and one Show button, as specified.
+    /// Never export this user-authored name in diagnostics bundles or logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_document: Option<String>,
 }
 impl CrashRecord {
     fn validate(&self) -> Result<()> {
@@ -103,7 +109,11 @@ impl Diagnostics {
         let mut crashes = Vec::new();
         for id in crash_ids {
             if let Some(crash) = Self::crash_status(storage, id)? {
-                crashes.push(crash);
+                // Explicit allowlist: recovery names are local UI data, not diagnostics.
+                crashes.push(serde_json::json!({
+                    "id": crash.id, "process": crash.process,
+                    "reason": crash.reason, "recovered": crash.recovered,
+                }));
             }
         }
         let dir = storage.directory("logs", "events")?;

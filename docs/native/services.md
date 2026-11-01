@@ -218,3 +218,13 @@ recovery. Strict crate Clippy passes. The CoreText broker adapter must implement
 `faces` and map its native weights into the engine's CSS/OpenType weight scale;
 macOS must verify activation, face selection, family-font submenus and inspector
 Weight choices. This lane adds no font renderer, face synthesis or visual metric.
+
+| Review item | Implementation / selecting rule |
+|---|---|
+| 6 — recovery document name (nice-to-have) | Optional `CrashRecord.recovered_document` retains the kernel's user-facing name for the next-launch notice. Old records load with no name; prior crash generations remain archived. Diagnostic exports use an explicit field allowlist and omit the name. The review's sentence and one Show button remain shell-owned, using `reading`. N1 useful recovery, N3 exact names, N4 old records and revisions preserved. |
+
+The five diagnostics tests pass, including old-record round trip, next-launch
+name retention after reopen, prior-generation preservation and export omission.
+Strict crate Clippy passes. The recovery owner must supply the document name;
+the shell owner must verify the specified notice and Show action on macOS. No
+user-authored name is added to log or bundle output.
