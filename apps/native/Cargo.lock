@@ -3077,16 +3077,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-mac-core"
+name = "pm-kernel"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "libc",
  "pm-edit",
  "pm-eval",
  "pm-expr",
  "pm-model",
  "pm-text",
  "pm-wasm",
+ "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "pm-mac-core"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
 ]
 
 [[package]]
