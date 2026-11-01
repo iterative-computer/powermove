@@ -227,4 +227,43 @@ test.describe('@viewer After Effects tool behavior', () => {
     expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return [tool.tool, viewer.temporaryTool]; })).toEqual(['select', null]);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
+
+  test('Pan Behind selects and drags a layer in one gesture, and a click only selects', async ({ session }) => {
+    await session.openEditor();
+    const { page } = session;
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return Boolean(viewer?.ov && tool?.setTool); });
+    for (const selectBoth of [false, true]) {
+      await cleanProject(page, 'Pan Behind selection');
+      const ids = await page.evaluate((selectBoth: boolean) => {
+        const PM = (window as any).PM;
+        const make = (name: string, x: number) => PM.mkLayer('shape', {
+          name, dur: 4, d: { shape: 'rect', color: '#FFFFFF', w: 120, h: 100, radius: 0, stroke: 0, strokeColor: '#000000', points: 5 },
+          p: { 'position.x': x, 'position.y': 180 },
+        }, PM.proj);
+        const card = make('Card', 180), badge = make('Badge', 450);
+        PM.proj.layers = [card, badge]; PM.ProjectIndex.invalidate(); PM.invalidate();
+        PM.selectLayers(selectBoth ? [card.id, badge.id] : [card.id]);
+        return { card: card.id, badge: badge.id };
+      }, selectBoth);
+      await page.keyboard.press('y');
+      const read = (id: string) => page.evaluate((id: string) => {
+        const PM = (window as any).PM; const layer = PM.L(id);
+        return { matrix: [...PM.worldMatrix(layer, 1)], anchor: [layer.p['anchor.x'].v, layer.p['anchor.y'].v], selected: PM.selLayers().map((item: any) => item.id) };
+      }, id);
+      const before = await read(ids.badge);
+      const start = await compositionPoint(page, 470, 165);
+      const end = await compositionPoint(page, 500, 225);
+      await page.mouse.move(start.x, start.y); await page.mouse.down();
+      await page.mouse.move(end.x, end.y, { steps: 10 }); await page.mouse.up();
+      const after = await read(ids.badge);
+      expect(after.selected).toEqual([ids.badge]);
+      after.anchor.forEach((value: number, index: number) => expect(value).toBeCloseTo([50, 45][index]!, 1));
+      expect(after.matrix).toEqual(before.matrix);
+      // A plain click on another layer selects it without moving its anchor.
+      const card = await compositionPoint(page, 180, 180);
+      await page.mouse.click(card.x, card.y);
+      expect(await read(ids.card)).toMatchObject({ anchor: [0, 0], selected: [ids.card] });
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
 });
