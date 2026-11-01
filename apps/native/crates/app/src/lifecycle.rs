@@ -307,7 +307,7 @@ impl Controller {
                     v.path = None;
                     v.host
                         .borrow()
-                        .set_document_metadata("Untitled", false, None);
+                        .set_document_metadata("Untitled", "", false, None);
                     v.mcp.bind(None);
                     v.close_operation.take();
                     if intent == Intent::Quit {

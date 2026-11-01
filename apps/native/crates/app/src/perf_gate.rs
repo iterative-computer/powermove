@@ -117,6 +117,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         // Deferred so the frame callback never runs inside this update.
                         "redraw" => {
                             let view = v.host.borrow().gpui.clone();
+                            // AppKit chrome (toolbar, tab bar) too: occluded windows skip display.
+                            let w = v.host.borrow().window.clone();
+                            if let Some(frame) = w.contentView().and_then(|c| unsafe { c.superview() }) {
+                                frame.layoutSubtreeIfNeeded();
+                            }
+                            w.display();
                             cx.spawn(async move |_, _| unsafe {
                                 let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
                                 if !layer.is_null() {
@@ -126,7 +132,33 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             }).detach();
                         },
                         "save" => v.save(None, cx),
+                        // Diagnostics: the window's AppKit view tree (class, frame, hidden).
+                        "views" => {
+                            let w = v.host.borrow().window.clone();
+                            let mut out = vec![];
+                            fn walk(view: &objc2_app_kit::NSView, depth: usize, out: &mut Vec<String>) {
+                                let f = view.frame();
+                                out.push(format!("{}{} {:.0},{:.0} {:.0}x{:.0}{}", "  ".repeat(depth), view.class().name().to_string_lossy(), f.origin.x, f.origin.y, f.size.width, f.size.height, if view.isHidden() { " hidden" } else { "" }));
+                                if depth < 7 {
+                                    for s in view.subviews().to_vec() { walk(&s, depth + 1, out); }
+                                }
+                            }
+                            let app = objc2_app_kit::NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+                            for win in app.windows().to_vec() {
+                                out.push(format!("WINDOW {} visible={} tabs={}", win.windowNumber(), win.isVisible(), win.tabbedWindows().map_or(0, |t| t.count())));
+                                if let Some(frame) = win.contentView().and_then(|c| unsafe { c.superview() }) {
+                                    walk(&frame, 0, &mut out);
+                                }
+                            }
+                            reply(json!({"views": out, "window": w.windowNumber(), "visible": w.isVisible(), "key": w.isKeyWindow(), "selected": w.tabGroup().and_then(|g| g.selectedWindow()).map(|s| s.windowNumber())}));
+                        },
                         "quit" => cx.quit(),
+                        // Shell command by name (`palette`, `layout:save`, `shellTest:drag`, …).
+                        "shell" => {
+                            let name = r["command"].as_str().ok_or_else(|| anyhow::anyhow!("missing command"))?;
+                            let args = r["args"].as_array().cloned().unwrap_or_default();
+                            v.host.borrow().send_command(name, args);
+                        },
                         _ => anyhow::bail!("unknown perf operation"),
                     }
                     let status = v.viewer.as_ref().map(|v| v.status());
@@ -148,6 +180,16 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         "duration":v.duration,
                     });
                     // Viewer-2 / lifecycle fields (a second object keeps json! shallow).
+                    // Shell 3 checks: toolbar title/subtitle, native tab group, AccentColor.
+                    let shell = {
+                        let h = v.host.borrow();
+                        let (title, subtitle) = h.document_title();
+                        let (tabs, tab_bar) = h.tab_info();
+                        let hex = |c: Option<u32>| c.map(|c| format!("#{c:06X}"));
+                        json!({"title":title,"subtitle":subtitle,"tabs":tabs,"tab_bar":tab_bar,
+                            "accent_light":hex(pm_shell::system_accent(pm_design::Scheme::Light)),
+                            "accent_dark":hex(pm_shell::system_accent(pm_design::Scheme::Dark))})
+                    };
                     let more = json!({
                         "layer_count":v.layers().len(),
                         "has_layer":r_layer.as_deref().map(|id| v.layers().iter().any(|l| l.id == id)),
@@ -173,6 +215,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         "stale_rejections":status.as_ref().map(|s| s.stale_rejections),
                         "represented":status.as_ref().map(|s| s.represented),
                         "generation":frame.map(|f| f.stamp.generation),
+                        "shell": shell,
                     });
                     if let (Value::Object(base), Value::Object(more)) = (&mut out, more) {
                         base.extend(more);

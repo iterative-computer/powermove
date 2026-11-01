@@ -43,7 +43,7 @@ impl Clip {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform(pub [f64; 6]);
 impl Transform {
     pub fn translation(x: f64, y: f64) -> Self {
@@ -64,7 +64,7 @@ pub enum Band {
     Below,
     Above,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Slot {
     pub id: u64,
     pub band: Band,
@@ -178,6 +178,13 @@ pub fn visible_rows(total: usize, scroll: f64, height: f64, row: f64) -> std::op
             .ceil()
             .max(start as f64)
             .min(total as f64) as usize
+}
+/// P-120: a composition frame needs GPUI's transaction-coupled present only if a
+/// slot's band, bounds, clip or transform changed, a slot was added/removed or
+/// reordered, or the content height changed (AppKit's flipped origin moves).
+/// `prev` is `None` before the first publication.
+pub fn slots_moved(prev: Option<(&[Slot], f64)>, next: &[Slot], height: f64) -> bool {
+    prev.is_none_or(|(slots, h)| h != height || slots != next)
 }
 #[cfg(test)]
 mod tests {
@@ -294,5 +301,32 @@ mod overlay_tests {
             assert!(r.contains([width - 13., 363.]));
             assert!(!r.contains([width - 333., 305.]));
         }
+    }
+    #[test]
+    fn p120_moves_only_when_geometry_changes() {
+        let r = Rect::new(0., 0., 100., 100.);
+        let f = Frame {
+            slots: vec![Slot {
+                id: 1,
+                band: Band::Below,
+                bounds: r,
+                clip: Clip::Rect(r),
+                transform: Transform::translation(0., 0.),
+            }],
+            ..Default::default()
+        };
+        assert!(slots_moved(None, &f.slots, 100.), "first publication");
+        assert!(!slots_moved(Some((&f.slots, 100.)), &f.slots, 100.));
+        let mut moved = f.slots.clone();
+        moved[0].transform = Transform::translation(4., 0.);
+        assert!(slots_moved(Some((&f.slots, 100.)), &moved, 100.));
+        let mut clipped = f.slots.clone();
+        clipped[0].clip = Clip::Rect(Rect::new(0., 0., 50., 100.));
+        assert!(slots_moved(Some((&f.slots, 100.)), &clipped, 100.));
+        assert!(slots_moved(Some((&f.slots, 100.)), &[], 100.), "removed");
+        assert!(
+            slots_moved(Some((&f.slots, 100.)), &f.slots, 120.),
+            "flip origin"
+        );
     }
 }

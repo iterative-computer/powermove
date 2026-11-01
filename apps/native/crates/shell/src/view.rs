@@ -1,14 +1,35 @@
 use crate::{
-    layout::{self, Divider, Geometry, Layout, LayoutStore, Rect},
-    native::{Command, Host},
+    layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, LayoutStore, Rect},
+    native::{Command, Host, MenuEntry, MenuState},
+    session::{Session, WindowState},
 };
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
+
+/// A tab drag in progress: the layout it started from, the pointer and the
+/// target it would drop on. Escape restores `original`.
+#[derive(Clone)]
+struct PanelDrag {
+    id: String,
+    start: Point<Pixels>,
+    original: Layout,
+    at: Point<Pixels>,
+    moved: bool,
+    preview: Option<DropPreview>,
+}
 #[derive(Clone)]
 enum Gesture {
     Resize(Divider, Point<Pixels>, Layout),
-    Panel(String, Point<Pixels>, Layout),
+    Panel(PanelDrag),
+}
+impl Gesture {
+    fn original(self) -> Layout {
+        match self {
+            Gesture::Resize(_, _, l) => l,
+            Gesture::Panel(d) => d.original,
+        }
+    }
 }
 pub struct Editor {
     pub integration: Option<Rc<dyn crate::integration::Integration>>,
@@ -16,6 +37,8 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    /// Docking area of the last render, in window points.
+    dock_bounds: Rect,
     gesture: Option<Gesture>,
     focus: FocusHandle,
     pub status: String,
@@ -23,32 +46,44 @@ pub struct Editor {
     path: Option<PathBuf>,
     project: String,
     split_focus: Option<Divider>,
+    /// Session window id; 0 until the window is registered (tests, smoke).
+    pub window_id: u64,
+    session_path: Option<PathBuf>,
+    session_pending: bool,
+    tool: String,
+}
+/// Layout store and window session paths. `PM_NATIVE_SHELL_STATE` selects an
+/// isolated layout file; its directory then also holds the session.
+pub fn state_paths() -> Option<(PathBuf, PathBuf)> {
+    let layouts = std::env::var_os("PM_NATIVE_SHELL_STATE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| {
+                PathBuf::from(h)
+                    .join("Library/Application Support/Powermove Native/Shell/layouts.json")
+            })
+        })?;
+    let session = layouts.with_file_name("session.json");
+    Some((layouts, session))
 }
 impl Editor {
     pub fn new(tokens: Tokens, host: Option<Rc<RefCell<Host>>>, cx: &mut Context<Self>) -> Self {
-        let path = if host.is_none() {
-            None
-        } else {
-            std::env::var_os("PM_NATIVE_SHELL_STATE")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|h| {
-                        PathBuf::from(h)
-                            .join("Library/Application Support/Powermove Native/Shell/layouts.json")
-                    })
-                })
-        };
+        let paths = if host.is_none() { None } else { state_paths() };
+        let path = paths.as_ref().map(|p| p.0.clone());
         let store = path
             .as_deref()
             .filter(|p| p.exists())
             .map(LayoutStore::load)
             .transpose();
         let (store, status) = match store {
-            Ok(s) => (s.unwrap_or_default(), "Ready".into()),
-            Err(e) => (
-                LayoutStore::default(),
-                format!("Layout could not be restored: {e}"),
-            ),
+            Ok(s) => (s.unwrap_or_default(), String::new()),
+            Err(e) => {
+                eprintln!("Workspace store could not be read: {e}");
+                (
+                    LayoutStore::default(),
+                    "Your workspaces couldn’t be restored, so the default is shown.".into(),
+                )
+            }
         };
         let project = "shell-untitled".to_string();
         let layout = store.get(
@@ -61,6 +96,7 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
             status,
@@ -68,11 +104,21 @@ impl Editor {
             path,
             project,
             split_focus: None,
+            window_id: 0,
+            session_path: paths.map(|p| p.1),
+            session_pending: false,
+            tool: "toolSelect".into(),
         }
+    }
+    /// Binds this editor to a session window and restores its project/workspace.
+    pub fn restore(&mut self, state: &WindowState) {
+        self.window_id = state.id;
+        self.project = state.project.clone();
+        self.layout = self.store.get(&self.project, &state.workspace);
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
-            self.tokens = Tokens::new(
+            self.tokens = crate::theme::tokens(
                 match window.appearance() {
                     WindowAppearance::Dark | WindowAppearance::VibrantDark => {
                         pm_design::Scheme::Dark
@@ -87,14 +133,32 @@ impl Editor {
             cx.notify();
         }
     }
+    /// Title, `Edited`/`Saving…` subtitle (`document_subtitle`) and proxy icon.
     pub fn set_document_metadata(
         &mut self,
         title: &str,
+        subtitle: &str,
         edited: bool,
         path: Option<&std::path::Path>,
     ) {
         if let Some(host) = &self.host {
-            host.borrow().set_document_metadata(title, edited, path);
+            host.borrow()
+                .set_document_metadata(title, subtitle, edited, path);
+        }
+    }
+    /// Applies a theme's `nativePatch` (`Tokens::apply_patch`) to every editor
+    /// window; it is re-applied on appearance and accessibility changes.
+    pub fn apply_theme(&mut self, patch: crate::theme::Patch, cx: &mut Context<Self>) {
+        match crate::theme::set(patch) {
+            Ok(()) => self.rebuild_tokens(),
+            Err(e) => self.status = format!("The theme could not be applied: {}", e.0),
+        }
+        cx.notify();
+    }
+    fn rebuild_tokens(&mut self) {
+        self.tokens = crate::theme::tokens(self.tokens.scheme, crate::native::settings());
+        if let Some(h) = &self.host {
+            h.borrow_mut().update_tokens(self.tokens.clone());
         }
     }
     pub fn bind_project(&mut self, project: String) {
@@ -107,6 +171,7 @@ impl Editor {
                 .get(&self.project)
                 .map_or("design", String::as_str),
         );
+        self.persist_session();
     }
     pub fn save(&mut self) {
         if let Some(path) = &self.path
@@ -126,6 +191,203 @@ impl Editor {
         {
             self.status = format!("Layout could not be saved: {e}");
         }
+        self.persist_session();
+    }
+    /// This window's restorable state, read from AppKit.
+    pub fn window_state(&self) -> Option<WindowState> {
+        let host = self.host.as_ref()?.borrow();
+        Some(WindowState {
+            id: self.window_id,
+            frame: host.frame(),
+            project: self.project.clone(),
+            workspace: self.layout.workspace.clone(),
+            tab_group: host.tab_leader(),
+            fullscreen: host.is_fullscreen(),
+        })
+    }
+    /// Read-modify-write of the shared session file (other windows write too).
+    /// A malformed or newer file is reported and never overwritten.
+    pub fn persist_session(&mut self) {
+        if self.window_id == 0 {
+            return;
+        }
+        let (Some(path), Some(state)) = (self.session_path.clone(), self.window_state()) else {
+            return;
+        };
+        let key = self.host.as_ref().is_some_and(|h| h.borrow().is_key());
+        let id = self.window_id;
+        self.update_session(&path, |s| {
+            s.upsert(state);
+            if key {
+                s.key = Some(id);
+            }
+        });
+    }
+    /// Removes this window from the session (the user closed it).
+    pub fn forget_session(&mut self) {
+        if let Some(path) = self.session_path.clone()
+            && self.window_id != 0
+        {
+            let id = self.window_id;
+            self.update_session(&path, |s| s.remove(id));
+        }
+    }
+    fn update_session(&mut self, path: &std::path::Path, f: impl FnOnce(&mut Session)) {
+        let mut session = if path.exists() {
+            match Session::load(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.status = format!("Window session could not be saved: {e}");
+                    return;
+                }
+            }
+        } else {
+            Session::default()
+        };
+        f(&mut session);
+        session.version = 1;
+        if let Err(e) = session.save(path) {
+            self.status = format!("Window session could not be saved: {e}");
+        }
+    }
+    /// Coalesces live-resize/move notifications into one session write.
+    pub fn schedule_session(&mut self, cx: &mut Context<Self>) {
+        if self.session_pending || self.window_id == 0 {
+            return;
+        }
+        self.session_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            let _ = this.update(cx, |v, _| {
+                v.session_pending = false;
+                v.persist_session();
+            });
+        })
+        .detach();
+    }
+    fn menu_state(&self) -> MenuState {
+        MenuState {
+            open: self
+                .layout
+                .open_panels()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            saved: self.store.saved.keys().cloned().collect(),
+            workspace: self.layout.workspace.clone(),
+            sidebar: self.dock_visible("left"),
+            inspector: self.dock_visible("right"),
+            tool: self.tool.clone(),
+        }
+    }
+    fn dock_visible(&self, id: &str) -> bool {
+        self.layout
+            .docks
+            .iter()
+            .any(|d| d.id == id && !d.collapsed && !d.groups.is_empty())
+    }
+    /// Shell-owned commands. Returns false when the command is not the shell's.
+    fn shell_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        let mut parts = name.splitn(3, ':');
+        let (Some(kind), Some(verb)) = (parts.next(), parts.next()) else {
+            return false;
+        };
+        let rest = parts.next().unwrap_or("");
+        let result = match (kind, verb) {
+            ("panel", "toggle") => {
+                if self.layout.open_panels().contains(&rest) && rest != "viewer" {
+                    self.layout.close_panel(rest)
+                } else {
+                    self.layout.show_panel(rest)
+                }
+            }
+            ("panel", "show") => self.layout.show_panel(rest),
+            ("panel", "close") => self.layout.close_panel(rest),
+            ("panel", "dock") => {
+                let (id, edge) = rest.rsplit_once(':').unwrap_or((rest, ""));
+                let edge = match edge {
+                    "left" => Edge::Left,
+                    "right" => Edge::Right,
+                    _ => Edge::Bottom,
+                };
+                self.layout.move_panel_to(id, DropTarget::Edge(edge))
+            }
+            // panel:addto:<dock>:<group>:<id> — the header's + menu.
+            ("panel", "addto") => {
+                let mut it = rest.splitn(3, ':');
+                let dock = it.next().and_then(|s| s.parse().ok());
+                let group = it.next().and_then(|s| s.parse().ok());
+                let id = it.next().unwrap_or("");
+                match (dock, group) {
+                    (Some(dock), Some(group)) => {
+                        let mut next = self.layout.clone();
+                        next.show_panel(id)
+                            .and_then(|_| {
+                                next.move_panel_to(
+                                    id,
+                                    DropTarget::Tab {
+                                        dock,
+                                        group,
+                                        index: usize::MAX,
+                                    },
+                                )
+                            })
+                            .map(|_| self.layout = next)
+                    }
+                    _ => Err(anyhow::anyhow!("Unknown group")),
+                }
+            }
+            ("layout", "save") if rest.is_empty() => {
+                if let Some(h) = &self.host {
+                    h.borrow().prompt_workspace_name(&self.layout.workspace);
+                }
+                Ok(())
+            }
+            ("layout", "save") => {
+                let layout = self.layout.clone();
+                let mut saved = String::new();
+                self.mutate_store(|s| s.save_named(rest, &layout).map(|n| saved = n))
+                    .map(|_| self.status = format!("Saved workspace “{saved}”"))
+            }
+            ("layout", "apply") => self
+                .store
+                .named(rest, &self.layout.workspace)
+                .map(|l| self.layout = l)
+                .ok_or_else(|| anyhow::anyhow!("There’s no workspace named “{rest}”.")),
+            ("layout", "delete") => self.mutate_store(|s| {
+                s.delete_named(rest);
+                Ok(())
+            }),
+            ("layout", "reset") => {
+                self.layout = Layout::preset(&self.layout.workspace);
+                Ok(())
+            }
+            _ => return false,
+        };
+        match result {
+            Ok(()) => self.save(),
+            Err(e) => self.status = e.to_string(),
+        }
+        cx.notify();
+        true
+    }
+    /// Reloads the latest store (other windows write it), applies `f` and writes
+    /// it back atomically. A malformed/newer store is reported, never replaced.
+    fn mutate_store(
+        &mut self,
+        f: impl FnOnce(&mut LayoutStore) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        if let Some(p) = self.path.clone().filter(|p| p.exists()) {
+            self.store = LayoutStore::load(&p)?;
+        }
+        f(&mut self.store)?;
+        if let Some(p) = &self.path {
+            self.store.version = 1;
+            self.store.save(p)?;
+        }
+        Ok(())
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
         if cmd.name == "shellReplayComplete" {
@@ -138,6 +400,13 @@ impl Editor {
             "shell command={} args={:?} token={:?}",
             cmd.name, cmd.args, cmd.token
         );
+        if cmd.name.starts_with("tool") && cmd.name.len() > 4 {
+            // Keep the toolbar's tool group in step with keyboard/menu selection.
+            self.tool = cmd.name.clone();
+            if let Some(h) = &self.host {
+                h.borrow().select_tool(&cmd.name);
+            }
+        }
         if self
             .integration
             .clone()
@@ -149,11 +418,15 @@ impl Editor {
             cx.notify();
             return;
         }
+        if cmd.name.starts_with("shellTest:") {
+            self.test_command(&cmd, cx);
+            return;
+        }
         let mut handled = true;
         match cmd.name.as_str() {
             "palette" => {
                 if let Some(h) = &self.host {
-                    h.borrow_mut().popup(false);
+                    h.borrow_mut().open_palette(&self.menu_state());
                 }
             }
             "fieldMenu" => {
@@ -172,19 +445,30 @@ impl Editor {
                     self.save();
                 }
             }
-            "shellAppearanceChanged" => {
-                self.tokens = Tokens::new(self.tokens.scheme, crate::native::settings());
-                if let Some(h) = &self.host {
-                    h.borrow_mut().update_tokens(self.tokens.clone());
+            "shellAppearanceChanged" => self.rebuild_tokens(),
+            // A theme from the theme pipeline: args[0] is its JSON output.
+            "shellTheme" => {
+                let json = cmd.args.first().map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                });
+                match json.as_deref().map(crate::theme::parse) {
+                    Some(Ok(patch)) => self.apply_theme(patch, cx),
+                    Some(Err(e)) => {
+                        self.status = format!("The theme could not be applied: {}", e.0)
+                    }
+                    None => {
+                        crate::theme::clear();
+                        self.rebuild_tokens();
+                    }
                 }
             }
             "settings" => crate::open_settings(cx),
             "newWindow" => crate::open_editor(cx),
+            "newTab" => crate::open_editor_tab(cx, self.window_id),
             "deselect" | "cancel" => {
                 if let Some(g) = self.gesture.take() {
-                    self.layout = match g {
-                        Gesture::Resize(_, _, l) | Gesture::Panel(_, _, l) => l,
-                    };
+                    self.layout = g.original();
                 } else {
                     handled = false;
                 }
@@ -194,18 +478,188 @@ impl Editor {
                 self.layout = self.store.get(&self.project, &name[10..]);
                 self.save();
             }
+            name if name.starts_with("tool") && name.len() > 4 => {}
+            name if self.shell_command(name, cx) => {}
             name => {
                 handled = self.host.as_ref().is_some_and(|h| h.borrow().system(name));
                 if !handled {
-                    self.status = "Command is not available yet".into();
+                    eprintln!("shell: unhandled command {name}");
                 }
             }
         }
         if let (Some(token), Some(host)) = (cmd.token, &self.host) {
             host.borrow_mut().resolve(token, handled);
         }
-        let _ = window;
         cx.notify();
+    }
+    /// Screen-free stand-in for a pointer drag of panel `id` to `(x, y)`, using the
+    /// last rendered geometry. Used by headless captures and tests.
+    #[doc(hidden)]
+    pub fn simulate_drag(&mut self, id: &str, x: f32, y: f32) {
+        let at = point(px(x), px(y));
+        let original = match self.gesture.take() {
+            Some(Gesture::Panel(d)) => d.original,
+            _ => self.layout.clone(),
+        };
+        let preview = self
+            .layout
+            .drop_target(&self.geometry, self.dock_bounds, x, y, &self.tokens);
+        self.gesture = Some(Gesture::Panel(PanelDrag {
+            id: id.into(),
+            start: at,
+            original,
+            at,
+            moved: true,
+            preview,
+        }));
+    }
+    /// Completes a simulated drag like a mouse-up; returns the applied target.
+    #[doc(hidden)]
+    pub fn simulate_drop(&mut self) -> Option<DropTarget> {
+        let Some(Gesture::Panel(drag)) = self.gesture.take() else {
+            return None;
+        };
+        let target = drag.preview?.target;
+        self.layout.move_panel_to(&drag.id, target).ok()?;
+        self.save();
+        Some(target)
+    }
+    fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>) {
+        self.gesture = Some(Gesture::Panel(PanelDrag {
+            id: id.into(),
+            start: at,
+            original: self.layout.clone(),
+            at,
+            moved: false,
+            preview: None,
+        }));
+        self.split_focus = None;
+        if let Some(h) = &self.host {
+            h.borrow_mut().splitter_focus = false;
+        }
+    }
+    /// Test-driver commands (`PM_PERF_GATE=1` runs only): drag a tab to a point,
+    /// drop it, open a tab's context menu, close transients.
+    fn test_command(&mut self, cmd: &Command, cx: &mut Context<Self>) {
+        if std::env::var("PM_PERF_GATE").as_deref() != Ok("1") {
+            return;
+        }
+        let s = |i: usize| {
+            cmd.args
+                .get(i)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let f = |i: usize| cmd.args.get(i).and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
+        match &cmd.name["shellTest:".len()..] {
+            "drag" => self.simulate_drag(&s(0), f(1), f(2)),
+            "drop" => {
+                self.simulate_drop();
+            }
+            "cancelDrag" => {
+                if let Some(g) = self.gesture.take() {
+                    self.layout = g.original();
+                }
+            }
+            "tabMenu" => self.tab_menu(&s(0), point(px(f(1)), px(f(2)))),
+            "dismiss" => {
+                if let Some(h) = &self.host {
+                    h.borrow().dismiss_transients();
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+    /// Runs a shell command without an AppKit host (tests).
+    #[doc(hidden)]
+    pub fn run_shell_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        self.shell_command(name, cx)
+    }
+    /// Context menu for a panel tab (also its header). The panel's current
+    /// dock carries a checkmark.
+    pub fn tab_menu_entries(&self, id: &str) -> Vec<MenuEntry> {
+        let title = layout::panel_title(id);
+        let current = self
+            .layout
+            .docks
+            .iter()
+            .find(|d| d.groups.iter().any(|g| g.tabs.iter().any(|t| t == id)))
+            .map(|d| d.id.as_str());
+        let mut items = vec![];
+        if id != "viewer" {
+            items.push(MenuEntry::item(
+                format!("Close {title}"),
+                format!("panel:close:{id}"),
+            ));
+            items.push(MenuEntry::separator());
+        }
+        for (label, edge) in [
+            ("Dock Left", "left"),
+            ("Dock Right", "right"),
+            ("Dock Bottom", "bottom"),
+        ] {
+            items.push(
+                MenuEntry::item(label, format!("panel:dock:{id}:{edge}"))
+                    .checked(current == Some(edge)),
+            );
+        }
+        items.push(MenuEntry::separator());
+        items.push(MenuEntry::item("Save Workspace…", "layout:save"));
+        items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
+        items
+    }
+    fn tab_menu(&self, id: &str, position: Point<Pixels>) {
+        let Some(h) = &self.host else { return };
+        h.borrow().context_menu(
+            &self.tab_menu_entries(id),
+            f32::from(position.x),
+            f32::from(position.y),
+        );
+    }
+    /// The status bar's workspace pop-up: presets (current checked) and saved ones.
+    fn workspace_menu(&self, position: Point<Pixels>) {
+        let Some(h) = &self.host else { return };
+        let mut items: Vec<_> = layout::PRESETS
+            .iter()
+            .map(|(id, label)| {
+                MenuEntry::item(*label, format!("workspace:{id}"))
+                    .checked(*id == self.layout.workspace)
+            })
+            .collect();
+        if !self.store.saved.is_empty() {
+            items.push(MenuEntry::separator());
+            items.extend(
+                self.store
+                    .saved
+                    .keys()
+                    .map(|n| MenuEntry::item(n.clone(), format!("layout:apply:{n}"))),
+            );
+        }
+        items.push(MenuEntry::separator());
+        items.push(MenuEntry::item("Save Workspace…", "layout:save"));
+        h.borrow()
+            .context_menu(&items, f32::from(position.x), f32::from(position.y));
+    }
+    fn add_menu(&self, dock: usize, group: usize, position: Point<Pixels>) {
+        let Some(h) = &self.host else { return };
+        let open = self.layout.open_panels();
+        let items: Vec<_> = layout::PANELS
+            .iter()
+            .filter(|p| !open.contains(p))
+            .map(|p| {
+                MenuEntry::item(
+                    layout::panel_title(p),
+                    format!("panel:addto:{dock}:{group}:{p}"),
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        h.borrow()
+            .context_menu(&items, f32::from(position.x), f32::from(position.y));
     }
 }
 fn positioned(r: Rect) -> Div {
@@ -215,6 +669,69 @@ fn positioned(r: Rect) -> Div {
         .top(px(r.y))
         .w(px(r.w))
         .h(px(r.h))
+}
+/// Drop-zone outline width (language: 2 pt `accent`).
+const DROP_OUTLINE: f32 = 2.;
+/// Centred empty state (language §9/§14): `heading` + one `reading` line.
+/// Callers may append one action.
+pub fn empty_state(t: &Tokens, heading: &str, line: &str) -> Div {
+    let (c, ty) = (&t.colors, t.typography);
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(t.metrics.border * 2.))
+        .px(px(t.metrics.inset))
+        .child(
+            div()
+                .text_size(px(ty.heading))
+                .font_weight(FontWeight(ty.semibold_weight))
+                .text_color(rgb(c.secondary))
+                .child(heading.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(ty.reading))
+                .text_color(rgb(c.muted))
+                .text_center()
+                .child(line.to_string()),
+        )
+}
+struct Tip {
+    text: SharedString,
+    tokens: Tokens,
+}
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (c, m) = (&self.tokens.colors, self.tokens.metrics);
+        div()
+            .px(px(m.gap))
+            .py(px(m.border * 2.))
+            .rounded(px(m.control_radius))
+            .bg(rgb(c.floating))
+            .border(px(m.border))
+            .border_color(rgb(c.separator))
+            .text_size(px(self.tokens.typography.minimum))
+            .text_color(rgb(c.text))
+            .font_family(pm_design::TEXT_FONT)
+            .child(self.text.clone())
+    }
+}
+/// A tooltip builder naming a control's action.
+pub fn tooltip(
+    t: &Tokens,
+    text: &'static str,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let tokens = t.clone();
+    move |_, cx| {
+        cx.new(|_| Tip {
+            text: text.into(),
+            tokens: tokens.clone(),
+        })
+        .into()
+    }
 }
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -231,15 +748,13 @@ impl Render for Editor {
             .host
             .as_ref()
             .map_or(m.toolbar, |h| h.borrow().toolbar_inset());
-        self.geometry = self.layout.geometry(
-            Rect {
-                x: m.gap,
-                y: top + m.gap,
-                w: (f32::from(viewport.width) - m.gap * 2.).max(0.),
-                h: (f32::from(viewport.height) - top - m.status - m.gap * 2.).max(0.),
-            },
-            &t,
-        );
+        self.dock_bounds = Rect {
+            x: m.gap,
+            y: top + m.gap,
+            w: (f32::from(viewport.width) - m.gap * 2.).max(0.),
+            h: (f32::from(viewport.height) - top - m.status - m.gap * 2.).max(0.),
+        };
+        self.geometry = self.layout.geometry(self.dock_bounds, &t);
         let viewer = self
             .geometry
             .panels
@@ -252,10 +767,13 @@ impl Render for Editor {
                 h: (p.rect.h - m.header - m.border).max(0.),
             });
         if let Some(h) = &self.host {
-            h.borrow().viewer_rect.set(viewer);
+            let h = h.borrow();
+            h.viewer_rect.set(viewer);
+            h.publish_menu_state(&self.menu_state());
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
+        let dragging = matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved);
         let mut root = div()
             .id("editor")
             .role(Role::Group)
@@ -266,6 +784,7 @@ impl Render for Editor {
             .text_size(px(t.typography.body))
             .text_color(rgb(c.text))
             .track_focus(&self.focus)
+            .when(dragging, |d| d.cursor(CursorStyle::ClosedHand))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 if let Some(i) = &this.integration {
                     i.drop_paths(paths.paths().to_vec(), cx);
@@ -331,15 +850,37 @@ impl Render for Editor {
                     if !e.dragging() {
                         return;
                     }
-                    if let Some(Gesture::Resize(d, start, original)) = &this.gesture {
-                        this.layout = original.clone();
-                        let delta = if d.horizontal {
-                            f32::from(e.position.y - start.y)
-                        } else {
-                            f32::from(e.position.x - start.x)
-                        };
-                        this.layout.resize(d, delta, &this.tokens);
-                        cx.notify();
+                    match &mut this.gesture {
+                        Some(Gesture::Resize(d, start, original)) => {
+                            this.layout = original.clone();
+                            let delta = if d.horizontal {
+                                f32::from(e.position.y - start.y)
+                            } else {
+                                f32::from(e.position.x - start.x)
+                            };
+                            this.layout.resize(d, delta, &this.tokens);
+                            cx.notify();
+                        }
+                        Some(Gesture::Panel(drag)) => {
+                            drag.at = e.position;
+                            let dx = f32::from(e.position.x - drag.start.x);
+                            let dy = f32::from(e.position.y - drag.start.y);
+                            drag.moved |= dx.hypot(dy) >= this.tokens.metrics.drag_threshold;
+                            drag.preview = drag
+                                .moved
+                                .then(|| {
+                                    this.layout.drop_target(
+                                        &this.geometry,
+                                        this.dock_bounds,
+                                        f32::from(e.position.x),
+                                        f32::from(e.position.y),
+                                        &this.tokens,
+                                    )
+                                })
+                                .flatten();
+                            cx.notify();
+                        }
+                        None => {}
                     }
                 });
                 move |e, phase, _, w, cx| {
@@ -349,29 +890,14 @@ impl Render for Editor {
                 }
             })
             .on_mouse_up_all({
-                let listener = cx.listener(|this, e: &MouseUpEvent, _, cx| {
+                let listener = cx.listener(|this, _: &MouseUpEvent, _, cx| {
                     if let Some(g) = this.gesture.take() {
-                        if let Gesture::Panel(id, start, _) = g {
-                            let dx = f32::from(e.position.x - start.x);
-                            let dy = f32::from(e.position.y - start.y);
-                            if dx.hypot(dy) >= this.tokens.metrics.drag_threshold
-                                && let Some(p) = this.geometry.panels.iter().find(|p| {
-                                    p.rect
-                                        .contains(f32::from(e.position.x), f32::from(e.position.y))
-                                })
-                            {
-                                let as_tab =
-                                    f32::from(e.position.y) < p.rect.y + this.tokens.metrics.header;
-                                let group = p.group
-                                    + usize::from(
-                                        !as_tab
-                                            && f32::from(e.position.y) > p.rect.y + p.rect.h / 2.,
-                                    );
-                                if let Err(err) = this.layout.move_panel(&id, p.dock, group, as_tab)
-                                {
-                                    this.status = err.to_string();
-                                }
-                            }
+                        if let Gesture::Panel(drag) = g
+                            && drag.moved
+                            && let Some(p) = drag.preview
+                            && let Err(err) = this.layout.move_panel_to(&drag.id, p.target)
+                        {
+                            this.status = err.to_string();
                         }
                         this.save();
                         cx.notify();
@@ -386,9 +912,7 @@ impl Render for Editor {
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     if let Some(g) = this.gesture.take() {
-                        this.layout = match g {
-                            Gesture::Resize(_, _, l) | Gesture::Panel(_, _, l) => l,
-                        };
+                        this.layout = g.original();
                         cx.notify();
                     }
                     return;
@@ -422,16 +946,20 @@ impl Render for Editor {
                 })
                 .flex()
                 .items_center()
-                .child("Untitled · Edited")
-                .child(div().ml_auto().child("Tools   ·   Agent   ·   Export")),
+                .child("Untitled"),
             );
         }
+        let dragged = match &self.gesture {
+            Some(Gesture::Panel(d)) if d.moved => Some(d.id.clone()),
+            _ => None,
+        };
         for p in self.geometry.panels.clone() {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
             let is_viewer = id == "viewer";
             let tabs = group.tabs.clone();
             let active = group.active;
+            let header_bg = if is_viewer { c.viewer } else { c.panel };
             let mut panel = positioned(p.rect)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -444,49 +972,183 @@ impl Render for Editor {
             if !is_viewer || !native {
                 panel = panel.bg(rgb(if is_viewer { c.viewer } else { c.panel }));
             }
+            // A panel may supply its own header content (viewer: pop-ups, no
+            // title; timeline: transport). The shell keeps the tab strip only
+            // when the group has more than one tab.
+            let custom = self
+                .integration
+                .as_ref()
+                .and_then(|i| i.header(&id, p.rect, w, cx));
+            let group_name: SharedString = format!("tabs-{}-{}", p.dock, p.group).into();
+            let header_id = id.clone();
+            let menu_header = id.clone();
             let mut header = div()
+                .id(format!("header-{}-{}", p.dock, p.group))
+                .group(group_name.clone())
                 .flex()
                 .items_center()
                 .gap(px(m.gap))
                 .h(px(m.header))
                 .px(px(m.inset))
-                .bg(rgb(if is_viewer { c.viewer } else { c.panel }));
-            for (ti, tab) in tabs.iter().enumerate() {
-                let tabid = tab.clone();
-                header = header.child(
-                    div()
+                .bg(rgb(header_bg))
+                // The header's empty area drags the active panel and opens its menu.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        this.begin_panel_drag(&header_id, e.position);
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, _, _| {
+                        this.tab_menu(&menu_header, e.position);
+                    }),
+                );
+            let multi = tabs.len() > 1;
+            if multi || custom.is_none() {
+                // Approved mockup: a sunken segmented strip for tab groups, a
+                // semibold title for single panels. The whole tab is the drag handle.
+                let mut strip = div().flex().items_center().gap(px(2.)).when(multi, |s| {
+                    s.bg(rgb(c.window))
+                        .rounded(px(m.control_radius + 2.))
+                        .p(px(2.))
+                });
+                for (ti, tab) in tabs.iter().enumerate() {
+                    let tabid = tab.clone();
+                    let menu_id = tab.clone();
+                    let selected = ti == active;
+                    let ghost = dragged.as_deref() == Some(tab.as_str());
+                    let close_id = tab.clone();
+                    let closable = tab != "viewer" && multi;
+                    let tab_group: SharedString = format!("tab-{tab}").into();
+                    let title = layout::panel_title(tab).to_string();
+                    let mut cell = div()
                         .id(format!("tab-{tab}"))
+                        .group(tab_group.clone())
                         .role(Role::Tab)
-                        .aria_label(layout::panel_title(tab).to_string())
-                        .px(px(m.gap))
-                        .py(px(m.gap))
+                        .aria_label(title.clone())
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .px(px(if multi { m.inset + m.border * 2. } else { 0. }))
+                        .py(px(3.))
                         .rounded(px(m.control_radius))
-                        .bg(rgb(if ti == active && tabs.len() > 1 {
-                            c.floating
-                        } else if is_viewer {
-                            c.viewer
-                        } else {
-                            c.panel
-                        }))
-                        .text_color(rgb(if ti == active { c.text } else { c.secondary }))
+                        .when(multi && selected, |s| s.bg(rgb(c.floating)))
+                        .when(ghost, |s| s.opacity(0.4))
+                        .text_color(rgb(if selected { c.text } else { c.secondary }))
+                        .text_size(px(t.typography.title))
+                        .when(!multi, |s| s.font_weight(FontWeight::SEMIBOLD))
+                        .when(multi, |s| s.font_weight(FontWeight::MEDIUM))
                         .cursor_pointer()
-                        .child(layout::panel_title(tab).to_string())
-                        .on_mouse_down(
+                        .child(title.clone());
+                    if closable {
+                        // Mac tabs: the close button sits at the leading edge, on hover.
+                        cell = cell.child(
+                            div()
+                                .id(format!("close-{tab}"))
+                                .aria_label(format!("Close {title}"))
+                                .role(Role::Button)
+                                .absolute()
+                                .left(px(m.border))
+                                .top_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .opacity(0.)
+                                .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
+                                .child(
+                                    div()
+                                        .rounded(px(m.inner_radius))
+                                        .hover_style(|s| s.bg(rgb(c.hover)))
+                                        .child(crate::symbol::symbol(
+                                            "xmark",
+                                            m.symbol_inline,
+                                            crate::symbol::Weight::Medium,
+                                            c.secondary,
+                                            w,
+                                        )),
+                                )
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.shell_command(&format!("panel:close:{close_id}"), cx);
+                                })),
+                        );
+                    }
+                    strip = strip.child(
+                        cell.on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
                                 this.layout.docks[p.dock].groups[p.group].active = ti;
-                                this.gesture = Some(Gesture::Panel(
-                                    tabid.clone(),
-                                    e.position,
-                                    this.layout.clone(),
-                                ));
-                                this.split_focus = None;
-                                if let Some(h) = &this.host {
-                                    h.borrow_mut().splitter_focus = false;
-                                }
+                                this.begin_panel_drag(&tabid, e.position);
                                 window.focus(&this.focus, cx);
-                                this.save();
                                 cx.notify();
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.tab_menu(&menu_id, e.position);
+                            }),
+                        ),
+                    );
+                }
+                header = header.child(strip);
+            }
+            if let Some(custom) = custom {
+                header = header.child(div().flex_1().min_w(px(0.)).h_full().child(custom));
+            } else if !is_viewer {
+                let (dock, gi) = (p.dock, p.group);
+                let add_group: SharedString = format!("add-{}-{}", p.dock, p.group).into();
+                header = header.child(
+                    div()
+                        .id(format!("add-{}-{}", p.dock, p.group))
+                        .group(add_group.clone())
+                        .role(Role::Button)
+                        .aria_label("Add Panel")
+                        .tooltip(tooltip(&t, "Add Panel"))
+                        .ml_auto()
+                        .relative()
+                        .size(px(m.hit))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(m.control_radius))
+                        .hover_style(|s| s.bg(rgb(c.hover)))
+                        .cursor_pointer()
+                        .child(crate::symbol::symbol(
+                            "plus",
+                            m.symbol_panel,
+                            crate::symbol::Weight::Medium,
+                            c.secondary,
+                            w,
+                        ))
+                        // `text` on hover (language §8): a second glyph fades in.
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(0.)
+                                .group_hover_style(add_group, |s| s.opacity(1.))
+                                .child(crate::symbol::symbol(
+                                    "plus",
+                                    m.symbol_panel,
+                                    crate::symbol::Weight::Medium,
+                                    c.text,
+                                    w,
+                                )),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.add_menu(dock, gi, e.position);
                             }),
                         ),
                 );
@@ -498,26 +1160,39 @@ impl Render for Editor {
                 .and_then(|i| i.panel(&id, p.rect, w, cx));
             if let Some(content) = content {
                 panel = panel.child(content);
-            } else if !is_viewer {
-                panel = panel.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px((p.rect.h - m.header).max(0.)))
-                        .text_color(rgb(c.muted))
-                        .child(id.clone()),
-                );
             } else {
-                panel = panel.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px((p.rect.h - m.header).max(0.)))
-                        .text_color(rgb(c.muted))
-                        .child("viewer"),
-                );
+                let (heading, line, action) = layout::empty_state(&id);
+                let mut empty = empty_state(&t, heading, line).h(px((p.rect.h - m.header).max(0.)));
+                // Actions run only with an app attached (the bare shell has no importer).
+                if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
+                    empty = empty.child(
+                        div()
+                            .id(format!("empty-action-{id}"))
+                            .role(Role::Button)
+                            .aria_label(label)
+                            .mt(px(m.gap))
+                            .h(px(m.control))
+                            .px(px(m.inset))
+                            .flex()
+                            .items_center()
+                            .rounded(px(m.control_radius))
+                            .bg(rgb(c.field))
+                            .hover_style(|s| s.bg(rgb(c.hover)))
+                            .text_size(px(t.typography.reading))
+                            .text_color(rgb(c.text))
+                            .cursor_pointer()
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let cmd = Command {
+                                    name: command.into(),
+                                    args: vec![],
+                                    token: None,
+                                };
+                                this.command(cmd, window, cx);
+                            })),
+                    );
+                }
+                panel = panel.child(empty);
             }
             root = root.child(panel);
         }
@@ -552,6 +1227,54 @@ impl Render for Editor {
                     ),
             );
         }
+        // Drop preview and a ghost label that follows the pointer. Work-surface
+        // overlays stay solid tints (no glass below the controls band).
+        if let Some(Gesture::Panel(drag)) = &self.gesture
+            && drag.moved
+        {
+            if let Some(p) = drag.preview {
+                // Only the drop zone: `accent_wash` with a 2 pt accent outline.
+                root = root.child(
+                    positioned(p.rect)
+                        .id("drop-preview")
+                        .rounded(px(m.control_radius))
+                        .border(px(DROP_OUTLINE))
+                        .border_color(rgb(c.accent))
+                        .bg(rgb(c.accent_wash)),
+                );
+            }
+            root = root.child(
+                div()
+                    .id("drag-ghost")
+                    .absolute()
+                    .left(drag.at.x + px(12.))
+                    .top(drag.at.y + px(10.))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(m.control_radius))
+                    .bg(rgb(c.floating))
+                    .border(px(m.border))
+                    .border_color(rgb(c.separator))
+                    .shadow_md()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(layout::panel_title(&drag.id).to_string()),
+            );
+        }
+        let workspace = layout::PRESETS
+            .iter()
+            .find(|p| p.0 == self.layout.workspace)
+            .map_or("Custom", |p| p.1);
+        // Status bar (language §2): quiet facts. Left: document facts (or a
+        // message); right: the workspace pop-up.
+        let left = self
+            .integration
+            .as_ref()
+            .map_or_else(|| self.status.clone(), |i| i.status(cx));
+        let left = if left.is_empty() {
+            self.status.clone()
+        } else {
+            left
+        };
         root.child(
             positioned(Rect {
                 x: 0.,
@@ -559,21 +1282,42 @@ impl Render for Editor {
                 w: f32::from(viewport.width),
                 h: m.status,
             })
+            .id("status-bar")
             .flex()
             .items_center()
-            .px(px(m.inset))
+            .gap(px(m.inset))
+            .px(px(m.inset + m.gap))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(c.muted))
+            .child(div().flex_1().min_w(px(0.)).truncate().child(left))
             .child(
-                self.integration
-                    .as_ref()
-                    .map_or_else(|| self.status.clone(), |i| i.status(cx)),
-            )
-            .child(div().ml_auto().child(if self.integration.is_none() {
-                "Shell preview · Paused"
-            } else {
-                ""
-            })),
+                div()
+                    .id("status-workspace")
+                    .role(Role::Button)
+                    .aria_label(format!("Workspace: {workspace}"))
+                    .flex()
+                    .items_center()
+                    .gap(px(m.border * 2.))
+                    .px(px(m.gap))
+                    .h(px(m.hit))
+                    .rounded(px(m.control_radius))
+                    .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
+                    .cursor_pointer()
+                    .child(workspace.to_string())
+                    .child(crate::symbol::symbol(
+                        "chevron.up.chevron.down",
+                        m.symbol_inline - 2.,
+                        crate::symbol::Weight::Medium,
+                        c.muted,
+                        w,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, _| {
+                            this.workspace_menu(e.position)
+                        }),
+                    ),
+            ),
         )
     }
 }

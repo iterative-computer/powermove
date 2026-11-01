@@ -1,11 +1,14 @@
 //! Phase 1 application shell. Kernel and engine are deliberately integration seams.
 pub mod integration;
-pub use native::{Command, Host};
+pub use native::{Command, Host, MenuEntry, accent_color, document_subtitle, system_accent};
 pub mod keyboard;
 pub mod layout;
 pub mod menu;
 mod native;
+pub mod session;
+pub mod symbol;
 pub mod text;
+pub mod theme;
 pub mod transient;
 pub mod view;
 use gpui::{prelude::*, *};
@@ -38,6 +41,11 @@ fn launch(
     smoke: bool,
     factory: Option<integration::Factory>,
 ) -> anyhow::Result<()> {
+    native::install_identity();
+    let theme_error = theme::load_from_env();
+    if let Some(e) = &theme_error {
+        eprintln!("{e}");
+    }
     let platform = Rc::new(gpui_macos::MacPlatform::new_with_metal_device(
         false,
         device.clone(),
@@ -54,7 +62,16 @@ fn launch(
             cx.set_global(integration::AppIntegration(factory));
         }
         native::install_menus();
-        open_editor_with_visibility(cx, !smoke);
+        native::install_accent();
+        // Dev/test appearance override: menus and sheets follow it too.
+        if std::env::var_os("PM_NATIVE_APPEARANCE").is_some() {
+            native::app_appearance(&tokens());
+        }
+        if smoke {
+            open_editor_window(cx, false, None, None);
+        } else {
+            restore_session(cx);
+        }
         if smoke {
             cx.quit();
         } else {
@@ -78,12 +95,73 @@ fn tokens() -> Tokens {
             Scheme::Light
         }
     };
-    Tokens::new(scheme, native::settings())
+    theme::tokens(scheme, native::settings())
+}
+/// Reopens the saved windows (all of them only when the system keeps windows
+/// on quit; see `Session::restore_plan`). With no session, one new window.
+fn restore_session(cx: &mut App) {
+    let plan = view::state_paths()
+        .map(|(_, session)| session)
+        .filter(|p| p.exists())
+        .and_then(|p| match session::Session::load(&p) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("Window session could not be restored: {e}");
+                None
+            }
+        })
+        .map(|s| s.restore_plan(keeps_windows()))
+        .unwrap_or_default();
+    if plan.is_empty() {
+        open_editor_window(cx, true, None, None);
+        return;
+    }
+    for state in plan {
+        let leader = state.tab_group;
+        open_editor_window(cx, true, Some(state), leader);
+    }
+}
+/// System Settings ▸ Desktop & Dock ▸ “Close windows when quitting an application”
+/// off ⇒ `NSQuitAlwaysKeepsWindows`. `PM_NATIVE_RESTORE=all|one` overrides it.
+fn keeps_windows() -> bool {
+    match std::env::var("PM_NATIVE_RESTORE").as_deref() {
+        Ok("all") => return true,
+        Ok("one") => return false,
+        _ => {}
+    }
+    use objc2_foundation::{NSString, NSUserDefaults};
+    NSUserDefaults::standardUserDefaults()
+        .boolForKey(&NSString::from_str("NSQuitAlwaysKeepsWindows"))
 }
 pub(crate) fn open_editor(cx: &mut App) {
-    open_editor_with_visibility(cx, true);
+    open_editor_window(cx, true, None, None);
 }
-fn open_editor_with_visibility(cx: &mut App, visible: bool) {
+/// Opens a new editor window as a native tab of the window with session id `leader`.
+pub(crate) fn open_editor_tab(cx: &mut App, leader: u64) {
+    open_editor_window(cx, true, None, Some(leader).filter(|l| *l != 0));
+}
+fn next_window_id() -> u64 {
+    thread_local! { static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+    let saved = view::state_paths()
+        .map(|(_, p)| p)
+        .filter(|p| p.exists())
+        .and_then(|p| session::Session::load(&p).ok())
+        .map_or(1, |s| s.next_id());
+    NEXT.with(|n| {
+        let id = n.get().max(saved);
+        n.set(id + 1);
+        id
+    })
+}
+fn open_editor_window(
+    cx: &mut App,
+    visible: bool,
+    restore: Option<session::WindowState>,
+    tab_leader: Option<u64>,
+) {
+    // The key editor window, for cascading a brand-new window. Read from AppKit:
+    // this can run inside that editor's own update.
+    let cascade = native::editor_frame();
     let t = tokens();
     let m = t.metrics;
     let result = cx.open_window(
@@ -96,11 +174,32 @@ fn open_editor_with_visibility(cx: &mut App, visible: bool) {
                 size(px(m.window_width), px(m.window_height)),
             )))),
         move |window, cx| {
-            window.set_window_title("Untitled — Powermove Native");
+            window.set_window_title("Untitled");
             let device = cx.global::<SharedMetalDevice>().0.clone();
             let (host, rx) = native::Host::install(window, &device, t.clone());
             if !visible {
                 host.borrow().smoke_validate();
+            }
+            let window_id = if visible {
+                restore.as_ref().map_or_else(next_window_id, |s| s.id)
+            } else {
+                0
+            };
+            if visible {
+                let h = host.borrow();
+                h.set_window_id(window_id);
+                match &restore {
+                    Some(s) => h.apply_frame(s.frame, s.fullscreen),
+                    None if tab_leader.is_none() => {
+                        if let Some(from) = cascade {
+                            h.cascade_from(from);
+                        }
+                    }
+                    None => {}
+                }
+                if let Some(leader) = tab_leader {
+                    h.join_tabs(leader);
+                }
             }
             let integration = cx
                 .try_global::<integration::AppIntegration>()
@@ -112,11 +211,27 @@ fn open_editor_with_visibility(cx: &mut App, visible: bool) {
                     i.observe(cx);
                 }
                 editor.integration = integration;
+                if let Some(state) = &restore {
+                    editor.restore(state);
+                } else {
+                    editor.window_id = window_id;
+                }
                 editor
             });
-            editor.update(cx, |_, cx| {
+            editor.update(cx, |v, cx| {
                 cx.observe_window_appearance(window, |v, w, cx| v.follow_appearance(w, cx))
                     .detach();
+                cx.observe_window_bounds(window, |v, _, cx| v.schedule_session(cx))
+                    .detach();
+                cx.observe_window_activation(window, |v, _, cx| v.schedule_session(cx))
+                    .detach();
+                v.persist_session();
+            });
+            // A window the user closes leaves the session; quitting keeps them all.
+            let closing = editor.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                let _ = closing.update(cx, |v, _| v.forget_session());
+                true
             });
             let weak = editor.downgrade();
             let handle = window.window_handle();

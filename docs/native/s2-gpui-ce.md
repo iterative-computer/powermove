@@ -578,6 +578,63 @@ Events, captures each step and restores input sources. Rerun P-120 with the
 documented `check-ptext-120.sh --display --no-build --runs 1` on a quiet, unlocked
 machine.
 
+## P-120 transaction patch (2026-11-01, lane `feat/na-shell2`)
+
+**Implemented; 120 Hz headroom gate still FAIL/UNVERIFIED.** Before this patch
+`composition::present` always returned a transaction, so `MacWindow::draw` set
+`presentsWithTransaction` on every GPUI frame and never cleared it: every frame ran
+`commit → waitUntilScheduled → present` on the main thread.
+
+What changed (vendor `gpui_macos`, see `POWERMOVE.md` P-120 row):
+
+- `composition::register_tracked` hosts return `SlotChange::{Moved, Unchanged}` from
+  their present callback; `native_text` reports its own frame/clip/visibility changes.
+  The untracked `register` keeps the old behaviour (always transactional).
+- `draw` now sets the flag **per frame** and resets it: transactional when slot geometry
+  moved, on the first frame after registration, during AppKit synchronous paints
+  (`displayLayer:` live resize, tab activation), **or when frames are continuous**
+  (previous frame < 33.3 ms ago). Isolated frames (hover, caret, a single edit) present
+  from the command buffer without blocking the main thread.
+- Hosts: the shell (viewer slot frame/layer/drawable size/visibility) and the S2 spike
+  (`contract::slots_moved`) report moves. `S2_SYNC_PRESENT=1` forces the pre-patch
+  behaviour; `PM_GPUI_ASYNC_PRESENT=1` forces the first-cut "async unless moved" policy.
+- Tests: `spikes/s2/src/p120.rs` (7) via `#[doc(hidden)] composition::probe`, plus
+  `contract::p120_moves_only_when_geometry_changes`. (The vendor crate's own tests do not
+  resolve offline: a wasm-only git dependency.)
+
+### On-screen A/B (why continuous frames stay transactional)
+
+`check-ptext-120.sh`-equivalent driver: `PTEXT_META=/tmp/<lane> python3
+apps/native/spikes/s2/scripts/check-ptext-120.py --display --no-build --p120 --runs 1
+--seconds 60` (GUI lock, one batch of 6 × 60 s). Built-in panel at 120 Hz, AC power,
+debug build, one-minute load ≈ 6 (other lanes compiling) — diagnostic, not a gate run.
+CPU = upstream `frame duration` (main-thread draw + present).
+
+| Workload | Policy | CPU p50 / p95 ms | `waitUntilScheduled` (n, p95) | `nextDrawable` p95 | missed 8.33 ms intervals | zero `presentedTime` |
+|---|---|---|---|---|---|---|
+| 1,000 tiles | always transactional (pre-patch) | 6.69 / 7.66 | 6,943 × 0.50 ms | 0.035 ms | 149 | 126 |
+| 1,000 tiles | async unless moved (first cut) | 6.27 / **10.93** | 0 | **4.14 ms** | 203 | 0 |
+| 1,000 tiles | **adaptive (shipped)** | 6.54 / 7.98 | 6,937 × 0.52 ms | 0.036 ms | 188 | 135 |
+| 5,000-row timeline | always transactional | 3.25 / 4.51 | 6,918 × 0.12 ms | 0.039 ms | 1,639 | 1,552 |
+| 5,000-row timeline | async unless moved | 4.60 / **12.60** | 0 | **8.78 ms** | 226 | 3 |
+| 5,000-row timeline | **adaptive (shipped)** | 3.12 / 3.85 | 6,952 × 0.11 ms | 0.038 ms | 1,124 | 1,059 |
+
+A first run (same build, before the adaptive rule) reproduced the async result
+(tiles `nextDrawable` p95 4.19 ms, timeline 9.14 ms). **Finding:** an asynchronous
+present stays on glass ~3 refreshes (perf-gate-p1 "Latency pass"), so back-to-back async
+frames starve CAMetalLayer's three drawables and the main thread blocks in `nextDrawable`
+instead — 8–80× the 0.1–0.5 ms `waitUntilScheduled` it saved. Hence the adaptive rule
+(rule: measured frame evidence, N8). Notable trade-off: the async path almost never
+produced zero-timestamp (never-shown) drawables, while the transactional timeline path
+loses ~1,000–1,500 of ~7,000; that is open S2 work (likely the same compositor-latch
+behaviour), not addressed here.
+
+Main-thread time per frame for **isolated** frames now excludes `waitUntilScheduled`
+(0.1–0.5 ms here); no isolated-frame workload exists in the spike, so that saving is
+asserted by the policy tests, not measured. All runs FAIL the provisional criteria
+(CPU p95 ≤ 4.167 ms, zero missed intervals, ≥ 6,000 valid presentations).
+Logs: `/tmp/ptext-{tiles,timeline}-{sync,async,p120}-0.log`, results `/tmp/pm-shell2/`.
+
 ## On-screen rerun 2 (2026-11-01, 10:39–10:52)
 
 **P-120 GUI pacing: FAIL. Japanese IME conversion: PASS, with a screenshot.**

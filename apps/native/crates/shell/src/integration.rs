@@ -16,6 +16,17 @@ pub trait Integration {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement>;
+    /// Content for panel `id`'s 32 pt header, replacing the shell's title
+    /// (a tab group keeps its tab strip). `None` = the shell's header.
+    fn header(
+        &self,
+        _id: &str,
+        _bounds: Rect,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<AnyElement> {
+        None
+    }
     fn project_id(&self, cx: &App) -> Option<String>;
     fn status(&self, cx: &App) -> String;
     fn drop_paths(&self, paths: Vec<std::path::PathBuf>, cx: &mut App);

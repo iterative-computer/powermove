@@ -133,3 +133,62 @@ and AppKit text/AX probe pass. This run's captures use
 Services, dictation, Writing Tools, emoji, keyboard traversal and the visible dense
 swap remain unverified after the session locked. Exact runnable checks and the
 30-second manual IME check are in [S2](s2-gpui-ce.md).
+
+## Shell 2 (2026-11-01, lane `feat/na-shell2`)
+
+**Docking.** Drag any panel tab: the shell shows an accent-tinted drop preview and a
+ghost label. Targets (`Layout::drop_target`): a header joins that tab group at the
+pointer's slot (same group = reorder); a body's upper/lower half inserts a group
+before/after; a 16-point zone at the left/right/bottom edge docks there, creating the
+dock if it does not exist and reopening it if collapsed. Escape restores the layout
+from before the drag. Moves are validated on a copy (`move_panel_to`). Tabs have a
+hover close button (not the viewer), a right-click menu (Close, Dock Left/Right/Bottom,
+Save Layout…, Reset Workspace) and a header **+** menu that adds a closed panel to that
+group. Headers follow the mockup: sunken segmented strip for tab groups, semibold title
+for single panels.
+
+**Saved layouts.** Window ▸ Layouts lists named layouts (shared by every project),
+Save Layout… (an NSAlert sheet with a name field), Delete Layout ▸ and Reset Workspace.
+A saved layout replaces the current workspace's arrangement. The store is re-read
+before every write so other windows' records survive; old stores without `saved` load.
+
+**Windows, tabs and restoration.** `session.json` (beside the layout store; the app
+puts both in its profile) records each editor window's id, frame, project, workspace,
+native tab-group leader, full-screen state and the key window. At launch the shell
+reopens all windows when the system keeps windows on quit (`NSQuitAlwaysKeepsWindows`),
+otherwise only the key window's arrangement (`PM_NATIVE_RESTORE=all|one` overrides).
+Frames are kept on screen; tabs rejoin their leader. Closing a window removes it;
+quitting keeps all. AppKit restoration and the single frame-autosave name are off (one
+autosave name cannot serve several windows). New windows cascade from the key window;
+Window ▸ New Tab opens a native tab. Document restoration remains the app's job.
+
+**Menus.** New Layer and Timeline menus and View ▸ Tools carry the old app's W1
+registry chords as **display-only** key equivalents: an NSMenuDelegate returns NO from
+`menuHasKeyEquivalent:…`, so the ordered resolver stays the only key path and a
+declined bare key (`v`, Space, `B`) reaches the focused text field instead of a menu
+(rule: old app wins on shortcuts/behaviour, HIG on placement). File ▸ Projects… (⌘P),
+Edit ▸ Deselect All (⇧⌘A), View ▸ Command Palette… (⌘K) and Agent (⇧⌘K) are ordinary
+equivalents with the same replay semantics as the 35 Electron accelerators. Window gains
+Show in Workspace ▸ (panel toggles with checkmarks), Workspaces ▸ (checkmark), Layouts ▸,
+New Tab, Merge All Windows, Show Tab Bar and Show All Tabs. Sidebar/Inspector items read
+Show/Hide per state; tool items show a checkmark.
+
+**Toolbar.** Title is semibold per the mockup; Sidebar and Inspector are on/off glass
+buttons that reflect dock visibility; the tool group follows keyboard/menu/palette tool
+commands.
+
+**Palette.** Ranks prefix > word start > substring > subsequence (`gtst` → Go to Start);
+right-aligned shortcut glyphs; dynamic Show/Hide panel, saved-layout, Save Layout… and
+Reset Workspace rows. A key palette panel now routes commands to its editor window.
+
+**Materials.** Unchanged rule: work surfaces and drop previews stay solid tints; glass
+only on the toolbar controls, palette/field menu (NSGlassEffectView `contentView`, or
+NSVisualEffectView before macOS 26, solid under Reduce Transparency).
+
+**Evidence.** 44 Rust tests across pm-shell, pm-design and the S2 spike, including 11
+Shell 2 model tests and a headless capture of the drag preview and drop. On-screen
+before/after screenshots (temp profiles) are in `/tmp/pm-shell2/`. Known gap: windows
+restore as one native tab group (verified: two windows, one hidden as a tab), but the
+native **tab bar did not appear** with this window style (unified-compact toolbar,
+transparent titlebar); switching tabs by Show Next Tab was not tested. Needs a fix in the
+window chrome or an explicit tab-bar accessory.

@@ -21,6 +21,7 @@ block2 = "0.6"
 raw-window-handle = "0.6"
 async-channel = "2"
 core-graphics = "0.24"
+image = { version = "0.25", default-features = false }
 [dev-dependencies]
 gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["test-support"] }
 gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
