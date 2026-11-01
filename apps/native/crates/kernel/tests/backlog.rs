@@ -47,6 +47,13 @@ fn edit(k: &mut Kernel, id: &str, name: &str) {
 fn selection_history_is_ephemeral_and_preserves_redo() {
     let mut k = Kernel::new(Default::default());
     open(&mut k, "P");
+    let dir = common::TempDir::new("selection-clean");
+    common::save_as(
+        k.project_mut("P").unwrap().store_mut(),
+        &dir.path("clean.pmv"),
+    )
+    .unwrap();
+    assert!(!k.project("P").unwrap().store().is_dirty());
     let before = k.project("P").unwrap().store().selection().clone();
     let layer = k.project("P").unwrap().store().layers()[0].id.clone();
     call(

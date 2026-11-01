@@ -69,6 +69,7 @@ pm-kernel thread ── Kernel ── slots: { project id → Slot }
 | `history.cancel()` | `HistoryCall::Cancel` | `Unit`; keeps edits, drops the entry |
 | `history.do(label, fn)` | native body: `HistoryCall::Do`; realm-run callback: `Begin` + writes + `Commit`, or `Rollback` on throw | `Applied`/`Throw`; the realm returns the callback's own value |
 | `history.external(label, undo, redo, {cleanup})` | `HistoryCall::External { handle, bytes, cleanup }` | `Entry(Some(id))`; the facade returns `null` for non-function closures |
+| `history.selection(before, after)` | `HistoryCall::Selection` | `Entry(Some(id))`, or `Entry(None)` for equality, pending history or redo navigation |
 | `history.undo/redo()` | `HistoryCall::Undo/Redo` | `Bool`; for an external entry `Continuation` (same realm: run inline, then `ExternalDone`) or a deferred reply (another realm's mailbox) |
 | `PM.hist.clear()`, `undoIfTop` | `HistoryCall::Clear`, `UndoIfTop` | `Unit`, `Bool` |
 | `edit.begin(label)` | `EditCall::Begin` | `Unit`, or `Throw("A source edit is already active")` |
@@ -102,10 +103,11 @@ Every `Ack` carries `revision`, `folded: Option<entry>`, `notice`, and the
   starting selection). `edit.cancel`, a gesture cancel and `Rollback` revert
   the owner's writes after `start`, newest first, **only if every probe still
   holds** on the staged tree (`Path` value, `Element` by id, `Order` of ids;
-  content equality ignoring node revisions), and only if no **index hazard**
-  exists (one side restructured a list — insert/delete/reorder/splice — that
-  the other side, writing later, addressed by index). Otherwise nothing is
-  reverted: **commit with notice** keeps the whole entry as one undoable step.
+  content equality ignoring node revisions). Index paths in probes and
+  inverses rebase through unique element IDs (including nested arrays and
+  numeric string keys); inverse insert positions anchor to surviving neighbours.
+  Changed unkeyed arrays, missing/ambiguous IDs and conflicting probes keep
+  the conservative fallback. Otherwise nothing is reverted: **commit with notice** keeps the whole entry as one undoable step.
   On success, folded foreign writes become **their own entry** (`ForeignSplit`)
   and the starting selection is restored.
 * **Gesture steps.** `replace: true` supersedes the previous step (today's
@@ -225,7 +227,7 @@ foreign split, sealing) are covered by the S5 scenario tests instead.
 | K2 | The actor is one OS thread with an mpsc mailbox and a std-only oneshot future; no async runtime | §3.2 "kernel waits are asynchronous in every host"; N8 no overhead |
 | K3 | A short transaction is one actor turn; folding, never queueing; D10 not implemented | §3.2.1 "no writer ever waits"; D10 decided "no" |
 | K4 | Depth is a holder list, not a counter | Same returns as today (traces match) while letting a failed realm release its nesting (§3.2.1 sealing) |
-| K5 | Selective cancel by per-operation after-image probes plus the index-hazard rule; any conflict → commit with notice of the whole entry | S5's rule: the simplest implementation satisfying "a cancel never removes an acknowledged write", favouring keeping work |
+| K5 | Selective cancel by per-operation after-image probes and ID-rebased paths; any conflict → commit with notice of the whole entry | S5's rule: the simplest implementation satisfying "a cancel never removes an acknowledged write", favouring keeping work |
 | K6 | `history.do`'s throw path reverts only the thrower's writes; a failed `edit.apply` batch is atomic (applies nothing) | The same invariant beats the tag's whole-pending rollback (C-MATRIX "explicit improvement") |
 | K7 | Undo/redo inside an open entry fold as navigation: included at commit (the tag's snapshot diff), neither reverted nor split by a cancel | Today's commit semantics; the cursor already accounts for them |
 | K8 | Direct writes outside an entry record no undo step; inside, they fold | Trace `workspace-direct` (raw write creates no history); the tag's pending diff picks them up |
@@ -256,7 +258,14 @@ sometimes one more, and undo works), 8 library, 1 trace replay.
 * `edit.commit` with no changes lowers the depth by one; the tag's
   `PM.hist.cancel()` there also dropped an enclosing pending entry.
 * Revisions are the kernel's monotonic counter (undo is a new revision).
-* Explicit `history.selection` navigation now matches the tag: no entries during pending history or after undo; entries stay out of persisted history and dirty state. Restoring selection uses the existing native pruning of missing layer/key IDs.
+* The 1,000-entry count cap is shared across open projects, as requested;
+  v1.2 shared the byte budget but capped entry count per stack. Each project
+  still retains its latest entry even if the aggregate exceeds a limit.
+* Selection restoration also prunes missing key IDs using the existing native
+  selection invariant; the tag's selection closure filtered only layer IDs.
+* V4 activation stages edits until success and retries on a changed document
+  or extension epoch, instead of v1–3's immediate live activation writes.
+  V1–3 write admission is unchanged.
 
 ## Engine needs (not changed here)
 
@@ -309,10 +318,47 @@ require activate to retry, and activation never folds into a live gesture.
 The runtime adapters still own JS execution, routing v4 writes to `Stage`,
 resource disposal, and applying the pinned definitions to the render pipeline.
 
+## ID-rebased selective cancellation
+
+Each folded operation retains its immutable after-image root. Cancellation maps
+its probes and inverse paths from that root onto the current staged tree by
+unique IDs, recursively. Inverse batches update their source image as they run.
+A deletion's inverse insertion anchors beside a surviving neighbour rather than
+reusing its obsolete index. All probes and final validation must succeed before
+any revert publishes; otherwise the complete acknowledged entry stays undoable
+with notice. Unkeyed changed lists and missing/duplicate identities refuse.
+
+After a successful cancel, retained history is regenerated with the engine's
+ID-aware node diff against the entry's original document. This preserves foreign
+writes whose original index paths depended on the cancelled reorder; undo/redo
+and persisted patches therefore describe the retained tree, not stale indices.
+This refines the already approved native selective-cancel difference from v1.2;
+no additional tag cancellation behavior is copied.
+
+### Cloud verification
+
+`cargo test --locked -p pm-kernel -p pm-mcp -p pm-first-launch` passes:
+**217 pm-kernel tests + 1 existing ignored profile smoke test, 25 pm-mcp,
+16 pm-first-launch** (258 passing total). Ten new tests cover the shared
+count/byte budgets, parked publication/cleanup, clean-state selection history,
+activation success/failure/staleness/ownership/epoch races, immutable export
+bindings, nested numeric-string indices, inverse insertion anchors, retained
+foreign history and ambiguous-list fallback. The former index-hazard test now
+asserts the intended successful selective revert plus undo/redo preservation.
+
+The tagged writer parity test verifies/fetches v1.2.0 and v1.3.0, probes Node
+or Bun (with `PM_TEST_JS_RUNTIME` override), and fails on missing runtimes.
+An unavailable tag after a failed fetch emits an uncaptured, visible `SKIP`
+message; a fetch that claims success but fails verification is an error.
+The actual tagged scripts ran and passed here; no tag check was skipped.
+
+Pinned-toolchain Clippy (`--locked -p pm-kernel --all-targets --no-deps`)
+adds **zero warnings**, compared with a separate checkout of the starting
+`origin/feat/native-engine` commit `5412ab207`: the same 15 library warnings
+and one existing test warning remain. Formatting and `git diff --check` pass.
+
 ## Remaining for P1
 
-* Index hazards: rebase index paths by id so more cancels revert instead of
-  committing with notice.
 * Realm adapters: the compat page's write barrier (dirty-path diffing, resync
   on refusal) and the JS facades that map onto `Call`; real transport for
   txids and lost acks (S5 channel).
@@ -501,7 +547,7 @@ are returned to the caller. It performs no compaction or project save.
 * `SelectionCall::{Layers, ToggleLayer, Keys, Channel, Clear}` runs in an actor
   turn, uses ordinary request generation fencing/txid deduplication, and returns
   the resulting selection. Invalid layer IDs refuse the whole selection change.
-  Selection stays ephemeral, outside document undo and dirty state.
+  Selection stays ephemeral and outside dirty state; explicit history.selection records navigation as described above.
   `SelectionChanged` follows publication, including pruning by document edits.
 * `KernelHandle::for_actor(Caller)` binds realm, generation and origin in an
   immutable `ActorHandle`. UI, MCP clients and agents never change a global

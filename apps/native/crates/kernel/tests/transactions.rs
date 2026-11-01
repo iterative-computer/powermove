@@ -739,7 +739,7 @@ fn edit_cancel_reverts_and_restores_selection() {
 }
 
 #[test]
-fn index_hazard_turns_cancel_into_commit_with_notice() {
+fn index_paths_rebase_by_id_and_cancel_preserves_foreign_insert() {
     let mut p = project();
     let Reply::Gesture(g) = call(
         &mut p,
@@ -765,9 +765,15 @@ fn index_hazard_turns_cancel_into_commit_with_notice() {
     // a different layer, so a by-index revert would hit the wrong one.
     call(&mut p, agent(), transact(add_layer("top")));
     let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
-    assert!(is_commit_with_notice(&cancel));
-    assert_eq!(opacity_of(&p, "layer1"), 10.0);
+    assert!(matches!(notice(&cancel), Some(Notice::ForeignSplit { .. })));
+    assert_eq!(opacity_of(&p, "layer1"), 100.0);
     assert!(layer(&p, "top").is_some());
+    call(&mut p, native(), HistoryCall::Undo);
+    assert!(layer(&p, "top").is_none());
+    assert_eq!(opacity_of(&p, "layer1"), 100.0);
+    call(&mut p, native(), HistoryCall::Redo);
+    assert!(layer(&p, "top").is_some());
+    assert_eq!(opacity_of(&p, "layer1"), 100.0);
 }
 
 // ── gestures ────────────────────────────────────────────────────────────────
@@ -1081,4 +1087,203 @@ fn transact_refuses_stale_expected_revision() {
             pm_kernel::TransactionError::Stale { .. }
         ))
     ));
+}
+
+#[test]
+fn nested_numeric_string_indices_rebase_through_both_reorders() {
+    let mut p = project();
+    call(&mut p,native(),transact(WriteBody::Ops(vec![Op::Leaf(Patch::set(vec!["future".into()],parse(r#"[{"id":"a","children":[{"id":"x","name":"old"},{"id":"y","name":"keep"}]},{"id":"b","children":[]}]"#).unwrap()))])));
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "nested".into(),
+        },
+    )
+    .reply
+    else {
+        panic!()
+    };
+    call(
+        &mut p,
+        native(),
+        GestureCall::Step {
+            gesture: g,
+            body: WriteBody::Ops(vec![Op::Leaf(Patch::set(
+                vec![
+                    "future".into(),
+                    "0".into(),
+                    "children".into(),
+                    "0".into(),
+                    "name".into(),
+                ],
+                Value::from("owner"),
+            ))]),
+            replace: false,
+        },
+    );
+    call(
+        &mut p,
+        agent(),
+        transact(WriteBody::Ops(vec![
+            Op::Order {
+                path: vec!["future".into()],
+                ids: vec!["b".into(), "a".into()],
+            },
+            Op::Order {
+                path: vec!["future".into(), 1.into(), "children".into()],
+                ids: vec!["y".into(), "x".into()],
+            },
+        ])),
+    );
+    let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
+    assert!(matches!(notice(&cancel), Some(Notice::ForeignSplit { .. })));
+    let after = p
+        .store()
+        .snapshot()
+        .root()
+        .unwrap()
+        .get("future")
+        .unwrap()
+        .to_value();
+    assert_eq!(after,parse(r#"[{"id":"b","children":[]},{"id":"a","children":[{"id":"y","name":"keep"},{"id":"x","name":"old"}]}]"#).unwrap());
+    call(&mut p, native(), HistoryCall::Undo);
+    call(&mut p, native(), HistoryCall::Redo);
+    assert_eq!(
+        p.store()
+            .snapshot()
+            .root()
+            .unwrap()
+            .get("future")
+            .unwrap()
+            .to_value(),
+        after
+    );
+}
+
+#[test]
+fn cancel_restores_deleted_element_next_to_its_id_neighbour() {
+    let mut p = project();
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "delete".into(),
+        },
+    )
+    .reply
+    else {
+        panic!()
+    };
+    call(
+        &mut p,
+        native(),
+        GestureCall::Step {
+            gesture: g,
+            body: delete_layer("layer1"),
+            replace: false,
+        },
+    );
+    call(&mut p, agent(), transact(add_layer("top")));
+    let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
+    assert!(matches!(notice(&cancel), Some(Notice::ForeignSplit { .. })));
+    let ids: Vec<_> = p.store().layers().into_iter().map(|l| l.id).collect();
+    assert_eq!(ids, ["top", "layer0", "layer1"]);
+    call(&mut p, native(), HistoryCall::Undo);
+    assert_eq!(p.store().layers().len(), 2);
+    assert!(layer(&p, "layer1").is_some());
+}
+
+#[test]
+fn owner_reorder_cancel_rebases_foreign_history_for_undo_and_redo() {
+    let mut p = project();
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "order".into(),
+        },
+    )
+    .reply
+    else {
+        panic!()
+    };
+    call(
+        &mut p,
+        native(),
+        GestureCall::Step {
+            gesture: g,
+            body: WriteBody::Ops(vec![Op::Order {
+                path: vec!["comps".into(), "C1".into(), "layers".into()],
+                ids: vec!["layer1".into(), "layer0".into()],
+            }]),
+            replace: false,
+        },
+    );
+    call(&mut p, agent(), transact(opacity("layer1", 22.0)));
+    let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
+    assert!(matches!(notice(&cancel), Some(Notice::ForeignSplit { .. })));
+    assert_eq!(p.store().layers()[0].id, "layer0");
+    assert_eq!(opacity_of(&p, "layer1"), 22.0);
+    call(&mut p, native(), HistoryCall::Undo);
+    assert_eq!(opacity_of(&p, "layer1"), 100.0);
+    call(&mut p, native(), HistoryCall::Redo);
+    assert_eq!(opacity_of(&p, "layer1"), 22.0);
+    assert_eq!(opacity_of(&p, "layer0"), 100.0);
+}
+
+#[test]
+fn changed_unkeyed_array_still_commits_with_notice() {
+    let mut p = project();
+    call(
+        &mut p,
+        native(),
+        transact(WriteBody::Ops(vec![Op::Leaf(Patch::set(
+            vec!["future".into()],
+            parse(r#"[{"name":"a"},{"name":"b"}]"#).unwrap(),
+        ))])),
+    );
+    let Reply::Gesture(g) = call(
+        &mut p,
+        native(),
+        GestureCall::Begin {
+            label: "unkeyed".into(),
+        },
+    )
+    .reply
+    else {
+        panic!()
+    };
+    call(
+        &mut p,
+        native(),
+        GestureCall::Step {
+            gesture: g,
+            body: WriteBody::Ops(vec![Op::Leaf(Patch::set(
+                vec!["future".into(), 0.into(), "name".into()],
+                Value::from("owner"),
+            ))]),
+            replace: false,
+        },
+    );
+    call(
+        &mut p,
+        agent(),
+        transact(WriteBody::Ops(vec![Op::Leaf(Patch::set(
+            vec!["future".into()],
+            parse(r#"[{"name":"foreign"},{"name":"owner"},{"name":"b"}]"#).unwrap(),
+        ))])),
+    );
+    let cancel = call(&mut p, native(), GestureCall::Cancel { gesture: g });
+    assert!(is_commit_with_notice(&cancel));
+    assert_eq!(
+        p.store()
+            .snapshot()
+            .root()
+            .unwrap()
+            .get("future")
+            .unwrap()
+            .to_value(),
+        parse(r#"[{"name":"foreign"},{"name":"owner"},{"name":"b"}]"#).unwrap()
+    );
 }

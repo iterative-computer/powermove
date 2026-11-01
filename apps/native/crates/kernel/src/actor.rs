@@ -563,16 +563,26 @@ fn publish_timed(
     for trimmed in std::mem::take(&mut kernel.trimmed_projects) {
         if trimmed != project {
             if let Some(revision) = publish(kernel, shared, &trimmed) {
-                emit(shared, KernelEvent::Published { project: trimmed.clone(), revision });
+                emit(
+                    shared,
+                    KernelEvent::Published {
+                        project: trimmed.clone(),
+                        revision,
+                    },
+                );
             }
             if let Some(p) = kernel.project_mut(&trimmed) {
                 let realms = shared.realms.lock().expect("realms");
                 for message in p.take_outbox() {
                     let writer = match &message {
-                        RealmMessage::RunExternal { writer, .. } | RealmMessage::Cleanup { writer, .. } => writer,
+                        RealmMessage::RunExternal { writer, .. }
+                        | RealmMessage::Cleanup { writer, .. } => writer,
                     };
                     if let Some(mailbox) = realms.get(writer) {
-                        let _ = mailbox.send(RealmEnvelope { project: trimmed.clone(), message });
+                        let _ = mailbox.send(RealmEnvelope {
+                            project: trimmed.clone(),
+                            message,
+                        });
                     }
                 }
             }

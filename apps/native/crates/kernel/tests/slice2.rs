@@ -829,10 +829,19 @@ fn v12_keys_and_writer_code_paths_and_v13_codec_accept_our_writes() {
                 .output()
                 .expect("git fetch is required");
             if !verify() {
-                eprintln!(
+                assert!(
+                    !fetched.status.success(),
+                    "Fetch reported success but {tag} is not a valid commit"
+                );
+                // Write directly: libtest captures eprintln even for a skip,
+                // making its default output indistinguishable from a pass.
+                use std::io::Write as _;
+                writeln!(
+                    std::io::stderr().lock(),
                     "SKIP tagged writer parity: {tag} unavailable after fetch: {}",
                     String::from_utf8_lossy(&fetched.stderr)
-                );
+                )
+                .expect("report skipped parity check");
                 return;
             }
         }
