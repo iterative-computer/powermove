@@ -241,3 +241,24 @@ compatibility, P1, release or supported-OS approval is implied.
 Only readiness and foreground/key/responder acquisition are observed. The five
 visual checks above remain open. Rerun `check.sh smoke` on an unlocked Mac with
 ≥ 6 GiB free and no concurrent build.
+
+## On-screen smoke rerun (2026-11-01, 10:52–11:02)
+
+**FAIL: the smoke stalls after foreground acquisition, with a blank panel.**
+`check.sh smoke` at `0863a9732` built (1 min 17 s, 12 GiB free, no concurrent
+build: the shared build lock was held) on an unlocked Mac. It acquired
+`compathost` and logged `SMOKE ready_generation=1`,
+`SMOKE native_foreground active=true key=true visible=true` and
+`SMOKE foreground=true responder=true`. Nothing followed. `shell-smoke` kept
+running at ~25% CPU well past its 35 s bound. The outer guard ended it at
+8 min (`compat_disk_or_8_minute_limit: owned child stopped`) and the lock was
+released. No `compat-host-*.png` captures were written.
+
+A screenshot at 7 min 51 s (`/tmp/pm-onscreen2/compat/hung-window-small.png`,
+outside Git) shows the GPUI window, sidebar, timeline strip and the purple
+overlay protruding left of the panel slot. The **slot itself is blank**: there
+is no "Remote DOM panel" content and no "Compat name" field, and the
+right-hand edge of the slot shows the window behind it. Checks 2–5 (typing,
+overlay click, popout, recovery) therefore did not run. The bounded 35 s
+owned test also failed to stop itself, so the internal deadline needs a look,
+not just the panel attach.

@@ -485,3 +485,92 @@ Validation: service **25/25** (kernel adapter) and **25/25**
 alignment. App **16/16**. Harness **27/27**, including onset A/V and content
 continuity. App/service Clippy `--all-targets -D warnings` and package `fmt`
 pass. No kernel, engine, vendor, shell or Cargo.lock change.
+
+## On-screen rerun 2 — 2026-11-01 (10:33–11:00)
+
+**Gate P1 remains NOT PASSED. The default (new) playback schedule at
+`0863a9732` regresses at 120 Hz: the present-lag estimate runs away and
+playback stops reaching glass after ≈10 s.** This was the first on-screen run
+of `73b91610c` (timed present) + `53f8f7027` (upper-decile lag). Both were
+previously tested only headlessly.
+
+Conditions: release build of `origin/feat/native-engine` @ `0863a9732` in a
+clean detached worktree. There were no uncommitted edits, unlike the latency
+pass. Rust 1.96.1, built in 5 min 22 s. Apple M5 / 16 GiB, macOS 27.2
+(26B5086k), AC, built-in panel only, unlocked, caffeinate held. The shared
+build lock (`/tmp/pm-build.lock`) was held for the whole session, so no other
+lane compiled. Each batch held the GUI lock as `onscreen2` and restored the
+display mode (`display_restore_ok` true for every run). The machine was **not
+quiet**. One-minute load was 18–19 during the audio runs and 13 → 4 later,
+from `fileproviderd` (~100% CPU) and an already-running Electron Powermove.
+Existing apps were retained, so every run is a diagnostic, not gate-eligible.
+Disk: 6.7 GiB free at the start. The oldest 7 GiB of stale
+`pm-target/debug/deps` artifacts (hash groups untouched for > 3 h) were
+evicted to keep ≥ 8 GiB free for the harness.
+
+Commands: the "Latency pass → Reproduce" block, with `--lock-owner onscreen2`
+and outputs under `/tmp/pm-onscreen2/lat/` (not tracked).
+
+**Audio A/B, 120 Hz, 20 s** (`public-audio.json`, `--audio --runs 1`):
+
+| Row | Legacy schedule | Default schedule | Verdict |
+|---|---|---|---|
+| Content onsets reached glass (of ≈600) | 601 | **131** | Default FAIL: 275 skipped |
+| Onset A/V mean signed / abs (ms) | 21.608 / 21.608 | 19.371 / 19.371 | FAIL ≤ 1 ms (both) |
+| Onset jitter p50 / p95 about mean (ms) | 2.276 / 6.045 | 11.053 / 13.944 | FAIL ≤ 2 ms (both) |
+| Late / skipped onsets | 27 / 0 | 18 / 275 (293 dropped) | FAIL zero |
+| All-presentation mean / jitter p95 (ms) | 33.878 / 14.651 | 19.371 / 13.944 | — |
+| Worker → completion p50 / p95 (ms) | 0.687 / 2.091 | **60.851 / 113.343** | Default FAIL |
+| Commit → display p50 / p95 (ms) | 24.601 / 24.710 | **174.164 / 249.146** | Default FAIL |
+| Load (1-min) before → after | 18.7 → 18.8 | 17.7 → 13.1 | Not quiet |
+
+**60 s shape run** (`public-shape.json`, 30 cached seeks + 30 edits, then 60 s
+looped playback; nearest-rank quantiles):
+
+| Row | Legacy 120 Hz (control) | Default 120 Hz | Default 60 Hz | Verdict |
+|---|---|---|---|---|
+| Cached scrub p50 / p95 (ms) | 23.034 / 24.367 | 22.659 / 24.383 | 22.711 / 24.471 | FAIL ≤ vsync+1; compositor floor (unchanged) |
+| Edit → presentation p50 / p95 (ms) | 22.957 / 24.457 | 22.932 / 24.530 | 23.063 / 28.408 | FAIL; floor (60 Hz tail) |
+| Content onsets reached glass (of 1,800) | 1,801 | **132** | 1,800 | Default 120 Hz FAIL |
+| Late / skipped onsets (dropped) | 39 / 0 (39) | 18 / 272 (**290**) | **1 / 0 (1)** | FAIL zero; 60 Hz nearly clean |
+| Held ticks | 0 (7,139 presents) | 63 | 1,829 | — |
+| Worker → completion p50 / p95 (ms) | 0.748 / 2.329 | **60.012 / 113.291** | 2.023 / 4.340 | 120 Hz FAIL; 60 Hz PASS 8.333 local bound |
+| Commit → display p50 / p95 (ms) | 24.604 / 24.730 | **174.047 / 249.143** | **73.926 / 82.463** | Default lag inflated at both rates |
+| Load before → after | 5.0 → 4.1 | 13.1 → 6.9 | 7.4 → 5.4 | — |
+
+Scrub/edit are measured before playback, so they are unaffected and remain on
+the ≈24 ms compositor floor.
+
+### Regression: present-lag runaway (from the trace)
+
+`predicted − target` (the lag the worker compensates for) grows without bound
+while playing at 120 Hz:
+
+- Audio run: 0 → 54 → 83 → 108 → 133 → 167 → 192 → 217 → 242 → 275 → 300 →
+  **333 ms** at t = 0, 0.4, 0.8, 1.3, 1.9, 2.6, 3.4, 4.3, 5.4, 6.6, 7.9, 9.3 s.
+  It climbs one refresh (8.3 ms) at a time, and `display − target` tracks it
+  at +8 ms. From **t = 9.97 s**, submissions never get a `presentedTime` (77 of
+  260 rows have none). Worker → GPU-done grows with it (3 → 101 ms).
+- Shape run, 120 Hz: the lag reaches **375 ms** by ≈17 s and stays there. From
+  9.6 s, **397 of 560** submissions are never displayed.
+- 60 Hz: the lag creeps 28 → 36 → 42 → 46 → **54 ms** over 60 s (still
+  rising at the end). Frames keep reaching glass, but picture latency is
+  ~3–5× the 60 Hz legacy value.
+
+Likely mechanism (not verified in code by this lane): `73b91610c` presents
+`atTime:` predicted glass − ½ refresh. The measured `presentedTime − target`
+therefore includes the requested delay. `53f8f7027` takes the **upper decile**
+of those samples, so each late slot raises the next prediction by a refresh
+and nothing pulls it back down. The latency pass already noted that a
+ratcheting estimate "does not correct downward". Lag must be sampled against
+the requested present time (or `presentedTime − scheduled-at`), not the link
+target. Alternatively the estimate needs a ceiling (e.g. 3 refreshes) and a
+downward path. The legacy schedule in the same binary has no runaway
+(commit → display p95 24.73 ms, 0 skipped).
+
+### Status after this rerun
+
+- Do not ship the default schedule at `0863a9732`. The legacy schedule is
+  stable but keeps the ~21 ms A/V bias and 27–39 late onsets per run.
+- Re-run the audio A/B and both shape runs after a lag-sampling fix, on a quiet
+  machine (`fileproviderd` idle, no Electron instance).

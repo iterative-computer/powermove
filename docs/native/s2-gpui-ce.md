@@ -577,3 +577,46 @@ launches the spike, AX-focuses `text field 1 of group 1`, types through System
 Events, captures each step and restores input sources. Rerun P-120 with the
 documented `check-ptext-120.sh --display --no-build --runs 1` on a quiet, unlocked
 machine.
+
+## On-screen rerun 2 (2026-11-01, 10:39–10:52)
+
+**P-120 GUI pacing: FAIL. Japanese IME conversion: PASS, with a screenshot.**
+S2 remains OPEN. Conditions: unlocked, AC, built-in 120 Hz panel. The shared
+build lock was held, so no lane compiled. One-minute load was 4–7, from
+`fileproviderd` and an existing Electron instance. Binary: the existing dev
+`pm-native-s2-spike` (built 09:19). `apps/native/spikes/s2`, `crates/shell`,
+`crates/design` and `vendor/` are unchanged between its sources (`93638bf7b`)
+and `0863a9732`. The run used the documented command from the checkout that
+owns `/tmp/ptext-120-build`, with an identical script:
+`check-ptext-120.sh --display --no-build --runs 1`. It held the GUI lock as
+`ptext` for one 4 × 65 s batch.
+
+| Workload (120 Hz, 65 s) | CPU frame p50 / p95 (ms) | Positive presents | Zero (unknown) timestamps | Missed 120 Hz intervals | Verdict |
+|---|---|---|---|---|---|
+| tiles-before (baseline) | 6.163 / 7.001 | 7,258 | 112 | 119 | FAIL |
+| tiles-after (P-120 cache; 2 tile renders) | 5.924 / 7.131 | 7,188 | 182 | 203 | FAIL |
+| timeline-before | 3.207 / 3.797 | 6,291 | 1,078 | 1,117 | FAIL |
+| timeline-after | 3.126 / 3.604 | 6,579 | 790 | 826 | FAIL |
+
+All four rows are `presentation_evidence_valid: false`, because zero
+timestamps are present, and all fail the ≤ 4.167 ms CPU p95 and zero-miss
+criteria. The timeline workload is under the CPU budget, but it misses ~11–15%
+of 120 Hz intervals. The P-120 view cache cut tile renders from 7,401 to 2 but
+did not lower CPU p95 or misses. Raw rows are in
+`/tmp/pm-onscreen2/s2/ptext-120-results.json` (not tracked).
+
+**Japanese IME** (`S2_TEXT=1`, synthetic keys through System Events,
+Kotoeri Romaji):
+`nihon` → Space → Space shows the candidate window anchored under the native
+field with **日本語** selected. Return commits it: the field value read via AX
+is `日本語`. Driver change versus `/tmp/pm-onscreen/s2/ime.py`: Kotoeri only
+switched out of direct input after the focused field ended editing once. The
+earlier "run 2 flake" reproduced twice as literal `nihon` with the mode
+reported as selected. Sending Return + Right Arrow after `TISSelectInputSource`
+fixed it. A real user who switches input source while a GPUI-hosted
+`NSTextField` is already first responder may hit the same thing; this is
+unverified with a real keyboard. Afterwards U.S. was reselected and the
+temporarily enabled Kotoeri parent was disabled again.
+Captures (outside Git): `/tmp/pm-onscreen2/s2/crop-converted.png`
+(candidate window), `japanese-3-committed*.png`, and the P-120 batch
+screenshots `ptext-{tiles,timeline}-{before,after}-0.png`.
