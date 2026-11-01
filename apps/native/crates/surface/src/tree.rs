@@ -80,6 +80,8 @@ pub struct InputState {
     pub displayed: String,
     pub selection: (usize, usize),
     pub composing: bool,
+    #[serde(default)]
+    pub composition: Option<(usize, usize)>,
     pub writes: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -306,6 +308,7 @@ impl Surface {
                             code: "unknownProp".into(),
                         });
                     }
+                    crate::schema::validate(&node.r#type, &key, &value)?;
                     validate_prop(&key, &value)?;
                     if key == "value"
                         && !value.is_null()
@@ -334,6 +337,8 @@ impl Surface {
                             let len = desired.encode_utf16().count();
                             input.selection =
                                 (input.selection.0.min(len), input.selection.1.min(len));
+                            input.composing = false;
+                            input.composition = None;
                             input.writes += 1;
                         }
                     }
@@ -384,6 +389,15 @@ impl Surface {
                 stack.push((*child, depth + 1));
             }
         }
+        for node in self.nodes.values() {
+            if node.r#type == "virtual-list"
+                && let Some((_, end)) = node.props.get("range").and_then(crate::schema::range)
+                && let Some(count) = node.props.get("count").and_then(Value::as_u64)
+                && end > count
+            {
+                return Err("virtual range exceeds count".into());
+            }
+        }
         if seen.len() != self.nodes.len() {
             return Err("unattached element".into());
         }
@@ -399,11 +413,25 @@ impl Surface {
         selection: (usize, usize),
         composing: bool,
     ) -> Result<(), String> {
+        self.observe_input_composition(id, value, selection, composing, None)
+    }
+    pub fn observe_input_composition(
+        &mut self,
+        id: Id,
+        value: String,
+        selection: (usize, usize),
+        composing: bool,
+        composition: Option<(usize, usize)>,
+    ) -> Result<(), String> {
         let input = self.node_mut(id)?.input.as_mut().ok_or("not an input")?;
         let len = value.encode_utf16().count();
         if selection.0 > selection.1 || selection.1 > len {
             return Err("invalid UTF-16 selection".into());
         }
+        if composition.is_some_and(|(a, b)| !composing || a > b || b > len) {
+            return Err("invalid UTF-16 composition".into());
+        }
+        input.composition = composition;
         input.observed = value.clone();
         input.displayed = value;
         input.selection = selection;
@@ -459,6 +487,11 @@ fn known_prop(key: &str) -> bool {
             | "focusRequest"
             | "styleRules"
             | "speed"
+            | "metadata"
+            | "resource"
+            | "time"
+            | "source"
+            | "points"
     ) || key.starts_with("aria-")
         || key.starts_with("data-")
 }
@@ -471,7 +504,7 @@ fn validate_prop(key: &str, value: &Value) -> Result<(), String> {
         | "unit" | "language" | "material" | "d" | "focusRequest" => value.is_string(),
         "checked" | "disabled" | "mixed" | "open" | "focusScope" => value.is_boolean(),
         "attr" | "state" | "style" | "preventDefault" => value.is_object(),
-        "tabIndex" | "min" | "max" | "step" | "precision" | "anchor" | "count" | "itemSize" => {
+        "tabIndex" | "min" | "max" | "step" | "precision" | "count" | "itemSize" => {
             value.is_number()
         }
         "binding" => value.is_string(),
