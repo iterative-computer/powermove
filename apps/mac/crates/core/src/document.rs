@@ -750,6 +750,41 @@ impl DocumentStore {
         Ok(Some(revision))
     }
 
+    /// One step computed from the gesture's *starting* state: `commands`
+    /// are staged on the document as it was at [`begin_gesture`](Self::begin_gesture)
+    /// and the result replaces the previous step. Use it for relative
+    /// commands in drags (`KeyframeCommand::Move { delta }`,
+    /// `TimingCommand::Move { delta }` with the total pointer delta): a key
+    /// removed by a temporary collision comes back when the pointer moves on,
+    /// as the old timeline's `applyKeyframeGesture` did. Returns the new
+    /// revision, or `None` when the document already looks like that.
+    pub fn update_gesture_from_start(
+        &mut self,
+        id: GestureId,
+        commands: &[Command],
+    ) -> Result<Option<u64>, TransactionError> {
+        let (origin, base) = {
+            let g = self.gesture_mut(id)?;
+            (g.origin, g.base.clone())
+        };
+        let staged = self.stage_commands_on(base.root(), commands, origin)?;
+        let ops = diff_node_ops(self.current.root(), staged.document.root());
+        if ops.is_empty() {
+            self.gesture_mut(id)?.scopes.extend(staged.scopes);
+            return Ok(None);
+        }
+        let step = self.stage_ops(&ops, false)?;
+        self.gesture_mut(id)?.scopes.extend(staged.scopes);
+        let revision = step.document.revision();
+        self.publish(
+            step.document,
+            ops.into(),
+            ChangeCause::GestureStep { gesture: id },
+        );
+        self.set_state_token(next_token());
+        Ok(Some(revision))
+    }
+
     /// Ends the gesture as one undo step from its starting values to its
     /// final ones. `None` when it changed nothing overall.
     pub fn commit_gesture(&mut self, id: GestureId) -> Result<Option<u64>, TransactionError> {
@@ -812,8 +847,22 @@ impl DocumentStore {
         commands: &[Command],
         origin: Origin,
     ) -> Result<Staged, TransactionError> {
+        let staged = self.stage_commands_on(self.current.root(), commands, origin)?;
+        #[cfg(test)]
+        assert_inverse_restores(self.current.root(), staged.document.root(), &staged.inverse);
+        Ok(staged)
+    }
+
+    /// [`stage_commands`](Self::stage_commands) on another tree (a
+    /// gesture's start).
+    fn stage_commands_on(
+        &self,
+        start: Option<&Node>,
+        commands: &[Command],
+        origin: Origin,
+    ) -> Result<Staged, TransactionError> {
         let revision = self.revision() + 1;
-        let mut root = self.current.root().cloned();
+        let mut root = start.cloned();
         let mut forward = Vec::new();
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
@@ -834,8 +883,6 @@ impl DocumentStore {
         inverse.reverse();
         let document = Document::from_root(root, revision);
         validate(&document, &forward)?;
-        #[cfg(test)]
-        assert_inverse_restores(self.current.root(), document.root(), &inverse);
         Ok(Staged {
             document,
             forward,

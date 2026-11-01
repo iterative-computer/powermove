@@ -20,3 +20,5 @@ pm-edit = { path = "../../../../engine/crates/pm-edit" }
 pm-eval = { path = "../../../../engine/crates/pm-eval" }
 # Expression validation (`expressionDiagnostic`).
 pm-expr = { path = "../../../../engine/crates/pm-expr" }
+# Text types for the measure stub the group-placement kernel takes.
+pm-text = { path = "../../../../engine/crates/pm-text", default-features = false }

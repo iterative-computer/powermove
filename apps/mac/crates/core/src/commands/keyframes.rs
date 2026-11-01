@@ -200,10 +200,13 @@ pub enum KeyframeCommand {
         channel: String,
         time: f64,
     },
-    /// Key drag and Option+←/→ nudge: shifts the keys by `delta` seconds
-    /// (each channel's moved keys together; a moved key landing within half
-    /// a frame of a key that did not move replaces it, as in the timeline;
-    /// times stay ≥ 0). Label "Move Keyframes".
+    /// Key drag and Option+←/→ nudge (`planKeyframeMove`): every key moves
+    /// by the same `delta`, snapped to a frame and clamped so no key leaves
+    /// the composition (keys already outside may stay); an unselected key
+    /// on a destination frame of the same channel is removed. In a drag,
+    /// send the total delta each step with
+    /// `DocumentStore::update_gesture_from_start`, so a key removed by a
+    /// passing collision comes back. Label "Move Keyframes".
     Move { key_ids: Vec<String>, delta: f64 },
     /// The keyframe value dialog: a key's time (composition seconds, snapped
     /// to a frame) and/or value (finite). A time on another key's frame is
@@ -645,58 +648,68 @@ fn clear_all(
     cx.put_layer(&loc, layer)
 }
 
-/// Key drags and nudges.
+/// Key drags and nudges (`planKeyframeMove`): one rigid delta, snapped to
+/// a frame and clamped so no key leaves the composition (keys already
+/// outside may stay); unselected keys on a destination frame are removed.
 fn move_keys(cx: &mut Cx<'_>, key_ids: &[String], delta: f64) -> Result<(), CommandError> {
     let delta = values::finite(delta, "delta")?;
-    if delta == 0.0 {
-        return Ok(());
-    }
     let ids: HashSet<&str> = key_ids.iter().map(String::as_str).collect();
-    let fps_of: Vec<(Option<String>, f64)> = Vec::new();
-    let _ = fps_of;
-    // Every touched layer lives in some composition; resolve its rate there.
-    let comps: std::collections::HashMap<String, f64> = cx
-        .all_layers()
-        .into_iter()
-        .filter_map(|loc| {
-            let id = cx
-                .layer_node(&loc)
-                .ok()?
-                .get("id")
-                .and_then(crate::model::str_of)?
-                .to_owned();
-            Some((id, track::safe_fps(cx.fps(loc.comp_id.as_deref()))))
-        })
-        .collect();
-    edit_tracks(cx, &ids, |layer, prop, _| {
-        let fps = values::text(layer, "id")
-            .and_then(|id| comps.get(id).copied())
-            .unwrap_or(30.0);
-        let keys = track::keys_mut(prop);
-        let moved: Vec<f64> = keys
-            .iter()
-            .filter(|k| {
-                k.get("i")
+    // Pass 1: the clamp over every selected key.
+    let mut fps = None;
+    let mut min_delta = f64::NEG_INFINITY;
+    let mut max_delta = f64::INFINITY;
+    for loc in cx.all_layers() {
+        let layer = cx.layer_node(&loc)?.to_value();
+        let from = values::num(&layer, "from").unwrap_or(0.0);
+        let dur = cx.duration(loc.comp_id.as_deref());
+        for (_, path) in channels::all(&layer) {
+            let Some(prop) = channels::get(&layer, &path) else {
+                continue;
+            };
+            for k in track::keys_of(prop) {
+                if !k
+                    .get("i")
                     .and_then(Value::as_str)
                     .is_some_and(|i| ids.contains(i))
-            })
-            .map(|k| (track::js_number(k.get("t").unwrap_or(&Value::Null)) + delta).max(0.0))
-            .collect();
-        keys.retain(|k| {
-            let selected = k
-                .get("i")
-                .and_then(Value::as_str)
-                .is_some_and(|i| ids.contains(i));
-            let t = track::js_number(k.get("t").unwrap_or(&Value::Null));
-            selected || !moved.iter().any(|m| (m - t).abs() < 0.5 / fps)
-        });
-        for k in keys.iter_mut() {
-            if k.get("i")
+                {
+                    continue;
+                }
+                fps.get_or_insert_with(|| track::safe_fps(cx.fps(loc.comp_id.as_deref())));
+                let t = track::js_number(k.get("t").unwrap_or(&Value::Null));
+                if !t.is_finite() {
+                    continue;
+                }
+                min_delta = min_delta.max(t.min(-from) - t);
+                max_delta = max_delta.min(t.max(0f64.max(dur - from)) - t);
+            }
+        }
+    }
+    let Some(rate) = fps else {
+        return Ok(());
+    };
+    let mut delta = values::js_round(delta * rate) / rate;
+    delta = delta.max(min_delta).min(max_delta);
+    if delta.abs() <= 1e-12 {
+        return Ok(());
+    }
+    edit_tracks(cx, &ids, |_, prop, _| {
+        let keys = track::keys_mut(prop);
+        let selected = |k: &Value| {
+            k.get("i")
                 .and_then(Value::as_str)
                 .is_some_and(|i| ids.contains(i))
-            {
-                let t = track::js_number(k.get("t").unwrap_or(&Value::Null));
-                values::obj(k).insert("t", Value::Number((t + delta).max(0.0)));
+        };
+        let t_of = |k: &Value| track::js_number(k.get("t").unwrap_or(&Value::Null));
+        let frames: Vec<f64> = keys
+            .iter()
+            .filter(|k| selected(k))
+            .map(|k| values::js_round((t_of(k) + delta) * rate))
+            .collect();
+        keys.retain(|k| selected(k) || !frames.contains(&values::js_round(t_of(k) * rate)));
+        for k in keys.iter_mut() {
+            if selected(k) {
+                let t = t_of(k);
+                values::obj(k).insert("t", Value::Number(t + delta));
             }
         }
         track::sort_keys(keys);

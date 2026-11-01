@@ -204,6 +204,34 @@ impl<'a> Cx<'a> {
         out
     }
 
+    /// Runs an engine edit kernel (`pm_edit`) over the scratch tree for
+    /// composition `comp` and writes the operations it returns. A kernel's
+    /// legacy throw becomes [`CommandError::Invalid`] with its message.
+    pub fn kernel<R>(
+        &mut self,
+        comp: Option<&str>,
+        f: impl FnOnce(&mut pm_edit::Edit<'_>) -> pm_eval::JsResult<R>,
+    ) -> Result<R, CommandError> {
+        let comp_id = self
+            .comp_id(comp)
+            .ok_or_else(|| CommandError::Malformed("the project has no compositions".into()))?;
+        let open = model::open_comp_id(self.root()).unwrap_or_else(|| comp_id.clone());
+        let doc = Document::from_root(Some(self.root().clone()), self.revision);
+        let ids = pm_edit::IdSource::new(new_id(""), 1);
+        let engine: std::sync::Arc<dyn pm_eval::ExpressionEngine> =
+            std::sync::Arc::new(pm_wasm::expr::PmExpressions);
+        let (result, ops) = {
+            let mut edit = pm_edit::Edit::new(&doc, &comp_id, &open, Some(engine), ids)
+                .map_err(|e| CommandError::Invalid(e.message))?;
+            let result = f(&mut edit).map_err(|e| CommandError::Invalid(e.message))?;
+            (result, edit.finish())
+        };
+        for op in ops {
+            self.write(op)?;
+        }
+        Ok(result)
+    }
+
     /// Writes an edited copy of a layer back (only what changed).
     pub fn put_layer(&mut self, loc: &LayerLoc, layer: Value) -> Result<(), CommandError> {
         self.replace(loc.path(), layer)

@@ -76,13 +76,13 @@ Status: **done** (ported, tested), **todo** (typed and documented, returns
 | **Spine** (kept for existing callers) | | |
 | `SetStaticOpacity`, `SetLayerName`, `SetLayerVisible`, `SetLayerLocked` | `set_property` static, `set_layer` | done |
 | **Layers** `LayerCommand` | | |
-| `Set { layer_id, patch: LayerPatch }` | `set_layer` (name, from, duration, visible, locked, shy, solo, blend, motionBlur, parent, matteSource, color, collapsed, threeD, scaleLinked, separateDimensions, continuousRaster, effectSpace) | todo |
-| `Add(AddLayer)` | `add_layer`, `PM.mkLayer` | todo |
-| `Delete { layer_ids }` | `delete_layers`, `PM.removeLayers` | todo |
-| `Duplicate { layer_ids, new_ids }` | Cmd+D, `PM.cloneLayer` | todo |
-| `Paste { comp, layers, new_ids, index, time }` | Cmd+V layers | todo |
-| `Reorder { layer_id, index }` | `reorder_layer` | todo |
-| `Restack { layer_ids, to }` | Cmd+[ ] (Shift: front/back) | todo |
+| `Set { layer_id, patch: LayerPatch }` | `set_layer` (name, from, duration, visible, locked, shy, solo, blend, motionBlur, parent, matteSource, color, collapsed, threeD, scaleLinked, separateDimensions, continuousRaster, effectSpace) | done |
+| `Add(AddLayer)` | `add_layer`, `PM.mkLayer` | done |
+| `Delete { layer_ids }` | `delete_layers`, `PM.removeLayers` | done |
+| `Duplicate { layer_ids, new_ids }` | Cmd+D, `PM.cloneLayer` | done |
+| `Paste { comp, layers, new_ids, index, time }` | Cmd+V layers | done |
+| `Reorder { layer_id, index, time }` | `reorder_layer` | done |
+| `Restack { layer_ids, to }` | Cmd+[ ] (Shift: front/back) | done |
 | `TransformLayers` | `transform_layers` (generated tools) | todo |
 | **Properties** `PropertyCommand` | | |
 | `Set(SetProperty)` | `set_property` (keys at `time` when animated) | done |
@@ -104,14 +104,14 @@ Status: **done** (ported, tested), **todo** (typed and documented, returns
 | `SetSpring` | spring easing | done |
 | `Transform` | graph transform box | todo |
 | **Timing** `TimingCommand` | | |
-| `Move { layer_ids, delta }` | strip drag (group strips move members) | todo |
-| `TrimIn`, `TrimOut` | edge drags, Option+[ ] | todo |
-| `MoveInTo`, `MoveOutTo` | [ ], Option+Home/End | todo |
-| `Slip` | source slip | todo |
-| `Split { layer_ids, time, new_ids }` | Cmd+Shift+D / Cmd+B | todo |
-| `Stagger { layer_ids, step }` | Cmd+Option drag | todo |
+| `Move { layer_ids, delta }` | strip drag (group strips move members) | done |
+| `TrimIn`, `TrimOut` | edge drags, Option+[ ] | done |
+| `MoveInTo`, `MoveOutTo` | [ ], Option+Home/End | done |
+| `Slip { layer_id, source_in }` | source slip (agent `slip`) | done |
+| `Split { layer_ids, time, new_ids }` | Cmd+Shift+D / Cmd+B | done |
+| `Stagger { layer_ids, step }` | Cmd+Option drag | done |
 | **Groups** `GroupCommand` | | |
-| `Group`, `Ungroup`, `MoveToGroup` | `group_layers`, `ungroup_layers`, `move_to_group` | todo |
+| `Group`, `Ungroup`, `MoveToGroup` | `group_layers`, `ungroup_layers`, `move_to_group` | done |
 | **Compositions** `CompCommand` | | |
 | `Set { comp, patch: CompPatch }` | `set_composition` | todo |
 | `SetWorkArea`, `ResetWorkArea` | B, N, ruler menu | todo |
@@ -156,6 +156,10 @@ Cut is Copy + `LayerCommand::Delete`; Lock All / Unlock All is a
   pointer move (each publishes a live revision) → `commit_gesture(id)` (one
   undo step from start to end values) or `cancel_gesture(id)` (restores the
   start). While a gesture is open, other edits, undo and redo are refused.
+  For relative commands in drags (key moves, strip moves, stagger) use
+  `update_gesture_from_start(id, &[cmds])` with the *total* delta: each step
+  is staged on the gesture's start, so a key removed by a passing collision
+  comes back (the old `applyKeyframeGesture`).
 * `restore_project(value, label, origin)`: replace the whole project as one
   step, written as minimal id-keyed operations (checkpoints, agent rollback).
 * `history_mark()` + `squash_since(&mark, label)`: an agent run as one step.
