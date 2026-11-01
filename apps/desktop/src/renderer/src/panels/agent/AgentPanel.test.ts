@@ -754,6 +754,36 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.keepSceneRun).toHaveBeenCalledOnce();
   });
 
+  it('folds a finished run behind "Worked for" and reopens it on click', () => {
+    renderPanel(snapshot({ conversation: [
+      { role: 'user', text: 'Build it' },
+      { role: 'trace', durationMs: 150_000, steps: [
+        { kind: 'text', id: 't1', text: 'Checking the timeline' },
+        { kind: 'text', id: 't2', text: 'All done.' }
+      ] as any }
+    ] }));
+    // Interim prose before a tool would fold; here both lines are the reply.
+    expect(target.querySelector('.agent-work-toggle')).toBeNull();
+    setAgentSnapshot(snapshot({ conversation: [
+      { role: 'user', text: 'Build it' },
+      { role: 'trace', durationMs: 150_000, steps: [
+        { kind: 'text', id: 't1', text: 'Checking the timeline' },
+        { kind: 'tool', id: 'x', toolName: 'shell', label: 'Read timeline', status: 'done' },
+        { kind: 'text', id: 't2', text: 'All done.' }
+      ] as any }
+    ] })); flushSync();
+    const toggle = target.querySelector<HTMLButtonElement>('.agent-work-toggle')!;
+    expect(toggle.textContent?.trim()).toBe('Worked for 2m 30s');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(target.textContent).toContain('All done.');
+    expect(target.textContent).not.toContain('Checking the timeline');
+    toggle.click(); flushSync();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(target.querySelector('.agent-work-details')?.textContent).toContain('Checking the timeline');
+    toggle.click(); flushSync();
+    expect(target.querySelector('.agent-work-details')).toBeNull();
+  });
+
   it('renders autonomous review notes as separate markdown blocks', () => {
     renderPanel(snapshot({ legacyPhase: 'result', run: {
       autonomous: true, changed: false,

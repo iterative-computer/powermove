@@ -35,8 +35,8 @@ describe('inlineRuns', () => {
   it('links autolinks, titled links, and images without stray markers', () => {
     expect(inlineRuns('Docs: <https://x.y/a>.')).toEqual([{ text: 'Docs: ' }, { text: 'https://x.y/a', href: 'https://x.y/a' }, { text: '.' }]);
     expect(inlineRuns('[Guide](https://x.y/g "The guide")')).toEqual([{ text: 'Guide', href: 'https://x.y/g' }]);
-    expect(inlineRuns('![Frame 12](https://x.y/f.png)')).toEqual([{ text: 'Frame 12', href: 'https://x.y/f.png' }]);
-    expect(inlineRuns('![](https://x.y/shots/f.png)')).toEqual([{ text: 'f.png', href: 'https://x.y/shots/f.png' }]);
+    expect(inlineRuns('![Frame 12](https://x.y/f.png)')).toEqual([{ text: '', media: { kind: 'image', src: 'https://x.y/f.png', path: 'https://x.y/f.png', alt: 'Frame 12', remote: true } }]);
+    expect(inlineRuns('![](http://x.y/shots/f.png)')).toEqual([{ text: 'f.png', href: 'http://x.y/shots/f.png' }]);
     // Targets main will not open (mail, local files) stay readable text.
     expect(inlineRuns('[mail](mailto:a@b.c)')).toEqual([{ text: 'mail' }]);
     expect(inlineRuns('[app.ts](/Users/me/app.ts:12)')).toEqual([{ text: 'app.ts' }]);
@@ -48,10 +48,10 @@ describe('blocksFromMarkdown', () => {
     const blocks = blocksFromMarkdown([
       '## Plan', '', 'First line', 'same paragraph', '', '- one', '- two', '1. first', '', '> aside', '', '```ts', 'const a = 1;', '```'
     ].join('\n'));
-    expect(blocks.map((block) => block.kind)).toEqual(['h', 'p', 'li', 'li', 'li', 'quote', 'code']);
+    expect(blocks.map((block) => block.kind)).toEqual(['h', 'p', 'list', 'list', 'quote', 'code']);
     expect(plainText(blocks)).toBe('Plan\nFirst line same paragraph\none\ntwo\nfirst\naside\nconst a = 1;');
-    expect(blocks[4]).toMatchObject({ kind: 'li', ordinal: 1 });
-    expect(blocks[6]).toMatchObject({ kind: 'code', lang: 'ts' });
+    expect(blocks[3]).toMatchObject({ kind: 'list', ordered: true, start: 1 });
+    expect(blocks[5]).toMatchObject({ kind: 'code', lang: 'ts' });
   });
 
   it('renders a still-open fence as code so streaming does not flicker', () => {
@@ -89,3 +89,85 @@ it('preserves dividers and formats strikethrough', () => {
   expect(blocksFromMarkdown('Before\n\n---\n\nAfter').map(block => block.kind)).toEqual(['p', 'hr', 'p']);
   expect(inlineRuns('~~old~~ and ~~**bold**~~')).toEqual([{ text: 'old', s: true }, { text: ' and ' }, { text: 'bold', b: true, s: true }]);
 });
+
+describe('full markdown', () => {
+  const tree = (text: string) => JSON.parse(JSON.stringify(blocksFromMarkdown(text)));
+
+  it('nests lists by indentation and keeps multi-paragraph items together', () => {
+    const [list] = tree('- one\n  - inner\n    1. deep\n- two\n\n  more of two\n- three\nlazy line');
+    expect(list.items).toHaveLength(3);
+    expect(list.items[0].blocks[1]).toMatchObject({ kind: 'list', items: [{ blocks: [{ kind: 'p' }, { kind: 'list', ordered: true }] }] });
+    expect(list.items[1].blocks.map((block: { kind: string }) => block.kind)).toEqual(['p', 'p']);
+    expect(plainText(list.items[2].blocks)).toBe('three lazy line');
+  });
+
+  it('reads task lists, start numbers, ) delimiters and code inside items', () => {
+    const [tasks] = tree('- [x] shipped\n- [ ] pending');
+    expect(tasks.items.map((item: { checked: boolean }) => item.checked)).toEqual([true, false]);
+    expect(plainText(tasks.items[0].blocks)).toBe('shipped');
+    expect(tree('3) c\n4) d')[0]).toMatchObject({ ordered: true, start: 3, items: [{}, {}] });
+    const [withCode] = tree('1. run:\n   ```sh\n   bun test\n   ```\n2. done');
+    expect(withCode.items[0].blocks[1]).toEqual({ kind: 'code', text: 'bun test', lang: 'sh' });
+    expect(withCode.items).toHaveLength(2);
+  });
+
+  it('nests quotes with any block inside', () => {
+    const [quote] = tree('> # Note\n> - a\n>\n> > deeper\n> lazy');
+    expect(quote.blocks.map((block: { kind: string }) => block.kind)).toEqual(['h', 'list', 'quote']);
+    expect(plainText(quote.blocks[2].blocks)).toBe('deeper lazy');
+  });
+
+  it('handles underlined headings, hard breaks, longer fences and bold italic', () => {
+    expect(tree('Title\n=====\n\nSub\n---')).toMatchObject([{ kind: 'h', level: 1 }, { kind: 'h', level: 2 }]);
+    expect(plainText(blocksFromMarkdown('a  \nb\\\nc\nd<br>e'))).toBe('a\nb\nc d\ne');
+    expect(tree('````md\n```\ninner\n```\n````')[0]).toEqual({ kind: 'code', text: '```\ninner\n```', lang: 'md' });
+    expect(inlineRuns('***both*** __bold__')).toEqual([{ text: 'both', b: true, i: true }, { text: ' ' }, { text: 'bold', b: true }]);
+  });
+
+  it('keeps simple inline HTML meaning without rendering HTML', () => {
+    expect(inlineRuns('<kbd>⌘K</kbd> <b>bold</b> <img src="/tmp/a.png" alt="A">')).toEqual([
+      { text: '⌘K', c: true }, { text: ' ' }, { text: 'bold', b: true }, { text: ' ' },
+      { text: '', media: { kind: 'image', src: 'app://powermove/_agent-file?path=%2Ftmp%2Fa.png', path: '/tmp/a.png', alt: 'A' } }
+    ]);
+    expect(inlineRuns('<script>x</script>')).toEqual([{ text: '<script>x</script>' }]);
+  });
+
+  it('keeps a linked image as both picture and link', () => {
+    expect(inlineRuns('[![shot](/tmp/s.png)](https://x.y)')).toEqual([
+      { text: 'shot', href: 'https://x.y' },
+      { text: '', media: { kind: 'image', src: 'app://powermove/_agent-file?path=%2Ftmp%2Fs.png', path: '/tmp/s.png', alt: 'shot' } }
+    ]);
+  });
+
+  it('streams a list item and a fence without breaking earlier blocks', () => {
+    expect(tree('Intro\n-').map((block: { kind: string }) => block.kind)).toEqual(['p']);
+    expect(tree('Intro\n- a').map((block: { kind: string }) => block.kind)).toEqual(['p', 'list']);
+    expect(tree('- a\n  ```\n  half')[0].items[0].blocks[1]).toEqual({ kind: 'code', text: 'half' });
+  });
+});
+
+describe('local media', () => {
+  it('turns local image markdown, bare paths and code paths into media markers', () => {
+    const [shot] = blocksFromMarkdown('![shot](/tmp/a.png)') as Array<{ runs: unknown[]; media?: Array<{ kind: string; path: string }> }>;
+    expect(shot!.runs).toEqual([]);
+    expect(shot!.media).toEqual([{ kind: 'image', path: '/tmp/a.png', alt: 'shot', src: 'app://powermove/_agent-file?path=%2Ftmp%2Fa.png' }]);
+    expect(inlineRuns('see /tmp/b.gif.').map(run => run.media?.path ?? run.text)).toEqual(['see /tmp/b.gif', '/tmp/b.gif', '.']);
+    expect(inlineRuns('`/tmp/c.mov`').map(run => run.media?.kind ?? run.text)).toEqual(['/tmp/c.mov', 'video']);
+    expect(inlineRuns('file:///tmp/d.webp')[0]).toEqual({ text: 'file:///tmp/d.webp' });
+    expect(inlineRuns('![d](file:///tmp/d%20e.webp)')[0]!.media!.path).toBe('/tmp/d e.webp');
+  });
+
+  it('leaves non-media paths, relative paths, traversal and remote images alone', () => {
+    for (const text of ['/etc/passwd', 'shots/a.png', '![x](/tmp/../etc/a.png)', 'a/tmp/x.png', '/tmp/a.pngx']) {
+      expect(inlineRuns(text).some(run => run.media), text).toBe(false);
+    }
+    expect(inlineRuns('see https://x.y/r.png')).toEqual([{ text: 'see ' }, { text: 'https://x.y/r.png', href: 'https://x.y/r.png' }]);
+  });
+
+  it('shows each file once per block and keeps it out of the reveal words', () => {
+    const [block] = blocksFromMarkdown('/tmp/a.png then `/tmp/a.png`') as Array<{ runs: Parameters<typeof wordsFromRuns>[0]; media?: unknown[] }>;
+    expect(block!.media).toHaveLength(1);
+    expect(wordsFromRuns(inlineRuns('/tmp/a.png')).map(word => word.text)).toEqual(['/tmp/a.png']);
+  });
+});
+

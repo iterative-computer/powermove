@@ -36,3 +36,22 @@ it('anchors the divider through repeated steering and resets for the next run', 
   setAgentSnapshot({ ...snapshot, conversation, requestToken: 2 });
   expect(agentState.workingConversationIndex).toBe(conversation.length);
 });
+
+it('keeps one timer when steering replaces the request mid-run', () => {
+  vi.useFakeTimers(); vi.setSystemTime(1000);
+  resetAgentState();
+  const snapshot = { ...agentState, legacyPhase: 'working', requestToken: 1,
+    conversation: [{ role: 'user' as const, text: 'Build it' }] };
+  setAgentSnapshot(snapshot);
+  vi.setSystemTime(90_000);
+  const conversation = [...snapshot.conversation,
+    { role: 'trace' as const, steps: [] },
+    { role: 'user' as const, text: 'Make it blue', steering: true }];
+  setAgentSnapshot({ ...snapshot, conversation, requestToken: 2, runStartedAt: 90_000 });
+  expect(agentState.workingStartedAt).toBe(1000);
+  expect(agentState.workingConversationIndex).toBe(1);
+  setAgentSnapshot({ ...snapshot, conversation, requestToken: 2, legacyPhase: 'idle' });
+  setAgentSnapshot({ ...snapshot, conversation: [...conversation, { role: 'user', text: 'Next' }], requestToken: 3 });
+  expect(agentState.workingStartedAt).toBe(90_000);
+  expect(agentState.workingConversationIndex).toBe(4);
+});

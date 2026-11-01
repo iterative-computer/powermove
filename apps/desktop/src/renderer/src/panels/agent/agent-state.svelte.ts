@@ -319,6 +319,11 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
   const tokenChanged = snapshot.requestToken !== agentState.requestToken;
   const enteringRun = phase === 'running' && agentState.phase !== 'running';
   const threadChanged = (snapshot.threadId || '') !== agentState.threadId;
+  /* Steering a provider without live steering replaces the request (a new
+     token) while the run keeps going: same timer, same place, no new divider. */
+  const lastUser = [...(snapshot.conversation ?? [])].reverse().find((message) => message.role === 'user');
+  const steered = tokenChanged && !threadChanged && agentState.phase === 'running' && phase === 'running' && Boolean(lastUser?.steering);
+  const restartTimer = enteringRun || threadChanged || (tokenChanged && !steered);
   let progressLines = tokenChanged || enteringRun || threadChanged ? [] : [...agentState.progressLines];
   if (phase === 'running' && snapshot.activity && progressLines.at(-1) !== snapshot.activity) {
     progressLines = [...progressLines, snapshot.activity].slice(-20);
@@ -365,12 +370,10 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     threadSaveError: threadSaveError || false,
     phase,
     workingStartedAt: phase === 'running'
-      ? (enteringRun || tokenChanged || threadChanged
-        ? (snapshot.runStartedAt ?? Date.now()) : agentState.workingStartedAt)
+      ? (restartTimer ? (snapshot.runStartedAt ?? Date.now()) : agentState.workingStartedAt)
       : null,
     workingConversationIndex: phase === 'running'
-      ? (enteringRun || tokenChanged || threadChanged
-        ? conversation.length : agentState.workingConversationIndex)
+      ? (restartTimer ? conversation.length : agentState.workingConversationIndex)
       : null,
     uiPlacement: phase === 'running' && uiPlacement ? { ...uiPlacement } : null,
     plan: plan ? { ...plan } : null,

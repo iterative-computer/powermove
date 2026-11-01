@@ -77,6 +77,7 @@ import { ProjectFiles } from './project-files';
 import { installStorageUpgrade, StorageUpgrade, visitSourceReferences } from './storage-upgrade';
 import { CACHE_BUDGET_BYTES, installStorageManagement } from './storage-management';
 import { LibraryMedia, registerLibraryMedia } from './library-media';
+import { serveAgentMedia } from './agent-media';
 import { agentWorkspaceRoot } from './codex/workspace';
 import { validatedArtifactPath } from './codex/artifacts';
 import { registerShellIpc } from './shell';
@@ -303,6 +304,7 @@ function registerAppProtocol(): void {
 
       const pathname = decodeURIComponent(requestUrl.pathname);
       const requestedPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+      if (requestedPath === '_agent-file') return await serveAgentMedia(requestUrl, request);
       if (requestedPath.startsWith('_media/')) return libraryMedia
         ? libraryMedia.serve(requestedPath.slice('_media/'.length), request) : errorResponse(404, 'Not found');
       if (requestedPath.startsWith('ext/')) {

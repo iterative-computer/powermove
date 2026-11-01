@@ -130,9 +130,27 @@
     else userScrolled = false;
   }
 
+  /* Native smooth scroll glides through the whole history, so a long thread
+     takes seconds. Snap to one screen above the end, then ease the last
+     stretch in a fixed 180ms, aiming at the live bottom while replies stream. */
+  let jumpFrame = 0;
   function jumpToLatest(): void {
     userScrolled = false;
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    showJump = false;
+    const el = scroller;
+    if (!el) return;
+    window.cancelAnimationFrame(jumpFrame);
+    const bottom = (): number => el.scrollHeight - el.clientHeight;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { el.scrollTop = bottom(); return; }
+    const from = Math.max(el.scrollTop, bottom() - el.clientHeight);
+    el.scrollTop = from;
+    const started = performance.now();
+    const step = (now: number): void => {
+      const t = Math.min(1, (now - started) / 180);
+      el.scrollTop = from + (bottom() - from) * (1 - (1 - t) ** 3);
+      if (t < 1) jumpFrame = window.requestAnimationFrame(step);
+    };
+    jumpFrame = window.requestAnimationFrame(step);
   }
 
   /* Pin-to-bottom is a threshold, not a boolean stick: while the reader is
