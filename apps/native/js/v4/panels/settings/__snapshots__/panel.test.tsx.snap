@@ -1,16 +1,6 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`empty: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -161,22 +151,11 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`loading: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -324,22 +303,11 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -490,22 +458,11 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -656,22 +613,11 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -822,22 +768,11 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`disabled: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -988,23 +923,11 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`error: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Try Again",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -1157,22 +1080,11 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Try Again","Open Store"]"
 `;
 
 exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -1323,18 +1235,11 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`no-search-results: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -1353,22 +1258,11 @@ exports[`no-search-results: six-op tree snapshot passes the real Rust wire and k
         text heading
           text "No settings found."
         text
-          text"
-,
-}
+          text
+Focus: ["settings.search","settings.sections"]"
 `;
 
 exports[`extension-detail: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Extensions",
-    "Show in Finder",
-    "Delete…",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -1533,22 +1427,11 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
             button toolbar-item label="Show in Finder"
               text "Show in Finder"
           button toolbar-item label="Delete…"
-            text "Delete…""
-,
-}
+            text "Delete…"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Extensions","Show in Finder","Delete…"]"
 `;
 
 exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -1699,22 +1582,11 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -1865,82 +1737,11 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "settings.extension.fixture-29980",
-    "settings.extension.fixture-29981",
-    "settings.extension.fixture-29982",
-    "settings.extension.fixture-29983",
-    "settings.extension.fixture-29984",
-    "settings.extension.fixture-29985",
-    "settings.extension.fixture-29986",
-    "settings.extension.fixture-29987",
-    "settings.extension.fixture-29988",
-    "settings.extension.fixture-29989",
-    "settings.extension.fixture-29990",
-    "settings.extension.fixture-29991",
-    "settings.extension.fixture-29992",
-    "settings.extension.fixture-29993",
-    "settings.extension.fixture-29994",
-    "settings.extension.fixture-29995",
-    "settings.extension.fixture-29996",
-    "settings.extension.fixture-29997",
-    "settings.extension.fixture-29998",
-    "settings.extension.fixture-29999",
-    "settings.extension.fixture-30000",
-    "settings.extension.fixture-30001",
-    "settings.extension.fixture-30002",
-    "settings.extension.fixture-30003",
-    "settings.extension.fixture-30004",
-    "settings.extension.fixture-30005",
-    "settings.extension.fixture-30006",
-    "settings.extension.fixture-30007",
-    "settings.extension.fixture-30008",
-    "settings.extension.fixture-30009",
-    "settings.extension.fixture-30010",
-    "settings.extension.fixture-30011",
-    "settings.extension.fixture-30012",
-    "settings.extension.fixture-30013",
-    "settings.extension.fixture-30014",
-    "settings.extension.fixture-30015",
-    "settings.extension.fixture-30016",
-    "settings.extension.fixture-30017",
-    "settings.extension.fixture-30018",
-    "settings.extension.fixture-30019",
-    "settings.extension.fixture-30020",
-    "settings.extension.fixture-30021",
-    "settings.extension.fixture-30022",
-    "settings.extension.fixture-30023",
-    "settings.extension.fixture-30024",
-    "settings.extension.fixture-30025",
-    "settings.extension.fixture-30026",
-    "settings.extension.fixture-30027",
-    "settings.extension.fixture-30028",
-    "settings.extension.fixture-30029",
-    "settings.extension.fixture-30030",
-    "settings.extension.fixture-30031",
-    "settings.extension.fixture-30032",
-    "settings.extension.fixture-30033",
-    "settings.extension.fixture-30034",
-    "settings.extension.fixture-30035",
-    "settings.extension.fixture-30036",
-    "settings.extension.fixture-30037",
-    "settings.extension.fixture-30038",
-    "settings.extension.fixture-30039",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -2387,22 +2188,11 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","settings.extension.fixture-29980","settings.extension.fixture-29981","settings.extension.fixture-29982","settings.extension.fixture-29983","settings.extension.fixture-29984","settings.extension.fixture-29985","settings.extension.fixture-29986","settings.extension.fixture-29987","settings.extension.fixture-29988","settings.extension.fixture-29989","settings.extension.fixture-29990","settings.extension.fixture-29991","settings.extension.fixture-29992","settings.extension.fixture-29993","settings.extension.fixture-29994","settings.extension.fixture-29995","settings.extension.fixture-29996","settings.extension.fixture-29997","settings.extension.fixture-29998","settings.extension.fixture-29999","settings.extension.fixture-30000","settings.extension.fixture-30001","settings.extension.fixture-30002","settings.extension.fixture-30003","settings.extension.fixture-30004","settings.extension.fixture-30005","settings.extension.fixture-30006","settings.extension.fixture-30007","settings.extension.fixture-30008","settings.extension.fixture-30009","settings.extension.fixture-30010","settings.extension.fixture-30011","settings.extension.fixture-30012","settings.extension.fixture-30013","settings.extension.fixture-30014","settings.extension.fixture-30015","settings.extension.fixture-30016","settings.extension.fixture-30017","settings.extension.fixture-30018","settings.extension.fixture-30019","settings.extension.fixture-30020","settings.extension.fixture-30021","settings.extension.fixture-30022","settings.extension.fixture-30023","settings.extension.fixture-30024","settings.extension.fixture-30025","settings.extension.fixture-30026","settings.extension.fixture-30027","settings.extension.fixture-30028","settings.extension.fixture-30029","settings.extension.fixture-30030","settings.extension.fixture-30031","settings.extension.fixture-30032","settings.extension.fixture-30033","settings.extension.fixture-30034","settings.extension.fixture-30035","settings.extension.fixture-30036","settings.extension.fixture-30037","settings.extension.fixture-30038","settings.extension.fixture-30039","Open Store"]"
 `;
 
 exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -2645,23 +2435,11 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`transcription available wire/AX state 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Download",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -2819,23 +2597,11 @@ exports[`transcription available wire/AX state 1`] = `
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Download","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`transcription downloading wire/AX state 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Cancel",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -2995,23 +2761,11 @@ exports[`transcription downloading wire/AX state 1`] = `
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Cancel","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`transcription installed wire/AX state 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Remove…",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -3171,23 +2925,11 @@ exports[`transcription installed wire/AX state 1`] = `
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Remove…","Filter extensions","Filter extensions","Open Store"]"
 `;
 
 exports[`transcription error wire/AX state 1`] = `
-{
-  "focus": [
-    "settings.search",
-    "settings.sections",
-    "Bring My Workspace…",
-    "Retry",
-    "Filter extensions",
-    "Filter extensions",
-    "Open Store",
-  ],
-  "tree": 
 "root
   div group settings label="Settings"
     div group label="Settings sections"
@@ -3347,7 +3089,6 @@ exports[`transcription error wire/AX state 1`] = `
         text
           text "Publish and manage your extensions on the Store."
         button toolbar-item label="Open Store"
-          text "Open Store""
-,
-}
+          text "Open Store"
+Focus: ["settings.search","settings.sections","Bring My Workspace…","Retry","Filter extensions","Filter extensions","Open Store"]"
 `;

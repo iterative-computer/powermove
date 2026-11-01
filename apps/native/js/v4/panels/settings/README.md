@@ -139,3 +139,28 @@ light/dark, contrast/transparency/motion variants, real controls, AppKit text/IM
 clipboard/dictation, AX help and counts, keyboard isolation/focus, 60k scroller and
 VoiceOver navigation, actual service persistence/Undo/archive/Keychain, lifecycle
 fencing, no main-thread JS wait, and Opus screenshots/sign-off on macOS.
+
+## Linux merge validation — 2026-11-01
+
+Merged `origin/feat/native-engine` at
+`4204a153dbf8af916ef2b92d7ca01858e363516a` and
+`origin/feat/na-v4-integrate` at
+`e5e209928817cb9434823ebf6ddf7d64f2213441`. The Cargo.lock conflict was resolved by
+retaining the four incoming panel-model entries alongside the existing v4/viewer
+entries; no package version or checksum changed. No new crate or dependency is
+introduced by this panel.
+
+- `bun test panels/settings`: 51 passing tests, 18 accepted-tree snapshots.
+- `bun test`: 223 passing tests, including the 51 settings tests; no skips/failures.
+- `cargo test --locked -p pm-services -p pm-surface`: 170 passing tests
+  (75 services, 95 surface); no ignored tests or failures.
+- Both TypeScript configurations, panel/shared Prettier checks, shared browser
+  build and standalone Settings browser bundle pass.
+- `cargo clippy --locked -p pm-services -p pm-surface --all-targets --no-deps -- -D warnings`,
+  `cargo fmt -p pm-services -p pm-surface -- --check` and
+  `rustfmt --edition 2024 --check js/v4/panels/settings/validation.rs` pass.
+- The panel-owned AccessKit test executable is compiled with `rustc -D warnings`
+  against the locked validator dependencies; it does not modify shared sources.
+
+These are merge/build results. They do not resolve the service/host API gaps or
+replace macOS verification and Opus review listed above.
