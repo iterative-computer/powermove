@@ -401,6 +401,10 @@ impl BackgroundTasks {
         }
         Ok(t)
     }
+    /// Inspect a live ticket on the kernel actor before dispatch/progress/control.
+    pub fn worker_state(&mut self, ticket: Ticket) -> Result<TaskState, TaskError> {
+        self.worker(ticket).map(|task| task.state)
+    }
     /// Requested control remains visible until the worker has released its resources.
     pub fn settle_control(&mut self, ticket: Ticket) -> Result<(), TaskError> {
         let t = self.worker(ticket)?;

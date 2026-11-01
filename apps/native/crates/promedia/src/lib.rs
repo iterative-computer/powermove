@@ -5,6 +5,12 @@ pub mod codec;
 pub mod media;
 pub mod storage;
 pub mod tasks;
+pub mod worker;
+
+// Compile the actual portable engine modules until the pm-media owner adds
+// exports and a Linux feature boundary around its Apple-only native build.
+#[path = "../../../../../engine/crates/pm-media/src/proxy.rs"]
+pub mod proxy;
 
 // Lane ownership excludes pm-color/lib.rs. Compile the actual engine sources
 // here until the colour owner exports these modules from pm-color.

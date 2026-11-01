@@ -266,3 +266,56 @@ The shell still owns toolbar visibility/aggregate progress, project grouping,
 popover/window controls, Retry routing and completion-row lifecycle. Verify these
 and live VoiceOver, Reduce Motion and render patterns on macOS using pm-design
 and the review, with Opus review before treating any visual result as final.
+
+## Pro media integration, slice 2: real worker encodes
+
+`pm-media/src/proxy.rs` adds the portable `RenditionEncoder` worker port and a
+Linux `SoftwareEncoder` using explicit FFmpeg/ffprobe executables, never a shell.
+The existing engine's encode sinks live in `pm-export`, not `pm-media`; its
+native build requires macOS dylibs/frameworks. This slice introduces the allowed
+portable pm-media path without changing that build or claiming to have connected
+VideoToolbox. A macOS adapter implements this same trait using the existing
+`pm-export` sink; it must satisfy the same output-verification contract.
+
+The software profile is deliberately `ffv1` / `mkv`: lossless, alpha-capable
+video and copied optional audio. Other profiles return typed `CodecUnsupported`.
+One video stream and at most one audio stream are admitted; other stream
+configurations remain original media, not project-open errors. Stream timebase,
+ordered presentation timestamps, individual sample durations, audio sample
+counts, alpha presence and interpretation metadata must match after encoding.
+Missing exact timing refuses rather than inferring a last frame from frame rate.
+This restricted adapter is Linux correctness evidence, not the shipping codec
+portfolio, performance certification or a replacement for the existing importers.
+
+`worker::RenditionWork::prepare` freezes the catalog job, live task ticket and
+original artifact on the kernel actor. Workers verify the source bytes, encode
+into a new private staging directory, probe/verify output and recheck the source.
+`WorkReport::accept` is the only attachment route in this integration; it calls
+`MediaCatalog::complete_task`. Late cancellation/pause wins even over a completed
+encode. Stale catalog jobs and queue lifetimes refuse. Retained staging paths
+are returned on errors and controls for the host's archive policy; no worker
+removes original, previous rendition or interrupted output bytes. Restarting a
+paused task uses a fresh job/output and reports monotone frame progress.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Add a portable FFV1 encode path and native encoder trait rather than importing the Apple-only `pm-export` graph into Linux. | N1/N8 and ownership: real CPU codec work, no Node/Chromium or main-thread JS wait; preserve existing engine consumers. |
+| Verify the ordered sample timeline and audio sample counts, beyond nominal frame-rate/duration metadata. Refuse missing exact timing. | N3: exact authored timing; do not manufacture unavailable evidence. |
+| Admit only explicitly supported software profiles/stream layouts and retain originals for everything else. | N1/N3/N4: no silent flattening, discarded streams or user-data loss. |
+| Validate output-path absence independently of process exit status; keep `-n` as defense in depth. | N3 quirk policy: FFmpeg 7.1.5 can report success for an existing-output refusal; correctness wins over reproducing the tool's status quirk. |
+| Freeze work on the actor and accept only current job/ticket results; controls win after codec release. | N3/N7/N8: headless inspectable jobs without a second writer. |
+
+The actual portable engine module is compiled by source path from `pm-promedia`,
+following the existing colour-module boundary. Out-of-lane follow-up: the media
+owner exports `pub mod proxy;` from `pm-media/src/lib.rs`, gates Apple-only build
+requirements for Linux, and the native workspace owner then replaces the source
+path with a normal `pm-media` dependency. No existing pm-media file is changed.
+The current base already includes `pm-promedia` in the native lockfile; the earlier
+lockfile limitation above is historical and no longer applies to this slice.
+
+Synthetic tests exercise real alpha/audio transcodes, nonzero start timestamps,
+optimized dimensions, no-clobber refusal, unsupported codecs, altered timing,
+changed sources, late cancellation and pause/restart. The exact executable build
+is a host-supplied deployment dependency; Linux validation does not establish
+VideoToolbox, AVFoundation, Metal, GPUI or macOS UI acceptance. No visual design
+or new UI copy is introduced.
