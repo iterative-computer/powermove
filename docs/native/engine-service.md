@@ -10,7 +10,8 @@ physical playback continuity, scrub latency, or speaker/display synchronization.
 `apps/native/crates/engine-service` is a native-workspace member through the
 existing `crates/*` glob. It depends on `pm-node` with default features disabled:
 its public Rust audio/clock/font modules are reused; no napi entrypoint is built.
-No engine, kernel, shell, spike or vendor source is changed by this package.
+The initial package did not change engine, kernel, shell, spike or vendor source.
+Slice 2 below also updates the owned S3 harness and minimal app wiring.
 
 - Create `Gpu` and `EngineService::start` on a worker. Inject
   `service.metal_device()` into GPUI (P-DEVICE). `start_with_fonts` accepts an
@@ -120,8 +121,8 @@ only catalogued originals resolve. Missing originals refuse export rather than
 silently substitute proxy pixels. The caller must correctly classify media
 provenance. Compat producers are explicitly refused until the P2 runtime host
 exists. Caller project-font registration/replay and extension definitions are not
-yet serialized to the child. Export GPU playback preemption/slicing across the
-child boundary is also still required; this first API uses `Unrestricted`.
+yet serialized to the child. The initial API used `Unrestricted`; slice 2 below replaces this with
+per-band child-pipe admission.
 
 ## Decisions and picking rules
 
@@ -178,10 +179,11 @@ bindings. Finish resource snapshots (definitions, project fonts, extension
 activation and generation pinning) for windowed and job/headless hosts. P2's
 windowless compat activation/virtual-time host is a separate dependency.
 
-Complete PQ/HLG encoded output, BT.2390/mastering policy, 8/16/32-bit preview
-selection, automatic resolution policy, cache memory accounting and export GPU
+Complete end-to-end source-preserving PQ/HLG, mastering metadata/export parity, 8/16/32-bit preview
+selection, automatic resolution policy, cache memory accounting and physical validation of export GPU
 slicing. This package currently presents Float16 extended-linear P3, including
-engine-decoded PQ/HLG content; it does not claim a PQ/HLG mastering output mode.
+engine-decoded PQ/HLG content; slice 2 adds explicit encoded mastering transforms, without claiming the full
+source-to-display HDR/metadata/export gate.
 
 Run real audible playback and matched device/scanout A/V capture, AppKit scrub
 latency, 60-second zero-drop/headroom soaks, popouts and physical mixed-display
@@ -189,3 +191,157 @@ moves. Take the shared GUI lock for every on-screen batch. S3/S3b measurements
 are prior evidence, not measurements of this service. The required machines,
 corpora, paired Electron comparisons, repetitions, orchestrator verification and
 Opus review remain outstanding. No P1/colour/performance gate is declared passed.
+
+## Slice 2 (2026-11-01)
+
+- `EngineService::notifications()` is a bounded, coalesced status edge feed.
+  Consumers read `Viewer::status()` after a wake. Submission, completion,
+  command/state changes and failures wake the host; paused viewers generate no
+  periodic notifications. `layers::DisplayLink` supplies view-bound native phase
+  and pauses with transport. On macOS 13, where the NSView selector is absent,
+  the status feed and provisional worker scheduler remain available; that OS
+  still needs a CoreVideo phase adapter before its pacing gate can pass.
+- `layers::OutputBinding` observes the shell layer's `drawableSize` synchronously.
+  It calls the supplied `Viewer::configure` closure inside the shell's placement
+  CATransaction, without replacing its composition registration. Screen/backing
+  changes and `NSApplicationDidChangeScreenParametersNotification` also refresh
+  output, including headroom-only changes. `sync()` is available to other hosts. Physical resize/zoom transaction
+  alignment and mixed-display movement remain **UNVERIFIED**.
+- `Viewer::mastering` selects extended-linear P3 (default), BT.2020 PQ or HLG.
+  Encoded modes require explicit source/target peaks (203–10,000 nits), use
+  203-nit reference white, a BT.2390 PQ-domain Hermite shoulder when compressing
+  the source peak, and label the retained RGBA16F layer with the matching
+  BT.2100 colour space. HLG reverses the target-display OOTF before its OETF.
+  The default path continues to preserve signed extended values. This is an
+  **output mastering transform**, not restoration of HDR source light already
+  tone-mapped by the engine's current input policy. Upstream source-preserving
+  HDR evaluation, metadata/export agreement and mastering controls remain
+  engine/colour-lane work; engine sources were not changed here.
+- `ResourceSnapshot` pins a generation with future extension/font requirements.
+  Viewer changes retire content/cache identity; export serializes the snapshot.
+  Unsupported nonempty requirements fail visibly until P2 activation exists.
+- `ExportHandle::start_scheduled` checks service activity over inherited pipes
+  before **each export band**. Playback, pending input, dirty content and viewer
+  flights defer export. Each grant admits one renderer band; cancellation and
+  parent EOF interrupt the wait. The app passes `engine.export_activity()`.
+  This replaces unrestricted whole-frame export submissions. A band already on
+  the GPU cannot be preempted; physical interactive-latency protection under
+  export load remains **UNVERIFIED**, including expensive indivisible passes.
+- `scrub_at` preserves NSEvent input origin. Frame reports expose optional
+  worker-to-completion cost, input origin and the audio presentation host time
+  matching that exact video media time. `PM_ENGINE_TRACE=/tmp/report.trace.json`
+  enables a bounded nonblocking diagnostic queue and a private worker that
+  streams NDJSON as frames complete. It remains readable after AppKit termination;
+  overflow/disconnection is an explicit status failure. Missing/zero
+  display timestamps never become GPU-derived presentation timestamps.
+
+Minimal app wiring: `src/playback.rs` replaces the 16 ms polling loop with the
+notification/display-link feed, attaches `OutputBinding`, forwards peak levels,
+and enables transport looping only for opt-in trace runs. `src/session.rs` uses
+NSEvent timestamps for seeks and passes export activity into the child scheduler
+(these three small hunks are coordinated with the concurrent kernel lane).
+No shell structure, design, kernel, vendor or engine implementation is owned by
+this change.
+
+Picking rules: N8/§3.3 choose notification-driven native layers; the §3.1
+composition contract chooses synchronous placement publication; N3/§1 choose
+explicit mastering with matching colour labels rather than a headroom clamp;
+N4 chooses visible unsupported-resource failures; §5 interactive budgets choose
+single-band export admission and truthful reporting of its preemption limit.
+
+### On-screen (2026-11-01)
+
+The session was locked. The owner requested finishing without waiting for an
+unlock. All physical rows below remain **UNVERIFIED**; there is no pass claim.
+
+| Real app with corpus project | Result | Verdict |
+|---|---|---|
+| Physical cached scrub input → present p95, 120 / 60 Hz | Not measured; budgets 9.333 / 17.667 ms, plus ≤60% of paired Electron | **UNVERIFIED** |
+| 60 s playback scanout gaps, 120 / 60 Hz | Not measured | **UNVERIFIED** |
+| Playback frame-time p95 headroom | Not measured; budgets 4.167 / 8.333 ms | **UNVERIFIED** |
+| Matched-time A/V offset with real audio | Not measured; mean ≤1 ms, p95 jitter ≤2 ms | **UNVERIFIED** |
+| EDR headroom / PQ / HLG physical output | Not measured | **UNVERIFIED** |
+| Resize/zoom placement and display moves | Not measured | **UNVERIFIED** |
+| Playback while exporting | Not measured | **UNVERIFIED** |
+
+Ready-to-run after unlocking, on power, with load below 12 and the other GUI
+lanes stopped:
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+cargo +1.96.1 build --manifest-path apps/native/Cargo.toml -p pm-native-app
+bun apps/native/crates/app/tools/prepare-corpus.ts /tmp/es2-corpus
+python3 apps/native/crates/engine-service/tools/foreground.py \
+  /tmp/es2-corpus/projects/shapes/primitives/document.json --hz 120 --seconds 60
+# Repeat at --hz 60; use the audio corpus document for the A/V row.
+# For physical scrub, add --scrub and click/drag the real timeline strip.
+# Do not count stdin seek commands as physical input.
+```
+
+The script uses the opt-in `PM_PERF_GATE` stdin seam, refuses a non-temporary
+project, creates a fresh disposable profile, logs readiness, requires positive
+presentedTime, and bounds its acquired-lock batch to under ten minutes. It
+acquires `/tmp/pm-shots/gui.lock` exclusively as `engsvc2`, retries every 30 s,
+and releases only its own lock on every exit. It never unlocks the Mac. Repeat
+with a real audio clip and inspect matching non-null `audio_host`/`display`
+values; no audio samples means no A/V result. Human scrubs must retain the
+NSEvent-origin samples and separate exact cache hits. Screenshots, if needed,
+belong only at `/tmp/pm-shots/es2-*.png`. Full §5 certification still requires
+paired Electron measurements, the required machines/corpora and ≥30 runs.
+
+Analyze a real-app trace after graceful exit with:
+
+```sh
+python3 apps/native/crates/engine-service/tools/report.py /tmp/es2-app-120.trace.json --hz 120
+```
+
+The report preserves absent values and counts missing/zero presentations. Its
+scanout span must cover the full requested window; a short run or late start
+cannot pass the 60-second gate. Read EDR potential/current headroom separately
+from `layers::screen_output` on the foreground screen.
+
+The headroom notification follows [Apple's NSScreen contract](https://developer.apple.com/documentation/AppKit/NSScreen/maximumExtendedDynamicRangeColorComponentValue?language=objc), which posts screen-parameter changes when current headroom changes.
+
+### Headless/offscreen validation (2026-11-01)
+
+Pinned Rust **1.96.1**, dev builds, one public shape fixture, **1280×720**.
+These single diagnostics ran while other lanes built/tested (observed system
+load approximately **10–18**); they are not the settled, paired, ≥30-run gate.
+Service playback reuses exact working frames at the 30 fps project cadence
+while accepting synthetic 120/60 Hz output ticks. Report samples are observed
+completion-status updates; counts alone do not prove uninterrupted delivery.
+
+| Service, 60 measured seconds | Synthetic 120 Hz | Synthetic 60 Hz |
+|---|---:|---:|
+| Completion samples | 7,065 | 3,574 |
+| Worker → completion p50 / p95 (ms) | 0.798 / **3.445** | 1.519 / **4.147** |
+| Render-cost bound (ms) | 4.167 | 8.333 |
+| Local render-cost verdict | **Pass, offscreen boundary only** | **Pass, offscreen boundary only** |
+| GPU failures / expired service targets | 0 / 0 | 0 / 0 |
+| Physical presentation, scrub, A/V and EDR | **UNVERIFIED** | **UNVERIFIED** |
+
+Default-kernel and standalone-adapter suites each pass **20/20** tests. This
+includes independently computed f64 PQ/HLG signal comparisons against the
+actual final Metal pass (maximum permitted signal error **0.002**), paused
+notification quiescence, bounded wake coalescing, resource generation/cache
+retirement, and a child export held at zero progress during interactive activity,
+then resumed or cancelled while deferred. The prior numerical simulated-device
+A/V test remains arithmetic evidence only. App/service all-target Clippy with
+`--no-deps -- -D warnings`, package formatting and the integrated app build pass.
+The existing `block 0.1.6` future-compatibility warning remains.
+
+Reproduce service diagnostics without a GUI lock or WindowServer:
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+cargo +1.96.1 build --manifest-path apps/native/Cargo.toml -p pm-engine-service --no-default-features
+"$CARGO_TARGET_DIR/debug/pm-engine-service" --bench --hz=120 --seconds=60 --report=/tmp/es2-service-120.json
+"$CARGO_TARGET_DIR/debug/pm-engine-service" --bench --hz=60 --seconds=60 --report=/tmp/es2-service-60.json
+```
+
+Still required: physical frame continuity/headroom under export, calibrated HDR
+output and mastering metadata/export parity, macOS 13 CoreVideo phase, resource
+activation rather than rejection stubs, actual mixed-display transaction checks,
+and all paired §5 gates. No release, tag or push was produced.

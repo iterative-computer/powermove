@@ -423,8 +423,8 @@ zsh apps/native/spikes/s3/foreground.sh
 the shared target only and stops its own batch below 4 GiB. `--case=<name>` selects
 one experiment; `--quick` shortens playback diagnostics to three seconds. Raw
 reports/logs stay in `/tmp/s3b-*`; no local dumps or screenshots are tracked.
-`foreground.sh` builds and selects the optimized viewer by default;
-`S3_PROFILE=debug` selects a dev comparison run. The script includes ordinary
+The historical S3b foreground launcher selected optimized builds. The dated
+section below describes its current dev default and explicit release opt-in. The script includes ordinary
 and repeated-position **AppKit** scrub tests, synthetic cached seeks, two 60-second
 soaks and SDR/PQ-input accuracy.
 
@@ -433,3 +433,108 @@ comparison), zero physical scanout gaps at both rates, foreground headroom,
 release viewer build/run, matched audio-clock behavior, physical display moves,
 required machines/corpora/repetitions and review. The earlier outstanding HDR
 output, overlay and composition items remain open.
+
+## On-screen (2026-11-01)
+
+**All on-screen rows are UNVERIFIED.** WindowServer reported a locked session;
+the owner requested completing non-screen work without waiting for an unlock.
+No unlocked physical after measurement supersedes S3's earlier scrub p95
+**45.701 ms** or its **6–11 scanout gaps per 60 s**. S3b's offscreen results
+remain render-boundary diagnostics, not physical after numbers.
+
+| Required foreground measurement | After numbers | Verdict |
+|---|---|---|
+| Physical cached scrub p95 at 120 Hz (≤9.333 ms and ≤60% Electron) | Not measured | **UNVERIFIED** |
+| Physical cached scrub p95 at 60 Hz (≤17.667 ms and ≤60% Electron) | Not measured | **UNVERIFIED** |
+| 60 s playback at 120 Hz: scanout gaps / p95 frame cost (≤4.167 ms) | Not measured | **UNVERIFIED** |
+| 60 s playback at 60 Hz: scanout gaps / p95 frame cost (≤8.333 ms) | Not measured | **UNVERIFIED** |
+| Real-audio matched-time A/V mean / p95 jitter (≤1 / ≤2 ms) | Not measured; spike has no real audio path | **UNVERIFIED** |
+| Physical EDR headroom, PQ/HLG output and mixed-display moves | Not measured | **UNVERIFIED** |
+| Real `powermove-native` corpus playback/scrub | Not measured; see engine-service runbook | **UNVERIFIED** |
+
+The prior foreground log ended after corpus preparation, which is immediately
+before `run.sh` acquired the GUI lock. Reproduction with a held lock now reports
+the owner and terminates with exit **75** at the configured acquisition deadline.
+The former silent infinite wait is removed. The launcher logs acquisition,
+launch, PID, timeout and exit; the run deadline terminates/reaps its own process
+group. A read-only session preflight exits **77** when locked and releases the
+lock. The held-lock and locked-session failure paths were exercised. An offscreen
+run forced the process timeout (exit **124**); terminating the wrapper also
+reaped its own child before releasing the lock (exit **143**). This distinguishes lock contention,
+locked-session refusal, window readiness failure and a running-app timeout.
+
+A short diagnostic before the locked-session preflight was added received
+**360 callbacks with zero presentedTime**, with **0** positive display samples.
+Those callbacks provide **no scanout continuity or physical latency evidence**.
+The harness completed rather than stalling, but that is not an on-screen pass.
+
+### Ready foreground procedure
+
+```sh
+source engine/env.sh
+export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
+# Builds use the pinned compiler explicitly; build outside the GUI lock.
+# Default dev profile avoids an unnecessary second target tree.
+zsh apps/native/spikes/s3/foreground.sh
+```
+
+Unlock and keep the Mac awake first. Stop other timing/GUI lanes, use power,
+and settle load below 12. The script runs the 120/60 Hz 60-second soaks,
+physical AppKit scrubs (ordinary and repeated positions), synthetic cached
+seeks, and SDR/PQ-input accuracy. Each case takes its own exclusive GUI lock
+with content `engsvc2`, retries every 30 s, and bounds the acquired-lock run to
+180 seconds by default. Acquisition itself has a 600-second deadline; input
+readiness has a 660-second deadline. Every exit releases only a successfully
+acquired lock. Disk guards stop below **6 GiB**. Never manually remove another
+lane's lock.
+
+If dev CPU encoding prevents headroom, build/run separately with
+`S3_PROFILE=release` and repeat in a quiet window, then delete the shared
+`$HOME/Developer/pm-target/release` **after coordinating with its other users**.
+This lane did not build a release target in this pass. Use
+`S3_LOCK_TIMEOUT`, `S3_LOCK_RETRY` and `S3_RUN_TIMEOUT` only for failure-path
+reproduction; physical timing runs keep the defaults. Logs/reports remain in
+`/tmp`, screenshots only at `/tmp/pm-shots/es2-*.png`; commit neither.
+
+Real-app playback and real-audio A/V use
+`apps/native/crates/engine-service/tools/foreground.py` and the runbook in
+`docs/native/engine-service.md`. The spike deliberately has no audio device
+clock, so no spike-only A/V result can satisfy §5. Missing display/audio samples
+must remain UNVERIFIED, even if GPU work completed successfully.
+
+`--hz` requests callback/presentation cadence; it does not change the physical
+display's refresh setting. Verify the real display mode independently for a
+60 Hz hardware row. A preferred display-link rate alone cannot establish that
+hardware condition.
+
+### Offscreen diagnostics from this pass
+
+Pinned Rust **1.96.1**, dev profile, unchanged public shape fixture at
+**1280×720**; single runs under concurrent lane activity (system load observed
+approximately **10–18**, not a settled §5 condition). These are completion
+measurements with synthetic timer input, separate from the UNVERIFIED physical
+rows above.
+
+| 60 measured seconds | Synthetic 120 Hz | Synthetic 60 Hz |
+|---|---:|---:|
+| Measured completions | 7,163 | 3,595 |
+| Worker → completion p50 / p95 (ms) | 3.666 / **6.274** | 4.906 / **7.541** |
+| Render-cost bound (ms) | 4.167 | 8.333 |
+| Local render-cost verdict | **Fail** | **Pass, offscreen boundary only** |
+| Synthetic timer sequences missed (includes warmup) | 41 | 6 |
+| GPU failures | 0 | 0 |
+| Physical scanout gaps | **UNVERIFIED** | **UNVERIFIED** |
+
+The separate-thread synthetic scrub run made **120 requests**, with **112 exact
+cache-hit** samples after eight misses. Cached synthetic input → GPU done
+p50/p95 was **0.629 / 2.253 ms**; request → worker was **0.022 / 0.058 ms**.
+No AppKit event or display timestamp was measured, so this cannot pass the
+physical scrub row.
+
+Offscreen SDR/PQ-input accuracy again passed the independent export comparison:
+**921,600 pixels** each; SDR ΔE2000 p99/max **0.030891 / 0.060174**, PQ
+**0.057133 / 0.121483**. Linear texture patches were **0.5, 1, 2, 4, 8**.
+These values verify texture output, not physical EDR headroom. The spike's
+isolated policy/colour/mailbox suite passes **11/11** tests. Shell/Python syntax
+and formatting checks pass. No release build was needed for this diagnostic
+pass; no private data, reports or screenshots were committed.

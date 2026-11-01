@@ -27,6 +27,8 @@ pub struct ExportRequest {
     pub originals: std::collections::BTreeMap<String, PathBuf>,
     pub proxies: std::collections::BTreeMap<String, PathBuf>,
     pub destination: PathBuf,
+    #[serde(default)]
+    pub resources: crate::resources::ResourceSnapshot,
 }
 impl ExportRequest {
     pub fn new(
@@ -48,6 +50,7 @@ impl ExportRequest {
             originals: media.originals,
             proxies: media.proxies,
             destination,
+            resources: Default::default(),
         })
     }
 }
@@ -76,7 +79,8 @@ fn status(
 }
 pub struct ExportHandle {
     child: Option<Child>,
-    input: ChildStdin,
+    input: Arc<Mutex<ChildStdin>>,
+    cancel: Arc<AtomicBool>,
     status: Arc<Mutex<JobStatus>>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
@@ -84,6 +88,16 @@ impl ExportHandle {
     /// Call from a job worker: process spawn and snapshot serialization are
     /// deliberately excluded from the UI event path.
     pub fn start(executable: &Path, request: ExportRequest) -> Result<Self> {
+        Self::start_scheduled(executable, request, Arc::default())
+    }
+    /// Interactive service activity takes precedence at every export band.
+    /// One already admitted band cannot be preempted by Metal.
+    pub fn start_scheduled(
+        executable: &Path,
+        request: ExportRequest,
+        interactive: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        request.resources.validate()?;
         ensure!(
             matches!(request.spec, JobSpec::Export { .. }),
             "expected export job"
@@ -103,6 +117,10 @@ impl ExportHandle {
             return Err(e.into());
         }
         input.flush()?;
+        let input = Arc::new(Mutex::new(input));
+        let gate_input = input.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let gate_cancel = cancel.clone();
         let output = child.stdout.take().unwrap();
         let state = Arc::new(Mutex::new(status(
             &request.job,
@@ -115,6 +133,24 @@ impl ExportHandle {
         let id = request.job;
         let reader = std::thread::spawn(move || {
             for line in std::io::BufReader::new(output).lines() {
+                if matches!(line.as_deref(), Ok("\"gpu\"")) {
+                    while interactive.load(Ordering::Acquire)
+                        && !gate_cancel.load(Ordering::Acquire)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    if !gate_cancel.load(Ordering::Acquire) {
+                        let mut input = gate_input.lock().unwrap();
+                        if input
+                            .write_all(b"grant\n")
+                            .and_then(|_| input.flush())
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 match line
                     .ok()
                     .and_then(|s| serde_json::from_str::<JobStatus>(&s).ok())
@@ -137,6 +173,7 @@ impl ExportHandle {
         Ok(Self {
             child: Some(child),
             input,
+            cancel,
             status: state,
             reader: Some(reader),
         })
@@ -145,8 +182,10 @@ impl ExportHandle {
         self.status.lock().unwrap().clone()
     }
     pub fn cancel(&mut self) -> Result<()> {
-        self.input.write_all(b"cancel\n")?;
-        self.input.flush()?;
+        self.cancel.store(true, Ordering::Release);
+        let mut input = self.input.lock().unwrap();
+        input.write_all(b"cancel\n")?;
+        input.flush()?;
         Ok(())
     }
     /// Worker-only wait. Drop also reaps the child (never a detached export).
@@ -162,6 +201,7 @@ impl ExportHandle {
 }
 impl Drop for ExportHandle {
     fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -181,9 +221,15 @@ pub fn run_child() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("missing export request"))??,
     )?;
     let cancel = Arc::new(AtomicBool::new(false));
+    request.resources.validate()?;
+    let (grant, permits) = std::sync::mpsc::channel();
     let stopped = cancel.clone();
     std::thread::spawn(move || {
         for line in lines {
+            if matches!(line.as_deref(), Ok("grant")) {
+                let _ = grant.send(());
+                continue;
+            }
             if matches!(line.as_deref(), Ok("cancel")) {
                 stopped.store(true, Ordering::Release);
                 return;
@@ -209,6 +255,7 @@ pub fn run_child() -> Result<()> {
     let worker_cancel = cancel.clone();
     let worker = std::thread::spawn(move || -> Result<PathBuf> {
         let cancel = worker_cancel;
+        let gate = ChildGate(Mutex::new(permits));
         let JobSpec::Export {
             composition,
             settings,
@@ -259,7 +306,7 @@ pub fn run_child() -> Result<()> {
             &job,
             plan,
             sink,
-            &pm_export::render::Unrestricted,
+            &gate,
             &cancel,
             &mut |p| {
                 let _ = emit(status(
@@ -300,4 +347,33 @@ pub fn run_child() -> Result<()> {
         ))?,
     }
     Ok(())
+}
+
+/// Inherited-pipe admission. Exactly one renderer band per grant; never a
+/// whole-frame burst. Cancellation and parent EOF interrupt a deferred export.
+struct ChildGate(Mutex<std::sync::mpsc::Receiver<()>>);
+impl pm_export::render::GpuGate for ChildGate {
+    fn admit(&self, _: u64, _: u32, cancel: &AtomicBool) -> Option<u32> {
+        {
+            let mut out = std::io::stdout().lock();
+            if out
+                .write_all(b"\"gpu\"\n")
+                .and_then(|_| out.flush())
+                .is_err()
+            {
+                return None;
+            }
+        }
+        let permits = self.0.lock().unwrap();
+        while !cancel.load(Ordering::Acquire) {
+            match permits.recv_timeout(std::time::Duration::from_millis(5)) {
+                Ok(()) => return Some(1),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+    fn finished(&self, _: u64, _: u32, _: f64) {}
+    fn abandoned(&self, _: u64) {}
 }

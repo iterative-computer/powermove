@@ -5,7 +5,7 @@ use objc2::{MainThreadMarker, msg_send};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use pm_engine_service::layers::PlaybackLayers;
 use pm_shell::layout::Rect;
-use std::{cell::RefCell, collections::HashMap, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 thread_local! {static TIMELINES: RefCell<HashMap<EntityId,(Rect,f32,f32)>>=RefCell::new(HashMap::new());}
 pub fn set_timeline(id: EntityId, r: Rect, x: f32, y: f32) {
     TIMELINES.with(|t| {
@@ -35,24 +35,69 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
             let _: () = msg_send![&*layers.playhead,setBackgroundColor:&*color];
         }
     }
+    let (tx, rx) = async_channel::bounded(1);
+    let ticks = Rc::new(RefCell::new(None));
+    let pending = ticks.clone();
+    let tick_tx = tx.clone();
+    let hz = std::env::var("PM_NATIVE_VERIFY_HZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120.);
+    let link = pm_engine_service::layers::DisplayLink::new(
+        &host.borrow().gpui,
+        hz,
+        Rc::new(move |target, interval| {
+            *pending.borrow_mut() = Some((target, interval));
+            let _ = tick_tx.try_send(());
+        }),
+    );
+    let notifications = entity.read(cx).engine.notifications();
+    cx.spawn(async move |_| {
+        while notifications.recv().await.is_ok() {
+            if tx.send(()).await.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+    let current = Rc::new(RefCell::new(None::<pm_engine_service::Viewer>));
+    let placed = current.clone();
+    let binding = pm_engine_service::layers::OutputBinding::new(
+        &host.borrow().window,
+        host.borrow().viewer_layer(),
+        Rc::new(move |output| {
+            if let Some(v) = &*placed.borrow() {
+                let _ = v.configure(output);
+            }
+        }),
+    );
     let weak = entity.downgrade();
     cx.spawn(async move|cx| {
         loop {
-            cx.background_executor().timer(Duration::from_millis(16)).await;
+            if rx.recv().await.is_err() { break; }
             if weak.update(cx, |v,cx| {
-                let Some(viewer)=&v.viewer else{return};
+                let Some(viewer)=&v.viewer else{link.set_paused(true); *current.borrow_mut()=None; return};
+                let new_viewer = current.borrow().as_ref().map(|v|v.identity()) != Some(viewer.identity());
+                if new_viewer {
+                    *current.borrow_mut() = Some(viewer.clone()); binding.sync();
+                    if std::env::var_os("PM_ENGINE_TRACE").is_some() {
+                        let _ = viewer.command(pm_protocol::clock::TransportCommand::SetLoop { range: Some(pm_protocol::common::TickRange {
+                            start: pm_protocol::common::Ticks::ZERO,
+                            end: pm_protocol::common::Ticks::new((v.duration * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap_or(pm_protocol::common::Ticks::from_whole_seconds(1))
+                        }) });
+                    }
+                }
+                if let Some((target, interval)) = ticks.borrow_mut().take() { let _=viewer.display_tick(target, interval); }
                 let status=viewer.status();
+                link.set_paused(status.clock.as_ref().is_none_or(|c|c.rate.num == 0));
                 if let Some(error)=status.error {
                     let error=format!("Viewer: {error}");
                     if v.message!=error {v.message=error;cx.notify();}
                 }
                 let scale=v.host.borrow().window.backingScaleFactor();
-                let size=v.host.borrow().viewer_layer().drawable_size();
-                let output=v.host.borrow().window.screen().and_then(|screen|pm_engine_service::layers::screen_output(MainThreadMarker::new().unwrap(),&screen,size.width.max(1.)as u32,size.height.max(1.)as u32).ok());
-                if let Some((output,_))=output {let _=viewer.configure(output);}
                 if let Some(clock)=status.clock {
                     let fraction=(clock.media_time.get()as f64/pm_protocol::common::TICKS_PER_SECOND as f64/v.duration).clamp(0.,1.);
-                    let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,[0.,0.]);
+                    let _=layers.update(MainThreadMarker::new().unwrap(),&clock,clock.host_time,v.rate,fraction,std::array::from_fn(|i|status.levels.as_ref().and_then(|l|l.master.peak.get(i)).copied().unwrap_or(0.) as f64));
                     let host=v.host.borrow();
                     let height=host.gpui.bounds().size.height;
                     let width=host.gpui.bounds().size.width;

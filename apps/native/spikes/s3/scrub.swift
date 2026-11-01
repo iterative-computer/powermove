@@ -3,7 +3,7 @@
 import AppKit
 import CoreGraphics
 let lock = try String(contentsOfFile: "/tmp/pm-shots/gui.lock", encoding: .utf8)
-precondition(lock.trimmingCharacters(in: .whitespacesAndNewlines) == "s3")
+precondition(["s3", "engsvc2"].contains(lock.trimmingCharacters(in: .whitespacesAndNewlines)))
 let pid = pid_t(CommandLine.arguments[1])!
 let wid = CGWindowID(CommandLine.arguments[2])!
 let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as! [[String:Any]]

@@ -58,11 +58,11 @@ fn wait_frame(v: &Viewer, stamp: Stamp) -> FrameReport {
     loop {
         let status = v.status();
         assert!(status.error.is_none(), "{:?}", status.error);
-        if let Some(f) = status.frame {
-            if f.stamp == stamp {
-                assert!(f.gpu_ok);
-                return f;
-            }
+        if let Some(f) = status.frame
+            && f.stamp == stamp
+        {
+            assert!(f.gpu_ok);
+            return f;
         }
         assert!(
             start.elapsed() < Duration::from_secs(20),
@@ -306,4 +306,34 @@ fn viewer_shuttle_and_scrub_bursts_keep_the_latest_intent() {
     assert_eq!(f.time.get(), 99 * TICKS_PER_SECOND / 30);
     assert!(!v.shuttle(K, false).unwrap());
     assert!(!v.shuttle(L, false).unwrap());
+}
+
+#[test]
+fn paused_notifications_are_coalesced_and_resource_pins_retire_cache() {
+    let service = EngineService::start(pm_gpu::Gpu::new("status-resource-test").unwrap()).unwrap();
+    let rx = service.notifications();
+    let v = service.viewer(config(snapshot())).unwrap();
+    wait_frame(&v, v.stamp().unwrap());
+    while rx.try_recv().is_ok() {}
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(
+        rx.try_recv().is_err(),
+        "paused service generated a periodic wake"
+    );
+    let old = v.stamp().unwrap();
+    v.resources(Arc::new(resources::ResourceSnapshot {
+        generation: 2,
+        ..Default::default()
+    }))
+    .unwrap();
+    let frame = wait_frame(&v, v.stamp().unwrap());
+    assert!(!frame.cache_hit);
+    assert!(frame.stamp.generation > old.generation);
+    assert!(rx.try_recv().is_ok());
+    assert!(v.resources(Arc::default()).is_err());
+    for i in 0..100 {
+        v.scrub(Ticks::new(i * 1000).unwrap()).unwrap();
+    }
+    wait_frame(&v, v.stamp().unwrap());
+    assert_eq!(rx.len(), 1, "notifications must stay bounded");
 }
