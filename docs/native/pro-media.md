@@ -1,9 +1,12 @@
 # P5 pro media and colour (package 21)
 
-CPU implementation: `apps/native/crates/promedia` (`pm-promedia`), plus the new
-`engine/crates/pm-color/src/lut.rs` and `scopes.rs` sources. These are worker-side
-services and single-writer models. No native UI, codec, platform performance,
-render-graph integration or cutover acceptance is claimed.
+Worker implementation: `apps/native/crates/promedia` (`pm-promedia`), portable
+`engine/crates/pm-media/src/proxy.rs` and `cache_frame.rs`, and the existing
+`engine/crates/pm-color/src/lut.rs` / `scopes.rs` sources. Real Linux software
+encodes and exact source frames drive the job/cache/LUT/scopes paths. Native
+composition-renderer wiring, VideoToolbox, UI, platform performance and cutover
+acceptance remain unverified. The final slice-2 evidence below supersedes the
+historical first-slice counts and lockfile limitation.
 
 Read against `pro-editing.md`, W1's pro-media additions and W019/W020, D-STATE's
 original/proxy-only/offline closure, the kernel single-writer contract,
@@ -140,7 +143,7 @@ active usage, not necessarily physical disk usage; full disks need another volum
 or an explicit host recovery flow. Original storage roots and archived files are
 never automatically collected by the render-cache policy.
 
-## Verification and remaining integration
+## First-slice verification and remaining integration (historical)
 
 Linux validation passes **83 crate tests** (72 original plus 11 design-review
 regressions): 16 colour/scope, 21 task, 18 media, 21 disk and 7 codec tests.
@@ -151,9 +154,10 @@ reopen/quota changes, quota refusal, archive preservation and symlink rejection.
 The unchanged engine suite passes **61 pm-color tests**. Strict Clippy
 (`--all-targets -- -D warnings`) and formatting pass on the new crate/sources.
 
-The requested root `cd apps/native && cargo test --locked -p pm-promedia` currently
-refuses because the new workspace package is absent from the native lockfile.
-That lockfile is outside ownership and remains untouched. Reproducible isolation:
+The first-slice root `cd apps/native && cargo test --locked -p pm-promedia`
+refused because the workspace package was absent from the native lockfile.
+The slice-2 base includes it and the root locked command now passes. The lockfile
+remains outside this lane's ownership and unchanged. Reproducible isolation:
 
 ```sh
 source /workspace/.tools/activate.sh
@@ -170,11 +174,9 @@ inspection. This is portable crate validation, not a root-workspace locked pass.
 
 Integration required outside owned paths:
 
-1. Native workspace owner: add `pm-promedia` to `apps/native/Cargo.lock` with
-   dependencies `blake3`, `serde`, `serde_json`, `tempfile` (all already locked)
-   and the existing engine `pm-time` path package,
-   then run the root locked test command. No root manifest edit is needed because
-   its existing `crates/*` glob discovers this crate.
+1. Native workspace owner: the first slice required the `pm-promedia` lock entry;
+   the current base already includes it. The native locked command now passes
+   without changing the lockfile or root manifest.
 2. Colour owner: add `pub mod lut; pub mod scopes;` to `pm-color/src/lib.rs`, then
    replace this crate's temporary source-path exports with a `pm-color` dependency
    when its integration lock entry is available. Tests currently compile the
@@ -254,8 +256,9 @@ Eight additional task tests cover the required data, all kind labels/symbols,
 window events, serialization, unknown totals, transitions, typed failures and
 legacy diagnostics. Combined with the three render-bar tests, all 83 tests pass
 in the Linux isolation harness, with formatting and strict Clippy clean.
-The root native locked command was attempted and refuses because the shared
-lockfile lacks this package; ownership keeps that lockfile unchanged.
+The first-slice root native locked command refused because its shared lockfile
+lacked the package. That limitation is resolved on the slice-2 base; this lane
+keeps the shared lockfile unchanged.
 
 Review disposition beyond must-fix items: item 10 is done at the presentation
 boundary. Should-fix item 3 (shared VoiceOver range summary), item 8 (sample-gated
@@ -421,3 +424,60 @@ late cancellation across an edit, stale progress refusal, admission ownership,
 worker failure and unrequested-stop refusal. Existing low-level `RenderWork`
 remains available for direct frame/scopes requests. These worker primitives do
 not schedule themselves or create another project/settings authority.
+
+### Real software source-frame integration and final verification
+
+`source_frames::SoftwareSourceFrames` implements the engine frame port for a
+single source-media graph. It hashes the complete source interpretation and
+explicit decoder/conversion version, uses the artifact fingerprint for media
+identity, and maps engine ticks through `pm-time` to an exact native PTS. The
+FFmpeg decode selector requires that PTS; between-frame and fractional-source
+requests refuse. Nonzero starts stay nonzero. Source bytes are verified before
+and after readback under the host's media lease. Cache hits require the host to
+hold that lease and publish relinks/interpretation changes before using a new
+source identity, as with composition-renderer sources.
+
+This software RGB source path drives both direct `RenderWork` scopes and a real
+BackgroundTasks Render cache fill. One integration test runs actual encoded
+synthetic media through exact-PTS decode, float frames, the pm-color LUT, cache
+miss/hit, integer scopes and task completion. The native composition renderer
+must implement its own `FrameSource` using complete composition graph hashes;
+this source-only graph does not impersonate a composition render.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Use exact PTS selection and engine rational conversion; reject absent timestamps rather than nearest-frame seeking. | N3: exact authored timing, including nonzero starts. |
+| Restrict software scope readback to decoded RGB layouts; leave generic YUV/working-E conversion to the native pm-color adapter. | N1/N3: never let an implicit FFmpeg matrix/transfer choice become authored colour intent. |
+| Disable automatic encoder pixel-format conversion (`-pix_fmt +`). | N3: an unsupported lossless input format must refuse instead of silently losing component precision. |
+| Include decoder version and source interpretation in source-graph identity. | N3/N7: cache identity is inspectable and changes with the actual decode contract. |
+
+Final Linux evidence, Rust **1.96.1**, synthetic fixtures only:
+
+- `cd apps/native && cargo test --locked -p pm-promedia`: **115 passed** —
+  83 existing plus 16 engine-work and 16 render-work tests (32 additions).
+- `cargo clippy --locked -p pm-promedia --all-targets -- -D warnings`: pass.
+- `cargo fmt -p pm-promedia -- --check` and formatting of both new engine files:
+  pass. The lane's disposable-workspace Linux harness also passes 115 tests and
+  strict Clippy against the actual engine source files.
+- `cd engine && cargo test --locked -p pm-color`: **61 passed**, unchanged.
+- `cd engine && cargo test --locked -p pm-media`: attempted; the existing
+  `build.rs` refuses because this Linux container lacks the required Powermove
+  macOS FFmpeg dylib build (`PM_FFMPEG_DIR`). No pm-media build/export file was
+  modified. The new portable modules are tested via the native crate's source
+  exports; this is not a full pm-media/platform pass.
+- Staged gitleaks scans and the repository pre-commit hook pass before commits.
+
+Remaining integration outside ownership: `pm-media` exports and portable build
+boundary; `pm-color` exports; normal crate dependencies replacing source-path
+exports; engine-service composition graph/readback and native VideoToolbox
+adapters; kernel/host scheduling, current-result receipt, durable catalog/task
+persistence, source leases, capability negotiation, free-space reservations and
+archival of private/superseded outputs. No old implementation is removed while
+it retains consumers (N4/N6 and the prune rule).
+
+On macOS verify actual VideoToolbox codec/alpha/HDR/colour tags, exact VFR/PTS and
+audio sync, cancellation/resource release, engine-E/unpremultiplication and
+LUT/scope reference vectors, graph publication races, GPU/source-frame equivalence,
+seek/playback performance, APFS/cross-volume durability, low-space recovery and
+security-scoped source leases. No AppKit, Metal, GPUI, WebKit or screen validation
+ran here. No visual/UX decisions or new `DESIGN-TODO(opus)` placeholders were added.

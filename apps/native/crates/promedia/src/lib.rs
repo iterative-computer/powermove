@@ -7,6 +7,7 @@ pub mod codec;
 pub mod media;
 pub mod render;
 pub mod render_job;
+pub mod source_frames;
 pub mod storage;
 pub mod tasks;
 pub mod worker;

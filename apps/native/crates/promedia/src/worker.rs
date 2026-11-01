@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn info(probe: &Probe) -> MediaInfo {
+pub(crate) fn info(probe: &Probe) -> MediaInfo {
     MediaInfo {
         width: probe.width,
         height: probe.height,
@@ -247,7 +247,7 @@ impl WorkReport {
 
 // Probe once, then hash streamed bytes with cooperative checkpoints. The caller
 // holds the source lease; metadata and content can never come from two sources.
-fn inspect(
+pub(crate) fn inspect(
     path: &Path,
     info: MediaInfo,
     control: &mut dyn FnMut() -> Control,

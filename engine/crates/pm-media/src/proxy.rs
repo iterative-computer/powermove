@@ -51,6 +51,7 @@ pub struct Probe {
     pub rate: Fraction,
     pub time_base: Fraction,
     pub alpha: bool,
+    pub pixel_format: String,
     pub colour: String,
     pub video: Timing,
     pub audio: Option<Audio>,
@@ -340,6 +341,26 @@ impl SoftwareEncoder {
         width: u32,
         height: u32,
     ) -> io::Result<Vec<[f32; 4]>> {
+        self.rgba_selected(path, &format!("select=eq(n\\,{ordinal})"), width, height)
+    }
+    /// Decode an exact native source PTS. Missing PTS refuses; no nearest-frame
+    /// seek or rounded frame-rate substitution is permitted.
+    pub fn rgba_at_pts(
+        &self,
+        path: &Path,
+        pts: i64,
+        width: u32,
+        height: u32,
+    ) -> io::Result<Vec<[f32; 4]>> {
+        self.rgba_selected(path, &format!("select=eq(pts\\,{pts})"), width, height)
+    }
+    fn rgba_selected(
+        &self,
+        path: &Path,
+        select: &str,
+        width: u32,
+        height: u32,
+    ) -> io::Result<Vec<[f32; 4]>> {
         let size = u64::from(width)
             .checked_mul(u64::from(height))
             .and_then(|n| n.checked_mul(16))
@@ -347,13 +368,13 @@ impl SoftwareEncoder {
             .ok_or_else(|| invalid("frame size bound"))?;
         let bytes = bounded_output(
             Command::new(&self.ffmpeg)
-                .args(["-v", "error", "-nostdin", "-i"])
+                .args(["-v", "error", "-nostdin", "-copyts", "-noautorotate", "-i"])
                 .arg(path)
                 .args([
                     "-map",
                     "0:v:0",
                     "-vf",
-                    &format!("select=eq(n\\,{ordinal})"),
+                    select,
                     "-frames:v",
                     "1",
                     "-pix_fmt",
@@ -460,6 +481,7 @@ impl RenditionEncoder for SoftwareEncoder {
             rate: Fraction::parse(field(v, "r_frame_rate")?)?,
             time_base: Fraction::parse(field(v, "time_base")?)?,
             alpha,
+            pixel_format: pixel.to_owned(),
             colour: serde_json::to_string(&interpretation)?,
             video: self.timing(path, "v:0", control)?,
             audio,
@@ -517,6 +539,8 @@ impl RenditionEncoder for SoftwareEncoder {
                     &format!("scale={}:{}:flags=lanczos", request.width, request.height),
                     "-c:v",
                     "ffv1",
+                    "-pix_fmt",
+                    "+",
                     "-threads:v",
                     "4",
                     "-g",

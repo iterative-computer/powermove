@@ -494,3 +494,176 @@ fn control_during_probe_settles_without_failure_or_output() {
     assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Paused);
     assert!(catalog.status("m").unwrap().failures.is_empty());
 }
+
+#[test]
+fn real_source_frames_flow_through_lut_cache_and_scope_pipeline_at_exact_pts() {
+    use pm_promedia::{cache::RenderCache, cache_frame::*, render::*, scopes::*, source_frames::*};
+    let dir = TempDir::new().unwrap();
+    let path = fixture(dir.path(), false, true);
+    let backend = SoftwareEncoder::default();
+    let artifact = Artifact::inspect(&path, &EngineProbe(&backend)).unwrap();
+    let mut source =
+        SoftwareSourceFrames::new(backend, artifact.clone(), "synthetic decoder-v1".into())
+            .unwrap();
+    let request = FrameRequest {
+        identity: source.identity(),
+        ticks: (artifact.info.start_tick + 80) * 705600,
+        width: 4,
+        height: 2,
+    };
+    let lut = LutTransform::parse(
+        "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n",
+        request.identity.encoding.clone(),
+    )
+    .unwrap();
+    let work = RenderWork::new(request.clone(), Some(lut)).unwrap();
+    let cache = RenderCache::open(&dir.path().join("renders"), 4096).unwrap();
+    let config = ScopeConfig {
+        columns: 4,
+        levels: 256,
+        vector_bins: 16,
+        min: 0.0,
+        max: 1.0,
+        matrix: Matrix::Bt709,
+    };
+    let scope = Some(ScopeRequest {
+        stage: AnalysisStage::AfterLut,
+        config,
+    });
+    let result = work.run(&mut source, &cache, scope).unwrap();
+    assert!((result.frame.rgba[0][0] - (1.0 - 19.0 / 255.0)).abs() < 0.001);
+    assert!((result.frame.rgba[0][3] - 32.0 / 255.0).abs() < 0.001);
+    assert_eq!(result.scopes.as_ref().unwrap().pixels, 8);
+    assert_eq!(
+        result.scopes.as_ref().unwrap().histogram[0]
+            .bins
+            .iter()
+            .sum::<u64>(),
+        8
+    );
+    let again = work.run(&mut source, &cache, scope).unwrap();
+    assert!(again.cache_hit);
+    assert_eq!(result.frame, again.frame);
+    assert_eq!(result.scopes, again.scopes);
+    // The real decoder drives Render tasks too, with a cache hit and a fill.
+    use pm_promedia::render_job::RenderFillWork;
+    let mut next_request = request.clone();
+    next_request.ticks += 40 * 705600;
+    let next_lut = LutTransform::parse(
+        "LUT_1D_SIZE 2\n1 1 1\n0 0 0\n",
+        request.identity.encoding.clone(),
+    )
+    .unwrap();
+    let mut tasks = BackgroundTasks::default();
+    tasks
+        .enqueue(
+            "w".into(),
+            "p".into(),
+            TaskSpec {
+                title: "Synthetic source".into(),
+                kind: TaskKind::Render,
+                unit: ProgressUnit::Frames,
+                priority: 0,
+                total: 2,
+            },
+        )
+        .unwrap();
+    let ticket = tasks.start_next().unwrap();
+    let fill = RenderFillWork::prepare(
+        &mut tasks,
+        ticket,
+        "p".into(),
+        source.identity(),
+        vec![
+            work.clone(),
+            RenderWork::new(next_request, Some(next_lut)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let report = fill.run(&mut source, &cache, |_| Control::Continue);
+    fill.accept(&report, &mut tasks, &source.identity())
+        .unwrap();
+    assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Completed);
+    assert_eq!(report.completed, 2);
+    let mut missing = request.clone();
+    missing.ticks += 705600;
+    assert!(source.render(&missing).is_err()); // no nearest-frame fallback
+    let mut fractional = request;
+    fractional.ticks += 1;
+    assert!(source.render(&fractional).is_err());
+}
+#[test]
+fn software_readback_identity_tracks_source_interpretation_and_decoder_version() {
+    use pm_promedia::{cache_frame::*, source_frames::*};
+    let dir = TempDir::new().unwrap();
+    let path = fixture(dir.path(), false, false);
+    let backend = SoftwareEncoder::default();
+    let original = Artifact::inspect(&path, &EngineProbe(&backend)).unwrap();
+    let mut source =
+        SoftwareSourceFrames::new(backend.clone(), original.clone(), "v1".into()).unwrap();
+    let other = SoftwareSourceFrames::new(backend.clone(), original.clone(), "v2".into()).unwrap();
+    assert_ne!(source.identity(), other.identity());
+    assert!(SoftwareSourceFrames::new(backend.clone(), original.clone(), String::new()).is_err());
+    let mut changed = original.clone();
+    changed.info.colour.push_str(";different-stage");
+    let changed = SoftwareSourceFrames::new(backend, changed, "v1".into()).unwrap();
+    assert_ne!(source.identity(), changed.identity());
+    let mut request = FrameRequest {
+        identity: source.identity(),
+        ticks: 0,
+        width: 2,
+        height: 1,
+    };
+    assert!(source.render(&request).is_err());
+    request.width = 4;
+    request.height = 2;
+    request.identity.media[0] ^= 1;
+    assert!(source.render(&request).is_err());
+    request.identity = source.identity();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"synthetic mutation");
+    fs::write(path, bytes).unwrap();
+    assert!(source.render(&request).is_err());
+}
+
+#[test]
+fn generic_yuv_scope_readback_refuses_an_implicit_colour_conversion() {
+    use pm_promedia::{cache_frame::*, source_frames::*};
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("yuv.mkv");
+    assert!(
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=4x2:rate=25",
+                "-frames:v",
+                "4",
+                "-c:v",
+                "ffv1",
+                "-threads:v",
+                "1"
+            ])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let backend = SoftwareEncoder::default();
+    let artifact = Artifact::inspect(&path, &EngineProbe(&backend)).unwrap();
+    let mut source = SoftwareSourceFrames::new(backend, artifact, "v1".into()).unwrap();
+    let request = FrameRequest {
+        identity: source.identity(),
+        ticks: 0,
+        width: 4,
+        height: 2,
+    };
+    assert_eq!(
+        source.render(&request).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+}
