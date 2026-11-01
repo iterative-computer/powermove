@@ -12,6 +12,7 @@ import { SettingsModel, type SpeechModel } from "./model";
 export { SettingsModel } from "./model";
 export type {
   SettingsServices,
+  ProfileSettings,
   SettingsWindow,
   Publication,
   Action,
@@ -441,7 +442,9 @@ export function SettingsPanel({ model, bindings }: SettingsPanelProps) {
       style={{ display: "flex", background: t("colors.panel") }}
       onKeyDown={(event) => {
         event.stopPropagation();
-        if (model.key(event)) event.preventDefault();
+        // Native cancellation must already have happened in the shell planner.
+        // The frozen v4 contract forbids retroactive JS preventDefault().
+        model.key(event);
       }}
     >
       <div

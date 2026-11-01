@@ -7,6 +7,7 @@ import {
   type Extension,
   type Publication,
   type SettingsWindow,
+  type ProfileSettings,
 } from "./model";
 export const extension = (i = 0): Extension => ({
   id: `fixture-${i}`,
@@ -28,6 +29,12 @@ export const publication = (patch: Partial<Publication> = {}): Publication => ({
   extensionsState: "ready",
   speech: [],
   ...patch,
+});
+/** Synthetic profile authority for the test host only. Not a production grant. */
+export const profileFor = (host: HostClient): ProfileSettings => ({
+  scope: "kernel-profile",
+  getSetting: (key) => host.getSetting(key),
+  setSetting: (key, value) => host.setSetting(key, value),
 });
 export function fixture(patch: Partial<Publication> = {}) {
   const requests: HostRequest[] = [];
@@ -74,6 +81,7 @@ export function fixture(patch: Partial<Publication> = {}) {
         };
       },
     },
+    profileFor(host),
   );
   return { model, host, settings, effects, requests, actions, window };
 }

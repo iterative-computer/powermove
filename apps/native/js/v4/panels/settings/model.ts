@@ -63,6 +63,14 @@ export type Action =
 export interface SettingsServices {
   perform(action: Action, expectedRevision: number): Promise<Publication>;
 }
+/** Native-authorized built-in profile adapter, separate from extension settings.
+ * The scope label documents the integration requirement; the native adapter must
+ * enforce privilege/allowed keys and return actual kernel/persistence acks.
+ */
+export interface ProfileSettings
+  extends Pick<HostClient, "getSetting" | "setSetting"> {
+  readonly scope: "kernel-profile";
+}
 export interface SettingsWindow {
   present(section: Section): void;
   closeAndRestoreFocus(): void;
@@ -117,6 +125,7 @@ export class SettingsModel {
     publication: Publication,
     readonly window: SettingsWindow,
     readonly services?: SettingsServices,
+    readonly profileSettings?: ProfileSettings,
   ) {
     this.publication = publication;
     this.active = publication.project ? "project" : "general";
@@ -147,6 +156,7 @@ export class SettingsModel {
       .filter((r) => r.section !== "project" || !!this.publication.project)
       .map((r) => ({
         ...r,
+        ...(r.profileKey && !this.profileSettings ? { disabled: true } : {}),
         ...(r.profileKey && this.profile.has(r.profileKey)
           ? { value: this.profile.get(r.profileKey) }
           : {}),
@@ -172,7 +182,7 @@ export class SettingsModel {
     return this.filtered.slice(...this.range);
   }
   async hydrate() {
-    if (!this.alive) return;
+    if (!this.alive || !this.profileSettings) return;
     const epoch = this.epoch;
     await Promise.all(
       generalRows(this.publication.multiWindow)
@@ -182,7 +192,8 @@ export class SettingsModel {
           // Per-key pending guard prevents a late initial read overwriting a user edit.
           const initial = this.profile.get(key);
           try {
-            const ack = await this.host.getSetting(key);
+            const ack = await this.profileSettings!.getSetting(key);
+            if (!ack.accepted) throw new Error("Profile setting read rejected");
             if (
               !this.alive ||
               epoch !== this.epoch ||
@@ -426,12 +437,14 @@ export class SettingsModel {
     )
       return false;
     if (!row.profileKey) return this.perform({ type: "write", id, value });
+    if (!this.profileSettings) return false;
     const epoch = this.epoch;
     this.pending.add(id);
     this.failures.delete(id);
     this.changed();
     try {
-      const ack = await this.host.setSetting(row.profileKey, value);
+      const ack = await this.profileSettings.setSetting(row.profileKey, value);
+      if (!ack.accepted) throw new Error("Profile setting write rejected");
       if (!this.alive || epoch !== this.epoch) return false;
       this.profile.set(row.profileKey, value);
       this.reindex();

@@ -502,3 +502,22 @@ test("view visual values are pm-design tokens, never lane-authored numbers or co
     /<webview|dangerouslySetInnerHTML|<UI.Checkbox|<UI.Toggle/,
   );
 });
+
+test("frozen-contract native key delivery never requests retroactive cancellation", async () => {
+  const f = fixture();
+  f.model.show();
+  const { root, commits } = recorder();
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  // Plan cancellation from actual accepted listener flags instead of marking
+  // every synthetic event already canceled. Modifier-aware native planning is
+  // a shell/API request, not a synchronous JS decision.
+  const target = find(root, "Search", "text-field").id;
+  await root.drive(target, "keydown", { key: "f", metaKey: true });
+  expect(f.effects.at(-1)).toEqual(["focus"]);
+  expect(root.inspect().fenced).toBe(false);
+  await root.drive(target, "keydown", { key: "f" });
+  expect(f.model.open).toBe(true);
+  replay(commits);
+  root.dispose();
+  f.model.dispose();
+});

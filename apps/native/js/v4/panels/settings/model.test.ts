@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { HostClient } from "../../src/host-api";
 import { SettingsModel, type Publication } from "./model";
-import { fixture, publication, extension } from "./fixtures";
+import { fixture, publication, extension, profileFor } from "./fixtures";
 
 for (const project of [undefined, { id: "p", name: "Fixture" }])
   test(`default section, singleton window intent, continuous section order: ${!!project}`, () => {
@@ -74,7 +74,13 @@ test("failed acknowledgement keeps the last accepted value and allows retry", as
       error: reject ? "declined" : undefined,
     }),
   );
-  const model = new SettingsModel(host, publication(), f.window);
+  const model = new SettingsModel(
+    host,
+    publication(),
+    f.window,
+    undefined,
+    profileFor(host),
+  );
   expect(await model.write("appearance", "dark")).toBe(false);
   expect(model.rows.find((r) => r.id === "appearance")?.value).toBe("system");
   expect(model.inspect().failedIds).toEqual(["appearance"]);
@@ -327,4 +333,46 @@ test("retired controller cannot enqueue new preference writes or native effects"
   expect(model.key({ key: "f", metaKey: true })).toBe(false);
   expect(requests).toEqual([]);
   expect(effects).toHaveLength(before);
+});
+
+test("ordinary extension-scoped settings client cannot read or write app preferences", async () => {
+  const f = fixture();
+  const model = new SettingsModel(f.host, publication(), f.window);
+  await model.hydrate();
+  expect(await model.write("appearance", "dark")).toBe(false);
+  expect(model.rows.find((row) => row.id === "appearance")?.disabled).toBe(
+    true,
+  );
+  expect(model.rows.find((row) => row.id === "preview-memory")?.disabled).toBe(
+    true,
+  );
+  expect(f.requests).toEqual([]);
+  model.dispose();
+});
+
+test("profile adapter declined acknowledgements never publish read or write values", async () => {
+  const f = fixture();
+  const model = new SettingsModel(f.host, publication(), f.window, undefined, {
+    scope: "kernel-profile",
+    getSetting: async (key) => ({
+      ...(await f.host.getSetting(key)),
+      accepted: false,
+      value: "dark",
+    }),
+    setSetting: async (key, value) => ({
+      ...(await f.host.getSetting(key)),
+      accepted: false,
+      value,
+    }),
+  });
+  await model.hydrate();
+  expect(model.rows.find((row) => row.id === "appearance")?.value).toBe(
+    "system",
+  );
+  expect(await model.write("appearance", "dark")).toBe(false);
+  expect(model.rows.find((row) => row.id === "appearance")?.value).toBe(
+    "system",
+  );
+  expect(f.settings.size).toBe(0);
+  model.dispose();
 });

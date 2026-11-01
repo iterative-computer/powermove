@@ -16,9 +16,14 @@ announcements, key routing and editor focus restoration. Feed section observatio
 to `trackSection`; manual scrolling cancels any host scroll animation. Host actions
 must check generation/document identity at consumption, not only at enqueue.
 
-`hydrate` reads the existing profile keys through `HostClient.settings.get`.
-`write` uses `HostClient.settings.set`, and changes its displayed value only after
-an acknowledgement. Unknown authored values remain intact. The current
+`hydrate` and profile `write` require the explicit `ProfileSettings` adapter
+(the optional fifth constructor argument), separate from the ordinary extension
+`HostClient`. The frozen API namespaces ordinary settings to the extension; they
+are not app profile preferences. Without this adapter profile rows stay disabled
+and no profile request is submitted. The adapter must enforce native built-in
+privilege/allowed keys and return actual kernel/persistence acknowledgements; its
+`scope` label is not an authorization grant. The displayed value changes only
+after an accepted acknowledgement, and unknown authored values remain intact.
 `pm_services::SettingsService<SettingsHook>` is the existing persistence boundary;
 no second durable store or speculative kernel command is created here.
 
@@ -164,3 +169,59 @@ introduced by this panel.
 
 These are merge/build results. They do not resolve the service/host API gaps or
 replace macOS verification and Opus review listed above.
+
+## Frozen-contract adoption — 2026-11-01
+
+Merged the frozen native-engine base
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005` without conflicts. This incoming commit
+adds the freeze decision only; no shared API or UI-kit source changes were needed.
+The panel now requires explicit profile authority rather than treating ordinary
+extension-scoped settings as app preferences. It also leaves native key cancellation
+to preflight planning: calling JS `preventDefault` after delivery is forbidden by
+the frozen contract. Regression tests cover both paths. Rules: N3/N4 keep profile
+intent/scope exact; N7/N8 retain asynchronous native planning.
+
+### API requests (additive only)
+
+1. **Built-in profile authority and projectless identity:** provide a privileged,
+   allowlisted profile adapter for the four legacy preference keys, with real
+   kernel/persistence acknowledgements and state-revision guards. Keep ordinary
+   extension settings namespaced. Support Settings from Home without inventing a
+   project. `ProfileSettings` is only the panel's local adapter interface.
+2. **Settings UI-kit recipes and tokens:** add Settings-only switches, secure text
+   leases, minimal system color wells, regular push buttons, grouped forms, native
+   search/source lists and status actions, plus the documented missing tokens and
+   token arithmetic. Existing frozen components retain their current semantics.
+3. **Accessibility projection:** add control help, virtual-list List role/full row
+   count, and native VoiceOver scroll-to-row. Retained metadata is not AX support.
+4. **Settings model data service:** add typed snapshot subscriptions, capability
+   rows, local/profile native binding leases, and acknowledged project/account/
+   subscription/provider/transcription/extension/workspace operations. Keep one
+   kernel writer, generation fencing, archive confirmations and Keychain ownership.
+5. **Native window and shortcut preflight:** supply singleton Settings-window
+   lifecycle/focus/scroll effects and modifier-aware native cancellation before
+   enqueueing key events. Do not suppress plain `f`, `w` or comma text entry merely
+   to implement Command equivalents, and do not wait on JS on the main thread.
+
+The seven DESIGN-TODO(opus) items and macOS/Opus acceptance gates above remain
+open. No visual decision or frozen-contract change is introduced by this update.
+
+### Frozen-base validation
+
+The final validated native-engine head is
+`6d1e3bf3faefe715f28277afd7bd17b6304bbddd` (includes frozen API commit
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005` and subsequent distribution work).
+Both merges were conflict-free; incoming lock entries were preserved. No new
+panel dependency, crate or frozen API change was needed.
+
+- `bun test panels/settings`: **54 passed**, 18 snapshots.
+- `bun test`: **226 passed**, 18 snapshots; no failures/skips.
+- `bun run eval --include-held-out --wire`: **40 passed**, zero failures/pending.
+- `cargo test --locked -p pm-services -p pm-surface`: **170 passed**; no failures/ignored tests.
+- Both TypeScript checks, panel/shared formatting, shared/Settings browser bundles,
+  strict all-target Clippy, cargo fmt and the panel Rust harness rustfmt pass.
+
+Spec coverage and the seven design TODOs above remain unchanged. Profile controls
+additionally require the explicit native profile adapter; the ordinary extension
+host cannot act as a substitute. macOS visual, keyboard, service integration and
+Opus review remain acceptance gates.
