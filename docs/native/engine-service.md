@@ -451,6 +451,9 @@ session was locked, so there are no on-screen rows.
 - **Vsync-aligned start:** `Transport::grid` (last display tick/presentation) places
   the audio `Start::At` and host-clock run start on a vsync. `wants_display` asks the
   host to run its display link while awaiting the audio epoch.
+- **Render-ahead:** while content changes at most every other refresh, playing frames
+  are encoded two refreshes before their target (one otherwise). WindowServer missed
+  the vsync when GPU completion landed within ~2 ms of the target.
 - `PM_ENGINE_PRESENT=legacy` restores the previous schedule for same-build A/B only.
 
 Layer configuration is unchanged (3 drawables, display sync, no transaction present):

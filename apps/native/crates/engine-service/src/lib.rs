@@ -661,6 +661,8 @@ struct Runtime {
     lag: VecDeque<f64>,
     /// Most recent known vsync (host s) and refresh interval.
     grid: Option<(f64, f64)>,
+    /// Refreshes ahead of the target at which a playing frame is encoded.
+    ahead: f64,
     /// Stamp/time already submitted. Repeating identical pixels at the
     /// display rate only queues more drawables behind the compositor.
     last: Option<(Stamp, Ticks)>,
@@ -839,6 +841,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     lag: VecDeque::with_capacity(15),
                     grid: None,
                     last: None,
+                    ahead: 1.,
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
@@ -894,7 +897,21 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if flights.len() >= 3 || flights.iter().filter(|f| f.id == id).count() >= 3 {
                 continue;
             }
-            if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - interval) {
+            // Encode two refreshes ahead while playing: WindowServer misses
+            // the vsync when GPU completion lands within ~2 ms of target.
+            // Only when content changes at most every other refresh: each
+            // drawable is then held about one refresh longer, which three
+            // drawables absorb at half rate but not at the full refresh rate.
+            let speed = sample.rate.num.unsigned_abs() as f64 / sample.rate.den.max(1) as f64;
+            let frame = v.config.rate.exact_frame_ticks().unwrap_or(1) as f64
+                / pm_protocol::common::TICKS_PER_SECOND as f64
+                / speed.max(1e-6);
+            r.ahead = if !legacy && frame >= 1.99 * interval {
+                2.
+            } else {
+                1.
+            };
+            if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - r.ahead * interval) {
                 continue;
             }
             // A timed present reaches glass `lag` after its target (measured
@@ -910,8 +927,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 };
                 let plain = at(shown);
                 let lead = at(shown + interval / 2.);
-                let forward = sample.rate.num > 0 && lead.get() >= plain.get();
-                let inside = r.transport.clock.end().is_none_or(|end| lead.get() < end);
+                // A lead that wrapped to the loop start is the correct frame.
+                let forward = sample.rate.num > 0;
+                let inside = lead.get() < plain.get()
+                    || r.transport.clock.end().is_none_or(|end| lead.get() < end);
                 if forward && inside && !legacy {
                     lead
                 } else {
@@ -1073,7 +1092,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         let room =
                             flights.len() < 3 && flights.iter().filter(|f| f.id == *id).count() < 3;
                         if r.transport.clock.is_playing() && room {
-                            Some((r.next - r.interval - now).max(0.0001))
+                            Some((r.next - r.ahead * r.interval - now).max(0.0001))
                         } else if r.transport.running() && !r.transport.clock.is_playing() {
                             Some(0.001) // waiting for the first audio epoch
                         } else {
