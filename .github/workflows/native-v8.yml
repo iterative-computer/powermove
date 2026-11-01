@@ -76,13 +76,6 @@ jobs:
           xcodebuild -version >> v8-artifact/build.txt
           (cd v8-artifact && shasum -a 256 librusty_v8.a src_binding.rs args.gn build.txt submodules.txt > SHA256SUMS)
           df -h /
-      - name: Verify consumer links only the artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          export RUSTY_V8_ARCHIVE="$GITHUB_WORKSPACE/v8-artifact/librusty_v8.a"
-          export RUSTY_V8_SRC_BINDING_PATH="$GITHUB_WORKSPACE/v8-artifact/src_binding.rs"
-          cargo +1.96.1 run --release --manifest-path apps/native/spikes/s1/isolated/Cargo.toml -- --smoke
       - uses: actions/upload-artifact@v4
         with:
           name: rusty-v8-152.2.0-sandbox-aarch64-apple-darwin
@@ -90,3 +83,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 6
+      - name: Verify consumer links only the artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTY_V8_ARCHIVE="$GITHUB_WORKSPACE/v8-artifact/librusty_v8.a"
+          export RUSTY_V8_SRC_BINDING_PATH="$GITHUB_WORKSPACE/v8-artifact/src_binding.rs"
+          cargo +1.96.1 run --locked --release --manifest-path apps/native/spikes/s1/isolated/Cargo.toml -- --smoke
