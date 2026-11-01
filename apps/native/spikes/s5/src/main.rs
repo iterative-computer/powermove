@@ -172,8 +172,32 @@ fn run() {
     }
     window.setTitle(&NSString::from_str("Powermove S5 synthetic spike"));
     window.setContentView(Some(&web));
-    window.orderFront(None);
     app.finishLaunching();
+    // A visible accessory window alone is not a foreground comparator.
+    window.makeKeyAndOrderFront(None);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    // Activation is asynchronous. Do not start measuring a merely ordered-front
+    // window: establish the actual AppKit foreground baseline first.
+    let activation_started = Instant::now();
+    while (!app.isActive() || !window.isKeyWindow())
+        && activation_started.elapsed() < Duration::from_secs(2)
+    {
+        if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::Any,
+            Some(&NSDate::dateWithTimeIntervalSinceNow(0.01)),
+            unsafe { NSDefaultRunLoopMode },
+            true,
+        ) {
+            app.sendEvent(&event);
+        }
+        app.updateWindows();
+    }
+    if !app.isActive() || !window.isKeyWindow() {
+        state.record(json!({"test":"foreground_activation_failed","app_active":app.isActive(),"window_key":window.isKeyWindow()}));
+        lifecycle.finish(&state);
+        std::process::exit(2);
+    }
     let url = NSURL::URLWithString(&NSString::from_str(&format!(
         "http://127.0.0.1:{}/{}/",
         state.port, state.token
@@ -220,6 +244,7 @@ fn run() {
     let mut diagnosed = false;
     let started = Instant::now();
     println!("{}", json!({"test":"host_started"}));
+    state.record(json!({"test":"foreground_state","app_active":app.isActive(),"window_key":window.isKeyWindow(),"window_visible":window.isVisible(),"minimised":window.isMiniaturized()}));
     while !state.done.load(Ordering::SeqCst)
         && started.elapsed()
             < Duration::from_secs(if case.starts_with("lifecycle-") {

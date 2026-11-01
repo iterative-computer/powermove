@@ -2,16 +2,26 @@ mod contract;
 mod design;
 mod glass;
 mod native;
+mod onscreen;
 mod slot_view;
 mod verify;
 use gpui::{prelude::*, *};
 use std::{cell::RefCell, rc::Rc};
 struct Demo {
     host: Rc<RefCell<native::Host>>,
+    fixture: Option<Rc<RefCell<onscreen::Fixture>>>,
 }
 impl Render for Demo {
-    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = self.host.clone();
+        let fixture = self.fixture.clone();
+        if fixture.as_ref().is_some_and(|f| f.borrow().frames < 650) {
+            let weak = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = weak.update(cx, |_, cx| cx.notify());
+            });
+            window.request_animation_frame();
+        }
         div()
             .size_full()
             .text_color(rgb(design::TEXT))
@@ -41,6 +51,9 @@ impl Render for Demo {
                                 ),
                                 rgb(c),
                             ));
+                        }
+                        if let Some(fixture) = &fixture {
+                            fixture.borrow_mut().paint(w, h, window);
                         }
                         let _ = cx;
                     },
@@ -97,6 +110,12 @@ fn main() -> anyhow::Result<()> {
         false,
         device.clone(),
     ));
+    let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+    println!(
+        "S2_SETTINGS reduce_transparency={} increase_contrast={}",
+        workspace.accessibilityDisplayShouldReduceTransparency(),
+        workspace.accessibilityDisplayShouldIncreaseContrast()
+    );
     Application::with_platform(platform).run(move |cx| {
         cx.open_window(
             WindowOptions::new()
@@ -109,8 +128,13 @@ fn main() -> anyhow::Result<()> {
                 window.set_window_title("Powermove Native · S2");
                 let actions = glass::install(window);
                 let host = native::Host::install(window, &device);
+                if std::env::var_os("S2_MENU").is_some() {
+                    host.borrow_mut().toggle_menu();
+                }
                 // Event-driven: native controls wake GPUI, with no idle timer.
-                let demo = cx.new(|_| Demo { host });
+                let fixture = std::env::var_os("S2_PACING")
+                    .map(|_| Rc::new(RefCell::new(onscreen::Fixture::new(&device))));
+                let demo = cx.new(|_| Demo { host, fixture });
                 let weak = demo.downgrade();
                 cx.spawn(async move |cx| {
                     while let Ok(action) = actions.recv().await {

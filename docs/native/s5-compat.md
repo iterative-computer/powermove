@@ -336,3 +336,160 @@ not converted into successful exits. Screenshots, corpus data, private baseline,
 capability URLs and local operational logs are not committed. The trusted-realm
 V8 + remote-DOM fallback is still a required unvalidated option, not dropped.
 No release/tag/push or P1 approval was performed.
+
+## Unlocked rerun (2026-11-01)
+
+**Verdict: OPEN / NOT PASSED.** The unlocked run confirms substantial pixel,
+continuation and lifecycle failures. No production channel/activity choice or P1
+approval follows. Earlier locked-session evidence remains above.
+
+### Foreground conditions and harness correction
+
+macOS 27.2, Apple M5, unlocked built-in display; one spike instance at a time,
+unoptimized Rust **1.96.1** build in `~/Developer/pm-target`, shared machine.
+The normal workspace build initially passed. Rebuilds used a temporary copy of
+the manifests/lock pointing at these exact sources while another workspace member
+was incomplete; the shared manifests/lock were unchanged. The final build passed.
+
+The old host only ordered its accessory window front. The first unlocked attempt
+called activation but logged AppKit state before its asynchronous completion.
+The harness now **waits for app-active AND key-window before navigation** (up to
+2 s, otherwise it fails explicitly). Every accepted probe logged app_active=true,
+window_key=true, visible=true and minimized=false before starting. Page startup
+also recorded document.hidden=false and document.hasFocus()=true. The confirmed
+runs below are the decision evidence; earlier attempts are retained in `/tmp`
+as diagnostics. Every candidate, pixel test, continuation, lifecycle option and
+hang mode was repeated after the correction.
+
+The screen automatically locked at **00:42:38** during an offscreen-host repeat.
+That repeat's hidden/windowless samples and subsequent rejected starts are
+excluded from unlocked evidence. The foreground guard correctly refused to run
+the latter. After the owner unlocked the Mac, the offscreen-host and all hang
+modes were repeated. Temporary activation experiments made while diagnosing the
+lock were removed; no parent app identity/activation workaround is retained.
+
+Main requests 120-Hz synthetic scrub work; this is still a timer workload, not
+actual engine scrubbing or a 120-Hz WebKit presentation proof. Sync candidates
+used 10 warmups and 2,000 measured calls, with 0.020-ms observed clock steps.
+One run per case is diagnostic, not a quiet-window or supported-OS performance gate.
+
+### Channels and blocked-page probes
+
+| Channel | p50 / p95 / p99 ms | Updated result |
+|---|---|---|
+| Same-origin sync HTTP | **0.440 / 0.780 / 1.240** | **FAIL** p95 ≤0.5 ms |
+| Main-thread scheme handler | **0.080 / 0.100 / 1.060** | Latency **PASS**, first provisional candidate in this run |
+| Text-input prompt delegate | **0.060 / 0.080 / 0.160** | Latency **PASS** |
+| Long-poll app→page ack, n=400 | **1.019 / 1.881 / 10.891** | Correctness **PASS**; round-trip upper bound |
+| WebSocket app→page ack, n=400 | **0.308 / 1.057 / 2.895** | Correctness **PASS**; lower p95 upper bound |
+
+HTTP/scheme/prompt scrub CPU work p95 was **1.069/1.086/1.062 ms**; actual timer
+interval p95 **9.763/9.770/9.581 ms**. App→page scrub work/interval p95 was
+**1.060/8.357 ms**. WebSocket max ack was **30.829 ms** (long-poll **14.063 ms**),
+so its lower p95 must not conceal its tail. All 400 messages were acknowledged
+on each path. No hot-path evaluateJavaScript delivery was added.
+
+Deliberate blocked calls returned at **307.400/300.600/301.400 ms** for
+HTTP/scheme/prompt. Each requested a snapshot while blocked and completed with
+non-null image/no error. Container AX proxy queries took **0.274/0.393/0.297 ms**;
+all synthetic composition events passed. These remain **limited proxy PASS**,
+not OS IME or VoiceOver deadlock certification. An external trusted AX walk of
+the visible host exposed native window/container controls but no WebContent tree.
+Snapshot completion during the hold (rather than after release), real IME and a
+full foreign-child AX walk remain **UNVERIFIED**. No production sync channel is
+approved; HTTP still straddles the threshold across reports.
+
+### 1080p pixels and render continuations
+
+Payload remains **8,294,400 bytes**, one warmup plus 30 measured transfers per
+direction; each verifies every byte. IDs use 2,000 measured operations.
+
+| Operation | p50 / p95 / p99 ms | Updated result |
+|---|---|---|
+| App→page text response/decode/verify | **82.380 / 91.920 / 92.140** | Integrity PASS; **FAIL** 10-ms pixel budget |
+| Page→app typed-array body/verify | **56.020 / 72.060 / 85.940** | Integrity PASS; **FAIL** provisional pixel budget |
+| Page→app UTF-8 text/decode/verify | **161.600 / 230.120 / 258.560** | Integrity PASS; much slower |
+| Engine-held ID download | **0.380 / 0.460 / 0.580** | Correctness PASS; no pixel bytes crossed |
+| Engine-held ID consume/upload | **0.440 / 0.500 / 0.580** | Correctness PASS; no pixel bytes crossed |
+| Nested capture + outer canvas fill, n=30 | **259.100 / 286.680 / 348.560** | Continuation correctness PASS; **FAIL** 10-ms budget |
+
+The real canvas/JPEG, override pixels, pinned/stale/single-use checks passed again.
+The trace was `outer needs_dependency → nested rendered → outer rendered`.
+Binary scrub CPU/interval p95 **1.067/9.070 ms**; continuation **1.056/9.648 ms**.
+Unlocked execution improves some rows but does not resolve the architectural
+pixel cost. Keep pixels native and pass IDs when semantics permit. Real engine
+integration and frozen-Electron paired canvas timing remain unverified.
+
+
+### Lifecycle: true foreground versus minimize/hide and closed editor
+
+The accepted SPI run completed before the screen lock. The final offscreen run
+completed after the owner unlocked the session; session state was checked unlocked
+again afterwards. Each phase performed the same five-second synthetic Canvas2D +
+sync-request job. Both waited **60.00 s** after minimize/hide. The delayed checks
+confirmed editor_minimised=true and app_hidden=true. Closed-editor checks confirmed
+editor_visible=false. Pages reported hidden=true in both background phases.
+
+| Activity option | Foreground / hidden / windowless jobs/s | Hidden / windowless share | Result |
+|---|---|---|---|
+| Job-scoped WebKit suppression/timer SPI | **1172.726 / 333.177 / 326.656** | **28.411% / 27.854%** | **FAIL ≥95%** |
+| Always-visible offscreen host, canHide=false | **949.346 / 363.098 / 386.943** | **38.247% / 40.759%** | **FAIL ≥95%** |
+
+Both options completed all phases unlocked. This resolves the earlier offscreen
+non-completion observation on this OS, but throughput remains far below the rule.
+The SPI run logged activity release and restored its original WKPreferences.
+The offscreen host stayed AppKit-visible while the page still reported hidden.
+Work/interval p95 was **1.108/8.940 ms** for SPI and **1.127/9.144 ms** for the
+final offscreen run. This is not production export, a supported-OS matrix or a
+validated V8 + remote-DOM fallback. **No activity option is approved.**
+
+### Real infinite loop and restart, final unlocked batch
+
+Every final hang mode began with app-active/key/visible state confirmed and a
+visible, focused page. A real `while(true){}` ran in WebContent.
+
+| Stop path | Updated result |
+|---|---|
+| Exact `_killWebContentProcess` | **FAIL**: no termination/restart within the **20-s** loop observation window; host exit 2 at **20.509 s**. Selector exists and call returned. |
+| WebKit automatic termination fallback | **FAIL to demonstrate termination** within **20 s**; host exit 2 at **20.203 s**. No eventual-termination claim. |
+| `_killWebContentProcessAndResetState` diagnostic | **PASS synthetic recovery**: callback/observation **0.975 ms** after Stop; replacement ready **98.648 ms** after Stop; different positive PID and old PID confirmed gone. localStorage survived and native snapshot revision **7** was fetched. |
+
+The first observation in the reset path preceded old-PID exit; success was only
+reported after confirming its exit. Failed-host cleanup is not counted as Stop.
+Scrub work/interval p95: exact SPI **1.050/9.076 ms**, automatic fallback
+**1.059/9.131 ms**, reset variant **1.058/9.112 ms**. The host remained responsive.
+These explicitly requested test kills do not implement product Stop/Wait policy,
+production gesture sealing, kernel/journal recovery or extension reactivation.
+The reset variant remains a separate provisional diagnostic requiring a decision;
+the exact named API and automatic fallback remain failed.
+
+### Artifacts, checks and final gate
+
+Screenshots outside Git:
+
+- `/tmp/pm-shots/s5v-confirmed-foreground.png`: visible foreground probe after activation confirmation.
+- `/tmp/pm-shots/s5v-foreground-lifecycle.png`: earlier unlocked page baseline.
+- `/tmp/pm-shots/s5v-real-loop-confirmed.png`: final unlocked real-loop batch.
+
+Accepted raw logs are listed by `/tmp/s5v-confirmed-driver.jsonl` (six foreground
+cases and SPI lifecycle) and `/tmp/s5v-unlocked-final-driver.jsonl` (final offscreen
+and three hang modes). The lock-interrupted offscreen repeat and all rejected
+foreground starts remain separate diagnostics, not accepted timing samples.
+All six functional cases and both accepted lifecycle probes exited 0. Exact SPI
+and automatic fallback correctly exited 2; reset-state exited 0. The final pinned
+build and **all three S5 Rust tests PASS**. The shared workspace's later locked
+build was refused because its lockfile was changing in another lane; no lockfile
+change was made here. Temporary manifest builds/tests used the exact sources.
+
+**S5 remains OPEN / NOT PASSED:** HTTP latency, pixel/canvas budgets, ≥95% lifecycle
+throughput and the exact hang path fail. Scheme/prompt latency, transport integrity
+and reset-state diagnostics passing do not close real IME/VoiceOver, production
+kernel integration, compat extraction/corpus, frozen-reference, supported-OS or
+V8-fallback gaps. These failures remain required input before P1 sizing.
+
+All spike processes were stopped. The GUI lock was released after every batch.
+WKPreferences activity overrides were restored. System-level accessibility/input
+restoration details, including the explicit-false preference-key limitation, are
+recorded in the S2 rerun section. The owner's caffeinate assertion was left intact.
+No screenshot, private plan, capability URL or raw log was committed; no push,
+release or tag was performed.

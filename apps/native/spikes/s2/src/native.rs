@@ -79,6 +79,9 @@ impl Host {
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         let web = crate::slot_view::SlotView::new(mtm);
+        // Autoresizing is relative to the parent's initial size. A zero-size
+        // wrapper offsets fixed DOM content outside the visible clip.
+        web.setFrame(web_content.frame());
         web.addSubview(&web_content);
         content.addSubview_positioned_relativeTo(&web, NSWindowOrderingMode::Below, Some(&gpui));
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
@@ -107,7 +110,7 @@ impl Host {
             NSRect::new(NSPoint::new(12., 184.), NSSize::new(276., 28.)),
         );
         search.setPlaceholderString(Some(&NSString::from_str("Search fields…")));
-        menu_content.addSubview(&search);
+        material_contents(&menu_content).addSubview(&search);
         for (i, name) in ["Position", "Scale", "Rotation", "Opacity"]
             .iter()
             .enumerate()
@@ -117,7 +120,7 @@ impl Host {
                 NSPoint::new(22., 148. - i as f64 * 32.),
                 NSSize::new(250., 26.),
             ));
-            menu_content.addSubview(&label);
+            material_contents(&menu_content).addSubview(&label);
         }
         menu.setContentView(Some(&menu_content));
         let library=device.new_library_with_source("#include <metal_stdlib>\nusing namespace metal;\nvertex float4 s2v(uint i [[vertex_id]]) {float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[i],0,1);}\nfragment float4 s2f(float4 p [[position]]) {float c=fmod(floor(p.x/48)+floor(p.y/48),2.0);return float4(0.06+c*0.025,0.12+c*0.035,0.19+c*0.045,1);}",&metal::CompileOptions::new()).expect("viewer pattern shader");
@@ -261,6 +264,13 @@ impl Host {
                 (size.height * scale).max(1.),
             ));
         if let Some(d) = self.layer.next_drawable() {
+            if std::env::var_os("S2_PACING").is_some() {
+                let handler = block::ConcreteBlock::new(|drawable: &metal::DrawableRef| {
+                    println!("S2_VIEWER_PRESENT {:.9}", drawable.presented_time());
+                })
+                .copy();
+                d.add_presented_handler(&handler);
+            }
             let pass = metal::RenderPassDescriptor::new();
             let c = pass.color_attachments().object_at(0).unwrap();
             c.set_texture(Some(d.texture()));
@@ -325,6 +335,12 @@ pub fn material(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSView> {
             frame,
         );
         view.setCornerRadius(16.);
+        let content = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        content.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.setContentView(Some(&content));
         Retained::into_super(view)
     } else {
         let view = objc2_app_kit::NSVisualEffectView::initWithFrame(
@@ -334,6 +350,17 @@ pub fn material(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSView> {
         view.setMaterial(objc2_app_kit::NSVisualEffectMaterial::Popover);
         view.setState(objc2_app_kit::NSVisualEffectState::Active);
         Retained::into_super(view)
+    }
+}
+pub fn material_contents(view: &NSView) -> Retained<NSView> {
+    unsafe {
+        let glass = objc2::runtime::AnyClass::get(c"NSGlassEffectView")
+            .is_some_and(|class| msg_send![view, isKindOfClass:class]);
+        if glass {
+            msg_send![view, contentView]
+        } else {
+            Retained::retain(view as *const NSView as *mut NSView).unwrap()
+        }
     }
 }
 fn animate_menu(window: &NSWindow, enter: bool) -> f64 {
@@ -378,6 +405,10 @@ fn animate_menu(window: &NSWindow, enter: bool) -> f64 {
                     let _: () = msg_send![&*spring,setFromValue:from];
                     let _: () = msg_send![&*spring,setToValue:to];
                     let settling: f64 = msg_send![&*spring, settlingDuration];
+                    println!(
+                        "S2_MENU enter={} perceptual_s={} bounce={} settling_s={}",
+                        enter, motion.enter, motion.bounce, settling
+                    );
                     let _: () = msg_send![&*spring,setDuration:settling];
                     let _: () = msg_send![&*layer,addAnimation:&*spring,forKey:&*NSString::from_str("pm.menu.scale")];
                 }

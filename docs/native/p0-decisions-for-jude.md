@@ -9,14 +9,16 @@ Each item names its evidence. Nothing here authorizes dropping a v1–3 member
 | Item | State | Evidence |
 |---|---|---|
 | S1 V8 | Not started. The sandbox build needs far more disk than this Mac has (~10 GB free vs §9's 80 GB). Owner: a machine with space or CI. | — |
-| S2 GPUI-CE | **Open.** P-DEVICE, P-HEADLESS, P-TEXTURE pass GPU tests. IME, VoiceOver, resize, display moves, glass and 120 Hz are unverified (Mac locked). 1,000-texture fixture met deadlines but not 50% headroom. P-A11Y not started. | `s2-gpui-ce.md` |
+| S2 GPUI-CE | **Open.** GPU tests pass (P-DEVICE, P-HEADLESS, P-TEXTURE). Unlocked rerun: dark glass toolbar PASS, Reduce Transparency fallback PASS, field menu spring 0.32/0.15 PASS, cross-slot drags limited PASS; **accessibility FAIL** (slot children absent from the AX tree, so P-A11Y is required); 120 Hz cadence p95 8.33 ms but CPU p95 6.88 ms vs 4.17 ms headroom (**FAIL**); resize ≤1-frame unproven; IME needs a manual check; one display, so no display-move test. Visual defects: light titlebar over dark content, overlay label clipped. | `s2-gpui-ce.md` |
 | S3 Viewer (EDR) | Not started; needs an unlocked GUI session and S2's on-screen checks. | — |
 | S4 GLSL | **Draw regression passes; gate open.** 661 cases / 1,605 variants by stage: 516 draw natively, 13 cases need the WebGL route, zero naga failures (so no SPIRV-Cross route), zero lost draws vs the previous writer; killable compiler processes. Open: production Metal compile still host-side, no historical WebGL captures, one self-unstable case. | `s4-glsl.md` |
 | S5 Compat | **Open, with failures** (below). | `s5-compat.md` |
 | S6 Migration readers | **Readers work; cutover proofs open.** Snapshot-only IndexedDB/LevelDB/V8/Blob and localStorage readers; resumable BLAKE3 media move at ~284 MiB/s, 5 MiB RSS. Real-profile proof on this Mac: 593 records (442 media, 151 posters) describing ~15.9 GB, read without Electron. Open: crashed-Chromium recovery, OS-denied blobs, rollback closure, signed Keychain/updater proofs, agent-client replay. Plan: two-DR Keychain ACL, TR-gated Squirrel, then Sparkle 2 with new EdDSA keys. | `s6-migration.md` |
 | Inventories | Done: W1, C-MATRIX, D-STATE, T1, OS base. | `w1-*.md`, `c-matrix.*`, `d-state.md`, `t1-themes.md`, `os-base.md` |
 
-## S5 failures (measured with the Mac locked; some may be inflated by WebKit background throttling and need a rerun in an unlocked session)
+## S5 failures
+
+First measured with the Mac locked, then rerun unlocked and confirmed foreground (2026-11-01). **The unlocked rerun did not rescue the budgets**: HTTP sync p95 0.78 ms (fails ≤ 0.5 ms; the scheme handler passes at 0.10 ms), 1080p pixels 92/72 ms, continuations p95 287 ms, background throughput 28–41% (worse than locked), hang kill via the named SPI still fails while the reset-state SPI recovers in 99 ms. The numbers below are the locked run.
 
 1. **Pixels page ↔ app:** 1080p download/decode p95 135 ms, binary upload 51 ms, text upload 171 ms against the ≤ 10 ms sync-pixel budget. Recommendation in the spike: keep pixels in the engine and pass ids; the sync `renderFrameTo` canvas fill is the remaining cost.
 2. **Render continuations:** work without deadlock (inline override, nested capture, real canvas, JPEG), but p95 384 ms on the synthetic path.
@@ -24,7 +26,7 @@ Each item names its evidence. Nothing here authorizes dropping a v1–3 member
 4. **Hang kill:** `_killWebContentProcess` and WebKit's own termination did not end a real infinite loop within 20 s; a different reset-state SPI restarted the page in 106 ms (old process confirmed gone).
 5. **Fallback** (trusted realm in V8 + remote DOM) is unimplemented and unmeasured; it depends on S1.
 
-Decision needed: accept S5 as "channels viable, pixel/continuation/background budgets need the engine-id design and an unlocked rerun", or trigger the V8 + remote-DOM fallback evaluation (blocked on S1).
+Decision needed (now firmer after the unlocked rerun): choose the scheme handler for page→app sync calls, and either accept S5 as "channels viable, pixel/continuation/background budgets need the engine-id design and an unlocked rerun", or trigger the V8 + remote-DOM fallback evaluation (blocked on S1).
 
 ## Questions from the inventories
 

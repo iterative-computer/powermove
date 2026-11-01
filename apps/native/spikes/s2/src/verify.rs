@@ -32,7 +32,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
         size(ScaledPixels(w), ScaledPixels(h)),
     )
 }
-fn make_texture(
+pub(crate) fn make_texture(
     device: &metal::Device,
     format: metal::MTLPixelFormat,
     pixel: &[u8],
@@ -110,7 +110,7 @@ fn run_inner() -> Result<()> {
     let source = NativeTexture::new(texture, event, 1, lease()).map_err(anyhow::Error::msg)?;
     let s = scene(source.clone(), 1);
     let image = renderer.render_scene_to_image(&s, size(DevicePixels(64), DevicePixels(64)))?;
-    image.save("/tmp/pm-shots/s2-texture-bgra.png")?;
+    image.save("/tmp/pm-shots/s2v-texture-bgra.png")?;
     ensure!(
         image.get_pixel(32, 32).0 == [128, 0, 0, 255],
         "premultiplied BGRA blend: {:?}",
@@ -132,7 +132,7 @@ fn run_inner() -> Result<()> {
         &scene(half_source, 1),
         size(DevicePixels(64), DevicePixels(64)),
     )?;
-    half_image.save("/tmp/pm-shots/s2-texture-rgba16f.png")?;
+    half_image.save("/tmp/pm-shots/s2v-texture-rgba16f.png")?;
     ensure!(
         half_image.get_pixel(32, 32).0 == [128, 0, 0, 255],
         "RGBA16F blend"
@@ -239,7 +239,7 @@ fn run_inner() -> Result<()> {
     tiles.finish();
     renderer
         .render_scene_to_image(&tiles, size(DevicePixels(640), DevicePixels(400)))?
-        .save("/tmp/pm-shots/s2-1000-tiles.png")?;
+        .save("/tmp/pm-shots/s2v-1000-tiles-offscreen.png")?;
     let mut encode = Vec::new();
     let mut complete = Vec::new();
     for i in 0..180 {
