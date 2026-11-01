@@ -460,6 +460,33 @@ fn unverifiable_variable_duration_is_refused_without_inventing_timing() {
             .success()
     );
     let bytes = fs::read(&source).unwrap();
+    // Some ffmpeg builds (e.g. Homebrew on macOS) rewrite these timestamps to a
+    // constant rate. Only assert refusal when the fixture really is variable.
+    let pts = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&source)
+        .output()
+        .unwrap();
+    let pts: Vec<i64> = String::from_utf8_lossy(&pts.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    let steps: std::collections::BTreeSet<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
+    if steps.len() < 2 {
+        eprintln!(
+            "ffmpeg produced constant-rate timestamps {pts:?}; variable-duration fixture unavailable here"
+        );
+        return;
+    }
     let error = SoftwareEncoder::default().probe(&source).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("exact sample duration"));

@@ -545,7 +545,7 @@ fn write_normalized_frame(
                         }
                     }
                     let linear = rgb.map(|v| match gamma {
-                        Some(g) => v.max(0.0).powf(1.0 / g),
+                        Some(g) => v.max(0.0).powf(1.0 / f64::from(g)),
                         None => source_linear(transfer, v),
                     });
                     let wide = pm_color::primaries::apply(&matrix, linear);
