@@ -51,6 +51,10 @@ pub enum ShellCall {
     Close(SessionHandle),
     /// Leave journal recoverable, without saving the base.
     DeferClose(SessionHandle),
+    /// Archive rejected work, release the session, and leave its base untouched.
+    DiscardClose(SessionHandle),
+    /// All earlier acknowledged writes and checkpoints are fsynced on success.
+    DurabilityBarrier,
     /// Compaction and durability barrier; refuses any in-flight save/open entry.
     PrepareQuit,
     AbortSave {
@@ -156,6 +160,7 @@ pub enum ShellReply {
     Closed {
         recovery_copy: Option<String>,
     },
+    Durable,
     Recent(Vec<Value>),
     Changed(bool),
 }
@@ -330,6 +335,18 @@ impl Kernel {
                 Ok(ShellReply::Closed {
                     recovery_copy: None,
                 })
+            }
+            ShellCall::DiscardClose(handle) => {
+                self.ensure_idle(&handle)?;
+                self.archive_journal(&handle.project)?;
+                self.remove_closed_project(&handle.project);
+                Ok(ShellReply::Closed {
+                    recovery_copy: None,
+                })
+            }
+            ShellCall::DurabilityBarrier => {
+                self.durability_barrier()?;
+                Ok(ShellReply::Durable)
             }
             ShellCall::PrepareQuit => {
                 for session in self.sessions.values() {
@@ -759,6 +776,10 @@ impl Kernel {
         if self.project(&id).is_some() {
             return Err(KernelFailure::AlreadyOpen(id));
         }
+        if let Some(d) = self.durability() {
+            d.barrier()
+                .map_err(|e| KernelFailure::Journal(e.to_string()))?;
+        }
         let original_source = source.clone();
         let mut decision = OpenDecision::Writable;
         let mut lock = None;
@@ -1044,15 +1065,7 @@ impl Kernel {
                 _ => vec![],
             };
             for path in paths {
-                let archive = path.parent().unwrap().join("discarded");
-                std::fs::create_dir_all(&archive).map_err(failure)?;
-                std::fs::rename(&path, archive.join(path.file_name().unwrap())).map_err(failure)?;
-                std::fs::File::open(&archive)
-                    .and_then(|f| f.sync_all())
-                    .map_err(failure)?;
-                std::fs::File::open(path.parent().unwrap())
-                    .and_then(|f| f.sync_all())
-                    .map_err(failure)?;
+                crate::journal::archive_session(path).map_err(failure)?;
             }
         }
         if matches!(

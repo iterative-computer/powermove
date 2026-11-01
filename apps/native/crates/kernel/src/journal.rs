@@ -99,12 +99,18 @@ pub struct CheckpointState {
 struct SyncTarget {
     file: File,
     dirty: AtomicBool,
+    syncing: Mutex<()>,
 }
 
 impl SyncTarget {
     fn sync(&self) -> io::Result<()> {
+        // A second caller must wait even after the flusher claimed `dirty`.
+        let _guard = self.syncing.lock().expect("sync target");
         if self.dirty.swap(false, Ordering::AcqRel) {
-            full_sync(&self.file)?;
+            if let Err(e) = full_sync(&self.file) {
+                self.dirty.store(true, Ordering::Release);
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -252,6 +258,7 @@ impl Durability {
         let target = Arc::new(SyncTarget {
             file: file.try_clone()?,
             dirty: AtomicBool::new(false),
+            syncing: Mutex::new(()),
         });
         self.shared
             .targets
@@ -273,6 +280,23 @@ impl Durability {
         let (tx, rx) = mpsc::channel();
         self.submit(Job::Barrier(tx));
         let _ = rx.recv();
+    }
+
+    /// Finish queued checkpoint creation/rename/pruning, then fsync every
+    /// registered segment (including rotated or closed journals). The actor
+    /// must not submit writes while waiting. Errors never certify durability.
+    pub fn barrier(&self) -> io::Result<()> {
+        self.wait_idle();
+        let targets = self.shared.targets.lock().expect("targets").clone();
+        for target in targets {
+            target.sync()?;
+        }
+        let errors = self.take_errors();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(errors.join("; ")))
+        }
     }
 
     /// Background errors since the last call (shown as a notice, never
@@ -471,6 +495,41 @@ impl Journal {
     pub fn sync_now(&self) -> io::Result<()> {
         self.target.sync()
     }
+
+    /// Call only after the durability barrier, with no concurrent writer.
+    pub(crate) fn archive(&mut self) -> io::Result<()> {
+        archive_path(&mut self.dir)
+    }
+}
+
+/// Archive rather than delete rejected recovery work. No checkpoint writer
+/// may still reference this path: the actor must pass its barrier first.
+pub(crate) fn archive_session(mut path: PathBuf) -> io::Result<()> {
+    archive_path(&mut path)
+}
+
+fn archive_path(path: &mut PathBuf) -> io::Result<()> {
+    if path.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("discarded")) {
+        let parent = path.parent().expect("session parent");
+        let archive = parent.join("discarded");
+        fs::create_dir_all(&archive)?;
+        // Make the destination directory durable before moving the only copy.
+        sync_dir(parent)?;
+        let destination = archive.join(path.file_name().expect("session name"));
+        if destination.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Journal archive exists",
+            ));
+        }
+        fs::rename(&*path, &destination)?;
+        // Keep a live journal's path correct even if directory syncing fails;
+        // retrying DiscardClose can finish the barrier without another move.
+        *path = destination;
+    }
+    let archive = path.parent().expect("archive directory");
+    sync_dir(archive)?;
+    sync_dir(archive.parent().expect("project directory"))
 }
 
 fn open_segment(
@@ -970,5 +1029,74 @@ impl Replay {
             other => return Err(format!("unknown journal record {other:?}")),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn barrier_waits_for_a_flush_that_already_claimed_dirty() {
+        let d = Arc::new(Durability::new(JournalConfig::default()));
+        let target = d.register(&File::open("/dev/null").unwrap()).unwrap();
+        // Model the flusher between dirty.swap(false) and fsync completion.
+        let flushing = target.syncing.lock().unwrap();
+        assert!(!target.dirty.load(Ordering::Acquire));
+        let (started, start) = mpsc::channel();
+        let (done, finish) = mpsc::channel();
+        let worker = {
+            let d = d.clone();
+            thread::spawn(move || {
+                started.send(()).unwrap();
+                done.send(d.barrier()).unwrap();
+            })
+        };
+        start.recv().unwrap();
+        assert!(matches!(
+            finish.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(flushing);
+        finish
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn failed_fsync_keeps_the_target_dirty_for_retry() {
+        use std::os::{fd::OwnedFd, unix::net::UnixStream};
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let target = SyncTarget {
+            file: File::from(OwnedFd::from(socket)),
+            dirty: AtomicBool::new(true),
+            syncing: Mutex::new(()),
+        };
+        assert!(target.sync().is_err(), "a socket cannot be fsynced");
+        assert!(target.dirty.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn barrier_reports_checkpoint_failure() {
+        let d = Durability::new(JournalConfig::default());
+        d.submit(Job::Checkpoint {
+            // A file cannot be a checkpoint directory.
+            dir: PathBuf::from("/dev/null"),
+            project: "synthetic".into(),
+            base: "base".into(),
+            segment: 0,
+            state: Box::new(CheckpointState {
+                revision: 1,
+                document: Arc::new(Document::new(None, 1)),
+                history: History::new().snapshot(),
+                workspace: Value::Null,
+            }),
+            supersedes: vec![],
+        });
+        let error = d.barrier().unwrap_err();
+        assert!(error.to_string().contains("checkpoint 0"), "{error}");
     }
 }

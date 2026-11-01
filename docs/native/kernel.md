@@ -436,6 +436,26 @@ methods are for dedicated workers and tests.
   certifying a completed shutdown. Application termination UI remains the shell
   lane's responsibility.
 
+### DiscardClose
+
+`ShellCall::DiscardClose(session)` is the standard **Don't Save** operation.
+It validates the session generation, refuses an active edit or in-flight save,
+waits for checkpoints and fsyncs, then atomically moves the rejected journal to
+`<journal-root>/<project>/discarded/<session>`. Both directories are synced
+before it releases the project lock and returns `Closed { recovery_copy: None }`.
+It never saves the file or library slot; their bytes stay unchanged. A journal
+must be configured so rejected work can be preserved. Archives are excluded
+from recovery offers and quit compaction, and can be restored explicitly by
+moving the archived session back into its project journal directory while closed.
+
+`DeferClose` keeps work eligible for recovery and quit compaction; use
+`DiscardClose` when the user rejects edits. Close/recovery transitions wait for
+checkpoint creation, rename and pruning before using or moving a journal path.
+Concurrent fsync callers also wait for the current flush, including rotated
+segments. `ShellCall::DurabilityBarrier` returns `ShellReply::Durable` only when
+all earlier acknowledged writes and queued checkpoints are fsynced; IO errors
+are returned to the caller. It performs no compaction or project save.
+
 ### Selection, actor identity and history
 
 * `SelectionCall::{Layers, ToggleLayer, Keys, Channel, Clear}` runs in an actor
