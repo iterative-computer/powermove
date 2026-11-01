@@ -180,3 +180,27 @@ Three-way settings/storage/workspace/extension merges with tombstones, adding
 beta-created projects/media, conflict review, journal compaction, reverse migration
 and restore-build round trips are still cutover work. The checkpoint is their base,
 not their implementation. GC stays disabled through cutover plus one release.
+
+
+## Wave 2: Linux migration gates
+
+Status 2026-11-01. **17 first-launch tests and 24 migration tests pass on Linux.**
+This extends the earlier 16/22 verification; all fixtures remain synthetic.
+The package 5 library reader also now honors v1.3 recovery sequences independently
+of edit revisions (see [kernel P1 evidence](kernel.md#wave-2-linux-p1-kernel-and-library-evidence)).
+
+| Gate P1 migration row | Linux coverage | Still open |
+|---|---|---|
+| Delta passes and interrupted resume | Existing step-by-step interruptions and process SIGKILL/resume stay green, including the actual 31-second dead-lock grace. The new interrupted-delta test resumes the captured pending checkpoint, imports the extra media once, and retains both completed passes. | Live macOS profile/Chromium recovery, OS-denied blobs and large-profile timing/RSS. |
+| Archive-never-delete | The initial checkpoint remains byte-identical after Electron deletes an unknown file, changes a quarantined file, and adds media. Interrupted/resumed deltas retain the later quarantine bytes too. Source bytes are unchanged; beta settings and deleted extension data are not overwritten/resurrected. | Full current-project/settings/extension/secret reverse migration and restore-build round trip. |
+| Proxy-record detection | The lower-level migration test proves either `playbackProxy` or a nonzero `playbackProxyVersion` prevents original promotion even when stored bytes match the sampled original fingerprint. Proxy-only status retains bytes and export warning; metadata still comes from project/history assets. | Real reference closure, orphan/unclassified record review, relink/export integration and service-owned opaque artifacts. |
+
+Selecting rules: N4 preserves every source/base/pass and beta tombstone; N3
+preserves original identity independently of a playable rendition; N6 preserves
+extension storage contracts. No production first-launch behavior was replaced;
+existing consumers continue to use the single kernel reader/writer (prune rule).
+
+Signed Keychain consent/ACL, APFS behavior, quarantine/Gatekeeper, updater/TR and
+physical power-loss verification require macOS. These tests do not close those
+rows or authorize cutover. The kernel's headless journal/old-reader/FPS rows and
+soak reproduction are recorded in [kernel.md](kernel.md).

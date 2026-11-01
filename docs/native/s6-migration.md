@@ -414,3 +414,34 @@ to N4, and no data is removed to make a gate appear green.
   and native journal replay uses the kernel reader (N4, single writer, prune rule).
 - OS secret access stays behind a consent-bound trait. Tests use synthetic secret
   material; migration manifests never contain plaintext (N4, N8).
+
+
+## Wave 2: Linux migration gates
+
+Status 2026-11-01: **24 migration tests pass** (12 importer, 11 reader,
+1 synthetic safe-storage proof), plus **17 first-launch tests**.
+`tests/migration.rs` adds two focused P1 probes:
+
+- An interrupted delta at each of ObjectPublished, RecordPublished and
+  ClosurePublished resumes without modifying prior objects, native key mappings,
+  completed pass receipts or snapshot source bytes. Conflicting revisions keep
+  both passes and continue to block cutover. Repeating the completed delta is
+  byte-identical and publishes no further step (N4).
+- Boolean-only, version-only and combined proxy metadata stay proxy-only even
+  when the stored payload's sampled fingerprint matches the reference. Each keeps
+  its object, original identity/provenance, and export warning; no original is
+  invented from the IndexedDB record (N3/N4).
+
+[First-launch](first-launch.md#wave-2-linux-migration-gates) adds an interrupted
+coordinator delta retaining both the original unknown/quarantined archive and the
+new quarantine bytes, while preserving beta setting edits/deletions. The
+[kernel lane](kernel.md#wave-2-linux-p1-kernel-and-library-evidence) covers the
+process-kill soak, old-reader gzip/library/undo round trip, fractional FPS and
+v1.3 recovery-sequence correction. The headless migration rows are covered by
+synthetic fixtures; the overall Gate P1 remains open.
+
+Mac-only/full-corpus work remains: APFS clone/rename and F_FULLFSYNC/power-loss
+proofs; signed Keychain consent/ACL; live/crashed Chromium and OS permissions;
+real media/reference closure; signed TR/updater and current-state forward/reverse
+restore-build round trips. No distribution action, real profile access, source
+deletion, or secret access was performed by this Linux lane.

@@ -730,3 +730,100 @@ fn multiple_snapshot_batches_share_one_verified_closure_pass() {
     .unwrap();
     assert_eq!(before, fs::read(dest.join("migration.json")).unwrap());
 }
+
+#[test]
+fn interrupted_delta_keeps_unknown_quarantined_archives_and_beta_changes() {
+    let t = tempdir().unwrap();
+    let config = profile(t.path());
+    let unknown = config
+        .electron_profile
+        .join("store/future-private-shape.json");
+    let quarantined = config
+        .electron_profile
+        .join("store/theme.json.corrupt-synthetic");
+    fs::write(&unknown, b"opaque synthetic input\x00\xff").unwrap();
+    fs::write(&quarantined, b"{synthetic torn JSON").unwrap();
+    run(&config, |_| Ok(())).unwrap();
+    let base = config.native_profile.join("first-launch-checkpoint");
+    let archive = files(&base);
+    assert_eq!(
+        fs::read(base.join("profile/store/future-private-shape.json")).unwrap(),
+        b"opaque synthetic input\x00\xff"
+    );
+    assert_eq!(
+        fs::read(base.join("profile/store/theme.json.corrupt-synthetic")).unwrap(),
+        b"{synthetic torn JSON"
+    );
+    // Simulate later Electron edits/removals after the immutable base is sealed.
+    fs::remove_file(unknown).unwrap();
+    fs::write(quarantined, b"later synthetic quarantine").unwrap();
+    media_db(&config.electron_profile, true);
+    let source = files(&config.electron_profile);
+    let beta = config.native_profile.join("store/theme.json");
+    fs::write(&beta, b"\"native authored setting\"").unwrap();
+    let deleted = config.native_profile.join("store/ext.synthetic.json");
+    fs::remove_file(&deleted).unwrap();
+    let mut interrupted = false;
+    assert!(
+        run(&config, |event| {
+            if matches!(
+                event,
+                Event::Progress {
+                    step: Step::Media,
+                    ..
+                }
+            ) && !interrupted
+            {
+                interrupted = true;
+                anyhow::bail!("synthetic interrupted delta");
+            }
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(interrupted);
+    assert!(
+        config
+            .native_profile
+            .join("first-launch-deltas/pending/checkpoint.json")
+            .is_file()
+    );
+    run(&config, |_| Ok(())).unwrap();
+    assert_eq!(
+        files(&base),
+        archive,
+        "the original 3-way base is immutable"
+    );
+    assert_eq!(
+        files(&config.electron_profile),
+        source,
+        "migration never changes Electron"
+    );
+    assert_eq!(fs::read(beta).unwrap(), b"\"native authored setting\"");
+    assert!(
+        !deleted.exists(),
+        "a delta must not resurrect beta tombstones"
+    );
+    assert!(
+        !config
+            .native_profile
+            .join("first-launch-deltas/pending")
+            .exists()
+    );
+    let deltas = fs::read_dir(config.native_profile.join("first-launch-deltas"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(
+        fs::read(
+            deltas[0]
+                .path()
+                .join("profile/store/theme.json.corrupt-synthetic")
+        )
+        .unwrap(),
+        b"later synthetic quarantine"
+    );
+    let media: Value = read(&config.native_profile.join("Media Store/migration.json"));
+    assert_eq!(media["passes"].as_object().unwrap().len(), 2);
+}
