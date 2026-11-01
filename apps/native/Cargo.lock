@@ -4516,6 +4516,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-compat-runner"
+version = "0.1.0"
+dependencies = [
+ "pm-recorder",
+ "pm-runtime-v8",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-design"
 version = "0.1.0"
 dependencies = [

@@ -330,6 +330,25 @@ test('real selectionchange refreshes the stable realm Selection before the handl
   expect(d.getSelection().anchorNode).toBe(p.firstChild);
   h.close();
 });
+test('Range.selectNodeContents preserves comment data offsets', async () => {
+  const h = harness(),
+    d = h.shim.document;
+  try {
+    const comment = d.createComment('Synthetic 🦀');
+    d.body.append(comment);
+    await h.settle();
+    const reference = h.page.window.document.createRange();
+    reference.selectNodeContents(h.applier.node(h.shim.id(comment)) as Comment);
+    const range = d.createRange();
+    range.selectNodeContents(comment);
+    expect(range.startOffset).toBe(reference.startOffset);
+    expect(range.endOffset).toBe(reference.endOffset);
+    expect(range.toString()).toBe(reference.toString());
+    expect(h.errors).toEqual([]);
+  } finally {
+    h.close();
+  }
+});
 test('FormData collects successful text/checkbox/select controls without including disabled or unchecked fields', async () => {
   const h = harness(),
     d = h.shim.document;
