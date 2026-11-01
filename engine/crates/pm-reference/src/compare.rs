@@ -23,7 +23,12 @@ pub enum Class {
     Unreferenced,
 }
 
-const CLASSES: [Class; 4] = [Class::Interior, Class::Edge, Class::Resampled, Class::Unreferenced];
+const CLASSES: [Class; 4] = [
+    Class::Interior,
+    Class::Edge,
+    Class::Resampled,
+    Class::Unreferenced,
+];
 
 /// Error statistics over one class, in CV.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -80,6 +85,8 @@ pub struct Bounds {
     /// Edge and resampled pixels: how much each statistic of the engine's
     /// error may exceed today's, for the rounding of the compared frames.
     pub precision_cv: f64,
+    /// How much the class maximum, a single pixel, may exceed today's.
+    pub max_cv: f64,
     /// The gate's previous per-pixel bound, as (p99.9, max): unreferenced
     /// pixels against today, and each edge or resampled pixel's error
     /// beyond today's (which `|engine − today|` within it implies).
@@ -92,6 +99,7 @@ impl Bounds {
     pub const EIGHT_BIT: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 0.5,
+        max_cv: 0.5,
         per_pixel_cv: (1.0, 4.0),
     };
     /// Half-float frames (transparent captures): one f16 rounding step
@@ -100,7 +108,20 @@ impl Bounds {
     pub const HALF_FLOAT: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 255.0 / 2048.0,
+        max_cv: 255.0 / 2048.0,
         per_pixel_cv: (1.0, 1.0),
+    };
+    /// Edges rasterized with 4 coverage samples, against a converged
+    /// reference and today's 8-bit capture: p99.9 and mean within today's
+    /// plus half a code of that capture's rounding; per pixel, and so the
+    /// maximum, a coverage estimate may be off by one of its 4 samples (a
+    /// quarter of full scale), whichever space the samples are resolved in.
+    /// Interiors stay at 1 CV.
+    pub const MSAA4: Bounds = Bounds {
+        interior_cv: 1.0,
+        precision_cv: 0.5,
+        max_cv: 255.0 / 4.0,
+        per_pixel_cv: (255.0 / 4.0, 255.0 / 4.0),
     };
 }
 
@@ -136,12 +157,12 @@ impl Report {
         for class in [Class::Edge, Class::Resampled] {
             let r = self.class(class);
             let (e, t) = (&r.engine_vs_reference, &r.today_vs_reference);
-            for (name, ev, tv) in [
-                ("max", e.max, t.max),
-                ("p99.9", e.p999, t.p999),
-                ("mean", e.mean, t.mean),
+            for (name, ev, tv, bound) in [
+                ("max", e.max, t.max, bounds.max_cv),
+                ("p99.9", e.p999, t.p999, bounds.precision_cv),
+                ("mean", e.mean, t.mean, bounds.precision_cv),
             ] {
-                if ev > tv + bounds.precision_cv + 1e-9 {
+                if ev > tv + bound + 1e-9 {
                     out.push(format!(
                         "{class:?}: engine {name} {ev:.3} CV from the reference, today {tv:.3}"
                     ));
@@ -156,7 +177,9 @@ impl Report {
         }
         let u = &self.class(Class::Unreferenced).engine_vs_today;
         if u.p999 > p999 + 1e-9 || u.max > max + 1e-9 {
-            out.push(format!("unreferenced: {u} from today (bound p99.9 {p999}, max {max})"));
+            out.push(format!(
+                "unreferenced: {u} from today (bound p99.9 {p999}, max {max})"
+            ));
         }
         out
     }
@@ -168,7 +191,13 @@ impl std::fmt::Display for Report {
             if r.engine_vs_today.pixels == 0 {
                 continue;
             }
-            write!(f, "\n    {:<12} {:>8} px  vs today {}", format!("{class:?}"), r.engine_vs_today.pixels, r.engine_vs_today)?;
+            write!(
+                f,
+                "\n    {:<12} {:>8} px  vs today {}",
+                format!("{class:?}"),
+                r.engine_vs_today.pixels,
+                r.engine_vs_today
+            )?;
             if *class != Class::Unreferenced {
                 write!(
                     f,
@@ -225,8 +254,17 @@ pub fn compare(engine: &[f64], today: &[f64], reference: &[f64], classes: &[Clas
 /// Pixel classes from per-pixel facts: `edge` (some modelled content is
 /// partially covered there) and `resampled`, each grown by `radius` pixels
 /// (Chebyshev). Resampled wins over edge, edge over interior.
-pub fn classify(edge: &[bool], resampled: &[bool], width: usize, height: usize, radius: usize) -> Vec<Class> {
-    let (edge, resampled) = (dilate(edge, width, height, radius), dilate(resampled, width, height, radius));
+pub fn classify(
+    edge: &[bool],
+    resampled: &[bool],
+    width: usize,
+    height: usize,
+    radius: usize,
+) -> Vec<Class> {
+    let (edge, resampled) = (
+        dilate(edge, width, height, radius),
+        dilate(resampled, width, height, radius),
+    );
     edge.iter()
         .zip(&resampled)
         .map(|(e, r)| match (e, r) {
@@ -247,9 +285,17 @@ pub fn dilate(mask: &[bool], width: usize, height: usize, radius: usize) -> Vec<
                     continue;
                 }
                 let (lo, hi, at): (usize, usize, &dyn Fn(usize) -> usize) = if horizontal {
-                    (x.saturating_sub(radius), (x + radius).min(width - 1), &|i| y * width + i)
+                    (
+                        x.saturating_sub(radius),
+                        (x + radius).min(width - 1),
+                        &|i| y * width + i,
+                    )
                 } else {
-                    (y.saturating_sub(radius), (y + radius).min(height - 1), &|i| i * width + x)
+                    (
+                        y.saturating_sub(radius),
+                        (y + radius).min(height - 1),
+                        &|i| i * width + x,
+                    )
                 };
                 for i in lo..=hi {
                     out[at(i)] = true;
@@ -278,13 +324,21 @@ pub fn geometry(alpha: &[f64], width: usize) -> Geometry {
     }
     Geometry {
         area,
-        centroid: if area > 0.0 { [sx / area, sy / area] } else { [0.0; 2] },
+        centroid: if area > 0.0 {
+            [sx / area, sy / area]
+        } else {
+            [0.0; 2]
+        },
     }
 }
 
 /// Authored geometry kept exactly: area within `tolerance` relative and
 /// centroid within `tolerance` px (the gates use 1e-3).
-pub fn same_geometry(engine: &Geometry, reference: &Geometry, tolerance: f64) -> Result<(), String> {
+pub fn same_geometry(
+    engine: &Geometry,
+    reference: &Geometry,
+    tolerance: f64,
+) -> Result<(), String> {
     let da = (engine.area - reference.area).abs() / reference.area.max(1.0);
     let dc = (engine.centroid[0] - reference.centroid[0])
         .abs()
@@ -298,18 +352,70 @@ pub fn same_geometry(engine: &Geometry, reference: &Geometry, tolerance: f64) ->
     Ok(())
 }
 
+/// [`same_geometry`] for coverage estimated with `samples` per pixel: each
+/// partly covered reference pixel may be off by half a sample, which bounds
+/// the area by `edge / (2·samples)` and the centroid by that area error over
+/// the shape's area times its extent.
+pub fn same_sampled_geometry(
+    engine: &Geometry,
+    reference: &Geometry,
+    reference_alpha: &[f64],
+    width: usize,
+    samples: u32,
+) -> Result<(), String> {
+    let half = 0.5 / f64::from(samples);
+    let (mut edge, mut extent) = (0.0, [0.0f64; 2]);
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for (i, a) in reference_alpha.iter().enumerate() {
+        if *a > 0.0 {
+            let p = [(i % width) as f64, (i / width) as f64];
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k] + 1.0);
+            }
+            if *a < 1.0 {
+                edge += 1.0;
+            }
+        }
+    }
+    for k in 0..2 {
+        extent[k] = (hi[k] - lo[k]).max(0.0);
+    }
+    let area_bound = edge * half;
+    let da = (engine.area - reference.area).abs();
+    let dc = (engine.centroid[0] - reference.centroid[0])
+        .abs()
+        .max((engine.centroid[1] - reference.centroid[1]).abs());
+    let dc_bound = area_bound / reference.area.max(1.0) * extent[0].max(extent[1]);
+    if da > area_bound + 1e-9 || dc > dc_bound + 1e-9 {
+        return Err(format!(
+            "geometry: area {:.4} vs {:.4} (bound {area_bound:.3}), centroid off by {dc:.2e} px (bound {dc_bound:.2e})",
+            engine.area, reference.area
+        ));
+    }
+    Ok(())
+}
+
 /// Preview == export: the two frames are identical, value for value.
 pub fn identical(preview: &[f32], export: &[f32]) -> Result<(), String> {
     if preview.len() != export.len() {
-        return Err(format!("sizes differ: {} vs {}", preview.len(), export.len()));
+        return Err(format!(
+            "sizes differ: {} vs {}",
+            preview.len(),
+            export.len()
+        ));
     }
     let (n, max) = preview
         .iter()
         .zip(export)
         .filter(|(a, b)| a.to_bits() != b.to_bits())
-        .fold((0usize, 0.0f32), |(n, m), (a, b)| (n + 1, m.max((a - b).abs())));
+        .fold((0usize, 0.0f32), |(n, m), (a, b)| {
+            (n + 1, m.max((a - b).abs()))
+        });
     if n > 0 {
-        return Err(format!("preview differs from export in {n} values (max {max:e})"));
+        return Err(format!(
+            "preview differs from export in {n} values (max {max:e})"
+        ));
     }
     Ok(())
 }
@@ -328,7 +434,11 @@ mod tests {
         let reference = [0.5, 0.5, 0.5, 1.0, 0.31, 0.31, 0.31, 1.0];
         let classes = [Class::Interior, Class::Edge];
         let r = compare(&engine, &today, &reference, &classes);
-        assert!(r.failures(&Bounds::EIGHT_BIT).is_empty(), "{:?}", r.failures(&Bounds::EIGHT_BIT));
+        assert!(
+            r.failures(&Bounds::EIGHT_BIT).is_empty(),
+            "{:?}",
+            r.failures(&Bounds::EIGHT_BIT)
+        );
         // Swapped: today is closer, so the engine fails the edge rule (all
         // three statistics, and per pixel: 25.5 CV beyond today's).
         let r = compare(&today, &engine, &reference, &classes);
@@ -351,7 +461,11 @@ mod tests {
         let mut today = Vec::new();
         for i in 0..n {
             // 400 partial pixels: exact coverage k, today all or nothing.
-            let k = if i < 400 { (i % 20) as f64 / 20.0 + 0.025 } else { (i % 2) as f64 };
+            let k = if i < 400 {
+                (i % 20) as f64 / 20.0 + 0.025
+            } else {
+                (i % 2) as f64
+            };
             let mix = |a: f64| -> [f64; 4] { std::array::from_fn(|c| bg[c] + (fg[c] - bg[c]) * a) };
             reference.extend(mix(k));
             today.extend(mix(k.round()));
@@ -369,7 +483,11 @@ mod tests {
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("per pixel"));
         // Improvements pass: the engine at the reference everywhere.
-        assert!(compare(&reference, &today, &reference, &classes).failures(&Bounds::EIGHT_BIT).is_empty());
+        assert!(
+            compare(&reference, &today, &reference, &classes)
+                .failures(&Bounds::EIGHT_BIT)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -384,7 +502,13 @@ mod tests {
     #[test]
     fn geometry_and_identity() {
         let g = geometry(&[0.0, 1.0, 1.0, 0.0], 2);
-        assert_eq!(g, Geometry { area: 2.0, centroid: [1.0, 1.0] });
+        assert_eq!(
+            g,
+            Geometry {
+                area: 2.0,
+                centroid: [1.0, 1.0]
+            }
+        );
         assert!(same_geometry(&g, &g, 1e-3).is_ok());
         assert!(identical(&[1.0, 2.0], &[1.0, 2.0]).is_ok());
         assert!(identical(&[1.0, 2.0], &[1.0, 2.5]).is_err());

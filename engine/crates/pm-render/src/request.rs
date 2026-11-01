@@ -186,18 +186,17 @@ impl RenderRequest {
             )));
         }
         if let Some((sx, sy)) = self.scale {
-            // A canvas supplies output pixels per composition pixel, not
-            // FrameRequest's bounded scale: zoom 16 on a 2x display is 32.
-            // Its allocation is still bounded by output_size/region. The
-            // viewer's already-validated canvas contract permits every
-            // finite positive density; captures retain the wire limits.
-            let canvas =
-                self.preview_canvas && !self.export && self.output_kind == OutputKind::Preview;
+            // A cropped viewer can use zoom 16 on a 2x display (density
+            // 32). Its actual allocation is bounded by output_size/region;
+            // captures and exports retain the wire scale limit.
+            let viewport = (self.origin.is_some() || self.preview_canvas)
+                && !self.export
+                && self.output_kind == OutputKind::Preview;
             for v in [sx, sy] {
-                if canvas {
+                if viewport {
                     if !(v.is_finite() && v > 0.0) {
                         return Err(RenderError::Request(format!(
-                            "canvas scale {v} must be finite and positive"
+                            "viewer scale {v} must be finite and positive"
                         )));
                     }
                 } else if !(v.is_finite() && (MIN_SCALE * 0.999..=MAX_SCALE * 1.001).contains(&v)) {
@@ -252,5 +251,21 @@ mod tests {
             request.scale = Some((32.0, invalid));
             assert!(request.validate().is_err(), "invalid y density {invalid}");
         }
+    }
+
+    #[test]
+    fn visible_viewer_region_accepts_high_zoom_without_a_canvas() {
+        let mut request = RenderRequest::sized(Size::new(1000, 700), Precision::Float32);
+        request.scale = Some((32.0, 32.0));
+        request.origin = Some((14_000.0, 8_000.0));
+        request.region = Some(PixelRect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 700,
+        });
+        assert!(request.validate().is_ok());
+        request.output_kind = OutputKind::Final;
+        assert!(request.validate().is_err());
     }
 }

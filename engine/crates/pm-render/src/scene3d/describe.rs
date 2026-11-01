@@ -13,7 +13,7 @@ use crate::three::math::{self, Mat4};
 use crate::three::program::Parameters;
 
 use super::lights::{self, LightState, ShadowView};
-use super::model::{Light3d, LightKind, Material3d, MaterialKind, Materials, Scene3d, Texture3d};
+use super::model::{Light3d, LightKind, Material3d, MaterialKind, Scene3d, Texture3d};
 
 /// What a sampler uniform binds.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +54,8 @@ pub enum Topology {
 /// Fixed-function state of a draw (`WebGLState.setMaterial`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DrawState {
+    /// Depth-only shadow caster, with no color attachment.
+    pub shadow: bool,
     pub color_write: bool,
     /// An explicit channel mask (viewport selection coverage preserves IDs).
     pub color_mask: Option<u32>,
@@ -70,8 +72,6 @@ pub struct DrawState {
     pub lines: bool,
     /// The primitive's topology (glTF points and lines).
     pub topology: Topology,
-    /// Into the transmission target (RGBA half float) instead of the canvas.
-    pub hdr: bool,
 }
 
 /// One `renderBufferDirect`.
@@ -84,9 +84,6 @@ pub struct DrawDesc {
     /// `scene.objects[object].meshes[mesh]`.
     pub object: usize,
     pub mesh: usize,
-    /// The draw range in the geometry's draw order (before the wireframe
-    /// index doubles it): `(start, count)`; `None` for the whole geometry.
-    pub range: Option<(u32, u32)>,
 }
 
 /// A pass of the layer's render.
@@ -110,7 +107,7 @@ pub enum PassDesc {
     },
     /// Depth of the set's occluding models (no color writes).
     Prepass(Vec<DrawDesc>),
-    /// The layer's color, cleared to `clear` (premultiplied, E-encoded).
+    /// The layer's linear color, cleared to transparent before the output transform.
     Color {
         clear: [f64; 4],
         draws: Vec<DrawDesc>,
@@ -208,7 +205,6 @@ struct Item<'s> {
     object: usize,
     mesh: usize,
     material: &'s Material3d,
-    range: Option<(u32, u32)>,
 }
 
 fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<Item<'s>> {
@@ -221,26 +217,11 @@ fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<I
         if !visible_in(planes, mesh) {
             continue;
         }
-        match &mesh.materials {
-            Materials::Single(material) => out.push(Item {
-                object,
-                mesh: m,
-                material,
-                range: None,
-            }),
-            Materials::Slots(list) => {
-                for g in mesh.geometry.geometry.groups() {
-                    if let Some(material) = list.get(g.material_index as usize) {
-                        out.push(Item {
-                            object,
-                            mesh: m,
-                            material,
-                            range: Some((g.start, g.count)),
-                        });
-                    }
-                }
-            }
-        }
+        out.push(Item {
+            object,
+            mesh: m,
+            material: &mesh.materials.0,
+        });
     }
     out
 }
@@ -315,6 +296,7 @@ fn state(
 ) -> DrawState {
     let mirrored = math::determinant(world) < 0.0;
     DrawState {
+        shadow: false,
         color_write: color,
         color_mask: None,
         depth_test: true,
@@ -324,7 +306,6 @@ fn state(
         front_face_cw: (material_side == Side::Back) != mirrored,
         lines,
         topology: Topology::Triangles,
-        hdr: false,
     }
 }
 
@@ -497,7 +478,6 @@ fn draw_to(
         m.wireframe,
     );
     st.topology = topology(mesh);
-    st.hdr = target == super::gltf::material::Target::Transmission;
     Ok(DrawDesc {
         params: program(mesh, m, side, &ls.counts, target)?,
         uniforms: u,
@@ -505,7 +485,6 @@ fn draw_to(
         state: st,
         object: item.object,
         mesh: item.mesh,
-        range: item.range,
     })
 }
 
@@ -552,21 +531,22 @@ fn shadow_draw(
     if mesh.gltf.is_none() {
         textures.clear();
     }
+    let mut state = state(
+        side,
+        &mesh.world,
+        false,
+        true,
+        false,
+        item.material.wireframe,
+    );
+    state.shadow = true;
     Ok(DrawDesc {
         params,
         uniforms: u,
         textures,
-        state: state(
-            side,
-            &mesh.world,
-            true,
-            true,
-            false,
-            item.material.wireframe,
-        ),
+        state,
         object: item.object,
         mesh: item.mesh,
-        range: item.range,
     })
 }
 
@@ -612,8 +592,9 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
             });
         }
     }
-    // Depth: opaque items of the set; a model writes depth only at layer
-    // opacity ≥ 0.999 without an enabled mask.
+    // Depth: every depth-writing material in the set, including transmissive
+    // and transparent materials. SceneRuntime's depth phase does not hide
+    // those materials; Three.js draws them with color writes disabled.
     let light_uniforms = lights::uniforms(scene, &ls, &scene.camera.view());
     let planes = camera_frustum(scene);
     let mut draws = Vec::new();
@@ -623,10 +604,7 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
             continue;
         }
         for item in items(scene, o, &planes) {
-            if item.material.transparent
-                || !item.material.depth_write
-                || loose(&scene.objects[item.object].meshes[item.mesh])
-            {
+            if !item.material.depth_write || loose(&scene.objects[item.object].meshes[item.mesh]) {
                 continue;
             }
             draws.push(shading_draw(
@@ -655,9 +633,7 @@ pub fn prepass(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
                 continue;
             }
             all.extend(items(scene, o, &planes).into_iter().filter(|i| {
-                !i.material.transparent
-                    && i.material.depth_write
-                    && !loose(&scene.objects[i.object].meshes[i.mesh])
+                i.material.depth_write && !loose(&scene.objects[i.object].meshes[i.mesh])
             }));
         }
         all.extend(loose_items(scene, &planes, None));
@@ -682,15 +658,9 @@ pub fn color(layer: &Layer3d<'_>) -> Result<PassDesc, String> {
     let scene = layer.scene;
     let ls = lights::state(scene);
     let light_uniforms = lights::uniforms(scene, &ls, &scene.camera.view());
-    let clear = match (layer.background, scene.background) {
-        (true, Some(c)) => [
-            math::linear_to_srgb(c[0]),
-            math::linear_to_srgb(c[1]),
-            math::linear_to_srgb(c[2]),
-            1.0,
-        ],
-        _ => [0.0; 4],
-    };
+    let clear = [0.0; 4];
+    let own_depth =
+        !scene.objects[layer.object].occludes || scene.objects[layer.object].layer_opacity < 0.999;
     let mut draws = Vec::new();
     if layer.depth_set.contains(&layer.object) {
         let all = items(scene, layer.object, &camera_frustum(scene));
@@ -702,7 +672,7 @@ pub fn color(layer: &Layer3d<'_>) -> Result<PassDesc, String> {
                 item,
                 item.material.side,
                 true,
-                false,
+                own_depth && item.material.depth_write,
             )?);
         }
         for item in all.iter().filter(|i| i.material.transparent) {
@@ -749,17 +719,9 @@ fn sort_keys(scene: &Scene3d, item: &Item<'_>, proj_screen: &Mat4) -> (u64, f64,
     };
     let p = clip4(&mesh.world, [center[0], center[1], center[2], 1.0]);
     let z = clip4(proj_screen, p)[2];
-    // `material.id`: creation order (objects in scene order, a mesh's
-    // materials in slot order).
+    // `material.id`: creation order (objects in scene order, then meshes).
     let order = item.material.ext.as_ref().map_or_else(
-        || {
-            let slot = mesh
-                .materials
-                .iter()
-                .position(|m| std::ptr::eq(m, item.material))
-                .unwrap_or(0);
-            ((item.object as u64) << 32) | ((item.mesh as u64) << 16) | slot as u64
-        },
+        || ((item.object as u64) << 32) | ((item.mesh as u64) << 16),
         |e| e.order,
     );
     (order, z, id)
@@ -950,16 +912,8 @@ pub fn color_passes(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
     }
     let ls = lights::state(scene);
     let light_uniforms = lights::uniforms(scene, &ls, &scene.camera.view());
-    let background = match (layer.background, scene.background) {
-        (true, Some(c)) => Some([
-            math::linear_to_srgb(c[0]),
-            math::linear_to_srgb(c[1]),
-            math::linear_to_srgb(c[2]),
-            1.0,
-        ]),
-        _ => None,
-    };
-    let clear = background.unwrap_or([0.0; 4]);
+    let background = layer.background.then_some(scene.background).flatten();
+    let clear = [0.0; 4];
     let planes = camera_frustum(scene);
     let own = items(scene, layer.object, &planes);
     let mut all: Vec<Item<'_>> = if layer.depth_set.contains(&layer.object) {
@@ -972,13 +926,18 @@ pub fn color_passes(layer: &Layer3d<'_>) -> Result<Vec<PassDesc>, String> {
     };
     all.extend(loose_items(scene, &planes, Some(layer.object)));
     // Points and lines keep their depth writes in the color pass.
-    let depth =
-        |i: &Item<'_>| loose(&scene.objects[i.object].meshes[i.mesh]) && i.material.depth_write;
+    let own_depth =
+        !scene.objects[layer.object].occludes || scene.objects[layer.object].layer_opacity < 0.999;
+    let depth = |i: &Item<'_>| {
+        i.material.depth_write
+            && (loose(&scene.objects[i.object].meshes[i.mesh])
+                || (own_depth && i.object == layer.object && !i.material.transparent))
+    };
     let mut passes = Vec::new();
     // The transmission target clears to the canvas clear color while it is
     // opaque (the GL clear color holds its sRGB-encoded values), else to
     // half-transparent white (premultiplied).
-    let t_clear = background.unwrap_or([0.5, 0.5, 0.5, 0.5]);
+    let t_clear = background.map_or([0.5, 0.5, 0.5, 0.5], |c| [c[0], c[1], c[2], 1.0]);
     if let Some(p) = transmission_pass(scene, &ls, &light_uniforms, &all, t_clear, depth)? {
         passes.push(p);
     }
@@ -1045,15 +1004,7 @@ pub fn whole_scene(scene: &Scene3d) -> Result<Vec<PassDesc>, String> {
         let all: Vec<Item<'_>> = (0..scene.objects.len())
             .flat_map(|o| items(scene, o, &planes))
             .collect();
-        let clear = match scene.background {
-            Some(c) => [
-                math::linear_to_srgb(c[0]),
-                math::linear_to_srgb(c[1]),
-                math::linear_to_srgb(c[2]),
-                1.0,
-            ],
-            None => [0.0; 4],
-        };
+        let clear = [0.0; 4];
         // The background renders into the transmission target too
         // (linear, forced clear); without one it clears to white at 0.5.
         let t_clear = match scene.background {
@@ -1131,15 +1082,7 @@ pub fn whole_scene(scene: &Scene3d) -> Result<Vec<PassDesc>, String> {
             )?);
         }
     }
-    let clear = match scene.background {
-        Some(c) => [
-            math::linear_to_srgb(c[0]),
-            math::linear_to_srgb(c[1]),
-            math::linear_to_srgb(c[2]),
-            1.0,
-        ],
-        None => [0.0; 4],
-    };
+    let clear = [0.0; 4];
     passes.push(PassDesc::Color { clear, draws });
     Ok(passes)
 }

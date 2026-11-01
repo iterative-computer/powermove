@@ -52,6 +52,8 @@ fn source(
         siting: ChromaSiting::Left,
         alpha: AlphaMode::Opaque,
         tone_map: None,
+        chromaticities: None,
+        power: None,
     };
     let mut encoder = gpu
         .device
@@ -298,6 +300,8 @@ fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
         siting: ChromaSiting::Left,
         alpha: AlphaMode::Opaque,
         tone_map: None,
+        chromaticities: None,
+        power: None,
     };
     let converted = |format| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());

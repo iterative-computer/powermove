@@ -118,13 +118,14 @@ it (export frames still decode on the caller's thread, with `DecodePurpose::Expo
   before (`pm_render::media::DEFAULT_FRAME_CACHE`): export jobs, `pm-cli`,
   and headless renders read each frame once and keep it there. Only the
   viewer's renderer (the presenter's composer) takes a share of the
-  engine's lease: a quarter of the lease, between 64 and 512 MiB (512 MiB
-  holds about 40 UHD 4:2:0 frames), never more than the lease has left
+  engine's lease: a quarter of the lease, between 64 and 512 MiB, never more than the lease has left
   after the viewer's surface pools (`pm_node::present::viewer_frame_cache`).
   The presenter reserves it in the lease ledger as `frameCache`, so usage
   reports show it, and resizes it on every grant (pm-engine calls
-  `FramePresenter::lease_changed`; `Renderer::apply_media_lease` forwards to
-  `DecodeService::apply_lease`, which evicts at once). A shrinking lease is
+  `FramePresenter::lease_changed`. `Renderer::apply_media_lease` divides this
+  share between decoded frames, converted whole-frame textures, and CPU/GPU
+  still tiles; each cache evicts on a shrinking lease, and the media usage
+  reports their total retained bytes. A shrinking lease is
   acknowledged once the smaller reservation fits (the next lease tick).
   Before the host's first grant the viewer keeps 64 MiB, unreserved, like
   everything else the engine holds then. An 8 GB Mac's idle interactive

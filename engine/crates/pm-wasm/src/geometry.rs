@@ -355,7 +355,7 @@ pub fn request_camera(request: &Value) -> Option<Camera> {
 #[cfg(test)]
 mod history_tests {
     use super::*;
-    use pm_geom3d::query::{Facing, Materials, Object, Shape};
+    use pm_geom3d::query::{Facing, Object, Shape};
 
     fn scene(ids: &[&str]) -> Scene {
         Scene {
@@ -367,7 +367,7 @@ mod history_tests {
                     world: pm_geom3d::gltf::math::IDENTITY,
                     shape: Shape::Mesh {
                         mesh: pm_geom3d::query::missing_box(),
-                        materials: Materials::Single(Facing::DEFAULT),
+                        facing: Facing::DEFAULT,
                     },
                 })
                 .collect(),
@@ -395,7 +395,7 @@ mod history_tests {
             &[("a".into(), 1), ("b".into(), 1)],
             &mut objects,
         );
-        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("a"));
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None), Some("a"));
 
         // Document reorder alone does not change Map insertion order.
         let mut objects = scene(&["b", "a"]);
@@ -404,7 +404,7 @@ mod history_tests {
             &[("b".into(), 1), ("a".into(), 1)],
             &mut objects,
         );
-        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("a"));
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None), Some("a"));
 
         // Replacing a's source removes and reinserts it after b.
         let mut objects = scene(&["b", "a"]);
@@ -413,7 +413,7 @@ mod history_tests {
             &[("b".into(), 1), ("a".into(), 2)],
             &mut objects,
         );
-        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("b"));
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None), Some("b"));
 
         // The next presented frame sees a restored source. Because the
         // previous frame synchronized version 2, restoring version 1
@@ -424,7 +424,7 @@ mod history_tests {
             &[("a".into(), 1), ("b".into(), 1)],
             &mut objects,
         );
-        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("b"));
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None), Some("b"));
 
         // Removing and then re-adding b moves it to the back.
         let mut objects = scene(&["a"]);
@@ -435,6 +435,6 @@ mod history_tests {
             &[("b".into(), 1), ("a".into(), 2)],
             &mut objects,
         );
-        assert_eq!(objects.pick(&camera, 0.0, 0.0, None).unwrap(), Some("a"));
+        assert_eq!(objects.pick(&camera, 0.0, 0.0, None), Some("a"));
     }
 }

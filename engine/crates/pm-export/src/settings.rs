@@ -293,6 +293,11 @@ pub enum ColorTags {
 }
 
 impl ColorTags {
+    /// CICP transfer 1 uses the BT.709 OETF. Transfer 13 is sRGB E.
+    pub fn bt709_transfer(self) -> bool {
+        matches!(self, Self::Rec709Broadcast | Self::Rec709Image)
+    }
+
     /// (colour primaries, transfer characteristics, matrix coefficients).
     pub fn cicp(self) -> (u16, u16, u16) {
         match self {

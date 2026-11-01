@@ -357,6 +357,9 @@ fn to_fixed4(v: f64) -> String {
 /// `getTexelEncodingFunction('linearToOutputTexel', outputColorSpace)` for
 /// sRGB or linear-sRGB output.
 fn texel_encoding(srgb: bool) -> String {
+    if !srgb {
+        return "vec4 linearToOutputTexel( vec4 value ) { return value; }".into();
+    }
     let m = format!(
         "mat3( {} )",
         rec709_round_trip()
@@ -365,13 +368,8 @@ fn texel_encoding(srgb: bool) -> String {
             .collect::<Vec<_>>()
             .join(",")
     );
-    let oetf = if srgb {
-        "sRGBTransferOETF"
-    } else {
-        "LinearTransferOETF"
-    };
     format!(
-        "vec4 linearToOutputTexel( vec4 value ) {{\n\treturn {oetf}( vec4( value.rgb * {m}, value.a ) );\n}}"
+        "vec4 linearToOutputTexel( vec4 value ) {{\n\treturn sRGBTransferOETF( vec4( value.rgb * {m}, value.a ) );\n}}"
     )
 }
 

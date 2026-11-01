@@ -556,6 +556,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
             &convert::ConvertParams {
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
+                tags: ColorTags::Rec709QuickTime,
                 dither: true,
                 frame: n as u32,
             },

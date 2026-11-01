@@ -1,7 +1,7 @@
 //! Executes the 3D pass on the GPU: three.js r180's programs (generated
 //! by [`crate::three::program`], translated through `pm_gpu::glsl` and, for
 //! Metal's safe math, `pm_gpu::msl`), the passes [`super::describe`] lays
-//! out, 4× MSAA into RGBA8 with a resolve (the WebGL canvas), the shared
+//! out, 4× MSAA into linear RGBA16F with hardware resolve, the shared
 //! depth prepass kept between the layers of one depth set, shadow maps,
 //! material maps, and the linear view depth of the depth and id surface.
 
@@ -139,6 +139,12 @@ fn constant_attribute_bit(name: &str) -> u16 {
     }
 }
 
+fn is_shadow_binding(name: &str) -> bool {
+    name.starts_with("directionalShadowMap")
+        || name.starts_with("spotShadowMap")
+        || name.starts_with("pointShadowMap")
+}
+
 fn constant_attributes(geometry: &super::model::Geometry3d) -> u16 {
     [
         "normal",
@@ -203,7 +209,6 @@ struct Attachments {
 
 struct ShadowTarget {
     size: (u32, u32),
-    color: wgpu::TextureView,
     depth: wgpu::TextureView,
 }
 
@@ -293,12 +298,30 @@ struct DepthSurface {
     layout: wgpu::BindGroupLayout,
 }
 
-/// The pass output: premultiplied 8-bit color (E codes) and, when asked,
+/// Encoding of the 3D color target at the compositing seam.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputColor3d {
+    /// Premultiplied linear scene light. Apply the authored ACES Filmic curve
+    /// once after the 3D blend and resolve, then encode once. The optional
+    /// background is an authored display color and bypasses tone mapping.
+    /// `weighted`: the samples resolved luminance-weighted
+    /// ([`super::karis`]); unweight before toning.
+    LinearScene {
+        exposure: f32,
+        background: Option<[f32; 3]>,
+        weighted: bool,
+    },
+    /// The legacy OBJ mesh pass already yields encoded color.
+    Encoded,
+}
+
+/// The pass output: premultiplied color and, when asked,
 /// linear view depth (`r32float`, +inf where nothing drew), both in GL row
 /// order.
 pub struct Rendered3d {
     pub color: Target,
     pub depth: Option<Target>,
+    pub color_space: OutputColor3d,
 }
 
 /// GPU state of the 3D pass, kept across frames.
@@ -336,6 +359,9 @@ pub struct Scene3dRenderer {
     gltf: super::gltf::gpu::GltfGpu,
     /// Studio renders object layers when on (path traced, scene3d/studio.rs).
     studio: Option<super::studio::StudioPass>,
+    /// The resolve weighting pass, once asked for (`None` inside: the
+    /// device has no passthrough MSL).
+    weighting: Option<Option<super::karis::Weighting>>,
 }
 
 impl Default for Scene3dRenderer {
@@ -364,7 +390,10 @@ impl Default for Scene3dRenderer {
             cache_write_failures: 0,
             legacy: Default::default(),
             gltf: Default::default(),
-            studio: std::env::var_os("PM_STUDIO").filter(|v| v != "0").map(|_| super::studio::StudioPass::default()),
+            studio: std::env::var_os("PM_STUDIO")
+                .filter(|v| v != "0")
+                .map(|_| super::studio::StudioPass::default()),
+            weighting: None,
         }
     }
 }
@@ -506,13 +535,7 @@ impl Scene3dRenderer {
     /// texture getter returns nothing; one outside the classes this pass
     /// draws (changed since the capability check) makes the render
     /// unsupported.
-    fn resolve_maps(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        scene: &Arc<Scene3d>,
-    ) -> Result<Arc<Scene3d>, Error3d> {
+    fn resolve_maps(&mut self, scene: &Arc<Scene3d>) -> Result<Arc<Scene3d>, Error3d> {
         if let Some((from, to)) = &self.resolved
             && Arc::ptr_eq(from, scene)
         {
@@ -524,7 +547,7 @@ impl Scene3dRenderer {
                 for mat in m.materials.iter() {
                     for (_, t) in mat.maps.all() {
                         let Some(t) = t else { continue };
-                        match self.textures.map(device, queue, encoder, &t.path, t.srgb) {
+                        match self.textures.map(&t.path, t.srgb) {
                             Ok(_) => {}
                             Err(MapError::Unsupported(why)) => {
                                 return Err(Error3d::Unsupported(why));
@@ -634,7 +657,38 @@ impl Scene3dRenderer {
         device: &wgpu::Device,
         params: &Parameters,
     ) -> Result<(u64, Arc<Compiled>), String> {
-        let (vs, fs) = sources(params)?;
+        let (vs, mut fs) = sources(params)?;
+        // Shadow caster programs inherit the scene's light counts, but their
+        // depth-only fragment has no shadow lookup to specialize. Only color
+        // programs that actually sample a shadow map need comparison samplers.
+        if params.shadow_map_enabled && fs.contains("float texture2DCompare(") {
+            for name in ["directionalShadowMap", "spotShadowMap", "pointShadowMap"] {
+                fs = fs.replace(
+                    &format!("sampler2D {name}"),
+                    &format!("sampler2DShadow {name}"),
+                );
+            }
+            fs = fs.replace("sampler2D shadowMap", "sampler2DShadow shadowMap");
+            let start = fs
+                .find("float texture2DCompare(")
+                .ok_or("shadow comparison function")?;
+            let end = fs[start..]
+                .find("vec2 texture2DDistribution(")
+                .map(|i| start + i)
+                .ok_or("shadow comparison end")?;
+            fs.replace_range(
+                start..end,
+                "float texture2DCompare( sampler2DShadow depths, vec2 uv, float compare ) {\n return texture( depths, vec3( uv, compare ) );\n}\n",
+            );
+        }
+        // Every color program targets the RGBA16F scene attachment; depth and
+        // distance programs write depth only.
+        if !matches!(
+            params.shader_type.as_str(),
+            "MeshDepthMaterial" | "MeshDistanceMaterial"
+        ) {
+            fs = super::color_round::at_fragment_output(&fs)?;
+        }
         // The sampler specialization and binding layout are part of the
         // translation.
         let mode = format!("{:?} preprocess 1 specialize 1 compact 1", self.math);
@@ -818,11 +872,16 @@ impl Scene3dRenderer {
             count: None,
         }];
         for (name, t, _) in &sorted {
+            let depth = is_shadow_binding(name);
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: *t,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: if depth {
+                        wgpu::TextureSampleType::Depth
+                    } else {
+                        wgpu::TextureSampleType::Float { filterable: true }
+                    },
                     view_dimension: if name == "morphTargetsTexture" {
                         wgpu::TextureViewDimension::D2Array
                     } else {
@@ -833,11 +892,15 @@ impl Scene3dRenderer {
                 count: None,
             });
         }
-        for (_, _, s) in &sorted {
+        for (name, _, s) in &sorted {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: *s,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(if is_shadow_binding(name) {
+                    wgpu::SamplerBindingType::Comparison
+                } else {
+                    wgpu::SamplerBindingType::Filtering
+                }),
                 count: None,
             });
         }
@@ -986,7 +1049,7 @@ impl Scene3dRenderer {
         {
             return;
         }
-        let make = |format: wgpu::TextureFormat, label: &str| {
+        let make = |format: wgpu::TextureFormat, usage, label: &str| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -999,17 +1062,29 @@ impl Scene3dRenderer {
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage,
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
+        // Every pass clears the color samples and discards them after the
+        // resolve, so they live in tile memory only (memoryless on Metal).
+        // Depth is kept between the prepass and the layers of a depth set.
+        let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
         self.attachments = Some(Attachments {
             width,
             height,
             samples,
-            color: make(wgpu::TextureFormat::Rgba8Unorm, "3d msaa color"),
-            depth: make(wgpu::TextureFormat::Depth32Float, "3d msaa depth"),
+            color: make(
+                wgpu::TextureFormat::Rgba16Float,
+                attachment | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
+                "3d msaa color",
+            ),
+            depth: make(
+                wgpu::TextureFormat::Depth32Float,
+                attachment,
+                "3d msaa depth",
+            ),
         });
         self.prepass = None;
     }
@@ -1018,38 +1093,27 @@ impl Scene3dRenderer {
         if matches!(self.shadows.get(&light), Some(t) if t.size == size) {
             return;
         }
-        let make = |format: wgpu::TextureFormat, usage: wgpu::TextureUsages, label: &str| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: size.0,
-                        height: size.1,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        };
         self.shadows.insert(
             light,
             ShadowTarget {
                 size,
-                color: make(
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                    "3d shadow map",
-                ),
-                depth: make(
-                    wgpu::TextureFormat::Depth32Float,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    "3d shadow depth",
-                ),
+                depth: device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("3d shadow depth"),
+                        size: wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Depth32Float,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
             },
         );
     }
@@ -1189,22 +1253,22 @@ impl Scene3dRenderer {
                 module: &compiled.fragment,
                 entry_point: compiled.fragment_entry.as_deref(),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: if state.hdr {
-                        wgpu::TextureFormat::Rgba16Float
-                    } else {
-                        wgpu::TextureFormat::Rgba8Unorm
-                    },
-                    blend,
-                    write_mask: if state.color_write {
-                        state.color_mask.map_or(
-                            wgpu::ColorWrites::ALL,
-                            wgpu::ColorWrites::from_bits_truncate,
-                        )
-                    } else {
-                        wgpu::ColorWrites::empty()
-                    },
-                })],
+                targets: &if state.shadow {
+                    vec![]
+                } else {
+                    vec![Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend,
+                        write_mask: if state.color_write {
+                            state.color_mask.map_or(
+                                wgpu::ColorWrites::ALL,
+                                wgpu::ColorWrites::from_bits_truncate,
+                            )
+                        } else {
+                            wgpu::ColorWrites::empty()
+                        },
+                    })]
+                },
             }),
             multiview_mask: None,
             cache: None,
@@ -1304,7 +1368,7 @@ impl Scene3dRenderer {
                 Some(TextureRef::Map(map)) => {
                     let tex = self
                         .textures
-                        .map(device, queue, encoder, &map.path, map.srgb)
+                        .map(&map.path, map.srgb)
                         .map_err(|e| match e {
                             MapError::Unsupported(m) => Error3d::Unsupported(m),
                             MapError::Failed(m) => Error3d::Failed(m),
@@ -1318,9 +1382,9 @@ impl Scene3dRenderer {
                     self.shadows
                         .get(light)
                         .ok_or("a shadow map that was not rendered")?
-                        .color
+                        .depth
                         .clone(),
-                    self.textures.clamp_nearest.clone().expect("samplers"),
+                    self.textures.shadow_compare.clone().expect("samplers"),
                 ),
                 Some(TextureRef::Gltf(m)) => {
                     self.gltf.map(device, queue, encoder, &mut self.textures, m)
@@ -1409,19 +1473,12 @@ impl Scene3dRenderer {
             .as_ref()
             .and_then(|g| g.instances.as_ref())
             .map_or(1, |(_, i)| i.matrices.len() as u32);
-        let factor = if draw.state.lines { 2 } else { 1 };
         let (index, total) = if draw.state.lines {
             mesh.wireframe.clone().expect("wireframe index")
         } else {
             (mesh.index.clone(), mesh.count)
         };
-        let range = match draw.range {
-            Some((start, count)) => {
-                let s = (start * factor).min(total);
-                s..(s + count * factor).min(total)
-            }
-            None => 0..total,
-        };
+        let range = 0..total;
         Ok(Some(Prepared {
             pipeline,
             bind,
@@ -1458,20 +1515,12 @@ impl Scene3dRenderer {
                 let t = &self.shadows[light];
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("3d shadow map"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &t.color,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &t.depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
+                            store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
                     }),
@@ -1623,6 +1672,17 @@ impl Scene3dRenderer {
                         list.push(prepared);
                     }
                 }
+                let weighting = if samples > 1 {
+                    self.weighting
+                        .get_or_insert_with(|| super::karis::Weighting::new(device, SAMPLES))
+                        .as_mut()
+                        .map(|w| {
+                            let params = w.params(device, scene.exposure as f32);
+                            (&*w, params)
+                        })
+                } else {
+                    None
+                };
                 let a = self.attachments.as_ref().expect("attachments");
                 let resolve = resolve.expect("a resolve target");
                 let (view, resolve_target, store) = if samples > 1 {
@@ -1661,9 +1721,47 @@ impl Scene3dRenderer {
                 for p in &list {
                     p.draw(&mut rp);
                 }
+                if let Some((w, params)) = &weighting {
+                    w.draw(&mut rp, params);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Loads the image maps this scene samples into the map cache, once per
+    /// file version: `still` converts a map's still as image layers do
+    /// (`MediaCache::image`, in linear light for sRGB maps) and says whether
+    /// it is deeper than 8 bits; the texels are its straight values.
+    pub fn prepare_image_maps(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &super::Object3dPlan,
+        still: &mut dyn FnMut(
+            &mut wgpu::CommandEncoder,
+            &std::path::Path,
+            bool,
+        ) -> Result<(wgpu::Texture, bool), MapError>,
+    ) {
+        for object in &plan.scene.objects {
+            for mesh in &object.meshes {
+                for material in mesh.materials.iter() {
+                    for (_, map) in material.maps.all() {
+                        let Some(map) = map else { continue };
+                        if map.svg.is_some() || self.textures.has_result(&map.path, map.srgb) {
+                            continue;
+                        }
+                        match still(encoder, &map.path, map.srgb) {
+                            Ok((texture, deep)) => self
+                                .textures
+                                .put_still(device, encoder, &map.path, map.srgb, &texture, deep),
+                            Err(e) => self.textures.put_failure(&map.path, map.srgb, e),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Draws the SVG maps this scene samples into the map cache: each SVG
@@ -1748,8 +1846,25 @@ impl Scene3dRenderer {
     ) -> Result<Rendered3d, Error3d> {
         self.start_generation();
         // Studio traces object layers (perspective cameras; no depth surface).
-        if let (Some(studio), super::Render3d::Layer { object, depth_set, background }, false) = (self.studio.as_mut(), &plan.kind, depth_surface) {
-            if let Some(color) = studio.render_layer(device, queue, pool, &plan.scene, *object, depth_set, *background) {
+        if let (
+            Some(studio),
+            super::Render3d::Layer {
+                object,
+                depth_set,
+                background,
+            },
+            false,
+        ) = (self.studio.as_mut(), &plan.kind, depth_surface)
+        {
+            if let Some(color) = studio.render_layer(
+                device,
+                queue,
+                pool,
+                &plan.scene,
+                *object,
+                depth_set,
+                *background,
+            ) {
                 return Ok(Rendered3d { color, depth: None });
             }
         }
@@ -1777,7 +1892,11 @@ impl Scene3dRenderer {
                     .legacy
                     .render(device, queue, encoder, pool, mesh, self.samples, precision)
                     .map_err(Error3d::Failed)?;
-                Ok(Rendered3d { color, depth: None })
+                Ok(Rendered3d {
+                    color,
+                    depth: None,
+                    color_space: OutputColor3d::Encoded,
+                })
             }
         }
     }
@@ -1792,12 +1911,17 @@ impl Scene3dRenderer {
         });
     }
 
+    /// Whether a color pass weights its samples ([`super::karis`]).
+    fn weighted(&self, device: &wgpu::Device) -> bool {
+        self.samples > 1 && pm_gpu::msl::supported(device)
+    }
+
     fn output(&self, device: &wgpu::Device, pool: &mut TargetPool, w: u32, h: u32) -> Target {
         pool.take(
             device,
             w,
             h,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
@@ -1829,7 +1953,7 @@ impl Scene3dRenderer {
             }
             _ => cross_scene_prepass_safe(scene),
         };
-        let scene = &self.resolve_maps(device, queue, encoder, scene)?;
+        let scene = &self.resolve_maps(scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
         let layer = Layer3d {
@@ -1878,7 +2002,24 @@ impl Scene3dRenderer {
         } else {
             None
         };
-        Ok(Rendered3d { color: out, depth })
+        // A color pass for a non-occluding layer may write its own depth so
+        // its back surface stays hidden. Rebuild the shared prepass before
+        // another layer uses it.
+        if !scene.objects[object].occludes || scene.objects[object].layer_opacity < 0.999 {
+            self.prepass = None;
+        }
+        Ok(Rendered3d {
+            color: out,
+            depth,
+            color_space: OutputColor3d::LinearScene {
+                weighted: self.weighted(device),
+                exposure: scene.exposure as f32,
+                background: background
+                    .then_some(scene.background)
+                    .flatten()
+                    .map(|c| c.map(|v| super::super::three::math::linear_to_srgb(v) as f32)),
+            },
+        })
     }
 
     fn render_whole(
@@ -1890,7 +2031,7 @@ impl Scene3dRenderer {
         scene: &Arc<Scene3d>,
         depth_surface: bool,
     ) -> Result<Rendered3d, Error3d> {
-        let scene = &self.resolve_maps(device, queue, encoder, scene)?;
+        let scene = &self.resolve_maps(scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
         self.prepass = None;
@@ -1933,7 +2074,17 @@ impl Scene3dRenderer {
         } else {
             None
         };
-        Ok(Rendered3d { color: out, depth })
+        Ok(Rendered3d {
+            color: out,
+            depth,
+            color_space: OutputColor3d::LinearScene {
+                weighted: self.weighted(device),
+                exposure: scene.exposure as f32,
+                background: scene
+                    .background
+                    .map(|c| c.map(|v| super::super::three::math::linear_to_srgb(v) as f32)),
+            },
+        })
     }
 
     fn depth_surface_pipeline(&mut self, device: &wgpu::Device) {
@@ -2278,7 +2429,7 @@ mod prepass_reuse_tests {
                     extra: None,
                 },
                 world: crate::three::math::IDENTITY,
-                materials: Materials::Single(Box::new(Material3d::standard_default())),
+                materials: Materials(Box::new(Material3d::standard_default())),
                 cast_shadow: false,
                 receive_shadow: false,
                 gltf: Some(Arc::new(super::super::gltf::MeshExt {
@@ -2345,9 +2496,7 @@ mod prepass_reuse_tests {
     #[test]
     fn external_maps_and_instances_refuse_cross_scene_reuse() {
         let mut mapped = scene();
-        let Materials::Single(material) = &mut mapped.objects[0].meshes[0].materials else {
-            unreachable!()
-        };
+        let material = &mut mapped.objects[0].meshes[0].materials.0;
         material.maps.color = Some(Texture3d {
             asset: "image".into(),
             path: "image.png".into(),

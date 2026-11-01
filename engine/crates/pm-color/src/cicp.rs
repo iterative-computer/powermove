@@ -85,6 +85,8 @@ pub fn transfer(code: u8) -> Option<Transfer> {
         1 | 6 | 13 | 14 | 15 => Some(Transfer::DisplayE),
         4 => Some(Transfer::Gamma22),
         8 => Some(Transfer::Linear),
+        9 => Some(Transfer::Log100),
+        10 => Some(Transfer::Log316),
         16 => Some(Transfer::Pq),
         18 => Some(Transfer::Hlg),
         _ => None,
@@ -113,6 +115,8 @@ pub fn transfer_code(transfer: Transfer) -> u8 {
         Transfer::Gamma22 => 4,
         Transfer::Pq => 16,
         Transfer::Hlg => 18,
+        Transfer::Log100 => 9,
+        Transfer::Log316 => 10,
     }
 }
 
@@ -192,6 +196,10 @@ mod tests {
         assert_eq!(transfer(13), Some(Transfer::DisplayE));
         assert_eq!(transfer(16), Some(Transfer::Pq));
         assert_eq!(transfer(2), None);
+        for (code, curve) in [(9, Transfer::Log100), (10, Transfer::Log316)] {
+            assert_eq!(transfer(code), Some(curve));
+            assert_eq!(transfer_code(curve), code);
+        }
         assert_eq!(matrix(6), Some(MatrixCoefficients::Bt601));
         assert_eq!(matrix(10), Some(MatrixCoefficients::Bt2020Cl));
         assert_eq!(matrix_code(MatrixCoefficients::Bt2020Cl), 10);

@@ -124,6 +124,31 @@ pub fn conversion(from: Primaries, to: Primaries) -> Option<Mat3> {
     Some(mul(&inverse(&b), &a))
 }
 
+/// The linear-light conversion from arbitrary chromaticities (PNG `cHRM`,
+/// OpenEXR) to a primaries set, relative colorimetric: the source white is
+/// adapted to the destination's with the Bradford transform (ICC.1:2022
+/// Annex E), as an ICC profile's PCS adaptation does. `None` for
+/// unspecified primaries.
+pub fn conversion_from(c: &Chromaticities, to: Primaries) -> Option<Mat3> {
+    const BRADFORD: Mat3 = [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ];
+    let dst = chromaticities(to)?;
+    let (sw, dw) = (apply(&BRADFORD, xyz(c.w)), apply(&BRADFORD, xyz(dst.w)));
+    let scale = [
+        [dw[0] / sw[0], 0.0, 0.0],
+        [0.0, dw[1] / sw[1], 0.0],
+        [0.0, 0.0, dw[2] / sw[2]],
+    ];
+    let adapt = mul(&inverse(&BRADFORD), &mul(&scale, &BRADFORD));
+    Some(mul(
+        &inverse(&rgb_to_xyz(&dst)),
+        &mul(&adapt, &rgb_to_xyz(c)),
+    ))
+}
+
 /// Applies a row-major matrix.
 pub fn apply(m: &Mat3, v: [f64; 3]) -> [f64; 3] {
     [
@@ -171,6 +196,26 @@ mod tests {
             red,
         );
         assert!((back[0] - 1.0).abs() < 1e-12 && back[1].abs() < 1e-12);
+    }
+
+    #[test]
+    fn chromaticities_adapt_their_white() {
+        // D65 chromaticities equal to a primaries set convert exactly as it.
+        let p3 = chromaticities(Primaries::DisplayP3).unwrap();
+        let a = conversion_from(&p3, Primaries::Bt709).unwrap();
+        let b = conversion(Primaries::DisplayP3, Primaries::Bt709).unwrap();
+        for (ra, rb) in a.iter().zip(b) {
+            for (x, y) in ra.iter().zip(rb) {
+                assert!((x - y).abs() < 1e-12);
+            }
+        }
+        // A D50 white maps to D65 white (relative colorimetric).
+        let d50 = Chromaticities {
+            w: [0.3457, 0.3585],
+            ..p3
+        };
+        let w = apply(&conversion_from(&d50, Primaries::Bt709).unwrap(), [1.0; 3]);
+        assert!(w.iter().all(|c| (c - 1.0).abs() < 1e-12), "{w:?}");
     }
 
     #[test]

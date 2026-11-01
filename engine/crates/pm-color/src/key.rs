@@ -42,6 +42,8 @@ fn transfer_id(t: Transfer) -> u8 {
         Transfer::Gamma22 => 4,
         Transfer::Pq => 5,
         Transfer::Hlg => 6,
+        Transfer::Log100 => 7,
+        Transfer::Log316 => 8,
     }
 }
 
