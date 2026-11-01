@@ -27,7 +27,7 @@ redone or lost. Where v6 and `architecture.md` disagree, **v6 wins**.
 | `apps/mac/crates/glass` (NSToolbar, glass behind/above GPUI) | #3 composition contract, §3.10 design system, S2 glass | Spike evidence. Re-done on GPUI-CE as P-LAYER slots. |
 | `apps/mac/crates/kit` (all `controls/` in GPUI, 31 tests) | #13 `powermove/ui` native backings | Logic modules (arith, scrub, linked scale, colour spaces) carry over. Widgets become the native backings of `powermove/ui` dense rows; AppKit owns segmented, colour wells, toggles and toolbar items. |
 | `apps/mac/vendor` RGB surface patch + `engine-host` | #3 P-TEXTURE, #6 engine service | Closest existing work to P-TEXTURE (BGRA8/RGBA16F, consumer completion). Port to GPUI-CE. The viewer itself moves to a CAMetalLayer slot (S3). |
-| `apps/mac/crates/core` (`pm-mac-core`: byte-identical PMV4 writer, atomic transactions, inverse-op undo, gestures, selection, 42 tests) | #5 `pm-kernel` | Seed of the kernel. Needs the actor thread, leases/folding (§3.2.1), external entries, journal, library store, uiState. The writer and its golden tests carry over as is. |
+| `apps/native/crates/core` (`pm-mac-core`: byte-identical PMV4 writer, atomic transactions, inverse-op undo, gestures, selection, 42 tests) | #5 `pm-kernel` | Seed of the kernel. Needs the actor thread, leases/folding (§3.2.1), external entries, journal, library store, uiState. The writer and its golden tests carry over as is. |
 | Core command catalog (lane in progress) | #5 kernel commands for MCP/agents/UI | Carries over: pure document operations with validation. |
 | Timeline and inspector lanes | P3 #15 built-ins | Stopped 2026-11-01: out of order (v4 API not frozen) and on the wrong framework. |
 
