@@ -27,7 +27,7 @@ acceptance_exit=$?
 set -e
 if [[ $acceptance_exit -le 2 ]]; then
   python3 - "$acceptance_work/report.json" <<'PY'
-import collections, json, sys
+import collections, csv, json, pathlib, sys
 report = json.load(open(sys.argv[1]))
 counts = collections.Counter(case['status'] for case in report['cases'])
 print(f"{counts['pass']} pass / {counts['fail']} fail / {counts['blocked-by']} blocked-by")
@@ -35,6 +35,14 @@ for case in report['cases']:
     if case['status'] == 'fail':
         print(f"FAIL {case['id']}: {case['reason']}")
 print(f"Report: {sys.argv[1]}")
+blockers = pathlib.Path(sys.argv[1]).with_name('remaining-blockers.csv')
+with blockers.open('w', newline='') as output:
+    writer = csv.writer(output, lineterminator='\n')
+    writer.writerow(['case_id','workflow','kind','needs_macos','blocked_by','reason'])
+    for case in report['cases']:
+        if case['status'] == 'blocked-by':
+            writer.writerow([case['id'],case['workflow'],case['kind'],str(case['needs_macos']).lower(),case['blocked_by'],case['reason']])
+print(f"Remaining case blockers: {blockers}")
 PY
 fi
 exit "$acceptance_exit"

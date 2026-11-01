@@ -1,47 +1,61 @@
 # W1 native acceptance harness
 
-`apps/native/crates/acceptance` (`pm-acceptance`) runs headlessly against the
-production kernel and MCP traits. Wave 2 package 20 starts at native-engine
-`36e677963` on 2026-11-01. Linux coverage is **not a native parity or cutover pass**.
-No shell, engine, vendor, spike or shared workspace lockfile is changed here.
+`apps/native/crates/acceptance` (`pm-acceptance`) runs headlessly against production
+kernel/MCP bodies and an optional native worker. Wave 5 starts at native-engine
+`ff42d751f` on 2026-11-01. Linux evidence is **not a native parity or cutover pass**.
+Final revalidation is on upstream base `c8f3f5c6e`; its intervening macOS pacing
+and v4 evaluation changes add no portable backing for the remaining W1 cases.
+Only the acceptance crate and the three lane-owned status documents change.
+The shared native lockfile, engine, shell, JS production sources, vendor and spikes
+are untouched. No visual or UX changes, placeholders or design choices were made.
 
 ## Before and after
 
-These are measured acceptance **cases**, separate from Rust test counts. The
-before run uses the unchanged base; the configured after run supplies the native
-V8 backing and the bundle built from the current compat sources.
+Measured **cases**, distinct from Rust tests; both runs use the same base APIs.
+Configured runs supply the separately locked native worker and a current-source
+compat/remote-DOM bundle. Before is the unchanged base, including its runner bug.
+The base worker's lockfile first required a refresh for merged runtime dependency
+drift; no base source or assertion was changed for that measurement.
 
-| Evidence class | Before pass/fail/blocked | After pass/fail/blocked |
+| Evidence class | Before configured pass/fail/blocked | After configured pass/fail/blocked |
 |---|---:|---:|
-| Original A/B variants | 7 / 0 / 1,337 | 11 / 0 / 1,333 |
+| Original A/B variants | 11 / 0 / 1,333 | 23 / 0 / 1,321 |
 | Complete W-group contracts | 0 / 0 / 83 | 0 / 0 / 83 |
 | Key integration variants (195 × 9) | 0 / 0 / 1,755 | 0 / 0 / 1,755 |
 | Actual shell resolver probes (195 × 7) | 1,365 / 0 / 0 | 1,365 / 0 / 0 |
-| Kernel/MCP/pro supporting probes | 22 / 1 / 0 | 29 / 1 / 0 |
-| Actual V8 and compat-source probes | 0 / 0 / 0 | 4 / 0 / 0 |
+| Kernel/MCP/pro supporting probes | 30 / 0 / 0 | 31 / 0 / 0 |
+| Optional native worker probes | 3 / 1 / 0 | 15 / 0 / 0 |
 | Engine/surface adapter doubles | 2 / 0 / 0 | 2 / 0 / 0 |
 | Public container copies | 3 / 0 / 0 | 3 / 0 / 0 |
-| **Total** | **1,399 / 1 / 3,175** | **1,414 / 1 / 3,171** |
+| **Total** | **1,414 / 1 / 3,171** | **1,439 / 0 / 3,159** |
 
-The configured run has **4,586 cases**. Without `--runtime-runner` and
-`--compat-bundle`, the four runtime cases are explicit portable blockers:
-**1,410 pass / 1 fail / 3,175 blocked**. Both modes exit **1** for the measured
-fractional-rate failure. Zero full workflows pass: W071 fails and 82 are blocked.
+The default portable run moves from **1,411 / 0 / 3,175** (4,586 cases) to
+**1,421 / 0 / 3,177** (4,598 cases). Its blocked count includes 18 explicitly
+unconfigured worker cases (including three originals). The configured after run has 12 additional supporting
+cases, twelve original blockers closed and the existing Stop fixture repaired.
+All 83 full workflows remain blocked; a passing subset does not certify a workflow.
+Default/configured exit is 0; `--strict` exits 2 for the remaining blockers.
+
+The kernel's merged fractional-rate correction already passes **29.97 exactly**
+on this base; the assertion remains unchanged. The configured baseline failure
+was **W038.v8-stop**: the old fixture requested a Store isolate through
+`RuntimePool::realm(Store(..))`, now deliberately refused by the runtime.
+The independent non-Store isolate is now `V4Extension`; an infinite compat loop
+can be stopped while that isolate keeps evaluating. Store confinement remains a
+separate macOS gate; the fixture does not bypass Store admission.
 
 All **396 legacy specs**, including the frozen **370-spec roster**, retain
-`blocked-by` replacement status before and after. There are **0 untriaged**
-rows after this pass; none of the specs is retired. The pre-existing replacement
-map already linked all 396; this pass adds those explicit acceptance/probe IDs,
-status, `needs_macos` and dependency columns to the authoritative triage CSV,
-and regression-checks them against the runner. 389 specs currently have a macOS
-integration gate; the other seven retain named non-macOS dependencies.
+`blocked-by` replacement status. There are **0 untriaged** rows and **0 retired**
+specs. 389 retain a macOS integration gate; seven have named portable dependencies.
+The authoritative triage CSV and generated replacement map retain all provenance.
 
-**Measured failure — W071.fractional-rate:** MCP `apply_commands` with
-`set_composition {patch:{fps:29.97}}` reads back `fps=30` because
-`pm-kernel/src/commands/comps.rs`, `CompCommand::Set`, rounds it. The acceptance
-assertion remains exactly 29.97 (N1/N3). The owning kernel lane must fix this;
-then remove the old measured-failure expectation in `tests/scenarios.rs` and
-update report counts while preserving the exact authored-value assertion.
+[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv)
+reports **every one of the 3,159 remaining case IDs**, with workflow, evidence kind,
+macOS flag, backing and precise unverified assertion. Original cases now include
+the exact W1 contract; MCP cases name the actual tool/backing and distinguish a
+merged adapter from an absent body. Keyboard rows retain their exact chord,
+arguments, routing flags and required real-shell context. See W1's
+[native status columns](w1-workflows.md#native-execution-status) for all 83 groups.
 
 ## Inventory and replacement limits
 
@@ -75,7 +89,28 @@ boundary. Neither becomes a pass. Existing tests and consumers are retained.
 
 ## New portable automation
 
-Four more original MCP cases execute:
+Wave 5 closes twelve more original cases against merged production bodies:
+
+| IDs | Executed contract |
+|---|---|
+| A504 / W033 | All eight strip operations; exact resulting timing/state/order, atomic malformed-tail refusal and persisted Undo/Redo |
+| A508 / W050 | 3D digest compared with independent tagged TypeScript fixtures; read-only document/revision |
+| A513 / W031 | Available/loading/failed/cloud/missing states, durable metadata, nested and structured references, inherited locks and pagination; absent registry never fabricates availability |
+| A516 / W031 | Folder create/rename/move/delete, asset rename/move/delete, referenced deletion refusal, opaque metadata retention and persisted Undo/Redo; metadata edits never delete source bytes |
+| A529 / W033 | Project/layer/property simplification scopes, exact retained keys, before/after counts, protected locked tracks and conservative expression refusal; persisted Undo/Redo |
+| A530 / W033 | All nine `edit_video` operations, exact source timing/key rebasing, handles/locks, unchanged assets and persisted Undo/Redo |
+| B258 / W057 | The original source-slip unit contract, including unchanged strip/animation, exhausted handles and persisted Undo/Redo; no dedicated mouse slip tool is claimed |
+| A539 / W031 | Kernel-evaluated empty ranges, opacity, composition/work bounds, missing/failed/offline/cloud media, source overrun and audio clipping using explicitly supplied synthetic measured peaks |
+| A659 / W040 | Actual CommandsAPI register/run/has/list in pinned V8 for v1–3, exact argument/result identity, literal false, exception attribution and owned override/disposal |
+| A689 / W040 | Actual ServicesAPI in pinned V8 for v1–3, held-old live object/closure identity, buried and top disposal, predecessor restoration and invalid-name refusal |
+| A691 / W040 | Actual EventsAPI in pinned V8 for v1–3, exact payload identity, synchronous nested ordering, exception attribution with following subscriber delivery and owned subscription disposal |
+| A550 / W067 | Actual SRT/WebVTT text in composition time: clipping, overlap normalization, Unicode/escaping, invalid-ID refusal, no edits and saved authored cues |
+
+`W057.mcp-refusals` separately covers atomic invalid targets, source handles and
+locks. `Fixture::verify_saved` now removes host revision metadata symmetrically;
+restored documents no longer produce a false comparison failure. All authored
+fields and media/history checks remain intact. The earlier eleven original passes
+remain, including these four Wave 2 additions:
 
 | ID | Executed contract |
 |---|---|
@@ -88,7 +123,7 @@ The existing seven originals remain: A495–A498, A501, A517 and A531.
 `W033.unavailable` now derives its pending set from **all catalog tools minus
 `pm_mcp::catalog::IMPLEMENTED`**. Every pending tool receives schema-valid
 synthetic arguments and must return `not_available_in_this_build` with the exact
-catalog backing. The current pending set has 53 members; no particular tool or
+catalog backing. The current pending set has 41 members; no particular tool or
 fixed count must remain pending. Newly unfamiliar schemas fail with an explicit
 request for a synthetic input, rather than silently reducing coverage.
 
@@ -116,10 +151,11 @@ Unicode text, masks and exact f64 properties. W057 retains its exact
 from=2, duration=3, trim=1, rate=2, source=12 fixture: allow 5+3×2, refuse 8+3×2,
 retain animation, Undo and Redo.
 
-## Actual V8 backing and compat boundary
+## Actual native backing and compat boundary
 
 `runtime/` is a separately locked native backing executable, depending on the
-production `pm-runtime-v8`. Its independent manifest keeps V8 build/download
+production runtime, services, promedia, remote-DOM, surface, Store-host and
+recorder/raster crates. Its independent manifest keeps optional backing build/download
 requirements out of the default kernel-only harness and avoids editing the
 shared workspace lockfile. It uses upstream Linux V8 152.2.0; it does not build
 V8 from source or run Node/Chromium. macOS requires `--features macos-sandbox`
@@ -141,11 +177,29 @@ child on timeout. Filters execute only their selected backing case.
 
 The compat entry imports `apps/native/js/compat` source directly. Bun is only a
 test bundler; no generated bundle, second facade implementation or runtime
-Node dependency is committed. Runtime kernel/storage hooks and recorder host
+Node dependency is committed. Runtime kernel/storage hooks and the JS recorder host
 are explicit synthetic doubles. The service probe has no project edits; the
-recorder probe produces no pixels and refuses readback. Full PM-to-kernel
-channels, native raster, remote DOM and extension corpus conformance remain open.
+JS-recorder probe produces no pixels and refuses readback. The separate native
+raster probe executes the merged CPU backend and reads exact pixels. Full
+PM-to-kernel/canvas bindings, WebKit page rendering and extension corpus
+conformance remain open.
 Successful owner disposal is awaited on a worker with bounded deadlines.
+
+Wave 5 adds eleven current-source/native production probes through that worker:
+
+| ID | Evidence and remaining limit |
+|---|---|
+| W040.compat-remote-dom | Actual pinned V8 runs the current remote-DOM shim; stable window/document/input identities, retained refused batch, input state before callback and ordered Unicode text publication. Actual batches are admitted through `pm-remote-dom::Router` with the synthetic event/causal sequence. No WebKit paint, IME or layout oracle. |
+| W001.service-entry | Merged service queue deduplicates/retries cold project opens without loss. EntryHook is an explicit double; LaunchServices/app delivery remains open. |
+| W012.service-storage | Production service lock, unknown settings, archive tombstones and backups survive reopening. Kernel/app settings adapter remains open. |
+| W019.background-tasks | Production promedia pause/cancel settlement fences late worker completion and old tickets. Real codecs and app Background Tasks wiring remain open. |
+| W022.proxy-identity | Proxy-only catalog retains original identity, exact 30000/1001 rate and export warning; wrong-hash relink refuses before matching original restoration. Artifact metadata is synthetic; actual probe/decoder verification remains open. |
+| W022.media-archive | Production storage refuses referenced purge and verifies retained archive bytes for originals/proxies/optimized media. Host closure inventory, power loss and APFS remain open. |
+| W077.render-cache | Production disk cache persists Keep Rendered, refuses kept eviction/different bytes and immediately misses a changed graph. Host must supply a complete render identity and real rendered frames. |
+| W040.native-raster | Actual recorder command stream executes in the production CPU rasterizer; exact RGBA pixels, signed regional readback and stale replay refusal. JS/native canvas binding and full Canvas corpus remain open. |
+| W040.remote-router | Production router keeps batch/event identities and state during backpressure, permits exact retry and refuses replay. WebKit transport remains open. |
+| W032.native-surface | Production six-op surface rejects an invalid tail atomically; removed controls retry cancellation against the original binding. BindingSink is a queue double; GPUI renderer/kernel adapter remains open. |
+| W038.store-view | Production Store host preserves profile/extension data identity across view restart, orders seal/stop/restart and rejects old generations. Platform process death and signed confinement remain open. |
 
 ## Input, engine and platform boundaries
 
@@ -200,10 +254,12 @@ cd /workspace/powermove
 apps/native/crates/acceptance/scripts/verify.sh
 ```
 
-This runs both locked acceptance suites, formatting and strict crate-local
+Install the pinned remote-DOM build dependencies first (`bun install --frozen-lockfile`
+in `apps/native/js/remote-dom`), or provide those packages through `NODE_PATH`.
+Bun is a build tool only. This runs both locked acceptance suites, formatting and strict crate-local
 Clippy, builds the current compat bundle under `work/native-acceptance`, then
-writes `report.json` there. Its final exit is **1** for W071's known failure;
-it does not hide that failure behind passing harness tests. It accepts CLI
+writes `report.json` and `remaining-blockers.csv` there. Its final exit is **0**
+with the recorded blockers, or **2** when passed `--strict`. It accepts CLI
 filters such as `--case W037.compat-services` and `--workflow W033 --strict`.
 
 Default harness and optional backing can also be run separately:
@@ -223,18 +279,30 @@ workflow explicitly says it is not a full-workflow verdict. Exit codes: 0 means
 no failures with blockers permitted; 1 means an assertion failed; `--strict`
 returns 2 for blockers if there are no failures; 3 means invalid configuration.
 
-Linux verification used Rust **1.99.1**, Bun **1.3.14**, and Node **24.19.0**
-only for existing frozen-source regression oracles. **63 pm-acceptance tests
-pass** (5 catalog, 6 runner, 4 runtime-adapter, 48 scenarios/fixtures), plus **4
-native-backing tests**. Formatting and strict `--all-targets --no-deps` Clippy
-pass for both owned crates. Kernel/MCP regressions pass serially: **267 kernel
-and 29 MCP tests**, plus **45 production V8 tests**, with one pre-existing
-ignored kernel profile test. Existing
-out-of-lane warnings remain: Linux `kernel/locks.rs:175` unused `path`, and
-Rust 1.99's `runtime-v8/runtime.rs:304` deprecated `fetch_update`. No owned crate
-warning is introduced. The activation/tooling and parity tags were initially
-absent; tools were installed under untracked scratch and public tag objects
-fetched for the existing oracles.
+Linux verification used Rust **1.99.1** and Bun **1.3.14**. **75 pm-acceptance
+tests pass** (5 catalog, 8 runner/report, 4 runtime-adapter, 58 scenarios/fixtures),
+plus **15 native-backing tests**; no ignored tests. The configured run executes
+all five actual V8/compat supporting probes, three original v1–3 API cases in
+V8 and ten portable production-crate probes.
+Formatting and strict `--all-targets --no-deps` Clippy pass for both owned crates.
+Rust 1.99 emits three existing dependency deprecations: `fetch_update` in
+`pm-runtime-v8` (two) and `pm-promedia` (one). No owned-crate warning is introduced.
+No Node or Electron was used in this lane's execution. The already committed
+3D fixture expectations come from the owner's tagged-source oracle.
+
+`--format blockers-csv` emits the exact open-case report. To refresh lane-owned
+status artifacts after a full public-synthetic configured run:
+
+```sh
+python3 apps/native/crates/acceptance/scripts/refresh-reports.py work/native-acceptance/report.json
+cargo run --locked --manifest-path apps/native/Cargo.toml -p pm-acceptance -- --format e2e-csv > apps/native/crates/acceptance/data/e2e-map.csv
+```
+
+The refresh script refuses filtered reports and user-supplied corpus cases.
+It edits only e2e status columns, the W1 status table and the blocker snapshot;
+it retains every original contract and provenance field. Regression tests reject
+report/map/triage/W1 drift. Mock backing tests validate report metadata only;
+the configured verification command executes every actual worker assertion.
 
 ## Decisions and selecting rules
 
@@ -246,8 +314,9 @@ fetched for the existing oracles.
 | Use real actor commands, exact values, atomic refusal and persisted Undo/Redo | N1/N2/N3/N4: stronger pro editing without altered authored intent or lost recovery |
 | Separately locked optional V8 backing, current-source test bundle and explicit missing-capability blockers | N7/N8 and ownership: headless/drivable, no Node in native execution, no shared-lock changes |
 | Preserve v1–3 live service identity and recorder pins in their V8 realm; leave WebKit to remote DOM | N4/N6/N8 and P0 decision 5; no compatibility exclusion or browser-quirk adoption |
-| Keep W071's exact 29.97 assertion failing until the kernel fix | N1/N3: correctness over imitation |
-| Require macOS for real input, native raster/remote DOM, decoded A/V and complete pro workflows | N1/N3/N6: Linux doubles cannot clear those gates |
+| Retain W071's exact 29.97 assertion after the merged fix; repair the Stop fixture using a separate v4 isolate | N1/N3/N8: exact authored timing and current runtime placement, without weakening Store isolation |
+| Execute native CPU raster/router/surface/services on Linux, retain macOS input/page/codec/presentation gates | N1/N3/N6/N7: test available production backings without overstating their integration |
+| Keep A511/A512 blocked for frozen-source reconciliation; retain their requirements unchanged | N3/N4: do not silently rewrite an inventory claim or fabricate a missing tool |
 | Copy public inputs and clean only owned synthetic scratch | N4: source data remains retained; no archive or user file is deleted |
 
 ## macOS verification and remaining work
@@ -262,95 +331,36 @@ linked bypass/track targets, native gesture cancellation and persisted history.
 Physical display/audio/performance gates and signed sandbox/helper-process
 confinement remain macOS work. No macOS execution was performed here.
 
-Pending MCP/domain/media/agent/Store adapters and full migration/media closure
-remain outside this lane. Kernel must preserve fractional fps in
-`CompCommand::Set`. No shared lockfile change is required. W1 source contracts
-are unchanged; measured statuses live in this document and the triage CSV.
+Precise portable gaps outside ownership:
+
+- **A506:** kernel container-copy probes preserve embedded bytes, but `Automation`
+  has no public file-open/adopt ingress or durable-media byte admission for an MCP
+  packing fixture. The MCP owner must expose the real ingress; then execute Save
+  against resident media and verify every packed byte/history record. Metadata-only
+  imports are insufficient. No fake packed bytes or source registry was introduced.
+- **A511/A512:** W1 names a memory index and `project_memory`, while tag
+  `07ed5fa17`'s `main/agent-tools/spec.ts` defines ordinary composition inspection
+  and its frozen 67-tool union has no `project_memory`. Native inspection also
+  has no memory index. `project-memory-contract` records the discrepancy; the
+  inventory/contract owner must reconcile it. These original requirements remain
+  unchanged and blocked, not silently reclassified as passes.
+- **W041/W067:** no native transcription/model-download/inference service crate
+  is merged on this base. Kernel caption Add/Edit commands explicitly return
+  `NotImplemented`; MCP `transcribe_media`/`generate_captions` remain unavailable.
+  Real caption text export is now covered independently by A550.
+- **W035/W036:** Store-host policy/identity/install models exist; the remote Store
+  catalog, release tree, account/publish APIs and app/kernel/runtime wiring remain
+  missing. A local extension registry is not the Store catalog.
+- **Engine/media/export:** six MCP host-backed adapters exist, but the Linux
+  acceptance worker has no real decoder, renderer, audio analyzer or ExportChild
+  codec worker. The full source pixels/labelled sheets/loudness/encoded output
+  cases remain blocked; test doubles are supporting evidence only.
+
+No shared lockfile change or unowned code edit was made. Full media/migration
+closure, agent/tool adapters and the macOS integration above remain open.
 
 ## Current configured workflow report
 
-| Workflow | Verdict | Pass | Fail | Blocked | Remaining gate |
-|---|---|---:|---:|---:|---|
-| W001 — Launch, restore and activate the last project | blocked-by | 0 | 0 | 14 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W002 — Move, reorder and focus project tabs across windows | blocked-by | 0 | 0 | 20 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W003 — Close a project or quit without losing work | blocked-by | 0 | 0 | 9 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W004 — Recover edits, undo and external connections after a crash | blocked-by | 1 | 0 | 6 | Kernel slices run; complete corpus/media closure, recovery and shell lifecycle acceptance remains |
-| W005 — Inspect and apply app/runtime updates | blocked-by | 0 | 0 | 4 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W006 — Create, open, rename, duplicate and trash projects | blocked-by | 57 | 0 | 82 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W007 — Save and reopen a portable project with media and history | blocked-by | 32 | 0 | 64 | Kernel slices run; complete corpus/media closure, recovery and shell lifecycle acceptance remains |
-| W008 — Open large projects while retaining input and tab intent | blocked-by | 0 | 0 | 9 | Kernel slices run; complete corpus/media closure, recovery and shell lifecycle acceptance remains |
-| W009 — Create and configure compositions and delivery defaults | blocked-by | 29 | 0 | 44 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W010 — Resolve every registered shortcut and preserve text ownership | blocked-by | 7 | 0 | 25 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W011 — Reach editor commands through native and contextual menus | blocked-by | 0 | 0 | 77 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W012 — Find and change app settings | blocked-by | 14 | 0 | 34 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W013 — Complete first-run setup and inspect About | blocked-by | 0 | 0 | 6 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W014 — Arrange, resize, hide and restore panels/workspaces | blocked-by | 0 | 0 | 14 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W015 — Edit in a popped-out panel and return it | blocked-by | 0 | 0 | 5 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W016 — Browse workspaces and live panel previews | blocked-by | 0 | 0 | 7 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W017 — Use command search, modal dialogs, menus and notices | blocked-by | 14 | 0 | 41 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W018 — Select and organize project media | blocked-by | 0 | 0 | 17 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W019 — Import durable media and cancel safely | blocked-by | 28 | 0 | 61 | Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending |
-| W020 — Import, replace and rate-convert an image sequence | blocked-by | 0 | 0 | 9 | Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending |
-| W021 — Preview source media without altering the timeline | blocked-by | 0 | 0 | 8 | Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending |
-| W022 — Recover offline sources or replace media in place | blocked-by | 0 | 0 | 13 | Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending |
-| W023 — Defer and download cloud media | blocked-by | 0 | 0 | 4 | Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending |
-| W024 — Connect subscription, API and local agent providers | blocked-by | 0 | 0 | 32 | Provider/thread/approval/composer integration is pending; use synthetic providers only |
-| W025 — Open, float, pin and resize the agent conversation | blocked-by | 14 | 0 | 34 | Provider/thread/approval/composer integration is pending; use synthetic providers only |
-| W026 — Write, attach and send an agent prompt | blocked-by | 0 | 0 | 12 | Provider/thread/approval/composer integration is pending; use synthetic providers only |
-| W027 — Run and revisit ordinary/background agent threads | blocked-by | 0 | 0 | 24 | Provider/thread/approval/composer integration is pending; use synthetic providers only |
-| W028 — Read streaming replies, reasoning, approvals and results | blocked-by | 0 | 0 | 7 | Provider/thread/approval/composer integration is pending; use synthetic providers only |
-| W029 — Publish and reopen interactive visual replies | blocked-by | 0 | 0 | 11 | Provider/thread/approval/composer integration is pending; use synthetic providers only |
-| W030 — Let an agent inspect, edit, verify and undo project work | blocked-by | 4 | 0 | 15 | Implemented MCP cases run; remaining tool bodies, complete external entry/agent/render integration are pending |
-| W031 — Inspect and manage footage through agent tools | blocked-by | 0 | 0 | 17 | Durable import/relink/source-preview MCP adapter and decoded-media oracles are pending |
-| W032 — Inspect and operate live panels or transfer a workspace | blocked-by | 2 | 0 | 14 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W033 — Use an external/headless tool session | blocked-by | 11 | 0 | 12 | Implemented MCP cases run; remaining tool bodies, complete external entry/agent/render integration are pending |
-| W034 — Use the existing browser-host/CLI workflows | blocked-by | 0 | 0 | 8 | Existing browser/serve workflows have an explicit out-of-scope native boundary in W1; retain evidence |
-| W035 — Manage account identity and remembered Store installs | blocked-by | 0 | 0 | 5 | Store/account lifecycle adapters and explicit-action synthetic service fixtures are pending |
-| W036 — Browse, install, update and publish extensions | blocked-by | 0 | 0 | 18 | Store/account lifecycle adapters and explicit-action synthetic service fixtures are pending |
-| W037 — Install, fork, rebase, reload and disable extensions | blocked-by | 2 | 0 | 30 | V8 lifecycle and compat service/recorder probes run with the optional native backing; full corpus, host services, WebKit remote DOM and native raster pixels still need macOS; no extension is excluded |
-| W038 — Use Store extensions under permission and crash isolation | blocked-by | 1 | 0 | 13 | V8 lifecycle and compat service/recorder probes run with the optional native backing; full corpus, host services, WebKit remote DOM and native raster pixels still need macOS; no extension is excluded |
-| W039 — Configure extension variables and durable storage | blocked-by | 0 | 0 | 3 | V8 lifecycle and compat service/recorder probes run with the optional native backing; full corpus, host services, WebKit remote DOM and native raster pixels still need macOS; no extension is excluded |
-| W040 — Run legacy extension APIs and contributions unchanged | blocked-by | 1 | 0 | 51 | V8 lifecycle and compat service/recorder probes run with the optional native backing; full corpus, host services, WebKit remote DOM and native raster pixels still need macOS; no extension is excluded |
-| W041 — Download and manage local speech models | blocked-by | 0 | 0 | 16 | Speech-model download/resume/transcription adapters are pending |
-| W042 — Apply appearance and themes without losing customization | blocked-by | 0 | 0 | 17 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W043 — Navigate with keyboard, text services and accessibility preferences | blocked-by | 0 | 0 | 7 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W044 — Receive completion notifications, warnings and alignment haptics | blocked-by | 0 | 0 | 5 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W045 — Navigate zoom, pan, fit and recover the composition view | blocked-by | 126 | 0 | 194 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W046 — Select and move canvas layers and groups | blocked-by | 204 | 0 | 287 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W047 — Resize, rotate, align and change anchors | blocked-by | 42 | 0 | 73 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W048 — Draw and edit vector shapes, paths and masks | blocked-by | 71 | 0 | 114 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W049 — Create and edit point and paragraph text on canvas | blocked-by | 36 | 0 | 76 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W050 — Build and navigate editable 2.5D/3D scenes | blocked-by | 0 | 0 | 31 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W051 — Play, pause, step and navigate visible events | blocked-by | 133 | 0 | 187 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W052 — Set preview/export in and out points | blocked-by | 57 | 0 | 82 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W053 — Add, persist, undo and remove composition markers | blocked-by | 1 | 0 | 8 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W054 — Snap playhead, clips and selected keys without changing spacing | blocked-by | 0 | 0 | 17 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W055 — Arrange layers/tracks, disclosures and viewport | blocked-by | 1 | 0 | 60 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W056 — Move, split and trim clips with source continuity | blocked-by | 71 | 0 | 104 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W057 — Slip a source range through the shipped editing API | blocked-by | 1 | 0 | 2 | Typed timing probe is supporting evidence; edit_video and decoded start/end frame oracles remain pending |
-| W058 — Retime video while preserving its retained source interval | blocked-by | 0 | 0 | 3 | Typed timing probe is supporting evidence; edit_video and decoded start/end frame oracles remain pending |
-| W059 — Play embedded A/V, separate audio and mix it | blocked-by | 0 | 0 | 7 | Real audio routing, levels and speaker synchronization need the macOS engine |
-| W060 — Create, reveal, edit and move keyframes | blocked-by | 183 | 0 | 277 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W061 — Edit value/speed curves and Bézier handles | blocked-by | 36 | 0 | 72 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W062 — Group, parent, reorder and precompose without changing authored output | blocked-by | 99 | 0 | 159 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W063 — Edit selected content, transforms and composition properties | blocked-by | 1 | 0 | 59 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W064 — Browse, apply, animate and reorder effects or mattes | blocked-by | 0 | 0 | 7 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W065 — Edit and organize easing/vector preset libraries | blocked-by | 0 | 0 | 11 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W066 — Change typography, variable axes and text animators | blocked-by | 0 | 0 | 19 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W067 — Generate, edit, style and exchange captions | blocked-by | 0 | 0 | 79 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W068 — Mix audible nested layers and inspect meters | blocked-by | 0 | 0 | 8 | Real audio routing, levels and speaker synchronization need the macOS engine |
-| W069 — Configure, start and cancel rendered delivery | blocked-by | 28 | 0 | 56 | MCP export jobs, codec/media adapters, cancellation and frame-rate output verification are pending |
-| W070 — Render queued composition snapshots and retry failures | blocked-by | 0 | 0 | 6 | MCP export jobs, codec/media adapters, cancellation and frame-rate output verification are pending |
-| W071 — Convert source/composition/output frame rates | fail | 0 | 1 | 1 | MCP export jobs, codec/media adapters, cancellation and frame-rate output verification are pending |
-| W072 — Export the shipped standalone web animation | blocked-by | 0 | 0 | 1 | Owner removed standalone web-animation export from cutover requirements (2026-10-29); retain traceability, never claim pass |
-| W073 — Use numeric, choice, toggle and point controls with keyboard | blocked-by | 0 | 0 | 58 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W074 — Pick, sample and edit solid/gradient colors | blocked-by | 0 | 0 | 38 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W075 — Undo/redo, clipboard and live edit transactions across surfaces | blocked-by | 99 | 0 | 142 | needs macOS: real GPUI/AppKit input, semantic shell/extension activation, menus, focus and persistence integration |
-| W076 — Render, capture and recover authored content correctly | blocked-by | 1 | 0 | 1 | needs macOS: real Metal pixels, shader/text/colour standards oracles and physical performance evidence |
-| W077 — Keep launch, editing and long playback responsive | blocked-by | 0 | 0 | 1 | needs macOS: real Metal pixels, shader/text/colour standards oracles and physical performance evidence |
-| W078 — Write and compile a custom shader | blocked-by | 0 | 0 | 1 | needs macOS: real Metal pixels, shader/text/colour standards oracles and physical performance evidence |
-| W079 — Cutover addition: state-dependent J/K/L shuttle | blocked-by | 1 | 0 | 1 | needs macOS: J/K/L engine transport plus shipped command fallthrough/decline integration |
-| W080 — Cutover addition: ripple delete and ripple trim | blocked-by | 2 | 0 | 2 | Actor-backed pro domain edits, saved history and refusal probes run; source-monitor UI, gestures, decoded A/V and engine integration still need macOS |
-| W081 — Cutover additions: roll and slide edits | blocked-by | 2 | 0 | 1 | Actor-backed pro domain edits, saved history and refusal probes run; source-monitor UI, gestures, decoded A/V and engine integration still need macOS |
-| W082 — Cutover addition: source-monitor three-point editing | blocked-by | 1 | 0 | 1 | Actor-backed pro domain edits, saved history and refusal probes run; source-monitor UI, gestures, decoded A/V and engine integration still need macOS |
-| W083 — Cutover addition: persistent linked A/V edits | blocked-by | 1 | 0 | 1 | Actor-backed pro domain edits, saved history and refusal probes run; source-monitor UI, gestures, decoded A/V and engine integration still need macOS |
+All 83 workflow verdicts and pass/fail/blocked status columns are maintained in
+[W1](w1-workflows.md#native-execution-status). The complete per-case open work is
+[remaining-blockers.csv](../../apps/native/crates/acceptance/data/remaining-blockers.csv).
