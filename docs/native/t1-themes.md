@@ -3907,8 +3907,8 @@ aliased them to the panel. Compat documents occupy solid panels/sheets, so
 the window material. Mapped density lengths move by the difference from the
 shipped normal density: native + (density − v1.2.0 normal). Compact is row 24,
 gap 4, header 26, control 24 and pad 9. Unmapped density values remain shipped.
-Root `style` retains its shipped replacement semantics, followed by workspace tokens. Arbitrary custom variables,
-attributes, classes and authored CSS stay available to compat content.
+Root `style` retains its shipped replacement semantics, followed by workspace
+tokens. Arbitrary custom variables, attributes, classes and authored CSS stay available to compat content.
 
 Increase Contrast uses the native stronger separator, secondary/muted ink
 and focus colour; related separator aliases and fourth-level ink also
@@ -3918,8 +3918,9 @@ capsule shape. Normal `--fs-md`/`--fs-lg` are native 13/15 px; unmapped
 `--fs-xl` stays at the shipped 18 px. List rows use the review's reactive
 `color-mix(in srgb,var(--tx) 4%,var(--bg-panel))`; `--accent-dim` retains its
 12% translucent accent mix instead of the opaque native wash. Reduce
-Transparency makes window/content/control/glass fills opaque and sets `--glass-backdrop:none`. Explicit authored contributions retain
-their normal cascade priority; an accessibility edition does not silently
+Transparency makes window/content/control/glass fills opaque and sets
+`--glass-backdrop:none`. Explicit authored contributions retain their normal
+cascade priority; an accessibility edition does not silently
 rewrite user-authored colours. Project pixels are never recoloured.
 
 ### Live replacement protocol
@@ -4006,6 +4007,7 @@ const receiver = new CompatThemeReceiver(
 | Preserve custom-property names, original selector specificity/order, density, inline/workspace priority and authored CSS/attributes. Keep radius and accent alias chains live; apply the recorded design-review surface corrections. | N3 authored intent exact; N6 v1–3 contract. |
 | Read the design crate’s serialized snapshot (including labels, semantics and new type/metric roles), validate every native target and use the first target as its CSS role. | N3 one authoritative token source; N7 inspectable fixtures. |
 | Apply review items 2–9: lift floats, keep pill/hairline/final heading foundation values, make density relative, use solid compat grounds, native type roles, lifted rows and translucent accent tints. | N1 pro-grade readability/density; N2 better than shipped; N3 recorded design intent wins over tagged material quirks. |
+| Set base-root tabular figures exactly as review item 10 specifies and check text contrast on panel, field, floating and window grounds per edition (item 11 plumbing). Keep current stable ids as neutral names. | N1 stable numeric rendering and accessibility; N3 follow specified rendering, no invented display copy; N7 stable edition identity. |
 | Define the five missing semantic aliases instead of reproducing invalid computed-value accidents. | N3/spec wins; N2 usable controls and typography. |
 | Full snapshots, stable edition/document ids, bounded safe generation numbers, version rejection and stale-message filtering. | N7 inspectable and drivable by id; N3 no mixed/stale theme state. |
 | Pure V8-compatible generation; WebKit only applies data to existing content. Host publication is queued. | N8 no Node/Chromium in the app or native main-thread JS waits; adopted S1/S5 architecture. |
@@ -4024,10 +4026,12 @@ node --experimental-vm-modules apps/native/js/themes/test/bare-v8.mjs
 node apps/native/js/themes/scripts/editions.mjs
 ```
 
-The edition suite contains **27 tests**. It verifies all
+The edition suite contains **35 tests** (**3,438** theme tests total). It verifies all
 eight exact CSS goldens/digests; current native Rust-serialized snapshots and tagged
 root CSS; native-input changes; neutral dark surfaces; opaque material fallbacks;
-text contrast ≥4.5 on panel surfaces and Increase Contrast separators ≥3;
+per-edition text contrast ≥7, secondary/muted ≥4.5 (secondary ≥7 with Increase
+Contrast) on panel, panel-secondary, field, floating and window surfaces;
+Increase Contrast separators ≥3 and base-root tabular figures;
 review items 1–9 across all eight editions, including changed host metrics;
 density, specificity, inline/workspace/important precedence and alias chains;
 root-style and Store semantics; copied versioned messages; stale/duplicate/wrong
@@ -4046,6 +4050,12 @@ panel reads **all 97 edition variables** and tests local aliases/fallbacks in al
 eight editions; a negative fixture proves that an unknown read is detected.
 This is a public-source static coverage check, not arbitrary dynamic-key or
 private installed-corpus conformance. The generator never reads an installation.
+
+**DESIGN-TODO(opus), review item 11:** exact human-readable edition names
+are not specified in the review. Current stable ids remain the neutral names;
+no display-name copy has been invented. The fully specified per-edition
+contrast checks are implemented. All visual output remains provisional until
+Opus reviews real macOS evidence.
 
 **Still required outside these owned paths:** wire kernel-resolved native token
 and appearance snapshots into worker generation and production remote-DOM

@@ -195,6 +195,7 @@
   --glass-rim-hi:rgb(var(--paper-rgb) / .09);
 }
 :root{
+  font-variant-numeric:tabular-nums;
   --bg-hover:var(--bg-row-hi);
   --font-mono:var(--f-mono);
   --orange:var(--accent);

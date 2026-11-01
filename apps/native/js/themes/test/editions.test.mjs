@@ -296,6 +296,17 @@ test("reviews 7 and 8: row lift and translucent accent remain reactive to author
   }
 });
 
+test("review 10: every edition sets tabular figures on its base root", () => {
+  for (const input of natives) {
+    const result = inspect(createCompatEdition(input));
+    assert.equal(
+      result.surfaces.root.base.style["font-variant-numeric"],
+      "tabular-nums",
+    );
+    assert.deepEqual(result.blockers, []);
+  }
+});
+
 test("density, source specificity, inline/workspace, important and radius alias cascade", () => {
   const theme = {
     id: "corpus",
@@ -687,14 +698,25 @@ function contrast(a, b) {
     y = luminance(b);
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
 }
-test("text and Increase Contrast separators retain native contrast on panel surfaces", () => {
-  for (const input of natives) {
-    const values = variables(createCompatEdition(input));
-    for (const surface of ["--bg-panel", "--bg-panel-2"])
-      for (const ink of ["--tx", "--tx-2", "--tx-3"])
+for (const input of natives) {
+  const edition = createCompatEdition(input);
+  test(`review 11: native contrast floors in ${edition.id}`, () => {
+    const values = variables(edition);
+    for (const surface of [
+      "--bg-panel",
+      "--bg-panel-2",
+      "--bg-field",
+      "--bg-float",
+      "--bg-window",
+    ])
+      for (const [ink, floor] of [
+        ["--tx", 7],
+        ["--tx-2", input.accessibility.increase_contrast ? 7 : 4.5],
+        ["--tx-3", 4.5],
+      ])
         assert.ok(
-          contrast(values[ink], values[surface]) >= 4.5,
-          `${input.scheme} ${ink} on ${surface}`,
+          contrast(values[ink], values[surface]) >= floor,
+          `${edition.id} ${ink} on ${surface} >= ${floor}`,
         );
     if (input.accessibility.increase_contrast)
       for (const line of [
@@ -704,5 +726,5 @@ test("text and Increase Contrast separators retain native contrast on panel surf
         "--section-line",
       ])
         assert.ok(contrast(values[line], values["--bg-panel"]) >= 3, line);
-  }
-});
+  });
+}

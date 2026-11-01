@@ -150,6 +150,7 @@ export function createCompatEdition(nativeInput, options = {}) {
   stylesheet += printRule(
     ":root",
     Object.entries({
+      "font-variant-numeric": "tabular-nums",
       "--bg-hover": "var(--bg-row-hi)",
       "--font-mono": "var(--f-mono)",
       "--orange": "var(--accent)",
