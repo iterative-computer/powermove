@@ -100,7 +100,7 @@ fn compatibility_still_corpus() {
 }
 
 #[test]
-fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
+fn deep_png_keeps_its_depth_at_every_level() {
     use serde_json::json;
     use support::doc::*;
     let dir = std::env::temp_dir().join(format!("pm-still-depth-{}", std::process::id()));
@@ -128,9 +128,6 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
     let pool = pm_media::pool::FramePool::new(0);
     let original = pm_media::image::read(&path, &pool).unwrap();
     assert_eq!(original.bit_depth, 16);
-    let bitmap = pm_media::image::compat::bitmap(&original, &pool).unwrap();
-    assert_eq!(bitmap.bit_depth, 8);
-    assert_eq!(original.bit_depth, 16);
     let mut value = project(
         8,
         8,
@@ -152,7 +149,6 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
     let mut renderer = Renderer::headless().unwrap();
     let mut request = RenderRequest::at_scale(Size::new(8, 8), 1.0, Precision::Float32);
     request.background = false;
-    let mut first = None;
     for level in [1, 2, 1] {
         value["layers"][0]["compat"] = json!(level);
         let frame = renderer
@@ -167,19 +163,11 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
         assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
         let rgba = renderer.read_rgba(&frame).unwrap();
-        let expected = if level == 1 {
-            f32::from((pixel[0] >> 8) as u8) / 255.0
-        } else {
-            f32::from(pixel[0]) / 65535.0
-        };
+        let expected = f32::from(pixel[0]) / 65535.0;
         assert!(
-            (rgba[0] - expected).abs() < 2e-5,
+            (rgba[0] - expected).abs() < 2e-6,
             "level{level}: {} expected {expected}",
             rgba[0]
         );
-        if level == 1 {
-            assert!(first.is_none_or(|v| v == rgba[0]));
-            first = Some(rgba[0]);
-        }
     }
 }

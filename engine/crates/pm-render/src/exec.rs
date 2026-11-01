@@ -468,10 +468,7 @@ impl Exec<'_> {
                         self.taken.push(target);
                     }
                     Source::Image {
-                        path,
-                        interpret,
-                        level2,
-                        ..
+                        path, interpret, ..
                     } => {
                         match self.media.image(
                             self.device,
@@ -482,7 +479,6 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                             interpret.as_ref(),
-                            !*level2,
                         ) {
                             Ok(t) => {
                                 r.view = Some(t.view.clone());
@@ -610,6 +606,18 @@ impl Exec<'_> {
                     Source::Object3d(object) => {
                         self.scene3d
                             .prepare_svg_maps(self.device, self.queue, encoder, object);
+                        let (device, queue, pipelines) = (self.device, self.queue, self.pipelines);
+                        let media = &mut *self.media;
+                        self.scene3d.prepare_image_maps(
+                            device,
+                            encoder,
+                            object,
+                            &mut |encoder, path, srgb| {
+                                crate::scene3d::textures::still_map(
+                                    media, device, queue, pipelines, encoder, path, srgb,
+                                )
+                            },
+                        );
                         match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,

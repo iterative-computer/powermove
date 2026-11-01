@@ -48,3 +48,13 @@ rg -n 'Unsupported|problems' engine/crates/pm-export/src/render.rs engine/crates
 ```
 
 The per-reason classification and gate evidence belong in e2e-ledger.md.
+
+## Merge 2: feat/ne-l5stills
+
+Two conflicts: pm-render/src/media.rs and tests/support/mod.rs.
+Take the native-depth still reader and float interpretation, remove the
+now-unconsumed Chromium RGBA8 helper; retain both sampling and still reference
+modules. Adapt the L4 bitmap oracle to L5's independent standards conversion.
+N2/N3: source precision, transfer, ICC and orientation follow the file, with no
+Blink upload emulation. Prune rule: the replaced helper has no consumers.
+No out-of-lane files were imported.

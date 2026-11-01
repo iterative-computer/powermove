@@ -238,36 +238,15 @@ fn reference_blend(mode: BlendMode) -> Blend {
 /// below are independent f64 calculations.
 fn decoded_bitmap(path: &Path) -> Result<Option<Bitmap>, String> {
     let pool = pm_media::pool::FramePool::new(0);
-    let (still, failed) =
-        pm_render::media::level1_bitmap(path, &pool).map_err(|e| format!("bitmap source {e:?}"))?;
-    if failed || still.bit_depth != 8 || !still.frame.format.rgba_premultiplied {
+    let still = pm_media::image::read(path, &pool).map_err(|e| format!("bitmap source {e:?}"))?;
+    if still.format == pm_media::image::ImageFormat::Svg {
         return Ok(None);
     }
-    let (width, height) = (still.frame.format.width, still.frame.format.height);
-    let bytes = still
-        .frame
-        .with_planes(|planes| {
-            let plane = planes.first()?;
-            if planes.len() != 1 || plane.desc.format != pm_media::frame::PlaneFormat::Rgba8 {
-                return None;
-            }
-            let mut bytes = Vec::with_capacity(width * height * 4);
-            for y in 0..height {
-                // The plane view owns `height` rows of `stride` bytes.
-                bytes.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(plane.ptr.add(y * plane.stride), width * 4)
-                });
-            }
-            Some(bytes)
-        })
-        .map_err(|e| format!("bitmap planes {e}"))?;
-    let Some(bytes) = bytes else {
-        return Ok(None);
-    };
+    let reference = super::still_reference::reference(path);
     Ok(Some(Bitmap {
-        width,
-        height,
-        rgba: bytes.into_iter().map(|v| f64::from(v) / 255.0).collect(),
+        width: reference.width,
+        height: reference.height,
+        rgba: reference.rgba,
     }))
 }
 

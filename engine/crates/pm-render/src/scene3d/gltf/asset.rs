@@ -145,8 +145,10 @@ fn chromium_decodes(format: pm_media::image::ImageFormat) -> bool {
 }
 
 /// Decodes embedded image bytes through `pm-media` (the engine's still
-/// readers: the `image` crate for PNG, JPEG, WebP, GIF, BMP, ICO; ImageIO
-/// for AVIF), sniffing the content as the browser does.
+/// readers: the `image` crate for PNG, WebP, GIF, BMP, ICO; libjpeg-turbo
+/// for JPEG; dav1d for AVIF), sniffing the content as the browser does.
+/// glTF ignores embedded color information (glTF 2.0 §3.8.4): the stored
+/// samples are the texels.
 pub fn decode(bytes: &[u8]) -> Result<DecodedImage, String> {
     let format = pm_media::image::sniff(&bytes[..bytes.len().min(64)]);
     if !chromium_decodes(format) {
@@ -165,6 +167,9 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, String> {
     }
     let pool = pm_media::pool::FramePool::new(0);
     let still = pm_media::image::read(&path, &pool).map_err(|e| e.to_string())?;
+    if still.frame.format.layout != pm_media::frame::Layout::Rgba {
+        return ycbcr_image(key, &still);
+    }
     let f = &still.frame.format;
     if f.planes.len() != 1 {
         return Err(format!("glTF image layout {}", f.label));
@@ -222,5 +227,41 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, String> {
         width: w as u32,
         height: h as u32,
         rgba: out,
+    })
+}
+
+/// An AVIF's Y′CbCr planes as RGBA8 texels: its matrix, range and chroma
+/// siting decoded in float, straight alpha, rounded once; the transfer and
+/// primaries are the texture's (glTF).
+fn ycbcr_image(key: u64, still: &pm_media::image::StillImage) -> Result<DecodedImage, String> {
+    let read = crate::media::interpreted_image_color(still, &Default::default())
+        .map_err(|e| format!("{e:?}"))?;
+    let rgba = crate::media::ycbcr_rgba(still, &read.color)?;
+    let premultiplied = matches!(
+        still.color.alpha,
+        pm_protocol::color::AlphaMode::Premultiplied
+    );
+    let out = rgba
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let a = p[3].clamp(0.0, 1.0);
+            let c = |v: f32| {
+                let v = if premultiplied && a > 0.0 { v / a } else { v };
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            };
+            [c(p[0]), c(p[1]), c(p[2]), (a * 255.0).round() as u8]
+        })
+        .collect::<Vec<u8>>();
+    let (w, h) = (still.frame.format.width, still.frame.format.height);
+    let (rgba, w, h) = if still.oriented {
+        (out, w, h)
+    } else {
+        pm_media::image::orient(&out, w, h, 4, still.orientation)
+    };
+    Ok(DecodedImage {
+        key,
+        width: w as u32,
+        height: h as u32,
+        rgba,
     })
 }

@@ -7,7 +7,7 @@ mod support;
 
 use pm_protocol::color::{Precision, Transfer};
 use pm_protocol::common::Size;
-use pm_render::media::{ProbeIssue, probe_interpreted_image};
+use pm_render::media::probe_interpreted_image;
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -107,8 +107,9 @@ fn dir() -> PathBuf {
     d
 }
 
+/// gAMA alone is a pure power (PNG Third Edition) at every level.
 #[test]
-fn level2_gamma_only_png_uses_the_file_curve() {
+fn gamma_only_png_uses_the_file_curve() {
     let d = dir();
     let mut renderer = Renderer::headless().unwrap();
     let srgb_oetf = |l: f64| {
@@ -120,7 +121,7 @@ fn level2_gamma_only_png_uses_the_file_curve() {
     };
     let plain = d.join("plain.png");
     write_png(&plain, false, None, &stored());
-    let plain_rgba = render(&mut renderer, &plain, 2);
+    let plain_rgba = render(&mut renderer, &plain, 1);
     for (gamma, name) in [(70_000u32, "g70"), (100_000, "g100"), (55_555, "g55555")] {
         let file_gamma = f64::from(gamma) / 100_000.0;
         let path = d.join(format!("{name}.png"));
@@ -137,49 +138,46 @@ fn level2_gamma_only_png_uses_the_file_curve() {
             .collect();
         let reference_path = d.join(format!("{name}-ref.png"));
         write_png(&reference_path, true, None, &reference);
-        let got = render(&mut renderer, &path, 2);
-        let want = render(&mut renderer, &reference_path, 2);
+        let got = render(&mut renderer, &path, 1);
+        assert_eq!(
+            got,
+            render(&mut renderer, &path, 2),
+            "{name}: levels differ"
+        );
+        let want = render(&mut renderer, &reference_path, 1);
         let diff = max_diff(&got, &want);
         let from_srgb = max_diff(&got, &plain_rgba);
         eprintln!("gAMA {file_gamma}: max {diff:.6} from reference, {from_srgb:.4} from sRGB");
         assert!(diff < 2e-4, "{name}: {diff}");
         assert!(from_srgb > 0.02, "{name}: the gamma was not applied");
     }
-    // ImageIO's sRGB window: gAMA 0.45455 is sRGB, as an untagged PNG.
+    // gAMA 0.45455 is the pure power 2.19998, not the sRGB curve: dark
+    // tones differ.
     let srgb = d.join("g45455.png");
     write_png(&srgb, false, Some(45_455), &stored());
-    assert_eq!(render(&mut renderer, &srgb, 2), plain_rgba);
+    assert!(max_diff(&render(&mut renderer, &srgb, 1), &plain_rgba) > 1e-3);
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// Nonempty Interpret Footage overrides must not ignore a PNG gamma;
-/// they need an explicit transfer override. Empty readings keep the curve.
+/// Interpret Footage overrides keep a PNG gamma unless a transfer override
+/// replaces it.
 #[test]
-fn interpreted_gamma_png_needs_a_transfer_override() {
+fn interpreted_gamma_png_keeps_its_curve() {
     let d = dir();
     let path = d.join("interp.png");
     write_png(&path, false, Some(70_000), &stored());
     let mut interp = pm_media::interpret::Interpretation::default();
     assert_eq!(probe_interpreted_image(&path, &interp), Ok(()));
     interp.alpha = Some(pm_media::interpret::AlphaChoice::Straight);
-    match probe_interpreted_image(&path, &interp) {
-        Err(ProbeIssue::Unsupported(f)) => assert!(f.to_string().contains("gAMA"), "{f}"),
-        other => panic!("{other:?}"),
-    }
+    assert_eq!(probe_interpreted_image(&path, &interp), Ok(()));
     interp.transfer = Some(Transfer::Linear);
     assert_eq!(probe_interpreted_image(&path, &interp), Ok(()));
-    let srgb = d.join("interp-srgb.png");
-    write_png(&srgb, false, Some(45_455), &stored());
-    assert_eq!(probe_interpreted_image(&srgb, &Default::default()), Ok(()));
     std::fs::remove_file(&path).ok();
-    std::fs::remove_file(&srgb).ok();
 }
 
-/// 3D texture maps upload the importer's bitmap, the one a level 1 image
-/// layer draws: a gamma-only PNG map has the level 1 image verdict
-/// (`threed_maps.rs` `map_verdicts_are_the_image_layer_verdicts`).
+/// A gamma-only PNG map has the image layer's verdict.
 #[test]
-fn gamma_png_texture_maps_follow_the_level1_image_verdict() {
+fn gamma_png_texture_maps_follow_the_image_verdict() {
     let d = dir();
     let path = d.join("map.png");
     let opaque: Vec<[u16; 4]> = VALUES
@@ -187,28 +185,7 @@ fn gamma_png_texture_maps_follow_the_level1_image_verdict() {
         .map(|&v| [v.into(), v.into(), v.into(), 255])
         .collect();
     write_png(&path, false, Some(70_000), &opaque);
-    let pool = pm_media::pool::FramePool::new(0);
-    match (
-        pm_render::media::probe_image(&path),
-        pm_render::scene3d::textures::decode(&path, &pool),
-    ) {
-        (Ok(()), Ok((w, h, rgba))) => {
-            let (bitmap, _) = pm_render::media::level1_bitmap(&path, &pool).unwrap();
-            assert_eq!(
-                (w as usize, h as usize),
-                (bitmap.frame.format.width, bitmap.frame.format.height)
-            );
-            assert_eq!(rgba.len(), w as usize * h as usize * 4);
-        }
-        (
-            Err(pm_render::media::ProbeIssue::Unsupported(a)),
-            Err(pm_render::scene3d::textures::MapError::Unsupported(b)),
-        ) => assert_eq!(a, b),
-        (layer, map) => panic!("image layer {layer:?}, map {map:?}"),
-    }
-    let plain = d.join("map-plain.png");
-    write_png(&plain, false, None, &opaque);
-    assert!(pm_render::scene3d::textures::decode(&plain, &pool).is_ok());
+    assert_eq!(pm_render::media::probe_image(&path), Ok(()));
+    assert_eq!(pm_render::scene3d::textures::Textures::probe(&path), Ok(()));
     std::fs::remove_file(&path).ok();
-    std::fs::remove_file(&plain).ok();
 }

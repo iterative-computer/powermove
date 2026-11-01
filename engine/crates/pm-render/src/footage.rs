@@ -8,13 +8,12 @@
 //! `pm_gpu::decode_in::deinterlace` (bwdif on normalized Y′CbCr, before
 //! chroma upsampling); the color conversion is the source pass.
 
-use pm_gpu::{Target, working_format};
+use pm_gpu::Target;
 use pm_media::decode::service::MediaSource;
 use pm_media::interlace::{self, DeinterlaceOutput, FieldOverride, FieldPlan};
 use pm_media::interpret::Interpretation;
 use pm_media::interpret::VideoReading;
 use pm_media::probe::FieldInfo;
-use pm_protocol::color::Precision;
 use pm_time::{Rate, Tick};
 
 /// An asset record's `interpret` member (Interpret Footage overrides), or
@@ -163,11 +162,13 @@ impl Timing {
 }
 
 /// The display geometry of a converted frame: a crop in coded pixels
-/// (the clean aperture) and quarter turns counterclockwise (the display
-/// matrix, as `av_display_rotation_get` reports it).
+/// (the clean aperture), a horizontal mirror of the cropped input, and
+/// quarter turns counterclockwise (the display matrix, as
+/// `av_display_rotation_get` reports it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     pub crop: Option<(u32, u32, u32, u32)>,
+    pub mirror: bool,
     pub quarter_turns: u32,
 }
 
@@ -181,12 +182,32 @@ impl Geometry {
         });
         Geometry {
             crop,
+            mirror: false,
             quarter_turns: reading.quarter_turns(),
         }
     }
 
+    /// An EXIF orientation (1 to 8) as a mirror and counterclockwise turns.
+    pub fn exif(orientation: u8) -> Geometry {
+        let (mirror, quarter_turns) = match orientation {
+            2 => (true, 0),
+            3 => (false, 2),
+            4 => (true, 2),
+            5 => (true, 1),
+            6 => (false, 3),
+            7 => (true, 3),
+            8 => (false, 1),
+            _ => (false, 0),
+        };
+        Geometry {
+            crop: None,
+            mirror,
+            quarter_turns,
+        }
+    }
+
     pub fn is_identity(&self) -> bool {
-        self.crop.is_none() && self.quarter_turns == 0
+        self.crop.is_none() && !self.mirror && self.quarter_turns == 0
     }
 
     /// The output size for a coded size.
@@ -211,6 +232,7 @@ impl Geometry {
             3 => (y, ch - 1 - x),
             _ => (x, y),
         };
+        let u = if self.mirror { cw - 1 - u } else { u };
         (cx + u, cy + v)
     }
 }
@@ -220,7 +242,7 @@ impl Geometry {
 struct OrientParams {
     /// crop x, y, w, h.
     crop: [u32; 4],
-    /// quarter turns, output w, output h, 0.
+    /// quarter turns, output w, output h, mirror.
     turn: [u32; 4],
 }
 
@@ -255,6 +277,8 @@ impl Orient {
         }
     }
 
+    /// The oriented copy of `input` in `format` storage (one of the
+    /// working formats).
     pub fn run(
         &self,
         device: &wgpu::Device,
@@ -262,7 +286,7 @@ impl Orient {
         encoder: &mut wgpu::CommandEncoder,
         input: &Target,
         geometry: Geometry,
-        precision: Precision,
+        format: wgpu::TextureFormat,
     ) -> Target {
         let coded = (input.width(), input.height());
         let (w, h) = geometry.output_size(coded);
@@ -271,13 +295,13 @@ impl Orient {
             "pm oriented source",
             w,
             h,
-            working_format(precision),
+            format,
             pm_gpu::target::working_usage(),
         );
         let crop = geometry.crop.unwrap_or((0, 0, coded.0, coded.1));
         let params = OrientParams {
             crop: [crop.0, crop.1, crop.2, crop.3],
-            turn: [geometry.quarter_turns % 4, w, h, 0],
+            turn: [geometry.quarter_turns % 4, w, h, u32::from(geometry.mirror)],
         };
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm orient params"),
@@ -286,10 +310,10 @@ impl Orient {
             mapped_at_creation: false,
         });
         queue.write_buffer(&buffer, 0, crate::pipelines::bytes_of(&params));
-        let pipeline = match precision {
-            Precision::Unorm8 => &self.pipelines[2],
-            Precision::Float16 => &self.pipelines[0],
-            Precision::Float32 => &self.pipelines[1],
+        let pipeline = match format {
+            wgpu::TextureFormat::Rgba8Unorm => &self.pipelines[2],
+            wgpu::TextureFormat::Rgba32Float => &self.pipelines[1],
+            _ => &self.pipelines[0],
         };
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pm orient"),
@@ -330,6 +354,7 @@ mod tests {
         let coded = (4, 2);
         let g = |t| Geometry {
             crop: None,
+            mirror: false,
             quarter_turns: t,
         };
         // 0 1 2 3 / 4 5 6 7, as (x, y) of the input.
@@ -348,9 +373,17 @@ mod tests {
         assert_eq!(out(g(3)), [4, 0, 5, 1, 6, 2, 7, 3]);
         let crop = Geometry {
             crop: Some((1, 0, 2, 2)),
+            mirror: false,
             quarter_turns: 0,
         };
         assert_eq!(out(crop), [1, 2, 5, 6]);
         assert_eq!(crop.output_size(coded), (2, 2));
+        // EXIF orientations are the permutations pm-media applies to packed
+        // pixels (`pm_media::image::orient`).
+        let input: Vec<u32> = (0..8).collect();
+        for o in 1..=8u8 {
+            let (want, ..) = pm_media::image::orient(&input, 4, 2, 1, o);
+            assert_eq!(out(Geometry::exif(o)), want, "orientation {o}");
+        }
     }
 }

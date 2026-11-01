@@ -622,6 +622,36 @@ pub fn resolve_still(
     }
 }
 
+/// How the engine reads a still's H.273 code points (PNG `cICP`, AVIF
+/// `colr nclx`): primaries, transfer and matrix, or `None` for a code point
+/// outside the still classes. Unspecified primaries read as BT.709 and an
+/// unspecified transfer as sRGB (MIAF's defaults); the BT.709 transfer family
+/// reads as the display encoding, as video's does; an unspecified matrix is
+/// BT.601 (MIAF).
+pub fn still_cicp(cicp: [u8; 4]) -> Option<(Primaries, Transfer, MatrixCoefficients)> {
+    let primaries = match cicp[0] {
+        1 | 2 => Primaries::Bt709,
+        9 => Primaries::Bt2020,
+        12 => Primaries::DisplayP3,
+        _ => return None,
+    };
+    let transfer = match cicp[1] {
+        1 | 2 | 6 | 13 | 14 | 15 => Transfer::DisplayE,
+        16 => Transfer::Pq,
+        18 => Transfer::Hlg,
+        _ => return None,
+    };
+    let matrix = match cicp[2] {
+        0 => MatrixCoefficients::Identity,
+        1 => MatrixCoefficients::Bt709,
+        2 | 5 | 6 => MatrixCoefficients::Bt601,
+        9 => MatrixCoefficients::Bt2020Ncl,
+        10 => MatrixCoefficients::Bt2020Cl,
+        _ => return None,
+    };
+    Some((primaries, transfer, matrix))
+}
+
 /// A still's reading under an interpretation, and how its samples get there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StillInterpretation {
@@ -663,7 +693,20 @@ pub fn interpret_still(
         source: source.into(),
     };
     let default = |rule: &str| Origin::Default { rule: rule.into() };
+    // H.273 code points when no profile overrides them.
+    let cicp = color
+        .cicp
+        .filter(|_| color.icc_class.is_none())
+        .and_then(still_cicp);
     let primaries = match color.icc_class {
+        None if cicp.is_some() => (
+            cicp.map(|c| c.0).unwrap(),
+            file("H.273 colour primaries (PNG cICP, AVIF colr)"),
+        ),
+        None if color.chromaticities.is_some() => (
+            Primaries::Bt709,
+            file("Chromaticities (PNG cHRM, OpenEXR), converted to Rec.709"),
+        ),
         None => (
             Primaries::Bt709,
             default("Stills without a profile read as sRGB"),
@@ -704,6 +747,16 @@ pub fn interpret_still(
             _ => "ICC profile equivalent to sRGB (sRGB curve)",
         };
         (color.transfer, file(source))
+    } else if let Some((_, transfer, _)) = cicp {
+        (
+            transfer,
+            file("H.273 transfer characteristics (PNG cICP, AVIF colr)"),
+        )
+    } else if color.gamma.is_some() {
+        (
+            color.transfer,
+            file("PNG gAMA: a pure power curve, decoded with 1 / gamma"),
+        )
     } else {
         let rule = match (set_aside, float) {
             (false, true) => "Floating-point stills are linear",
@@ -723,16 +776,20 @@ pub fn interpret_still(
     } else {
         default("No alpha channel")
     };
-    StillInterpretation {
-        reading: resolve_still(
-            primaries,
-            transfer,
-            (color.alpha, alpha_origin),
-            has_alpha,
-            interp,
-        ),
-        colorsync,
+    let mut reading = resolve_still(
+        primaries,
+        transfer,
+        (color.alpha, alpha_origin),
+        has_alpha,
+        interp,
+    );
+    // A PQ still's content peak is its mastering display's, as video's.
+    if let (Some(t), Some(peak)) = (reading.tone_map.as_mut(), color.mastering_peak)
+        && t.transfer == Transfer::Pq
+    {
+        t.peak_nits = peak;
     }
+    StillInterpretation { reading, colorsync }
 }
 
 #[cfg(test)]
@@ -860,9 +917,7 @@ mod tests {
             icc: Some(vec![0; 4]),
             icc_bytes: Some(4),
             icc_class: Some(crate::image::icc::IccClass::Other),
-            transfer: Transfer::DisplayE,
-            alpha,
-            chromaticities: None,
+            ..crate::image::ImageColor::plain(Transfer::DisplayE, alpha)
         }
     }
 

@@ -10,7 +10,8 @@
 //   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 and tone
 //   mapped with the BT.2390 EETF to linear light with SDR white at 1.0
 //   (pm_color::tonemap's WGSL is prepended too); the primaries columns
-//   then convert the source's primaries to Rec.709.
+//   then convert the source's primaries to Rec.709. Transfer 7 is a pure
+//   power with the exponent in `hdr.z` (PNG gAMA).
 // - Alpha by pm_color::alpha's plan.
 //
 // `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
@@ -35,7 +36,8 @@ struct Params {
     p2: vec4<f32>,
     // Matte color for "premultiplied with color".
     matte: vec4<f32>,
-    // HDR tone mapping: x the content peak in cd/m².
+    // HDR tone mapping: x the content peak in cd/m²; y 1 for BT.2020
+    // constant luminance; z the exponent of the pure power transfer (7).
     hdr: vec4<f32>,
 };
 
@@ -117,6 +119,10 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
         }
         case 4u: {
             return sign(c) * pow(abs(c), vec3<f32>(2.2));
+        }
+        case 7u: {
+            // A pure power (PNG gAMA alone), odd-symmetric.
+            return sign(c) * pow(abs(c), vec3<f32>(P.hdr.z));
         }
         default: {
             return c;

@@ -3,12 +3,13 @@
 //! `djpeg`: accurate integer IDCT, fancy (smooth) chroma upsampling, block
 //! smoothing for progressive scans. Gray, Y′CbCr, and RGB JPEGs decode to
 //! RGBA at their sample precision (8 or 12 bits; lossless JPEG at 2 to 16).
-//! CMYK and YCCK JPEGs need their profile and go to ImageIO.
+//! CMYK and YCCK JPEGs with a CMYK profile go to ImageIO, which converts
+//! them through it; without one they are device CMYK.
 //!
 //! EXIF orientation is read from the APP1 segment and applied, as the
 //! browser applies it.
 
-use super::{ImageBackend, ImageColor, ImageFormat, Rgba, StillImage, icc, orient, pool_rgba};
+use super::{ImageBackend, ImageColor, ImageFormat, Rgba, StillImage, orient, pool_rgba};
 use crate::error::{MediaError, Result};
 use crate::pool::FramePool;
 use crate::sys::turbojpeg as tj;
@@ -157,50 +158,35 @@ fn header(h: &Handle, bytes: &[u8]) -> Result<JpegInfo> {
     })
 }
 
-/// Whether libjpeg-turbo decodes this JPEG here (CMYK and YCCK go to
-/// ImageIO, which applies their profile).
+/// Whether libjpeg-turbo decodes this JPEG's colors here (CMYK and YCCK
+/// with a CMYK profile go to ImageIO, which converts them through it).
 pub fn handles(info: &JpegInfo) -> bool {
     [tj::TJCS_RGB, tj::TJCS_YCbCr, tj::TJCS_GRAY].contains(&info.colorspace)
 }
 
-/// Blink's CMYK/YCCK bitmap and decode-time ICC transform. Native-depth
-/// reading still uses ImageIO.
-pub fn cmyk_bitmap(path: &Path, pool: &FramePool) -> Result<Option<StillImage>> {
-    let bytes = std::fs::read(path)?;
-    let h = Handle::new()?;
-    let info = header(&h, &bytes)?;
-    if ![tj::TJCS_CMYK, tj::TJCS_YCCK].contains(&info.colorspace) {
-        return Ok(None);
-    }
+/// A CMYK or YCCK JPEG without a CMYK profile has no colorimetry. Its
+/// samples are read as Blink reads them (libjpeg's inverted, Adobe-style
+/// CMYK: R = C′·K′, likewise G and B), in float instead of Blink's integer
+/// truncation, into 16-bit device RGB read as sRGB.
+fn device_cmyk(h: &Handle, bytes: &[u8], info: &JpegInfo, pool: &FramePool) -> Result<StillImage> {
     if info.precision != 8 || info.lossless {
         return Err(MediaError::unsupported("deep/lossless CMYK JPEG"));
     }
-    let profile = unsafe {
-        let mut profile = std::ptr::null_mut();
-        let mut size = 0;
-        if tj::tj3GetICCProfile(h.0, &mut profile, &mut size) == 0 && !profile.is_null() {
-            let bytes = std::slice::from_raw_parts(profile, size).to_vec();
-            tj::tj3Free(profile.cast());
-            bytes
-        } else {
-            Vec::new()
-        }
-    };
     let (w, height) = (info.width, info.height);
     let len = w
         .checked_mul(height)
         .and_then(|n| n.checked_mul(4))
         .filter(|n| *n <= 1 << 30)
-        .ok_or_else(|| MediaError::invalid("CMYK JPEG bitmap size"))?;
+        .ok_or_else(|| MediaError::invalid("CMYK JPEG size"))?;
     h.set(tj::TJPARAM_FASTDCT, 0)?;
     h.set(tj::TJPARAM_FASTUPSAMPLE, 0)?;
-    let mut rgba = vec![0; len];
+    let mut cmyk = vec![0u8; len];
     let rc = unsafe {
         tj::tj3Decompress8(
             h.0,
             bytes.as_ptr(),
             bytes.len(),
-            rgba.as_mut_ptr(),
+            cmyk.as_mut_ptr(),
             (w * 4) as i32,
             tj::TJPF_CMYK,
         )
@@ -208,95 +194,40 @@ pub fn cmyk_bitmap(path: &Path, pool: &FramePool) -> Result<Option<StillImage>> 
     if rc != 0 && unsafe { tj::tj3GetErrorCode(h.0) } == tj::TJERR_FATAL as i32 {
         return Err(h.error("CMYK decode"));
     }
-    // JPEGImageDecoder::SetPixel<JCS_CMYK> interprets libjpeg's inverted
-    // CMYK bytes as iC*iK/255, using integer truncation, with opaque alpha.
-    for p in rgba.chunks_exact_mut(4) {
-        let k = u32::from(p[3]);
-        for c in &mut p[..3] {
-            *c = (u32::from(*c) * k / 255) as u8;
-        }
-        p[3] = 255;
-    }
-    // Chromium 152 first writes the approximate RGB above, then applies
-    // its CMYK ICC transform to that four-byte row (including the 255 K).
-    // Preserve this shipped order even though a direct CMYK transform is
-    // more accurate. Invalid or mismatched profiles are ignored by Blink.
-    if !profile.is_empty() {
-        use crate::sys::skcms as s;
-        let mut padded = profile.clone();
-        padded.extend([0; 4]);
-        unsafe {
-            let mut source = std::mem::zeroed();
-            if s::skcms_ParseWithA2BPriority(
-                padded.as_ptr().cast(),
-                profile.len(),
-                [0, 1].as_ptr(),
-                2,
-                &mut source,
-            ) && source.data_color_space == s::skcms_Signature_CMYK
-            {
-                let mut converted = vec![0; rgba.len()];
-                if !s::skcms_Transform(
-                    rgba.as_ptr().cast(),
-                    s::skcms_PixelFormat_RGBA_8888,
-                    s::skcms_AlphaFormat_Unpremul,
-                    &source,
-                    converted.as_mut_ptr().cast(),
-                    s::skcms_PixelFormat_RGBA_8888,
-                    s::skcms_AlphaFormat_Unpremul,
-                    s::skcms_sRGB_profile(),
-                    w * height,
-                ) {
-                    return Err(MediaError::decode("CMYK JPEG ICC conversion"));
-                }
-                rgba = converted;
-            }
-        }
-    }
-    let orientation = exif_orientation(&bytes);
+    let rgba: Vec<u16> = cmyk
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let k = u32::from(p[3]);
+            // c·k / 255² in 16 bits, rounded: exact to half a 16-bit step.
+            let v = |c: u8| ((u32::from(c) * k * 65535 + 32512) / 65025) as u16;
+            [v(p[0]), v(p[1]), v(p[2]), u16::MAX]
+        })
+        .collect();
+    let orientation = exif_orientation(bytes);
     let (rgba, w, height) = orient(&rgba, w, height, 4, orientation);
-    Ok(Some(StillImage {
+    Ok(StillImage {
         frame: pool_rgba(
             pool,
             w,
             height,
-            Rgba::U8(&rgba),
-            true,
-            8,
-            "Blink CMYK JPEG rgba8".into(),
+            Rgba::U16(&rgba),
+            false,
+            16,
+            "device CMYK JPEG".into(),
         )?,
         format: ImageFormat::Jpeg,
         backend: ImageBackend::LibjpegTurbo,
-        bit_depth: 8,
+        bit_depth: 16,
         float: false,
         orientation,
-        color: ImageColor {
-            icc: None,
-            icc_bytes: None,
-            icc_class: None,
-            transfer: Transfer::DisplayE,
-            alpha: AlphaMode::Opaque,
-            chromaticities: None,
-        },
-    }))
+        oriented: true,
+        color: ImageColor::plain(Transfer::DisplayE, AlphaMode::Opaque),
+    })
 }
 
-pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
-    let bytes = std::fs::read(path)?;
-    let h = Handle::new()?;
-    let info = header(&h, &bytes)?;
-    if !handles(&info) {
-        return super::imageio::read_frame(path, 0, pool, ImageFormat::Jpeg);
-    }
-    let (w, ht) = (info.width, info.height);
-    if w == 0 || ht == 0 || w > 1 << 16 || ht > 1 << 16 {
-        return Err(MediaError::Image(format!("JPEG of {w}×{ht}")));
-    }
-    // Accurate IDCT and smooth upsampling (TurboJPEG's defaults, set
-    // explicitly: they are what the viewer shows).
-    h.set(tj::TJPARAM_FASTDCT, 0)?;
-    h.set(tj::TJPARAM_FASTUPSAMPLE, 0)?;
-    let icc = unsafe {
+/// The embedded ICC profile, if any.
+fn profile(h: &Handle) -> Option<Vec<u8>> {
+    unsafe {
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut size = 0usize;
         if tj::tj3GetICCProfile(h.0, &mut buf, &mut size) == 0 && !buf.is_null() && size > 0 {
@@ -306,7 +237,32 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         } else {
             None
         }
-    };
+    }
+}
+
+pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
+    let bytes = std::fs::read(path)?;
+    let h = Handle::new()?;
+    let info = header(&h, &bytes)?;
+    if !handles(&info) {
+        // CMYK and YCCK: colorimetric through a CMYK profile (ICC.1, by
+        // ColorSync), otherwise device CMYK.
+        let cmyk_profile = profile(&h).is_some_and(|p| p.get(16..20) == Some(b"CMYK"));
+        return if cmyk_profile {
+            super::imageio::read_frame(path, 0, pool, ImageFormat::Jpeg)
+        } else {
+            device_cmyk(&h, &bytes, &info, pool)
+        };
+    }
+    let (w, ht) = (info.width, info.height);
+    if w == 0 || ht == 0 || w > 1 << 16 || ht > 1 << 16 {
+        return Err(MediaError::Image(format!("JPEG of {w}×{ht}")));
+    }
+    // Accurate IDCT and smooth upsampling (TurboJPEG's defaults, set
+    // explicitly: they are what the viewer shows).
+    h.set(tj::TJPARAM_FASTDCT, 0)?;
+    h.set(tj::TJPARAM_FASTUPSAMPLE, 0)?;
+    let icc = profile(&h);
     let orientation = exif_orientation(&bytes);
     let pitch = (w * 4) as i32;
     let label = format!("libjpeg-turbo {}-bit", info.precision);
@@ -361,22 +317,15 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
             (pool_rgba(pool, ow, oh, Rgba::U16(&px), false, p, label)?, p)
         }
     };
-    let icc_class = icc.as_deref().map(icc::classify);
     Ok(StillImage {
         frame,
         format: ImageFormat::Jpeg,
         backend: ImageBackend::LibjpegTurbo,
         bit_depth: bits,
         float: false,
-        color: ImageColor {
-            icc_bytes: icc.as_ref().map(Vec::len),
-            icc,
-            icc_class,
-            transfer: Transfer::DisplayE,
-            alpha: AlphaMode::Opaque,
-            chromaticities: None,
-        },
+        color: ImageColor::plain(Transfer::DisplayE, AlphaMode::Opaque).with_icc(icc),
         orientation,
+        oriented: true,
     })
 }
 

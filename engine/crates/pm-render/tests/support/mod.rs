@@ -9,6 +9,7 @@ pub mod mask_reference;
 pub mod reference;
 pub mod reference_substitutions;
 pub mod sampling_reference;
+pub mod still_reference;
 pub mod text;
 pub mod text_group_reference;
 pub mod text_mask_reference;
