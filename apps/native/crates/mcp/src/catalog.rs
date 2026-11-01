@@ -135,6 +135,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "apply_commands",
     "edit_layer_strips",
     "rollback_changes",
+    "get_panel_layout",
 ];
 pub fn backing(name: &str) -> &'static str {
     match name {
@@ -156,8 +157,8 @@ pub fn backing(name: &str) -> &'static str {
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
         "validate_effect" => "extension registration validator",
-        "get_panel_layout"
-        | "set_panel_layout"
+        "get_panel_layout" => "pm-kernel saved workspace and winning panel registrations",
+        "set_panel_layout"
         | "get_panel_state"
         | "open_panel"
         | "interact_panel"
