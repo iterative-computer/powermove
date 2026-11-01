@@ -832,3 +832,276 @@ added per-sample noise-pixel assertion.
 Raw logs and sampling diagnostics remain outside Git. No private plan, screenshot,
 corpus, capability URL or operational dump is included. Only S5 sources and this
 report change; no production runtime switch, push, release or tag is performed.
+
+## S5c fallback evaluation (2026-11-01)
+
+**Decision: reject A as the universal synchronous-pixel implementation; continue
+B as the recorder/compute fallback, but approve neither complete B nor a general
+trusted-realm split for P1. S5 remains OPEN.** The disconnected hybrid below is
+measurable, but is not permission to split C-MATRIX's live-service closure.
+N4/N6 require all existing callers and identities; §5 requires all applicable
+budgets, not just the fastest row. The remaining failures go to Jude before P1
+sizing (§7 S5 / §10 risk 1).
+
+### Prototype and interpretation
+
+Owned implementation: `apps/native/spikes/s5/s5c`. An isolated Cargo manifest and
+lock avoid the concurrently edited native workspace lock. `build.sh` sources
+engine/env.sh, uses pinned Rust 1.96.1 and only `~/Developer/pm-target`, rejects
+V8_FROM_SOURCE, checks all five S1 CI artifact hashes, supplies both archive and
+sandbox bindings, and stops below 6 GiB free. **No local V8 source build.** Runtime
+asserts V8 sandbox enabled. No Node, Chromium or new production dependency.
+
+- **A:** the unchanged S5b WebKit control/image/continuation fixture, rerun unlocked;
+  the local panel fixture also measures real WebKit event handling.
+- **B:** one V8 isolate owns JS state, synchronous service objects and recorder
+  canvases. The JS-visible pixel ArrayBuffer is allocated by V8's sandbox
+  allocator, filled while exclusively owned, then exposed. There is one counted
+  native-surface-to-sandbox copy; no host Vec is installed as an ArrayBuffer.
+  Commands and immutable source versions remain native. No WebKit image decoder
+  participates in V8 pixel reads.
+- **Remote DOM:** V8 retains shadow-node identity, input listeners and a pending
+  mutation list; each event produces one create/append/attribute/text batch.
+  A loopback WebSocket carries batches to a real WKWebView; native text-input
+  events travel back to V8 and update a real output element. There is no hot-path
+  evaluateJavaScript, no pixel payload on this channel, and no main-thread wait
+  on JS. A random per-run capability is exchanged in an owner-only temporary
+  file and is never printed. This is a synthetic transport, not production
+  network/security hardening.
+- **Hybrid H:** an actual concurrent run, with local DOM code in WebKit and the
+  recorder/compute fixture in V8. Its two synthetic programs deliberately have
+  **no synchronous cross-realm edge**. DOM and compute measurements are from
+  that combined run, not sums of isolated timing rows. It does not implement a
+  live-service proxy across realms.
+
+**Raster stand-in:** CoreGraphics RGBA8 bitmap contexts plus CoreText Helvetica
+16, rather than pm-vector/pm-text. Inspection found engine path/coverage and text
+rendering APIs, but integrating their float paint, font registry and engine
+surface ownership is a separate engine integration; a platform bitmap painter
+keeps this consumer spike bounded and independently reproducible. The subset
+records fillRect, drawImage of an immutable source revision, begin/move/line/cubic/
+close/fill paths, fillText, bounded getImageData, full-size putImageData and JPEG
+toDataURL. It retains the recorder/context objects across writes. It does **not**
+implement a real DOM canvas, arbitrary CSS colours/state, general image scaling,
+clipping, gradients, transparent unpremultiplication, text metrics/font loading,
+parser/clone/popout creation, OffscreenCanvas, WebGL or promotion into a displayed
+canvas. The CoreGraphics coordinate conversion includes asymmetric image checks.
+
+Full 8,294,400-byte comparisons pass for both S5/S5b's pattern and deterministic
+noise. Source repaint after drawImage preserves the captured older version;
+held-context put/read, cropped read, path ink, separate text ink, JPEG markers
+and native ImageIO finalization are checked. Opaque pixels only: this is not the
+spec/visual oracle. Timings include JSON command decoding, allocation, native
+raster, sandbox allocation/copy and synchronous JS return where applicable.
+JPEG includes native raster, ImageIO encoding, base64 and V8 string creation;
+ImageIO's default quality is not asserted equivalent to WebKit's default.
+Native surfaces are explicitly retired by the measurement driver between
+samples (maximum 128 live surfaces); production reference-counted retirement,
+quotas and generation ownership are not supplied by this prototype.
+
+### Conditions and results
+
+Apple M5, macOS 27.2, unlocked/key/active foreground and page hidden=false/focus=true
+were observed. Each on-screen batch held the prescribed GUI lock and finished
+under ten minutes. One host at a time; a requested 120-Hz AppKit timer performs
+at least 1 ms of 5,000-transform scrub work without calling JS. Shared-machine
+contention remains; there is no quiet-window, frozen-Electron or supported-OS
+performance-gate claim. A is the existing **unoptimized** S5b host; B/H native
+code is **release**, with a dev check reported below. B pixel timings are CLI
+isolate runs; its remote-DOM panel is measured separately. H measures the same
+compute route while AppKit scrub and local DOM input run concurrently. Same-realm
+remote-DOM input competing with long raster jobs is not measured. WebKit/V8 JITs
+remain on.
+A's image resources are pre-encoded and its outer result pre-rendered; B/H really
+rasterize/generate their native outputs. A's cold decode rows are asynchronous
+lower bounds and still cannot provide its required same-stack synchronous return.
+These are semantic/workload comparisons, not an apples-to-apples engine speedup.
+
+All times below are **p95 milliseconds**, nearest-rank. Pixel/snapshot/cold rows
+have 30 samples; warm rows 100; channels/services 2,000; per-layer JS 400 samples.
+A's final unlocked rerun is used; earlier S5/S5b results remain above.
+
+| Workload | A: WebKit S5b | B: V8 recorder + remote DOM | H: V8 compute + local WebKit DOM |
+|---|---:|---:|---:|
+| Control ID round trip / direct host callback | 0.120 | 0.000084 | 0.000125 |
+| Fresh 1080p pattern, raster/fill → JS pixels | 10.120 (img); 11.060 (bitmap) (decode/fill lower bound) | 1.303 | 2.737 |
+| Fresh 1080p noise, raster/fill → JS pixels | 31.180 (img); 36.200 (bitmap) (decode/fill lower bound) | 3.936; repeat **34.509** | 7.696 |
+| Solid 1080p raster + full JS pixel observation | Cold WebKit import still fails sync semantics | 1.580 | 1.715 |
+| JPEG snapshot, pattern | 7.540 (materialized canvas only) | 5.005 | 6.357 |
+| JPEG snapshot, noise | Not measured separately in A | 21.087 | 23.350 |
+| Four overrides + nested capture, cold outer pixels | **14.280** | 3.066 | 3.780 |
+| Same continuation, cached source / warm page image | 2.120 | 3.743 | 2.957 |
+| Four changed layers: complete synthetic recorder path, native output | 0.380 control only; renderer excluded | 2.009 | 2.129 |
+| JS recording per changed 16×16 layer | Not independently measured in A | 0.000584 | 0.000750 |
+| Full 1080p read from an already native/materialized canvas | 2.120 | 1.698 | 1.507 |
+| Same-realm synchronous service identity/callback | ≤0.001 batched clock bound | 0.000250 | V8 0.000667; WebKit ≤0.001 |
+
+Before the final native begin/nested/revision-pinned single-use resume check was
+added, two complete release runs had pattern p95 2.304/1.428, noise 4.794/**34.509**,
+cold continuations 3.723/3.235 and noise JPEG 21.270/20.895 ms. Keep the failing
+noise tail: the shared-machine repeat does **not** establish ≤10 ms reliably.
+The final checked-protocol run is the B column above. Stale, unknown and replayed
+resumes are rejected in the verifier; this remains a fixed four-dependency stub,
+not an engine dependency graph. The tiny V8 callback timings measure a direct
+in-process boundary, not a kernel actor, locking, permission admission or IPC. A WebSocket remote-DOM round trip
+is a different path, reported below; it does not inherit the callback number.
+
+An earlier H run under shared load had pattern JPEG p95 **12.645 ms** versus
+6.357 ms in the final run. The new passing sample does not erase that failure.
+
+The four-layer recorder row runs four actual 16×16 layer rasterizations, a nested
+1080p source and an outer native draw. JS timing covers each layer's recording;
+the complete path includes native command consumption. B/H meet **synthetic**
+EXT-RASTER-1 (≤1 ms/layer, ≤4 ms/frame) in these samples. This does not certify
+engine raster work, real extension callbacks, GPU upload or presentation.
+
+Unoptimized B verification also passes. Its p95 pattern/noise generation+pixels
+is **74.237/82.488 ms**, pattern/noise JPEG **89.950/104.862 ms**, cold/warm
+continuation **69.591/2.590 ms**, solid native raster+pixels **1.939 ms** and
+four-layer path **75.113 ms**. This exposes how much scalar pattern generation
+costs without optimization; comparing optimized B directly with the old debug
+pattern generator would be misleading. Sandbox copy/warm-read p95 is 2.306 ms.
+
+### Keystroke to DOM output and memory
+
+Thirty **AppKit-generated keyDown/keyUp** pairs per mode enter a focused real
+WebKit input (not dispatchEvent). For B, the page sends each input value to V8;
+V8's listener changes the shadow output; the returned batch changes the real
+output. Output text/sequence are checked after every event. The page waits two
+rAF callbacks and acknowledges; the host then completes takeSnapshot. Thus the
+native key→snapshot figure is a rendered-snapshot upper bound, **not measured
+photon/display presentation or a physical keyboard/IME result**. The snapshot
+exists and DOM text matches; no OCR/pixel text oracle is claimed. Page-clock
+values have approximately 1-ms quantization in this fixture.
+
+| Panel timing (p50 / p95 ms) | A | B remote DOM | H local DOM while V8 computes |
+|---|---:|---:|---:|
+| Native key → two-rAF acknowledgment | 16.605 / 18.917 | 32.318 / 34.493 | 16.859 / 18.621 |
+| Native key → completed rendered snapshot | 18.121 / **21.526** | 34.051 / **36.494** | 18.590 / **20.368** |
+| Input callback → mutation applied in page | Same callback | **1 / 1** | Same callback |
+| V8 event handling + mutation batch construction | — | 0.014 / 0.109 | — |
+
+B adds roughly one display interval in this host. The event/mutation round trip
+p95 1 ms is **not** a passing ≤0.5-ms synchronous kernel channel. It serves async
+UI updates; the V8/native channel is the separate direct callback above. No new
+DOM latency budget is invented, and S2's live-resize one-frame gate is not tested.
+WebKit service timing uses 30 batches of 1,000 probes to avoid single-call clock
+zeros. Both models check live-object `===`, held-old-provider references,
+callback reentrancy and restoration after top-provider disposal. They are small
+service fixtures, not the unchanged inspector/timeline cluster-switch test.
+
+`proc_pid_rusage` physical footprints, **decimal MB**, from the panel runs:
+
+| Placement | AppKit host | WebContent | V8 worker | Interpretation |
+|---|---:|---:|---:|---|
+| A | 30.72 | 45.63 | — | 76.35 MB measured subtotal |
+| B | 30.84 | 46.92 | 5.46 | 83.22 MB measured subtotal |
+| H | 31.21 | 39.29 | 61.60 before GC / 46.38 after GC | 132.10 / 116.88 MB component-snapshot subtotal |
+
+V8 bootstrap is **5.06–5.21 MB** including worker runtime, versus **2.70–2.77 MB**
+after V8 initialization before creating the isolate/context: about **2.4 MB
+incremental** for this empty realm, with 786,432 physical heap bytes. This is not
+39 extensions or one additional realm in the final app. The heavy standalone
+benchmark reaches **117.57 MB** physical footprint, **199.07 MB** V8-reported
+external allocations; a full GC clears external bytes but leaves **52.82 MB**
+physical footprint in the repeat. H reaches 124.42 MB external bytes before GC,
+then zero (an earlier H repeat reached 257.13 MB). V8 GC/allocation high-water
+retention matters even after native IDs are retired. A production cage/external-memory admission policy is still needed.
+
+Additional recorder-subset timing (30 samples, native raster and JS pixels
+included): full 1080p fill plus cubic path and text **1.036/4.176 ms p50/p95**;
+full getImageData → putImageData → read-after-write **1.772/3.842 ms**. The
+4.176-ms result is another reason not to generalize the 16×16 override pass to
+all Canvas workloads. That subset run reaches **112.03 MB** physical footprint
+before GC and **34.29 MB** after; native surface retirement alone is not a
+process-memory ceiling.
+
+These measurements use a V8 worker **process** to separate the standalone AppKit
+harness, whereas the proposed trusted app runtime is an in-process worker
+**thread**. Subtotals exclude WebKit GPU/network/shared allocations and are not
+simultaneous peak-family accounting. H reports component snapshots around
+shutdown, not a true peak. They cannot freeze §5's ≤120 MB compat-page or family
+memory budgets; Store helper quotas/isolation remain S1/Store responsibilities.
+
+### Background and headless throughput
+
+Same workload shape as S5b: one 1080p canvas fill, 100 rectangles, a one-pixel
+readback and one native ID call per job; five seconds per phase. Native recorder
+B eagerly rasterizes to native pixels before reading that pixel. A uses its real
+page Canvas2D. After a verified foreground phase, minimize and hide, dwell 60 s,
+then close the editor; B's job has no WebKit dependency. The local DOM host is
+kept only to establish lifecycle transitions and scrub load. Activity policy is
+WebKit's public None for A, no WebKit suppression SPI or activity trick for B.
+
+| Placement | Foreground / hidden / closed-editor jobs/s | Hidden / closed share | Result |
+|---|---:|---:|---|
+| A | 2846.86 / 903.69 / 680.56 | 31.74% / 23.91% | FAIL ≥95% on this run |
+| B | 3708.98 / 4323.53 / 4288.33 | 116.57% / 115.62% | PASS this diagnostic; OS/paired gate open |
+| H | 3708.98 / 4323.53 / 4288.33 (same B/H exporter path; DOM idle) | 116.57% / 115.62% (same samples) | No independent hybrid lifecycle pass |
+
+An earlier B diagnostic accidentally read all 1080p pixels per job: **857.39 →
+682.08 → 772.81 jobs/s** (79.55%/90.14%). It is **excluded from the matched
+one-pixel comparison**, retained here to avoid hiding the workload correction.
+It also demonstrates that moving to V8 does not make shared-machine throughput
+ratios immune to contention. No WebKit means no WebContent suppression; it does
+not mean guaranteed constant throughput. CLI execution of the V8 verifier and
+benchmarks needs no NSApplication. A no-WindowServer login/SSH/launchd session,
+long unattended real export and macOS 14/15/26 remain unverified.
+
+### Rule-selected consequences and remaining gates
+
+1. **A cannot be the universal pixel backend.** N4/N6 forbid blank canvases,
+   changed synchronous returns or mandatory async migration. The rerun improves
+   the old cold-continuation number but still crosses 10 ms and remains async.
+   IDs and warmed images are useful optimizations, not a correctness solution.
+2. **Continue B's native recorder/compute route.** §3.5.1's sandbox-buffer rule
+   and N8 select direct worker-owned native calls over WebKit decode for JS
+   pixels. This is measured feasibility, **not a full B pass**: noisy JPEG fails,
+   a noise-pixel repeat fails, and recorder objects are not real DOM canvases.
+3. **Do not split the trusted E closure by “uses DOM.”** §3.4's first acceptable
+   service option is co-location where full facades are not proven. C-MATRIX's
+   connected synchronous closure (timeline, inspector, viewer chrome, toolbar,
+   caption/3D builders, live provider objects, old references and history
+   callbacks) must stay in **one owning realm**. A timeline fork switches the
+   whole dependent closure to its matching compat editions. Native scalar/data
+   facades may remove an edge only after complete behavior/identity traces.
+   No blocking calls between isolate threads and no serialized substitute for
+   a live service object.
+4. **H is a constrained placement option, not a compatibility escape hatch.**
+   Only proven-disconnected non-DOM clusters, or new v4 data/async contracts,
+   can take its measured V8 path while DOM clusters remain in WebKit. Existing
+   trusted v1–3 code can discover dynamic PM/services and share globals: static
+   zero counts do not prove disconnection or authorize migration. Keeping an
+   affected DOM/raster cluster in A retains A's failed pixel boundary. Moving
+   that cluster wholly to B instead needs complete remote-DOM semantics.
+5. **Keep Store isolation separate.** The four catalog entries are GLSL-only
+   effects; local installations supply the observed DOM users. This makes a
+   DOM-free helper a useful Store fixture, not proof that runtime globals or
+   trusted user panels can be dropped. Per-extension helpers, Store views and
+   per-runtime WebView fallback remain as planned; this trusted prototype does
+   not certify their security or view/process isolation.
+
+**Still unverified:** arbitrary DOM and Svelte execution, synchronous layout and
+style reads, element/media/canvas identity, DOM-first capture/bubble/default
+cancellation, IME/focus/selection/clipboard, MutationObserver/microtask order,
+Shadow DOM, fonts and real assets, same-element canvas promotion and all creation
+paths, WebGL/presenter EXT-WGL-1, full Canvas alpha/colour/text/spec oracle,
+pm-vector/pm-text/pm-render integration, real render graph/revision/cancel/error
+continuations, kernel actor/leases/direct writes and race suite, unchanged
+inspector and timeline fork switch, watchdog/hang recovery for this placement,
+history generation pins/reload, real corpus/frozen-reference traces, 39-extension
+memory, paired reference margins and quiet-window supported-OS lifecycle gates.
+Asynchronous remote mutations alone cannot preserve synchronous layout reads or
+preventDefault after WebKit has already run its default action. These require a
+concrete semantic design; the benchmark does not silently claim to implement it.
+
+Reproduction (raw logs/capabilities/binaries remain outside Git):
+
+```sh
+apps/native/spikes/s5/s5c/build.sh
+printf '%s\n' '{"kind":"verify"}' '{"kind":"bench","build":"release"}' '{"kind":"subset"}' \
+  | ~/Developer/pm-target/release/pm-native-s5c-spike
+S5C_DEV=1 apps/native/spikes/s5/s5c/build.sh
+# Requires an unlocked shared Mac; acquires/retries/releases the GUI lock itself.
+apps/native/spikes/s5/s5c/run-gui.sh
+```

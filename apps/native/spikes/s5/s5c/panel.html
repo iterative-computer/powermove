@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><style>body{font:18px system-ui;background:#f6f6f6;padding:24px;color:#111}input{font:inherit;margin:12px}output{display:block;margin:12px}section{padding:12px}</style><h2>S5c synthetic panel</h2><main id="root"></main><script>
+const mode=MODE, url=URL_VALUE, nodes=new Map();let socket,seq=0,starts=new Map();
+const post=v=>window.webkit.messageHandlers.probe.postMessage(v);
+function painted(s,worker=0,bridge=0){requestAnimationFrame(()=>requestAnimationFrame(()=>{post({kind:'paint',seq:s,event_ms:performance.now()-starts.get(s),worker_ms:worker,event_to_apply_ms:bridge,hidden:document.hidden,focused:document.hasFocus(),text:document.querySelector('output').textContent});starts.delete(s)}))}
+function services(){const provider={n:7,call(cb){return cb(this)}},stack=[provider];function one(){const old=stack.at(-1);const next={n:9};stack.push(next);if(stack.at(-1)!==next||old.call(x=>x)!==provider)throw Error('identity');stack.pop();if(stack.at(-1)!==old)throw Error('disposal');return old.call(x=>x.n)}const a=[];for(let i=0;i<31;i++){const t=performance.now();for(let j=0;j<1000;j++){if(one()!==7)throw Error('service')}if(i)a.push((performance.now()-t)/1000)}a.sort((x,y)=>x-y);post({kind:'services',n:30,batch:1000,p50:a[14],p95:a[28]})}
+services();
+function local(){const section=document.createElement('section'),input=document.createElement('input'),out=document.createElement('output');out.textContent='Ready';section.append(input,out);document.querySelector('main').append(section);input.setAttribute('aria-label','S5c test input');input.addEventListener('input',()=>{const s=++seq;starts.set(s,performance.now());out.textContent='Value: '+input.value;painted(s)});input.focus();post({kind:'ready',hidden:document.hidden,focused:document.hasFocus()})}
+if(mode==='B'){
+ socket=new WebSocket(url);socket.onopen=()=>socket.send(JSON.stringify({kind:'init',seq:0}));
+ socket.onmessage=e=>{const m=JSON.parse(e.data);for(const c of m.mutations){const [op,id,...a]=c;if(op==='create'){const n=document.createElement(a[0]);nodes.set(id,n);if(a[0]==='section')document.querySelector('main').append(n);if(a[0]==='input')n.addEventListener('input',()=>{const s=++seq;starts.set(s,performance.now());socket.send(JSON.stringify({kind:'input',id,value:n.value,seq:s}))})}else if(op==='text')nodes.get(id).textContent=a[0];else if(op==='attr')nodes.get(id).setAttribute(a[0],a[1]);else if(op==='append')nodes.get(id).append(nodes.get(a[0]));else throw Error('bad mutation')}
+ if(m.seq===0){document.querySelector('input').focus();post({kind:'ready',hidden:document.hidden,focused:document.hasFocus()})}else painted(m.seq,m.worker_ms,performance.now()-starts.get(m.seq))};
+ socket.onerror=()=>post({kind:'failure',message:'websocket error'});
+}else local();
+</script>
