@@ -403,3 +403,35 @@ Window-specific screenshots (outside Git): `onscreen-engine-120.png`,
 They show the actual app and were taken before their playback windows. Remaining:
 paired/repeated physical gates, real service input scrub, resize/export-load
 protection, mixed-display alignment and calibrated HDR output.
+
+### Performance fix pass (2026-11-01)
+
+See [the P1 fix-pass report](perf-gate-p1.md#fix-pass--2026-11-01) for conditions,
+before/after observations and remaining failures. **P1 is not passed.**
+
+The native viewer now uses three bounded drawables, forward-only display targets,
+interactive worker QoS and completion/presentation wake tokens. The bounded token
+queue preserves a wake that arrives before a wait; Metal callbacks never lock
+service state. Work waits for its next deadline instead of polling every 1 ms
+(except while awaiting the initial audio epoch). Existing source leases still
+cover GPU consumption; revision, size and display retirement still reject stale
+submission. Headroom is telemetry: the shader already preserves extended linear
+light and only explicit mastering changes transform it. Draw reuse uses the
+engine's existing invalidation rules.
+
+`Transport::audio_host_for` maps wrapped frame time to the current unwrapped
+loop pass before inverting the followed audio clock. The decoded PCM loop/seek
+regression now meets mean ≤1 ms / p95 jitter ≤2 ms numerically, including 160 ms
+simulated output latency. Physical video still carries presentation delay and
+30-fps sampling error; numerical clock agreement is not physical A/V acceptance.
+
+Opt-in traces include event/request, actor/publication spans, render/drawable
+stages, GPU timestamps, commit, intended target and physical presentation.
+Submitted stale frames are retained as diagnostics. Missing presentation remains
+null. Edit origins wait for a new revision, so an old playback frame cannot take
+the token. The native harness matches input, presented revision and new viewer
+identity for scrub/edit/open respectively. See `tools/perf-gate/native.py` for
+release-only, lock-owned foreground diagnostics and display restoration.
+
+No engine, vendor, shell structure or dependency-lock changes were made.
+The only kernel edit adds actor/publication timing in `actor.rs`.

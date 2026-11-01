@@ -243,10 +243,14 @@ class App:
                            frame['display_host_s'] >= accepted)
             if op == 'seek':
                 # Caller supplies an exact project frame time.
+                matches = matches and frame.get('input_host_s') == accepted
                 matches = matches and abs(frame['ticks'] - round(kwargs['seconds'] * TICKS)) <= 1
             if op == 'edit':
-                matches = matches and state.get('revision', 0) > old.get('revision', 0)
+                matches = matches and frame.get('input_host_s') == accepted
+                matches = matches and frame.get('revision', 0) > old.get('revision', 0)
                 matches = matches and frame['stamp'] != (old.get('frame') or {}).get('stamp')
+            if op == 'open':
+                matches = matches and state.get('viewer_id') != old.get('viewer_id')
             if matches and state.get('opened') and not state.get('opening'):
                 return {'ms': (frame['display_host_s'] - accepted) * 1000,
                         'endpoint': 'command-accepted-to-drawable-presentedTime',

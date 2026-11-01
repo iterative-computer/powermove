@@ -80,6 +80,7 @@ impl Engine {
             .new_render_pipeline_state(&desc)
             .map_err(|s| anyhow!(s))?;
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+        renderer.set_draw_reuse(true);
         renderer.set_definitions(&pm_render::all_builtin_definitions())?;
         Ok(Self {
             mastering: Default::default(),
@@ -361,17 +362,25 @@ impl Submission {
     pub fn submit(&self, due: Option<f64>) {
         // Metal's present convenience methods may create autoreleased helpers.
         // Drain these every frame as well as the encoding pool above.
-        objc2::rc::autoreleasepool(|_| self.submit_inner(due));
+        self.submit_notifying(due, None);
     }
-    fn submit_inner(&self, due: Option<f64>) {
+    pub fn submit_notifying(&self, due: Option<f64>, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
+        objc2::rc::autoreleasepool(|_| self.submit_inner(due, wake));
+    }
+    fn submit_inner(&self, due: Option<f64>, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
         if let Some(drawable) = &self.drawable {
             self.trace.lock().unwrap().present_requested = now();
             let t = self.trace.clone();
+            let displayed = wake.clone();
             drawable.add_presented_handler(
                 &block::ConcreteBlock::new(move |d: &metal::DrawableRef| {
                     let mut t = t.lock().unwrap();
                     t.display = Some(d.presented_time());
                     t.display_callback = now();
+                    drop(t);
+                    if let Some(wake) = &displayed {
+                        wake();
+                    }
                 })
                 .copy(),
             );
@@ -402,6 +411,10 @@ impl Submission {
                 t.gpu_done = gpu_time(b, false);
                 t.completed = now();
                 t.gpu_ok = b.status() == metal::MTLCommandBufferStatus::Completed;
+                drop(t);
+                if let Some(wake) = &wake {
+                    wake();
+                }
             })
             .copy(),
         );

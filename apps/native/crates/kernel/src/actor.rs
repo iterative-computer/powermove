@@ -186,6 +186,9 @@ pub struct OpenEntryInfo {
 /// One project's published state: immutable, swapped after every call.
 #[derive(Clone, Debug)]
 pub struct Published {
+    /// Diagnostic spans; no document serialization or main-thread clock dependency.
+    pub actor_work: std::time::Duration,
+    pub publication_work: std::time::Duration,
     pub project: String,
     pub snapshot: Snapshot,
     /// Recent changes, oldest first (for incremental readers and mirrors).
@@ -548,10 +551,22 @@ impl KernelHandle {
 }
 
 fn publish(kernel: &mut Kernel, shared: &Shared, project: &str) -> Option<u64> {
+    publish_timed(kernel, shared, project, None)
+}
+
+fn publish_timed(
+    kernel: &mut Kernel,
+    shared: &Shared,
+    project: &str,
+    started: Option<std::time::Instant>,
+) -> Option<u64> {
+    let publication_started = std::time::Instant::now();
     let p = kernel.project(project)?;
     let store = p.store();
     let history = store.history();
-    let published = Published {
+    let mut published = Published {
+        actor_work: started.map_or(std::time::Duration::ZERO, |t| t.elapsed()),
+        publication_work: Default::default(),
         project: project.to_owned(),
         snapshot: store.snapshot(),
         changes: store.recent_changes().into(),
@@ -578,6 +593,7 @@ fn publish(kernel: &mut Kernel, shared: &Shared, project: &str) -> Option<u64> {
         media: store.media().clone(),
         path: store.path().map(std::path::Path::to_path_buf),
     };
+    published.publication_work = publication_started.elapsed();
     let revision = published.revision();
     shared
         .published
@@ -698,6 +714,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                 request,
                 reply,
             } => {
+                let actor_started = std::time::Instant::now();
                 let before_state = kernel.state().clone();
                 let before_selection = kernel
                     .project(&project)
@@ -724,7 +741,7 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                             .is_some_and(|p| &p.workspace != ws)
                     });
                 // Publication boundary: publish, then answer, then events.
-                let revision = publish(&mut kernel, &shared, &project);
+                let revision = publish_timed(&mut kernel, &shared, &project, Some(actor_started));
                 let (outbox, notices) = match kernel.project_mut(&project) {
                     Some(p) => (p.take_outbox(), p.take_notices()),
                     None => (Vec::new(), Vec::new()),
