@@ -4927,6 +4927,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-panel-inspector"
+version = "0.1.0"
+dependencies = [
+ "pm-eval",
+ "pm-kernel",
+ "pm-model",
+]
+
+[[package]]
+name = "pm-panel-viewerchrome"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
+ "pm-model",
+]
+
+[[package]]
 name = "pm-perf"
 version = "0.1.0"
 
