@@ -146,12 +146,12 @@ accessibility settings, 1×/2× hit rectangles, no UI-thread JS waits and Opus r
 
 - 11 new export-adapter tests; pm-promedia totals 94 tests. pm-surface totals 95;
   the combined native command passes 189 tests, with no skipped tests.
-- 47 export JS tests, 21 accepted-tree snapshots; full v4 suite 218 tests.
+- 47 export JS tests, 21 accepted-tree snapshots; full v4 suite 219 tests.
 - Strict Clippy for the touched crates, rustfmt, both TypeScript checks, panel
   Prettier and browser builds pass. The dedicated whole-panel browser bundle is
   executed without Node/Chromium/DOM globals by the suite.
 - Merged native-engine `4204a153dbf8af916ef2b92d7ca01858e363516a` and retained
-  v4-integrate `483ff243da57b99f61981eab8f57de4b401be771`. The only merge
+  v4-integrate `e5e209928817cb9434823ebf6ddf7d64f2213441`. The only merge
   conflict was the lockfile's added panel-package list; all additions survived.
   The lane's own lock changes add the test inspector and pm-promedia's protocol
   dependency without upgrading packages. No engine lockfile change is needed.

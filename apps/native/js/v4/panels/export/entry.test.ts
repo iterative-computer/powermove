@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
+import { fileURLToPath } from "node:url";
 import { fixture, initial } from "./fixtures";
 import { mountExportPanel } from "./index";
 
@@ -31,7 +32,7 @@ test("worker entry queries/subscribes via the public host service and releases i
 });
 test("whole panel bundles and executes without Node/Chromium/DOM globals", async () => {
   const build = await Bun.build({
-    entrypoints: [new URL("./nodefree.ts", import.meta.url).pathname],
+    entrypoints: [fileURLToPath(new URL("./nodefree.ts", import.meta.url))],
     target: "browser",
     format: "iife",
     minify: true,
