@@ -31,3 +31,11 @@ path = "../src/lib.rs"
 [profile.dev]
 debug = 0
 incremental = false
+
+[[bin]]
+name = "pm-store-helper"
+path = "../src/bin/pm-store-helper.rs"
+
+[[test]]
+name = "store_helper"
+path = "../tests/store_helper.rs"
