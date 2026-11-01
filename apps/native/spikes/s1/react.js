@@ -33,6 +33,6 @@ const tree=(C,rev)=>React.createElement('div',null,React.createElement(C),...Arr
 commit(tree(Counter,0));r.flushSyncFromReconciler(()=>setter(17));
 check(root.textContent.includes('count:17'),'react state before refresh');Refresh.register(Updated,'Counter');Refresh.performReactRefresh();r.flushSyncWork();
 const refresh=root.textContent.includes('updated:17');check(refresh,'react refresh');
-const times=[];for(let n=1;n<=40;n++){const t=hostNow();commit(tree(Updated,n));times.push(hostNow()-t)}
+const times=[];for(let n=1;n<=40;n++){const t=hostNow();commit(tree(Updated,n));if(n>10)times.push(hostNow()-t)}
 check(walk(root).filter(n=>n.type==='button').length===999,'react tree size');
-globalThis.probeResult=summary('react',times,refresh,{bundle_semantics:'real react-reconciler + react-refresh; synthetic host adapter'});
+globalThis.probeResult=summary('react',times,refresh,{native_nodes:walk(root).length,bundle_semantics:'real react-reconciler + react-refresh; synthetic host adapter'});

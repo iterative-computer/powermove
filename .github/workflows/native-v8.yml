@@ -52,13 +52,13 @@ jobs:
           path: |
             ~/.cargo/registry
             upstream-v8/target/release
-          key: native-v8-arm64-152.2.0-sandbox-rust1.96.1-gn-v1-${{ runner.os }}
+          key: native-v8-arm64-152.2.0-sandbox-rust1.96.1-gn-v2-${{ runner.os }}
       - name: Build sandbox and pointer compression from source
         working-directory: upstream-v8
         env:
           V8_FROM_SOURCE: '1'
           PRINT_GN_ARGS: '1'
-          GN_ARGS: 'v8_enable_sandbox=true v8_enable_pointer_compression=true v8_enable_pointer_compression_shared_cage=true v8_enable_external_code_space=true symbol_level=0'
+          GN_ARGS: 'v8_enable_sandbox=true v8_enable_pointer_compression=true v8_enable_pointer_compression_shared_cage=true v8_enable_external_code_space=true symbol_level=0 mac_deployment_target="14.0"'
         run: cargo +1.96.1 build --locked --release --lib --features v8_enable_sandbox -vv
       - name: Package library, matching bindings and build provenance
         shell: bash

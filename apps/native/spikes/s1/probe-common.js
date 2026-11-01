@@ -27,7 +27,7 @@ export function node(type,text='') {
 }
 export const walk=(n)=>[n,...n.children.flatMap(walk)];
 export function summary(kind,times,refresh,extra={}) {
-  const sorted=times.toSorted((a,b)=>a-b);return {probe:'reconciler',kind,n:times.length,nodes:1000,p50_ms:sorted[Math.ceil(times.length*.5)-1],p95_ms:sorted[Math.ceil(times.length*.95)-1],provisional_budget_ms:4,fast_refresh_preserves_state:refresh,operation_names:[...new Set(ops.map(o=>o[0]))],...extra};
+  const sorted=times.toSorted((a,b)=>a-b);return {probe:'reconciler',kind,n:times.length,widgets:1000,p50_ms:sorted[Math.ceil(times.length*.5)-1],p95_ms:sorted[Math.ceil(times.length*.95)-1],provisional_budget_ms:4,fast_refresh_preserves_state:refresh,operation_names:[...new Set(ops.map(o=>o[0]))],...extra};
 }
 // V8 is deliberately Node-free. Fixtures run sync, with explicit flushes.
 globalThis.performance={now:hostNow};

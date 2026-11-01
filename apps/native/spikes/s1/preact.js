@@ -18,6 +18,6 @@ for(const [prev,next] of pending){runtime.replaceComponent(prev,next,false);}
 globalThis.flushPreact?.();
 const refresh=root.textContent.includes('updated:17');check(refresh,'preact refresh');
 const times=[];
-for(let n=0;n<40;n++){const t=hostNow();render(h('div',null,h(Updated),...Array.from({length:999},(_,i)=>h('button',{key:999-i,'data-value':n+i,onClick:()=>{}},`${n+i}`))),root);times.push(hostNow()-t)}
+for(let n=0;n<40;n++){const t=hostNow();render(h('div',null,h(Updated),...Array.from({length:999},(_,i)=>h('button',{key:999-i,'data-value':n+i,onClick:()=>{}},`${n+i}`))),root);if(n>=10)times.push(hostNow()-t)}
 check(walk(root).filter(n=>n.type==='button').length===999,'preact tree size '+walk(root).filter(n=>n.type==='button').length);
-globalThis.probeResult=summary('preact',times,refresh,{bundle_semantics:'real preact + prefresh; synthetic host adapter'});
+globalThis.probeResult=summary('preact',times,refresh,{native_nodes:walk(root).length,bundle_semantics:'real preact + prefresh; synthetic host adapter'});
