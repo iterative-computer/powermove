@@ -445,6 +445,7 @@ export async function exerciseOwner(
             <input
               key={axis}
               id={`coordinate-${axis}`}
+              control="number"
               value={value}
               onKeyDown={(event) => {
                 if (event.key === "ArrowRight") handles[axis] += 0.05;

@@ -4,21 +4,12 @@ import { tasks } from "./tasks";
 import { Evaluation } from "./harness";
 const wire = process.env.PM_SURFACE_WIRE;
 const wireTest = test.skipIf(!wire);
-const knownFailures: Record<string, string> = {
-  "builtin-06": "complete accepted snapshot",
-  "wild-10": "complete accepted snapshot",
-};
 for (const task of tasks.filter((task) => task.group !== "owner")) {
   wireTest(`independent extension ${task.id}`, async () => {
     const result = await runExtension(task.id, wire);
     if (task.status === "pending-owner") {
       expect(result.status).toBe("pending-owner");
       expect("lines" in result).toBe(false);
-    } else if (knownFailures[task.id]) {
-      expect(result.status).toBe("fail");
-      expect("error" in result && result.error).toContain(
-        knownFailures[task.id],
-      );
     } else expect(result.status, JSON.stringify(result)).toBe("pass");
   });
 }

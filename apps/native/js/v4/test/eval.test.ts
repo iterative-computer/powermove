@@ -29,13 +29,9 @@ for (const task of tasks.filter((t) => t.status === "ready"))
         ? {
             id: task.id,
             status: "fail",
-            fixtureStatus: task.id === "owner-10" && wire ? "fail" : "pass",
-            failureKind: task.id === "owner-10" && wire ? "fixture" : "api-gap",
+            fixtureStatus: "pass",
+            failureKind: "api-gap",
           }
         : { id: task.id, status: "pass" },
     );
-    if (task.id === "owner-10" && wire)
-      expect("error" in result && result.error).toContain(
-        "complete accepted snapshot",
-      );
   });
