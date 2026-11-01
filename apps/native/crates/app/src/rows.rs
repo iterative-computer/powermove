@@ -25,6 +25,22 @@ pub fn layer_count(snapshot: &Snapshot) -> usize {
         .map_or(0, |comp| pm_kernel::model::layers_of(comp).count())
 }
 
+/// Keyframes in the open composition (status bar count); O(nodes), so it
+/// runs wherever `list` runs.
+pub fn keyframe_count(snapshot: &Snapshot) -> usize {
+    snapshot
+        .root()
+        .and_then(|root| {
+            let open = pm_kernel::model::open_comp_id(root);
+            pm_kernel::model::comp_node(root, open.as_deref())
+        })
+        .map_or(0, |comp| {
+            let mut ids = std::collections::HashSet::new();
+            pm_kernel::model::keyframe_ids(comp, &mut ids);
+            ids.len()
+        })
+}
+
 pub fn list(snapshot: &Snapshot) -> Vec<LayerInfo> {
     snapshot
         .root()

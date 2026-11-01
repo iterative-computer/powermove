@@ -62,3 +62,40 @@ visual changes required before merge.**
     only the status bar; it reverts to nothing on success.
 13. Capture the viewer with real media in light mode too; the surround and
     frame outline need checking against `#E6E6EA`.
+
+## Viewer 3 — 2026-11-01
+
+Implemented by the design lead on `feat/na-design2` in the temporary
+panels (`apps/native/crates/app`), on top of the merged viewer-2 lane
+(virtualised rows kept). Evidence (not committed):
+`/tmp/pm-design2/{before,after}-{dark,light}-{1-opened,2-selected}.png`,
+captured with temp profiles through the perf gate's new `redraw` op
+(paints while the screen is locked).
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Selected clip | Done. Clips use `labels.*` by kind (tokens.md mapping), 20 pt in a 28 pt row, `inner_radius`, name inside; selection is a 1.5 pt `text` ring with fill mixed 12 % towards `text`. No accent fill anywhere. |
+| 2 | Inspector overflow | Done. One `value_column` (128) well per row ending at `inset`, left-aligned, tabular. |
+| 3 | Units on values | Done. `Opacity` / `100 %`, `Position X` / `0 px`; % to 1 decimal, px to 2, trailing zeros trimmed. |
+| 4 | Viewer surround | Done. Surround stays `colors.viewer` (shell). Fit now leaves a margin so the composition reads at its real bounds; a 1 pt `separator` outline is drawn outside the frame when the comp background is transparent or within 24/255 of the surround. The blue-grey/black "surround" was the composition filling the viewer edge to edge. |
+| 5 | Zoom chips | Done in part. One native pop-up `Fit (37 %) ▾` (Fit, 25–400 %) in a 32 pt viewer bar. Quality pop-up **not done**: the engine has no preview-resolution control (`ViewerConfig`); add one, then a `Auto ▾` pop-up next to zoom. `Viewer` title removal is shell-owned (below). |
+| 6 | Timeline anatomy | Done. Header with play button, native timecode (`timecode` 13 medium, tabular, `text`) and fps in `muted`; 24 pt ruler (major ticks `secondary` with `minimum` labels, minor `muted`, click/drag to scrub); layer column 232 on `panel_secondary` with index and label badge; 1.5 pt accent playhead with an 11 pt rounded head in the ruler. Timecode left the status bar. |
+| 7 | Status copy | Done. `Saved · 3 layers · 2 keyframes` / `Edited · …`; copy-open reasons in user language (`Opened as a copy because the file is read-only.`) until the P3 banner. |
+| 8 | Project rows | Done except symbols: full-width `row` height rows, `selected_fill`, label badge per kind. SF Symbol kind glyphs need a symbol element in GPUI (shell/vendor). |
+| 9 | Helper text | Done: tooltip on the value wells. |
+| 10 | Selected layer header | Done: `Flight edit · Shape`, title semibold + `muted`, no fill. |
+| 11 | Title alignment | Not done: shell-owned. |
+| 12 | `Saving…` subtitle | Not done: shell-owned (`set_document_metadata` only takes `edited`). |
+| 13 | Light capture | Done (`after-light-*`). |
+
+Needed from the shell lane (`feat/na-shell3`; not edited here):
+
+- The viewer and timeline panels draw the shell's tab row *and* the app's
+  own 32 pt bar. Let `Integration` supply header content for a panel
+  (viewer: zoom/quality pop-ups trailing, no title; timeline: play,
+  timecode, fps), then the app drops its extra bars. Once the viewer bar
+  is the header, centre the image in the rect below it so `fit_scale` can
+  stop reserving the bar's height at the bottom too.
+- Title centring with no subtitle (item 11) and a subtitle string API for
+  `Saving…` (item 12); a lock badge for copy-opened projects.
+- An SF Symbol element usable from GPUI panels (item 8, and every list).

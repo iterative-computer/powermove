@@ -95,3 +95,42 @@ Nice-to-have:
     (drag) may set it later.
 11. The old app's `Render queue` modal (v1.2.0 `render-queue.ts`) is replaced by
     this window; its `Retry` / `Remove` actions map to Retry / Cancel here.
+
+## Re-review — 2026-11-01
+
+Commits: `c4e0424b8` … `6ace8c91a` on `feat/na-cloud-promedia`.
+**Verdict: APPROVE with a design fix — merge
+`origin/feat/na-design-fix-promedia` (`b06647295`, based on the lane
+branch), not the lane branch itself.**
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Range in display terms | Done. `render_bar_frames` maps ticks through `pm-time`'s exact rate; views never convert ad hoc. |
+| 2 | Invalidated is a state | Done via the immediate-`Missing` alternative: an edited graph digest never hits old frames; Keep Rendered bytes survive. |
+| 3 | VoiceOver summary | Deferred (should-fix). Owed before the timeline binds the bar. |
+| 4 | Title and kind labels/symbols | Done verbatim (`TaskKind::label`, `symbol`); `title` required for new work. |
+| 5 | Progress units, indeterminate | Done. `ProgressUnit`; `total == 0` → `TaskProgress::Indeterminate`. |
+| 6 | Transitional words | Done. `Pausing…` / `Cancelling…`, controls disabled; `Resume` when paused. |
+| 7 | Typed errors | Done. `TaskFailureCode`; diagnostics only through `diagnostic_for_log`. |
+| 8–9 | ETA, retained terminal rows | Deferred (should-fix). Owed before the Background Tasks window ships. |
+| 10–11 | Priority hidden; render-queue mapping | Respected. |
+
+The lane left a `DESIGN-TODO(opus)` for failure copy. Specified on the fix
+branch (sentence case, `danger`):
+
+| Code | Message |
+|---|---|
+| SourceOffline | The source media is offline. Reconnect it and try again. |
+| DiskFull | Not enough disk space. Free some space and try again. |
+| CodecUnsupported | This media’s format isn’t supported. |
+| Unknown | The task couldn’t be completed. Try again. |
+| Cancelled | none: not an error to the user; the row leaves like a completed task |
+
+The fix also corrects a gap: legacy records with only a raw diagnostic
+reported `error_code = Unknown` but no message; the message now comes from
+the same classified code. A task with an empty legacy title shows its kind
+label alone. 83 tests pass, clippy `-D warnings` clean. On macOS the
+`disk` tests need `TMPDIR` on a non-symlinked path (`/private/tmp/...`):
+the storage layer correctly refuses `/var` → `/private/var`; that is a test
+fixture issue, not a product bug. The lane also has not added
+`pm-promedia` to `apps/native/Cargo.lock`; the merge must.

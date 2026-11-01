@@ -73,3 +73,36 @@ downgraded). The prompt **data** is too thin to present honestly.
    agent question card first, then the sheet when the user accepts.
 9. A `learn_more_url` (https only, Store-origin) shown as a link-style button
    in the sheet footer.
+
+## Re-review — 2026-11-01
+
+Commits: `cc65c000c` … `3b8e237c9` on `feat/na-cloud-storehost`.
+**Verdict: APPROVE with a design fix — merge
+`origin/feat/na-design-fix-storehost` (`651740fea`, based on the lane
+branch), not the lane branch itself.**
+
+| # | Item | Status |
+|---|---|---|
+| 1 | One consent per install | Done. `PermissionRequest.permissions` covers every undecided declared permission; `respond_all` records them in one CAS; updates prompt only for added permissions. |
+| 2 | Display data | Done. `extension_name` (signed manifest), host-provisioned `publisher_name` / `publisher_verified` (a manifest cannot claim them), bundle `icon` asset id, `reason` ≤ 140 chars, plain text. |
+| 3 | Sheet vs alert | Done. `presentation()` → `WindowModalSheet` (`Allow “Glass Blur” To:`, `Don’t Allow` / `Allow` accent default) or `NsAlertWarning` (exact v1.2.0 message and informative text, `Trust` / `Cancel`, Cancel default). |
+| 4 | Copy table | Done verbatim, in disclosure order; Store labels match v1.2.0 `PERMISSION_LABEL`. |
+| 5 | Denied is not silent | Done. `stored_decisions` with `active` flags; `SETTINGS_ALLOW_LABEL`. |
+| 6 | Stale prompts | Done and documented: dismiss and re-request, no error. |
+| 7 | Prompt identity | Done. `accessibility_identifier` = request id. |
+| 8–9 | Anchoring, Learn More | Deferred (no owner/endpoint yet). Acceptable. |
+
+The lane left a `DESIGN-TODO(opus)` for records without a signed name,
+publisher name or icon. Specified and implemented on the fix branch:
+
+| Missing | Shown |
+|---|---|
+| Extension name | Sheet `Allow This Extension To:`; alert `Give this extension full access to Powermove?` |
+| Publisher name | `From an unidentified developer` (no badge) |
+| Icon | SF Symbol `puzzlepiece.extension`, `secondary` |
+
+A named publisher reads `From Example Publisher` (+ `checkmark.seal.fill`
+in `accent_text` when the host verified it) or `From Example Publisher ·
+Unverified`. `presentation().title` is now always a `String`; new fields
+`publisher_line`, `publisher_badge`, `icon_symbol`. 88 contract tests pass
+(isolated manifest), clippy `-D warnings` clean.

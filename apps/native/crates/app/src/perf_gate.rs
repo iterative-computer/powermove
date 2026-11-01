@@ -112,6 +112,19 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             }
                         },
                         "screens" => {},
+                        // Paint one frame now, even while the window is occluded
+                        // (locked screen): GPUI's displayLayer: renders synchronously.
+                        // Deferred so the frame callback never runs inside this update.
+                        "redraw" => {
+                            let view = v.host.borrow().gpui.clone();
+                            cx.spawn(async move |_, _| unsafe {
+                                let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+                                if !layer.is_null() {
+                                    let _: () = objc2::msg_send![layer, setNeedsDisplay];
+                                    let _: () = objc2::msg_send![layer, displayIfNeeded];
+                                }
+                            }).detach();
+                        },
                         "save" => v.save(None, cx),
                         "quit" => cx.quit(),
                         _ => anyhow::bail!("unknown perf operation"),

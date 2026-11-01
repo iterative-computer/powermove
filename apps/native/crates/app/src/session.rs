@@ -44,6 +44,10 @@ pub struct Controller {
     pub duration: f64,
     pub dimensions: [f64; 2],
     pub zoom: Option<f64>,
+    /// Composition background (`bg`); `None` when transparent.
+    pub background: Option<u32>,
+    /// Keyframes in the open composition, for the status bar.
+    pub keyframes: usize,
     pub drag: Option<panels::NumericDrag>,
     pub recovery_pending: bool,
     pub mcp: Arc<crate::mcp::Host>,
@@ -52,6 +56,27 @@ pub struct Controller {
     pub close_operation: Option<crate::mcp::Operation>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
+}
+
+/// Why a project opened as a copy, in user language (never the enum name).
+/// A banner with a lock badge replaces this status copy in P3.
+pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static str> {
+    use pm_kernel::locks::{CopyReason::*, OpenDecision};
+    let OpenDecision::AsCopy(reason) = decision else {
+        return None;
+    };
+    Some(match reason {
+        ForeignLibrary => "Opened as a copy because the project belongs to another library.",
+        ChangedOnDisk => "Opened as a copy because the file changed on disk.",
+        OfflineFile => "Opened as a copy because the file isn’t downloaded.",
+        CloudFolder => "Opened as a copy because the file is in a syncing folder.",
+        ReadOnly => "Opened as a copy because the file is read-only.",
+        OlderElectron => "Opened as a copy because an earlier version of Powermove saved it.",
+        Locked => "Opened as a copy because the project is open somewhere else.",
+        UncertainLock => {
+            "Opened as a copy because Powermove couldn’t confirm the project isn’t open elsewhere."
+        }
+    })
 }
 
 pub struct Bridge(pub Entity<Controller>);
@@ -76,7 +101,7 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
     }
     fn status(&self, cx: &App) -> String {
-        self.0.read(cx).message.clone()
+        self.0.read(cx).status_text()
     }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
         if let Some(path) = paths
@@ -88,6 +113,21 @@ impl pm_shell::integration::Integration for Bridge {
     }
 }
 impl Controller {
+    /// Status bar copy (language §14): a pending message or error, else
+    /// `Saved`/`Edited` with layer and keyframe counts.
+    pub fn status_text(&self) -> String {
+        // "Saved" is the state word the computed line already starts with.
+        if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
+            return self.message.clone();
+        }
+        let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
+        panels::status_line(
+            dirty,
+            self.path.is_some(),
+            self.layers().len(),
+            self.keyframes,
+        )
+    }
     pub fn new(
         kernel: KernelHandle,
         engine: Arc<EngineService>,
@@ -190,6 +230,8 @@ impl Controller {
             duration: 1.,
             dimensions: [1920., 1080.],
             zoom: None,
+            background: None,
+            keyframes: 0,
             drag: None,
             recovery_pending: false,
             mcp,
@@ -280,18 +322,24 @@ impl Controller {
             Plan::Current => {}
             Plan::Inline => {
                 let _span = crate::diag::span("refresh.rows");
-                self.rows.accept(key, rows::list(&p.snapshot), Some(key));
+                if self.rows.accept(key, rows::list(&p.snapshot), Some(key)) {
+                    self.keyframes = rows::keyframe_count(&p.snapshot);
+                }
             }
             Plan::Worker => {
                 let snapshot = p.snapshot.clone();
                 cx.spawn(async move |this, cx| {
                     let list = cx
                         .background_executor()
-                        .spawn(async move { rows::list(&snapshot) })
+                        .spawn(
+                            async move { (rows::list(&snapshot), rows::keyframe_count(&snapshot)) },
+                        )
                         .await;
                     let _ = this.update(cx, |v, cx| {
                         let latest = v.published.as_ref().map(|p| rows::key(&p.snapshot));
+                        let (list, keyframes) = list;
                         if v.rows.finish(key, list, latest) {
+                            v.keyframes = keyframes;
                             cx.notify();
                         }
                         if let Some(p) = v.published.clone() {
@@ -545,14 +593,19 @@ impl Controller {
             pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
         let media = media.unwrap_or_default();
         self.media = media.clone();
-        self.message = format!(
-            "Opened · {decision:?}{}",
-            if history_rejected {
-                " · Saved undo history could not be imported"
-            } else {
-                ""
-            }
-        );
+        self.background = composition
+            .get("bg")
+            .and_then(crate::node_string)
+            .and_then(panels::parse_background);
+        // The status bar shows document state and counts; only exceptions get words.
+        self.message = [
+            copy_notice(&decision),
+            history_rejected.then_some("Undo history from the last session couldn’t be restored."),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
         match self.engine.viewer(ViewerConfig {
             snapshot: p.snapshot.clone(),
             composition: comp,
@@ -713,7 +766,7 @@ impl Controller {
                         if as_path.is_some() {
                             v.path = as_path;
                         }
-                        v.message = recovery_copy.map_or("Saved".into(), |_| {
+                        v.message = recovery_copy.map_or(String::new(), |_| {
                             "Saved to a recovery copy; original was not overwritten".into()
                         });
                         v.load_recent(cx);
