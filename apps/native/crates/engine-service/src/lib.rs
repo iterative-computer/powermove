@@ -978,6 +978,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
                 shown,
+                interval,
             ));
             break;
         }
@@ -1010,6 +1011,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             pipeline,
             audio_host,
             shown,
+            interval,
         )) = work
         {
             drop(state);
@@ -1048,8 +1050,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match result {
                     Ok(Some(s)) => {
                         let completed = Arc::downgrade(&shared);
+                        // Ask for glass no earlier than half a refresh before the
+                        // predicted instant: the compositor otherwise sometimes
+                        // latches an early commit one refresh sooner, which shows
+                        // the frame before its audio (and moves the onset).
+                        let present_at = due.map(|d| match shown {
+                            Some(shown) if !legacy => (shown - interval / 2.).max(d),
+                            _ => d,
+                        });
                         s.submit_notifying(
-                            due,
+                            present_at,
                             Some(Arc::new(move || {
                                 // Bounded tokens cannot lose a wake; callbacks
                                 // never acquire the service state lock.

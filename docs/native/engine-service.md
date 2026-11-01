@@ -454,6 +454,9 @@ session was locked, so there are no on-screen rows.
 - **Render-ahead:** while content changes at most every other refresh, playing frames
   are encoded two refreshes before their target (one otherwise). WindowServer missed
   the vsync when GPU completion landed within ~2 ms of the target.
+- **Timed present:** playing frames use `presentDrawable:atTime:` at the predicted glass
+  time minus half a refresh (never before the target). The compositor otherwise
+  sometimes latched a frame a refresh early, before its audio.
 - `PM_ENGINE_PRESENT=legacy` restores the previous schedule for same-build A/B only.
 
 Layer configuration is unchanged (3 drawables, display sync, no transaction present):
