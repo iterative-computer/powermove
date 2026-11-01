@@ -199,3 +199,23 @@ cross-panel drops, native controls/IME/clipboard and picker commit/cancel,
 VoiceOver count/actions/announcements/virtual navigation, accessibility settings,
 60k scroll/reveal cost, actor durability and no UI-thread JS waits. Obtain Opus
 review screenshots/keyboard/VoiceOver evidence and sign-off before activation.
+
+### Linux result and merge baseline — 2026-11-01
+
+Normal locked workspace: **11 new adapter tests + 100 inspector tests + 273
+kernel tests pass** (384 total); the existing optional real-profile smoke remains
+ignored. The full v4 Bun suite reports **211 passed, zero failures, zero skipped**,
+including **39 panel tests** and **18 complete operation/native-tree/AX state
+goldens**. Strict all-target Clippy for both touched crates, cargo fmt, locked
+binary build, frozen Bun install, the panel's TypeScript check and Prettier check
+pass. The production panel browser-target bundle check finds no Node/DOM runtime
+imports. Gitleaks passes on staged changes before each commit.
+
+Merged `feat/native-engine` at `4204a153dbf8af916ef2b92d7ca01858e363516a`
+and `feat/na-v4-integrate` at `e5e209928817cb9434823ebf6ddf7d64f2213441`.
+The native-engine merge's only conflict was Cargo.lock; both the existing v4
+UI-kit dependencies and incoming model package entries were retained. The
+final v4 merge was conflict-free. The complete `check.sh` passed after both merges.
+Only the test harness's local package was added to the lockfile; no registry
+package was upgraded, and engine/Cargo.lock needed no change. Native rendering
+and G1–G6 / T1–T5 above remain open; this branch is not a production activation.
