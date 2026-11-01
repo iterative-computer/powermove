@@ -65,6 +65,7 @@ pub mod actor;
 pub mod commands;
 pub mod document;
 pub mod error;
+pub mod extensions;
 pub mod history;
 pub mod journal;
 pub mod kernel;

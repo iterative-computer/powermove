@@ -672,6 +672,10 @@ impl DocumentStore {
             .peek_undo()
             .ok_or(TransactionError::NothingToUndo)?
             .clone();
+        if record.selection.is_some() {
+            self.kernel_undo()?;
+            return Ok(self.revision());
+        }
         if !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
@@ -701,6 +705,10 @@ impl DocumentStore {
             .peek_redo()
             .ok_or(TransactionError::NothingToRedo)?
             .clone();
+        if record.selection.is_some() {
+            self.kernel_redo()?;
+            return Ok(self.revision());
+        }
         if !record.is_document() {
             return Err(TransactionError::ExternalEntry);
         }
@@ -1188,6 +1196,7 @@ pub(crate) struct Applied {
 /// What a kernel undo/redo step did ([`DocumentStore::kernel_undo`]).
 #[derive(Clone, Debug)]
 pub(crate) enum Step {
+    Selection,
     /// A document entry: its operations were applied as `revision`.
     Document {
         ops: Arc<[Op]>,
@@ -1384,6 +1393,22 @@ impl DocumentStore {
         record
     }
 
+    pub(crate) fn kernel_selection(&mut self, before: Selection, after: Selection) -> Option<u64> {
+        let id = self.history.push_selection(before, after);
+        if id.is_some() {
+            self.emit(StoreEvent::HistoryChanged);
+        }
+        id
+    }
+
+    pub(crate) fn trim_history_one(&mut self) -> bool {
+        let trimmed = self.history.trim_one_shared();
+        if trimmed {
+            self.emit(StoreEvent::HistoryChanged);
+        }
+        trimmed
+    }
+
     /// `history.external`: pushes a closure entry.
     pub(crate) fn kernel_push_external(
         &mut self,
@@ -1410,6 +1435,12 @@ impl DocumentStore {
             .peek_undo()
             .ok_or(TransactionError::NothingToUndo)?
             .clone();
+        if let Some(selection) = &record.selection {
+            self.set_selection(selection.0.clone());
+            self.history.mark_undone();
+            self.emit(StoreEvent::HistoryChanged);
+            return Ok(Step::Selection);
+        }
         if let Some(external) = record.external {
             self.history.mark_undone();
             self.tap(|_| Tap::Undo { external: true });
@@ -1446,6 +1477,12 @@ impl DocumentStore {
             .peek_redo()
             .ok_or(TransactionError::NothingToRedo)?
             .clone();
+        if let Some(selection) = &record.selection {
+            self.set_selection(selection.1.clone());
+            self.history.mark_redone();
+            self.emit(StoreEvent::HistoryChanged);
+            return Ok(Step::Selection);
+        }
         if let Some(external) = record.external {
             self.history.mark_redone();
             self.tap(|_| Tap::Redo { external: true });

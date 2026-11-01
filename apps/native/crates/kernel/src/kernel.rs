@@ -108,6 +108,10 @@ pub(crate) struct Slot {
 /// Every open project. See the module docs.
 pub struct Kernel {
     config: KernelConfig,
+    history_order: Vec<String>,
+    history_max_bytes: usize,
+    history_max_entries: usize,
+    pub(crate) trimmed_projects: Vec<String>,
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
     pub(crate) compacting: bool,
@@ -125,6 +129,10 @@ impl Kernel {
             .map(|_| Durability::new(config.journal.clone()));
         Kernel {
             config,
+            history_order: Vec::new(),
+            history_max_bytes: crate::history::DEFAULT_MAX_BYTES,
+            history_max_entries: crate::history::MAX_ENTRIES,
+            trimmed_projects: Vec::new(),
             durability,
             slots: BTreeMap::new(),
             library: None,
@@ -285,6 +293,7 @@ impl Kernel {
                 base_hash,
             },
         );
+        self.maintain_history(id);
         Ok(info)
     }
 
@@ -306,6 +315,7 @@ impl Kernel {
     pub(crate) fn remove_closed_project(&mut self, id: &str) -> bool {
         self.sessions.remove(id);
         std::sync::Arc::make_mut(&mut self.state.ui).remove(id);
+        self.history_order.retain(|p| p != id);
         self.slots.remove(id).is_some()
     }
 
@@ -339,6 +349,45 @@ impl Kernel {
         match self.project_dir(id) {
             Some(dir) => journal::recover(&dir, current_base, base_document),
             None => Recovery::Nothing,
+        }
+    }
+
+    /// Apply Memory.trim's shared budget. Background histories, oldest
+    /// recently active first, surrender distant redo then undo head before
+    /// the active history. Every project keeps its latest entry.
+    pub fn set_history_budget(&mut self, max_entries: usize, max_bytes: usize) {
+        self.history_max_entries = max_entries;
+        self.history_max_bytes = max_bytes;
+        if let Some(active) = self.history_order.last().cloned() {
+            self.maintain_history(&active);
+        }
+    }
+
+    fn maintain_history(&mut self, active: &str) {
+        self.history_order
+            .retain(|p| p != active && self.slots.contains_key(p));
+        self.history_order.push(active.to_owned());
+        let (mut entries, mut bytes) = self.slots.values().fold((0, 0), |(n, b), s| {
+            let stats = s.project.store().history().stats();
+            (n + stats.entries, b + stats.bytes)
+        });
+        for id in &self.history_order {
+            let Some(slot) = self.slots.get_mut(id) else {
+                continue;
+            };
+            while entries > self.history_max_entries || bytes > self.history_max_bytes {
+                let before = slot.project.store().history().stats();
+                if !slot.project.store_mut().trim_history_one() {
+                    break;
+                }
+                let after = slot.project.store().history().stats();
+                entries -= before.entries - after.entries;
+                bytes -= before.bytes - after.bytes;
+                if !self.trimmed_projects.contains(id) {
+                    self.trimmed_projects.push(id.clone());
+                }
+            }
+            slot.project.collect_retired();
         }
     }
 
@@ -418,6 +467,7 @@ impl Kernel {
                 }
             }
         }
+        self.maintain_history(id);
         Ok(handled)
     }
 

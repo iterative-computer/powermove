@@ -35,8 +35,8 @@
 //!   holds (a [`Probe`] per operation, checked against the staged tree).
 //!   Foreign writes folded in are split into their own history entry. If any
 //!   owner inverse conflicts (overlapping values, a create/delete the foreign
-//!   writer depends on, or an index-addressed write inside an array the
-//!   other side restructured), nothing is reverted: the entry is kept whole
+//!   writer depends on, or an ambiguous index identity), nothing is reverted:
+//!   the entry is kept whole
 //!   and the reply carries [`Notice::CommitWithNotice`]. Rule: S5's choice,
 //!   "the simplest implementation that satisfies the invariant", favouring
 //!   keeping work.
@@ -135,6 +135,7 @@ impl Request {
 
 #[derive(Clone, Debug)]
 pub enum Call {
+    Extension(crate::extensions::ExtensionCall),
     History(HistoryCall),
     Edit(EditCall),
     Gesture(GestureCall),
@@ -205,6 +206,11 @@ impl From<SelectionCall> for Call {
 
 #[derive(Clone, Debug)]
 pub enum HistoryCall {
+    /// Explicit navigation record; suppressed inside an entry or after undo.
+    Selection {
+        before: Selection,
+        after: Selection,
+    },
     Mark,
     Squash {
         mark: ActorHistoryMark,
@@ -338,6 +344,8 @@ pub enum Direction {
 /// A call's answer, in the form the API returns today.
 #[derive(Clone, Debug)]
 pub enum Reply {
+    Activation(u64),
+    Export(crate::extensions::ExportJob),
     /// `undefined`.
     Unit,
     Mark(ActorHistoryMark),
@@ -496,6 +504,7 @@ enum Probe {
 /// One write applied while the entry was open.
 #[derive(Clone, Debug)]
 struct EntryOp {
+    after_root: Option<Node>,
     writer: Writer,
     label: String,
     origin: Origin,
@@ -543,6 +552,7 @@ struct OpenEntry {
     before: Arc<Document>,
     ops: Vec<EntryOp>,
     leases: Vec<Lease>,
+    rebased: bool,
 }
 
 /// What a selective cancel reverts.
@@ -587,6 +597,7 @@ pub struct Project {
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
     notices: Vec<Notice>,
+    extensions: crate::extensions::Extensions,
 }
 
 #[derive(Clone, Debug)]
@@ -615,6 +626,7 @@ impl Project {
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
+            extensions: Default::default(),
         }
     }
 
@@ -705,6 +717,10 @@ impl Project {
         let before_mark = self.store.history_mark();
         let before_cursor = self.store.history().applied();
         let handled = match call {
+            Call::Extension(call) => {
+                let reply = self.extension(caller, call);
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
             Call::Selection(selection) => {
                 let reply = self.select(selection);
                 Handled::reply(self.ack(txid, None, None, reply))
@@ -763,15 +779,7 @@ impl Project {
                 self.mutations.pop_front();
             }
         }
-        for retired in self.store.take_retired() {
-            self.outbox.push(RealmMessage::Cleanup {
-                writer: Writer {
-                    realm: retired.realm,
-                    generation: retired.generation,
-                },
-                handle: retired.handle,
-            });
-        }
+        self.collect_retired();
         if let (Some(key), Some(ack)) = (txid, &handled.reply) {
             self.remember(key, ack.clone());
         }
@@ -809,6 +817,18 @@ impl Project {
             SelectionCall::Clear => self.store.clear_selection(),
         }
         Reply::Selection(self.store.selection().clone())
+    }
+
+    pub(crate) fn collect_retired(&mut self) {
+        for retired in self.store.take_retired() {
+            self.outbox.push(RealmMessage::Cleanup {
+                writer: Writer {
+                    realm: retired.realm,
+                    generation: retired.generation,
+                },
+                handle: retired.handle,
+            });
+        }
     }
 
     fn remember(&mut self, key: TxId, ack: Ack) {
@@ -893,6 +913,7 @@ impl Project {
         let probes = probes(root.as_ref(), &applied.forward, &applied.scopes);
         let entry = self.entry.as_mut().expect("open entry");
         entry.ops.push(EntryOp {
+            after_root: root,
             writer,
             label: label.to_owned(),
             origin,
@@ -917,6 +938,7 @@ impl Project {
             before: self.store.current().clone(),
             ops: Vec::new(),
             leases: Vec::new(),
+            rebased: false,
         });
         id
     }
@@ -929,7 +951,24 @@ impl Project {
         origin: Origin,
         before: &Document,
         ops: Vec<EntryOp>,
+        rebased: bool,
     ) -> bool {
+        if rebased {
+            let after = self.store.current();
+            let forward = pm_model::ops::diff_node_ops(before.root(), after.root());
+            let inverse = pm_model::ops::diff_node_ops(after.root(), before.root());
+            if forward.is_empty() {
+                return false;
+            }
+            let scopes = forward
+                .iter()
+                .chain(&inverse)
+                .map(|o| o.path().to_vec())
+                .collect();
+            self.store
+                .kernel_record(label, origin, forward, inverse, before, scopes);
+            return true;
+        }
         if ops.is_empty() {
             return false;
         }
@@ -959,7 +998,7 @@ impl Project {
             return false;
         };
         let label = label.unwrap_or(entry.label);
-        self.record_ops(label, entry.origin, &entry.before, entry.ops)
+        self.record_ops(label, entry.origin, &entry.before, entry.ops, entry.rebased)
     }
 
     /// Reverts `owner`'s operations at `ops[start..]` if every inverse still
@@ -973,39 +1012,31 @@ impl Project {
         if owned.is_empty() {
             return Ok(0);
         }
-        // Index hazards: an index-addressed write inside an array the other
-        // side restructured after it (or before it, for the owner's
-        // restructure) would undo the wrong element.
-        for &i in &owned {
-            let o = &entry.ops[i];
-            for f in entry.ops.iter().skip(i + 1) {
-                if f.writer == owner || f.navigation {
-                    continue;
-                }
-                // The owner restructured a list the foreign write then
-                // addressed by index, or the foreign write restructured a
-                // list the owner had addressed by index.
-                if hazard(o, f) || hazard(f, o) {
-                    return Err(format!(
-                        "{} changed the same list as this edit",
-                        describe(f.origin)
-                    ));
-                }
-            }
-        }
         let revision = self.revision() + 1;
         let mut root = self.store.current().root().cloned();
         let mut ops = Vec::new();
         for &i in owned.iter().rev() {
             let op = &entry.ops[i];
-            if !op.probes.iter().all(|p| probe_holds(root.as_ref(), p)) {
+            let mapped: Result<Vec<_>, _> = op
+                .probes
+                .iter()
+                .map(|p| rebase_probe(op.after_root.as_ref(), root.as_ref(), p))
+                .collect();
+            if !mapped?.iter().all(|p| probe_holds(root.as_ref(), p)) {
                 return Err("another writer changed what this edit changed".into());
             }
+            // Rebase each inverse against the tree at this operation's
+            // after-image. Update the source in parallel for multi-op batches.
+            let mut source = op.after_root.clone();
             for inv in &op.inverse {
-                root = crate::document::apply_one(root, inv, revision)
+                let mapped = rebase_op(source.as_ref(), root.as_ref(), inv)?;
+                source = crate::document::apply_one(source, inv, revision)
                     .map_err(|e| e.to_string())?
                     .0;
-                ops.push(inv.clone());
+                root = crate::document::apply_one(root, &mapped, revision)
+                    .map_err(|e| e.to_string())?
+                    .0;
+                ops.push(mapped);
             }
         }
         let document = Document::from_root(root, revision);
@@ -1018,6 +1049,7 @@ impl Project {
             },
         );
         let entry = self.entry.as_mut().expect("open entry");
+        entry.rebased = true;
         let n = owned.len();
         for &i in owned.iter().rev() {
             entry.ops.remove(i);
@@ -1063,7 +1095,13 @@ impl Project {
                 if closing {
                     let entry = self.entry.take().expect("open entry");
                     let label = entry.label.clone();
-                    self.record_ops(label.clone(), entry.origin, &entry.before, entry.ops);
+                    self.record_ops(
+                        label.clone(),
+                        entry.origin,
+                        &entry.before,
+                        entry.ops,
+                        entry.rebased,
+                    );
                     return Some(Notice::CommitWithNotice { label, reason });
                 }
                 Some(Notice::CommitWithNotice { label, reason })
@@ -1085,8 +1123,13 @@ impl Project {
                     .iter()
                     .find(|o| o.writer != owner)
                     .map_or_else(|| entry.label.clone(), |o| o.label.clone());
-                let recorded =
-                    self.record_ops(split_label.clone(), kept[0].origin, &entry.before, kept);
+                let recorded = self.record_ops(
+                    split_label.clone(),
+                    kept[0].origin,
+                    &entry.before,
+                    kept,
+                    entry.rebased,
+                );
                 recorded.then_some(Notice::ForeignSplit {
                     label: split_label,
                     writes,
@@ -1100,6 +1143,11 @@ impl Project {
     fn history(&mut self, caller: Caller, txid: Option<TxId>, call: HistoryCall) -> Handled {
         let writer = caller.writer;
         let reply = match call {
+            HistoryCall::Selection { before, after } => Reply::Entry(if self.entry.is_none() {
+                self.store.kernel_selection(before, after)
+            } else {
+                None
+            }),
             HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
                 document: self.store.doc_id(),
                 writer,
@@ -1235,6 +1283,7 @@ impl Project {
                 Handled::reply(self.ack(txid, None, None, Reply::Bool(false)))
             }
             Err(e) => Handled::reply(self.ack(txid, None, None, Reply::Throw(e.into()))),
+            Ok(Step::Selection) => Handled::reply(self.ack(txid, None, None, Reply::Bool(true))),
             Ok(Step::Document {
                 ops,
                 reverse,
@@ -1784,9 +1833,120 @@ impl Project {
         }
     }
 
+    fn extension(&mut self, caller: Caller, call: crate::extensions::ExtensionCall) -> Reply {
+        use crate::extensions::{Activation, ExportJob, ExtensionCall, ExtensionGeneration};
+        match call {
+            ExtensionCall::PinExport => {
+                if self
+                    .extensions
+                    .current
+                    .values()
+                    .any(|g| self.dead.contains(&g.writer))
+                {
+                    return Reply::Throw(KernelError::Guard(
+                        "An export extension generation is unavailable".into(),
+                    ));
+                }
+                Reply::Export(ExportJob {
+                    snapshot: self.store.snapshot(),
+                    generations: self.extensions.current.clone(),
+                })
+            }
+            ExtensionCall::BeginActivation {
+                extension,
+                definitions,
+            } => {
+                if extension.is_empty() {
+                    return Reply::Throw(KernelError::Guard("Extension id is empty".into()));
+                }
+                if self.extensions.current.get(&extension).is_some_and(|g| {
+                    g.writer.realm == caller.writer.realm
+                        && g.writer.generation >= caller.writer.generation
+                }) {
+                    return Reply::Throw(KernelError::Guard(
+                        "Activation requires a new generation".into(),
+                    ));
+                }
+                let ticket = crate::history::next_token();
+                self.extensions.staged.insert(
+                    ticket,
+                    Activation {
+                        generation: Arc::new(ExtensionGeneration {
+                            extension,
+                            writer: caller.writer,
+                            definitions,
+                        }),
+                        revision: self.revision(),
+                        epoch: self.extensions.epoch,
+                        ops: Vec::new(),
+                    },
+                );
+                Reply::Activation(ticket)
+            }
+            ExtensionCall::Stage { ticket, ops } => {
+                let Some(stage) = self
+                    .extensions
+                    .staged
+                    .get_mut(&ticket)
+                    .filter(|s| s.generation.writer == caller.writer)
+                else {
+                    return Reply::Throw(KernelError::UnknownTicket);
+                };
+                stage.ops.extend(ops);
+                Reply::Unit
+            }
+            ExtensionCall::Finish { ticket, success } => {
+                let Some(stage) = self
+                    .extensions
+                    .staged
+                    .get(&ticket)
+                    .filter(|s| s.generation.writer == caller.writer)
+                else {
+                    return Reply::Throw(KernelError::UnknownTicket);
+                };
+                if !success {
+                    self.extensions.staged.remove(&ticket);
+                    return Reply::Bool(false);
+                }
+                // Refuse folding: activation and generation publication must
+                // succeed together, independently of another live gesture.
+                if self.entry.is_some() {
+                    return Reply::Throw(KernelError::Guard(
+                        "Finish the active edit before activating an extension".into(),
+                    ));
+                }
+                if stage.revision != self.revision() || stage.epoch != self.extensions.epoch {
+                    self.extensions.staged.remove(&ticket);
+                    return Reply::Throw(KernelError::Guard(
+                        "Project changed during activation; retry activate".into(),
+                    ));
+                }
+                let stage = self.extensions.staged.remove(&ticket).expect("checked");
+                match self.write(
+                    caller.writer,
+                    caller.origin,
+                    "Activate extension",
+                    &WriteBody::Ops(stage.ops),
+                    true,
+                ) {
+                    Err(e) => Reply::Throw(e.into()),
+                    Ok(_) => {
+                        self.extensions.epoch += 1;
+                        Arc::make_mut(&mut self.extensions.current)
+                            .insert(stage.generation.extension.clone(), stage.generation);
+                        Reply::Bool(true)
+                    }
+                }
+            }
+        }
+    }
+
     fn realm_failed(&mut self, caller: Caller, txid: Option<TxId>) -> Handled {
         let failed = caller.writer;
         self.dead.insert(failed);
+        self.extensions
+            .staged
+            .retain(|_, s| s.generation.writer != failed);
         let mut notice = None;
         if let Some(entry) = &mut self.entry {
             entry.leases.retain(|l| l.owner != failed);
@@ -1796,7 +1956,13 @@ impl Project {
                 let entry = self.entry.take().expect("open");
                 let writes = entry.ops.iter().filter(|o| !o.navigation).count();
                 let label = entry.label.clone();
-                self.record_ops(label.clone(), entry.origin, &entry.before, entry.ops);
+                self.record_ops(
+                    label.clone(),
+                    entry.origin,
+                    &entry.before,
+                    entry.ops,
+                    entry.rebased,
+                );
                 notice = Some(Notice::Sealed { label, writes });
             }
         }
@@ -1838,15 +2004,6 @@ impl Project {
     }
 }
 
-fn describe(origin: Origin) -> &'static str {
-    match origin {
-        Origin::Interface => "Another edit",
-        Origin::Agent => "The agent",
-        Origin::Mcp => "An MCP client",
-        Origin::Extension => "An extension",
-    }
-}
-
 /// `edit.mutate` may change only the layer tree and compositions (plus the
 /// revision/provenance bookkeeping the kernel owns).
 fn structural_path(path: &[PathPart]) -> bool {
@@ -1857,44 +2014,130 @@ fn structural_path(path: &[PathPart]) -> bool {
     )
 }
 
-fn is_prefix(prefix: &[PathPart], path: &[PathPart]) -> bool {
-    prefix.len() <= path.len()
-        && prefix
-            .iter()
-            .zip(path)
-            .all(|(a, b)| a.property_key() == b.property_key())
+/// Map every index through a unique stable id, including nested arrays.
+/// An unkeyed changed array is ambiguous: keep the acknowledged work.
+fn path_index(part: &PathPart) -> Option<usize> {
+    let key = part.property_key();
+    let text = key.as_str()?;
+    let index: u32 = text.parse().ok()?;
+    (index < u32::MAX && index.to_string() == text).then_some(index as usize)
 }
 
-/// Arrays an operation restructures (inserts, deletes, reorders, splices).
-fn restructured(op: &EntryOp) -> Vec<&[PathPart]> {
+fn rebase_path(
+    source: Option<&Node>,
+    target: Option<&Node>,
+    path: &[PathPart],
+) -> Result<Vec<PathPart>, String> {
     let mut out = Vec::new();
-    for (i, f) in op.forward.iter().enumerate() {
-        match f {
-            Op::Order { path, .. } | Op::Insert { path, .. } | Op::Delete { path, .. } => {
-                out.push(path.as_slice())
-            }
-            Op::Leaf(p) => {
-                if let Some(scope) = op.scopes.get(i)
-                    && scope.len() < p.path.len()
+    for (depth, part) in path.iter().enumerate() {
+        let from = source.and_then(|r| r.lookup(&path[..depth]));
+        let to = target.and_then(|r| r.lookup(&out));
+        let mapped = if let (Some(NodeKind::Array(items)), Some(index)) =
+            (from.map(Node::kind), path_index(part))
+        {
+            let node = items.get(index);
+            if let Some(id) = node
+                .and_then(|n| n.get("id"))
+                .and_then(crate::model::string_of)
+            {
+                if items
+                    .iter()
+                    .filter(|n| n.get("id").and_then(crate::model::string_of) == Some(id))
+                    .count()
+                    != 1
                 {
-                    out.push(scope.as_slice());
+                    return Err("ambiguous index identity".into());
                 }
+                let Some(NodeKind::Array(next)) = to.map(Node::kind) else {
+                    return Err("indexed list no longer exists".into());
+                };
+                let matches: Vec<_> = next
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| n.get("id").and_then(crate::model::string_of) == Some(id))
+                    .collect();
+                if matches.len() != 1 {
+                    return Err("indexed element no longer has a unique identity".into());
+                }
+                PathPart::Index(matches[0].0 as f64)
+            } else if same(from, to) {
+                part.clone()
+            } else {
+                return Err("another writer changed an unkeyed list".into());
+            }
+        } else {
+            part.clone()
+        };
+        out.push(mapped);
+    }
+    Ok(out)
+}
+
+fn rebase_op(source: Option<&Node>, target: Option<&Node>, op: &Op) -> Result<Op, String> {
+    let path = rebase_path(source, target, op.path())?;
+    Ok(match op {
+        Op::Leaf(p) => Op::Leaf(Patch { path, ..p.clone() }),
+        Op::Order { ids, .. } => Op::Order {
+            path,
+            ids: ids.clone(),
+        },
+        Op::Insert { index, value, .. } => {
+            let from = source.and_then(|r| r.lookup(op.path()));
+            let to = target.and_then(|r| r.lookup(&path));
+            let index = if same(from, to) {
+                *index
+            } else {
+                let Some(NodeKind::Array(items)) = from.map(Node::kind) else {
+                    return Err("insert list no longer exists".into());
+                };
+                if items.is_empty() || *index as usize > items.len() {
+                    return Err("insert position has no stable neighbour".into());
+                }
+                let at_end = *index as usize == items.len();
+                let neighbour = if at_end {
+                    items.len() - 1
+                } else {
+                    *index as usize
+                };
+                let mut anchor = op.path().to_vec();
+                anchor.push(PathPart::Index(neighbour as f64));
+                let mapped = rebase_path(source, target, &anchor)?;
+                path_index(mapped.last().expect("anchor"))
+                    .and_then(|n| u32::try_from(n + usize::from(at_end)).ok())
+                    .ok_or("insert position is out of range")?
+            };
+            Op::Insert {
+                path,
+                index,
+                value: value.clone(),
             }
         }
-    }
-    out
+        Op::Delete { id, .. } => Op::Delete {
+            path,
+            id: id.clone(),
+        },
+    })
 }
 
-/// `later` writes by index inside an array `earlier` restructured.
-fn hazard(earlier: &EntryOp, later: &EntryOp) -> bool {
-    let arrays = restructured(earlier);
-    later.forward.iter().any(|f| {
-        let path = f.path();
-        arrays.iter().any(|a| {
-            path.len() > a.len()
-                && is_prefix(a, path)
-                && matches!(path[a.len()], PathPart::Index(_))
-        })
+fn rebase_probe(
+    source: Option<&Node>,
+    target: Option<&Node>,
+    probe: &Probe,
+) -> Result<Probe, String> {
+    Ok(match probe {
+        Probe::Path { path, node } => Probe::Path {
+            path: rebase_path(source, target, path)?,
+            node: node.clone(),
+        },
+        Probe::Element { array, id, node } => Probe::Element {
+            array: rebase_path(source, target, array)?,
+            id: id.clone(),
+            node: node.clone(),
+        },
+        Probe::Order { array, ids } => Probe::Order {
+            array: rebase_path(source, target, array)?,
+            ids: ids.clone(),
+        },
     })
 }
 

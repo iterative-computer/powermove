@@ -807,6 +807,50 @@ fn workspace_mutations_keep_partial_writes_without_document_undo_and_emit_events
 }
 #[test]
 fn v12_keys_and_writer_code_paths_and_v13_codec_accept_our_writes() {
+    let root = common::crate_dir().join("../../../..");
+    for tag in ["v1.2.0", "v1.3.0"] {
+        let verify = || {
+            Process::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/tags/{tag}^{{commit}}"),
+                ])
+                .current_dir(&root)
+                .output()
+                .expect("git is required")
+                .status
+                .success()
+        };
+        if !verify() {
+            let fetched = Process::new("git")
+                .args(["fetch", "origin", "tag", tag])
+                .current_dir(&root)
+                .output()
+                .expect("git fetch is required");
+            if !verify() {
+                assert!(
+                    !fetched.status.success(),
+                    "Fetch reported success but {tag} is not a valid commit"
+                );
+                // Write directly: libtest captures eprintln even for a skip,
+                // making its default output indistinguishable from a pass.
+                use std::io::Write as _;
+                writeln!(
+                    std::io::stderr().lock(),
+                    "SKIP tagged writer parity: {tag} unavailable after fetch: {}",
+                    String::from_utf8_lossy(&fetched.stderr)
+                )
+                .expect("report skipped parity check");
+                return;
+            }
+        }
+    }
+    // Probe the capability we need, not a version string. A missing runtime
+    // is a setup failure, never a successful parity check.
+    let runtime = [std::env::var_os("PM_TEST_JS_RUNTIME"), Some("node".into()), Some("bun".into())]
+        .into_iter().flatten().find(|program| Process::new(program).args(["--input-type=module", "-e", "import * as m from 'node:module'; if (!m.stripTypeScriptTypes && !globalThis.Bun) process.exit(1)"]).output().is_ok_and(|o| o.status.success()))
+        .expect("Tagged parity needs Node with stripTypeScriptTypes or Bun; set PM_TEST_JS_RUNTIME to its executable");
     let dir = common::TempDir::new("tag-parity");
     let v = Value::from("repeat".repeat(12000));
     fs::write(
@@ -831,7 +875,7 @@ fn v12_keys_and_writer_code_paths_and_v13_codec_accept_our_writes() {
         k.shell(ShellCall::Close(h)).unwrap();
     }
     let script = common::crate_dir().join("tests/tag_store_parity.mjs");
-    let result = Process::new("node")
+    let result = Process::new(runtime)
         .arg(script)
         .arg(&dir.0)
         .current_dir(common::crate_dir().join("../../../.."))
