@@ -1,7 +1,7 @@
 # v4 integration evaluation before freeze — 2026-11-01
 
 **Final recommendation: HOLD the production API/cutover freeze.** The integrated
-Linux headless suite is green: **171 Bun tests**, **95 distinct pm-surface tests**,
+Linux headless suite is green: **172 Bun tests**, **95 distinct pm-surface tests**,
 and **40/40 headless eval tasks (100%)**, including all ten supplied owner
 behavior specs, both with and without `--wire`. There are no failed, skipped or
 pending tests/tasks. The scaffold-with-wire comparison also passes 40/40.
@@ -22,7 +22,7 @@ No private owner names, source, identifiers or user projects were used.
 | Same tests via standalone manifest | 95 passed | Same tests, not 95 additional tests |
 | Workspace and standalone all-target Clippy, `-D warnings` | pass | No new warnings |
 | Workspace and standalone rustfmt | pass | Owned surface source/examples/tests |
-| Plain `bun test` | 171 passed / 0 failed / 0 skipped | Preload builds/configures native conformance examples |
+| Plain `bun test` | 172 passed / 0 failed / 0 skipped | Preload builds/configures native conformance examples |
 | Base and eval/examples TypeScript, Prettier, browser build | pass | Includes kit declarations and document-free bundle tests |
 | Default `eval --include-held-out` | 40 passed / 0 failed / 0 pending | Public briefs plus authored owner fixtures and native host-service checks |
 | `eval --include-held-out --wire` | 40 passed / 0 failed / 0 pending | Additionally validates surface batches in standalone Rust |
@@ -633,3 +633,63 @@ and durable settings, including project switch/disposal/lost ack. Verify native
 appearance against pm-design and Opus review, and measure input-to-presentation
 at display scales/120 Hz with no main-thread JS waits. No Linux result certifies
 those gates or v1–3 compatibility cutover.
+
+
+## Merge-ready follow-up — 2026-11-01
+
+Merged `origin/feat/native-engine` at
+`4204a153dbf8af916ef2b92d7ca01858e363516a` in merge commit `9f1d789d8`.
+Merged/check-confirmed `origin/feat/na-v4-integrate` at
+`483ff243da57b99f61981eab8f57de4b401be771` (already an ancestor).
+The sole merge conflict was `apps/native/Cargo.lock`: retain the upstream
+superset, adding four panel-model package entries while preserving all surface
+and design dependencies. No dependency versions were upgraded. `engine/Cargo.lock`
+and the standalone lock require no changes. No new crate or workspace member was
+introduced. Unowned files imported by the upstream merge were not edited locally.
+
+File-URL conversion now decodes native test/build paths and safely constructs the
+candidate-module base URL. A regression runs candidate evaluation from a directory
+containing spaces and `#`, canonicalizing its own synthetic temporary directory;
+it assumes neither the spelling nor ownership of macOS system temp symlinks.
+The owned tests use no `/proc`, ffmpeg/ffprobe, GNU-only command-line flags or
+unavailable spike fixtures. Test manifests and fixture sources live under the owned
+surface/JS paths; pm-design remains an existing declared workspace dependency.
+N3/N7 select exact path/identity handling; the merge-ready portability rules select
+system-neutral temporary-directory handling. No visual or UX behavior changed.
+
+Post-merge verification (same Linux/Bun/Rust versions as above):
+
+```sh
+# apps/native
+cargo test --locked -p pm-surface
+# 95 passed, 0 failed, 0 ignored
+cargo test --locked --manifest-path crates/surface/standalone/Cargo.toml
+# Same 95 tests passed, not additional distinct tests
+cargo clippy --locked -p pm-surface --all-targets -- -D warnings
+cargo clippy --locked --manifest-path crates/surface/standalone/Cargo.toml --all-targets -- -D warnings
+cargo fmt -p pm-surface --check
+cargo fmt --manifest-path crates/surface/standalone/Cargo.toml --check
+cargo build --locked --manifest-path crates/surface/standalone/Cargo.toml --examples
+# All pass
+
+# apps/native/js/v4
+bun test
+# 172 passed, 0 failed, 0 skipped
+bun run typecheck
+bunx tsc -p eval/tsconfig.json
+bun run format
+bun run build
+# All pass
+bun run eval --include-held-out
+bun run eval --include-held-out --wire
+bun run eval --include-held-out --scaffold --wire
+# Each: 40 passed, 0 failed, 0 pending; 10 ownerProductionBlocked
+```
+
+The tracked integration JSON/hash records above remain the prior successful
+rerun's evidence; the post-merge rerun preserves their score and production gates.
+The extra portability regression raises the Bun count from 171 to 172.
+**Production freeze remains HOLD.** The KernelData application binding,
+permission/media/resource adapters and macOS checks listed above remain open:
+IME/caret/clipboard, native focus and AX/VoiceOver, rendering/Opus review, input
+routing and physical presentation performance. No new DESIGN-TODO(opus).
