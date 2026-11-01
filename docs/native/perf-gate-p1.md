@@ -256,10 +256,13 @@ measurement. No push, tag, release or workflow dispatch.
 
 **Gate P1 remains NOT PASSED.** This pass root-caused the presentation rows,
 changed the engine service's playback schedule and the harness's A/V/drop
-definitions, and produced headless evidence. **The Mac stayed locked for the
-whole on-screen window (09:00 through commit at ~09:42, `CGSSessionScreenIsLocked = true`); no
-on-screen before/after row was measured.** The commands at the end reproduce
-every row under one owned GUI lock per batch (`latency`, each < 10 minutes).
+definitions, and measured on screen. The session was locked 09:00–09:45; after
+unlock, two probe batches (120/60 Hz) and the 120 Hz app A/B ran under the
+`latency` GUI lock (each < 10 min, display mode restored). **The 60 Hz and
+audio app A/B did not run:** the harness's mandatory 8 GiB free-disk check
+failed (7.2 GiB; shared target directory), and a fresh release build would
+have crossed this lane's 6 GB stop rule. An earlier probe run made behind
+the lock screen is superseded by the on-screen repeat.
 
 Conditions: Apple M5 / 16 GiB, macOS 27.2 (26B5086k), AC power, built-in
 Retina panel only (3024×1964, ProMotion: minimum/maximum refresh interval
@@ -271,7 +274,7 @@ build also contained other lanes' **uncommitted** GPUI-CE/shell edits
 
 | Row | Root cause | Evidence |
 |---|---|---|
-| Edit → present, cached scrub (p95 30.5 / 24.2 ms vs ≤ 9.333) | **WindowServer composition latency, not Powermove.** commit → `presentedTime` for an asynchronous `CAMetalLayer` present is ~2.4 refresh intervals at 120 Hz. Kernel, service and render work total ≈ 2–3 ms. | A standalone Swift probe (`tools/perf-gate/present_probe.swift`: layer-hosting root, RGBA16F EDR `CAMetalLayer`, clear-only frame) measured commit → display **p50 20.1 / p95 25.3 ms** at 120 Hz, n=39. **No layer setting moved it:** `maximumDrawableCount` 2 (20.3/24.4), `displaySyncEnabled = NO` (19.7/23.7), 120 Hz `CADisplayLink` voting (19.1/24.3), `presentsWithTransaction` + main-thread present (19.2/24.6), EDR off (20.1/24.6). GPU commit → completion was ~1 ms. **Caveat:** these ran while the session was locked (window behind the lock screen; display links did not fire, so the `link=1` and continuous variants are invalid). They must be repeated on screen. |
+| Edit → present, cached scrub (p95 30.5 / 24.2 ms vs ≤ 9.333) | **WindowServer composition latency, not Powermove.** An asynchronous `CAMetalLayer` present reaches glass ~20 ms (p50) / ~24 ms (p95) after commit at **both** 120 and 60 Hz, so the delay is time-based, not a frame count. Kernel, service and render work total ≈ 2–3 ms. | **On screen**, standalone Swift probe (`tools/perf-gate/present_probe.swift`: layer-hosting root, RGBA16F EDR `CAMetalLayer`, clear-only frame, n=39 each). 120 Hz commit → display p50/p95 (ms): default **20.5/24.4**, live 120 Hz `CADisplayLink` 19.8/24.4, `maximumDrawableCount` 2 19.8/23.8, `displaySyncEnabled = NO` 19.8/23.7, `presentsWithTransaction` + main present 20.2/24.1. 60 Hz: 22.7/45.4 (one tail), live link 20.8/24.5, 2 drawables 21.6/24.9, sync off 19.8/24.1, transaction 20.7/24.7. **No layer setting moves the floor.** In continuous mode, a present for the link's target displays exactly 3 refreshes later at 120 Hz (24.99 ms p50 and p95); 3 drawables add one refresh of commit-side queueing over 2 (32.4 vs 24.1 ms commit → display). |
 | 60 s playback gaps (34 at 120 Hz) | **Drawable-pool starvation by re-presenting held frames.** The service presented every display tick, and a 30 fps frame was presented 4× at 120 Hz. A drawable stays busy acquire → commit → ~2.4 intervals → on glass → released after the *next* scanout, ≈ 3.5–4 intervals. Three drawables (the CAMetalLayer maximum) cannot sustain one present per vsync, so `nextDrawable` blocks and ticks are missed. This is also why 2 drawables showed 2,266 gaps. | Pool arithmetic from the measured lag. Headless: the new schedule submits exactly **1,800** frames per 60 s (30 fps content) and holds **5,290** ticks at 120 Hz / **1,796** at 60 Hz. |
 | A/V mean 34.6 / jitter p95 12.6 ms | **(1) Metric:** every scanout of a held frame was compared with its frame-start audio time, giving offsets 0/8.3/16.7/25 ms + lag. That is exactly ±12.5 ms of "jitter" (reported 12.558). **(2) Mapping:** the picture was chosen for the *target* vsync, but it reaches glass one lag (~22 ms) later. **(3) Phase:** audio started at `now + 50 ms`, not on the display's vsync line, so onsets cannot be closer than the phase difference (≤ ±4.2 ms at 120 Hz). | Same arithmetic reproduced in the new harness test (`av_all_presentations` jitter 12.5 ms, onset jitter 0). |
 | Main-thread GPU waits (edit row's ≤ 4 ms clause) | **GPUI-CE vendor:** `composition::present` always returns `Some(Transaction)`, so `MacWindow::draw` sets `presents_with_transaction(true)` on every frame and never clears it. Every GPUI frame then runs `commit(); wait_until_scheduled(); present()` on the main thread inside the composition `CATransaction`. | Code inspection (`gpui_macos/src/window.rs` `draw`, `composition.rs` `present`); not timed this pass. |
@@ -307,31 +310,65 @@ except while slot geometry is moving.
   a drop count with held frames. `native.py --lock-owner` and
   `PM_ENGINE_PRESENT=legacy` (A/B of the previous schedule in the same build)
   were added.
+- **Follow-ups after the on-screen run (tested headlessly only):** the loop-wrap
+  lead fix, and adaptive render-ahead (2 refreshes while content changes at
+  most every other refresh, else 1).
 - **Not changed:** drawable count stays 3, display sync stays on and
   `presentsWithTransaction` stays off on the viewer. Measurements showed no
   latency benefit, and transaction coupling would add main-thread waits.
 
-### Before / after
+### Before / after (on screen, 120 Hz, same release build, `PM_ENGINE_PRESENT=legacy` vs default)
 
-| Row | Before (fix pass) | After | Status |
-|---|---|---|---|
-| Edit → presentation 120 / 60 Hz p95 (ms) | 30.545 / 32.110 | **not measured on screen (locked)** | FAIL expected: windowed compositor floor ≈ 25 ms p95 > 9.333 |
-| Cached scrub 120 / 60 Hz p95 (ms) | 24.249 / 24.506 | **not measured on screen** | FAIL expected for the same reason |
-| Content frames dropped, 60 s, 120 / 60 Hz | 34 / 3 raw scanout gaps | headless: 0 skipped of 1,800 content frames at both rates; on screen **not measured** | UNVERIFIED |
-| Worker → completion p95 120 / 60 Hz (ms) | 3.445 / 4.147 (headless dev, earlier) | **1.806 / 2.657** (headless dev, same bench) | PASS local 4.167 / 8.333 bounds, offscreen only |
-| Presents per 60 s at 120 Hz (30 fps content) | ~7,141 | **1,800** (+5,290 held) headless | Drawable/compositor load ÷ ~4 |
-| A/V mean / p95 jitter (ms) | 34.634 / 12.558 (all presentations) | **not measured on screen**; harness reproduces the 12.5 ms artefact and 0 onset jitter | UNVERIFIED |
+Public shape fixture (640×360, 30 fps, 3 s loop), 30 cached seeks + 30 edits,
+then 60 s looped playback. Load (1-min) 8.2 → 5.9 legacy, 5.7 → 3.9 default.
+Existing apps retained, as in earlier passes. Quantiles are nearest rank.
+
+| Row (120 Hz) | Fix pass (earlier build) | Legacy schedule, this build | New schedule | Verdict |
+|---|---|---|---|---|
+| Edit → presentation p50 / p95 (ms) | 23.429 / 30.545 | 23.528 / 24.407 | **22.958 / 24.533** | FAIL ≤ 9.333; at the compositor floor |
+| Cached scrub p50 / p95 (ms) | 22.958 / 24.249 | 22.918 / 24.333 | **22.712 / 24.489** | FAIL ≤ 9.333; at the floor |
+| Presents in 60 s (30 fps content) | 7,141 | 7,175 | **1,800** (+5,486 held ticks) | Drawable/compositor load ÷ 4 |
+| Commit → display p50 / p95 (ms) | 24.706 p95 | 24.503 / 24.687 | **19.783 / 21.172** | One refresh of drawable queueing removed |
+| Target → display p50 / p95 (ms) | — | 16.5 / 24.5 (2–3 refreshes, bimodal) | **13.739 / 14.024** (1.65 refreshes, stable) | Predictable lag for A/V |
+| Raw scanout gaps > 1.5 refresh | 34 | 19 | 1,799 (expected: held frames) | Not a drop measure any more |
+| Dropped content frames (skipped + late onsets) | — | 12 (0 + 12) | **36 (0 + 36)** | FAIL zero; see below |
+| Worker → completion p95, new frames only (ms) | 1.511 (all presents) | 2.624 | 4.061 | PASS 4.167 local bound, barely |
+| A/V | 34.634 / 12.558 (all presentations) | not run | not run | UNVERIFIED (disk guard) |
+
+The 36 dropped onsets break down as follows.
+- **19 are a bug in this change, at the loop wrap (every 3.00 s).** The
+  half-refresh lead wrapped to the loop start, and a `lead ≥ plain` guard fell
+  back to the unrounded time, so the first frame of each pass landed one
+  refresh late. **Fixed after the run (the wrapped lead is used); not
+  re-measured.**
+- **17 are WindowServer missing a vsync** (display − target 1.65 → 2.65
+  refreshes). In each one, GPU completion landed ≈ 2 ms before the target
+  (median −4.35 ms for on-time frames).
+- **Follow-up, not re-measured:** while content changes at most every other
+  refresh, frames are now encoded **two** refreshes ahead. This applies to
+  30 fps at 120/60 Hz but not at content rate = refresh rate, where it would
+  hold a third drawable. It gives completion a full extra refresh of slack.
+- Worker p95 rose because every submission is now a new frame with a full
+  render, and fewer submissions let the GPU clock down. Legacy's per-present
+  average was diluted by 3 cache hits per frame.
+
+Headless service (dev, offscreen) after the change: exactly **1,800** submissions
+per 60 s at 120 and 60 Hz, **5,290 / 1,796** held ticks, worker → completion p95
+**1.806 / 2.657 ms** (earlier 3.445 / 4.147 ms), 0 GPU failures.
 
 ### What still fails or is open
 
-- **Edit/scrub ≤ vsync + 1 against `presentedTime` looks unattainable for a
-  windowed `CAMetalLayer` on this OS/machine.** The probe floor (p95 ≈ 24–25 ms
-  at 120 Hz) is ~2.7× the budget before any app work. Electron's 15–19 ms
-  reference ends at GPU completion + rAF, not glass. A matched-endpoint
-  Electron measurement is required before any ratio is meaningful, and the
-  §5 row needs either a defined endpoint (e.g. commit, or the compositor
-  floor subtracted) or a council decision. If the on-screen probe confirms the
-  floor, no service/layer change can meet the absolute clause.
+- **Edit/scrub ≤ vsync + 1 against `presentedTime` is unattainable for a
+  windowed `CAMetalLayer` on this OS/machine.** The on-screen probe floor
+  (p95 ≈ 24 ms at 120 and 60 Hz) is ~2.6× the 120 Hz budget before any app
+  work, and the app now sits on that floor (p95 24.4–24.5 ms). Electron's
+  15–19 ms reference ends at GPU completion + rAF, not glass, and is subject to
+  the same compositor. The §5 row needs a defined endpoint (e.g. commit, or
+  the floor subtracted) and a matched-endpoint Electron run. This needs an
+  orchestrator/council decision, not more service work.
+- **Zero dropped frames** is not shown. The loop-wrap fix and two-ahead encoding
+  should remove the 19 wrap drops and most of the 17 compositor misses. Both
+  need an on-screen re-run (≥ 8 GiB free, rebuild).
 - **A/V ≤ 1 / ≤ 2 ms** depends on (a) a stable lag estimate (lag variance of one
   refresh appears directly as onset jitter), (b) the grid being current at Play
   (the start uses the last known vsync; ProMotion may re-phase after idle),
