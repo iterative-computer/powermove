@@ -1,0 +1,45 @@
+[package]
+name = "pm-native-s3-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Isolated build harness avoids writing the shared native workspace lockfile.
+[workspace]
+resolver = "3"
+
+[profile.dev]
+debug = 0
+incremental = false
+[profile.test]
+debug = 0
+incremental = false
+
+[[bin]]
+name = "pm-native-s3-spike"
+path = "../src/main.rs"
+
+[dependencies]
+anyhow = "1"
+gpui = { package = "gpui-ce", path = "../../../vendor/gpui-ce/crates/gpui", default-features = false }
+gpui_macos = { package = "gpui_ce_macos", path = "../../../vendor/gpui-ce/crates/gpui_macos" }
+pm-gpu = { path = "../../../../../engine/crates/pm-gpu" }
+pm-render = { path = "../../../../../engine/crates/pm-render" }
+pm-model = { path = "../../../../../engine/crates/pm-model" }
+pm-export = { path = "../../../../../engine/crates/pm-export" }
+pm-time = { path = "../../../../../engine/crates/pm-time" }
+pm-protocol = { path = "../../../../../engine/crates/pm-protocol", default-features = false }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+wgpu-hal = { version = "30", features = ["metal"] }
+metal = "0.33"
+foreign-types = "0.5"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-quartz-core = "0.3"
+objc2-core-graphics = "0.3"
+block = "0.1"
+raw-window-handle = "0.6"
+async-channel = "2"
+serde_json = "1"
+half = "2"
