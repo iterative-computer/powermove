@@ -395,3 +395,55 @@ test("drag payload families preserve canonical MIME keys, current drag identity 
     label: "synthetic-effect",
   });
 });
+test("control binding factories preserve work-area limits and linked-scale authored intent", () => {
+  const host = new FakeHost(),
+    realm = new CompatRealm({
+      id: "bindings",
+      generation: 1,
+      initial: host.publication(),
+      host,
+      capabilities: {
+        anim: {
+          ev: (_layer: unknown, key: string) => (key === "scale.x" ? 50 : 100),
+        },
+      },
+    });
+  Object.assign(realm.PM.proj, { dur: 10, fps: 30, work: [1, 9] });
+  realm.PM.proj.layers.push({ id: "scaled", scaleLinked: true, p: {} });
+  const binding = realm.extension("bindings").api.ui.controls.binding;
+  expect(
+    binding.layerFieldBinding("scaled", "layer.name").command("Name"),
+  ).toEqual({ type: "set_layer", target: "scaled", patch: { name: "Name" } });
+  expect(
+    binding.contentBinding("scaled", "content.text").command("Caption"),
+  ).toEqual({
+    type: "set_content",
+    target: "scaled",
+    patch: { text: "Caption" },
+  });
+  expect(binding.compositionBinding("workArea.start").command(20)).toEqual({
+    type: "set_composition",
+    patch: { workArea: [9 - 1 / 30, 9] },
+  });
+  const scale = binding.channelBinding("scaled", "transform.scale.x", {
+    time: 2,
+    origin: "synthetic",
+    label: "Scale",
+  });
+  scale.prepare();
+  const commands = scale.command(30);
+  expect(
+    commands.map((command: Data) => [command.path, command.value]),
+  ).toEqual([
+    ["scale.x", 30],
+    ["scale.y", 60],
+  ]);
+  expect(commands[0]).toMatchObject({
+    type: "set_property",
+    time: 2,
+    mode: "auto",
+    preserveHandEdits: false,
+    markIntent: "human",
+  });
+  expect(scale.origin).toBe("synthetic");
+});

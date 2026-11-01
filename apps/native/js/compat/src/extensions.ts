@@ -66,7 +66,7 @@ export function extensionAPI(
     anim: namespaces.anim,
     model: namespaces.model,
     transport: namespaces.transport,
-    project: namespaces.project,
+    project: mergeDescriptors(namespaces.project, { get: () => realm.PM.proj }),
     util: namespaces.util,
   };
   namespaces.ui = mergeDescriptors(namespaces.ui, {
@@ -237,6 +237,7 @@ export function extensionAPI(
         id,
         name: id,
         version: "0.0.0",
+        ...backends.manifest,
         ...settings.manifest,
         apiVersion,
       },
