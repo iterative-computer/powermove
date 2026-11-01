@@ -2403,7 +2403,6 @@ dependencies = [
 name = "pm-node"
 version = "0.1.0"
 dependencies = [
- "dhat",
  "image",
  "libc",
  "napi",

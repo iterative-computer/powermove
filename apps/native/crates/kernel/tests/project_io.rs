@@ -3,12 +3,12 @@
 mod common;
 
 use common::*;
-use pm_mac_core::project_io::save::{SaveLayout, VerifyLevel, WriteFault};
-use pm_mac_core::project_io::{
+use pm_kernel::project_io::save::{SaveLayout, VerifyLevel, WriteFault};
+use pm_kernel::project_io::{
     BackupPolicy, MediaEntry, MediaSource, OpenOptions, SaveOptions, SaveTarget, list_backups,
     open_project,
 };
-use pm_mac_core::{Command, DocumentStore, Origin, ProjectIoError};
+use pm_kernel::{Command, DocumentStore, Origin, ProjectIoError};
 use pm_model::canonical::{canonical_project, project_of};
 use pm_model::container::{ContainerFormat, ReadOptions, read_container};
 use pm_model::json::{Value, parse, to_canonical_string};

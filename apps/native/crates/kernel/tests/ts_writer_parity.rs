@@ -5,9 +5,9 @@
 mod common;
 
 use common::*;
-use pm_mac_core::project_io::save::SaveLayout;
-use pm_mac_core::project_io::{SaveOptions, SaveTarget};
-use pm_mac_core::{Command, Origin};
+use pm_kernel::project_io::save::SaveLayout;
+use pm_kernel::project_io::{SaveOptions, SaveTarget};
+use pm_kernel::{Command, Origin};
 
 /// A first save of a project: document, then media, index, footer.
 #[test]

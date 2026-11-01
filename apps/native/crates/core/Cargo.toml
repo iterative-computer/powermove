@@ -1,24 +1,13 @@
 [package]
 name = "pm-mac-core"
-description = "Powermove for Mac: the single document authority (open/save .pmv, revisions, transactions, undo, selection, synchronous queries)"
+description = "Compatibility name for pm-kernel's document layer (thin re-export; see docs/native/kernel.md)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
-# Pure Rust, no GPUI: panels, the MCP server and extensions share it, and it
-# is fully unit-testable without a window. Engine crates are linked by path
-# (docs/gpui/engine-boundary.md, section 2).
+# Thin re-export kept so lanes that started against pm-mac-core keep
+# compiling. Delete it once no crate depends on it (plan v6 N5).
 
 [dependencies]
-pm-model = { path = "../../../../engine/crates/pm-model" }
-pm-wasm = { path = "../../../../engine/crates/pm-wasm" }
-sha2 = "0.10"
-# Edit kernels (groups, reparenting, anchors) and the evaluator's temporal
-# math, both already linked through pm-wasm.
-pm-edit = { path = "../../../../engine/crates/pm-edit" }
-pm-eval = { path = "../../../../engine/crates/pm-eval" }
-# Expression validation (`expressionDiagnostic`).
-pm-expr = { path = "../../../../engine/crates/pm-expr" }
-# Text types for the measure stub the group-placement kernel takes.
-pm-text = { path = "../../../../engine/crates/pm-text", default-features = false }
+pm-kernel = { path = "../kernel" }

@@ -3,9 +3,9 @@
 //! `model.ts`, `shortcuts.ts` paste/duplicate/order/split, the timeline's
 //! trims, `layer-groups.ts`).
 
-use pm_mac_core::commands::keyframes::KeyframeCommand;
-use pm_mac_core::commands::layers::{AddLayer, LayerPatch, ParentChange, Restack};
-use pm_mac_core::{
+use pm_kernel::commands::keyframes::KeyframeCommand;
+use pm_kernel::commands::layers::{AddLayer, LayerPatch, ParentChange, Restack};
+use pm_kernel::{
     Command, CommandError, DocumentStore, GroupCommand, LayerCommand, Origin, TimingCommand,
     TransactionError,
 };
@@ -94,8 +94,8 @@ fn store() -> DocumentStore {
 
 fn layer(store: &DocumentStore, id: &str) -> Value {
     let root = store.root().unwrap();
-    let loc = pm_mac_core::model::find_layer(root, id).unwrap_or_else(|| panic!("no layer {id}"));
-    pm_mac_core::model::layer_at(root, &loc).unwrap().to_value()
+    let loc = pm_kernel::model::find_layer(root, id).unwrap_or_else(|| panic!("no layer {id}"));
+    pm_kernel::model::layer_at(root, &loc).unwrap().to_value()
 }
 
 fn ids(store: &DocumentStore) -> Vec<String> {
@@ -867,8 +867,8 @@ fn key_drags_restart_from_the_pointer_down_state() {
 
 #[test]
 fn align_moves_the_common_box_to_the_frame_edge_once() {
-    use pm_mac_core::TransformCommand;
-    use pm_mac_core::commands::transform::AlignMode;
+    use pm_kernel::TransformCommand;
+    use pm_kernel::commands::transform::AlignMode;
     let mut s = store();
     let align = || TransformCommand::Align {
         layer_ids: vec!["box".into(), "top".into()],

@@ -60,7 +60,6 @@ test-hooks = []
 
 [dev-dependencies]
 tempfile = "3"
-dhat = "0.3"
 pm-model = { path = "../pm-model" }
 # Export frame rates in the WebCodecs encode tests.
 pm-time = { path = "../pm-time" }

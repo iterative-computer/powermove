@@ -6,7 +6,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::*;
-use pm_mac_core::{
+use pm_kernel::{
     ChangeCause, Command, CommandError, DocumentStore, Origin, StoreEvent, TransactionError,
 };
 use pm_model::json::{Value, parse};
@@ -81,8 +81,8 @@ fn a_command_publishes_one_revision_and_one_undo_step() {
     assert_eq!(opacity_of(&store, "s1"), Some(40.0));
     // Snapshots are immutable: the old one still says 100.
     let root = before.document.root().unwrap();
-    let loc = pm_mac_core::model::find_layer(root, "s1").unwrap();
-    let old = pm_mac_core::model::layer_at(root, &loc).unwrap();
+    let loc = pm_kernel::model::find_layer(root, "s1").unwrap();
+    let old = pm_kernel::model::layer_at(root, &loc).unwrap();
     assert_eq!(
         old.get("p")
             .unwrap()
@@ -364,7 +364,7 @@ fn transactions_are_all_or_nothing() {
     let err = store
         .transact_with(
             &[opacity("s1", 1.0)],
-            pm_mac_core::TransactOptions {
+            pm_kernel::TransactOptions {
                 expected_revision: Some(1),
                 ..Default::default()
             },
@@ -663,12 +663,12 @@ fn queries_follow_the_committed_revision() {
     let [_, _, _, _, cx, cy] = q.world_matrix(None, "L00a", 0.0).unwrap();
     // The top layer is text: without fonts the pick must say so, not "miss".
     match q.pick(None, cx, cy, 0.0, &Default::default()) {
-        Err(pm_mac_core::QueryError::NeedsFonts) => {}
+        Err(pm_kernel::QueryError::NeedsFonts) => {}
         other => assert!(other.is_ok(), "{other:?}"),
     }
     assert!(matches!(
         q.evaluate(None, "missing", "opacity", 0.0),
-        Err(pm_mac_core::QueryError::LayerNotFound(_))
+        Err(pm_kernel::QueryError::LayerNotFound(_))
     ));
     assert_eq!(q.layers(None).len(), store.layers().len());
 
@@ -715,7 +715,7 @@ fn pick_binds_the_hit_to_a_stable_id() {
     let b = q.bounds(None, &ids[0], 0.0).unwrap().unwrap();
     // Bounds are in the layer's plane; the world matrix maps them to the
     // composition.
-    let to_comp = |q: &mut pm_mac_core::QueryContext, id: &str, x: f64, y: f64| {
+    let to_comp = |q: &mut pm_kernel::QueryContext, id: &str, x: f64, y: f64| {
         let [a, b, c, d, e, f] = q.world_matrix(None, id, 0.0).unwrap();
         (a * x + c * y + e, b * x + d * y + f)
     };
