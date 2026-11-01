@@ -707,7 +707,7 @@ fn prompt_is_bound_to_identity_release_permission_and_revision() {
         panic!()
     };
     let mut forged = p.clone();
-    forged.permission = Permission::Assets;
+    forged.permissions = vec![Permission::Assets];
     assert_eq!(
         respond(&mut k, &forged, Decision::Allow).unwrap_err(),
         Error::Stale
@@ -737,6 +737,133 @@ fn failed_permission_commit_never_issues_grant() {
         request(&k, &id("sample-ext"), Permission::Assets).unwrap(),
         Admission::Prompt(_)
     ));
+}
+#[test]
+fn install_consent_groups_all_undecided_permissions_in_shipped_order() {
+    let (mut k, _dir, _a) = installed(&PERMISSION_ORDER);
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(prompt.permissions, PERMISSION_ORDER);
+    assert!(prompt.requires_trusted_realm);
+    for permission in PERMISSION_ORDER {
+        assert_eq!(
+            request(&k, &id("sample-ext"), permission).unwrap(),
+            Admission::Prompt(prompt.clone())
+        );
+    }
+    let decisions = prompt
+        .permissions
+        .iter()
+        .map(|p| {
+            (
+                *p,
+                if *p == Permission::FullAccess {
+                    Decision::Deny
+                } else {
+                    Decision::Allow
+                },
+            )
+        })
+        .collect();
+    respond_all(&mut k, &prompt, &decisions).unwrap();
+    assert_eq!(state(&k).revision, prompt.revision + 1);
+    assert_eq!(state(&k).permissions.len(), 5);
+    assert_eq!(
+        request(&k, &id("sample-ext"), Permission::FullAccess).unwrap(),
+        Admission::Denied
+    );
+    assert_eq!(
+        request(&k, &id("sample-ext"), Permission::Network).unwrap(),
+        Admission::Granted
+    );
+    assert_eq!(respond_all(&mut k, &prompt, &decisions), Err(Error::Stale));
+}
+
+#[test]
+fn grouped_consent_is_atomic_and_requires_exact_response_coverage() {
+    let (mut k, _dir, _a) = installed(&[Permission::Network, Permission::Assets]);
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    let before = state(&k);
+    for decisions in [
+        std::collections::BTreeMap::new(),
+        [(Permission::Assets, Decision::Allow)].into(),
+        [
+            (Permission::Assets, Decision::Allow),
+            (Permission::Clipboard, Decision::Allow),
+        ]
+        .into(),
+        [
+            (Permission::Assets, Decision::Allow),
+            (Permission::Network, Decision::Allow),
+            (Permission::Clipboard, Decision::Allow),
+        ]
+        .into(),
+    ] {
+        assert_eq!(
+            respond_all(&mut k, &prompt, &decisions),
+            Err(Error::Invalid("permission response coverage"))
+        );
+        assert_eq!(state(&k), before);
+    }
+    k.fail_next_commit = true;
+    assert!(respond(&mut k, &prompt, Decision::Allow).is_err());
+    assert_eq!(state(&k), before);
+    respond(&mut k, &prompt, Decision::Allow).unwrap();
+    assert_eq!(state(&k).revision, 2);
+    assert_eq!(state(&k).permissions.len(), 2);
+}
+
+#[test]
+fn update_prompts_only_for_new_undecided_permissions_and_preserves_denials() {
+    let (mut k, _dir, mut a) = installed(&[Permission::Assets, Permission::Clipboard]);
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Assets).unwrap()
+    else {
+        panic!()
+    };
+    respond_all(
+        &mut k,
+        &prompt,
+        &[
+            (Permission::Assets, Decision::Allow),
+            (Permission::Clipboard, Decision::Deny),
+        ]
+        .into(),
+    )
+    .unwrap();
+    install(
+        &mut k,
+        &mut a,
+        "test-profile",
+        &verified(
+            "2",
+            &[
+                Permission::Assets,
+                Permission::Clipboard,
+                Permission::Network,
+            ],
+        ),
+        Some(2),
+    )
+    .unwrap();
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(prompt.permissions, vec![Permission::Network]);
+    respond(&mut k, &prompt, Decision::Allow).unwrap();
+    assert_eq!(
+        request(&k, &id("sample-ext"), Permission::Clipboard).unwrap(),
+        Admission::Denied
+    );
+    assert_eq!(
+        request(&k, &id("sample-ext"), Permission::Assets).unwrap(),
+        Admission::Granted
+    );
 }
 #[test]
 fn full_access_routes_to_trusted_realm_without_bypassing_store_policy() {
@@ -770,13 +897,13 @@ fn method_policy_denies_unknown_methods_and_requires_every_capability() {
             .is_err()
     );
     grant(&mut k, Permission::Assets);
+    p.authorize(&k, &id("sample-ext"), "assets.importUrl")
+        .unwrap();
+    permission::revoke(&mut k, &id("sample-ext"), 2, Permission::Network).unwrap();
     assert!(
         p.authorize(&k, &id("sample-ext"), "assets.importUrl")
             .is_err()
     );
-    grant(&mut k, Permission::Network);
-    p.authorize(&k, &id("sample-ext"), "assets.importUrl")
-        .unwrap();
     assert!(p.authorize(&k, &id("sample-ext"), "unknown").is_err());
     assert!(
         p.register("assets.importUrl".into(), BTreeSet::new())

@@ -162,11 +162,21 @@ across reopen. This does not certify the production kernel journal integration.
 
 The permission names match the shipped registry: `network`, `clipboard`,
 `assets`, `project:write`, `full-access`. Undeclared permissions fail without a
-prompt. Requests return Granted/Denied/a serializable prompt. Prompts bind the
-extension, signed bundle, publisher, capability and current kernel revision.
-Only a native UI/authorized agent decision may call `respond`; pages cannot
+prompt. Requests return Granted/Denied/a serializable `PermissionRequest` (also
+named `PermissionPrompt` for existing callers). Each request includes **every
+undecided declared permission** for the active release, ordered Full Access,
+project:write, assets, network, clipboard. Asking from a different undecided
+capability produces the same request; an install gets one consent, not a chain
+of prompts. A single-permission prompt occurs when an update adds just one
+undecided permission. Prompts bind the extension, signed bundle, publisher,
+entire ordered permission set and current kernel revision.
+Only a native UI/authorized agent decision may call `respond_all`; pages cannot
 approve themselves. A grant is returned only after durable CAS. Forged, replayed
 and update-stale responses fail. Denials are retained without repeated prompts.
+`respond_all` requires exactly one Allow/Deny for every disclosed permission
+and publishes all decisions in one CAS. `respond` is the uniform all-Allow or
+all-Deny convenience wrapper. Partial/extra responses publish nothing; a failed
+CAS grants nothing. No existing decisions or user data are removed.
 
 Existing decisions apply only to the same pinned publisher and currently
 requested permission. A newly added permission requires consent. Removed
@@ -247,6 +257,7 @@ step. Main-thread timers/JS waits do not drive export or native editing.
 | Signed, bounded, fully hashed immutable bundles before CAS publication | N1 reliable installation; N2 stronger release admission; N3 exact bytes |
 | Preserve local overlays and conflict candidates; explicit rollback keeps current values | N3 authored edits; N4 no discarded work |
 | Publisher/capability/revision-bound durable prompts; explicit full-access route | N6 shipped permission names/trust contract; N4 no excluded legacy extensions |
+| Group every undecided declared permission into one consent and one CAS; preserve prior grants/denials across updates | Review must-fix 1; N1 atomic consent; N3 authored declarations; N6 shipped grouped disclosure; N4 retained decisions |
 | Nonce applier, opaque origin, passive HTTPS only after consent | N8 logic isolation; N1 permission enforcement |
 | Generation/sequence fencing and lossless bounded queues | N3 exact acknowledged operations; N7 inspectable ID-driven automation |
 | Seal before kill, fresh snapshot, bounded Store crash retries | N4 acknowledged state survives; N1/N2 editor responsiveness; N8 main independent |

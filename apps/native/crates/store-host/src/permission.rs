@@ -1,4 +1,8 @@
-use crate::{Error, Result, hex, identity::ExtensionId, install::StoreKernel};
+use crate::{
+    Error, Result, hex,
+    identity::ExtensionId,
+    install::{ExtensionState, StoreKernel},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +20,14 @@ pub enum Permission {
     #[serde(rename = "full-access")]
     FullAccess,
 }
+/// Shipped disclosure order; independent of enum/JSON ordering.
+pub const PERMISSION_ORDER: [Permission; 5] = [
+    Permission::FullAccess,
+    Permission::ProjectWrite,
+    Permission::Assets,
+    Permission::Network,
+    Permission::Clipboard,
+];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub id: ExtensionId,
@@ -53,16 +65,19 @@ pub struct PermissionDecision {
     pub decision: Decision,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionPrompt {
+pub struct PermissionRequest {
     pub id: String,
     pub extension: ExtensionId,
     pub release: String,
     pub publisher: String,
     pub revision: u64,
-    pub permission: Permission,
+    /// Every undecided declared permission, in shipped disclosure order.
+    pub permissions: Vec<Permission>,
     /// UI must distinguish full access from isolated Store capability grants.
     pub requires_trusted_realm: bool,
 }
+/// Kept for callers using the original prompt name; responses are now grouped.
+pub type PermissionPrompt = PermissionRequest;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admission {
     Granted,
@@ -92,23 +107,39 @@ pub fn request<K: StoreKernel>(
             (Decision::Allow, _) => Admission::Granted,
         });
     }
+    Ok(Admission::Prompt(pending_request(&state)?))
+}
+
+fn pending_request(state: &ExtensionState) -> Result<PermissionRequest> {
+    let active = state.active.as_ref().ok_or(Error::NotInstalled)?;
+    let permissions: Vec<_> = PERMISSION_ORDER
+        .into_iter()
+        .filter(|p| {
+            active.manifest.permissions.contains(p)
+                && state
+                    .permissions
+                    .get(p)
+                    .is_none_or(|d| d.publisher != active.publisher)
+        })
+        .collect();
+    let id = &active.manifest.id;
     let body = serde_json::to_vec(&(
         id,
         &active.bundle,
         &active.publisher,
         state.revision,
-        permission,
+        &permissions,
     ))
     .map_err(|_| Error::Invalid("prompt"))?;
-    Ok(Admission::Prompt(PermissionPrompt {
+    Ok(PermissionRequest {
         id: hex(&Sha256::digest(body)),
         extension: id.clone(),
         release: active.bundle.clone(),
         publisher: active.publisher.clone(),
         revision: state.revision,
-        permission,
-        requires_trusted_realm: permission == Permission::FullAccess,
-    }))
+        requires_trusted_realm: permissions.contains(&Permission::FullAccess),
+        permissions,
+    })
 }
 /// Called only for a native/authorized agent response, never directly from view
 /// JSON. CAS durability completes before any caller receives a grant.
@@ -117,20 +148,39 @@ pub fn respond<K: StoreKernel>(
     prompt: &PermissionPrompt,
     decision: Decision,
 ) -> Result<()> {
-    if request(kernel, &prompt.extension, prompt.permission)? != Admission::Prompt(prompt.clone()) {
-        return Err(Error::Stale);
-    }
+    let decisions = prompt.permissions.iter().map(|p| (*p, decision)).collect();
+    respond_all(kernel, prompt, &decisions)
+}
+
+/// Record exactly one decision for every disclosed permission in one durable
+/// CAS. A partial/extra response cannot publish a subset of an install's consent.
+/// `Stale` means dismiss and re-request; it is not a user-facing error.
+pub fn respond_all<K: StoreKernel>(
+    kernel: &mut K,
+    prompt: &PermissionRequest,
+    decisions: &BTreeMap<Permission, Decision>,
+) -> Result<()> {
     let mut state = kernel.load(&prompt.extension)?.ok_or(Error::NotInstalled)?;
-    if state.revision != prompt.revision {
+    if state.active.is_none()
+        || pending_request(&state)? != *prompt
+        || prompt.permissions.is_empty()
+    {
         return Err(Error::Stale);
     }
-    state.permissions.insert(
-        prompt.permission,
-        PermissionDecision {
-            publisher: prompt.publisher.clone(),
-            decision,
-        },
-    );
+    if decisions.len() != prompt.permissions.len()
+        || !prompt.permissions.iter().all(|p| decisions.contains_key(p))
+    {
+        return Err(Error::Invalid("permission response coverage"));
+    }
+    for (permission, decision) in decisions {
+        state.permissions.insert(
+            *permission,
+            PermissionDecision {
+                publisher: prompt.publisher.clone(),
+                decision: *decision,
+            },
+        );
+    }
     state.revision = state
         .revision
         .checked_add(1)
