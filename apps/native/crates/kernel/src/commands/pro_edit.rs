@@ -165,12 +165,16 @@ impl ProEditCommand {
                             .iter()
                             .any(|c| values::text(&layer, "id") == Some(&c.id))
                     {
-                        let c = Clip::read(
-                            cx,
-                            values::text(&layer, "id")
-                                .ok_or_else(|| invalid("Missing clip id."))?,
+                        let from = number(
+                            values::num(&layer, "from")
+                                .ok_or_else(|| invalid("Missing clip start."))?,
                         )?;
-                        if c.from < end - EPS && c.end() > start + EPS {
+                        let stop = from
+                            + number(
+                                values::num(&layer, "dur")
+                                    .ok_or_else(|| invalid("Missing clip duration."))?,
+                            )?;
+                        if from < end - EPS && stop > start + EPS {
                             return Err(invalid(
                                 "A surviving clip intersects the ripple-deleted interval.",
                             ));
@@ -282,7 +286,7 @@ pub(super) fn targets(
     Ok(clips)
 }
 pub(super) fn in_scope(layer: &Value, tracks: &[TrackTarget]) -> bool {
-    tracks.iter().any(|t| t.matches(layer))
+    values::text(layer, "type") != Some("group") && tracks.iter().any(|t| t.matches(layer))
 }
 fn require_scope(clips: &[Clip], tracks: &[TrackTarget]) -> Result<(), CommandError> {
     if tracks.is_empty() || clips.iter().any(|c| !in_scope(&c.value, tracks)) {

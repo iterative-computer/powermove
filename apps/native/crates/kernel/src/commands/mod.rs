@@ -33,6 +33,7 @@
 //! | [`Command::Library`] | [`library`] | `create_section`, `update_section` |
 //! | [`Command::ProEdit`] | [`pro_edit`] | ripple, roll, slide, slip and linked clip timing |
 //! | [`Command::ProLink`] | [`pro_links`] | persistent A/V links, selection and sync offsets |
+//! | [`Command::ProSource`] | [`pro_source`] | source-monitor insert and overwrite |
 //! | [`Command::Transform`] | [`transform`] | nudge, center anchor, align, distribute |
 //!
 //! Every variant is typed and documented (parameters, validation, undo
@@ -78,6 +79,7 @@ use crate::error::CommandError;
 
 pub mod pro_edit;
 pub mod pro_links;
+pub mod pro_source;
 mod pro_support;
 
 mod channels;
@@ -117,6 +119,7 @@ pub use masks::MaskCommand;
 pub use media::MediaCommand;
 pub use pro_edit::ProEditCommand;
 pub use pro_links::ProLinkCommand;
+pub use pro_source::ProSourceCommand;
 pub use properties::PropertyCommand;
 pub use scene3d::Scene3dCommand;
 pub use spine::check_lock;
@@ -200,6 +203,7 @@ pub enum Command {
     Transform(TransformCommand),
     ProEdit(ProEditCommand),
     ProLink(ProLinkCommand),
+    ProSource(ProSourceCommand),
 }
 
 macro_rules! from_domain {
@@ -231,6 +235,7 @@ from_domain!(
     Transform(TransformCommand),
     ProEdit(ProEditCommand),
     ProLink(ProLinkCommand),
+    ProSource(ProSourceCommand),
 );
 
 impl Command {
@@ -259,6 +264,7 @@ impl Command {
             Command::Transform(c) => c.label(),
             Command::ProEdit(c) => c.label(),
             Command::ProLink(c) => c.label(),
+            Command::ProSource(c) => c.label(),
         }
     }
 
@@ -289,6 +295,7 @@ impl Command {
             Command::Transform(c) => c.plan(&mut cx)?,
             Command::ProEdit(c) => c.plan(&mut cx)?,
             Command::ProLink(c) => c.plan(&mut cx)?,
+            Command::ProSource(c) => c.plan(&mut cx)?,
         }
         Ok(cx.finish())
     }

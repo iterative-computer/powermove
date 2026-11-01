@@ -73,3 +73,43 @@ apply linked selection deliberately, and display sync badges. Verify actual
 source frame identity, audio sync, hit testing, accessibility, modifier bypass,
 track-target UI and cancellation in the macOS application. This document does
 not claim W079–W083 native UI acceptance has passed.
+
+## Source-monitor editing (W082)
+
+`Command::ProSource(ProSourceCommand)` resolves `EditPoints` before planning.
+Each source/timeline mark is optional. Three marks determine the fourth; four
+consistent marks are accepted. If both source marks exist and neither timeline
+mark exists, playhead supplies timeline In. Two marks, negative/resolved-negative
+points, reversed/zero ranges, nonfinite values or inconsistent durations refuse.
+There is no implicit rate change or fit-to-fill. Source and timeline duration
+must match exactly within the arithmetic comparison epsilon (1e-8 seconds).
+
+`SourceTarget` explicitly names video/audio, a track/group id and a fresh layer
+id. One source stream can target one lane; an A/V edit uses distinct lanes and
+a fresh persistent pair id. Video-only inserts disable embedded audio;
+audio-only uses an audio strip referencing the source asset. Audio from a video
+requires imported `hasAudio: true` metadata. Asset duration is required, and
+imported video dimensions are used when available. New clips reuse the kernel's
+`make_layer` defaults rather than inventing renderer-specific transforms.
+Target groups must exist in that composition and be unlocked. Group headers
+are containers, not clips on their root track.
+
+Insert splits a crossing strip and shifts its tail and the suffix by the exact
+inserted duration on targeted tracks. Overwrite retains only the portions
+outside the interval, without rippling. Keys and source positions are rebased
+for each retained tail; effects, masks and unknown content survive. The caller
+supplies `SourceSplit` ids only for originals retaining both sides. Those ids
+must match exactly, and paired tails need one shared fresh pair id. Both tracks
+of existing linked clips must be targeted and receive matching fragments;
+otherwise the edit refuses. Entirely removed clips remain recoverable through
+the standard transaction history, including after PMV save/reopen. Surviving
+transform children are unparented as in ordinary deletion. Untargeted content
+and composition duration remain authored.
+
+Additional decisions: N1/N3 choose three-point range resolution and exact
+source sampling over implicit stretching; N7 makes marks/targets/created ids
+explicit command data; N4 retains fragments, opaque fields, native metadata and
+undo through the existing PMV writer. N8 keeps all planning independent of
+media decoders, JS and the renderer. Tests cover all four missing-point cases,
+insert/overwrite boundaries and fragments, stream targeting, source/lock/id
+failure, pair fragments and actual PMV reopen with persisted undo/redo.
