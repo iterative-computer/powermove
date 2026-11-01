@@ -593,3 +593,14 @@ Cases were bounded to 180 s per spike run; the S3/service phase had an 840 s gua
 The session retained one exclusive GUI-lock inode throughout.
 Screenshots were window-only, frontmost first, and remain under
 `/tmp/pm-shots/onscreen-*.png`; no desktop or private artifact is tracked.
+
+## On-screen batch (2026-11-01, 09:48–10:17): S3 not rerun
+
+The S3 foreground script (EDR viewer soaks, J/K/L, PQ/HLG) was **not run** this
+batch. The Mac locked at ~10:17, before the quiet window it needs. App-path viewer
+numbers from this batch (present probe floor, 60 Hz and audio A/B, CPU) are in
+`perf-gate-p1.md`. **PQ/HLG on screen cannot be exercised from the app yet:**
+`Viewer::mastering` exists in engine-service, but `pm-native-app` has no caller
+or opt-in switch. A physical PQ/HLG check first needs a small verify-only seam
+(e.g. an env var applied when the viewer is created in `playback.rs`). J/K/L
+remain covered only by the service's headless shuttle tests.

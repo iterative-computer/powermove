@@ -223,3 +223,21 @@ Inspect `/tmp/pm-shots/compat-host-{typing,overlay,popout-parent,popout,recovere
 locally. Captures and raw logs must remain outside Git. A compiled script and an
 offscreen DOM event are not an on-screen typing/visual pass. No full S5, remote-DOM
 compatibility, P1, release or supported-OS approval is implied.
+
+## On-screen smoke attempt (2026-11-01, ~10:12–10:17)
+
+**UNVERIFIED: no pass is claimed.** `check.sh smoke` ran twice:
+
+1. It built and acquired `compathost`, and logged `SMOKE ready_generation=1`,
+   `SMOKE native_foreground active=true key=true visible=true` and
+   `SMOKE foreground=true responder=true`. The script's own disk guard then stopped
+   it (`compat_disk_or_8_minute_limit`) before typing, the overlay click, popout or
+   recovery. Free space fell below 6 GiB because this lane ran a release build at
+   the same time; that was a scheduling error, not a host failure. No captures
+   were written.
+2. After disk was restored (9.7 GiB), the script correctly refused with
+   `compat_screen_locked: smoke UNVERIFIED`. The Mac locked at ~10:17.
+
+Only readiness and foreground/key/responder acquisition are observed. The five
+visual checks above remain open. Rerun `check.sh smoke` on an unlocked Mac with
+≥ 6 GiB free and no concurrent build.
