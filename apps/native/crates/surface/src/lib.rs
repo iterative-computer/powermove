@@ -5,6 +5,7 @@ pub mod style;
 pub mod tree;
 pub use tree::*;
 pub mod controls;
+pub mod kit;
 
 /// macOS owns the renderer. Implementations enqueue immutable accepted trees;
 /// this interface never synchronously calls JS or performs platform layout reads.

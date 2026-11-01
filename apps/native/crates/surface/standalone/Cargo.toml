@@ -20,9 +20,19 @@ path = "../examples/wire.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+pm-design = { path = "../../design" }
+accesskit = "=0.24.1"
 
 [workspace]
 
 [[example]]
 name = "budget"
 path = "../examples/budget.rs"
+
+[[test]]
+name = "ui_kit"
+path = "../tests/ui_kit.rs"
+
+[[example]]
+name = "ui_kit_wire"
+path = "../examples/ui_kit_wire.rs"
