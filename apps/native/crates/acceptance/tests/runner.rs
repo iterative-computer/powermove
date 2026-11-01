@@ -8,19 +8,19 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1410, 1, 3175));
-    assert_eq!(r.exit_code(false), 1);
-    assert_eq!(r.exit_code(true), 1);
+    assert_eq!(r.counts(), (1411, 0, 3175));
+    assert_eq!(r.exit_code(false), 0);
+    assert_eq!(r.exit_code(true), 2);
     assert_eq!(
         r.workflows
             .iter()
             .filter(|w| w.status == Status::BlockedBy)
             .count(),
-        82
+        83
     );
     assert_eq!(
         r.workflows.iter().find(|w| w.id == "W071").unwrap().status,
-        Status::Fail
+        Status::BlockedBy
     );
     assert_eq!(
         r.cases
@@ -108,7 +108,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1410 pass / 1 fail / 3175 blocked-by")
+            .contains("1411 pass / 0 fail / 3175 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
