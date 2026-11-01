@@ -92,6 +92,20 @@ pub enum ChangeCause {
         label: String,
         origin: Origin,
     },
+    /// A kernel write (`crate::tx`): applied now, recorded in history when
+    /// its open entry closes (or never, for direct writes outside one).
+    Write {
+        label: String,
+        origin: Origin,
+        /// The open entry the write folded into.
+        entry: Option<u64>,
+    },
+    /// A kernel cancel reverting a lease owner's operations.
+    Revert {
+        label: String,
+    },
+    /// Journal recovery replaying a record.
+    Recover,
 }
 
 /// One published revision: what readers need to follow incrementally.
@@ -168,6 +182,34 @@ struct Staged {
     changed: bool,
 }
 
+/// A durable state change, in order, for the kernel journal
+/// ([`DocumentStore::enable_tap`]).
+#[derive(Clone, Debug)]
+pub(crate) enum Tap {
+    /// A published revision.
+    Rev {
+        base: u64,
+        revision: u64,
+        ops: Arc<[Op]>,
+    },
+    /// A document record pushed (discarding redo, then trimming).
+    Push(crate::history::HistoryRecord),
+    /// An external record pushed.
+    PushExternal(crate::history::HistoryRecord),
+    Undo {
+        external: bool,
+    },
+    Redo {
+        external: bool,
+    },
+    /// `count` records from the top replaced by `record`.
+    Squash {
+        count: usize,
+        record: crate::history::HistoryRecord,
+    },
+    Clear,
+}
+
 /// Most changes kept for [`DocumentStore::changes_since`].
 const CHANGE_LOG: usize = 256;
 
@@ -191,6 +233,9 @@ pub struct DocumentStore {
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
     save_ticket: Weak<()>,
+    /// Durable changes since the last [`take_tap`](Self::take_tap), when
+    /// enabled (the kernel journal).
+    tap: Option<Vec<Tap>>,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -253,6 +298,7 @@ impl DocumentStore {
             listeners: Vec::new(),
             next_listener: 1,
             save_ticket: Weak::new(),
+            tap: None,
         }
     }
 
@@ -606,6 +652,7 @@ impl DocumentStore {
             revision,
         );
         self.history_owned = true;
+        self.tap_push();
         self.publish(staged.document, forward, cause);
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -625,6 +672,9 @@ impl DocumentStore {
             .peek_undo()
             .ok_or(TransactionError::NothingToUndo)?
             .clone();
+        if !record.is_document() {
+            return Err(TransactionError::ExternalEntry);
+        }
         let staged = self.stage_ops(&record.inverse, false)?;
         let revision = staged.document.revision();
         self.publish(
@@ -635,6 +685,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_undone();
+        self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(revision)
@@ -650,6 +701,9 @@ impl DocumentStore {
             .peek_redo()
             .ok_or(TransactionError::NothingToRedo)?
             .clone();
+        if !record.is_document() {
+            return Err(TransactionError::ExternalEntry);
+        }
         let staged = self.stage_ops(&record.forward, false)?;
         let revision = staged.document.revision();
         self.publish(
@@ -660,6 +714,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_redone();
+        self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(revision)
@@ -677,7 +732,13 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return None;
         }
+        let before_len = self.history.len();
         let id = self.history.squash_since(mark, label)?;
+        let count = before_len + 1 - self.history.len();
+        self.tap(|h| Tap::Squash {
+            count,
+            record: h.records().last().expect("pushed").clone(),
+        });
         // The state is unchanged; only its name moved to the new record.
         let dirty_before = self.is_dirty();
         if self.saved_token == self.state_token {
@@ -807,6 +868,7 @@ impl DocumentStore {
             self.revision(),
         );
         self.history_owned = true;
+        self.tap_push();
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Some(record))
@@ -895,8 +957,18 @@ impl DocumentStore {
     /// Stages raw operations (undo, redo, cancel, restore). `capture`
     /// records inverses (only `restore_project` needs them).
     fn stage_ops(&self, ops: &[Op], capture: bool) -> Result<Staged, TransactionError> {
+        self.stage_ops_from(self.current.root().cloned(), ops, capture)
+    }
+
+    /// [`stage_ops`](Self::stage_ops) on another tree.
+    fn stage_ops_from(
+        &self,
+        root: Option<Node>,
+        ops: &[Op],
+        capture: bool,
+    ) -> Result<Staged, TransactionError> {
         let revision = self.revision() + 1;
-        let mut root = self.current.root().cloned();
+        let mut root = root;
         let mut inverse = Vec::new();
         let mut scopes = Vec::new();
         let mut changed = false;
@@ -944,6 +1016,13 @@ impl DocumentStore {
             ops,
             cause,
         });
+        if let Some(tap) = &mut self.tap {
+            tap.push(Tap::Rev {
+                base: base_revision,
+                revision,
+                ops: change.ops.clone(),
+            });
+        }
         self.log.push_back(change.clone());
         while self.log.len() > CHANGE_LOG {
             self.log.pop_front();
@@ -1096,10 +1175,339 @@ impl DocumentStore {
     }
 }
 
+/// What one kernel write applied ([`DocumentStore::kernel_apply`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Applied {
+    pub forward: Vec<Op>,
+    /// Inverses in undo order (last operation first).
+    pub inverse: Vec<Op>,
+    /// Where each operation's inverse was captured (forward order).
+    pub scopes: Vec<Vec<PathPart>>,
+}
+
+/// What a kernel undo/redo step did ([`DocumentStore::kernel_undo`]).
+#[derive(Clone, Debug)]
+pub(crate) enum Step {
+    /// A document entry: its operations were applied as `revision`.
+    Document {
+        ops: Arc<[Op]>,
+        /// The operations that reverse this step (the other side of the record).
+        reverse: Arc<[Op]>,
+        label: String,
+    },
+    /// An external entry: the cursor moved; its realm must run the closure.
+    External {
+        external: crate::history::ExternalRef,
+        label: String,
+    },
+}
+
+/// What a kernel write carries.
+#[derive(Clone, Debug)]
+pub enum WriteBody {
+    /// Typed commands, planned on the scratch tree in order.
+    Commands(Vec<Command>),
+    /// Raw operations (direct writes, `edit.mutate` results, journal replay).
+    Ops(Vec<Op>),
+}
+
+impl WriteBody {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            WriteBody::Commands(c) => c.is_empty(),
+            WriteBody::Ops(o) => o.is_empty(),
+        }
+    }
+}
+
+impl From<Command> for WriteBody {
+    fn from(c: Command) -> Self {
+        WriteBody::Commands(vec![c])
+    }
+}
+
+impl From<Vec<Command>> for WriteBody {
+    fn from(c: Vec<Command>) -> Self {
+        WriteBody::Commands(c)
+    }
+}
+
+/// Kernel primitives: apply now, record later. The transaction layer
+/// (`crate::tx`) composes these into today's open-entry semantics; the
+/// stand-alone [`DocumentStore::execute`]/gesture API above stays for
+/// single-owner callers and tests.
+impl DocumentStore {
+    /// Starts recording durable changes for the journal.
+    pub(crate) fn enable_tap(&mut self) {
+        self.tap.get_or_insert_with(Vec::new);
+    }
+
+    /// The durable changes since the last call.
+    pub(crate) fn take_tap(&mut self) -> Vec<Tap> {
+        self.tap.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    fn tap(&mut self, event: impl FnOnce(&History) -> Tap) {
+        if let Some(tap) = &mut self.tap {
+            tap.push(event(&self.history));
+        }
+    }
+
+    fn tap_push(&mut self) {
+        self.tap(|h| Tap::Push(h.records().last().expect("pushed").clone()));
+    }
+
+    /// Reverts a cursor move (an undo barrier).
+    pub(crate) fn kernel_unstep(&mut self, undone: bool) {
+        if undone {
+            self.history.mark_redone();
+            self.tap(|_| Tap::Redo { external: true });
+        } else {
+            self.history.mark_undone();
+            self.tap(|_| Tap::Undo { external: true });
+        }
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+    }
+
+    /// `PM.hist.clear()`.
+    pub(crate) fn kernel_clear(&mut self) {
+        self.history.clear();
+        self.tap(|_| Tap::Clear);
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+    }
+
+    /// External entries with a cleanup that retired.
+    pub(crate) fn take_retired(&mut self) -> Vec<crate::history::ExternalRef> {
+        self.history.take_retired()
+    }
+
+    /// The current document (shared, immutable).
+    pub(crate) fn current(&self) -> &Arc<Document> {
+        &self.current
+    }
+
+    /// Stages, validates and publishes `body` without recording history.
+    /// `Ok(None)`: nothing changed (nothing published).
+    pub(crate) fn kernel_apply(
+        &mut self,
+        body: &WriteBody,
+        origin: Origin,
+        cause: ChangeCause,
+    ) -> Result<Option<Applied>, TransactionError> {
+        let staged = match body {
+            WriteBody::Commands(commands) => self.stage_commands(commands, origin)?,
+            WriteBody::Ops(ops) => self.stage_ops(ops, true)?,
+        };
+        if !staged.changed {
+            return Ok(None);
+        }
+        let applied = Applied {
+            forward: staged.forward.clone(),
+            inverse: staged.inverse,
+            scopes: staged.scopes,
+        };
+        self.publish(staged.document, staged.forward.into(), cause);
+        self.set_state_token(next_token());
+        Ok(Some(applied))
+    }
+
+    /// A gesture step that supersedes the previous one: `prev_inverse`
+    /// (that step's inverses, already validated by the caller) and `body`
+    /// are staged together and published as one revision. The returned
+    /// forward/inverse describe `body` alone, relative to the reverted state.
+    pub(crate) fn kernel_replace(
+        &mut self,
+        prev_inverse: &[Op],
+        body: &WriteBody,
+        origin: Origin,
+        cause: ChangeCause,
+    ) -> Result<Option<Applied>, TransactionError> {
+        let revision = self.revision() + 1;
+        let mut root = self.current.root().cloned();
+        for op in prev_inverse {
+            root = apply_one(root, op, revision)?.0;
+        }
+        let staged = match body {
+            WriteBody::Commands(commands) => {
+                self.stage_commands_on(root.as_ref(), commands, origin)?
+            }
+            WriteBody::Ops(ops) => self.stage_ops_from(root, ops, true)?,
+        };
+        let mut ops = prev_inverse.to_vec();
+        ops.extend(staged.forward.iter().cloned());
+        validate(&staged.document, &ops)?;
+        if ops.is_empty() {
+            return Ok(None);
+        }
+        let applied = Applied {
+            forward: staged.forward,
+            inverse: staged.inverse,
+            scopes: staged.scopes,
+        };
+        self.publish(staged.document, ops.into(), cause);
+        self.set_state_token(next_token());
+        Ok(Some(applied))
+    }
+
+    /// Publishes an already staged document (a validated cancel).
+    pub(crate) fn kernel_publish(&mut self, document: Document, ops: Vec<Op>, cause: ChangeCause) {
+        self.publish(document, ops.into(), cause);
+        self.set_state_token(next_token());
+    }
+
+    /// Pushes a document entry covering writes that are already applied.
+    /// `before` is the document right before the first of them (for the
+    /// file's leaf-patch form when any operation is structural).
+    pub(crate) fn kernel_record(
+        &mut self,
+        label: String,
+        origin: Origin,
+        forward: Vec<Op>,
+        inverse: Vec<Op>,
+        before: &Document,
+        scopes: Vec<Vec<PathPart>>,
+    ) -> u64 {
+        let structural = forward
+            .iter()
+            .chain(inverse.iter())
+            .any(|op| !matches!(op, Op::Leaf(_)));
+        let saved = structural.then(|| scoped_patches(before.root(), self.current.root(), scopes));
+        let record = self
+            .history
+            .push(label, origin, forward, inverse, saved, self.revision());
+        self.history_owned = true;
+        self.tap_push();
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        record
+    }
+
+    /// `history.external`: pushes a closure entry.
+    pub(crate) fn kernel_push_external(
+        &mut self,
+        label: String,
+        origin: Origin,
+        external: crate::history::ExternalRef,
+        bytes: usize,
+    ) -> u64 {
+        let id = self
+            .history
+            .push_external(label, origin, external, bytes, self.revision());
+        self.tap(|h| Tap::PushExternal(h.records().last().expect("pushed").clone()));
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        id
+    }
+
+    /// Undo of the newest applied entry, document or external. An external
+    /// entry moves the cursor first (as `idx--` did before `entry.undo()`),
+    /// then its realm runs the closure.
+    pub(crate) fn kernel_undo(&mut self) -> Result<Step, TransactionError> {
+        let record = self
+            .history
+            .peek_undo()
+            .ok_or(TransactionError::NothingToUndo)?
+            .clone();
+        if let Some(external) = record.external {
+            self.history.mark_undone();
+            self.tap(|_| Tap::Undo { external: true });
+            self.set_state_token(self.history.state_token());
+            self.emit(StoreEvent::HistoryChanged);
+            return Ok(Step::External {
+                external,
+                label: record.label,
+            });
+        }
+        let staged = self.stage_ops(&record.inverse, false)?;
+        self.publish(
+            staged.document,
+            record.inverse.clone(),
+            ChangeCause::Undo {
+                label: record.label.clone(),
+            },
+        );
+        self.history.mark_undone();
+        self.tap(|_| Tap::Undo { external: false });
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        Ok(Step::Document {
+            ops: record.inverse.clone(),
+            reverse: record.forward.clone(),
+            label: record.label,
+        })
+    }
+
+    /// Redo, as [`kernel_undo`](Self::kernel_undo).
+    pub(crate) fn kernel_redo(&mut self) -> Result<Step, TransactionError> {
+        let record = self
+            .history
+            .peek_redo()
+            .ok_or(TransactionError::NothingToRedo)?
+            .clone();
+        if let Some(external) = record.external {
+            self.history.mark_redone();
+            self.tap(|_| Tap::Redo { external: true });
+            self.set_state_token(self.history.state_token());
+            self.emit(StoreEvent::HistoryChanged);
+            return Ok(Step::External {
+                external,
+                label: record.label,
+            });
+        }
+        let staged = self.stage_ops(&record.forward, false)?;
+        self.publish(
+            staged.document,
+            record.forward.clone(),
+            ChangeCause::Redo {
+                label: record.label.clone(),
+            },
+        );
+        self.history.mark_redone();
+        self.tap(|_| Tap::Redo { external: false });
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+        Ok(Step::Document {
+            ops: record.forward.clone(),
+            reverse: record.inverse.clone(),
+            label: record.label,
+        })
+    }
+
+    /// Replaces the selection (a cancelled edit restores the one it began
+    /// with).
+    pub(crate) fn set_selection(&mut self, selection: Selection) {
+        if self.selection != selection {
+            self.selection = selection;
+            self.prune_selection();
+            self.emit(StoreEvent::SelectionChanged);
+        }
+    }
+
+    /// A store over a library project (clean: it matches its slot).
+    pub(crate) fn adopt(document: Document, history: History) -> DocumentStore {
+        DocumentStore::from_parts(ProjectFile::untitled(), document, history, true)
+    }
+
+    /// Every change still in the log, oldest first (published to mirrors).
+    pub(crate) fn recent_changes(&self) -> Vec<Arc<Change>> {
+        self.log.iter().cloned().collect()
+    }
+
+    /// A store adopting recovered state (journal recovery): dirty, since
+    /// the recovered work is not in any saved file.
+    pub(crate) fn recovered(document: Document, history: History) -> DocumentStore {
+        let mut store = DocumentStore::from_parts(ProjectFile::untitled(), document, history, true);
+        store.saved_token = next_token();
+        store
+    }
+}
+
 // ── staging helpers ─────────────────────────────────────────────────────────
 
 /// Applies one operation to a tree as `revision`.
-fn apply_one(
+pub(crate) fn apply_one(
     root: Option<Node>,
     op: &Op,
     revision: u64,
@@ -1218,7 +1626,7 @@ fn same_part(a: &PathPart, b: &PathPart) -> bool {
 
 /// The old app's scoped history entries (`scopedPatches`): for each touched
 /// path not already covered by a shorter one, its value before and after.
-fn scoped_patches(
+pub(crate) fn scoped_patches(
     before: Option<&Node>,
     after: Option<&Node>,
     mut scopes: Vec<Vec<PathPart>>,
@@ -1247,7 +1655,7 @@ fn scoped_patches(
 }
 
 /// Whole-transaction validation on the staged result.
-fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
+pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
     let invalid = |m: String| Err(TransactionError::Invalid(m));
     let Some(root) = document.root() else {
         return invalid("the project was removed".into());

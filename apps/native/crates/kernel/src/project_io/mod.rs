@@ -30,7 +30,7 @@
 //! Always writes PMV4, the format and layout of the old `ProjectSave`; see
 //! the [`save`] module for the algorithm and guarantees.
 
-mod base64;
+pub(crate) mod base64;
 mod durable;
 mod envelope;
 pub mod save;

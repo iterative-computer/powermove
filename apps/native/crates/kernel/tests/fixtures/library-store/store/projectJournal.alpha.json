@@ -1,0 +1,48 @@
+[
+ {
+  "revision": 4,
+  "patches": [
+   {
+    "path": [
+     "name"
+    ],
+    "exists": true,
+    "value": "stale"
+   }
+  ]
+ },
+ {
+  "revision": 6,
+  "patches": [
+   {
+    "path": [
+     "name"
+    ],
+    "exists": true,
+    "value": "Alpha journalled"
+   }
+  ]
+ },
+ {
+  "revision": 7,
+  "patches": [
+   {
+    "path": [
+     "layers",
+     0,
+     "name"
+    ],
+    "exists": true,
+    "value": "Renamed"
+   },
+   {
+    "path": [
+     "missing",
+     "deep"
+    ],
+    "exists": true,
+    "value": 1
+   }
+  ]
+ }
+]

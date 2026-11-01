@@ -1,0 +1,21 @@
+{
+ "v": "1.2.0",
+ "proj": {
+  "id": "gamma",
+  "name": "Gamma",
+  "compId": "C1",
+  "compName": "Main",
+  "w": 200,
+  "h": 100,
+  "fps": 30,
+  "dur": 2,
+  "bg": "#000000",
+  "assets": {},
+  "layers": [],
+  "comps": {},
+  "revision": 1,
+  "futureField": {
+   "kept": true
+  }
+ }
+}

@@ -1,0 +1,17 @@
+[
+ {
+  "id": "alpha",
+  "name": "Alpha",
+  "at": 1,
+  "w": 200,
+  "h": 100
+ },
+ {
+  "id": "beta",
+  "name": "Beta",
+  "at": 2,
+  "w": 200,
+  "h": 100,
+  "thumb": "data:image/png;base64,AAAA"
+ }
+]
