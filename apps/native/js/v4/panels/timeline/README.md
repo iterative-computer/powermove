@@ -208,3 +208,28 @@ five-second interaction-test timeout. The first final parallel run exposed
 Cargo build-lock waiting inside that short timeout; after fixing the harness,
 the complete sequential suite passed. This is setup tolerance, not a relaxed
 interaction/performance budget or a macOS gate pass.
+
+## Frozen v4 contract adoption — 2026-11-01
+
+Merged `feat/native-engine` at `f7844ebc0` after the orchestrator recorded the
+40/40 integrated eval and froze the v4 contract. The merge is conflict-free.
+The API and kit sources, `docs/native/v4-api.md` and `docs/native/ui-kit.md`
+are unchanged from the integration contract already consumed by this lane; the
+incoming change records the freeze in `docs/native/p0-decisions.md`.
+
+No API changes or compatibility workarounds are needed in the timeline adapter.
+The existing typed primitives, worker lifecycle, generation/revision fencing,
+acknowledged model actions and kit components remain the contract. Changes to
+`crates/surface` or `js/v4/src` were not made. T1–T5 above remain additive **API
+requests** to their owners, not permission for a breaking contract change. T6
+remains missing design copy. The panel is still provisional; the incomplete
+spec sections and macOS gates listed above have not been relabelled as done.
+
+Against the frozen base, the locked combined Rust suite passes **404 tests**
+(131 timeline + 273 kernel), with the one existing private-profile test ignored.
+The complete Bun suite passes **226 tests**, including 54 timeline tests and
+18 snapshots. Package rustfmt, strict all-target Clippy, both TypeScript checks,
+panel Prettier, frozen dependency installation and both browser builds pass.
+Decision: retain the frozen shape and submit missing capabilities as additive
+requests (orchestrator freeze; N3/N6/N8), preserving existing consumers and the
+single-writer worker boundary.
