@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod presentation;
+pub use presentation::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Permission {
     #[serde(rename = "network")]
@@ -32,6 +35,16 @@ pub const PERMISSION_ORDER: [Permission; 5] = [
 pub struct Manifest {
     pub id: ExtensionId,
     pub version: String,
+    /// Display name from the signed manifest. Empty only for older records
+    /// admitted before display metadata was read; never fall back to the ID.
+    #[serde(default)]
+    pub name: String,
+    /// Exact bundle asset ID; release admission checks the signed inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Author-supplied plain text; adapters must never interpret markup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(rename = "apiVersion", default = "api_one")]
     pub api_version: u32,
     #[serde(default)]
@@ -50,6 +63,11 @@ impl Manifest {
             || !(1..=4).contains(&self.api_version)
         {
             return Err(Error::Invalid("manifest version"));
+        }
+        if self.reason.as_ref().is_some_and(|reason| {
+            reason.chars().count() > 140 || reason.chars().any(char::is_control)
+        }) {
+            return Err(Error::Invalid("permission reason"));
         }
         Ok(())
     }
@@ -71,6 +89,12 @@ pub struct PermissionRequest {
     pub release: String,
     pub publisher: String,
     pub revision: u64,
+    pub extension_name: String,
+    pub publisher_name: String,
+    /// Host-pinned Store identity evidence, never a manifest assertion.
+    pub publisher_verified: bool,
+    pub icon: Option<String>,
+    pub reason: Option<String>,
     /// Every undecided declared permission, in shipped disclosure order.
     pub permissions: Vec<Permission>,
     /// UI must distinguish full access from isolated Store capability grants.
@@ -82,7 +106,7 @@ pub type PermissionPrompt = PermissionRequest;
 pub enum Admission {
     Granted,
     Denied,
-    Prompt(PermissionPrompt),
+    Prompt(Box<PermissionPrompt>),
     RequiresTrustedRealm,
 }
 
@@ -107,7 +131,7 @@ pub fn request<K: StoreKernel>(
             (Decision::Allow, _) => Admission::Granted,
         });
     }
-    Ok(Admission::Prompt(pending_request(&state)?))
+    Ok(Admission::Prompt(Box::new(pending_request(&state)?)))
 }
 
 fn pending_request(state: &ExtensionState) -> Result<PermissionRequest> {
@@ -123,23 +147,24 @@ fn pending_request(state: &ExtensionState) -> Result<PermissionRequest> {
         })
         .collect();
     let id = &active.manifest.id;
-    let body = serde_json::to_vec(&(
-        id,
-        &active.bundle,
-        &active.publisher,
-        state.revision,
-        &permissions,
-    ))
-    .map_err(|_| Error::Invalid("prompt"))?;
-    Ok(PermissionRequest {
-        id: hex(&Sha256::digest(body)),
+    let mut prompt = PermissionRequest {
+        id: String::new(),
         extension: id.clone(),
         release: active.bundle.clone(),
         publisher: active.publisher.clone(),
         revision: state.revision,
+        extension_name: active.manifest.name.clone(),
+        publisher_name: active.publisher_identity.name.clone(),
+        publisher_verified: active.publisher_identity.verified,
+        icon: active.manifest.icon.clone(),
+        reason: active.manifest.reason.clone(),
         requires_trusted_realm: permissions.contains(&Permission::FullAccess),
         permissions,
-    })
+    };
+    // Include display metadata in the binding, with an empty ID for hashing.
+    let body = serde_json::to_vec(&prompt).map_err(|_| Error::Invalid("prompt"))?;
+    prompt.id = hex(&Sha256::digest(body));
+    Ok(prompt)
 }
 /// Called only for a native/authorized agent response, never directly from view
 /// JSON. CAS durability completes before any caller receives a grant.
@@ -160,7 +185,7 @@ pub fn respond_all<K: StoreKernel>(
     prompt: &PermissionRequest,
     decisions: &BTreeMap<Permission, Decision>,
 ) -> Result<()> {
-    let mut state = kernel.load(&prompt.extension)?.ok_or(Error::NotInstalled)?;
+    let mut state = kernel.load(&prompt.extension)?.ok_or(Error::Stale)?;
     if state.active.is_none()
         || pending_request(&state)? != *prompt
         || prompt.permissions.is_empty()
@@ -185,7 +210,49 @@ pub fn respond_all<K: StoreKernel>(
         .revision
         .checked_add(1)
         .ok_or(Error::Invalid("revision exhausted"))?;
-    kernel.compare_exchange(&prompt.extension, Some(prompt.revision), &state)
+    kernel
+        .compare_exchange(&prompt.extension, Some(prompt.revision), &state)
+        .map_err(|error| {
+            if error == Error::Conflict {
+                Error::Stale
+            } else {
+                error
+            }
+        })
+}
+
+/// Settings/authorized-agent inspection. Includes inactive/old-publisher
+/// decisions for preservation, but only `active` rows can be current switches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPermission {
+    pub permission: Permission,
+    pub publisher: String,
+    pub decision: Decision,
+    pub active: bool,
+}
+
+pub fn stored_decisions<K: StoreKernel>(
+    kernel: &K,
+    id: &ExtensionId,
+) -> Result<Vec<StoredPermission>> {
+    let state = kernel.load(id)?.ok_or(Error::NotInstalled)?;
+    Ok(PERMISSION_ORDER
+        .into_iter()
+        .filter_map(|permission| {
+            state
+                .permissions
+                .get(&permission)
+                .map(|stored| StoredPermission {
+                    permission,
+                    publisher: stored.publisher.clone(),
+                    decision: stored.decision,
+                    active: state.active.as_ref().is_some_and(|release| {
+                        release.publisher == stored.publisher
+                            && release.manifest.permissions.contains(&permission)
+                    }),
+                })
+        })
+        .collect())
 }
 
 /// Host-owned operation policy; never accept a permission name from the page as

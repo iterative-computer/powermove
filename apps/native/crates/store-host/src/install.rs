@@ -1,6 +1,6 @@
 use crate::{
     Error, Result,
-    artifact::{ArtifactStore, SignedRelease, VerifiedRelease},
+    artifact::{ArtifactStore, PublisherIdentity, SignedRelease, VerifiedRelease},
     identity::{DataStoreIdentity, ExtensionId},
     permission::{Manifest, Permission, PermissionDecision},
 };
@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 pub struct InstalledRelease {
     pub manifest: Manifest,
     pub publisher: String,
+    #[serde(default)]
+    pub publisher_identity: PublisherIdentity,
     pub release_id: String,
     pub bundle: String,
     pub proof: SignedRelease,
@@ -129,6 +131,7 @@ pub fn install<K: StoreKernel, A: ArtifactStore>(
     let candidate = InstalledRelease {
         manifest: verified.manifest.clone(),
         publisher: verified.statement.publisher.clone(),
+        publisher_identity: verified.publisher_identity.clone(),
         release_id: verified.statement.release_id.clone(),
         bundle: verified.statement.archive_sha256.clone(),
         proof: verified.proof.clone(),
@@ -194,7 +197,7 @@ pub fn rollback<K: StoreKernel, A: ArtifactStore>(
     if state.revision != expected {
         return Err(Error::Conflict);
     }
-    let target = state
+    let mut target = state
         .archives
         .iter()
         .find(|a| a.id == archive)
@@ -205,6 +208,7 @@ pub fn rollback<K: StoreKernel, A: ArtifactStore>(
         return Err(Error::Integrity("rollback target"));
     }
     artifacts.preserve(verified)?;
+    target.publisher_identity = verified.publisher_identity.clone();
     advance(&mut state)?;
     archive_active(&mut state, ArchiveReason::RolledBack);
     state.active = Some(target);

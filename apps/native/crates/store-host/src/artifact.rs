@@ -62,15 +62,32 @@ impl Default for Limits {
         }
     }
 }
+/// Store-controlled publisher display metadata. Signature validity by itself
+/// is not a verified-publisher badge. Never populate this from a manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublisherIdentity {
+    pub name: String,
+    pub verified: bool,
+}
 #[derive(Debug, Default)]
-pub struct TrustStore(BTreeMap<String, VerifyingKey>);
+pub struct TrustStore(BTreeMap<String, (VerifyingKey, PublisherIdentity)>);
 impl TrustStore {
     pub fn trust(&mut self, publisher: String, key_id: String, key: VerifyingKey) -> Result<()> {
+        self.trust_with_identity(publisher, key_id, key, PublisherIdentity::default())
+    }
+    /// Host-only provisioning from the authenticated Store publisher registry.
+    pub fn trust_with_identity(
+        &mut self,
+        publisher: String,
+        key_id: String,
+        key: VerifyingKey,
+        identity: PublisherIdentity,
+    ) -> Result<()> {
         let id = trust_id(&publisher, &key_id);
         if publisher.is_empty() || key_id.is_empty() || self.0.contains_key(&id) {
             return Err(Error::Conflict);
         }
-        self.0.insert(id, key);
+        self.0.insert(id, (key, identity));
         Ok(())
     }
     pub fn revoke(&mut self, publisher: &str, key_id: &str) {
@@ -101,6 +118,7 @@ pub struct VerifiedRelease {
     pub(crate) statement: ReleaseStatement,
     pub(crate) manifest: Manifest,
     pub(crate) proof: SignedRelease,
+    pub(crate) publisher_identity: PublisherIdentity,
     files: BTreeMap<String, Vec<u8>>,
     archive: Vec<u8>,
 }
@@ -147,7 +165,7 @@ pub fn verify(
             return Err(Error::Invalid("expanded size"));
         }
     }
-    let key = trust
+    let (key, publisher_identity) = trust
         .0
         .get(&trust_id(&s.publisher, &s.key_id))
         .ok_or(Error::Integrity("untrusted signing key"))?;
@@ -214,6 +232,11 @@ pub fn verify(
     let manifest: Manifest =
         serde_json::from_slice(manifest_bytes).map_err(|_| Error::Invalid("manifest"))?;
     manifest.validate()?;
+    if let Some(icon) = &manifest.icon
+        && (!valid_path(icon) || !files.contains_key(icon))
+    {
+        return Err(Error::Integrity("manifest icon"));
+    }
     if manifest.id != s.extension {
         return Err(Error::Integrity("manifest id"));
     }
@@ -221,6 +244,7 @@ pub fn verify(
         statement: s.clone(),
         manifest,
         proof: release.clone(),
+        publisher_identity: publisher_identity.clone(),
         files,
         archive: archive.to_vec(),
     })

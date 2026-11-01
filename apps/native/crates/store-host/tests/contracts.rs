@@ -865,6 +865,437 @@ fn update_prompts_only_for_new_undecided_permissions_and_preserves_denials() {
         Admission::Granted
     );
 }
+
+fn display_release(
+    reason: Option<&str>,
+    icon: Option<&str>,
+    verified_publisher: bool,
+) -> VerifiedRelease {
+    let mut files = entries("1", &[Permission::Network, Permission::Assets]);
+    let mut manifest: Value = serde_json::from_slice(&files[0].1).unwrap();
+    manifest["name"] = json!("Glass Blur");
+    manifest["publisher_verified"] = json!(!verified_publisher);
+    manifest["publisher_name"] = json!("Manifest cannot choose the publisher name");
+    if let Some(reason) = reason {
+        manifest["reason"] = json!(reason);
+    }
+    if let Some(icon) = icon {
+        manifest["icon"] = json!(icon);
+    }
+    files[0].1 = serde_json::to_vec(&manifest).unwrap();
+    files.push(("icon.png".into(), b"synthetic icon fixture".to_vec(), b'0'));
+    let (signed, bytes) = from_entries(&files);
+    let mut pins = TrustStore::default();
+    pins.trust_with_identity(
+        "publisher".into(),
+        "test-key".into(),
+        signing_key().verifying_key(),
+        PublisherIdentity {
+            name: "Example Publisher".into(),
+            verified: verified_publisher,
+        },
+    )
+    .unwrap();
+    verify(&signed, &bytes, &pins, Limits::default()).unwrap()
+}
+
+#[test]
+fn prompt_display_data_comes_from_signed_manifest_and_host_publisher_identity() {
+    for verified_publisher in [false, true] {
+        let release = display_release(
+            Some("Load images for your project."),
+            Some("icon.png"),
+            verified_publisher,
+        );
+        let (mut k, _dir, mut a) = installed(&[]);
+        install(&mut k, &mut a, "test-profile", &release, Some(1)).unwrap();
+        let Admission::Prompt(prompt) =
+            request(&k, &id("sample-ext"), Permission::Network).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(prompt.extension_name, "Glass Blur");
+        assert_eq!(prompt.publisher_name, "Example Publisher");
+        assert_eq!(prompt.publisher_verified, verified_publisher);
+        assert_eq!(prompt.icon.as_deref(), Some("icon.png"));
+        assert_eq!(
+            prompt.reason.as_deref(),
+            Some("Load images for your project.")
+        );
+        assert_eq!(
+            release.manifest().extra["publisher_verified"],
+            json!(!verified_publisher)
+        );
+        let json = serde_json::to_vec(&prompt).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<PermissionRequest>(&json).unwrap(),
+            *prompt
+        );
+    }
+}
+
+#[test]
+fn optional_purpose_is_bounded_plain_text_without_truncating_authored_content() {
+    let reason = "🖼".repeat(140);
+    assert_eq!(
+        display_release(Some(&reason), None, false)
+            .manifest()
+            .reason
+            .as_deref(),
+        Some(reason.as_str())
+    );
+    assert_eq!(display_release(None, None, false).manifest().reason, None);
+    // Angle brackets/Markdown stay literal text, never a renderer instruction.
+    let text = "Use <images> and **fonts**.";
+    assert_eq!(
+        display_release(Some(text), None, false)
+            .manifest()
+            .reason
+            .as_deref(),
+        Some(text)
+    );
+    for reason in [
+        "x".repeat(141),
+        "🖼".repeat(141),
+        "line\nbreak".into(),
+        "tab\there".into(),
+        "null\0here".into(),
+    ] {
+        let mut files = entries("1", &[Permission::Network]);
+        let mut manifest: Value = serde_json::from_slice(&files[0].1).unwrap();
+        manifest["reason"] = json!(reason);
+        files[0].1 = serde_json::to_vec(&manifest).unwrap();
+        let (signed, bytes) = from_entries(&files);
+        assert_eq!(
+            verify(&signed, &bytes, &trust(), Limits::default()).unwrap_err(),
+            Error::Invalid("permission reason")
+        );
+    }
+}
+
+#[test]
+fn icon_must_be_an_exact_asset_in_the_verified_bundle() {
+    for icon in [
+        "missing.png",
+        "../icon.png",
+        "/icon.png",
+        "https://example.com/icon.png",
+        "icon.png/../index.js",
+    ] {
+        let mut files = entries("1", &[]);
+        let mut manifest: Value = serde_json::from_slice(&files[0].1).unwrap();
+        manifest["icon"] = json!(icon);
+        files[0].1 = serde_json::to_vec(&manifest).unwrap();
+        let (signed, bytes) = from_entries(&files);
+        assert_eq!(
+            verify(&signed, &bytes, &trust(), Limits::default()).unwrap_err(),
+            Error::Integrity("manifest icon")
+        );
+    }
+    assert!(
+        display_release(None, Some("icon.png"), false)
+            .file("icon.png")
+            .is_some()
+    );
+}
+
+#[test]
+fn forged_display_data_and_presentation_class_cannot_authorize_consent() {
+    let release = display_release(Some("Load images."), Some("icon.png"), true);
+    let (mut k, _dir, mut a) = installed(&[]);
+    install(&mut k, &mut a, "test-profile", &release, Some(1)).unwrap();
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    let before = state(&k);
+    let mut changes = vec![prompt.clone(); 7];
+    changes[0].extension_name = "Different name".into();
+    changes[1].publisher_name = "Different publisher".into();
+    changes[2].publisher_verified = false;
+    changes[3].icon = None;
+    changes[4].reason = None;
+    changes[5].requires_trusted_realm = true;
+    changes[6].id = "forged".into();
+    for forged in changes {
+        assert_eq!(respond(&mut k, &forged, Decision::Allow), Err(Error::Stale));
+        assert_eq!(state(&k), before);
+    }
+}
+
+#[test]
+fn permission_copy_matches_every_verbatim_review_row_and_shipped_store_label() {
+    let review = include_str!("../../../../../docs/native/design/reviews/na-cloud-storehost.md");
+    assert_eq!(PERMISSION_COPY.map(|row| row.permission), PERMISSION_ORDER);
+    for row in PERMISSION_COPY {
+        let permission = serde_json::to_value(row.permission).unwrap();
+        assert!(review.contains(&format!(
+            "| `{}` | `{}` | {} | {} |",
+            permission.as_str().unwrap(),
+            row.symbol,
+            row.name,
+            row.detail
+        )));
+    }
+    assert_eq!(
+        PERMISSION_COPY.map(|row| row.store_label),
+        [
+            "Needs full access to Powermove",
+            "Edits your project",
+            "Imports files",
+            "Uses the network",
+            "Uses the clipboard",
+        ]
+    );
+    assert_eq!(SETTINGS_ALLOW_LABEL, "Allow");
+}
+
+#[test]
+fn isolated_permissions_specify_a_window_modal_sheet_and_accent_allow_default() {
+    let release = display_release(None, None, false);
+    let (mut k, _dir, mut a) = installed(&[]);
+    install(&mut k, &mut a, "test-profile", &release, Some(1)).unwrap();
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    let sheet = prompt.presentation();
+    assert_eq!(sheet.surface, PermissionSurface::WindowModalSheet);
+    assert_eq!(sheet.title.as_deref(), Some("Allow “Glass Blur” To:"));
+    assert_eq!(sheet.informative_text, None);
+    assert_eq!(sheet.rows, vec![PERMISSION_COPY[2], PERMISSION_COPY[3]]);
+    assert_eq!(sheet.buttons.map(|b| b.label), ["Don’t Allow", "Allow"]);
+    assert_eq!(
+        sheet.buttons.map(|b| b.decision),
+        [Decision::Deny, Decision::Allow]
+    );
+    assert_eq!(
+        sheet.buttons[sheet.default_button].style,
+        PermissionButtonStyle::Accent
+    );
+    assert_eq!(sheet.buttons[sheet.cancel_button].decision, Decision::Deny);
+    assert_eq!(sheet.accessibility_identifier, prompt.id);
+}
+
+#[test]
+fn full_access_specifies_a_warning_nsalert_with_exact_copy_and_cancel_default() {
+    let mut files = entries("1", &PERMISSION_ORDER);
+    let mut manifest: Value = serde_json::from_slice(&files[0].1).unwrap();
+    manifest["name"] = json!("Glass Blur");
+    files[0].1 = serde_json::to_vec(&manifest).unwrap();
+    let (signed, bytes) = from_entries(&files);
+    let release = verify(&signed, &bytes, &trust(), Limits::default()).unwrap();
+    let (mut k, _dir, mut a) = installed(&[]);
+    install(&mut k, &mut a, "test-profile", &release, Some(1)).unwrap();
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    assert!(prompt.requires_trusted_realm);
+    let alert = prompt.presentation();
+    assert_eq!(alert.surface, PermissionSurface::NsAlertWarning);
+    assert_eq!(
+        alert.title.as_deref(),
+        Some("Give Glass Blur full access to Powermove?")
+    );
+    assert_eq!(
+        alert.informative_text,
+        Some(
+            "It will run with the same access as the app: your projects, files you open, the network, and other extensions’ values. Only trust extensions from people you know. You can revoke this from the Library."
+        )
+    );
+    assert_eq!(alert.rows, PERMISSION_COPY);
+    assert_eq!(alert.buttons.map(|b| b.label), ["Trust", "Cancel"]);
+    assert_eq!(
+        alert.buttons.map(|b| b.style),
+        [PermissionButtonStyle::System; 2]
+    );
+    assert_eq!(alert.default_button, 1);
+    assert_eq!(alert.cancel_button, 1);
+    respond(
+        &mut k,
+        &prompt,
+        alert.buttons[alert.default_button].decision,
+    )
+    .unwrap();
+    assert!(
+        stored_decisions(&k, &id("sample-ext"))
+            .unwrap()
+            .iter()
+            .all(|row| row.decision == Decision::Deny)
+    );
+}
+
+#[test]
+fn older_displayless_records_are_preserved_without_using_ids_as_labels() {
+    for permission in [Permission::Network, Permission::FullAccess] {
+        let (k, _dir, _a) = installed(&[permission]);
+        let mut legacy = serde_json::to_value(state(&k)).unwrap();
+        legacy["active"]
+            .as_object_mut()
+            .unwrap()
+            .remove("publisher_identity");
+        legacy["active"]["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("name");
+        let restored: ExtensionState = serde_json::from_value(legacy).unwrap();
+        let active = restored.active.as_ref().unwrap();
+        assert_eq!(active.publisher_identity, PublisherIdentity::default());
+        assert!(active.manifest.name.is_empty());
+        assert_eq!(active.manifest.extra["future"]["opaque"], json!(42));
+        let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), permission).unwrap() else {
+            panic!()
+        };
+        assert!(prompt.extension_name.is_empty());
+        assert!(prompt.publisher_name.is_empty());
+        assert!(!prompt.publisher_verified);
+        assert_eq!(prompt.presentation().title, None);
+        assert_eq!(prompt.icon, None);
+    }
+}
+
+#[test]
+fn settings_inspection_retains_denials_and_marks_removed_or_old_publisher_decisions_inactive() {
+    let (mut k, _dir, mut a) = installed(&[Permission::Assets, Permission::Network]);
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    respond_all(
+        &mut k,
+        &prompt,
+        &[
+            (Permission::Assets, Decision::Allow),
+            (Permission::Network, Decision::Deny),
+        ]
+        .into(),
+    )
+    .unwrap();
+    let rows = stored_decisions(&k, &id("sample-ext")).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.permission, r.decision, r.active))
+            .collect::<Vec<_>>(),
+        vec![
+            (Permission::Assets, Decision::Allow, true),
+            (Permission::Network, Decision::Deny, true),
+        ]
+    );
+    install(
+        &mut k,
+        &mut a,
+        "test-profile",
+        &verified("2", &[Permission::Network, Permission::Clipboard]),
+        Some(2),
+    )
+    .unwrap();
+    let mut state = state(&k);
+    state.revision += 1;
+    state.permissions.insert(
+        Permission::Clipboard,
+        PermissionDecision {
+            publisher: "old-publisher".into(),
+            decision: Decision::Allow,
+        },
+    );
+    k.compare_exchange(&id("sample-ext"), Some(3), &state)
+        .unwrap();
+    let rows = stored_decisions(&k, &id("sample-ext")).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.permission, r.active))
+            .collect::<Vec<_>>(),
+        vec![
+            (Permission::Assets, false),
+            (Permission::Network, true),
+            (Permission::Clipboard, false)
+        ]
+    );
+    permission::revoke(&mut k, &id("sample-ext"), 4, Permission::Network).unwrap();
+    assert_eq!(
+        stored_decisions(&k, &id("sample-ext")).unwrap()[1].decision,
+        Decision::Deny
+    );
+    uninstall(&mut k, &id("sample-ext"), 5).unwrap();
+    assert!(
+        stored_decisions(&k, &id("sample-ext"))
+            .unwrap()
+            .iter()
+            .all(|r| !r.active)
+    );
+    assert_eq!(stored_decisions(&k, &id("sample-ext")).unwrap().len(), 3);
+}
+
+#[test]
+fn stale_responses_cover_uninstall_missing_install_and_cas_races() {
+    struct CasRace(MemoryKernel);
+    impl StoreKernel for CasRace {
+        fn load(&self, id: &ExtensionId) -> Result<Option<ExtensionState>> {
+            self.0.load(id)
+        }
+        fn compare_exchange(
+            &mut self,
+            _: &ExtensionId,
+            _: Option<u64>,
+            _: &ExtensionState,
+        ) -> Result<()> {
+            Err(Error::Conflict)
+        }
+    }
+    let (mut k, _dir, _a) = installed(&[Permission::Network]);
+    let Admission::Prompt(prompt) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    let before = state(&k);
+    let mut race = CasRace(k);
+    assert_eq!(
+        respond(&mut race, &prompt, Decision::Allow),
+        Err(Error::Stale)
+    );
+    assert_eq!(state(&race), before);
+    k = race.0;
+    uninstall(&mut k, &id("sample-ext"), 1).unwrap();
+    assert_eq!(respond(&mut k, &prompt, Decision::Allow), Err(Error::Stale));
+    assert_eq!(
+        respond(&mut MemoryKernel::default(), &prompt, Decision::Allow),
+        Err(Error::Stale)
+    );
+}
+
+#[test]
+fn accessibility_identifier_is_stable_across_requests_and_changes_with_the_binding() {
+    let (mut k, _dir, mut a) = installed(&[Permission::Network, Permission::Assets]);
+    let Admission::Prompt(first) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    let Admission::Prompt(second) = request(&k, &id("sample-ext"), Permission::Assets).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(first.id, second.id);
+    assert_eq!(first.id.len(), 64);
+    assert_eq!(
+        first.presentation().accessibility_identifier,
+        second.presentation().accessibility_identifier
+    );
+    install(
+        &mut k,
+        &mut a,
+        "test-profile",
+        &verified("2", &[Permission::Network, Permission::Assets]),
+        Some(1),
+    )
+    .unwrap();
+    let Admission::Prompt(updated) = request(&k, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    assert_ne!(first.id, updated.id);
+    assert_eq!(updated.presentation().accessibility_identifier, updated.id);
+}
 #[test]
 fn full_access_routes_to_trusted_realm_without_bypassing_store_policy() {
     let (mut k, _dir, _a) = installed(&[Permission::FullAccess]);
@@ -1072,6 +1503,122 @@ fn permission_and_archive_decisions_survive_durable_kernel_reopen() {
     assert_eq!(s.archives.len(), 1);
     assert_eq!(s.data_store, identity);
     assert!(!s.permissions.is_empty());
+}
+
+#[test]
+fn grouped_display_metadata_and_mixed_decisions_survive_durable_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let blobs = tempfile::tempdir().unwrap();
+    let mut kernel = DiskKernel {
+        root: root.path().into(),
+    };
+    let mut artifacts = FileArtifacts::new(blobs.path()).unwrap();
+    let release = display_release(Some("Load images."), Some("icon.png"), true);
+    install(&mut kernel, &mut artifacts, "profile", &release, None).unwrap();
+    let Admission::Prompt(prompt) =
+        request(&kernel, &id("sample-ext"), Permission::Network).unwrap()
+    else {
+        panic!()
+    };
+    respond_all(
+        &mut kernel,
+        &prompt,
+        &[
+            (Permission::Assets, Decision::Allow),
+            (Permission::Network, Decision::Deny),
+        ]
+        .into(),
+    )
+    .unwrap();
+    drop(kernel);
+    let reopened = DiskKernel {
+        root: root.path().into(),
+    };
+    let persisted = state(&reopened);
+    assert_eq!(persisted.revision, 2);
+    let active = persisted.active.unwrap();
+    assert_eq!(active.manifest.name, prompt.extension_name);
+    assert_eq!(active.manifest.reason, prompt.reason);
+    assert_eq!(active.manifest.icon, prompt.icon);
+    assert_eq!(
+        active.publisher_identity,
+        PublisherIdentity {
+            name: prompt.publisher_name,
+            verified: true
+        }
+    );
+    assert_eq!(
+        stored_decisions(&reopened, &id("sample-ext"))
+            .unwrap()
+            .iter()
+            .map(|row| (row.permission, row.decision, row.active))
+            .collect::<Vec<_>>(),
+        vec![
+            (Permission::Assets, Decision::Allow, true),
+            (Permission::Network, Decision::Deny, true)
+        ]
+    );
+}
+
+#[test]
+fn rollback_uses_current_host_publisher_metadata_and_preserves_the_archive() {
+    let (mut kernel, _dir, mut artifacts) = installed(&[]);
+    let release = display_release(None, Some("icon.png"), true);
+    install(
+        &mut kernel,
+        &mut artifacts,
+        "test-profile",
+        &release,
+        Some(1),
+    )
+    .unwrap();
+    let target = state(&kernel).active.unwrap();
+    install(
+        &mut kernel,
+        &mut artifacts,
+        "test-profile",
+        &verified("2", &[Permission::Network]),
+        Some(2),
+    )
+    .unwrap();
+    let mut pins = TrustStore::default();
+    pins.trust_with_identity(
+        "publisher".into(),
+        "test-key".into(),
+        signing_key().verifying_key(),
+        PublisherIdentity {
+            name: "Current Publisher Name".into(),
+            verified: false,
+        },
+    )
+    .unwrap();
+    let bytes = artifacts
+        .read(&target.bundle, Limits::default().archive_bytes)
+        .unwrap();
+    let reverified = verify(&target.proof, &bytes, &pins, Limits::default()).unwrap();
+    rollback(
+        &mut kernel,
+        &mut artifacts,
+        &reverified,
+        &id("sample-ext"),
+        3,
+        3,
+    )
+    .unwrap();
+    let restored = state(&kernel);
+    let active = restored.active.unwrap();
+    assert_eq!(active.publisher_identity.name, "Current Publisher Name");
+    assert!(!active.publisher_identity.verified);
+    assert!(
+        restored
+            .archives
+            .iter()
+            .find(|archive| archive.id == 3)
+            .unwrap()
+            .release
+            .publisher_identity
+            .verified
+    );
 }
 
 fn envelope(seq: u64) -> Envelope {

@@ -178,6 +178,89 @@ and publishes all decisions in one CAS. `respond` is the uniform all-Allow or
 all-Deny convenience wrapper. Partial/extra responses publish nothing; a failed
 CAS grants nothing. No existing decisions or user data are removed.
 
+### Display data and presentation (design review items 2–4)
+
+`PermissionRequest` includes `extension_name`, `publisher_name`,
+`publisher_verified`, `icon` and `reason`. `extension_name` is the signed
+manifest's `name`; optional `icon` is an exact signed bundle asset ID, never a
+remote URL or an unchecked file path. Admission checks inventory membership.
+Optional manifest `reason` is the author's purpose string: at most 140 Unicode
+scalar characters, without control characters. Preserve it verbatim and render
+it as **plain text** (including any literal markup); never truncate or interpret
+it as HTML/Markdown. Omission does not invalidate a v1–3 extension.
+
+Publisher display name and verification are **host-provisioned Store registry
+metadata**, bound to the pinned publisher/key by `trust_with_identity`. Signing
+key validity alone never establishes a verified-publisher badge. An extension's
+manifest cannot choose these fields. The existing `trust` API defaults to an
+empty display name and `verified: false`. Installation persists the admitted
+identity, and rollback uses current reverified host metadata while preserving
+the original archive. Older records deserialize without dropping unknown fields,
+archives or decisions.
+
+`PermissionRequest::presentation` is the platform-neutral AppKit contract:
+
+| `requires_trusted_realm` | Surface | Title/message | Buttons (in order) | Default / cancel |
+|---|---|---|---|---|
+| false | Window-modal sheet, attached below the toolbar | `Allow “Glass Blur” To:` (substitute signed display name) | `Don’t Allow`, `Allow` | Allow / Don’t Allow |
+| true | System `NSAlert`, warning style and warning symbol | `Give Glass Blur full access to Powermove?` (substitute signed display name) | `Trust`, `Cancel` | Cancel / Cancel |
+
+The isolated sheet has one row per requested permission: SF Symbol, name and
+detail from `PERMISSION_COPY` in `permission/presentation.rs`. This is the
+single runtime copy table, in shipped order; it also exposes the distinct
+v1.2.0 Store disclosure labels. A test compares every consent row verbatim with
+the review table. Full Access uses `FULL_ACCESS_DETAIL`, the exact v1.2.0
+informative text specified by the review. It is never rendered as an isolated
+permission sheet or silently downgraded. Grouped disclosure data remains
+inspectable, including in the Full Access case. Button decisions apply to the
+entire group; Cancel/Don’t Allow records denial. The Trust button is not the
+default, and Return must not grant Full Access.
+
+No UI, colour, metric or layout value is implemented in this crate. The AppKit
+adapter must use system sheet/alert placement and controls, `pm-design` tokens
+for custom content, and the app AccentColor; only the isolated Allow button is
+the accent default. Linux tests validate the output contract, not an AppKit
+implementation. All resulting visual output remains provisional until Opus review.
+
+**DESIGN-TODO(opus):** older admitted records can lack a signed display name or
+host publisher display name, and manifests may omit an icon. The neutral
+placeholder is an absent title/icon and empty display names; never substitute
+the extension ID, bundle hash or publisher ID as a primary label. Opus must
+specify the missing-metadata presentation before a UI binds these cases. No new
+fallback copy, icon or layout has been invented.
+
+### Settings, stale prompts and accessibility (review items 5–7)
+
+`stored_decisions(kernel, extension_id)` returns serializable permission,
+publisher, decision and `active` facts in disclosure order. It includes retained
+removed-permission and old-publisher records with `active: false`; they must not
+be shown as current grants. Settings ▸ Extensions can bind current permissions
+to switches labelled `Allow` (`SETTINGS_ALLOW_LABEL`). Revoke must use the
+existing revision-guarded `revoke`; it never removes the stored decision.
+This lane exposes the facts and revoke operation; the Settings view and its
+authorized re-enable flow belong to their integration owners. A stored denial
+does not cause repeated prompts from extension traffic.
+
+When `respond`/`respond_all` returns `Stale`, **dismiss the sheet/alert and
+re-request against the active release**. Do not show a user-facing error, retry
+the old response, or carry the previous Allow choice into a replacement prompt.
+An uninstall, missing installation, changed binding or a CAS race also returns
+`Stale`; re-request may find no active release and then leaves the UI dismissed.
+I/O errors remain errors and issue no grant.
+
+`id` is SHA-256 of the entire serialized request with its ID empty, including
+display data, publisher, bundle, ordered permissions and revision. Identical
+inputs produce an identical ID regardless of which undecided permission caused
+the request. Set the native sheet/alert's accessibility identifier to
+`presentation.accessibility_identifier` **unchanged**. VoiceOver/MCP/UI tests
+target this ID; native accessible labels use the signed display name, never
+the ID itself. An updated binding yields a new ID.
+
+Review nice-to-haves 8–9 are deferred: Store-panel/agent anchoring requires a
+window/agent UI owner and the agent question-card copy is not specified;
+`learn_more_url` has no supplied Store-origin endpoint or metadata contract.
+No window routing, question-card copy, URL or footer layout is invented here.
+
 Existing decisions apply only to the same pinned publisher and currently
 requested permission. A newly added permission requires consent. Removed
 permissions become inactive; the old decision remains archived. `revoke`
@@ -258,6 +341,11 @@ step. Main-thread timers/JS waits do not drive export or native editing.
 | Preserve local overlays and conflict candidates; explicit rollback keeps current values | N3 authored edits; N4 no discarded work |
 | Publisher/capability/revision-bound durable prompts; explicit full-access route | N6 shipped permission names/trust contract; N4 no excluded legacy extensions |
 | Group every undecided declared permission into one consent and one CAS; preserve prior grants/denials across updates | Review must-fix 1; N1 atomic consent; N3 authored declarations; N6 shipped grouped disclosure; N4 retained decisions |
+| Signed manifest display data and exact local icon; host-pinned publisher name/badge; verbatim bounded purpose | Review must-fix 2; N1 honest consent; N3 authored intent; N4 backward-readable records |
+| System sheet vs warning NSAlert, exact reviewed copy/order, Cancel default for Full Access | Review must-fix 3–4; N1 pro controls; N3 authored trust intent; N6 shipped trust behavior |
+| Preserve and expose inactive/stored decisions; route revocation through existing CAS | Review should-fix 5; N4 no erased decisions; N7 inspectable facts |
+| Dismiss/re-request stale prompts, never auto-apply old consent; stable AX/MCP identifier | Review should-fix 6–7; N3 release-bound intent; N7 ID-driven operation; N8 no UI JS wait |
+| Neutral missing-metadata placeholders; defer unspecified agent card/link integration | User design-ownership constraint; N3 no invented authored copy; N4 legacy records retained |
 | Nonce applier, opaque origin, passive HTTPS only after consent | N8 logic isolation; N1 permission enforcement |
 | Generation/sequence fencing and lossless bounded queues | N3 exact acknowledged operations; N7 inspectable ID-driven automation |
 | Seal before kill, fresh snapshot, bounded Store crash retries | N4 acknowledged state survives; N1/N2 editor responsiveness; N8 main independent |
@@ -286,15 +374,26 @@ cargo clippy --locked --manifest-path apps/native/crates/store-host/isolated/Car
 cargo fmt --manifest-path apps/native/crates/store-host/isolated/Cargo.toml --check
 ```
 
-Linux evidence: **72 contract tests pass**, covering signed/tampered releases,
+Linux evidence: **88 contract tests pass** (72 existing + 16 review regression
+tests), covering signed/tampered releases,
 archive safety/budgets/checksums, durable immutable storage, CAS failure/reopen,
 local edits/conflicts, archive rollback, permission persistence/revocation,
-CSP, route/identity/schema/sequence enforcement, backpressure, process lifecycle
+CSP, grouped atomic consent, signed display metadata/icon admission, bounded
+purpose text, exact reviewed copy/defaults, stored-decision inspection, stale
+responses, stable AX identifiers, route/identity/schema/sequence enforcement,
+backpressure, process lifecycle
 policy and independent retained stores in the Linux platform double. Strict
 Clippy (`-D warnings`) and formatting pass. No private profile or real
 project was read. No GUI, performance, sandbox or whole-app compatibility claim.
 
 Must verify on macOS / integrate in other owned lanes:
+
+- Bind the reviewed prompt contract to real AppKit window-modal sheets and
+  warning NSAlerts; verify the parent window, below-toolbar placement, exact
+  labels/details, orange Allow default, safe Full Access Return/Escape behavior,
+  VoiceOver and unchanged AX identifiers. Verify stale dismissal/re-request and
+  Settings switches/revocation with kernel actor tickets; no main-thread I/O.
+  Obtain Opus review of all rendered output and the missing-metadata TODO above.
 
 - Wire this policy into `pm-compat-host`/remote DOM and the kernel actor; use
   async tickets and a confined Store V8 helper with signed sandbox entitlements.
