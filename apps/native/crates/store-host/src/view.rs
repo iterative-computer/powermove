@@ -24,6 +24,7 @@ pub enum ViewStatus {
     Ready,
     Sealing,
     Stopping,
+    StopFailed,
     WaitingToRestart,
     Disabled,
     Closed,
@@ -180,12 +181,14 @@ impl View {
     }
     /// Call only after kernel confirms sealing/revocation. A failed seal leaves
     /// Sealing and can retry; never kill before acknowledged work is safe.
-    pub fn sealed(&mut self, generation: u64) -> Result<Action> {
+    pub fn sealed(&mut self, generation: u64, now: u64) -> Result<Action> {
         self.current(generation)?;
         if self.status != ViewStatus::Sealing {
             return Err(Error::Stale);
         }
+        self.clock(now)?;
         self.status = ViewStatus::Stopping;
+        self.deadline_ms = now.saturating_add(self.policy.ready_timeout_ms);
         Ok(Action::Stop {
             token: self.token.clone(),
         })
@@ -194,7 +197,7 @@ impl View {
     /// complete for an already crashed process. An API invocation isn't proof.
     pub fn stopped(&mut self, generation: u64, now: u64) -> Result<Action> {
         self.current(generation)?;
-        if self.status != ViewStatus::Stopping {
+        if !matches!(self.status, ViewStatus::Stopping | ViewStatus::StopFailed) {
             return Err(Error::Stale);
         }
         self.clock(now)?;
@@ -257,7 +260,23 @@ impl View {
                 .fail(self.token.generation, Failure::ReadyTimeout, now)
                 .map(Some);
         }
+        if self.status == ViewStatus::Stopping && now >= self.deadline_ms {
+            return self.stop_failed(self.token.generation).map(Some);
+        }
         Ok(None)
+    }
+    /// Unsupported kill API or expired exit confirmation. Keep the view fenced
+    /// and refuse recreation until a later `stopped` confirms old-process exit.
+    pub fn stop_failed(&mut self, generation: u64) -> Result<Action> {
+        self.current(generation)?;
+        if self.status != ViewStatus::Stopping {
+            return Err(Error::Stale);
+        }
+        self.status = ViewStatus::StopFailed;
+        Ok(Action::Disabled {
+            token: self.token.clone(),
+            reason: Failure::PlatformFailure,
+        })
     }
     pub fn close(&mut self) -> Result<Action> {
         if self.status == ViewStatus::Closed {

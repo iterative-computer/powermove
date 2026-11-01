@@ -474,7 +474,7 @@ fn install_update_uninstall_and_rollback_keep_identity_and_all_versions() {
     assert_eq!(uninstall(&mut k, &id("sample-ext"), 2).unwrap(), 3);
     assert_eq!(state(&k).data_status, DataStoreStatus::Archived);
     assert!(state(&k).active.is_none());
-    assert_eq!(rollback(&mut k, &id("sample-ext"), 3, 2).unwrap(), 4);
+    assert_eq!(restore(&mut k, &mut a, &id("sample-ext"), 3, 2).unwrap(), 4);
     let s = state(&k);
     assert_eq!(s.data_store, original);
     assert_eq!(s.archives.len(), 2);
@@ -532,7 +532,7 @@ fn stale_operations_cannot_overwrite_a_newer_install() {
         uninstall(&mut k, &id("sample-ext"), 0).unwrap_err(),
         Error::Conflict
     );
-    assert!(rollback(&mut k, &id("sample-ext"), 1, 999).is_err());
+    assert!(restore(&mut k, &mut a, &id("sample-ext"), 1, 999).is_err());
     assert_eq!(state(&k).revision, 1);
 }
 #[test]
@@ -593,7 +593,7 @@ fn local_edits_keep_running_and_remote_candidate_stays_alongside() {
     let s = state(&k);
     assert_eq!(s.active.unwrap().manifest.version, "1.0.0");
     assert_eq!(s.archives[0].reason, ArchiveReason::ConflictCandidate);
-    rollback(&mut k, &id("sample-ext"), 3, 3).unwrap();
+    restore(&mut k, &mut a, &id("sample-ext"), 3, 3).unwrap();
     assert!(
         state(&k)
             .archives
@@ -633,10 +633,10 @@ fn rollback_never_drops_the_replaced_version() {
         Some(1),
     )
     .unwrap();
-    rollback(&mut k, &id("sample-ext"), 2, 2).unwrap();
+    restore(&mut k, &mut a, &id("sample-ext"), 2, 2).unwrap();
     assert_eq!(state(&k).archives.len(), 2);
     assert_eq!(state(&k).archives[1].release.manifest.version, "2.0.0");
-    rollback(&mut k, &id("sample-ext"), 3, 3).unwrap();
+    restore(&mut k, &mut a, &id("sample-ext"), 3, 3).unwrap();
     assert_eq!(state(&k).active.unwrap().manifest.version, "2.0.0");
 }
 #[test]
@@ -655,7 +655,7 @@ fn failed_uninstall_and_rollback_are_atomic() {
     .unwrap();
     let before = state(&k);
     k.fail_next_commit = true;
-    assert!(rollback(&mut k, &id("sample-ext"), 2, 2).is_err());
+    assert!(restore(&mut k, &mut a, &id("sample-ext"), 2, 2).is_err());
     assert_eq!(state(&k), before);
 }
 #[test]
@@ -1173,7 +1173,7 @@ fn fail_and_stop(v: &mut View, reason: Failure, now: u64) -> Action {
         v.fail(g, reason, now).unwrap(),
         Action::Seal { .. }
     ));
-    assert!(matches!(v.sealed(g).unwrap(), Action::Stop { .. }));
+    assert!(matches!(v.sealed(g, now).unwrap(), Action::Stop { .. }));
     v.stopped(g, now).unwrap()
 }
 #[test]
@@ -1198,7 +1198,7 @@ fn view_crash_requires_seal_stop_exit_and_delay_before_recreation() {
     ));
     assert!(v.stopped(100, 10).is_err());
     assert!(v.restart(101, 10).is_err());
-    v.sealed(100).unwrap();
+    v.sealed(100, 10).unwrap();
     assert!(matches!(
         v.stopped(100, 11).unwrap(),
         Action::ScheduleRestart {
@@ -1276,8 +1276,8 @@ fn recovery_rejects_clock_reversal_and_stale_completion() {
     assert!(v.fail(100, pm_store_host::view::Failure::Crash, 4).is_err());
     assert_eq!(v.status(), ViewStatus::Ready);
     v.fail(100, pm_store_host::view::Failure::Crash, 6).unwrap();
-    assert!(v.sealed(99).is_err());
-    v.sealed(100).unwrap();
+    assert!(v.sealed(99, 6).is_err());
+    v.sealed(100, 6).unwrap();
     assert!(v.stopped(99, 7).is_err());
 }
 #[test]
@@ -1343,5 +1343,149 @@ fn zero_restart_budget_and_ready_deadline_are_explicit() {
     assert!(matches!(
         fail_and_stop(&mut v, pm_store_host::view::Failure::ReadyTimeout, 20_000),
         Action::Disabled { .. }
+    ));
+}
+
+fn restore(
+    k: &mut impl StoreKernel,
+    a: &mut impl ArtifactStore,
+    ext: &ExtensionId,
+    expected: u64,
+    archive: u64,
+) -> Result<u64> {
+    let state = k.load(ext)?.ok_or(Error::NotInstalled)?;
+    let target = state.archives.iter().find(|a| a.id == archive);
+    let version = target
+        .map(|a| a.release.manifest.version.as_str())
+        .unwrap_or("1.0.0");
+    let permissions: Vec<_> = target
+        .map(|a| a.release.manifest.permissions.iter().copied().collect())
+        .unwrap_or_default();
+    pm_store_host::install::rollback(
+        k,
+        a,
+        &verified(version, &permissions),
+        ext,
+        expected,
+        archive,
+    )
+}
+
+#[test]
+fn channel_rejects_sequence_reuse_with_different_authored_payload() {
+    let mut c = channel(ChannelLimits::default());
+    let original = envelope(1);
+    admit(&mut c, &original).unwrap();
+    let mut changed = original.clone();
+    changed.message = Message::PaintAck { revision: 123 };
+    assert_eq!(admit(&mut c, &changed).unwrap_err(), Error::Conflict);
+    c.complete(Endpoint::View, 1).unwrap();
+    assert_eq!(admit(&mut c, &changed).unwrap_err(), Error::Conflict);
+    assert_eq!(
+        admit(&mut c, &original).unwrap(),
+        Receipt::Duplicate { completed: true }
+    );
+}
+#[test]
+fn channel_replay_retention_is_bounded_and_old_retries_require_query() {
+    let mut c = channel(ChannelLimits::default());
+    for seq in 1..=1000 {
+        admit(&mut c, &envelope(seq)).unwrap();
+        c.complete(Endpoint::View, seq).unwrap();
+    }
+    assert_eq!(admit(&mut c, &envelope(1)).unwrap_err(), Error::Stale);
+    assert_eq!(
+        admit(&mut c, &envelope(1000)).unwrap(),
+        Receipt::Duplicate { completed: true }
+    );
+    assert_eq!(c.queued(), 0);
+}
+#[test]
+fn channel_duplicate_payload_comparison_ignores_json_whitespace() {
+    let mut c = channel(ChannelLimits::default());
+    let m = envelope(1);
+    admit(&mut c, &m).unwrap();
+    c.complete(Endpoint::View, 1).unwrap();
+    assert_eq!(
+        c.admit(Endpoint::View, &serde_json::to_vec_pretty(&m).unwrap())
+            .unwrap(),
+        Receipt::Duplicate { completed: true }
+    );
+}
+#[test]
+fn failed_stop_is_visible_and_cannot_restart_before_exit_is_confirmed() {
+    let mut v = view();
+    v.fail(100, pm_store_host::view::Failure::Hang, 1).unwrap();
+    v.sealed(100, 1).unwrap();
+    assert!(matches!(
+        v.stop_failed(100).unwrap(),
+        Action::Disabled {
+            reason: pm_store_host::view::Failure::PlatformFailure,
+            ..
+        }
+    ));
+    assert_eq!(v.status(), ViewStatus::StopFailed);
+    assert!(v.restart(101, 1000).is_err());
+    assert!(matches!(
+        v.stopped(100, 1001).unwrap(),
+        Action::ScheduleRestart { .. }
+    ));
+    v.restart(101, 1251).unwrap();
+}
+#[test]
+fn stop_exit_deadline_does_not_pretend_successful_recovery() {
+    let mut v = view();
+    v.fail(100, pm_store_host::view::Failure::Crash, 1).unwrap();
+    v.sealed(100, 1).unwrap();
+    assert!(v.tick(20_000).unwrap().is_none());
+    assert!(matches!(
+        v.tick(20_001).unwrap(),
+        Some(Action::Disabled {
+            reason: pm_store_host::view::Failure::PlatformFailure,
+            ..
+        })
+    ));
+    assert!(v.restart(101, 30_000).is_err());
+}
+#[test]
+fn rollback_rejects_different_signed_release_and_corrupt_preserved_bytes() {
+    let (mut k, _dir, mut a) = installed(&[]);
+    install(
+        &mut k,
+        &mut a,
+        "test-profile",
+        &verified("2.0.0", &[]),
+        Some(1),
+    )
+    .unwrap();
+    let before = state(&k);
+    assert_eq!(
+        pm_store_host::install::rollback(
+            &mut k,
+            &mut a,
+            &verified("9.0.0", &[]),
+            &id("sample-ext"),
+            2,
+            2
+        )
+        .unwrap_err(),
+        Error::Integrity("rollback target")
+    );
+    let path = a.object_path(&before.archives[0].release.bundle).unwrap();
+    fs::write(path, b"damaged").unwrap();
+    assert!(restore(&mut k, &mut a, &id("sample-ext"), 2, 2).is_err());
+    assert_eq!(state(&k), before);
+}
+
+#[test]
+fn stop_deadline_starts_after_kernel_sealing_completes() {
+    let mut v = view();
+    v.fail(100, pm_store_host::view::Failure::Crash, 1).unwrap();
+    // A slow worker seal does not count against platform process-exit time.
+    v.sealed(100, 30_000).unwrap();
+    assert!(v.tick(49_999).unwrap().is_none());
+    assert!(matches!(
+        v.tick(50_000).unwrap(),
+        Some(Action::Disabled { .. })
     ));
 }

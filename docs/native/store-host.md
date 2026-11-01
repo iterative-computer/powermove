@@ -140,7 +140,11 @@ An interrupted write is an unreferenced preserved candidate; an interrupted
 acknowledgment is resolved by querying the kernel revision/active digest before
 retrying. No blind repeated publication is required.
 
-`rollback` selects an archive ID and archives the replaced code. It never rolls
+`rollback` selects an archive ID and requires a freshly verified release matching
+that archive's entire signed proof and manifest. Callers reverify the saved
+proof/bytes against current publisher pins; re-preservation checks stored object
+integrity before the kernel CAS. A mismatch/corrupt object leaves the active
+version unchanged. It archives the replaced code and never rolls
 back kernel project edits or extension JSON values. Old code must adapt to
 current data or surface a recoverable migration issue; it cannot erase new
 values. All archive choices and permission/install decisions are inspectable
@@ -205,7 +209,10 @@ Admission rejects stale identities/generations, unknown schema/version,
 sequence gaps and invalid routes. Limits default to 1 MiB/message,
 256 queued messages and 8 MiB total. Backpressure consumes neither sequence nor
 older work. Consumers complete the front entry only after acceptance. Duplicate
-receipts distinguish queued from completed requests; they never redispatch an
+receipts distinguish queued from completed requests; payload changes under the
+same sequence fail with Conflict. Pending payloads plus the last completed
+fingerprint per endpoint bound replay memory. Older completed retries return
+Stale and must query kernel transaction receipts; they never redispatch an
 edit. Service request IDs must also map to kernel realm/generation/txids for
 lost-ack replay across connections. The transport owns response replay.
 
@@ -223,8 +230,11 @@ an inspectable reason; native UI/authorized agents can explicitly restart it.
 User Stop disables without automatic restart. Failed sealing never authorizes a
 kill. Failed platform enqueue is returned; retain/retry the owned Action.
 Stop completion requires actual old PID exit (or complete crash detachment),
-not merely an SPI return. `close` cancels pending restart; the adapter revokes
-that view and keeps its store and realm data. Recovery has no delete/reset-data
+not merely an SPI return. A 20 s exit-confirmation deadline starts after kernel
+sealing completes. Unsupported termination/expired exit confirmation enters
+StopFailed, surfaces PlatformFailure and refuses recreation until old-process
+exit is confirmed; a later exit can resume recovery. `close` cancels pending
+restart; the adapter revokes that view and keeps its store and realm data. Recovery has no delete/reset-data
 step. Main-thread timers/JS waits do not drive export or native editing.
 
 ## Decisions and selecting rules
@@ -265,12 +275,12 @@ cargo clippy --locked --manifest-path apps/native/crates/store-host/isolated/Car
 cargo fmt --manifest-path apps/native/crates/store-host/isolated/Cargo.toml --check
 ```
 
-Linux evidence: **65 contract tests pass**, covering signed/tampered releases,
+Linux evidence: **72 contract tests pass**, covering signed/tampered releases,
 archive safety/budgets/checksums, durable immutable storage, CAS failure/reopen,
 local edits/conflicts, archive rollback, permission persistence/revocation,
 CSP, route/identity/schema/sequence enforcement, backpressure, process lifecycle
 policy and independent retained stores in the Linux platform double. Strict
-Clippy and formatting are required before commit. No private profile or real
+Clippy (`-D warnings`) and formatting pass. No private profile or real
 project was read. No GUI, performance, sandbox or whole-app compatibility claim.
 
 Must verify on macOS / integrate in other owned lanes:

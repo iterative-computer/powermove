@@ -3,6 +3,7 @@
 use crate::{Error, Result, identity::ExtensionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -98,7 +99,7 @@ pub struct Channel {
     generation: u64,
     limits: ChannelLimits,
     admitted: BTreeMap<Endpoint, u64>,
-    completed: BTreeMap<Endpoint, u64>,
+    completed: BTreeMap<Endpoint, (u64, [u8; 32])>,
     queue: VecDeque<(Envelope, usize)>,
     bytes: usize,
 }
@@ -149,9 +150,29 @@ impl Channel {
             return Err(Error::Invalid("sequence"));
         }
         if m.sequence <= last {
-            return Ok(Receipt::Duplicate {
-                completed: self.completed.get(&m.from).copied().unwrap_or(0) >= m.sequence,
-            });
+            if let Some((pending, _)) = self
+                .queue
+                .iter()
+                .find(|(old, _)| old.from == m.from && old.sequence == m.sequence)
+            {
+                return if *pending == m {
+                    Ok(Receipt::Duplicate { completed: false })
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+            if let Some((sequence, digest)) = self.completed.get(&m.from)
+                && *sequence == m.sequence
+            {
+                return if *digest == fingerprint(&m)? {
+                    Ok(Receipt::Duplicate { completed: true })
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+            // Only the last completion per endpoint is retained, bounding replay
+            // memory. Older retries must query the kernel transaction receipt.
+            return Err(Error::Stale);
         }
         if last.checked_add(1) != Some(m.sequence) {
             return Err(Error::Invalid("sequence gap"));
@@ -179,14 +200,19 @@ impl Channel {
         {
             return Err(Error::Stale);
         }
+        let digest = fingerprint(self.front().expect("checked front"))?;
         let (_, bytes) = self.queue.pop_front().expect("checked front");
         self.bytes -= bytes;
-        self.completed.insert(source, sequence);
+        self.completed.insert(source, (sequence, digest));
         Ok(())
     }
     pub fn queued(&self) -> usize {
         self.queue.len()
     }
+}
+fn fingerprint(m: &Envelope) -> Result<[u8; 32]> {
+    let bytes = serde_json::to_vec(m).map_err(|_| Error::Invalid("message encoding"))?;
+    Ok(Sha256::digest(bytes).into())
 }
 fn name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control)

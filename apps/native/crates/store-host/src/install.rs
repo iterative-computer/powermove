@@ -178,10 +178,14 @@ pub fn uninstall<K: StoreKernel>(kernel: &mut K, id: &ExtensionId, expected: u64
 
 /// Select an explicit archived version, including local overrides. Never removes
 /// the chosen archive or rewinds JSON/user data to the old code's snapshot.
+/// Supply a freshly `verify`-admitted copy of the archived proof and bytes using
+/// current publisher pins. Re-preservation checks disk integrity before CAS.
 /// The kernel adapter must revoke the old view/realm generation when publishing
 /// an install/uninstall/rollback, before issuing a replacement capability.
-pub fn rollback<K: StoreKernel>(
+pub fn rollback<K: StoreKernel, A: ArtifactStore>(
     kernel: &mut K,
+    artifacts: &mut A,
+    verified: &VerifiedRelease,
     id: &ExtensionId,
     expected: u64,
     archive: u64,
@@ -197,6 +201,10 @@ pub fn rollback<K: StoreKernel>(
         .ok_or(Error::Invalid("archive id"))?
         .release
         .clone();
+    if target.proof != verified.proof || target.manifest != verified.manifest {
+        return Err(Error::Integrity("rollback target"));
+    }
+    artifacts.preserve(verified)?;
     advance(&mut state)?;
     archive_active(&mut state, ArchiveReason::RolledBack);
     state.active = Some(target);
