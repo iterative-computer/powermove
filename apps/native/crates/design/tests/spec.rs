@@ -217,7 +217,11 @@ fn root() -> PathBuf {
 fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, Value)>) {
     match v {
         Value::Object(map) => {
-            for (k, v) in map {
+            // Sorted, so the table is identical whether or not another crate in the
+            // build turns on serde_json's `preserve_order` feature.
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in entries {
                 let key = if prefix.is_empty() {
                     k.clone()
                 } else {
