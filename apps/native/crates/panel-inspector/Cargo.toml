@@ -1,0 +1,12 @@
+[package]
+name = "pm-panel-inspector"
+description = "Headless Inspector and Effect Controls model over the kernel actor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-kernel = { path = "../kernel" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-eval = { path = "../../../../engine/crates/pm-eval" }
