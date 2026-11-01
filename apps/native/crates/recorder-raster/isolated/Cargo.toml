@@ -24,5 +24,13 @@ name = "raster"
 path = "../tests/raster.rs"
 
 [[test]]
+name = "golden"
+path = "../tests/golden.rs"
+
+[[test]]
 name = "recorder_contract"
 path = "../../recorder/tests/spec.rs"
+
+[[example]]
+name = "ops"
+path = "../examples/ops.rs"

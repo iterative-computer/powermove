@@ -1,0 +1,20 @@
+{
+  "browser": "Chromium 154.0.8037.57",
+  "format": "straight sRGB RGBA8 PNG, canvas.toDataURL; no screenshot",
+  "generator": "generate.py",
+  "sha256": {
+    "arcs.png": "d8641f945e057ce03bf5b75ce762a497f3a878545e0acf8e3d52d5d64e4168df",
+    "clip-transform.png": "5b8d31d10244cb0bd275a5befde33c859d0e3aeb38c031a0b87ec1167b7a83fb",
+    "composites.png": "890560b86ebb1ff2f133ed84343c5acd904feaff4cfe44fd01f541c135c32f2c",
+    "conic.png": "34f145119e101d874ae31641d2e265c813ad712b9ebbe378ca07c4c51e8f2ffb",
+    "curves.png": "a42bbe6f099572927cdfc4d3be1528f4116f04c7aab35f8a71d361540a2f3ae6",
+    "images.png": "85fd0e1554a328b5f99e1c577ff0a003b3551a33505b6ab7f4fcb8fe69c11cbd",
+    "linear.png": "dc9ee4d0f1741f7a608981642722b0a264b0929a6e56a5f9f91bf96c231f00e0",
+    "patterns.png": "dd1327a71e467e59480ca5163f9d8c93bb8229ac5e080d79c33db055e80c6a26",
+    "radial.png": "e371e759a9f728d7205ffcfd58eada93f02d754d2c504969d314770a3316e184",
+    "rects.png": "2e533f03ea2e801ee8682ac52e85112d7c3be729ad4fa1c6943f97f41edd8212",
+    "roundrect.png": "321f35397e6de6a53ca09a01439fdc627f3629052cddaf27d4869658bb95a380",
+    "strokes.png": "7748518b0f7a672573f17a8ca3a30b6969fbab9b3caf10d8c7840ad8986d6bd4",
+    "text.png": "9648d68fff068a2887118cb4ebf943f744492a30a98d33cc6f993ba24bbb6621"
+  }
+}
