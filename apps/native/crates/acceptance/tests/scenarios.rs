@@ -5,6 +5,9 @@ macro_rules! checks {
     )*}
 }
 checks! {
+    wave5_lint => "A539", wave5_simplify => "A529",
+    wave5_slip => "B258",
+    wave5_strips => "A504", wave5_scene => "A508", wave5_list_media => "A513", wave5_manage_media => "A516", wave5_video => "A530", wave5_captions => "A550", wave5_video_refusals => "W057.mcp-refusals",
     mcp_union => "A494", mcp_timeline => "A503", mcp_manage => "A505", mcp_layout => "A520",
     shuttle => "W079.shuttle", ripple_delete => "W080.ripple-delete", ripple_trim => "W080.ripple-trim", roll => "W081.roll", slide => "W081.slide", source_edit => "W082.source", linked_av => "W083.links",
     composition_settings => "W009.settings", authored_mask => "W048.mask", authored_text => "W049.text", authored_easing => "W061.easing",
@@ -62,9 +65,7 @@ fn corpus_copy_refuses_symlinks_and_never_overwrites_source() {
     }
 }
 
-/// This is a measured product failure, never an acceptance pass or skip. Remove
-/// this baseline expectation when the owning kernel lane fixes fractional fps;
-/// the runner's strict authored-value assertion must stay unchanged.
+/// The merged kernel fix must keep the exact authored rate through persistence.
 #[test]
 fn fractional_fps_stays_exact_now_that_the_kernel_keeps_authored_rates() {
     let scenario = scenarios::all()

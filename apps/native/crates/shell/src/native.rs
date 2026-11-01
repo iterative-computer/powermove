@@ -650,6 +650,8 @@ impl ToolbarDelegate {
                 )
             };
             control.setSelectedSegment(0);
+            control.setAccessibilityLabel(Some(&NSString::from_str("Tools")));
+            control.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tools")));
             for (i, (_, _, l)) in TOOLS.iter().enumerate() {
                 control.setToolTip_forSegment(Some(&NSString::from_str(l)), i as isize);
             }
@@ -716,6 +718,7 @@ impl ToolbarDelegate {
                 )
             }
         };
+        b.setAccessibilityIdentifier(Some(&NSString::from_str(&format!("shell.toolbar.{name}"))));
         b.setTag(TOOLBAR.iter().position(|n| *n == name).unwrap() as isize);
         if name == "toggleSidebar" || name == "toggleInspector" {
             // Apple's sidebar toggles: a plain toolbar item, never a filled tint.
@@ -806,6 +809,7 @@ pub struct Host {
     viewer: Retained<NSView>,
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
     pub splitter_focus: bool,
+    pub keyboard_control_focus: Cell<bool>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>)>,
     /// Last published viewer geometry (`Some(None)` = hidden); `None` before the first frame.
@@ -976,6 +980,7 @@ impl Host {
             viewer,
             viewer_rect: Rc::new(Cell::new(None)),
             splitter_focus: false,
+            keyboard_control_focus: Cell::new(false),
             layer,
             viewer_transform: None,
             last_geometry: None,
@@ -1044,6 +1049,16 @@ impl Host {
                         }
                         return event.as_ptr();
                     }
+                    if e.r#type() == NSEventType::KeyDown {
+                        let key = chord(e);
+                        if let Some(sheet) = host.borrow().sheet.borrow().as_ref()
+                            && e.windowNumber() == sheet.window.windowNumber()
+                            && matches!(key.as_str(), "tab" | "shift+tab")
+                        {
+                            sheet.tab(key == "shift+tab");
+                            return std::ptr::null_mut();
+                        }
+                    }
                     for popup in [&palette, &fields] {
                         let mut p = popup.borrow_mut();
                         if e.windowNumber() == p.window.windowNumber() && p.model.open {
@@ -1057,8 +1072,15 @@ impl Host {
                                 let key = chord(e);
                                 if matches!(
                                     key.as_str(),
-                                    "up" | "down" | "home" | "end" | "enter" | "escape" | "tab"
-                                ) {
+                                    "up" | "down"
+                                        | "home"
+                                        | "end"
+                                        | "enter"
+                                        | "escape"
+                                        | "tab"
+                                        | "shift+tab"
+                                ) || (key == "space" && p.row_focus)
+                                {
                                     p.key(&key);
                                     return std::ptr::null_mut();
                                 }
@@ -1079,16 +1101,67 @@ impl Host {
                         return event.as_ptr();
                     }
                     let chord = chord(e);
+                    if e.r#type() == NSEventType::KeyDown {
+                        if matches!(
+                            chord.as_str(),
+                            "ctrl+f6" | "ctrl+shift+f6" | "ctrl+tab" | "ctrl+shift+tab"
+                        ) {
+                            {
+                                let h = host.borrow();
+                                h.window.makeFirstResponder(Some(&h.gpui));
+                            }
+                            host.borrow().send_command(
+                                if chord.contains("shift") {
+                                    "shellPanelPrevious"
+                                } else {
+                                    "shellPanelNext"
+                                },
+                                vec![],
+                            );
+                            return std::ptr::null_mut();
+                        }
+                        if matches!(chord.as_str(), "tab" | "shift+tab") && !name.contains("Text") {
+                            let h = host.borrow();
+                            let reverse = chord == "shift+tab";
+                            if !h.advance_toolbar(reverse) {
+                                let native = responder.as_ref().is_some_and(|r| {
+                                    !std::ptr::eq(
+                                        &**r as *const _,
+                                        &*h.gpui as *const _ as *const NSResponder,
+                                    )
+                                });
+                                h.window.makeFirstResponder(Some(&h.gpui));
+                                h.send_command(
+                                    if reverse {
+                                        "shellFocusPrevious"
+                                    } else {
+                                        "shellFocusNext"
+                                    },
+                                    vec![serde_json::json!(native)],
+                                );
+                            }
+                            return std::ptr::null_mut();
+                        }
+                    }
+                    if host.borrow().keyboard_control_focus.get()
+                        && matches!(
+                            chord.as_str(),
+                            "enter" | "space" | "up" | "down" | "left" | "right"
+                        )
+                    {
+                        return event.as_ptr();
+                    }
                     if splitter_focus
                         && matches!(chord.as_str(), "up" | "down" | "left" | "right" | "enter")
                     {
                         return event.as_ptr();
                     }
-                    if matches!(chord.as_str(), "enter" | "space")
-                        && responder.as_ref().is_some_and(|r| unsafe {
-                            msg_send![&**r,isKindOfClass:NSButton::class()]
-                        })
-                    {
+                    if matches!(
+                        chord.as_str(),
+                        "enter" | "space" | "up" | "down" | "left" | "right"
+                    ) && responder.as_ref().is_some_and(|r| unsafe {
+                        msg_send![&**r,isKindOfClass:NSControl::class()]
+                    }) {
                         return event.as_ptr();
                     }
                     let field = responder.as_ref().is_some_and(|r| unsafe {
@@ -1189,6 +1262,67 @@ impl Host {
                 }
             }
         }
+    }
+    fn toolbar_controls(&self) -> Vec<Retained<NSView>> {
+        fn collect(view: &NSView, out: &mut Vec<Retained<NSView>>) {
+            if view.isHidden() {
+                return;
+            }
+            let control: bool = unsafe { msg_send![view, isKindOfClass: NSControl::class()] };
+            if control && view.acceptsFirstResponder() {
+                out.push(unsafe { Retained::retain(view as *const _ as *mut _).unwrap() });
+            } else {
+                for child in view.subviews().to_vec() {
+                    collect(&child, out);
+                }
+            }
+        }
+        fn toolbar(view: &NSView, out: &mut Vec<Retained<NSView>>) {
+            if view.class().name().to_string_lossy().as_ref() == "NSToolbarView" {
+                collect(view, out);
+            } else {
+                for child in view.subviews().to_vec() {
+                    toolbar(&child, out);
+                }
+            }
+        }
+        let mut out = vec![];
+        if let Some(frame) = unsafe { self.content.superview() } {
+            toolbar(&frame, &mut out);
+        }
+        out.sort_by(|a, b| {
+            a.convertRect_toView(a.bounds(), None)
+                .origin
+                .x
+                .total_cmp(&b.convertRect_toView(b.bounds(), None).origin.x)
+        });
+        out
+    }
+    pub fn focus_toolbar(&self, reverse: bool) -> bool {
+        let controls = self.toolbar_controls();
+        let control = if reverse {
+            controls.last()
+        } else {
+            controls.first()
+        };
+        control.is_some_and(|v| self.window.makeFirstResponder(Some(v)))
+    }
+    fn advance_toolbar(&self, reverse: bool) -> bool {
+        let controls = self.toolbar_controls();
+        let Some(responder) = self.window.firstResponder() else {
+            return self.focus_toolbar(reverse);
+        };
+        let current = controls
+            .iter()
+            .position(|v| std::ptr::eq(&**v as *const _ as *const NSResponder, &*responder));
+        // An unfocused GPUI surface starts at the toolbar (initial Tab).
+        if current.is_none() {
+            return false;
+        }
+        let index = current.unwrap() as isize + if reverse { -1 } else { 1 };
+        controls
+            .get(index as usize)
+            .is_some_and(|v| self.window.makeFirstResponder(Some(v)))
     }
     pub fn smoke_validate(&self) {
         assert!(!self.window.isVisible(), "Smoke window became visible");
@@ -1800,6 +1934,8 @@ fn end_sheet(sender: &NSControl, response: NSModalResponse) {
 pub struct Sheet {
     pub window: Retained<NSWindow>,
     pub field: Retained<NSTextField>,
+    cancel: Retained<NSButton>,
+    save: Retained<NSButton>,
     _target: Retained<SheetTarget>,
 }
 /// The Save Workspace sheet (language §9 sheets): `heading` title, one
@@ -1931,11 +2067,44 @@ pub fn workspace_sheet(t: &Tokens, placeholder: &str) -> Sheet {
     ));
     content.addSubview(&cancel);
     content.addSubview(&save);
+    unsafe {
+        field.setNextKeyView(Some(&cancel));
+        cancel.setNextKeyView(Some(&save));
+        save.setNextKeyView(Some(&field));
+    }
+    window.setAutorecalculatesKeyViewLoop(false);
     window.setInitialFirstResponder(Some(&field));
     Sheet {
         window,
         field,
+        cancel,
+        save,
         _target: target,
+    }
+}
+impl Sheet {
+    fn tab(&self, reverse: bool) {
+        let responder = self.window.firstResponder();
+        let current = if responder
+            .as_ref()
+            .is_some_and(|r| std::ptr::eq(&**r, &*self.cancel as *const _ as *const NSResponder))
+        {
+            1
+        } else if responder
+            .as_ref()
+            .is_some_and(|r| std::ptr::eq(&**r, &*self.save as *const _ as *const NSResponder))
+        {
+            2
+        } else {
+            0
+        };
+        let next = (current + if reverse { 2 } else { 1 }) % 3;
+        let view: &NSView = match next {
+            1 => &self.cancel,
+            2 => &self.save,
+            _ => &self.field,
+        };
+        self.window.makeFirstResponder(Some(view));
     }
 }
 pub struct Popup {
@@ -1957,6 +2126,7 @@ pub struct Popup {
     previous: Option<Retained<NSResponder>>,
     /// Tallest the panel may grow (`palette_height` / `field_menu_height`).
     max_height: f32,
+    row_focus: bool,
 }
 impl Popup {
     fn new(
@@ -1980,6 +2150,11 @@ impl Popup {
         unsafe {
             window.setReleasedWhenClosed(false);
         }
+        window.setTitle(&NSString::from_str(if surface == Surface::Palette {
+            "Command Palette"
+        } else {
+            "Field Menu"
+        }));
         window.setOpaque(false);
         window.setHasShadow(true);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
@@ -2036,6 +2211,7 @@ impl Popup {
             tokens: t.clone(),
             previous: None,
             max_height: height,
+            row_focus: false,
         }));
         let target: Retained<PopupTarget> = unsafe {
             msg_send![
@@ -2110,6 +2286,18 @@ impl Popup {
                     mtm,
                 )
             };
+            b.setAccessibilityLabel(Some(&NSString::from_str(&c.label)));
+            b.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
+                "shell.palette.{}",
+                c.command
+            ))));
+            unsafe {
+                b.setAccessibilityValue(Some(&NSString::from_str(if i == self.model.selected {
+                    "Selected"
+                } else {
+                    ""
+                })));
+            }
             b.setBordered(false);
             b.setAlignment(NSTextAlignment::Left);
             b.setFont(Some(&NSFont::systemFontOfSize(
@@ -2153,6 +2341,9 @@ impl Popup {
                 self.body.addSubview(&hint);
                 self.hints.push(hint);
             }
+            if self.row_focus && i == self.model.selected {
+                self.window.makeFirstResponder(Some(&b));
+            }
             self.rows.push(b);
         }
     }
@@ -2161,6 +2352,7 @@ impl Popup {
             self.hide();
             return;
         }
+        self.row_focus = false;
         self.model.open = true;
         self.model.search(String::new());
         self.search.setStringValue(&NSString::from_str(""));
@@ -2187,10 +2379,61 @@ impl Popup {
         unsafe {
             let _: () = msg_send![&*self.window,performSelector:sel!(orderOut:),withObject:std::ptr::null::<AnyObject>(),afterDelay:duration];
         }
-        self.parent.makeKeyWindow();
-        self.parent.makeFirstResponder(self.previous.as_deref());
+        // Becoming key can synchronously render GPUI. Restore after the event
+        // monitor releases its popup borrow; a command may already have opened
+        // a sheet/settings/new window, whose focus must take precedence.
+        let (parent, popup, previous) = (
+            self.parent.clone(),
+            self.window.clone(),
+            self.previous.clone(),
+        );
+        let restore = block2::RcBlock::new(move || {
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            let another_window = app.keyWindow().is_some_and(|key| {
+                key.windowNumber() != popup.windowNumber()
+                    && key.windowNumber() != parent.windowNumber()
+            });
+            if !another_window && parent.isVisible() && parent.attachedSheet().is_none() {
+                parent.makeKeyWindow();
+                parent.makeFirstResponder(previous.as_deref());
+            }
+        });
+        unsafe {
+            objc2_foundation::NSOperationQueue::mainQueue().addOperationWithBlock(&restore);
+        }
     }
     fn key(&mut self, key: &str) {
+        if matches!(key, "tab" | "shift+tab") {
+            let n = self.model.filtered().len();
+            if n == 0 {
+                return;
+            }
+            let reverse = key == "shift+tab";
+            if !self.row_focus {
+                self.row_focus = true;
+                self.model.selected = if reverse { n - 1 } else { 0 };
+            } else if (!reverse && self.model.selected + 1 == n)
+                || (reverse && self.model.selected == 0)
+            {
+                self.row_focus = false;
+            } else if reverse {
+                self.model.selected -= 1;
+            } else {
+                self.model.selected += 1;
+            }
+            self.refresh();
+            if !self.row_focus {
+                self.window.makeFirstResponder(Some(&self.search));
+            }
+            return;
+        }
+        let key = if key == "space" && self.row_focus {
+            "enter"
+        } else if key == "space" {
+            return;
+        } else {
+            key
+        };
         if let Some(name) = self.model.navigate(key) {
             let _ = self.sender.try_send(Command {
                 name,
