@@ -28,6 +28,7 @@ pub mod fallback_cache;
 pub mod font;
 #[cfg(feature = "level2")]
 pub mod level2;
+pub mod measure;
 pub mod registry;
 #[cfg(feature = "ink")]
 pub mod render;

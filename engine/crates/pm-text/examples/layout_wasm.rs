@@ -102,6 +102,7 @@ pub unsafe extern "C" fn pm_run(
 ///
 /// # Safety
 /// Both buffers must come from `pm_alloc` with these lengths.
+#[cfg(feature = "level2")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pm_run_level2(
     inputs: *mut u8,

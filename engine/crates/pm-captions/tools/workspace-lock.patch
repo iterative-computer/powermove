@@ -1,0 +1,36 @@
+diff --git a/engine/Cargo.lock b/engine/Cargo.lock
+index 119d2cd09..3ffb876a5 100644
+--- a/engine/Cargo.lock
++++ b/engine/Cargo.lock
+@@ -2191,6 +2191,16 @@ dependencies = [
+  "pm-bridge",
+ ]
+
++[[package]]
++name = "pm-captions"
++version = "0.1.0"
++dependencies = [
++ "regex",
++ "ryu-js",
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "pm-cli"
+ version = "0.1.0"
+@@ -2304,6 +2314,14 @@ dependencies = [
+  "smallvec",
+ ]
+
++[[package]]
++name = "pm-fx-defs"
++version = "0.1.0"
++dependencies = [
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "pm-geom3d"
+ version = "0.1.0"
