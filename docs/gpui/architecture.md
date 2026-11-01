@@ -109,6 +109,31 @@ Decision (user, 2026-10-31): keeping today's Svelte extensions running is
 3. A web-view compatibility host for v1–3 panels is built only if a spike shows
    it is cheap; otherwise migration is the path.
 
+## What 1:1 means (owner decisions, 2026-10-31)
+
+Parity = every item in `parity-a-shell.md` and `parity-b-editor.md` checked off
+with a test or screenshot as evidence.
+
+- **Same:** every feature and action; behavior details (shortcuts, modifier
+  keys, double-click to type, Escape to cancel, undo grouping, snapping,
+  selection rules); every existing project opens and saves without loss;
+  rendered pixels match the engine gates; agents, MCP and CLI do the same
+  things.
+- **May differ:** the look (HIG, Liquid Glass); the *placement* of things when
+  macOS has a standard place (e.g. a real Settings window instead of an
+  in-app modal) as long as every setting/action still exists; speed may only
+  get better.
+- **Dropped/replaced (earlier decisions):** web animation export; Blender and
+  the three.js 3D (replaced by Studio); Svelte extensions running as-is
+  (replaced by v4 + agent migration).
+- **Gray areas, decided:**
+  1. Old-app bugs: fix clear bugs; copy quirks that are habits users rely on.
+     Note each deliberate difference in the lane's report.
+  2. HIG vs old layout: HIG wins on placement and look; the old app wins on
+     behavior and shortcuts.
+  3. Extension panels the user built: migrated *after* cutover, not a cutover
+     blocker. (The v4 format and migration tooling still ship by cutover.)
+
 ## Parity process
 
 - The inventories are the checklist. Each lane checks off items as they land,
