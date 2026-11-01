@@ -196,6 +196,7 @@ describe('MediaStore', () => {
     await second.init();
     const { readdir } = await import('node:fs/promises');
     expect(await readdir(path.join(storeRoot, 'tmp'))).toEqual([]);
+    await first.abandon(1); // Close the fixture descriptor after simulating a killed owner.
   });
 
   it('verifies a link by size and time, rehashes when the time moved, and reports changes', async () => {

@@ -23,3 +23,16 @@ it.each(['ENOSPC','EACCES'])('retains old disk data and failed edits after %s, t
   fail=false;await store.flushAll({strict:true});const restored=createStore(folder);await restored.load();expect(restored.get!('projectJournal.synthetic')).toEqual(next);
   expect((await fs.readdir(folder)).some(name=>name.includes('.tmp-'))).toBe(false);
 });
+
+it('TR refuses queued and new library writes after its writer lease is lost, retaining disk and pending work', async () => {
+  const folder=await fs.mkdtemp(path.join(tmpdir(),'powermove-tr-writer-'));folders.push(folder);
+  let locked=true;
+  const store=createStore(folder,{assertWritable:()=>{if(!locked)throw new Error('writer lease lost');}});await store.load();
+  store.set('theme','first');await store.flushAll({strict:true});
+  store.set('theme','queued');locked=false;
+  await expect(store.flushAll({strict:true})).rejects.toThrow('could not be saved');
+  expect(()=>store.set('theme','rejected')).toThrow('writer lease lost');
+  const saved=createStore(folder);await saved.load();expect(saved.get!('theme')).toBe('first');expect(store.get!('theme')).toBe('queued');
+  locked=true;await store.flushAll({strict:true});
+  const reopened=createStore(folder);await reopened.load();expect(reopened.get!('theme')).toBe('queued');
+});

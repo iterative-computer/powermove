@@ -38,7 +38,9 @@ export class LibraryMedia {
   private grants = new Map<string, { owner: number; record: Record }>();
   private queue: Promise<unknown> = Promise.resolve();
   constructor(readonly root: string, private readonly artifactSource?: (reference: ImportedArtifact) => Promise<string>,
-    private readonly sourceAvailable: (source: string) => Promise<boolean> = async () => true) {}
+    private readonly sourceAvailable: (source: string) => Promise<boolean> = async () => true,
+    private readonly preserveForTransition = false,
+    private readonly assertWritable: () => void = () => {}) {}
   async initialize(): Promise<void> {
     for (const folder of [this.root, path.join(this.root, 'Index'), path.join(this.root, '.incoming')]) {
       await mkdir(folder, { recursive: true });
@@ -46,14 +48,21 @@ export class LibraryMedia {
     }
     // Only main's incomplete uploads live here; no editors exist at startup.
     for (const file of await readdir(path.join(this.root, '.incoming'))) {
-      if (/^[a-f0-9-]{36}\.part$/.test(file)) await unlink(path.join(this.root, '.incoming', file));
+      if (/^[a-f0-9-]{36}\.part$/.test(file)) await this.retirePartial(path.join(this.root, '.incoming', file));
     }
     for (const file of await readdir(path.join(this.root, 'Index'))) {
-      if (/^[a-f0-9]{64}\.json\.[a-f0-9-]{36}\.tmp$/.test(file)) await unlink(path.join(this.root, 'Index', file));
+      if (/^[a-f0-9]{64}\.json\.[a-f0-9-]{36}\.tmp$/.test(file)) await this.retirePartial(path.join(this.root, 'Index', file));
     }
   }
+  private async retirePartial(file: string): Promise<void> {
+    if (!this.preserveForTransition) { await unlink(file); return; }
+    const archive = path.join(this.root, 'TR Archive');
+    await mkdir(archive, { recursive: true, mode: 0o700 });
+    await rename(file, path.join(archive, `${path.basename(file)}-${randomUUID()}`));
+    await syncDirectory(archive);
+  }
   private serial<T>(action: () => Promise<T>): Promise<T> {
-    const task = this.queue.then(action);
+    const task = this.queue.then(() => { this.assertWritable(); return action(); });
     this.queue = task.then(() => undefined, () => undefined);
     return task;
   }
@@ -211,6 +220,7 @@ export class LibraryMedia {
     });
   }
   async begin(owner: number, raw: LibraryMediaInput): Promise<string> {
+    this.assertWritable();
     if (!raw || !validKey(raw.key) || !Number.isSafeInteger(raw.size) || raw.size < 0 || raw.size > 64 * 1024 ** 3
       || typeof raw.type !== 'string' || !/^[\w.+-]+\/[\w.+-]+$/.test(raw.type)
       || raw.revision !== undefined && (typeof raw.revision !== 'string' || raw.revision.length > 256)
@@ -225,6 +235,7 @@ export class LibraryMedia {
     return token;
   }
   async chunk(owner: number, token: string, offset: number, data: Uint8Array): Promise<void> {
+    this.assertWritable();
     const job = this.uploads.get(token);
     if (!job || job.owner !== owner || !(data instanceof Uint8Array) || !data.length || data.length > LIBRARY_MEDIA_CHUNK
       || offset !== job.received || offset + data.length > job.input.size) throw new Error('Invalid media upload chunk.');
@@ -265,6 +276,7 @@ export class LibraryMedia {
         }
         const record: Record = { key: job.input.key, revision: job.input.revision || randomUUID(), type: job.input.type,
           size: job.input.size, file, sha256, mtime: (await lstat(target)).mtimeMs };
+        this.assertWritable();
         await writeLibraryJSON(path.join(this.root, 'Index', indexName(record.key)), record);
         if (job.input.artifact && this.artifactSource) {
           // The imported copy is already durable. Failure to archive must keep
@@ -287,7 +299,7 @@ export class LibraryMedia {
     } finally { await handle.close(); }
     const pinned = { ...record, key: artifactKey(reference) };
     await writeLibraryJSON(path.join(this.root, 'Index', indexName(pinned.key)), pinned);
-    if (sameFile(before, await lstat(source))) await unlink(source);
+    if (!this.preserveForTransition && sameFile(before, await lstat(source))) await unlink(source);
   }
   async archivedArtifact(reference: ImportedArtifact): Promise<{ path: string; mime: string } | null> {
     const record = await this.record(artifactKey(reference));

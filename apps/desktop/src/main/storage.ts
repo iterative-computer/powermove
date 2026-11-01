@@ -56,6 +56,8 @@ export interface Store {
 
 /** Test seams are optional; normal callers only pass the store directory. */
 export interface StoreOptions {
+  /** TR writer lease; checked again immediately before durable publication. */
+  assertWritable?: () => void;
   fs?: StoreFileSystem;
   syncFs?: Pick<typeof syncFs, 'readFileSync' | 'renameSync'>;
   heavyCacheBytes?: number;
@@ -92,7 +94,8 @@ class FileStore implements Store {
     private readonly now: () => number,
     private readonly randomSuffix: () => string,
     private readonly synchronousFs: Pick<typeof syncFs, 'readFileSync' | 'renameSync'>,
-    private readonly heavyCacheBytes: number
+    private readonly heavyCacheBytes: number,
+    private readonly assertWritable: () => void
   ) {}
 
   async load(): Promise<void> {
@@ -351,6 +354,7 @@ class FileStore implements Store {
   }
 
   set(key: string, value: unknown): void {
+    this.assertWritable();
     this.fileNameFor(key, IPC.storeSet);
 
     // Old renderers send session metadata without history. Such a partial
@@ -395,6 +399,7 @@ class FileStore implements Store {
   }
 
   setSerialized(key: string, serialized: string): void {
+    this.assertWritable();
     this.fileNameFor(key, IPC.storeSetSerialized);
     const parsed = parseStoreKey(key);
     const large = parsed?.kind === 'dynamic' && ['project', 'projectState', 'projectHistory'].includes(parsed.prefix);
@@ -413,6 +418,7 @@ class FileStore implements Store {
   }
 
   delete(key: string): void {
+    this.assertWritable();
     this.fileNameFor(key, IPC.storeDelete);
     this.bumpVersion(key);
     this.keys.delete(key);
@@ -501,6 +507,7 @@ class FileStore implements Store {
   }
 
   private async persist(key: string, operation: PendingOperation): Promise<void> {
+    this.assertWritable();
     const finalPath = path.join(this.directory, this.fileNameFor(key, 'store:write'));
     if (operation.kind === 'delete') {
       try {
@@ -523,6 +530,7 @@ class FileStore implements Store {
       } finally {
         await handle.close();
       }
+      this.assertWritable();
       await this.fs.rename(temporaryPath, finalPath);
       const directory = await this.fs.open(this.directory, 'r');
       try { await directory.sync(); } finally { await directory.close(); }
@@ -615,7 +623,8 @@ export function createStore(dir: string, options: StoreOptions = {}): Store {
     options.now ?? Date.now,
     options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`),
     options.syncFs ?? syncFs,
-    options.heavyCacheBytes ?? HEAVY_CACHE_BYTES
+    options.heavyCacheBytes ?? HEAVY_CACHE_BYTES,
+    options.assertWritable ?? (() => {})
   );
 }
 

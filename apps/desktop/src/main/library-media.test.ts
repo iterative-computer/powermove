@@ -229,3 +229,26 @@ it('upgrade does not delete a link that names an owned payload itself', async ()
   await media.link(1, { key: 'clip', sourcePath: owned, size: 14, type: 'video/mp4', revision: 'revision', matchExisting: true });
   expect(await media.collectLinkedDuplicates()).toBe(0); expect(await readFile(owned, 'utf8')).toBe('original video');
 });
+
+it('TR archives interrupted uploads and index files rather than deleting them', async () => {
+  const partial = '12345678-1234-1234-1234-123456789abc.part';
+  const index = `${'a'.repeat(64)}.json.12345678-1234-1234-1234-123456789abc.tmp`;
+  await writeFile(path.join(root, '.incoming', partial), 'recoverable payload');
+  await writeFile(path.join(root, 'Index', index), 'recoverable mapping');
+  const transition = new LibraryMedia(root, undefined, undefined, true);
+  await transition.initialize();
+  const archive = await readdir(path.join(root, 'TR Archive'));
+  expect(archive).toHaveLength(2);
+  expect(await readFile(path.join(root, 'TR Archive', archive.find(x => x.startsWith(partial))!), 'utf8')).toBe('recoverable payload');
+  expect(await readFile(path.join(root, 'TR Archive', archive.find(x => x.startsWith(index))!), 'utf8')).toBe('recoverable mapping');
+});
+
+it('TR keeps imported agent artifact sources even after durable library archival', async () => {
+  const source = path.join(root, 'agent-original.mp4'); await writeFile(source, 'synthetic artifact');
+  const transition = new LibraryMedia(root, async () => source, undefined, true);
+  await transition.initialize();
+  const token = await transition.begin(3, { key: 'media:agent', size: 18, type: 'video/mp4', artifact: { projectId: 'synthetic', path: 'clip.mp4' } });
+  await transition.chunk(3, token, 0, Buffer.from('synthetic artifact')); await transition.finish(3, token);
+  expect(await readFile(source, 'utf8')).toBe('synthetic artifact');
+  expect(await transition.archivedArtifact({ projectId: 'synthetic', path: 'clip.mp4' })).not.toBeNull();
+});

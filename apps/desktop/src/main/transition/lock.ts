@@ -32,9 +32,10 @@ export class TransitionLock {
       });
     });
   }
-  async assertOwned(): Promise<void> {
+  assertOwnedSync(): void {
     if (this.failed || this.released || this.child.exitCode !== null) throw new Error('The project lock heartbeat failed. Your edits have been kept.');
   }
+  async assertOwned(): Promise<void> { this.assertOwnedSync(); }
   async release(): Promise<void> {
     if (this.released) return;
     this.released = true;

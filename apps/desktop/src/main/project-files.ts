@@ -185,6 +185,7 @@ export class ProjectFiles {
       await checkVersion(destination, previous);
       await mkdir(path.dirname(this.registryPath), { recursive: true });
       await atomicWrite(journal, Buffer.from(JSON.stringify({ id, path: destination, hash, generation, baseRevisionHash: previous?.hash ?? null })));
+      await this.lock(destination);
       await publishFile(temporary, destination, previous, hash, () => {
         // A finalization failure must compare the next retry with bytes that
         // actually reached the destination. The renderer still stays dirty.

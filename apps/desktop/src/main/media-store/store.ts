@@ -63,6 +63,7 @@ type Stream = {
 
 export type MediaStoreOptions = {
   root: string;
+  assertWritable?: () => void;
   executor: HashExecutor;
   now?: () => number;
   log?: (message: string) => void;
@@ -109,7 +110,8 @@ export class MediaStore {
   init(): Promise<void> {
     this.ready ??= (async () => {
       for (const directory of [this.root, this.objects, this.keys]) await mkdir(directory, { recursive: true, mode: 0o700 });
-      await rm(this.tmp, { recursive: true, force: true });
+      try { await rename(this.tmp, path.join(this.root, `archived-tmp-${randomUUID()}`)); }
+      catch (error: any) { if (error.code !== 'ENOENT') throw error; }
       await mkdir(this.tmp, { recursive: true, mode: 0o700 });
     })();
     return this.ready;
@@ -350,8 +352,13 @@ export class MediaStore {
 
   /** Moves a verified temporary file into `objects/` under its hash. */
   private async commitObject(temporary: string, hash: string, size: number): Promise<void> {
+    this.options.assertWritable?.();
     const target = this.objectPath(hash);
-    if (await this.hasObject(hash, size)) return;
+    if (await this.hasObject(hash, size)) {
+      const existing = await hashFile(this.options.executor, target, { settleMs: 0 });
+      if (existing.hash !== hash) throw new MediaStoreError('An existing media object is damaged.', 'mismatch');
+      return;
+    }
     await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     await chmod(temporary, 0o400);
     await rename(temporary, target);
@@ -360,12 +367,13 @@ export class MediaStore {
 
   /** Archive old mappings before an intentional import updates a key (N4). */
   async publishRecord(record: MediaStoreRecord): Promise<void> {
+    this.options.assertWritable?.();
     if (!validStorageKey(record.key) || !validRecord(record, record.key)) throw new MediaStoreError('Invalid media mapping.');
     const file = path.join(this.keys, keyFile(record.key));
     try {
       const old = JSON.parse(await readFile(file, 'utf8'));
       if (!validRecord(old, record.key)) throw new MediaStoreError('A media mapping is damaged.');
-      if (old.hash === record.hash && old.revision === record.revision) return;
+      if (old.hash === record.hash && old.revision === record.revision && old.source === record.source) return;
       await writeJSON(path.join(this.root, 'key-history', keyFile(record.key), `${old.hash}-${createHash('sha256').update(JSON.stringify(old)).digest('hex')}.json`), old);
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
     await writeJSON(file, record);
