@@ -489,7 +489,7 @@ fn unavailable() -> Check {
             "edit_video",
             json!({"operation":"slip","layerId":"L-missing","sourceIn":5}),
         ),
-        ("get_panel_layout", json!({})),
+        ("get_workspace_state", json!({})),
     ] {
         let error = tool_error(&mut f.session, name, args)?;
         assert_eq!(
