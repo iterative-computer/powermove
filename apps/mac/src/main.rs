@@ -1,8 +1,8 @@
 //! Powermove for Mac. See docs/gpui/architecture.md.
 
-mod glass;
-mod theme;
 mod workspace;
+
+use pm_glass as glass;
 
 use gpui::{App, AppContext as _, Bounds, Menu, MenuItem, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, px, size};
 

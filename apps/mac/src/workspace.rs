@@ -10,8 +10,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, canvas, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
 
-use crate::glass::{self, Action, Contents, Layer, Rect, Tool};
-use crate::theme;
+use pm_glass::{self as glass, Action, Contents, Layer, Rect, Tool};
+use pm_kit::theme;
 
 const FPS: f64 = 30.0;
 const DURATION: f64 = 12.0;

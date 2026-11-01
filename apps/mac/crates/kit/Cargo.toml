@@ -1,0 +1,10 @@
+[package]
+name = "pm-kit"
+description = "GPUI component kit: Powermove's controls, tokens and layout primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
