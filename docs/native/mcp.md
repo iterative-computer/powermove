@@ -231,9 +231,12 @@ returns the full ShellReply so app callers can present recovery-copy decisions.
    validated `Call::Restore`, adds an undoable restore entry and publishes
    through the kernel's journal boundary. Refusal preserves all work. Disconnect logs a
    refusal; the client is already gone. Undo can recover a successful rollback.
-7. Finish removes extension staging; false finish/disconnect removes the run
-   workspace. Committed artifacts/API/input files remain. Finish errors also
-   end the run, preserving the document and its ordinary Undo history.
+7. Finish archives extension staging under `mcp-archives/<runId>/extensions`;
+   false finish/disconnect archives the whole run under
+   `mcp-archives/<runId>/workspace`. Committed artifacts/API/input files stay
+   in the original run directory. No authored workspace file is deleted.
+   Finish errors also end the run, preserving the document and ordinary Undo
+   history; failed archival leaves the source files in place.
 
 Applied acknowledgements are retained when the kernel reports a notice such as
 NotDurable. Mutation results include the notice and subscribers/stderr receive
@@ -291,6 +294,7 @@ to block the UI thread or create another kernel writer.
 |---|---|
 | Keep frozen response adapters separate from optional native worker primitives | N6 freezes the public contract; N7/N8 permit headless tests without Node or UI-thread waits. |
 | Plan full video/media edits in scratch state, then publish one guarded transaction | N3 exact authored timing; N4 no partial edits; kernel single-writer architecture. |
+| Archive retired run/staging files instead of deleting them | N4 protects authored artifacts even on cancel, disconnect and failed finish; N6 keeps response schemas unchanged. |
 | Preserve all bytes/versions on metadata deletion; block run restore/squash after media actions | N4 archive, never delete; N6 native media Undo contract. |
 | Refuse import/replacement and full transform/caption/3D edits until complete backing exists | N1/N3/N4/N6 forbid success with missing durable bytes, validation or authored intent. |
 | Evaluate source timing and structural checks through kernel queries | N3 one evaluated truth; N7 deterministic headless inspection. |
@@ -350,8 +354,8 @@ to block the UI thread or create another kernel writer.
 
 ## Validation
 
-Wave 2 verification: **49 MCP tests pass** (5 unit + 24 existing integration +
-20 new integration tests); **267 kernel tests pass, 1 optional test ignored**.
+Wave 2 verification: **51 MCP tests pass** (5 unit + 24 existing integration +
+22 new integration tests); **267 kernel tests pass, 1 optional test ignored**.
 The required combined default test run passed; one earlier kernel selection-event
 ordering failure passed its exact retry and the full rerun without kernel edits.
 Package formatting and strict all-target Clippy pass with no pm-mcp warnings;

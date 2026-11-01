@@ -973,3 +973,80 @@ fn incomplete_composition_sheets_and_invalid_image_blocks_are_truthful() {
         );
     }
 }
+#[test]
+fn finish_and_disconnect_archive_authored_run_files_without_overwriting() {
+    for commit in [false, true] {
+        let f = Fixture::new();
+        let mut s = McpSession::new(f.host.clone());
+        let start = ok(s.call("start_session", json!({"prompt":"Synthetic archive"})));
+        let root = PathBuf::from(start["workspace"].as_str().unwrap());
+        std::fs::write(
+            root.join("extensions/synthetic.ts"),
+            "export const synthetic = true;",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("artifacts/synthetic.txt"),
+            "Authored synthetic artifact",
+        )
+        .unwrap();
+        let archive = f.root.join("mcp-archives").join(root.file_name().unwrap());
+        ok(s.call("finish_session", json!({"commit":commit})));
+        if commit {
+            assert_eq!(
+                std::fs::read_to_string(archive.join("extensions/synthetic.ts")).unwrap(),
+                "export const synthetic = true;"
+            );
+            assert!(root.join("artifacts/synthetic.txt").exists());
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(archive.join("workspace/artifacts/synthetic.txt")).unwrap(),
+                "Authored synthetic artifact"
+            );
+            assert!(!root.exists());
+        }
+    }
+    let f = Fixture::new();
+    let mut s = McpSession::new(f.host.clone());
+    let start = ok(s.call("start_session", json!({"prompt":"Synthetic disconnect"})));
+    let root = PathBuf::from(start["workspace"].as_str().unwrap());
+    std::fs::write(
+        root.join("artifacts/retained.txt"),
+        "Synthetic retained work",
+    )
+    .unwrap();
+    let archive = f.root.join("mcp-archives").join(root.file_name().unwrap());
+    drop(s);
+    assert_eq!(
+        std::fs::read_to_string(archive.join("workspace/artifacts/retained.txt")).unwrap(),
+        "Synthetic retained work"
+    );
+}
+
+#[test]
+fn archive_collision_preserves_existing_archive_and_retiring_workspace() {
+    let f = Fixture::new();
+    let mut s = McpSession::new(f.host.clone());
+    let start = ok(s.call("start_session", json!({"prompt":"Synthetic collision"})));
+    let root = PathBuf::from(start["workspace"].as_str().unwrap());
+    std::fs::write(
+        root.join("artifacts/retained.txt"),
+        "Synthetic current work",
+    )
+    .unwrap();
+    let archive = f.root.join("mcp-archives").join(root.file_name().unwrap());
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::write(archive.join("previous.txt"), "Synthetic previous work").unwrap();
+    assert_eq!(
+        err(s.call("finish_session", json!({"commit":false})))["code"],
+        "io_error"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("artifacts/retained.txt")).unwrap(),
+        "Synthetic current work"
+    );
+    assert_eq!(
+        std::fs::read_to_string(archive.join("previous.txt")).unwrap(),
+        "Synthetic previous work"
+    );
+}

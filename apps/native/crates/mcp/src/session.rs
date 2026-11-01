@@ -437,15 +437,11 @@ impl McpSession {
             )
         })();
         if let Some(root) = session.workspace {
-            let cleanup = if commit {
-                std::fs::remove_dir_all(root.join("extensions"))
-            } else {
-                std::fs::remove_dir_all(root)
-            };
+            let cleanup = archive_workspace(&root, commit);
             if let Err(e) = cleanup
                 && result.is_ok()
             {
-                return Err(e.into());
+                return Err(e);
             }
         }
         result
@@ -630,5 +626,28 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     tx.mark = host.history_mark(id, writer)?;
     tx.changed = false;
     session.baseline = tx.revision;
+    Ok(())
+}
+
+/// N4: retiring an agent workspace must preserve its authored files. Moving
+/// within the explicit profile is atomic and never follows staged symlinks.
+fn archive_workspace(root: &std::path::Path, commit: bool) -> Result<()> {
+    let profile = root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| Error::invalid("Invalid run workspace"))?;
+    let runs = profile.join("mcp-archives");
+    std::fs::create_dir_all(&runs)?;
+    let archive = runs.join(
+        root.file_name()
+            .ok_or_else(|| Error::invalid("Missing run identity"))?,
+    );
+    // Exclusive creation prevents overwriting an earlier archive on retry.
+    std::fs::create_dir(&archive)?;
+    if commit {
+        std::fs::rename(root.join("extensions"), archive.join("extensions"))?;
+    } else {
+        std::fs::rename(root, archive.join("workspace"))?;
+    }
     Ok(())
 }
