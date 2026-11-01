@@ -4927,6 +4927,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-panel-agentpanel"
+version = "0.1.0"
+dependencies = [
+ "pm-agents",
+ "pm-kernel",
+ "pm-model",
+ "serde_json",
+]
+
+[[package]]
+name = "pm-panel-inspector"
+version = "0.1.0"
+dependencies = [
+ "pm-eval",
+ "pm-kernel",
+ "pm-model",
+]
+
+[[package]]
+name = "pm-panel-media"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
+ "pm-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pm-panel-timeline"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
+ "pm-model",
+]
+
+[[package]]
 name = "pm-panel-viewerchrome"
 version = "0.1.0"
 dependencies = [

@@ -121,7 +121,7 @@ fn validate_value(s: &Value, v: &Value, path: &str) -> Result<()> {
 }
 
 /// Tools with concrete bodies/adapters. HOST_BACKED tools need an injected
-/// engine/export worker; without it they still fail explicitly.
+/// native worker capabilities; without them they still fail explicitly.
 pub const IMPLEMENTED: &[&str] = &[
     "list_projects",
     "create_project",
@@ -149,15 +149,24 @@ pub const IMPLEMENTED: &[&str] = &[
     "media_waveform",
     "export_video",
     "export_captions",
+    "validate_effect",
+    "fork_builtin_extension",
+    "store_search",
+    "store_extension",
+    "store_source",
 ];
 /// Adapter availability is distinct from a working standalone backend.
 pub const HOST_BACKED: &[&str] = &[
+    "fork_builtin_extension",
     "render_frames",
     "probe_media",
     "sample_media_frames",
     "media_contact_sheet",
     "media_waveform",
     "export_video",
+    "store_search",
+    "store_extension",
+    "store_source",
 ];
 pub fn backing(name: &str) -> &'static str {
     match name {
@@ -178,7 +187,7 @@ pub fn backing(name: &str) -> &'static str {
         | "media_contact_sheet"
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
-        "validate_effect" => "extension registration validator",
+        "validate_effect" => "native frozen kernel/glsl.ts registration validator port",
         "get_panel_layout" => "pm-kernel saved workspace and winning panel registrations",
         "set_panel_layout" => {
             "workspace editing state and external workspace Undo/Redo continuation host"
@@ -195,7 +204,12 @@ pub fn backing(name: &str) -> &'static str {
         "open_panel" | "get_panel_state" | "interact_panel" => {
             "macOS shell/remote-DOM panel host, fresh semantic refs and stable element IDs"
         }
-        n if n.starts_with("store_") => "Store service",
+        "store_search" | "store_extension" | "store_source" => {
+            "native Store same-origin bounded HTTP transport (search/detail/release/tree/file)"
+        }
+        n if n.starts_with("store_") => {
+            "Store install/publish host: verified artifacts, durable StoreKernel, permission/trust, provenance, local-tree hashes and native publish confirmation"
+        }
         "get_3d_scene" | "check_project" => {
             "pm-kernel evaluated composition/3D/source-timing queries and optional live media registry"
         }
@@ -209,8 +223,11 @@ pub fn backing(name: &str) -> &'static str {
         "replace_media" | "import_media" | "import_media_to_timeline" => {
             "durable media import/version service: verified bytes, fingerprints, retained versions and native Undo"
         }
-        "fork_builtin_extension" | "stage_fork_rebase" | "publish_extensions" => {
-            "extension runtime, compiler and isolated sandbox"
+        "fork_builtin_extension" => {
+            "native shipped source root, frozen manifest validation and isolated fork staging with pristine merge base"
+        }
+        "stage_fork_rebase" | "publish_extensions" => {
+            "extension source inventory, native compiler/scanner, complete API pack, isolated runtime validation and atomic promotion/reload host"
         }
         "inspect_creative_workspace" | "inspect_creative_extension" => {
             "creative-app inventory service"
