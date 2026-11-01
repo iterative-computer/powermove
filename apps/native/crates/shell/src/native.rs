@@ -385,6 +385,7 @@ pub struct Host {
     pub viewer_rect: Rc<Cell<Option<crate::layout::Rect>>>,
     pub splitter_focus: bool,
     layer: metal::MetalLayer,
+    viewer_transform: Option<([f64; 2], Option<f64>)>,
     _toolbar: Retained<NSToolbar>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
@@ -421,8 +422,10 @@ impl Host {
         window.setTabbingIdentifier(&NSString::from_str("com.powermove.native.editor"));
         window.setTabbingMode(NSWindowTabbingMode::Preferred);
         window.setRestorable(true);
-        window.setFrameAutosaveName(&NSString::from_str("PowermoveNative.Editor"));
-        window.setFrameUsingName(&NSString::from_str("PowermoveNative.Editor"));
+        if std::env::var_os("PM_NATIVE_SHELL_STATE").is_none() {
+            window.setFrameAutosaveName(&NSString::from_str("PowermoveNative.Editor"));
+            window.setFrameUsingName(&NSString::from_str("PowermoveNative.Editor"));
+        }
         window.setMinSize(NSSize::new(
             t.metrics.min_width as f64,
             t.metrics.min_height as f64,
@@ -506,6 +509,7 @@ impl Host {
             viewer_rect: Rc::new(Cell::new(None)),
             splitter_focus: false,
             layer,
+            viewer_transform: None,
             _toolbar: toolbar,
             _delegate: delegate,
             _target: target,
@@ -769,6 +773,33 @@ impl Host {
         let effects = self.resolver.resolve(token, handled);
         self.effects(effects);
     }
+    /// Retained below-slot layer; the app configures the service presenter.
+    /// Opt in to a clipped content layer. Standalone shell keeps its placeholder.
+    pub fn viewer_transform(&mut self, dimensions: [f64; 2], zoom: Option<f64>) {
+        if self.viewer_transform.is_none() {
+            let root = objc2_quartz_core::CALayer::new();
+            root.setMasksToBounds(true);
+            root.setBackgroundColor(Some(&native_color(self.tokens.colors.viewer).CGColor()));
+            unsafe {
+                let _: () = msg_send![&*self.viewer,setLayer:&*root];
+                let _: () = msg_send![&*root,addSublayer:self.layer.as_ptr() as *mut AnyObject];
+            }
+        }
+        self.viewer_transform = Some((dimensions, zoom));
+    }
+    pub fn add_bindings(&mut self, bindings: impl IntoIterator<Item = crate::keyboard::Binding>) {
+        self.resolver.bindings.extend(bindings);
+        self.resolver
+            .bindings
+            .sort_by_key(|b| std::cmp::Reverse(b.priority));
+    }
+    pub fn viewer_layer(&self) -> metal::MetalLayer {
+        self.layer.clone()
+    }
+    pub fn set_viewer_label(&self, label: &str) {
+        self.viewer
+            .setAccessibilityLabel(Some(&NSString::from_str(label)));
+    }
     pub fn toolbar_inset(&self) -> f32 {
         (self.gpui.bounds().size.height - self.window.contentLayoutRect().size.height).max(0.)
             as f32
@@ -779,10 +810,24 @@ impl Host {
             self.viewer.setHidden(false);
             self.viewer.setFrame(rect(r, h));
             let scale = self.window.backingScaleFactor();
+            let (width, height) = if let Some((dimensions, zoom)) = self.viewer_transform {
+                let fit = (r.w as f64 / dimensions[0]).min(r.h as f64 / dimensions[1]);
+                let zoom = zoom
+                    .unwrap_or(fit)
+                    .min(8192. / dimensions[0].max(dimensions[1]) / scale);
+                (dimensions[0] * zoom, dimensions[1] * zoom)
+            } else {
+                (r.w as f64, r.h as f64)
+            };
+            unsafe {
+                let _: () = msg_send![self.layer.as_ptr() as *mut AnyObject,setFrame:NSRect::new(
+                    NSPoint::new((r.w as f64-width)/2., (r.h as f64-height)/2.), NSSize::new(width,height))];
+            }
+            self.layer.set_contents_scale(scale);
             self.layer
                 .set_drawable_size(core_graphics::geometry::CGSize::new(
-                    r.w as f64 * scale,
-                    r.h as f64 * scale,
+                    width * scale,
+                    height * scale,
                 ));
         } else {
             self.viewer.setHidden(true);

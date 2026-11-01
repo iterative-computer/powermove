@@ -10,3 +10,22 @@ path = "src/main.rs"
 [dependencies]
 pm-shell = { path = "../shell" }
 anyhow = "1"
+pm-kernel = { path = "../kernel" }
+pm-engine-service = { path = "../engine-service" }
+pm-design = { path = "../design" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
+pm-time = { path = "../../../../engine/crates/pm-time" }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
+gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false }
+metal = "0.33"
+foreign-types = "0.5"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-quartz-core = "0.3"
+block2 = "0.6"
+async-channel = "2"
+serde_json = "1"
+tempfile = "3"

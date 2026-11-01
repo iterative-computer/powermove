@@ -1,4 +1,6 @@
 //! Phase 1 application shell. Kernel and engine are deliberately integration seams.
+pub mod integration;
+pub use native::{Command, Host};
 pub mod keyboard;
 pub mod layout;
 pub mod menu;
@@ -16,16 +18,25 @@ pub fn run() -> anyhow::Result<()> {
 struct SharedMetalDevice(metal::Device);
 impl Global for SharedMetalDevice {}
 pub fn run_with_device(device: metal::Device) -> anyhow::Result<()> {
-    launch(device, false)
+    launch(device, false, None)
 }
 /// Initializes native chrome with activation prohibited and every window hidden.
 pub fn smoke() -> anyhow::Result<()> {
     launch(
         metal::Device::system_default().ok_or_else(|| anyhow::anyhow!("Metal unavailable"))?,
         true,
+        None,
     )
 }
-fn launch(device: metal::Device, smoke: bool) -> anyhow::Result<()> {
+/// Launch using the engine device and app-owned panel/command implementation.
+pub fn run_integrated(device: metal::Device, factory: integration::Factory) -> anyhow::Result<()> {
+    launch(device, false, Some(factory))
+}
+fn launch(
+    device: metal::Device,
+    smoke: bool,
+    factory: Option<integration::Factory>,
+) -> anyhow::Result<()> {
     let platform = Rc::new(gpui_macos::MacPlatform::new_with_metal_device(
         false,
         device.clone(),
@@ -38,6 +49,9 @@ fn launch(device: metal::Device, smoke: bool) -> anyhow::Result<()> {
     };
     app.with_accessibility_forced().run(move |cx| {
         cx.set_global(SharedMetalDevice(device));
+        if let Some(factory) = factory {
+            cx.set_global(integration::AppIntegration(factory));
+        }
         native::install_menus();
         open_editor_with_visibility(cx, !smoke);
         if smoke {
@@ -87,7 +101,18 @@ fn open_editor_with_visibility(cx: &mut App, visible: bool) {
             if !visible {
                 host.borrow().smoke_validate();
             }
-            let editor = cx.new(|cx| view::Editor::new(t, Some(host), cx));
+            let integration = cx
+                .try_global::<integration::AppIntegration>()
+                .map(|g| g.0.clone())
+                .map(|factory| factory(host.clone(), window, cx));
+            let editor = cx.new(|cx| {
+                let mut editor = view::Editor::new(t, Some(host), cx);
+                if let Some(i) = &integration {
+                    i.observe(cx);
+                }
+                editor.integration = integration;
+                editor
+            });
             editor.update(cx, |_, cx| {
                 cx.observe_window_appearance(window, |v, w, cx| v.follow_appearance(w, cx))
                     .detach();
