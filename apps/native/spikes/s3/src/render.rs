@@ -2,7 +2,7 @@
 //! surfaces, exact Metal-device injection. Here the final consumer IS the viewer.
 use crate::policy::Output;
 use anyhow::{Result, anyhow, bail};
-use foreign_types::{ForeignType, ForeignTypeRef};
+use foreign_types::ForeignTypeRef;
 use pm_gpu::{Gpu, Target, bridge_out::surface::ExportedSurface};
 use pm_protocol::{
     color::Precision,
@@ -86,16 +86,14 @@ impl Engine {
             .new_library_with_source(include_str!("viewer.metal"), &metal::CompileOptions::new())
             .map_err(|s| anyhow!(s))?;
         let desc = metal::RenderPipelineDescriptor::new();
-        desc.set_vertex_function(Some(
-            &library
-                .get_function("vs", None)
-                .map_err(anyhow::Error::msg)?,
-        ));
-        desc.set_fragment_function(Some(
-            &library
-                .get_function("fs", None)
-                .map_err(anyhow::Error::msg)?,
-        ));
+        let vertex = library
+            .get_function("vs", None)
+            .map_err(anyhow::Error::msg)?;
+        let fragment = library
+            .get_function("fs", None)
+            .map_err(anyhow::Error::msg)?;
+        desc.set_vertex_function(Some(&vertex));
+        desc.set_fragment_function(Some(&fragment));
         desc.color_attachments()
             .object_at(0)
             .unwrap()
@@ -140,7 +138,7 @@ impl Engine {
         output: Output,
         layer: &metal::MetalLayer,
         rect: [f32; 4],
-        overlay: bool,
+        overlay: u32,
         capture: bool,
     ) -> Result<Option<Submission>> {
         objc2::rc::autoreleasepool(|_| {
@@ -154,7 +152,7 @@ impl Engine {
         output: Output,
         layer: &metal::MetalLayer,
         rect: [f32; 4],
-        overlay: bool,
+        overlay: u32,
         capture: bool,
     ) -> Result<Option<Submission>> {
         let slot = self.next;
@@ -227,7 +225,7 @@ impl Engine {
         let params = Params {
             rect,
             headroom: output.headroom.max(1.) as f32,
-            overlay: overlay as u32,
+            overlay,
             pad: [0; 2],
         };
         pass.set_fragment_bytes(

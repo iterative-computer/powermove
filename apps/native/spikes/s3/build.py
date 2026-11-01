@@ -6,6 +6,9 @@ os.chdir(Path(__file__).resolve().parent / "isolated")
 os.environ['CARGO_TARGET_DIR'] = str(Path.home() / 'Developer/pm-target')
 os.environ['CARGO_PROFILE_DEV_DEBUG'] = '0'
 os.environ['CARGO_PROFILE_TEST_DEBUG'] = '0'
+# System Python strips DYLD_* on entry; set it explicitly for Cargo's test child.
+if os.environ.get('PM_FFMPEG_DIR'):
+    os.environ['DYLD_LIBRARY_PATH'] = os.environ['PM_FFMPEG_DIR'] + '/lib'
 def free():
     s = os.statvfs('/')
     return s.f_bavail * s.f_frsize
