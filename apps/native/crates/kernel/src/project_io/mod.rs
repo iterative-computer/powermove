@@ -105,6 +105,85 @@ impl MediaEntry {
         }
     }
 
+    /// Stream this read capability to a new private cache file. Never writes a
+    /// source project or creates a source-side lock. Checks version and digest.
+    pub fn copy_to(&self, destination: &Path) -> Result<(), ProjectIoError> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut input: Box<dyn Read> = match &self.source {
+            MediaSource::Memory(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
+            MediaSource::File { path, length, .. } => {
+                let file = File::open(path).map_err(|e| io_err(path, e))?;
+                if file.metadata().map_err(|e| io_err(path, e))?.len() != *length {
+                    return Err(ProjectIoError::Invalid("Media source changed".into()));
+                }
+                Box::new(file.take(*length))
+            }
+            MediaSource::Embedded {
+                file,
+                offset,
+                length,
+                ..
+            } => {
+                file.check(true)?;
+                let mut input = File::open(&file.path).map_err(|e| io_err(&file.path, e))?;
+                input
+                    .seek(SeekFrom::Start(*offset))
+                    .map_err(|e| io_err(&file.path, e))?;
+                Box::new(input.take(*length))
+            }
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options
+            .open(destination)
+            .map_err(|e| io_err(destination, e))?;
+        let result = (|| {
+            let mut total = 0;
+            let mut digest = Sha256::new();
+            let mut buffer = vec![0; 1 << 20];
+            loop {
+                let n = input
+                    .read(&mut buffer)
+                    .map_err(|e| io_err(destination, e))?;
+                if n == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..n])
+                    .map_err(|e| io_err(destination, e))?;
+                digest.update(&buffer[..n]);
+                total += n as u64;
+            }
+            let hash = match &self.source {
+                MediaSource::Embedded { sha256, .. } | MediaSource::File { sha256, .. } => {
+                    sha256.as_deref()
+                }
+                _ => None,
+            };
+            if total != self.length()
+                || hash.is_some_and(|hash| hash != durable::hex(&digest.finalize()))
+            {
+                return Err(ProjectIoError::Invalid(
+                    "Media source length or checksum changed".into(),
+                ));
+            }
+            if let MediaSource::Embedded { file, .. } = &self.source {
+                file.check(true)?;
+            }
+            output.sync_all().map_err(|e| io_err(destination, e))
+        })();
+        drop(output);
+        if result.is_err() {
+            let _ = std::fs::remove_file(destination);
+        }
+        result
+    }
+
     /// A new revision string for bytes without one (`crypto.randomUUID()`).
     pub fn fresh_revision() -> JsString {
         JsString::from(durable::random_uuid().as_str())
@@ -114,7 +193,7 @@ impl MediaEntry {
 /// Embedded media by asset id, in file order.
 #[derive(Clone, Debug, Default)]
 pub struct MediaTable {
-    entries: Vec<MediaEntry>,
+    entries: Arc<Vec<MediaEntry>>,
 }
 
 impl MediaTable {
@@ -136,15 +215,16 @@ impl MediaTable {
 
     /// Adds or replaces an entry by id; an existing id keeps its position.
     pub fn insert(&mut self, entry: MediaEntry) {
-        match self.entries.iter_mut().find(|e| e.id == entry.id) {
+        let entries = Arc::make_mut(&mut self.entries);
+        match entries.iter_mut().find(|e| e.id == entry.id) {
             Some(slot) => *slot = entry,
-            None => self.entries.push(entry),
+            None => entries.push(entry),
         }
     }
 
     pub fn remove(&mut self, id: &str) -> Option<MediaEntry> {
         let pos = self.entries.iter().position(|e| e.id == *id)?;
-        Some(self.entries.remove(pos))
+        Some(Arc::make_mut(&mut self.entries).remove(pos))
     }
 }
 

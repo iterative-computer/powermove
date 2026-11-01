@@ -370,6 +370,13 @@ fn secrets_require_explicit_one_time_prompt_and_never_put_plaintext_in_manifests
         access.values,
         vec![b"S6 synthetic secret; never a user credential".to_vec(); 4]
     );
+    let locators: Vec<serde_json::Value> =
+        read(&config.native_profile.join("secret-locators.json"));
+    assert_eq!(locators.len(), 4);
+    assert!(locators.iter().all(|v| v["service"]
+        == format!("{} migration secrets", pm_first_launch::BETA_BUNDLE_ID)
+        && v["account"].as_str().is_some_and(|s| s.len() == 64)
+        && v["version"].as_str().is_some_and(|s| s.len() == 64)));
     run(&config, |_| Ok(())).unwrap();
     assert_eq!(access.reads, 1);
     for (p, bytes) in files(&config.native_profile) {

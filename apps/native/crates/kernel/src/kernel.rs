@@ -111,6 +111,7 @@ pub struct Kernel {
     durability: Option<Durability>,
     slots: BTreeMap<String, Slot>,
     pub(crate) compacting: bool,
+    pub(crate) pending_recovery: BTreeMap<String, crate::session::PendingRecovery>,
     pub(crate) library: Option<crate::persistence::LibraryWriter>,
     pub(crate) sessions: BTreeMap<String, crate::session::Session>,
     pub(crate) state: crate::state::StateSnapshot,
@@ -128,6 +129,7 @@ impl Kernel {
             slots: BTreeMap::new(),
             library: None,
             compacting: false,
+            pending_recovery: BTreeMap::new(),
             sessions: BTreeMap::new(),
             state: Default::default(),
         }
@@ -293,17 +295,18 @@ impl Kernel {
             let handle = s.handle.clone();
             return self.shell(crate::session::ShellCall::Close(handle)).is_ok();
         }
+        if self.project(id).is_some_and(|p| p.store().is_saving())
+            || self.flush_project(id).is_err()
+        {
+            return false;
+        }
+        self.remove_closed_project(id)
+    }
+    /// Remove only after the caller's flush/compaction barrier succeeded.
+    pub(crate) fn remove_closed_project(&mut self, id: &str) -> bool {
         self.sessions.remove(id);
         std::sync::Arc::make_mut(&mut self.state.ui).remove(id);
-        match self.slots.remove(id) {
-            Some(slot) => {
-                if let Some(j) = &slot.journal {
-                    let _ = j.sync_now();
-                }
-                true
-            }
-            None => false,
-        }
+        self.slots.remove(id).is_some()
     }
 
     pub(crate) fn config_journal_root(&self) -> Option<PathBuf> {
@@ -543,7 +546,39 @@ impl Kernel {
         })
     }
 
-    /// Flushes every journal now (clean shutdown, tests).
+    /// Flush one journal, reporting IO failure before releasing its session.
+    pub fn flush_project(&self, id: &str) -> Result<(), KernelFailure> {
+        let slot = self
+            .slots
+            .get(id)
+            .ok_or_else(|| KernelFailure::NoProject(id.into()))?;
+        if let Some(journal) = &slot.journal {
+            journal
+                .sync_now()
+                .map_err(|e| KernelFailure::Journal(e.to_string()))?;
+        }
+        Ok(())
+    }
+    pub fn durability_barrier(&self) -> Result<(), KernelFailure> {
+        for id in self.projects() {
+            self.flush_project(id)?;
+        }
+        if let Some(writer) = &self.library {
+            writer
+                .flush()
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+        }
+        if let Some(d) = &self.durability {
+            d.wait_idle();
+            let errors = d.take_errors();
+            if !errors.is_empty() {
+                return Err(KernelFailure::Journal(errors.join("; ")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Best-effort flush for Drop; callers certifying shutdown use durability_barrier.
     pub fn sync_all(&self) {
         if let Some(writer) = &self.library {
             let _ = writer.flush();

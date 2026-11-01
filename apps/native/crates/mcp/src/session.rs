@@ -1,6 +1,6 @@
 use crate::{Automation, Error, Result, catalog, commands, failure, json_value, success, views};
 use pm_kernel::session::{ShellCall, ShellReply};
-use pm_kernel::{HistoryMark, Origin};
+use pm_kernel::{ActorHistoryMark, Origin};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -12,7 +12,7 @@ use std::{
 
 struct Transaction {
     snapshot: Value,
-    mark: HistoryMark,
+    mark: ActorHistoryMark,
     revision: u64,
     changed: bool,
     interleaved: bool,
@@ -119,7 +119,7 @@ impl McpSession {
             } else {
                 views::timeline(&host, &id, args)?
             };
-            refresh(session, &host, &id)?;
+            refresh(session, &mut host, &id, self.writer)?;
             return Ok(result);
         }
         match name {
@@ -130,7 +130,9 @@ impl McpSession {
                     .iter()
                     .map(|v| v.as_str().unwrap().to_owned())
                     .collect::<Vec<_>>();
-                Ok(json!({"selection":host.select_layers(&id,&ids,args["add"]==true)?}))
+                Ok(
+                    json!({"selection":host.select_layers(&id,&ids,args["add"]==true, self.writer)?}),
+                )
             }
             "save_project" => host.save_project(&id),
             "apply_commands" | "edit_layer_strips" => {
@@ -178,7 +180,7 @@ impl McpSession {
                 if session.transaction.is_none() {
                     session.transaction = Some(Transaction {
                         snapshot: p,
-                        mark: host.history_mark(&id)?,
+                        mark: host.history_mark(&id, self.writer)?,
                         revision,
                         changed: false,
                         interleaved: false,
@@ -203,7 +205,7 @@ impl McpSession {
                         expected,
                         self.writer,
                     )?;
-                    host.select_layers(&id, &batch.selection, false)?;
+                    host.select_layers(&id, &batch.selection, false, self.writer)?;
                     (ack, batch.descriptions, batch.results, None)
                 };
                 let tx = session.transaction.as_mut().unwrap();
@@ -480,7 +482,7 @@ fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
     }
     Ok(())
 }
-fn refresh(session: &mut Active, host: &Automation, id: &str) -> Result<()> {
+fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
     let revision = host.revision(id)?;
     session.baseline = revision;
     if let Some(tx) = &mut session.transaction
@@ -490,7 +492,7 @@ fn refresh(session: &mut Active, host: &Automation, id: &str) -> Result<()> {
             tx.interleaved = true;
         } else {
             tx.snapshot = host.read_document(id)?;
-            tx.mark = host.history_mark(id)?;
+            tx.mark = host.history_mark(id, writer)?;
         }
         tx.revision = revision;
     }
@@ -511,7 +513,7 @@ fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) 
     host.restore(id, tx.snapshot.clone(), tx.revision, writer)?;
     tx.snapshot = host.read_document(id)?;
     tx.revision = host.revision(id)?;
-    tx.mark = host.history_mark(id)?;
+    tx.mark = host.history_mark(id, writer)?;
     tx.changed = false;
     session.baseline = tx.revision;
     Ok(())

@@ -86,8 +86,10 @@ fn corpus(manifest: PathBuf, fonts: RenderFonts) -> Result<()> {
             let root = p.snapshot.document.root().context("No document")?;
             let c = pm_kernel::model::comp_node(root, Some(&comp)).context("No composition")?;
             let duration = c.get("dur").and_then(crate::node_number).unwrap_or(1.);
-            let mut media =
-                crate::media::for_file(&source, &temp.path().join(format!("media-{index}")))?;
+            let mut media = crate::media::for_session(
+                &p.snapshot, &p.media, p.path.as_deref(),
+                &temp.path().join(format!("media-{index}")),
+            )?;
             if let Some(paths) = row["media"].as_object() {
                 for (id, path) in paths {
                     media.originals.insert(

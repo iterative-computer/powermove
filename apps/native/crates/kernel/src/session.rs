@@ -15,7 +15,7 @@ pub struct SessionHandle {
     pub project: String,
     pub generation: String,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum SessionSource {
     Library { profile: PathBuf, project: String },
     File(PathBuf),
@@ -33,12 +33,30 @@ pub enum ShellCall {
         source: SessionSource,
         electron_profile: Option<PathBuf>,
     },
+    /// Prepare without publishing recovered work. Resolve only this ticket.
+    PrepareOpen {
+        id: String,
+        source: SessionSource,
+        electron_profile: Option<PathBuf>,
+    },
+    DecideRecovery {
+        ticket: String,
+        decision: RecoveryDecision,
+    },
     Save(SessionHandle),
     SaveAs {
         session: SessionHandle,
         path: PathBuf,
     },
     Close(SessionHandle),
+    /// Leave journal recoverable, without saving the base.
+    DeferClose(SessionHandle),
+    /// Compaction and durability barrier; refuses any in-flight save/open entry.
+    PrepareQuit,
+    AbortSave {
+        session: SessionHandle,
+        ticket: String,
+    },
     Recent,
     CompactAll,
     Trash(String),
@@ -49,6 +67,64 @@ pub enum ShellCall {
         name: String,
     },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryDecision {
+    Recover,
+    OpenAsCopy,
+    Discard,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionMetadata {
+    pub handle: SessionHandle,
+    pub destination: SessionDestination,
+    pub metadata: Value,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionDestination {
+    Library(String),
+    File(PathBuf),
+}
+
+pub(crate) struct PendingRecovery {
+    id: String,
+    source: SessionSource,
+    electron_profile: Option<PathBuf>,
+    stamp: String,
+}
+enum RecoveryMode {
+    Legacy,
+    Ask,
+    Decide(RecoveryDecision, String),
+}
+pub(crate) struct PendingSave {
+    ticket: String,
+    path: Option<PathBuf>,
+    lock: Option<FileLock>,
+    revision: u64,
+}
+/// Run on a worker, then send the completion to KernelHandle::finish_save.
+/// Dropping a handoff requires AbortSave after its plan has been dropped.
+pub struct SessionSave {
+    pub session: SessionHandle,
+    pub ticket: String,
+    pub plan: crate::SavePlan,
+}
+pub struct SessionSaveCompletion {
+    session: SessionHandle,
+    ticket: String,
+    result: Result<crate::SaveReceipt, crate::ProjectIoError>,
+}
+impl SessionSave {
+    pub fn run(self) -> SessionSaveCompletion {
+        SessionSaveCompletion {
+            session: self.session,
+            ticket: self.ticket,
+            result: self.plan.run(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveryResult {
     None,
@@ -59,6 +135,10 @@ pub enum RecoveryResult {
 #[derive(Clone, Debug)]
 pub enum ShellReply {
     Library(OpenDecision),
+    RecoveryRequired {
+        ticket: String,
+        recovery: RecoveryResult,
+    },
     Opened {
         session: SessionHandle,
         info: OpenInfo,
@@ -89,6 +169,7 @@ pub(crate) struct Session {
     pub lock: Option<FileLock>,
     pub meta: Value,
     pub rejected_history: Option<Value>,
+    pub pending_save: Option<PendingSave>,
 }
 fn failure(e: impl std::fmt::Display) -> KernelFailure {
     KernelFailure::Storage(e.to_string())
@@ -111,6 +192,48 @@ fn with_identity(mut v: Value, id: &str, name: Option<&str>) -> Value {
     }
     v
 }
+// A durable rebase checkpoint after a clean close contains no unsaved work.
+// Compare history and workspace too; document equality alone would hide edits.
+fn saved_state(source: &OpenSource) -> Option<(Value, Value)> {
+    let empty = || crate::History::new().snapshot().to_saved_packed();
+    match source {
+        OpenSource::File(opened) => Some((
+            opened
+                .history
+                .as_ref()
+                .map(|h| h.snapshot().to_saved_packed())
+                .unwrap_or_else(empty),
+            opened
+                .file
+                .envelope
+                .workspace
+                .clone()
+                .unwrap_or(Value::Null),
+        )),
+        OpenSource::Library(lib) | OpenSource::LibraryWithFile { lib, .. } => {
+            let canonical = crate::model::to_canonical(lib.project.clone());
+            let history = lib.history.as_ref().and_then(|h| {
+                crate::History::import(h, canonical.get("compId").and_then(Value::as_str)).ok()
+            });
+            Some((
+                history
+                    .map(|h| h.snapshot().to_saved_packed())
+                    .unwrap_or_else(empty),
+                lib.workspace
+                    .clone()
+                    .or_else(|| {
+                        lib.session
+                            .as_ref()
+                            .and_then(|s| s.get("workspace"))
+                            .cloned()
+                    })
+                    .unwrap_or(Value::Null),
+            ))
+        }
+        _ => None,
+    }
+}
+
 impl Kernel {
     pub fn shell(&mut self, call: ShellCall) -> Result<ShellReply, KernelFailure> {
         match call {
@@ -169,6 +292,53 @@ impl Kernel {
                 source,
                 electron_profile,
             } => self.open_session(id, source, electron_profile),
+            ShellCall::PrepareOpen {
+                id,
+                source,
+                electron_profile,
+            } => self.open_session_mode(id, source, electron_profile, RecoveryMode::Ask),
+            ShellCall::DecideRecovery { ticket, decision } => {
+                let pending = self
+                    .pending_recovery
+                    .remove(&ticket)
+                    .ok_or_else(|| failure("Recovery choice expired; prepare the open again"))?;
+                self.open_session_mode(
+                    pending.id,
+                    pending.source,
+                    pending.electron_profile,
+                    RecoveryMode::Decide(decision, pending.stamp),
+                )
+            }
+            ShellCall::AbortSave { session, ticket } => {
+                self.check_session(&session)?;
+                let s = &self.sessions[&session.project];
+                if s.pending_save.as_ref().is_none_or(|p| p.ticket != ticket)
+                    || self.project(&session.project).unwrap().store().is_saving()
+                {
+                    return Err(failure("Save is still in flight or ticket expired"));
+                }
+                self.sessions
+                    .get_mut(&session.project)
+                    .unwrap()
+                    .pending_save = None;
+                Ok(ShellReply::Changed(true))
+            }
+            ShellCall::DeferClose(handle) => {
+                self.ensure_idle(&handle)?;
+                self.flush_project(&handle.project)?;
+                self.remove_closed_project(&handle.project);
+                Ok(ShellReply::Closed {
+                    recovery_copy: None,
+                })
+            }
+            ShellCall::PrepareQuit => {
+                for session in self.sessions.values() {
+                    self.ensure_idle(&session.handle)?;
+                }
+                let result = self.shell(ShellCall::CompactAll)?;
+                self.durability_barrier()?;
+                Ok(result)
+            }
             ShellCall::Save(handle) => {
                 self.check_session(&handle)?;
                 self.save_session(&handle, None)
@@ -178,13 +348,15 @@ impl Kernel {
                 self.save_session(&session, Some(path))
             }
             ShellCall::Close(handle) => {
-                self.check_session(&handle)?;
+                self.ensure_idle(&handle)?;
+                self.flush_project(&handle.project)?;
                 let saved = self.save_session(&handle, None)?;
                 let ShellReply::Saved { recovery_copy, .. } = saved else {
                     unreachable!()
                 };
-                self.sessions.remove(&handle.project);
-                self.close(&handle.project);
+                self.flush_project(&handle.project)?;
+                self.durability_barrier()?;
+                self.remove_closed_project(&handle.project);
                 Ok(ShellReply::Closed { recovery_copy })
             }
             ShellCall::CompactAll => {
@@ -278,6 +450,130 @@ impl Kernel {
                 Ok(ShellReply::Changed(true))
             }
         }
+    }
+    pub fn session_metadata(&self, id: &str) -> Option<SessionMetadata> {
+        let s = self.sessions.get(id)?;
+        Some(SessionMetadata {
+            handle: s.handle.clone(),
+            metadata: s.meta.clone(),
+            destination: match &s.destination {
+                Destination::Library(id) => SessionDestination::Library(id.clone()),
+                Destination::File(path) => SessionDestination::File(path.clone()),
+            },
+        })
+    }
+    fn ensure_idle(&self, handle: &SessionHandle) -> Result<(), KernelFailure> {
+        self.check_session(handle)?;
+        let p = self.project(&handle.project).unwrap();
+        if p.store().is_saving() || self.sessions[&handle.project].pending_save.is_some() {
+            return Err(failure(
+                "A save is in flight; finish it before saving or closing",
+            ));
+        }
+        if p.open_entry().is_some() {
+            return Err(failure("Finish the active edit before saving or closing"));
+        }
+        Ok(())
+    }
+    /// Freeze a file save on the actor; the worker owns disk IO only.
+    pub fn prepare_session_save(
+        &mut self,
+        session: SessionHandle,
+        path: Option<PathBuf>,
+    ) -> Result<SessionSave, KernelFailure> {
+        self.ensure_idle(&session)?;
+        let mut lock = None;
+        if let Some(path) = &path {
+            if locks::open_decision(path, None) != OpenDecision::Writable {
+                return Err(failure("Choose a writable local destination"));
+            }
+            lock = Some(FileLock::acquire(&locks::project_lock_path(path)).map_err(failure)?);
+        } else if !matches!(
+            self.sessions[&session.project].destination,
+            Destination::File(_)
+        ) {
+            return Err(failure(
+                "Library saves use ShellCall::Save; file handoff needs SaveAs",
+            ));
+        }
+        let target = path
+            .clone()
+            .map_or(SaveTarget::InPlace, |path| SaveTarget::SaveAs {
+                path,
+                replace: false,
+            });
+        let p = self.project_mut(&session.project).unwrap();
+        let workspace = p.workspace().clone();
+        p.store_mut().set_workspace(Some(workspace));
+        let plan = p
+            .store_mut()
+            .prepare_save(target, SaveOptions::default())
+            .map_err(failure)?;
+        let ticket = crate::new_id("save");
+        self.sessions
+            .get_mut(&session.project)
+            .unwrap()
+            .pending_save = Some(PendingSave {
+            ticket: ticket.clone(),
+            path,
+            lock,
+            revision: plan.revision,
+        });
+        Ok(SessionSave {
+            session,
+            ticket,
+            plan,
+        })
+    }
+    pub fn finish_session_save(
+        &mut self,
+        completion: SessionSaveCompletion,
+    ) -> Result<ShellReply, KernelFailure> {
+        let SessionSaveCompletion {
+            session,
+            ticket,
+            result,
+        } = completion;
+        self.check_session(&session)?;
+        if self.sessions[&session.project]
+            .pending_save
+            .as_ref()
+            .is_none_or(|p| p.ticket != ticket)
+        {
+            return Err(failure("Save ticket expired"));
+        }
+        let pending = self
+            .sessions
+            .get_mut(&session.project)
+            .unwrap()
+            .pending_save
+            .take()
+            .unwrap();
+        let receipt = result.map_err(failure)?;
+        self.project_mut(&session.project)
+            .unwrap()
+            .store_mut()
+            .finish_save(receipt)
+            .map_err(failure)?;
+        if let Some(path) = pending.path {
+            let s = self.sessions.get_mut(&session.project).unwrap();
+            s.destination = Destination::File(path);
+            s.lock = pending.lock;
+        }
+        if self.library.is_some() {
+            self.save_library_slot(&session.project, &session.project, false)?;
+        }
+        // Newer edits remain dirty, journalled against the older base. Recovery
+        // offers a copy if the file and journal bases differ.
+        let store = self.project(&session.project).unwrap().store();
+        if store.revision() == pending.revision && !store.is_dirty() {
+            self.rebase_journal(&session.project)?;
+        }
+        self.flush_project(&session.project)?;
+        Ok(ShellReply::Saved {
+            session,
+            recovery_copy: None,
+        })
     }
     fn duplicate_slot(
         &self,
@@ -451,6 +747,19 @@ impl Kernel {
         if self.project(&id).is_some() {
             return Err(KernelFailure::AlreadyOpen(id));
         }
+        self.open_session_mode(id, source, electron_profile, RecoveryMode::Legacy)
+    }
+    fn open_session_mode(
+        &mut self,
+        id: String,
+        source: SessionSource,
+        electron_profile: Option<PathBuf>,
+        mode: RecoveryMode,
+    ) -> Result<ShellReply, KernelFailure> {
+        if self.project(&id).is_some() {
+            return Err(KernelFailure::AlreadyOpen(id));
+        }
+        let original_source = source.clone();
         let mut decision = OpenDecision::Writable;
         let mut lock = None;
         let mut meta = Value::Object(Map::new());
@@ -509,19 +818,28 @@ impl Kernel {
                 rejected_history = p.history.clone();
                 let hash = crate::kernel::base_hash_of(&p.project);
                 let value = p.project.clone();
-                let associated = p
-                    .session
-                    .as_ref()
-                    .and_then(|m| m.get("file"))
+                let media_only = meta.get("file").is_none() && meta.get("embeddedMedia").is_some();
+                let association = meta.get("file").or_else(|| meta.get("embeddedMedia"));
+                let associated = association
                     .and_then(|m| m.get("path"))
                     .and_then(Value::as_str)
                     .and_then(|path| {
                         project_io::open_project(std::path::Path::new(path), OpenOptions::default())
                             .ok()
                     })
+                    .filter(|opened| {
+                        !media_only
+                            || association
+                                .and_then(|m| m.get("savedHash"))
+                                .and_then(Value::as_str)
+                                .is_none_or(|hash| {
+                                    opened.file.version.as_ref().is_some_and(|v| v.hash == hash)
+                                })
+                    })
                     .map(|o| o.file);
                 let mut target = Destination::Library(project.clone());
                 if owned
+                    && !media_only
                     && decision == OpenDecision::Writable
                     && let Some(file) = &associated
                     && let Some(path) = &file.path
@@ -627,11 +945,147 @@ impl Kernel {
             Destination::Library(slot) => slot.as_str(),
             _ => id.as_str(),
         };
-        let recovery = match self.recover(
+        let mut recovered = self.recover(
             recovery_id,
             Some(&base),
             Some(&crate::model::to_canonical(base_value)),
-        ) {
+        );
+        if matches!(mode, RecoveryMode::Ask)
+            && let Recovery::Recovered(r) = &recovered
+            && !r.truncated
+            && r.document
+                .root()
+                .map(pm_model::hash::canonical_hash)
+                .as_deref()
+                == Some(&base)
+            && saved_state(&source).is_some_and(|(history, workspace)| {
+                r.history.snapshot().to_saved_packed() == history && r.workspace == workspace
+            })
+        {
+            // Keep old checkpoints on disk; the base already holds these exact
+            // document/history/workspace facts, so there is nothing to decide.
+            recovered = Recovery::Nothing;
+        }
+        let file_stamp = recovery_file
+            .as_ref()
+            .and_then(|f| f.version.as_ref())
+            .map(|v| v.hash.as_str())
+            .unwrap_or("");
+        let stamp = format!(
+            "{file_stamp}:{}",
+            match &recovered {
+                Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => format!(
+                    "{}:{}:{}:{}",
+                    base,
+                    r.session.display(),
+                    r.revision,
+                    r.document
+                        .root()
+                        .map(pm_model::hash::canonical_hash)
+                        .unwrap_or_default()
+                ),
+                Recovery::Unrecoverable { session, reason } =>
+                    format!("{base}:{session:?}:{reason}"),
+                Recovery::Nothing => format!("{base}:none"),
+            }
+        );
+        if matches!(mode, RecoveryMode::Ask) && !matches!(recovered, Recovery::Nothing) {
+            let recovery = match &recovered {
+                Recovery::Recovered(r) => RecoveryResult::Recovered {
+                    truncated: r.truncated,
+                },
+                Recovery::Copy { recovered: r, .. } => RecoveryResult::OfferCopy {
+                    project: id.clone(),
+                    truncated: r.truncated,
+                },
+                Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable {
+                    reason: reason.clone(),
+                },
+                _ => unreachable!(),
+            };
+            self.pending_recovery.retain(|_, p| p.id != id);
+            let ticket = crate::new_id("recovery-choice");
+            self.pending_recovery.insert(
+                ticket.clone(),
+                PendingRecovery {
+                    id,
+                    source: original_source,
+                    electron_profile,
+                    stamp,
+                },
+            );
+            return Ok(ShellReply::RecoveryRequired { ticket, recovery });
+        }
+        let choice = match &mode {
+            RecoveryMode::Decide(choice, expected) => {
+                if expected != &stamp {
+                    return Err(failure("Recovery base changed; prepare the open again"));
+                }
+                Some(*choice)
+            }
+            _ => None,
+        };
+        if choice.is_some()
+            && choice != Some(RecoveryDecision::Discard)
+            && matches!(&recovered, Recovery::Unrecoverable { .. })
+        {
+            return Err(failure(
+                "Recovery could not be replayed; files are retained",
+            ));
+        }
+        if choice == Some(RecoveryDecision::Discard) {
+            // Explicitly rejected sessions remain archived. No save of recovered
+            // content, and no unrelated journal session is retired.
+            let paths = match &recovered {
+                Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => {
+                    vec![r.session.clone()]
+                }
+                Recovery::Unrecoverable { session, .. } => vec![session.clone()],
+                _ => vec![],
+            };
+            for path in paths {
+                let archive = path.parent().unwrap().join("discarded");
+                std::fs::create_dir_all(&archive).map_err(failure)?;
+                std::fs::rename(&path, archive.join(path.file_name().unwrap())).map_err(failure)?;
+                std::fs::File::open(&archive)
+                    .and_then(|f| f.sync_all())
+                    .map_err(failure)?;
+                std::fs::File::open(path.parent().unwrap())
+                    .and_then(|f| f.sync_all())
+                    .map_err(failure)?;
+            }
+        }
+        if matches!(
+            choice,
+            Some(RecoveryDecision::OpenAsCopy | RecoveryDecision::Recover)
+        ) && (choice == Some(RecoveryDecision::OpenAsCopy)
+            || matches!(&recovered, Recovery::Copy { .. }))
+        {
+            let r = match recovered {
+                Recovery::Recovered(r) | Recovery::Copy { recovered: r, .. } => r,
+                _ => {
+                    return Err(failure(
+                        "Recovery could not be replayed; files are retained",
+                    ));
+                }
+            };
+            let copy = self.recovery_copy(r, recovery_file)?;
+            let profile = self.library.as_ref().unwrap().store().dir().to_path_buf();
+            return self.open_session(
+                id,
+                SessionSource::Library {
+                    profile,
+                    project: copy,
+                },
+                None,
+            );
+        }
+        let recovered = if choice == Some(RecoveryDecision::Discard) {
+            Recovery::Nothing
+        } else {
+            recovered
+        };
+        let recovery = match recovered {
             Recovery::Nothing => RecoveryResult::None,
             Recovery::Unrecoverable { reason, .. } => RecoveryResult::Unrecoverable { reason },
             Recovery::Copy { recovered, .. } => {
@@ -702,6 +1156,7 @@ impl Kernel {
                 lock,
                 meta,
                 rejected_history,
+                pending_save: None,
             },
         );
         // A new/copy project gets a rollback-readable slot immediately.
@@ -791,6 +1246,7 @@ impl Kernel {
         handle: &SessionHandle,
         save_as: Option<PathBuf>,
     ) -> Result<ShellReply, KernelFailure> {
+        self.ensure_idle(handle)?;
         let id = &handle.project;
         let mut new_lock = None;
         if let Some(path) = &save_as {
@@ -938,15 +1394,20 @@ impl Kernel {
             .as_ref()
             .ok_or_else(|| failure("Attach a native library first"))?;
         let result = if self.compacting {
-            writer.compact_project(slot, value, history, p.workspace().clone(), meta)
+            writer.compact_project(slot, value, history, p.workspace().clone(), meta.clone())
         } else {
-            writer.save_project(slot, value, history, p.workspace().clone(), meta)
+            writer.save_project(slot, value, history, p.workspace().clone(), meta.clone())
         };
         result.map_err(failure)?;
-        self.project_mut(id)
-            .unwrap()
-            .store_mut()
-            .mark_library_saved();
+        self.sessions.get_mut(id).unwrap().meta = meta;
+        // A library snapshot is crash recovery for a file session, not proof
+        // that the external file contains newer edits made during a save.
+        if recovery || matches!(self.sessions[id].destination, Destination::Library(_)) {
+            self.project_mut(id)
+                .unwrap()
+                .store_mut()
+                .mark_library_saved();
+        }
         Ok(())
     }
 }
