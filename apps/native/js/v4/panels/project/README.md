@@ -99,7 +99,7 @@ v1–3 API is introduced.
 | §8 copy           | Spec strings/menu grouping and tagged formatting; missing states never acquire invented copy                                                                                                                                                                                                         | Transport/unknown-state design questions below; announcements need actual completion callbacks                                                                              |
 | §9 constraints    | No import progress UI, list/sort controls, glass, filesystem deletion, browser/Node runtime dependency or replacement/removal of old consumers                                                                                                                                                       | Production integration remains necessary; these headless checks do not certify the application                                                                              |
 
-## API gaps (outside lane ownership)
+## API requests (additive only; outside lane ownership)
 
 1. **pm-design:** shared rules §6 request `metrics.thumbnail_min` and
    `colors.media_badge`; neither exists in the merged token struct. The spec
@@ -189,3 +189,17 @@ On macOS verify all rendering/appearance gates, actual padded hit targets and
 1×/2× poster sizes, native field/IME/clipboard behavior and focus order, menus/
 alerts/capture/drags, VoiceOver actions/announcements/virtual traversal, real
 media/import/archive/relink/undo provenance, and no main-thread JS waits.
+
+## Frozen-contract adoption — 2026-11-01
+
+Merged `feat/native-engine` at `f7844ebc007c17900cb2d65f4ef63c6bd3f8b005`.
+The merge adds the recorded freeze decision; `docs/native/v4-api.md`,
+`docs/native/ui-kit.md` and the API/kit implementation are unchanged from the
+integration revision already consumed by this panel. No panel API adaptation,
+shared API edit or dependency/lockfile update is required by this merge.
+
+The recorded integrated eval is 40/40. That result freezes the contract and does
+not certify this panel's app mounting or macOS UI acceptance. Existing spec
+coverage, both design questions and all remaining host/model/rendering gates
+above remain explicit. The requests above are additive API requests, not a
+reason to change the frozen surface contract (N3/N7/N8; design ownership).
