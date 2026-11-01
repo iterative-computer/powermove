@@ -12,7 +12,7 @@ Each item names its evidence. Nothing here authorizes dropping a v1–3 member
 |---|---|---|
 | S1 V8 | Not started. The sandbox build needs far more disk than this Mac has (~10 GB free vs §9's 80 GB). Owner: a machine with space or CI. | — |
 | S2 GPUI-CE | **Open.** GPU tests pass (P-DEVICE, P-HEADLESS, P-TEXTURE). Unlocked rerun: dark glass toolbar PASS, Reduce Transparency fallback PASS, field menu spring 0.32/0.15 PASS, cross-slot drags limited PASS; **accessibility FAIL** (slot children absent from the AX tree, so P-A11Y is required); 120 Hz cadence p95 8.33 ms but CPU p95 6.88 ms vs 4.17 ms headroom (**FAIL**); resize ≤1-frame unproven; IME needs a manual check; one display, so no display-move test. Visual defects: light titlebar over dark content, overlay label clipped. | `s2-gpui-ce.md` |
-| S3 Viewer (EDR) | Not started; needs an unlocked GUI session and S2's on-screen checks. | — |
+| S3 Viewer (EDR) | **Open.** RGBA16F below-slot EDR layer works (headroom 1.2×→2.67×, linear values preserved to 8.0); engine-drawn safe-area overlay 0 px offset; playhead/timecode as native layers with 0 GPUI repaints in playback; viewer = export ΔE p99 0.03 (SDR) / 0.06 (PQ input). **Fails:** 120 Hz soaks show 6–11 scanout gaps per 60 s; scrub input→present p95 45.7 ms vs vsync+1. Open: PQ/BT.2100 output, animated gizmos, display moves. | `s3-viewer.md` |
 | S4 GLSL | **Draw regression passes; gate open.** 661 cases / 1,605 variants by stage: 516 draw natively, 13 cases need the WebGL route, zero naga failures (so no SPIRV-Cross route), zero lost draws vs the previous writer; killable compiler processes. Open: production Metal compile still host-side, no historical WebGL captures, one self-unstable case. | `s4-glsl.md` |
 | S5 Compat | **Open, with failures** (below). | `s5-compat.md` |
 | S6 Migration readers | **Readers work; cutover proofs open.** Snapshot-only IndexedDB/LevelDB/V8/Blob and localStorage readers; resumable BLAKE3 media move at ~284 MiB/s, 5 MiB RSS. Real-profile proof on this Mac: 593 records (442 media, 151 posters) describing ~15.9 GB, read without Electron. Open: crashed-Chromium recovery, OS-denied blobs, rollback closure, signed Keychain/updater proofs, agent-client replay. Plan: two-DR Keychain ACL, TR-gated Squirrel, then Sparkle 2 with new EdDSA keys. | `s6-migration.md` |
@@ -36,6 +36,12 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 2. **Authored vs fixed:** decided case by case under §4's quirk policy; each decision is recorded beside its fixture/trace.
 3. **S5 direction:** page→app sync uses the scheme handler (0.10 ms p95); pixels stay in the engine and are referenced by id; a focused spike on continuation latency and background activity follows; the V8 + remote-DOM fallback is evaluated once S1 can run.
 4. **Pro features missing at v1.2.0** (J/K/L, ripple, linked A/V, slide/roll, three-point editing) are cutover work, as §1 already states.
+
+## Owner decisions (Chike, 2026-11-01)
+
+- **Eval specs:** anonymised behaviour specs of Chike's panels may be used in the v4 eval (no names, ids or code in tracked files).
+- **Store-wide counts:** pull published Store extension sources read-only through the Store tools; record usage counts only.
+- **S1:** runs on a cloud/CI macOS runner (this Mac lacks the disk).
 
 ## Questions from the inventories (original wording, kept for traceability)
 
