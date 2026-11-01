@@ -1,6 +1,6 @@
 use crate::{
     layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, LayoutStore, Rect},
-    native::{Command, Host, MenuState},
+    native::{Command, Host, MenuEntry, MenuState},
     session::{Session, WindowState},
 };
 use gpui::{prelude::*, *};
@@ -76,11 +76,14 @@ impl Editor {
             .map(LayoutStore::load)
             .transpose();
         let (store, status) = match store {
-            Ok(s) => (s.unwrap_or_default(), "Ready".into()),
-            Err(e) => (
-                LayoutStore::default(),
-                format!("Layout could not be restored: {e}"),
-            ),
+            Ok(s) => (s.unwrap_or_default(), String::new()),
+            Err(e) => {
+                eprintln!("Workspace store could not be read: {e}");
+                (
+                    LayoutStore::default(),
+                    "Your workspaces couldn’t be restored, so the default is shown.".into(),
+                )
+            }
         };
         let project = "shell-untitled".to_string();
         let layout = store.get(
@@ -115,7 +118,7 @@ impl Editor {
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("PM_NATIVE_APPEARANCE").is_none() {
-            self.tokens = Tokens::new(
+            self.tokens = crate::theme::tokens(
                 match window.appearance() {
                     WindowAppearance::Dark | WindowAppearance::VibrantDark => {
                         pm_design::Scheme::Dark
@@ -130,14 +133,32 @@ impl Editor {
             cx.notify();
         }
     }
+    /// Title, `Edited`/`Saving…` subtitle (`document_subtitle`) and proxy icon.
     pub fn set_document_metadata(
         &mut self,
         title: &str,
+        subtitle: &str,
         edited: bool,
         path: Option<&std::path::Path>,
     ) {
         if let Some(host) = &self.host {
-            host.borrow().set_document_metadata(title, edited, path);
+            host.borrow()
+                .set_document_metadata(title, subtitle, edited, path);
+        }
+    }
+    /// Applies a theme's `nativePatch` (`Tokens::apply_patch`) to every editor
+    /// window; it is re-applied on appearance and accessibility changes.
+    pub fn apply_theme(&mut self, patch: crate::theme::Patch, cx: &mut Context<Self>) {
+        match crate::theme::set(patch) {
+            Ok(()) => self.rebuild_tokens(),
+            Err(e) => self.status = format!("The theme could not be applied: {}", e.0),
+        }
+        cx.notify();
+    }
+    fn rebuild_tokens(&mut self) {
+        self.tokens = crate::theme::tokens(self.tokens.scheme, crate::native::settings());
+        if let Some(h) = &self.host {
+            h.borrow_mut().update_tokens(self.tokens.clone());
         }
     }
     pub fn bind_project(&mut self, project: String) {
@@ -320,7 +341,7 @@ impl Editor {
             }
             ("layout", "save") if rest.is_empty() => {
                 if let Some(h) = &self.host {
-                    h.borrow().prompt_layout_name(&self.layout.workspace);
+                    h.borrow().prompt_workspace_name(&self.layout.workspace);
                 }
                 Ok(())
             }
@@ -328,13 +349,13 @@ impl Editor {
                 let layout = self.layout.clone();
                 let mut saved = String::new();
                 self.mutate_store(|s| s.save_named(rest, &layout).map(|n| saved = n))
-                    .map(|_| self.status = format!("Saved layout “{saved}”"))
+                    .map(|_| self.status = format!("Saved workspace “{saved}”"))
             }
             ("layout", "apply") => self
                 .store
                 .named(rest, &self.layout.workspace)
                 .map(|l| self.layout = l)
-                .ok_or_else(|| anyhow::anyhow!("No layout named “{rest}”")),
+                .ok_or_else(|| anyhow::anyhow!("There’s no workspace named “{rest}”.")),
             ("layout", "delete") => self.mutate_store(|s| {
                 s.delete_named(rest);
                 Ok(())
@@ -424,10 +445,22 @@ impl Editor {
                     self.save();
                 }
             }
-            "shellAppearanceChanged" => {
-                self.tokens = Tokens::new(self.tokens.scheme, crate::native::settings());
-                if let Some(h) = &self.host {
-                    h.borrow_mut().update_tokens(self.tokens.clone());
+            "shellAppearanceChanged" => self.rebuild_tokens(),
+            // A theme from the theme pipeline: args[0] is its JSON output.
+            "shellTheme" => {
+                let json = cmd.args.first().map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                });
+                match json.as_deref().map(crate::theme::parse) {
+                    Some(Ok(patch)) => self.apply_theme(patch, cx),
+                    Some(Err(e)) => {
+                        self.status = format!("The theme could not be applied: {}", e.0)
+                    }
+                    None => {
+                        crate::theme::clear();
+                        self.rebuild_tokens();
+                    }
                 }
             }
             "settings" => crate::open_settings(cx),
@@ -450,7 +483,7 @@ impl Editor {
             name => {
                 handled = self.host.as_ref().is_some_and(|h| h.borrow().system(name));
                 if !handled {
-                    self.status = "Command is not available yet".into();
+                    eprintln!("shell: unhandled command {name}");
                 }
             }
         }
@@ -491,13 +524,33 @@ impl Editor {
         self.save();
         Some(target)
     }
+    fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>) {
+        self.gesture = Some(Gesture::Panel(PanelDrag {
+            id: id.into(),
+            start: at,
+            original: self.layout.clone(),
+            at,
+            moved: false,
+            preview: None,
+        }));
+        self.split_focus = None;
+        if let Some(h) = &self.host {
+            h.borrow_mut().splitter_focus = false;
+        }
+    }
     /// Test-driver commands (`PM_PERF_GATE=1` runs only): drag a tab to a point,
     /// drop it, open a tab's context menu, close transients.
     fn test_command(&mut self, cmd: &Command, cx: &mut Context<Self>) {
         if std::env::var("PM_PERF_GATE").as_deref() != Ok("1") {
             return;
         }
-        let s = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let s = |i: usize| {
+            cmd.args
+                .get(i)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         let f = |i: usize| cmd.args.get(i).and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
         match &cmd.name["shellTest:".len()..] {
             "drag" => self.simulate_drag(&s(0), f(1), f(2)),
@@ -524,24 +577,68 @@ impl Editor {
     pub fn run_shell_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
         self.shell_command(name, cx)
     }
-    fn tab_menu(&self, id: &str, position: Point<Pixels>) {
-        let Some(h) = &self.host else { return };
+    /// Context menu for a panel tab (also its header). The panel's current
+    /// dock carries a checkmark.
+    pub fn tab_menu_entries(&self, id: &str) -> Vec<MenuEntry> {
         let title = layout::panel_title(id);
+        let current = self
+            .layout
+            .docks
+            .iter()
+            .find(|d| d.groups.iter().any(|g| g.tabs.iter().any(|t| t == id)))
+            .map(|d| d.id.as_str());
         let mut items = vec![];
         if id != "viewer" {
-            items.push((format!("Close {title}"), format!("panel:close:{id}")));
+            items.push(MenuEntry::item(
+                format!("Close {title}"),
+                format!("panel:close:{id}"),
+            ));
+            items.push(MenuEntry::separator());
         }
-        items.push((String::new(), String::new()));
         for (label, edge) in [
             ("Dock Left", "left"),
             ("Dock Right", "right"),
             ("Dock Bottom", "bottom"),
         ] {
-            items.push((label.to_string(), format!("panel:dock:{id}:{edge}")));
+            items.push(
+                MenuEntry::item(label, format!("panel:dock:{id}:{edge}"))
+                    .checked(current == Some(edge)),
+            );
         }
-        items.push((String::new(), String::new()));
-        items.push(("Save Layout…".into(), "layout:save".into()));
-        items.push(("Reset Workspace".into(), "layout:reset".into()));
+        items.push(MenuEntry::separator());
+        items.push(MenuEntry::item("Save Workspace…", "layout:save"));
+        items.push(MenuEntry::item("Reset Workspace", "layout:reset"));
+        items
+    }
+    fn tab_menu(&self, id: &str, position: Point<Pixels>) {
+        let Some(h) = &self.host else { return };
+        h.borrow().context_menu(
+            &self.tab_menu_entries(id),
+            f32::from(position.x),
+            f32::from(position.y),
+        );
+    }
+    /// The status bar's workspace pop-up: presets (current checked) and saved ones.
+    fn workspace_menu(&self, position: Point<Pixels>) {
+        let Some(h) = &self.host else { return };
+        let mut items: Vec<_> = layout::PRESETS
+            .iter()
+            .map(|(id, label)| {
+                MenuEntry::item(*label, format!("workspace:{id}"))
+                    .checked(*id == self.layout.workspace)
+            })
+            .collect();
+        if !self.store.saved.is_empty() {
+            items.push(MenuEntry::separator());
+            items.extend(
+                self.store
+                    .saved
+                    .keys()
+                    .map(|n| MenuEntry::item(n.clone(), format!("layout:apply:{n}"))),
+            );
+        }
+        items.push(MenuEntry::separator());
+        items.push(MenuEntry::item("Save Workspace…", "layout:save"));
         h.borrow()
             .context_menu(&items, f32::from(position.x), f32::from(position.y));
     }
@@ -552,8 +649,8 @@ impl Editor {
             .iter()
             .filter(|p| !open.contains(p))
             .map(|p| {
-                (
-                    layout::panel_title(p).to_string(),
+                MenuEntry::item(
+                    layout::panel_title(p),
                     format!("panel:addto:{dock}:{group}:{p}"),
                 )
             })
@@ -573,9 +670,68 @@ fn positioned(r: Rect) -> Div {
         .w(px(r.w))
         .h(px(r.h))
 }
-/// `rgb` with an alpha channel (0–255) for overlays drawn from opaque tokens.
-fn tint(rgb: u32, alpha: u8) -> Rgba {
-    gpui::rgba((rgb << 8) | alpha as u32)
+/// Drop-zone outline width (language: 2 pt `accent`).
+const DROP_OUTLINE: f32 = 2.;
+/// Centred empty state (language §9/§14): `heading` + one `reading` line.
+/// Callers may append one action.
+pub fn empty_state(t: &Tokens, heading: &str, line: &str) -> Div {
+    let (c, ty) = (&t.colors, t.typography);
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(t.metrics.border * 2.))
+        .px(px(t.metrics.inset))
+        .child(
+            div()
+                .text_size(px(ty.heading))
+                .font_weight(FontWeight(ty.semibold_weight))
+                .text_color(rgb(c.secondary))
+                .child(heading.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(ty.reading))
+                .text_color(rgb(c.muted))
+                .text_center()
+                .child(line.to_string()),
+        )
+}
+struct Tip {
+    text: SharedString,
+    tokens: Tokens,
+}
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (c, m) = (&self.tokens.colors, self.tokens.metrics);
+        div()
+            .px(px(m.gap))
+            .py(px(m.border * 2.))
+            .rounded(px(m.control_radius))
+            .bg(rgb(c.floating))
+            .border(px(m.border))
+            .border_color(rgb(c.separator))
+            .text_size(px(self.tokens.typography.minimum))
+            .text_color(rgb(c.text))
+            .font_family(pm_design::TEXT_FONT)
+            .child(self.text.clone())
+    }
+}
+/// A tooltip builder naming a control's action.
+pub fn tooltip(
+    t: &Tokens,
+    text: &'static str,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let tokens = t.clone();
+    move |_, cx| {
+        cx.new(|_| Tip {
+            text: text.into(),
+            tokens: tokens.clone(),
+        })
+        .into()
+    }
 }
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -790,8 +946,7 @@ impl Render for Editor {
                 })
                 .flex()
                 .items_center()
-                .child("Untitled · Edited")
-                .child(div().ml_auto().child("Tools   ·   Agent   ·   Export")),
+                .child("Untitled"),
             );
         }
         let dragged = match &self.gesture {
@@ -817,121 +972,178 @@ impl Render for Editor {
             if !is_viewer || !native {
                 panel = panel.bg(rgb(if is_viewer { c.viewer } else { c.panel }));
             }
+            // A panel may supply its own header content (viewer: pop-ups, no
+            // title; timeline: transport). The shell keeps the tab strip only
+            // when the group has more than one tab.
+            let custom = self
+                .integration
+                .as_ref()
+                .and_then(|i| i.header(&id, p.rect, w, cx));
             let group_name: SharedString = format!("tabs-{}-{}", p.dock, p.group).into();
+            let header_id = id.clone();
+            let menu_header = id.clone();
             let mut header = div()
+                .id(format!("header-{}-{}", p.dock, p.group))
                 .group(group_name.clone())
                 .flex()
                 .items_center()
                 .gap(px(m.gap))
                 .h(px(m.header))
                 .px(px(m.inset))
-                .bg(rgb(header_bg));
-            // Approved mockup: a sunken segmented strip for tab groups, a bold
-            // title for single panels. The whole tab is the drag handle.
+                .bg(rgb(header_bg))
+                // The header's empty area drags the active panel and opens its menu.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        this.begin_panel_drag(&header_id, e.position);
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, _, _| {
+                        this.tab_menu(&menu_header, e.position);
+                    }),
+                );
             let multi = tabs.len() > 1;
-            let mut strip = div().flex().items_center().gap(px(2.)).when(multi, |s| {
-                s.bg(rgb(c.window))
-                    .rounded(px(m.control_radius + 2.))
-                    .p(px(2.))
-            });
-            for (ti, tab) in tabs.iter().enumerate() {
-                let tabid = tab.clone();
-                let menu_id = tab.clone();
-                let selected = ti == active;
-                let ghost = dragged.as_deref() == Some(tab.as_str());
-                let close_id = tab.clone();
-                let closable = tab != "viewer";
-                strip = strip.child(
-                    div()
+            if multi || custom.is_none() {
+                // Approved mockup: a sunken segmented strip for tab groups, a
+                // semibold title for single panels. The whole tab is the drag handle.
+                let mut strip = div().flex().items_center().gap(px(2.)).when(multi, |s| {
+                    s.bg(rgb(c.window))
+                        .rounded(px(m.control_radius + 2.))
+                        .p(px(2.))
+                });
+                for (ti, tab) in tabs.iter().enumerate() {
+                    let tabid = tab.clone();
+                    let menu_id = tab.clone();
+                    let selected = ti == active;
+                    let ghost = dragged.as_deref() == Some(tab.as_str());
+                    let close_id = tab.clone();
+                    let closable = tab != "viewer" && multi;
+                    let tab_group: SharedString = format!("tab-{tab}").into();
+                    let title = layout::panel_title(tab).to_string();
+                    let mut cell = div()
                         .id(format!("tab-{tab}"))
+                        .group(tab_group.clone())
                         .role(Role::Tab)
-                        .aria_label(layout::panel_title(tab).to_string())
+                        .aria_label(title.clone())
+                        .relative()
                         .flex()
                         .items_center()
-                        .gap(px(4.))
-                        .px(px(if multi { 10. } else { 2. }))
+                        .px(px(if multi { m.inset + m.border * 2. } else { 0. }))
                         .py(px(3.))
                         .rounded(px(m.control_radius))
                         .when(multi && selected, |s| s.bg(rgb(c.floating)))
                         .when(ghost, |s| s.opacity(0.4))
                         .text_color(rgb(if selected { c.text } else { c.secondary }))
+                        .text_size(px(t.typography.title))
                         .when(!multi, |s| s.font_weight(FontWeight::SEMIBOLD))
                         .when(multi, |s| s.font_weight(FontWeight::MEDIUM))
                         .cursor_pointer()
-                        .child(layout::panel_title(tab).to_string())
-                        .when(closable && selected, |s| {
-                            s.child(
-                                div()
-                                    .id(format!("close-{tab}"))
-                                    .aria_label(format!("Close {}", layout::panel_title(tab)))
-                                    .role(Role::Button)
-                                    .w(px(14.))
-                                    .h(px(14.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(7.))
-                                    .text_size(px(t.typography.minimum))
-                                    .text_color(rgb(c.muted))
-                                    .opacity(0.)
-                                    .group_hover_style(group_name.clone(), |s| s.opacity(1.))
-                                    .hover_style(|s| s.bg(rgb(c.hover)))
-                                    .child("×")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.shell_command(&format!("panel:close:{close_id}"), cx);
-                                    })),
-                            )
-                        })
-                        .on_mouse_down(
+                        .child(title.clone());
+                    if closable {
+                        // Mac tabs: the close button sits at the leading edge, on hover.
+                        cell = cell.child(
+                            div()
+                                .id(format!("close-{tab}"))
+                                .aria_label(format!("Close {title}"))
+                                .role(Role::Button)
+                                .absolute()
+                                .left(px(m.border))
+                                .top_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .opacity(0.)
+                                .group_hover_style(tab_group.clone(), |s| s.opacity(1.))
+                                .child(
+                                    div()
+                                        .rounded(px(m.inner_radius))
+                                        .hover_style(|s| s.bg(rgb(c.hover)))
+                                        .child(crate::symbol::symbol(
+                                            "xmark",
+                                            m.symbol_inline,
+                                            crate::symbol::Weight::Medium,
+                                            c.secondary,
+                                            w,
+                                        )),
+                                )
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.shell_command(&format!("panel:close:{close_id}"), cx);
+                                })),
+                        );
+                    }
+                    strip = strip.child(
+                        cell.on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
                                 this.layout.docks[p.dock].groups[p.group].active = ti;
-                                this.gesture = Some(Gesture::Panel(PanelDrag {
-                                    id: tabid.clone(),
-                                    start: e.position,
-                                    original: this.layout.clone(),
-                                    at: e.position,
-                                    moved: false,
-                                    preview: None,
-                                }));
-                                this.split_focus = None;
-                                if let Some(h) = &this.host {
-                                    h.borrow_mut().splitter_focus = false;
-                                }
+                                this.begin_panel_drag(&tabid, e.position);
                                 window.focus(&this.focus, cx);
                                 cx.notify();
                             }),
                         )
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, e: &MouseDownEvent, _, _| {
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
                                 this.tab_menu(&menu_id, e.position);
                             }),
                         ),
-                );
+                    );
+                }
+                header = header.child(strip);
             }
-            header = header.child(strip);
-            if !is_viewer {
+            if let Some(custom) = custom {
+                header = header.child(div().flex_1().min_w(px(0.)).h_full().child(custom));
+            } else if !is_viewer {
                 let (dock, gi) = (p.dock, p.group);
+                let add_group: SharedString = format!("add-{}-{}", p.dock, p.group).into();
                 header = header.child(
                     div()
                         .id(format!("add-{}-{}", p.dock, p.group))
+                        .group(add_group.clone())
                         .role(Role::Button)
                         .aria_label("Add Panel")
+                        .tooltip(tooltip(&t, "Add Panel"))
                         .ml_auto()
-                        .w(px(20.))
-                        .h(px(20.))
+                        .relative()
+                        .size(px(m.hit))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded(px(m.control_radius))
-                        .text_color(rgb(c.muted))
-                        .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
+                        .hover_style(|s| s.bg(rgb(c.hover)))
                         .cursor_pointer()
-                        .child("+")
+                        .child(crate::symbol::symbol(
+                            "plus",
+                            m.symbol_panel,
+                            crate::symbol::Weight::Medium,
+                            c.secondary,
+                            w,
+                        ))
+                        // `text` on hover (language §8): a second glyph fades in.
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(0.)
+                                .group_hover_style(add_group, |s| s.opacity(1.))
+                                .child(crate::symbol::symbol(
+                                    "plus",
+                                    m.symbol_panel,
+                                    crate::symbol::Weight::Medium,
+                                    c.text,
+                                    w,
+                                )),
+                        )
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -949,19 +1161,38 @@ impl Render for Editor {
             if let Some(content) = content {
                 panel = panel.child(content);
             } else {
-                panel = panel.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px((p.rect.h - m.header).max(0.)))
-                        .text_color(rgb(c.muted))
-                        .child(if is_viewer {
-                            "viewer".into()
-                        } else {
-                            id.clone()
-                        }),
-                );
+                let (heading, line, action) = layout::empty_state(&id);
+                let mut empty = empty_state(&t, heading, line).h(px((p.rect.h - m.header).max(0.)));
+                // Actions run only with an app attached (the bare shell has no importer).
+                if let Some((label, command)) = action.filter(|_| self.integration.is_some()) {
+                    empty = empty.child(
+                        div()
+                            .id(format!("empty-action-{id}"))
+                            .role(Role::Button)
+                            .aria_label(label)
+                            .mt(px(m.gap))
+                            .h(px(m.control))
+                            .px(px(m.inset))
+                            .flex()
+                            .items_center()
+                            .rounded(px(m.control_radius))
+                            .bg(rgb(c.field))
+                            .hover_style(|s| s.bg(rgb(c.hover)))
+                            .text_size(px(t.typography.reading))
+                            .text_color(rgb(c.text))
+                            .cursor_pointer()
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let cmd = Command {
+                                    name: command.into(),
+                                    args: vec![],
+                                    token: None,
+                                };
+                                this.command(cmd, window, cx);
+                            })),
+                    );
+                }
+                panel = panel.child(empty);
             }
             root = root.child(panel);
         }
@@ -1002,13 +1233,14 @@ impl Render for Editor {
             && drag.moved
         {
             if let Some(p) = drag.preview {
+                // Only the drop zone: `accent_wash` with a 2 pt accent outline.
                 root = root.child(
                     positioned(p.rect)
                         .id("drop-preview")
-                        .rounded(px(m.panel_radius))
-                        .border(px(2.))
+                        .rounded(px(m.control_radius))
+                        .border(px(DROP_OUTLINE))
                         .border_color(rgb(c.accent))
-                        .bg(tint(c.accent, 0x2e)),
+                        .bg(rgb(c.accent_wash)),
                 );
             }
             root = root.child(
@@ -1032,6 +1264,17 @@ impl Render for Editor {
             .iter()
             .find(|p| p.0 == self.layout.workspace)
             .map_or("Custom", |p| p.1);
+        // Status bar (language §2): quiet facts. Left: document facts (or a
+        // message); right: the workspace pop-up.
+        let left = self
+            .integration
+            .as_ref()
+            .map_or_else(|| self.status.clone(), |i| i.status(cx));
+        let left = if left.is_empty() {
+            self.status.clone()
+        } else {
+            left
+        };
         root.child(
             positioned(Rect {
                 x: 0.,
@@ -1039,32 +1282,42 @@ impl Render for Editor {
                 w: f32::from(viewport.width),
                 h: m.status,
             })
+            .id("status-bar")
             .flex()
             .items_center()
-            .gap(px(14.))
-            .px(px(m.inset + 4.))
+            .gap(px(m.inset))
+            .px(px(m.inset + m.gap))
             .text_size(px(t.typography.minimum))
             .text_color(rgb(c.muted))
-            .child(
-                self.integration
-                    .as_ref()
-                    .map_or_else(|| self.status.clone(), |i| i.status(cx)),
-            )
+            .child(div().flex_1().min_w(px(0.)).truncate().child(left))
             .child(
                 div()
-                    .ml_auto()
+                    .id("status-workspace")
+                    .role(Role::Button)
+                    .aria_label(format!("Workspace: {workspace}"))
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .child(div().w(px(7.)).h(px(7.)).rounded(px(4.)).bg(rgb(0x34c77b)))
-                    .child("Metal"),
-            )
-            .child(workspace.to_string())
-            .child(if self.integration.is_none() {
-                "Paused"
-            } else {
-                ""
-            }),
+                    .gap(px(m.border * 2.))
+                    .px(px(m.gap))
+                    .h(px(m.hit))
+                    .rounded(px(m.control_radius))
+                    .hover_style(|s| s.bg(rgb(c.hover)).text_color(rgb(c.text)))
+                    .cursor_pointer()
+                    .child(workspace.to_string())
+                    .child(crate::symbol::symbol(
+                        "chevron.up.chevron.down",
+                        m.symbol_inline - 2.,
+                        crate::symbol::Weight::Medium,
+                        c.muted,
+                        w,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, _| {
+                            this.workspace_menu(e.position)
+                        }),
+                    ),
+            ),
         )
     }
 }

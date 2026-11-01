@@ -226,6 +226,14 @@ macro_rules! patchable {
         /// Every field a theme may patch, as `group.field`. The JS theme pipeline's
         /// `native` targets must be a subset of this list (see `tests/spec.rs`).
         pub const PATCHABLE: &[&str] = &[$(concat!(stringify!($group), ".", stringify!($field))),*];
+        /// Current value of a patchable field (`"metrics.gap"` → 6), as the theme
+        /// pipeline's `environment.nativeTokens` expects. `None` for other names.
+        pub fn field(&self, name: &str) -> Option<f64> {
+            match name {
+                $(concat!(stringify!($group), ".", stringify!($field)) => Some(self.$group.$field as f64),)*
+                _ => None,
+            }
+        }
         fn set_field(&mut self, name: &str, value: f64) -> Result<(), PatchError> {
             match name {
                 $(concat!(stringify!($group), ".", stringify!($field)) => {

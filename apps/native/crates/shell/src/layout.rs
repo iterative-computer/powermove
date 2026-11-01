@@ -407,42 +407,23 @@ impl Layout {
             None
         };
         if let Some(edge) = edge {
-            let existing = geometry
-                .panels
-                .iter()
-                .filter(|p| self.docks[p.dock].id == edge.dock_id())
-                .map(|p| p.rect)
-                .reduce(|a, b| {
-                    let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
-                    Rect {
-                        x: x0,
-                        y: y0,
-                        w: (a.x + a.w).max(b.x + b.w) - x0,
-                        h: (a.y + a.h).max(b.y + b.h) - y0,
-                    }
-                });
-            let rect = existing.unwrap_or(match edge {
+            // Only the drop zone lights up: the outer quarter of the docking area.
+            let rect = match edge {
                 Edge::Left => Rect {
-                    w: DEFAULT_LEFT.min(bounds.w / 3.),
+                    w: bounds.w * EDGE_ZONE,
                     ..bounds
                 },
-                Edge::Right => {
-                    let w = DEFAULT_RIGHT.min(bounds.w / 3.);
-                    Rect {
-                        x: bounds.x + bounds.w - w,
-                        w,
-                        ..bounds
-                    }
-                }
-                Edge::Bottom => {
-                    let h = DEFAULT_TIMELINE.min(bounds.h / 3.);
-                    Rect {
-                        y: bounds.y + bounds.h - h,
-                        h,
-                        ..bounds
-                    }
-                }
-            });
+                Edge::Right => Rect {
+                    x: bounds.x + bounds.w * (1. - EDGE_ZONE),
+                    w: bounds.w * EDGE_ZONE,
+                    ..bounds
+                },
+                Edge::Bottom => Rect {
+                    y: bounds.y + bounds.h * (1. - EDGE_ZONE),
+                    h: bounds.h * EDGE_ZONE,
+                    ..bounds
+                },
+            };
             return Some(DropPreview {
                 target: DropTarget::Edge(edge),
                 rect,
@@ -459,7 +440,11 @@ impl Layout {
                     group: p.group,
                     index: index.min(n),
                 },
-                rect: r,
+                // Joining a tab group highlights the header strip only.
+                rect: Rect {
+                    h: t.metrics.header.min(r.h),
+                    ..r
+                },
             });
         }
         let lower = y > r.y + r.h / 2.;
@@ -698,7 +683,7 @@ pub struct LayoutStore {
     #[serde(default)]
     pub active: std::collections::BTreeMap<String, String>,
     pub projects: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Layout>>,
-    /// User-named layouts, shared by every project (Window ▸ Layouts).
+    /// User-named workspaces, shared by every project (Window ▸ Workspace).
     #[serde(default)]
     pub saved: std::collections::BTreeMap<String, Layout>,
 }
@@ -707,14 +692,14 @@ pub const LAYOUT_NAME_MAX: usize = 64;
 /// Trims and validates a saved-layout name.
 pub fn layout_name(name: &str) -> anyhow::Result<String> {
     let name = name.trim();
-    anyhow::ensure!(!name.is_empty(), "Layout name is empty");
+    anyhow::ensure!(!name.is_empty(), "Enter a name for the workspace.");
     anyhow::ensure!(
         name.chars().count() <= LAYOUT_NAME_MAX,
-        "Layout name is longer than {LAYOUT_NAME_MAX} characters"
+        "Workspace names can be up to {LAYOUT_NAME_MAX} characters."
     );
     anyhow::ensure!(
         !name.chars().any(char::is_control),
-        "Layout name contains control characters"
+        "Workspace names can’t contain control characters."
     );
     Ok(name.to_string())
 }
@@ -780,6 +765,59 @@ impl LayoutStore {
         }
         std::fs::rename(tmp, path)?;
         Ok(())
+    }
+}
+/// Share of the docking area an edge-dock preview covers (the outer 25 %).
+pub const EDGE_ZONE: f32 = 0.25;
+/// Empty state for a panel with nothing to show (language §9/§14): a
+/// `heading`, one `reading` line and an optional action (label, command).
+pub fn empty_state(
+    id: &str,
+) -> (
+    &'static str,
+    &'static str,
+    Option<(&'static str, &'static str)>,
+) {
+    match id {
+        "assets" => (
+            "No Media",
+            "Import files or drag them here.",
+            Some(("Import…", "import")),
+        ),
+        "inspector" => (
+            "No Selection",
+            "Select a layer to see its properties.",
+            None,
+        ),
+        "layer-effects" => ("No Selection", "Select a layer to see its effects.", None),
+        "fxbrowser" => (
+            "No Effects",
+            "Installed effects and presets appear here.",
+            None,
+        ),
+        "viewer" | "timeline" => (
+            "No Composition",
+            "Open a project to start editing.",
+            Some(("Open…", "open")),
+        ),
+        "gradient-controls" => ("No Gradient", "Select a gradient layer to edit it.", None),
+        "takes" => ("No Takes", "Takes you record appear here.", None),
+        "shader" => (
+            "No Shader",
+            "Select a shader layer to edit its source.",
+            None,
+        ),
+        "perf" => (
+            "No Measurements",
+            "Play the composition to measure it.",
+            None,
+        ),
+        "notes" => (
+            "No Notes",
+            "Notes you add to this project appear here.",
+            None,
+        ),
+        _ => ("Nothing Here", "This panel has nothing to show yet.", None),
     }
 }
 pub fn panel_title(id: &str) -> &str {

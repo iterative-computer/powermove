@@ -48,7 +48,14 @@ fn drop_targets_cover_header_tab_split_halves_and_edges() {
             index: 1
         }
     );
-    assert_eq!(p.rect, inspector);
+    // Only the header strip lights up (shell 3).
+    assert_eq!(
+        p.rect,
+        Rect {
+            h: t.metrics.header,
+            ..inspector
+        }
+    );
     // Body upper/lower half → split before/after with a half-height preview.
     let viewer = rect_of(&l, "viewer");
     let mid = viewer.x + viewer.w / 2.;
@@ -359,13 +366,12 @@ fn display_only_menu_items_carry_the_old_apps_registry_shortcuts() {
         let item = all.iter().find(|i| i.command == command).unwrap();
         assert_eq!(menu::accelerator(&item.chord), menu::accelerator(chord));
     }
-    // Window-tab, workspace, layout and panel menus exist (HIG placement).
+    // Window-tab, workspace and panel menus exist (HIG placement).
     for c in [
         "newTab",
         "mergeAllWindows:",
         "toggleTabBar:",
         "panels",
-        "layouts",
         "workspaces",
     ] {
         assert!(all.iter().any(|i| i.command == c), "{c}");

@@ -46,7 +46,7 @@ impl Item {
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
 pub const DISPLAY_ONLY: [&str; 3] = ["Layer", "Timeline", "tools"];
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 5] = ["openRecent", "workspaces", "panels", "layouts", "tools"];
+pub const SUBMENUS: [&str; 4] = ["openRecent", "workspaces", "panels", "tools"];
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
 pub fn tools() -> Vec<Item> {
     [
@@ -276,9 +276,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::role("Minimize", "performMiniaturize:", "Command+M"),
                 Item::role("Zoom", "performZoom:", ""),
                 sep(),
-                Item::command("Show in Workspace", "panels", ""),
-                Item::command("Workspaces", "workspaces", ""),
-                Item::command("Layouts", "layouts", ""),
+                Item::command("Panels", "panels", ""),
+                Item::command("Workspace", "workspaces", ""),
                 sep(),
                 Item::command("New Tab", "newTab", ""),
                 m("nextTab"),

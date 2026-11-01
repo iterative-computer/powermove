@@ -185,9 +185,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()];
                         let _:()=msg_send![&*layers.playhead,setHidden:geometry.is_none()];
                         if let Some((r,x,y))=geometry {
-                            // Timecode sits in the timeline header after the play button.
+                            // Timecode sits in the timeline header (the shell's) after the play button.
                             let slot=timecode_slot(&host.tokens);
-                            let top=r.y+metrics.header+(metrics.header-slot.h)/2.;
+                            let top=r.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                             let line=metrics.playhead as f64;
                             let tall=(r.h-y-metrics.inset).max(0.) as f64;

@@ -1,12 +1,14 @@
 //! Phase 1 application shell. Kernel and engine are deliberately integration seams.
 pub mod integration;
-pub use native::{Command, Host};
+pub use native::{Command, Host, MenuEntry, accent_color, document_subtitle, system_accent};
 pub mod keyboard;
 pub mod layout;
 pub mod menu;
 mod native;
 pub mod session;
+pub mod symbol;
 pub mod text;
+pub mod theme;
 pub mod transient;
 pub mod view;
 use gpui::{prelude::*, *};
@@ -39,6 +41,11 @@ fn launch(
     smoke: bool,
     factory: Option<integration::Factory>,
 ) -> anyhow::Result<()> {
+    native::install_identity();
+    let theme_error = theme::load_from_env();
+    if let Some(e) = &theme_error {
+        eprintln!("{e}");
+    }
     let platform = Rc::new(gpui_macos::MacPlatform::new_with_metal_device(
         false,
         device.clone(),
@@ -55,6 +62,11 @@ fn launch(
             cx.set_global(integration::AppIntegration(factory));
         }
         native::install_menus();
+        native::install_accent();
+        // Dev/test appearance override: menus and sheets follow it too.
+        if std::env::var_os("PM_NATIVE_APPEARANCE").is_some() {
+            native::app_appearance(&tokens());
+        }
         if smoke {
             open_editor_window(cx, false, None, None);
         } else {
@@ -83,7 +95,7 @@ fn tokens() -> Tokens {
             Scheme::Light
         }
     };
-    Tokens::new(scheme, native::settings())
+    theme::tokens(scheme, native::settings())
 }
 /// Reopens the saved windows (all of them only when the system keeps windows
 /// on quit; see `Session::restore_plan`). With no session, one new window.
@@ -162,7 +174,7 @@ fn open_editor_window(
                 size(px(m.window_width), px(m.window_height)),
             )))),
         move |window, cx| {
-            window.set_window_title("Untitled — Powermove Native");
+            window.set_window_title("Untitled");
             let device = cx.global::<SharedMetalDevice>().0.clone();
             let (host, rx) = native::Host::install(window, &device, t.clone());
             if !visible {

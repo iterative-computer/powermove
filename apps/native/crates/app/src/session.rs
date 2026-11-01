@@ -97,6 +97,16 @@ impl pm_shell::integration::Integration for Bridge {
         self.0
             .update(cx, |v, cx| panels::render(v, id, bounds, w, cx))
     }
+    fn header(
+        &self,
+        id: &str,
+        bounds: pm_shell::layout::Rect,
+        w: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.0
+            .update(cx, |v, cx| panels::header(v, id, bounds, w, cx))
+    }
     fn project_id(&self, cx: &App) -> Option<String> {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
     }
@@ -222,7 +232,8 @@ impl Controller {
             main_output: Default::default(),
             timeline_scroll: Default::default(),
             selected: None,
-            message: "Open a project to begin".into(),
+            // The status bar holds facts, not instructions (review shell 2 #11).
+            message: "No project".into(),
             path: None,
             recent: vec![],
             show_library: false,
@@ -295,9 +306,13 @@ impl Controller {
             .and_then(|r| r.get("name"))
             .and_then(crate::node_string)
             .unwrap_or("Untitled");
-        self.host
-            .borrow()
-            .set_document_metadata(title, p.dirty, self.path.as_deref());
+        // `Saving…` under the title while a save runs, then `Edited` or nothing.
+        self.host.borrow().set_document_metadata(
+            title,
+            pm_shell::document_subtitle(p.dirty, saving),
+            p.dirty,
+            self.path.as_deref(),
+        );
         platform::history_labels(
             p.history
                 .undo_label

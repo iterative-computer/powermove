@@ -527,3 +527,15 @@ fn theme_pipeline_targets_exist() {
     }
     assert!(seen >= 20, "parsed only {seen} targets");
 }
+
+#[test]
+fn every_patchable_field_reads_back() {
+    let mut t = Tokens::new(Scheme::Light, Accessibility::default());
+    for name in Tokens::PATCHABLE {
+        assert!(t.field(name).is_some(), "{name} has no getter");
+    }
+    assert_eq!(t.field("metrics.gap"), Some(t.metrics.gap as f64));
+    assert_eq!(t.field("colors.nope"), None);
+    t.apply_patch([("colors.accent", 0x123456 as f64)]).unwrap();
+    assert_eq!(t.field("colors.accent"), Some(0x123456 as f64));
+}

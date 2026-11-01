@@ -224,11 +224,11 @@ pub fn zoom_title(zoom: Option<f64>, fit: f64) -> String {
     }
 }
 
-/// Fit scale that keeps the image clear of the viewer bar: the shell centres
-/// the image in the body, so the bar's height is reserved top and bottom.
-pub fn fit_scale(body_w: f32, body_h: f32, comp: [f64; 2], bar: f32, inset: f32, gap: f32) -> f64 {
-    let w = (body_w - inset * 2.).max(1.) as f64 / comp[0].max(1.);
-    let h = (body_h - (bar + gap) * 2.).max(1.) as f64 / comp[1].max(1.);
+/// Fit scale for the body below the viewer bar (the shell's header): the
+/// image is centred there with `margin` on every side.
+pub fn fit_scale(body_w: f32, body_h: f32, comp: [f64; 2], margin: f32) -> f64 {
+    let w = (body_w - margin * 2.).max(1.) as f64 / comp[0].max(1.);
+    let h = (body_h - margin * 2.).max(1.) as f64 / comp[1].max(1.);
     w.min(h).max(0.01)
 }
 
@@ -456,12 +456,11 @@ pub fn render(
                     );
                 }
                 if v.recent.is_empty() {
-                    body = body.child(
-                        div()
-                            .px(px(m.gap))
-                            .text_color(rgb(c.muted))
-                            .child("No recent projects. Choose File ▸ Open… to open one."),
-                    );
+                    body = body.justify_center().child(pm_shell::view::empty_state(
+                        &t,
+                        "No Recent Projects",
+                        "Choose File ▸ Open… to open a project.",
+                    ));
                 }
             } else {
                 // Only visible rows are built: a 60,000-layer composition must
@@ -563,11 +562,10 @@ pub fn render(
                     );
                 }
             } else {
-                body = body.child(
-                    div()
-                        .text_color(rgb(c.muted))
-                        .child("Select a layer to see its properties."),
-                );
+                let (heading, line, _) = pm_shell::layout::empty_state("inspector");
+                body = body
+                    .justify_center()
+                    .child(pm_shell::view::empty_state(&t, heading, line));
             }
             body = body
                 .on_mouse_move_all({
@@ -615,53 +613,6 @@ pub fn render(
             let width = (bounds.w - column - m.inset).max(1.);
             let duration = v.duration.max(0.001);
             let fps = v.rate.to_f64();
-            let playing = v.playing();
-            // Header: play button, then the native timecode layer's slot, then fps.
-            let slot = crate::playback::timecode_slot(&t);
-            body = body.child(
-                div()
-                    .flex_none()
-                    .h(px(m.header))
-                    .px(px(m.inset))
-                    .flex()
-                    .items_center()
-                    .gap(px(m.gap))
-                    .border_b(px(m.border))
-                    .border_color(rgb(c.separator))
-                    .child(
-                        div()
-                            .id("timeline-play")
-                            .role(Role::Button)
-                            .aria_label(if playing { "Pause" } else { "Play" })
-                            .flex_none()
-                            .size(px(m.hit))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(m.control_radius))
-                            .text_color(rgb(c.text))
-                            .hover_style(|s| s.bg(rgb(c.hover)))
-                            .cursor_pointer()
-                            .child(if playing { "❚❚" } else { "▶" })
-                            .on_click(cx.listener(|v, _, w, cx| {
-                                let play = pm_shell::Command {
-                                    name: "play".into(),
-                                    args: vec![],
-                                    token: None,
-                                };
-                                v.command(&play, w, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().flex_none().w(px(slot.w)).h(px(slot.h)))
-                    .child(
-                        div()
-                            .text_size(px(ty.body))
-                            .font_features(tabular())
-                            .text_color(rgb(c.muted))
-                            .child(format!("{} fps", trim_rate(fps))),
-                    ),
-            );
             // Ruler: major ticks `secondary` with `minimum` labels, minor ticks `muted`.
             let pps = width as f64 / duration;
             let step = ruler_step(fps, pps, 72.);
@@ -762,7 +713,7 @@ pub fn render(
                 div()
                     .absolute()
                     .left(px(0.))
-                    .top(px(m.header + m.ruler))
+                    .top(px(m.ruler))
                     .bottom(px(0.))
                     .w(px(column))
                     .bg(rgb(c.panel_secondary))
@@ -771,48 +722,13 @@ pub fn render(
             );
             body = body.child(rows);
             // The native playhead runs from the ruler's top edge; its head sits in the ruler.
-            crate::playback::set_timeline(cx.entity_id(), bounds, column, m.header * 2.);
+            crate::playback::set_timeline(cx.entity_id(), bounds, column, m.header);
         }
         "viewer" => {
-            // The surface stays clear below the bar; native Metal sits beneath this panel.
-            let fit = fit_scale(bounds.w, body_h, v.dimensions, m.header, m.inset, m.gap);
-            let title = zoom_title(v.zoom, fit);
-            body = body.p(px(0.)).gap(px(0.)).child(
-                div()
-                    .flex_none()
-                    .h(px(m.header))
-                    .w_full()
-                    .px(px(m.inset))
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .gap(px(m.gap))
-                    .bg(rgb(c.viewer))
-                    .child(
-                        div()
-                            .id("viewer-zoom")
-                            .role(Role::Button)
-                            .aria_label(format!("Zoom: {title}"))
-                            .h(px(m.control))
-                            .px(px(m.gap * 1.5))
-                            .flex()
-                            .items_center()
-                            .gap(px(m.gap))
-                            .rounded(px(m.control_radius))
-                            .text_size(px(ty.body))
-                            .font_features(tabular())
-                            .text_color(rgb(c.text))
-                            .hover_style(|s| s.bg(rgb(c.hover)))
-                            .cursor_pointer()
-                            .child(title)
-                            .child(div().text_color(rgb(c.secondary)).child("▾"))
-                            .on_click(cx.listener(move |v, e: &ClickEvent, _, cx| {
-                                let x = f32::from(e.position().x);
-                                let y = bounds.y + m.header * 2.;
-                                v.zoom_menu(x, y, fit, cx);
-                            })),
-                    ),
-            );
+            // The shell's header is the viewer bar; the image is centred in the
+            // body below it. Native Metal sits beneath this panel.
+            let fit = fit_scale(bounds.w, body_h, v.dimensions, m.inset);
+            body = body.p(px(0.)).gap(px(0.));
             let zoom = Some(v.zoom.unwrap_or(fit));
             v.host.borrow_mut().viewer_transform(v.dimensions, zoom);
             crate::playback::frame_outline(
@@ -826,6 +742,120 @@ pub fn render(
         _ => return None,
     }
     Some(body.into_any_element())
+}
+
+/// Header content for panels that own their 32 pt bar (language §10, §11):
+/// the viewer's zoom pop-up (trailing, no title) and the timeline transport
+/// (play, timecode, fps). The shell draws it in the panel header.
+pub fn header(
+    v: &mut Controller,
+    id: &str,
+    bounds: Rect,
+    _window: &mut Window,
+    cx: &mut Context<Controller>,
+) -> Option<AnyElement> {
+    let t = v.host.borrow().tokens.clone();
+    let (c, m, ty) = (&t.colors, t.metrics, t.typography);
+    let bar = div().size_full().flex().items_center().gap(px(m.gap));
+    match id {
+        "viewer" => {
+            let body_h = (bounds.h - m.header).max(0.);
+            let fit = fit_scale(bounds.w, body_h, v.dimensions, m.inset);
+            let title = zoom_title(v.zoom, fit);
+            Some(
+                bar.justify_end()
+                    .child(
+                        div()
+                            .id("viewer-zoom")
+                            .role(Role::Button)
+                            .aria_label(format!("Zoom: {title}"))
+                            .h(px(m.field))
+                            .px(px(m.gap * 1.5))
+                            .flex()
+                            .items_center()
+                            .gap(px(m.gap))
+                            .rounded(px(m.control_radius))
+                            .text_size(px(ty.body))
+                            .font_features(tabular())
+                            .text_color(rgb(c.text))
+                            .hover_style(|s| s.bg(rgb(c.hover)))
+                            .cursor_pointer()
+                            .child(title)
+                            .child(div().text_color(rgb(c.secondary)).child("▾"))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |v, e: &ClickEvent, _, cx| {
+                                let x = f32::from(e.position().x);
+                                let y = bounds.y + m.header;
+                                v.zoom_menu(x, y, fit, cx);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        }
+        "timeline" => {
+            let playing = v.playing();
+            let fps = v.rate.to_f64();
+            // Play button, then the native timecode layer's slot, then fps.
+            let slot = crate::playback::timecode_slot(&t);
+            Some(
+                bar.child(
+                    div()
+                        .id("timeline-play")
+                        .role(Role::Button)
+                        .aria_label(if playing { "Pause" } else { "Play" })
+                        .flex_none()
+                        .size(px(m.hit))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(m.control_radius))
+                        .hover_style(|s| s.bg(rgb(c.hover)))
+                        .cursor_pointer()
+                        .child(SymbolImage(
+                            if playing { "pause.fill" } else { "play.fill" },
+                            m.symbol_panel,
+                            c.text,
+                        ))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|v, _, w, cx| {
+                            let play = pm_shell::Command {
+                                name: "play".into(),
+                                args: vec![],
+                                token: None,
+                            };
+                            v.command(&play, w, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(div().flex_none().w(px(slot.w)).h(px(slot.h)))
+                .child(
+                    div()
+                        .text_size(px(ty.minimum))
+                        .font_features(tabular())
+                        .text_color(rgb(c.muted))
+                        .child(format!("{} fps", trim_rate(fps))),
+                )
+                .into_any_element(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// An SF Symbol (`pm_shell::symbol`) at `points` in `color`, rendered at the
+/// window's scale when laid out.
+#[derive(IntoElement)]
+struct SymbolImage(&'static str, f32, u32);
+impl RenderOnce for SymbolImage {
+    fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        pm_shell::symbol::symbol(
+            self.0,
+            self.1,
+            pm_shell::symbol::Weight::Medium,
+            self.2,
+            window,
+        )
+    }
 }
 
 fn list_row(t: &pm_design::Tokens, id: ElementId, selected: bool) -> Stateful<Div> {
@@ -845,15 +875,23 @@ fn list_row(t: &pm_design::Tokens, id: ElementId, selected: bool) -> Stateful<Di
         .cursor_pointer()
 }
 
+/// Kind symbol (`film`, `textformat`, …) in a label-colour badge (language §8, §11).
 fn kind_badge(t: &pm_design::Tokens, kind: &str) -> Div {
     let fill = label_color(kind, &t.colors.labels);
+    let side = t.metrics.symbol_inline + t.metrics.border * 6.;
     div()
         .flex_none()
-        .size(px(t.typography.minimum - 1.))
-        .rounded(px(t.metrics.inner_radius / 2.))
+        .size(px(side))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(t.metrics.inner_radius))
         .bg(rgb(fill))
-        .border(px(1.))
-        .border_color(rgb(mix(fill, t.colors.text, 0.25)))
+        .child(SymbolImage(
+            pm_shell::symbol::kind_symbol(kind),
+            t.metrics.symbol_inline,
+            t.colors.text,
+        ))
 }
 
 fn project_row(
@@ -1065,11 +1103,11 @@ mod tests {
     fn zoom_titles_and_fit_keep_the_image_clear_of_the_bar() {
         assert_eq!(zoom_title(None, 0.5414), "Fit (54 %)");
         assert_eq!(zoom_title(Some(1.), 0.5), "100 %");
-        // 1000×600 body, 32 pt bar, 6 pt gap, 12 pt inset, 1920×1080 comp.
-        let fit = fit_scale(1000., 600., [1920., 1080.], 32., 12., 6.);
+        // 1000×600 body below the bar, 12 pt margin, 1920×1080 comp.
+        let fit = fit_scale(1000., 600., [1920., 1080.], 12.);
         let image_h = 1080. * fit;
         let top = (600. - image_h) / 2.;
-        assert!(top >= 32., "image top {top} under the viewer bar");
+        assert!(top >= 12. - 1e-9, "image top {top} touches the viewer bar");
         assert!(1920. * fit <= 1000. - 24. + 1e-9);
     }
 
