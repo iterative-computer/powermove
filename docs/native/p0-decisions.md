@@ -43,6 +43,7 @@ Decision needed (now firmer after the unlocked rerun): choose the scheme handler
 - **Eval specs:** anonymised behaviour specs of Chike's panels may be used in the v4 eval (no names, ids or code in tracked files).
 - **Store-wide counts:** pull published Store extension sources read-only through the Store tools; record usage counts only.
 - **S1:** runs on a cloud/CI macOS runner (this Mac lacks the disk).
+- **Edit/scrub latency endpoint (P1 §5 rows):** split into two checks. (1) Powermove's own share, input → frame ready for presentation (kernel + service + render, ending at GPU completion), p95 ≤ 9.333 ms at 120 Hz. (2) End to end, input → on screen (`presentedTime`), native must beat Electron measured the same way on the same Mac. Reason: macOS composition alone adds ~20–24 ms for any windowed `CAMetalLayer` (perf-gate-p1.md, "Latency pass"), and Electron's reference numbers stopped at GPU completion + rAF. Approved by Chike; Jude to confirm.
 
 ## Questions from the inventories (original wording, kept for traceability)
 

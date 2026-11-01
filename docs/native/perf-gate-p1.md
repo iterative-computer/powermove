@@ -684,3 +684,12 @@ warnings` passes for service, app and compat-host (all features); `fmt`
 passes. No kernel, engine, vendor, shell or Cargo.lock change. To keep ≥ 8 GiB
 free, 4 GiB of `pm-target/debug/deps` hash groups untouched for > 6 h were
 evicted.
+
+## Budget endpoint decision (2026-11-01)
+
+The edit → display and cached-scrub rows are now judged as two checks (owner decision, see
+p0-decisions.md): Powermove's own share (input → frame ready, ending at GPU completion) at
+p95 ≤ 9.333 ms, and input → on screen faster than Electron when both are measured to
+`presentedTime` on the same machine. The ~20–24 ms macOS composition floor measured in the
+"Latency pass" counts against neither app. The harness must report both numbers per row.
+
