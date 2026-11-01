@@ -1,0 +1,21 @@
+// Frozen runtime extraction declarations; exercised against the tagged source.
+export const defaultDockSize: any;
+export function keepPanelAtSetHeight(...args: any[]): any;
+export const eachDock: any;
+export const hasPanel: any;
+export function ensureDockFill(...args: any[]): any;
+export function removePanel(...args: any[]): any;
+export function ensureDock(...args: any[]): any;
+export function hidePanel(...args: any[]): any;
+export function restorePanel(...args: any[]): any;
+export function findPanel(...args: any[]): any;
+export function addPanel(...args: any[]): any;
+export function insertPanel(...args: any[]): any;
+export function movePanel(...args: any[]): any;
+export function movePanelBy(...args: any[]): any;
+export const SIDE_FLUID_MIN_HEIGHT: any;
+export function panelMinHeight(...args: any[]): any;
+export function panelFlex(...args: any[]): any;
+export function applyPanelSize(...args: any[]): any;
+export function setPanelCollapsed(...args: any[]): any;
+export function dockLabel(...args: any[]): any;

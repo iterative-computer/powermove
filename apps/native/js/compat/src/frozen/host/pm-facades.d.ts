@@ -1,0 +1,14 @@
+import type { Data } from "../../types";
+export function makeAnim(PM: Data): Data;
+export function makeModel(PM: Data): Data;
+export function makeSelection(PM: Data): Data;
+export function makeGroups(PM: Data): Data;
+export function makeTransport(PM: Data): Data;
+export function makeMedia(PM: Data): Data;
+export function makeRender(PM: Data): Data;
+export function makeUIState(PM: Data): Data;
+export function makeUtil(PM: Data): Data;
+export function makeEase(PM: Data): Data;
+export function makeSpace3D(PM: Data): Data;
+export function makeDnd(PM: Data): Data;
+export function makeWorkspace(PM: Data): Data;
