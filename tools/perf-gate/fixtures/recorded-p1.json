@@ -1,0 +1,319 @@
+{
+  "schema": "powermove.perf-gate.fixture/v1",
+  "synthetic": true,
+  "description": "Synthetic recorded adapter-protocol responses for Linux policy tests. No Mac measurements.",
+  "context": {
+    "hz": 120,
+    "runs": 30,
+    "rig": "xdr-120",
+    "rig_certified": true,
+    "quality_certified": true,
+    "allowed_apps": [
+      "com.apple.finder"
+    ],
+    "max_load_per_cpu": 0.5
+  },
+  "baseline": {
+    "logical_cpus": 8,
+    "load": [
+      1,
+      1,
+      1
+    ],
+    "thermal": "nominal",
+    "ac_power": true,
+    "screen_unlocked": true,
+    "free_bytes": 17179869184,
+    "other_apps": [
+      "com.apple.finder"
+    ],
+    "active_builds": [],
+    "os_build": "synthetic-fixture",
+    "displays": [
+      {
+        "id": 1,
+        "mode": 1,
+        "width": 3024,
+        "height": 1964,
+        "hz": 120,
+        "builtin": true
+      }
+    ]
+  },
+  "rows": {
+    "cold_launch": {
+      "native": {
+        "metrics": {
+          "latency_ms": 300
+        },
+        "evidence": {
+          "latency_endpoint": "process-start-to-first-interactive-presentedTime",
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "latency_ms": 800
+        },
+        "evidence": {
+          "latency_endpoint": "process-start-to-first-interactive-presentedTime",
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "open": {
+      "native": {
+        "metrics": {
+          "latency_ms": 100,
+          "main_max_ms": 4
+        },
+        "evidence": {
+          "latency_endpoint": "open-request-to-first-new-viewer-presentedTime",
+          "main_thread_census": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "latency_ms": 300,
+          "main_max_ms": 8
+        },
+        "evidence": {
+          "latency_endpoint": "open-request-to-first-new-viewer-presentedTime",
+          "main_thread_census": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "scrub_cached": {
+      "native": {
+        "metrics": {
+          "own_share_ms": 3,
+          "on_screen_ms": 24
+        },
+        "evidence": {
+          "own_share_endpoint": "input-to-gpu-completion",
+          "screen_endpoint": "input-to-presentedTime",
+          "exact_cached_frame": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "own_share_ms": 12,
+          "on_screen_ms": 30
+        },
+        "evidence": {
+          "own_share_endpoint": "input-to-gpu-completion",
+          "screen_endpoint": "input-to-presentedTime",
+          "exact_cached_frame": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "scrub_random_seek": {
+      "native": {
+        "metrics": {
+          "preview_ms": 9,
+          "full_ms": 120
+        },
+        "evidence": {
+          "preview_endpoint": "input-to-preview-presentedTime",
+          "full_endpoint": "input-to-full-resolution-presentedTime",
+          "long_gop_4k_verified": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "preview_ms": 30,
+          "full_ms": 250
+        },
+        "evidence": {
+          "preview_endpoint": "input-to-preview-presentedTime",
+          "full_endpoint": "input-to-full-resolution-presentedTime",
+          "long_gop_4k_verified": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "playback": {
+      "native": {
+        "metrics": {
+          "drops": 0,
+          "frame_work_p95_ms": 8,
+          "duration_s": 60,
+          "fps": 60
+        },
+        "evidence": {
+          "complete_frame_census": true,
+          "main_and_render_work_census": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "drops": 0,
+          "frame_work_p95_ms": 12,
+          "duration_s": 60,
+          "fps": 60
+        },
+        "evidence": {
+          "complete_frame_census": true,
+          "main_and_render_work_census": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "playback_cost": {
+      "native": {
+        "metrics": {
+          "cpu_percent": 10,
+          "gpu_ms": 4,
+          "energy_j": 7
+        },
+        "evidence": {
+          "process_family_cpu": true,
+          "app_attributed_gpu": true,
+          "app_attributed_energy": true,
+          "full_playback_window": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "cpu_percent": 20,
+          "gpu_ms": 6,
+          "energy_j": 12
+        },
+        "evidence": {
+          "process_family_cpu": true,
+          "app_attributed_gpu": true,
+          "app_attributed_energy": true,
+          "full_playback_window": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "av": {
+      "native": {
+        "metrics": {
+          "mean_abs_offset_ms": 0.5,
+          "jitter_p95_ms": 1.5
+        },
+        "evidence": {
+          "matched_device_timestamps": true,
+          "content_onsets_only": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "mean_abs_offset_ms": 2,
+          "jitter_p95_ms": 4
+        },
+        "evidence": {
+          "matched_device_timestamps": true,
+          "content_onsets_only": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "edit_repaint": {
+      "native": {
+        "metrics": {
+          "own_share_ms": 3,
+          "on_screen_ms": 24,
+          "main_max_ms": 3
+        },
+        "evidence": {
+          "own_share_endpoint": "input-to-gpu-completion",
+          "screen_endpoint": "input-to-presentedTime",
+          "shell_repaint_included": true,
+          "main_thread_census": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "own_share_ms": 12,
+          "on_screen_ms": 30,
+          "main_max_ms": 5
+        },
+        "evidence": {
+          "own_share_endpoint": "input-to-gpu-completion",
+          "screen_endpoint": "input-to-presentedTime",
+          "shell_repaint_included": true,
+          "main_thread_census": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "idle": {
+      "native": {
+        "metrics": {
+          "cpu_percent": 0.4,
+          "extension_wakeups_s": 1
+        },
+        "evidence": {
+          "per_extension_wakeups": true,
+          "stable_idle_window": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "cpu_percent": 1,
+          "extension_wakeups_s": 3
+        },
+        "evidence": {
+          "per_extension_wakeups": true,
+          "stable_idle_window": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    },
+    "memory_small": {
+      "native": {
+        "metrics": {
+          "footprint_mb": 200
+        },
+        "evidence": {
+          "deduplicated_cpu_gpu_allocations": true,
+          "whole_process_family": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      },
+      "electron": {
+        "metrics": {
+          "footprint_mb": 400
+        },
+        "evidence": {
+          "deduplicated_cpu_gpu_allocations": true,
+          "whole_process_family": true,
+          "input_origin": "command-accepted",
+          "matching_frame_identity": true
+        }
+      }
+    }
+  }
+}
