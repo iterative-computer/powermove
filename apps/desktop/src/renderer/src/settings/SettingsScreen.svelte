@@ -74,6 +74,13 @@
   };
 
   let shown = $state(false);
+  /* Hides the editor behind this screen (settings.css). A flag on the root
+     instead of body:has(#settings-screen.on): a :has() on <body> made every
+     DOM insertion during playback restyle the whole document. */
+  $effect(() => {
+    document.documentElement.toggleAttribute('data-settings-open', shown);
+    return () => document.documentElement.toggleAttribute('data-settings-open', false);
+  });
   let page = $state<SettingsPage>('general');
   let searchText = $state('');
   const query = $derived(searchText.trim().toLowerCase());

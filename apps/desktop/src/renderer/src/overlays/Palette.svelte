@@ -94,7 +94,12 @@
     }
   }
 
-  onMount(() => input.focus({ preventScroll: true }));
+  onMount(() => {
+    input.focus({ preventScroll: true });
+    // Lets the scrim skip its fade (app.css) without a document-wide :has().
+    document.documentElement.toggleAttribute('data-palette-open', true);
+    return () => document.documentElement.toggleAttribute('data-palette-open', false);
+  });
 
   // One highlight surface follows the selected row immediately; hover and keyboard both
   // write `selection`, so a single fill is ever visible.

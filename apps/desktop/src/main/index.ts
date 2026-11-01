@@ -1,4 +1,5 @@
 import { createEditorClosePreparation } from './editor-close';
+import { watchMemoryPressure } from './memory-pressure';
 import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
 import { registerClaudeDesktopMcp } from './claude-desktop-mcp';
@@ -937,6 +938,8 @@ if (!hasSingleInstanceLock) {
     const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder, hdrProxy), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
     registerAppProtocol();
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
+    // Editors release caches and idle video decoders when macOS runs short.
+    watchMemoryPressure();
 
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the settings and the active project must be ready before the window exists.

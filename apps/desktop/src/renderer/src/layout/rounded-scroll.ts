@@ -43,8 +43,12 @@ export function roundedScroll(node: HTMLElement) {
     const remaining = node.scrollHeight - node.clientHeight;
     // Sub-pixel dock heights leave a fractional remainder at either end.
     const scrollable = remaining > 1;
-    node.dataset.overflowTop = scrollable && node.scrollTop > 1 ? '1' : '0';
-    node.dataset.overflowBottom = scrollable && node.scrollTop < remaining - 1 ? '1' : '0';
+    // Rewriting an unchanged attribute still invalidates the selectors that
+    // read it. Only touch the DOM when an edge actually changes.
+    const top = scrollable && node.scrollTop > 1 ? '1' : '0';
+    const bottom = scrollable && node.scrollTop < remaining - 1 ? '1' : '0';
+    if (node.dataset.overflowTop !== top) node.dataset.overflowTop = top;
+    if (node.dataset.overflowBottom !== bottom) node.dataset.overflowBottom = bottom;
   };
   const update = () => {
     frame = 0;
@@ -87,7 +91,15 @@ export function roundedScroll(node: HTMLElement) {
     node.querySelectorAll<HTMLElement>(':scope > .panel-slot > .panel').forEach(panel => resize.observe(panel));
     schedule();
   };
-  const mutations = new MutationObserver(observe);
+  /* Only the column's own panel slots matter. Panel content changes constantly
+     during playback (timecodes, meters, previews); re-measuring the column for
+     each of those forced a style and layout pass on every frame. */
+  const mutations = new MutationObserver((records) => {
+    for (const record of records) {
+      const target = record.target as Node;
+      if (target === node || target.parentNode === node) { observe(); return; }
+    }
+  });
   mutations.observe(node, { childList: true, subtree: true });
   node.addEventListener('scroll', schedule, { passive: true });
   observe();

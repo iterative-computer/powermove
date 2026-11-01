@@ -77,12 +77,18 @@ export class LibraryMedia {
     return record;
   }
   private pathFor(record: Record): string { return record.sourcePath ?? path.join(this.root, record.file!); }
+  /** Files already proven to hold a record's bytes, keyed by their identity.
+   * Playback streams a clip through many small range requests; re-checking a
+   * linked original (and hashing it after a touch) on each one starved decoding. */
+  private validated = new WeakMap<Record, string>();
   private async validateFile(record: Record): Promise<void> {
     // Metadata probes must not silently materialize an offloaded cloud file.
     // The renderer's existing cloud prompt owns that download decision.
     if (record.sourcePath && !await this.sourceAvailable(record.sourcePath)) throw new Error('The source file needs to be downloaded.');
     const file = this.pathFor(record), metadata = await lstat(file);
     if (!metadata.isFile() || metadata.size !== record.size) throw new Error('A media file was changed or removed.');
+    const identity = `${file}\0${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}`;
+    if (this.validated.get(record) === identity) return;
     if (metadata.mtimeMs !== record.mtime) {
       const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
@@ -90,6 +96,7 @@ export class LibraryMedia {
           || !sameFile(metadata, await handle.stat())) throw new Error('A media file was changed outside Powermove.');
       } finally { await handle.close(); }
     }
+    this.validated.set(record, identity);
   }
   private grant(owner: number, record: Record): LibraryMediaRecord {
     for (const [token, grant] of this.grants) {
@@ -347,11 +354,16 @@ export class LibraryMedia {
       'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes' };
     let start = 0, end = grant.record.size - 1, status = 200;
     const range = request.headers.get('Range');
+    // A media element asks for open-ended ranges (`bytes=N-`) and streams
+    // from there, so playback reads from disk instead of holding the file in
+    // memory. Bounded ranges keep the one-MiB limit used by saves.
+    let openEnded = false;
     if (range) {
-      const match = /^bytes=(\d+)-(\d+)$/.exec(range);
-      start = Number(match?.[1]); end = Number(match?.[2]);
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      openEnded = match?.[2] === '';
+      start = Number(match?.[1]); end = openEnded ? grant.record.size - 1 : Number(match?.[2]);
       if (!match || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start
-        || end >= grant.record.size || end - start + 1 > LIBRARY_MEDIA_CHUNK) {
+        || end >= grant.record.size || (!openEnded && end - start + 1 > LIBRARY_MEDIA_CHUNK)) {
         return new Response(null, { status: 416, headers: { ...headers, 'Content-Range': `bytes */${grant.record.size}` } });
       }
       status = 206; headers['Content-Range'] = `bytes ${start}-${end}/${grant.record.size}`;
@@ -363,7 +375,7 @@ export class LibraryMedia {
     try {
       const info = await handle.stat();
       if (!info.isFile() || info.size !== grant.record.size) throw new Error('The project media changed while reading.');
-      if (range) {
+      if (range && !openEnded) {
         // Save ranges are at most one MiB. Finish the filesystem read before
         // handing bytes to Chromium, avoiding its custom-protocol stream /
         // Blob cancellation path while keeping allocation bounded.

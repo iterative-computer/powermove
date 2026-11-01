@@ -1,6 +1,7 @@
 import { videoClipsAt, type VideoClip } from './video-timeline';
 import { previewVideoElement } from './video-preview';
 import { layerVideoElement, pruneVideoInstances } from './video-instances';
+import { parkIdleVideos, releaseVideoDecoders, useVideo, videoResidency } from './video-residency';
 import { cancelPreviewVideoSeek, seekPreviewVideo } from './video-seek';
 import { capturePlaybackVideoFrame, clearPlaybackVideoFrames, startPlaybackVideoFrames, stopPlaybackVideoFrames, playbackVideoFrameAt, type PlaybackVideoFrame } from './video-playback-frames';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
@@ -182,6 +183,14 @@ function scrubVideos(T: any, lookahead = true) {
     seekPreviewVideo(el, videoPlaybackTime(asset, at), .0005);
   }
 
+  // Idle decoders are released (video-residency). Reload the files of clips
+  // starting in the next few seconds so the 0.5 s lookahead above only seeks.
+  if (PM.playing && lookahead) for (const layer of videos) {
+    if (layer.from <= drawn + .5 || layer.from > drawn + 3) continue;
+    const asset = PM.assets.get(layer.d.asset);
+    if (asset?.el) useVideo(previewVideoElement(PM, asset));
+  }
+
   // Prepare the loop entrance only if it owns a different decoder. Seeking an
   // active clip early would interrupt the tail of the current loop.
   const [start, end] = PM.proj.work?.[1] > PM.proj.work?.[0] ? PM.proj.work : [0, PM.proj.dur];
@@ -276,6 +285,14 @@ for (const event of ['layers', 'project', 'assets']) PM.bus.on(event, () => {
   for (const asset of PM.assets.map?.values() ?? []) pruneVideoInstances(asset, byAsset.get(asset.id) ?? empty);
 });
 
+/* Decoders join the shared memory budget, so system memory pressure (and
+   Settings › Storage) can release the ones that are not on screen. */
+PM.Memory?.register?.('decoders', {
+  bytes: () => videoResidency().bytes,
+  entries: () => videoResidency().resident,
+  trim: (target: number) => releaseVideoDecoders(target, new Set([...playingVideos, ...bufferedVideos])),
+});
+
 /* ── transport ─────────────────────────────────────────── */
 PM.setTime = (t: any, opt: any = {}) => {
   // Invalid gesture/plugin input must never replace the current valid frame.
@@ -363,6 +380,7 @@ let pausedFrame: { time: number; project: any; generation: number } | null = nul
 let lastRenderFailure = -Infinity;
 let interactionUntil = 0, refinePending = false, lastQualityChange = -Infinity;
 let inputUntil = 0;
+let lastResidencyPass = 0;
 PM.interactionActive = () => window.performance.now() < Math.max(inputUntil, interactionUntil);
 for (const event of ['pointerdown', 'pointermove', 'wheel', 'keydown']) window.document?.addEventListener?.(event, () => { inputUntil = window.performance.now() + 500; }, { passive: true });
 const automaticPreview = installAutomaticPreview(PM);
@@ -383,6 +401,13 @@ function frame(now: any) {
   // Redrawing the preview here seeks them back to the editor playhead between
   // export frames, producing repeated/frozen frames in the encoded video.
   if (PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active) return;
+  // Release decoders of clips nobody has drawn for a while. Active and
+  // buffering clips are protected; every use refreshes the rest.
+  if (now - lastResidencyPass > 1000) {
+    lastResidencyPass = now;
+    parkIdleVideos(new Set([...playingVideos, ...bufferedVideos]), now);
+    PM.Memory?.maintain?.('decoders');
+  }
   if (PM.playing && E.auto && cadenceSlow && PM.quality > .25) {
     PM.quality = Math.max(.25, PM.quality - .25);
     lastQualityChange = now;

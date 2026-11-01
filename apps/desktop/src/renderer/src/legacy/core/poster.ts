@@ -1,3 +1,4 @@
+import { useVideo } from './video-residency';
 function canvasBlob(canvas: HTMLCanvasElement, type: string, quality: number): Promise<Blob | null> {
   if (typeof canvas.toBlob !== 'function') return Promise.resolve(null);
   return new Promise(resolve => {
@@ -48,7 +49,8 @@ function seekVideo(video: HTMLVideoElement, time: number, timeout = 2000): Promi
 export async function capturePoster(asset: any, { maxEdge = 320 }: { maxEdge?: number } = {}): Promise<Blob | null> {
   try {
     if (!asset || (asset.kind !== 'image' && asset.kind !== 'video')) return null;
-    const el: any = asset.el;
+    // A released decoder (video-residency) starts reloading here.
+    const el: any = asset.kind === 'video' ? useVideo(asset.el) : asset.el;
     if (!el) return null;
     const width = asset.kind === 'video'
       ? Number(el.videoWidth) || 0

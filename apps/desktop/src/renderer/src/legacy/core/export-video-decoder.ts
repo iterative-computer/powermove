@@ -1,3 +1,4 @@
+import { isVideoParked, wakeVideo } from './video-residency';
 import { mp4VideoSamples, type Mp4VideoSamples } from '../../../../shared/mp4-samples';
 import { seekVideoFrame } from './video-frame-decode';
 
@@ -287,6 +288,8 @@ function sameAsElement(frame: VideoFrame, element: HTMLVideoElement): boolean {
  * saving; a blob: URL still resolves to the same data without copying it. */
 async function sourceBlob(asset: any): Promise<Blob | null> {
   if (asset.persistBlob instanceof Blob) return asset.persistBlob;
+  // Library-backed footage is read in ranges, never copied whole.
+  if (asset.streamSource) return asset.streamSource as Blob;
   if (!/^blob:/.test(asset.url)) return null;
   const response = await fetch(asset.url);
   return response.ok ? await response.blob() : null;
@@ -306,6 +309,8 @@ export class ExportVideoDecoders {
   async frame(asset: any, layerKey: string, time: number, signal?: AbortSignal): Promise<DecodedVideoFrame | null> {
     const route = layerKey;
     const element = asset?.el;
+    // A decoder released while idle (video-residency) comes back for export.
+    if (typeof HTMLVideoElement !== 'undefined' && element instanceof HTMLVideoElement && isVideoParked(element)) await wakeVideo(element);
     if (this.disposed || asset?.imageSequence || typeof asset?.url !== 'string' || typeof HTMLVideoElement === 'undefined'
         || !(element instanceof HTMLVideoElement) || !asset.url || (element.currentSrc || element.src) !== asset.url
         || !(element.videoWidth > 0 && element.videoHeight > 0)) {

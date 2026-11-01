@@ -1,5 +1,7 @@
 import { cancelPreviewVideoSeek } from './video-seek';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { isStreamedMedia, type StreamedMedia } from '../../host/streamed-media';
+import { trackVideo } from './video-residency';
 
 /** Full preview resolution and offline rendering always use the source. */
 export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
@@ -16,8 +18,22 @@ export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
 
 let work: Promise<unknown> = Promise.resolve();
 
+/* Opening a project installs every stored preview. Each install loads a
+   player and decodes a frame, so doing all of them at once spiked memory by
+   more than a gigabyte on an 87-clip edit. A couple at a time is just as fast
+   in practice; the residency pass then releases the ones nobody is viewing. */
+const INSTALL_SLOTS = 2;
+let installing = 0;
+const installQueue: Array<() => void> = [];
+async function installSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (installing >= INSTALL_SLOTS) await new Promise<void>(resolve => installQueue.push(resolve));
+  installing++;
+  try { return await run(); }
+  finally { installing--; installQueue.shift()?.(); }
+}
+
 /** Build disposable editing media independently of the portable original. */
-export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed: () => boolean): Promise<void> {
+export function prepareVideoPreview(PM: any, asset: any, source: Blob | StreamedMedia, disposed: () => boolean): Promise<void> {
   const media = hostBridge()?.media;
   const legacyCutout = asset.playbackProxy && Number(asset.playbackProxyVersion || 0) < 3;
   // Long GOPs make HD footage expensive to seek too. Build editing media for
@@ -28,8 +44,11 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
   // Derivatives have their own versioned key; never replace the portable source.
   const cacheKey = asset.storageKey
     ? `${asset.storageKey}:preview:intra-1280-v1:${asset.playbackProxyVersion || 0}:${source.size}` : null;
-  const installPreview = async (blob: Blob) => {
-    const url = URL.createObjectURL(blob);
+  // A stored derivative plays straight from the library file; only a freshly
+  // converted one is a Blob until it has been saved.
+  const installPreview = async (blob: Blob | StreamedMedia) => {
+    const url = isStreamedMedia(blob) ? blob.url : URL.createObjectURL(blob);
+    const release = () => { if (!isStreamedMedia(blob)) URL.revokeObjectURL(url); };
     const el = document.createElement('video'); el.muted = true; el.playsInline = true; el.preload = 'auto';
     try {
       await new Promise<void>((resolve, reject) => {
@@ -50,23 +69,26 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
         else ready();
         void el.play().catch(error => { clearTimeout(timer); reject(error); });
       });
-      if (disposed()) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); return; }
+      if (disposed()) { el.removeAttribute('src'); el.load(); release(); return; }
       asset.preview = { el, url, deferred: !!PM.playing };
+      // Not in use yet: the next residency pass may release its decoder.
+      trackVideo(el, -Infinity);
       if (previewVideoElement(PM, asset) === el) {
         cancelPreviewVideoSeek(asset.el); asset.el.pause();
       }
       PM.bus.emit('assets', { runtimeOnly: true }); PM.invalidate('render');
-    } catch (error) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); throw error; }
+    } catch (error) { el.removeAttribute('src'); el.load(); release(); throw error; }
   };
   // A cached preview bypasses the conversion queue entirely. Older alpha clips
   // also bypass optional 4K work when they need their first conversion.
   const task = Promise.resolve().then(async () => {
     if (disposed()) return;
     if (cacheKey) {
-      const cached = await Promise.resolve(PM.MediaStore.get(cacheKey)).catch(() => null);
+      const cached = await Promise.resolve(PM.MediaStore.source?.(cacheKey) ?? null).catch(() => null)
+        ?? await Promise.resolve(PM.MediaStore.get(cacheKey)).catch(() => null);
       if (disposed()) return;
       if (cached) {
-        try { await installPreview(cached); return; }
+        try { await installSlot(() => installPreview(cached)); return; }
         catch { /* A damaged derivative can be rebuilt from the original. */ }
       }
     }
@@ -89,11 +111,15 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
           chunks.push(new Uint8Array(chunk)); offset += chunk.length;
         }
         const blob = new Blob(chunks, { type: 'video/webm' });
-        await installPreview(blob);
-        if (cacheKey && !disposed()) {
-          // Cache failure is harmless: the portable source remains authoritative.
-          await PM.MediaStore.put(cacheKey, blob, { storageKey: cacheKey }).catch(() => false);
-        }
+        chunks.length = 0;
+        // Store first, then play the stored file. Playing the Blob kept every
+        // finished preview in memory (about 10 MB per clip) until the project
+        // closed. Cache failure is harmless: the Blob still plays.
+        const stored = cacheKey && !disposed()
+          ? await PM.MediaStore.put(cacheKey, blob, { storageKey: cacheKey }).catch(() => false) : false;
+        const streamed = stored && !disposed()
+          ? await Promise.resolve(PM.MediaStore.source?.(cacheKey) ?? null).catch(() => null) : null;
+        await installPreview(streamed ?? blob);
       } finally { await media.releasePlaybackProxy(token).catch(() => undefined); }
     };
     const conversion = legacyCutout ? convert() : work.catch(() => undefined).then(convert);

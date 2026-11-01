@@ -10,6 +10,7 @@ import { videoClipsAt } from '../core/video-timeline';
 import { sizeAnchorOffset } from '../core/size-anchor';
 import { previewSeekFrame, seekPreviewVideo } from '../core/video-seek';
 import { layerVideoElement, videoInstanceTextureKey } from '../core/video-instances';
+import { onVideoParked } from '../core/video-residency';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
 import { GPUTiming } from './gpu-timing';
 import { createOpaqueReadback } from './opaque-readback';
@@ -163,6 +164,8 @@ export function svgRasterDimensions(
   }
   return { width, height, scale: width / sw };
 }
+
+const PARKED_TEXTURES = Symbol.for('powermove.compositor.parked-textures');
 
 export function install(PM: PMRegistry): void {
 
@@ -730,6 +733,10 @@ function dropIsolatedVideoTexture(key: string) {
   textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
   GL.texes.delete(key);
 }
+// A released decoder's last upload is stale by the time it is used again.
+// A reinstall (new registry) replaces the previous listener.
+(globalThis as any)[PARKED_TEXTURES]?.();
+(globalThis as any)[PARKED_TEXTURES] = onVideoParked(el => dropIsolatedVideoTexture(videoInstanceTextureKey(el)));
 GL.dropTextures = (prefix = '') => {
   GL.cancelPreviewPreparation(); cancelInputPreview();
   previewFrames.clear();

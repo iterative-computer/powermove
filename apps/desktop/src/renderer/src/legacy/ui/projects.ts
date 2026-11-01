@@ -34,13 +34,18 @@ PM.ProjectsScreen = {
   show(section: any) {
     ensure();
     if (section && SECTIONS.includes(section)) selectSection(section, false);
-    paint(); S.el.classList.add('on'); PM.bus.emit('projects:screen');
+    paint(); S.el.classList.add('on');
+    // A root flag hides the editor behind this screen (app.css). It replaces
+    // body:has(#projects-screen.on), which restyled the whole document on
+    // every DOM insertion, including each playback frame's timecode.
+    document.documentElement?.toggleAttribute?.('data-projects-open', true); PM.bus.emit('projects:screen');
   },
   hide() {
     // Nothing to fall back to: this window has no composition behind the screen.
     if (!PM.proj?.id || PM.isHomeProject?.()) return;
     if (S.section === 'store') (PM as any).StoreUI?.setActive?.(false);
     if (S.el) S.el.classList.remove('on');
+    document.documentElement?.toggleAttribute?.('data-projects-open', false);
     PM.bus.emit('projects:screen');
   },
   toggle() { this.isOpen ? this.hide() : this.show(); },

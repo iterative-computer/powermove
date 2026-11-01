@@ -1,3 +1,4 @@
+import { videoSource } from '../legacy/core/video-residency';
 type Request = { key: string; asset: any; at: number };
 type CapturedFrame = VideoFrame | HTMLCanvasElement;
 export interface ThumbnailVideoFrames {
@@ -56,7 +57,8 @@ export function prepareThumbnailVideoFrames(PM: any, comp: any, time: number, si
         if (existing) { frames.set(request.key, existing); continue; }
         video ??= document.createElement('video');
         video.muted = true; video.playsInline = true; video.preload = 'auto';
-        const nextSource = request.asset.el.currentSrc || request.asset.el.src;
+        // A parked decoder (video-residency) has no live src but keeps its URL.
+        const nextSource = videoSource(request.asset.el);
         if (!nextSource) throw new Error('Composition thumbnail video source is unavailable');
         if (source !== nextSource) {
           source = nextSource;

@@ -98,3 +98,47 @@ describe('panel clips across columns', () => {
     void right;
   });
 });
+
+describe('column measurement during playback', () => {
+  it('ignores content changes inside a panel and re-measures only when panels move', async () => {
+    const node = dockElement(900, 400);
+    const slot = document.createElement('div');
+    slot.className = 'panel-slot';
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    const timecode = document.createElement('span');
+    panel.append(timecode);
+    slot.append(panel);
+    node.append(slot);
+    handle = roundedScroll(node);
+    await settle();
+    let measured = 0;
+    const original = node.getBoundingClientRect.bind(node);
+    node.getBoundingClientRect = () => { measured++; return original(); };
+    // A timecode or meter repainting every frame must not force a layout pass.
+    for (let frame = 0; frame < 5; frame++) {
+      timecode.textContent = `00:00:0${frame}`;
+      await settle();
+    }
+    expect(measured).toBe(0);
+    const added = document.createElement('div');
+    added.className = 'panel-slot';
+    node.append(added);
+    await settle();
+    await settle();
+    expect(measured).toBeGreaterThan(0);
+  });
+
+  it('leaves unchanged edge flags alone', async () => {
+    const node = dockElement(900, 400);
+    handle = roundedScroll(node);
+    await settle();
+    const writes: string[] = [];
+    new MutationObserver(records => records.forEach(record => writes.push(record.attributeName!)))
+      .observe(node, { attributes: true });
+    node.dispatchEvent(new Event('scroll'));
+    await settle();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(writes).toEqual([]);
+  });
+});

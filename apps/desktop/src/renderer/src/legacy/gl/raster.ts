@@ -28,6 +28,8 @@ import { parseObj } from '../../kernel/obj';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg } from '../core/svg-import';
+import { isStreamedMedia } from '../../host/streamed-media';
+import { forgetVideo, trackVideo } from '../core/video-residency';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
 import { bridge as hostBridge } from '../../kernel/bridge';
@@ -623,7 +625,7 @@ function disposeAsset(a: any) {
   disposeVideoInstances(a);
   if (a.preview) {
     cancelPreviewVideoSeek(a.preview.el);
-    a.preview.el.pause(); a.preview.el.removeAttribute('src'); a.preview.el.load();
+    a.preview.el.pause(); a.preview.el.removeAttribute('src'); a.preview.el.load(); forgetVideo(a.preview.el);
     window.URL.revokeObjectURL(a.preview.url); delete a.preview;
   }
   if ((a.kind === 'audio' || a.audioBlob) && PM.Audio) PM.Audio.disposeAsset(a);
@@ -633,6 +635,7 @@ function disposeAsset(a: any) {
     // Revoking a Blob URL alone leaves the element's decoder and decoded
     // frames alive. Only unload after the final live/history owner is gone.
     try { a.el.removeAttribute('src'); a.el.load(); } catch (e) { }
+    forgetVideo(a.el);
   }
   try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
   if (a.url && String(a.url).startsWith('blob:')) window.URL.revokeObjectURL(a.url);
@@ -714,7 +717,11 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
     ? new window.Blob([blob], { type: 'image/svg+xml' })
     : blob;
   const svg = imageFormat === 'svg' ? parseSvg(await sourceBlob.text()) : null;
-  let url = window.URL.createObjectURL(sourceBlob);
+  /* A library-backed video plays straight from its file (see StreamedMedia).
+     Everything else, and anything that must be converted, uses a Blob. */
+  if (isStreamedMedia(sourceBlob) && kind !== 'video') sourceBlob = await sourceBlob.blob();
+  let url = isStreamedMedia(sourceBlob) ? sourceBlob.url : window.URL.createObjectURL(sourceBlob);
+  const realBlob = async () => isStreamedMedia(blob) ? await blob.blob() : blob;
   let el: any, w = 0, hh = 0, dur = 0;
   let playbackProxyUsed = meta.playbackProxy === true;
   let playbackProxyVersion = Number(meta.playbackProxyVersion) || 0;
@@ -757,9 +764,9 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
       const treatment = canProxy && !needsProxy ? videoColorTreatment(await mp4VideoColor(blob)) : null;
       if (treatment) {
         try {
-          const converted = await playbackProxy(blob, name, onStage, assertCurrent,
+          const converted = await playbackProxy(await realBlob(), name, onStage, assertCurrent,
             treatment === 'tonemap' ? 'Converting HDR video' : 'Preparing log footage');
-          window.URL.revokeObjectURL(url);
+          if (!isStreamedMedia(sourceBlob)) window.URL.revokeObjectURL(url);
           sourceBlob = converted; url = window.URL.createObjectURL(sourceBlob);
           playbackProxyUsed = true; playbackProxyVersion = 3; canProxy = false;
         } catch (error) {
@@ -786,8 +793,8 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
           el.removeAttribute('src');
           el.load();
         }
-        window.URL.revokeObjectURL(url);
-        sourceBlob = await playbackProxy(blob, name, onStage, assertCurrent);
+        if (!isStreamedMedia(sourceBlob)) window.URL.revokeObjectURL(url);
+        sourceBlob = await playbackProxy(await realBlob(), name, onStage, assertCurrent);
         playbackProxyUsed = true;
         playbackProxyVersion = 3;
         url = window.URL.createObjectURL(sourceBlob);
@@ -805,7 +812,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
       playbackProxy: playbackProxyUsed,
       playbackProxyVersion,
       ...(kind === 'video' ? { videoTimestampScale: await webmTimestampScale(sourceBlob) } : {}),
-      persistBlob: sourceBlob,
+      ...(isStreamedMedia(sourceBlob) ? { streamSource: sourceBlob } : { persistBlob: sourceBlob }),
       ...(imageSequence ? { imageSequence } : {}),
       ...(imageFormat ? { format: imageFormat } : {}),
       ...(svg ? { svg } : {}),
@@ -841,6 +848,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage, assertCu
       }
     } else if (kind === 'video') asset.hasAudio = false;
     if (kind === 'video') {
+      trackVideo(el);
       asset.previewReady = prepareVideoPreview(PM, asset, sourceBlob, () => disposedAssets.has(asset));
       if (asset.playbackProxy && asset.playbackProxyVersion < 3) await asset.previewReady;
     }
@@ -1294,8 +1302,13 @@ PM.assets = {
         const posterKey = meta.storageKey
           ? PM.MediaImport.posterKeyFor(meta.storageKey)
           : null;
+        // Footage plays from its library file; reading it into a Blob kept a
+        // second copy of every clip in memory for as long as the project was open.
+        const read = () => meta.kind === 'video' && typeof PM.MediaStore.source === 'function'
+          ? Promise.resolve(PM.MediaStore.source(meta)).catch(() => null).then((source: any) => source ?? PM.MediaStore.get(meta))
+          : PM.MediaStore.get(meta);
         const [blob, storedPoster] = await Promise.all([
-          Promise.resolve().then(() => PM.MediaStore.get(meta)).catch(error => { cacheError = error; return null; }),
+          Promise.resolve().then(read).catch(error => { cacheError = error; return null; }),
           posterKey ? Promise.resolve(PM.MediaStore.get(posterKey)).catch(() => null) : Promise.resolve(null),
         ]);
         if (!current()) return { stale: true };

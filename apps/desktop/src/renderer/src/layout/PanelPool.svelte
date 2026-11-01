@@ -46,10 +46,14 @@
   {#each entries as entry (entry.spec.id)}
     <!-- Parked hosts get a real dock-like size so panels that measure
          themselves (canvases, virtual lists, composers) lay out sanely and
-         preview correctly instead of collapsing to the pool's 1px width. -->
+         preview correctly instead of collapsing to the pool's 1px width.
+         content-visibility keeps that size but skips style, layout and paint
+         for the parked contents: a dozen hidden panels updating during
+         playback otherwise restyled thousands of elements every frame.
+         Explicit measurement (getBoundingClientRect) still lays them out. -->
     <div
       data-panel-host={entry.spec.id}
-      style="width:320px;height:420px;display:flex;flex-direction:column"
+      style="width:320px;height:420px;display:flex;flex-direction:column;content-visibility:hidden"
       use:panelPoolHost={{ PM, spec: entry.spec, dock: entry.dock }}
     ></div>
   {/each}

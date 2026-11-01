@@ -73,6 +73,12 @@ export class MeterLoop {
   resize(id: string, width: number, height: number, ratio: number): void {
     const view = this.views.get(id);
     if (!view) return;
+    const pixelWidth = Math.round(Math.max(0, width) * Math.max(1, ratio));
+    const pixelHeight = Math.round(Math.max(0, height) * Math.max(1, ratio));
+    // Assigning a canvas size clears it and invalidates layout even when the
+    // value is unchanged. Keep the backing store when nothing moved.
+    if (view.width === Math.max(0, width) && view.height === Math.max(0, height) && view.ratio === Math.max(1, ratio)
+        && view.canvas.width === pixelWidth && view.canvas.height === pixelHeight) return;
     view.width = Math.max(0, width);
     view.height = Math.max(0, height);
     view.ratio = Math.max(1, ratio);

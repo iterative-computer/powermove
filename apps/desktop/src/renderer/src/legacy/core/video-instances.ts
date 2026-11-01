@@ -1,6 +1,7 @@
 import { previewVideoElement } from './video-preview';
 import { cancelPreviewVideoSeek } from './video-seek';
 import { stopPlaybackVideoFrames } from './video-playback-frames';
+import { forgetVideo, trackVideo, useVideo, videoSource } from './video-residency';
 
 type Instance = { el: HTMLVideoElement; release: () => void };
 type Pool = { source: HTMLVideoElement; layers: Map<string, Instance> };
@@ -21,7 +22,9 @@ export function layerVideoElement(PM: any, asset: any, layerId: string): HTMLVid
     pools.set(asset, pool);
   }
   const existing = pool.layers.get(layerId);
-  if (existing) return existing.el;
+  // Every clip that draws or plays comes through here, which keeps its decoder
+  // resident (and restores one that was released while idle).
+  if (existing) return useVideo(existing.el);
   // Reuse the imported decoder for the first clip; only copies need another.
   const ownedSource = [...pool.layers.values()].some(instance => instance.el === source);
   const el = ownedSource ? document.createElement('video') : source;
@@ -29,7 +32,8 @@ export function layerVideoElement(PM: any, asset: any, layerId: string): HTMLVid
   if (el !== source) {
     el.muted = true; el.playsInline = true; el.preload = 'auto';
     el.addEventListener('loadeddata', ready);
-    el.src = source.currentSrc || source.src;
+    el.src = videoSource(source);
+    trackVideo(el);
   }
   pool.layers.set(layerId, { el, release: () => {
     stopPlaybackVideoFrames(el);
@@ -38,9 +42,10 @@ export function layerVideoElement(PM: any, asset: any, layerId: string): HTMLVid
     if (el !== source) {
       el.removeEventListener('loadeddata', ready);
       el.removeAttribute('src'); el.load();
+      forgetVideo(el);
     }
   } });
-  return el;
+  return useVideo(el);
 }
 
 /** Decoder replacements must never reuse an older element's texture version. */

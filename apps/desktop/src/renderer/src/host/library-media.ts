@@ -1,4 +1,5 @@
 import { mediaRangeSource } from './media-range';
+import { StreamedMedia, canStreamFrom } from './streamed-media';
 import type { MediaReadSource } from '../../../shared/media-source';
 import { LIBRARY_MEDIA_CHUNK, type LibraryMediaBridge, type LibraryMediaRecord } from '../../../shared/library-media';
 import { Sha256 } from '../../../shared/sha256';
@@ -87,6 +88,11 @@ export function attachLibraryMedia(host: LibraryMediaBridge, legacy: LegacyMedia
         return true;
       }
       catch (error) { console.warn('[media-library] Import was not saved.', error); return false; }
+    },
+    /** The stored file as a disk-backed source, without reading its bytes. */
+    async source(value: unknown): Promise<StreamedMedia | null> {
+      const record = await find(value);
+      return record?.url && canStreamFrom(record.url) ? new StreamedMedia(record.url, record.size, record.type || '') : null;
     },
     async get(value: unknown, { signal }: { signal?: AbortSignal } = {}): Promise<Blob | null> {
       const record = await find(value);

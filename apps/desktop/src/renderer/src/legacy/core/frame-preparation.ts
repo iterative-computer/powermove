@@ -1,3 +1,4 @@
+import { useVideo } from './video-residency';
 import { captureAborted, seekVideoFrame, VideoFrameDecodeError, withCaptureSignal } from './video-frame-decode';
 import { layerInputPlan, hasLayerInputs, EffectInputError } from '../../core/effect-inputs';
 import { evaluatedValue } from './content-properties';
@@ -90,7 +91,7 @@ async function prepareVideos(requests: VideoRequest[], budget = Infinity, cancel
   const paused = new Set<object>();
   for (const request of requests) {
     const { asset } = request;
-    const video = capture.videoForCapture?.(asset) ?? asset.el;
+    const video = capture.videoForCapture?.(asset) ?? useVideo(asset.el);
     if (!capture.videoForCapture && !paused.has(asset)) {
       pauseVideoInstances(asset); asset.preview?.el.pause();
       cancelPreviewVideoSeek(asset.el); paused.add(asset);
@@ -124,7 +125,8 @@ async function prepareVideos(requests: VideoRequest[], budget = Infinity, cancel
             checkCancellation();
             // Keep traversal order and preserve a separately keyed immutable
             // snapshot for each requested source time, including shared clips.
-            const seek = () => seekVideoFrame(video, request.at, { tolerance: exact ? .0000011 : .0005,
+            // Each request refreshes residency so a long capture keeps its decoder.
+            const seek = () => seekVideoFrame(useVideo(video), request.at, { tolerance: exact ? .0000011 : .0005,
               signal: controller.signal, timeoutMs: capture.videoFrameTimeoutMs ?? 15_000 });
             // A decoded frame is the one this seek would show; null keeps seeking.
             let decoded: DecodedVideoFrame | null = null;

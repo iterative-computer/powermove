@@ -392,19 +392,38 @@ async function run(opts: any) {
   }
 }
 
+/* The host writes one file per window at a time. A background project save
+   (autosave after an edit or import) can hold that slot when an export
+   finishes; wait for it rather than failing a completed render. */
+const SAVE_BUSY = 'A save is already in progress.';
+async function whenSaveSlotFree<T>(write: () => Promise<T>): Promise<T> {
+  const deadline = performance.now() + 60_000;
+  for (let wait = 50; ; wait = Math.min(1000, wait * 2)) {
+    let result: any;
+    try { result = await write(); }
+    catch (error: any) {
+      if (!String(error?.message || error).includes(SAVE_BUSY) || performance.now() > deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, wait)); continue;
+    }
+    if (result?.ok !== false || result?.error !== SAVE_BUSY || performance.now() > deadline) return result;
+    await new Promise(resolve => setTimeout(resolve, wait));
+  }
+}
+
 async function deliver(blob: Blob, name: string): Promise<boolean> {
   const bridge = (hostBridge() as any);
   let result: any;
   if (destinationToken && bridge.fileUpload && blob.size > 4 * 1024 * 1024) {
-    const uploadId = await bridge.fileUpload.begin(blob.size);
+    const uploadId = await whenSaveSlotFree(() => bridge.fileUpload.begin(blob.size));
     try {
       await writeBlobChunks(blob, bytes => bridge.fileUpload.chunk(uploadId, bytes));
-      result = await bridge.fileUpload.finish(uploadId, { name, destinationToken });
+      // A busy answer leaves the staged upload in place, so finishing retries.
+      result = await whenSaveSlotFree(() => bridge.fileUpload.finish(uploadId, { name, destinationToken }));
     } finally { await bridge.fileUpload.abort(uploadId).catch(() => undefined); }
   } else {
-    result = destinationToken
+    result = await whenSaveSlotFree(async () => destinationToken
       ? await bridge.saveFile({ name, data: new Uint8Array(await blob.arrayBuffer()), destinationToken })
-      : await PM.download(blob, name);
+      : await PM.download(blob, name));
   }
   if (result?.cancelled) return false;
   if (result?.ok === false) throw new Error(result.error || 'Save failed');

@@ -89,6 +89,33 @@ it('serves exact bounded ranges without reading unrelated bytes', async () => {
   }
 });
 
+it('streams open-ended ranges to the end of the file for media playback', async () => {
+  const record = await put('stream', '0123456789');
+  const token = record.url.split('/').at(-1)!;
+  const tail = await media.serve(token, new Request(record.url, { headers: { Range: 'bytes=4-' } }));
+  expect(tail.status).toBe(206);
+  expect(tail.headers.get('Content-Range')).toBe('bytes 4-9/10');
+  expect(tail.headers.get('Content-Length')).toBe('6');
+  expect(await tail.text()).toBe('456789');
+  expect(await (await media.serve(token, new Request(record.url, { headers: { Range: 'bytes=0-' } }))).text()).toBe('0123456789');
+  expect((await media.serve(token, new Request(record.url, { headers: { Range: 'bytes=10-' } }))).status).toBe(416);
+});
+
+it('validates a linked original once per file state instead of on every range read', async () => {
+  const source = path.join(root, 'linked.mp4'); await writeFile(source, 'linked video');
+  const record = await media.link(1, { key: 'linked', sourcePath: source, size: 12, type: 'video/mp4' });
+  const token = record.url.split('/').at(-1)!;
+  // A touched original is re-hashed once, then served from the cached proof.
+  const later = new Date(Date.now() + 5000); await utimes(source, later, later);
+  for (let index = 0; index < 3; index++) {
+    const response = await media.serve(token, new Request(record.url, { headers: { Range: 'bytes=0-5' } }));
+    expect(await response.text()).toBe('linked');
+  }
+  // Changed bytes of the same size are still rejected.
+  await writeFile(source, 'LINKED VIDEO'); const after = new Date(Date.now() + 9000); await utimes(source, after, after);
+  expect((await media.serve(token, new Request(record.url, { headers: { Range: 'bytes=0-5' } }))).status).toBe(404);
+});
+
 it('honors request cancellation and allows another read after the consumer cancels', async () => {
   const record = await put('cancel', 'some synthetic media');
   const token = record.url.split('/').at(-1)!;

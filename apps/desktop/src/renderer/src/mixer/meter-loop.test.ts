@@ -58,6 +58,23 @@ describe('meter loop', () => {
     expect(colors).toContain('#FEDCBA');
   });
 
+  it('keeps the canvas backing store when a resize reports the same size', () => {
+    const h = harness();
+    const { element } = canvas();
+    let writes = 0, width = 0, height = 0;
+    Object.defineProperty(element, 'width', { get: () => width, set: (value: number) => { writes++; width = value; } });
+    Object.defineProperty(element, 'height', { get: () => height, set: (value: number) => { writes++; height = value; } });
+    h.loop.attach('music', element, () => {});
+    h.loop.resize('music', 12, 100, 2);
+    expect([width, height, writes]).toEqual([24, 200, 2]);
+    // Assigning a canvas size clears it and invalidates layout, so a repeated
+    // observation of the same box must not touch it.
+    h.loop.resize('music', 12, 100, 2);
+    expect(writes).toBe(2);
+    h.loop.resize('music', 14, 100, 2);
+    expect([width, writes]).toEqual([28, 4]);
+  });
+
   it('draws nothing and holds no taps while hidden', () => {
     const h = harness();
     const view = canvas();

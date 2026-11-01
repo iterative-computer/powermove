@@ -592,14 +592,19 @@ function publishState() {
   if (PM.headlessPlayer) return;
   if (typeof window.document === 'undefined' || !window.document.documentElement) return;
   const root: any = window.document.documentElement;
-  root.dataset.audioEngine = 'decoded-buffer-v2';
-  root.dataset.audioState = state.running ? 'playing' : 'paused';
-  root.dataset.audioVoices = String(state.voices.size);
-  if (state.monitorSolo.size) root.dataset.audioMonitorSolo = [...state.monitorSolo].join(' ');
-  else delete root.dataset.audioMonitorSolo;
+  // These attributes live on <html>. Writing one, even with the same value,
+  // makes the browser revisit every selector that could depend on the root.
+  // Publish only real changes; playback calls this many times a second.
+  const write = (key: string, value: string | undefined) => {
+    if (value === undefined) { if (key in root.dataset) delete root.dataset[key]; }
+    else if (root.dataset[key] !== value) root.dataset[key] = value;
+  };
+  write('audioEngine', 'decoded-buffer-v2');
+  write('audioState', state.running ? 'playing' : 'paused');
+  write('audioVoices', String(state.voices.size));
+  write('audioMonitorSolo', state.monitorSolo.size ? [...state.monitorSolo].join(' ') : undefined);
   const first: any = state.voices.values().next().value;
-  if (first) root.dataset.audioSourceOffset = String(Math.round(first.sourceOffset * 1000) / 1000);
-  else delete root.dataset.audioSourceOffset;
+  write('audioSourceOffset', first ? String(Math.round(first.sourceOffset * 1000) / 1000) : undefined);
 }
 
 function stopVoice(id: any) {

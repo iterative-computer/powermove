@@ -8,6 +8,9 @@ const DEFAULT_BUDGETS: Record<string, number> = {
   framebuffers: 256 * MIB,
   audio: 128 * MIB,
   preview: 256 * MIB,
+  // Live video decoders (video-residency). Idle ones are released anyway;
+  // this bounds how many a long scrub may keep warm before that happens.
+  decoders: 512 * MIB,
 };
 
 /** One place for every large cache to declare, measure, and release memory. */
