@@ -304,7 +304,12 @@ exposes three AXButtons.
 Programmatic focus passes **GPUI → WebKit inner field → GPUI**, then
 **GPUI → native field → GPUI**. Each AXFocused setter succeeds, the node reports
 AXFocused=true, and the application's AXFocusedUIElement matches that exact
-node. Native field and web input AXValue writes/readback/restoration pass.
+node. The previous GPUI node reports **AXFocused=false** while either native
+text field owns the responder, then regains focus on return. A follow-up check
+caught and fixed a stale GPUI focus flag: window-key status alone was insufficient.
+Successful native responder changes now queue an AccessKit host-focus update
+after the AX action releases its tree borrow; key-status updates also check the
+actual responder. Native field and web input AXValue writes/readback/restoration pass.
 The WebKit button's AXPress changes its title to `Clicked`; the native glass
 Play button accepts AXPress. Hit tests use screen points, exercising the actual
 AppKit/AccessKit bridge rather than only the composition model.

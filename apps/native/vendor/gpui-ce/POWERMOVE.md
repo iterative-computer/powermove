@@ -110,7 +110,14 @@ slot clipping, then delegates to the winning native slot. GPUIView forwards its 
 hit query to the content adapter. GPUIWindow/GPUIPanel use AccessKit's standard
 focus forwarder. Native focus queries use WebKit's actual responder for a remote
 DOM element and the owning NSControl for its shared field editor. An AccessKit
-Focus action makes GPUIView first responder before updating GPUI's logical focus.
+Focus action makes GPUIView first responder before updating GPUI's logical focus. GPUIWindow/GPUIPanel also observe
+successful `makeFirstResponder:` changes and queue AccessKit host-focus updates
+after the native action unwinds. Host focus requires GPUIView itself to own the
+responder; a native slot in the same key window must clear the previous GPUI
+node's AXFocused flag. The adapter is shared through a main-thread RefCell so this
+synchronization never enters the GPUI window mutex or re-borrows AccessKit's tree
+during an AX action. The external probe verifies losing and regaining AXFocused
+as well as the application's focused element.
 
 Verification lives in `spikes/s2/scripts/check-ax.sh`. Its external Swift walker
 uses AXUIElementCreateApplication; its independent AppKit-only probe compiles these
