@@ -28,7 +28,7 @@ Rules determining this implementation:
   from literal shipped rollback behavior.
 
 `apps/native/spikes/s5` is package `pm-native-s5-spike`, automatically included by
-`spikes/*`. No workspace-member edit is needed. The existing empty `crates/*`
+`spikes/*`. No workspace-member edit is needed. An empty `crates/*`
 workspace glob initially prevented Cargo loading. Initial channel/pixel runs
 used the exact sources with a temporary isolated manifest/lock, leaving shared
 files untouched. The core/migrate lanes have since populated crates/* and the
@@ -62,7 +62,9 @@ The server and host use an unoptimized development build. Page latency uses
 performance.now and nearest-rank quantiles after warmup. App→page results are
 server-send→page callback→server-ack **round-trip upper bounds**, not invented
 one-way measurements or clock-synchronized estimates. No evaluateJavaScript is
-used to deliver these calls.
+used to deliver these calls. Cross-origin isolation headers are **fixture-only**
+to obtain finer clocks; they are not a production CSP/COEP decision and would
+need compatibility review for trusted extensions loading arbitrary web assets.
 
 ## 1. Channels under scrub load
 
@@ -74,18 +76,44 @@ p95 was 9.652/10.251/9.823 ms: requested 120 Hz, with measurable scheduling jitt
 | Candidate | p50 / p95 / p99 (ms) | Result / decision |
 |---|---|---|
 | Sync loopback HTTP, same-origin XHR | 0.400 / **0.660** / 1.040 | **FAIL** observed p95 >0.5 |
-| WKURLSchemeHandler on main | 0.080 / **0.100** / 1.060 | Latency PASS; first provisional candidate by §3.5.2 ordering |
+| WKURLSchemeHandler on main | 0.080 / **0.100** / 1.060 | Latency PASS; backup after latest HTTP repeat below |
 | Text-input prompt delegate on main | 0.060 / **0.060** / 0.080 | Latency PASS; later candidate, not preferred by rule |
 | Page-held long-poll, 400 calls | 1.271 / **2.502** / 6.801 | Ack upper bound; slower observed path |
 | Off-main loopback WebSocket, 400 calls | 0.271 / **0.575** / 0.717 | Provisional app→page choice; no hot-path eval |
 
 **No production channel is approved.** Scheme/prompt measure immediate synthetic
 native replies, not a completed kernel-actor integration. IME/real WebContent AX
-and supported-OS evidence are missing. A quiet-window repeat must confirm HTTP's
-failure; this shared-machine observation does not establish an intrinsic limit.
+and supported-OS evidence are missing. HTTP straddles the threshold across runs;
+these shared-machine observations do not establish an intrinsic limit.
 App→page numbers include JS and return-trip overhead. WebSocket is chosen
 provisionally because its observed delivery+ack bound is lower; EXT-RASTER-1
 still needs a real override workload.
+
+### Final workspace repeat
+
+After the normal workspace build became available, the final validation repeated
+all six functional cases (HTTP, scheme, prompt, app→page, binary, continuation).
+All completed with exit 0 and their integrity/proxy assertions passed. The final
+driver also requires snapshot completion, checks all 400 WebSocket acknowledgments,
+and parses the WebSocket upgrade through the authenticated HTTP path, including
+partial reads. New log names include a run timestamp so earlier evidence survives.
+
+| Sync candidate | Repeat p50 / p95 / p99 (ms), n=2,000 |
+|---|---|
+| HTTP | **0.360 / 0.400 / 0.420** |
+| Scheme | **0.080 / 0.100 / 1.060** |
+| Text-input prompt | **0.040 / 0.060 / 0.080** |
+
+HTTP's p95 changed from **0.660 (FAIL) to 0.400 ms (PASS)**. Per §3.5.2's
+first-passing rule, **HTTP is again the first provisional candidate**, with the
+scheme handler as backup; do not freeze the earlier scheme preference. A stable
+quiet-window run and real IME are still needed before choosing. Scheme's p99
+around 1.06 ms is also recorded even though the stated gate uses p95.
+
+App→page repeat (400 each): long-poll p95/p99 **2.571/3.223 ms**; WebSocket
+**0.391/0.733 ms**, both acknowledgment upper bounds. **WebSocket remains the
+provisional choice.** These are two diagnostic runs, not the ≥30 independent,
+paired, quiet-window performance gate runs specified for full app budgets.
 
 An initial timer-yielding fixture did not finish in 90.009 s; host scrub work p95
 1.086 ms and interval p95 8.745 ms continued. A later 35-s external timeout also
@@ -136,6 +164,11 @@ route **FAILS the provisional 10-ms budget** in this fixture. Optimized builds,
 scheme-handler binary transfer, real engine readback and frozen-reference paired
 timings remain unverified; no exclusion from N4 follows from this result.
 
+Final workspace repeat (30 each): download/decode/verify p95 **135.100 ms**,
+typed-array upload/verify **51.240 ms**, text upload/decode/verify **171.280 ms**.
+Reference-only download/upload p95 **1.160/1.440 ms** (2,000 each). Integrity
+passed again; the architectural conclusion is unchanged.
+
 ## 3. Render continuations
 
 **PASS synthetic no-deadlock/correctness; FAIL provisional latency budget.**
@@ -165,6 +198,10 @@ and byte checks. This is a heavier synthetic operation than the plan's ordinary
 paused renderFrameTo row, but plainly cannot certify ≤10 ms. The JPEG correctness
 probe is outside this timed loop. Two Rust tests pass for byte corruption and
 pinned/single-use/stale resume behavior.
+
+Final workspace repeat (30): p50/p95/p99 **239.080/383.700/384.200 ms**;
+canvas/JPEG/override integrity and stale-resume checks passed again. Pixel budget
+remains failed.
 
 **Decision:** use bounded same-stack continuations (N8, §3.2.1/§3.5.2), with native
 IDs until pixels are demanded. Do not approve this pixel transport for production.
@@ -234,15 +271,44 @@ specified architectural fallback, **not an implemented or measured solution**.
 
 ## 5. Transactions / remaining work
 
-Optional stub not yet implemented. Real write-barrier, retained references,
-observer order, native edit races, external undo, lease folding, selective cancel,
-owner-kill recovery/journal, and frozen-reference traces remain open. This pass
-also does not close extraction, inspector/cluster switch, recorder promotion,
-Store-process isolation, virtual time, presenter or 39-extension memory gates.
+**PASS: eight executable synthetic scenarios** in a minimal single-writer actor,
+run with `pm-native-s5-spike --kernel` (no WebKit/window needed). Three Rust tests
+pass overall, including this scenario suite and the two pixel/continuation tests.
+The stub is deliberately separate from the production core and from the native
+UI; its blocking CLI request shim is never called by AppKit.
+
+| Scenario | Observed invariant |
+|---|---|
+| Lost ack, retry and txid query | Same stored answer; revision increments once; key includes realm/generation/txid |
+| Rejection after optimistic page mutation / target deleted natively | Authority unchanged on invalid value; deleted-path flush returns failure + null resync target |
+| Native drag + admitted page write + edit.cancel | Immediate folded acknowledgment; owner x reverts, foreign y remains in its own undoable entry |
+| Overlapping property writes | Conflicting owner inverse → commit with notice; acknowledged foreign value kept |
+| Owner create + foreign edit dependency | Cancel cannot delete the foreign writer's layer; commit with notice |
+| Owner delete + foreign recreate/edit dependency | Cancel cannot overwrite acknowledged recreated data; commit with notice |
+| history.cancel | Edits remain, pending history entry is dropped |
+| Begin left open + UI/MCP/agent writes + owner failure | Admitted writes keep folding without waiting; edit.mutate refuses live source edit with ok:false; failure seals acknowledged owner/foreign operations into undoable history |
+
+**Choice:** stage and validate owner inverses against current authority; if any
+conflict, keep the whole entry with notice. Otherwise split foreign operations
+into their own entry. This is the simple conservative option satisfying
+§3.2.1's acknowledged-write invariant; it intentionally favors keeping work.
+It is not a port of every write API's return/admission semantics.
+
+The lost-ack scenario simulates a lost reply with retry/query, not a faulted real
+socket. Owner failure is an actor command, not a real realm crash or journal
+recovery. Retained JS references, observer/event ordering, actual write-barrier
+flush timing, external-undo continuation versus concurrent page commands,
+durability/recovery and frozen-reference traces remain **UNVERIFIED**. No model
+pass is presented as a native race or compatibility gate.
+
+This pass also does not close extraction, inspector/cluster switch, recorder
+promotion, Store-process isolation, virtual time, presenter or 39-extension memory
+gates; these are outside the architecture-first implementation in this report.
 
 ## Current failures for Jude before P1 sizing
 
-- HTTP channel p95 0.660 ms exceeds 0.5 ms in this shared-machine run.
+- HTTP channel p95 straddles the 0.5-ms limit: 0.660 initially, 0.400 ms on repeat.
+  No stable channel selection is approved from these shared-machine runs.
 - Sync HTTP pixels and nested-capture canvas path greatly exceed 10 ms; IDs
   preserve native buffers but cannot replace observable canvas/pixel APIs.
 - SPI activity diagnostic ratios are 74.0%/69.2%; offscreen-only hidden job does
@@ -252,3 +318,21 @@ Store-process isolation, virtual time, presenter or 39-extension memory gates.
 - Full IME/VoiceOver, kernel-actor scheme round trip, quiet-window repeats,
   frozen-reference paired traces/timings, supported OS runs and the V8+remote-DOM
   fallback remain unverified. No compatibility exception or P1 approval follows.
+
+## Reproduction / validation handoff
+
+```sh
+apps/native/spikes/s5/check.sh build
+apps/native/spikes/s5/check.sh test
+~/Developer/pm-target/debug/pm-native-s5-spike --kernel
+python3 apps/native/spikes/s5/run.py http scheme prompt app binary continuation
+python3 apps/native/spikes/s5/run.py kill-spi kill-fallback kill-reset
+python3 apps/native/spikes/s5/run.py lifecycle-spi lifecycle-offscreen
+```
+
+The driver runs one instance at a time, returns nonzero for fixture errors or
+watchdog expiry and keeps all raw logs outside Git. Expected failing probes are
+not converted into successful exits. Screenshots, corpus data, private baseline,
+capability URLs and local operational logs are not committed. The trusted-realm
+V8 + remote-DOM fallback is still a required unvalidated option, not dropped.
+No release/tag/push or P1 approval was performed.

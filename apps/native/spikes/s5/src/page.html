@@ -31,7 +31,7 @@ async function channels(){
  const a=[];
  for(let i=0;i<400;i++){const t=await (await fetch(base+'poll')).text();await fetch(base+'ack',{method:'POST',body:t});}
  await report({test:'long_poll_done',n:400});
- await new Promise(resolve=>{const ws=new WebSocket(location.origin.replace('http:','ws:')+base+'ws');let n=0;ws.onmessage=e=>{ws.send(e.data);n++;};ws.onclose=()=>{report({test:'websocket_done',n}).then(resolve);};ws.onerror=()=>report({test:'websocket_error'});});
+ await new Promise((resolve,reject)=>{const ws=new WebSocket(location.origin.replace('http:','ws:')+base+'ws');let n=0;ws.onmessage=e=>{ws.send(e.data);n++;};ws.onclose=()=>{if(n!==400){reject(Error('incomplete WebSocket probe '+n));return;}report({test:'websocket_done',n}).then(resolve);};ws.onerror=()=>reject(Error('WebSocket transport failed'));});
 }
 (async()=>{try{await report({test:'page_started',isolated:crossOriginIsolated,timer_resolution_ms:(()=>{let t=performance.now(),next=t;while(next===t)next=performance.now();return next-t;})()});if(testCase.startsWith('lifecycle-'))await lifecycleJob();else if(testCase.startsWith('kill-'))await infiniteLoop();else if(testCase==='binary')await binary();else if(testCase==='continuation')await continuations();else await channels();}catch(e){await report({test:'fatal',error:String(e)});}finally{await fetch(base+'done');}})();
 </script>
