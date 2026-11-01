@@ -52,3 +52,33 @@ except item 1.
    an unexpected quit." (sentence case, `reading` style, one Show button).
 7. Entry queue: when a `.pmv` open fails, keep the path so the UI can offer
    "Show in Finder" in the error alert.
+
+## Re-review — 2026-11-01
+
+Commits: `468f2e0a2` … `3c68b9c19` on `feat/na-cloud-services`.
+**Verdict: APPROVE — merge `origin/feat/na-cloud-services` as is.** (Its
+`pm-services` entry in `apps/native/Cargo.lock` is still owed by the merge.)
+
+| # | Item | Status |
+|---|---|---|
+| 1 | No developer strings | Done. `ServiceError { code, diagnostic }`; Display/Debug are log text only. |
+| 2 | Mac library vocabulary | Done. `Move to Trash`, `Put Back`, `Recently Deleted` exported; internal names documented. |
+| 3 | Library row facts | Done. `ProjectSummary` (thumbnail, duration, size, exact fps); dates stay instants for the system formatter. |
+| 4 | Update sheet | Done. `name`, `size_bytes`, notes as untrusted Markdown ≤ 64 KiB; title and three button labels verbatim. |
+| 5 | Font faces | Done. `faces(family)` from the same broker. |
+| 6 | Recovered document name | Done (`CrashRecord.recovered_document`, omitted from exports). |
+| 7 | Failed-open path | Done (`failed_file()`, `Show in Finder`). |
+
+Copy for UI lanes, keyed by `ServiceErrorCode` (sentence case; `“%@”` is the
+document or item name when known, otherwise drop the clause):
+
+| Code | Alert message | Informative text |
+|---|---|---|
+| Offline | Powermove can’t connect. | Check your internet connection and try again. |
+| NotFound | “Launch Film” can’t be found. | It may have been moved or deleted. |
+| TooLarge | “Launch Film” is too large to open. | — |
+| InvalidProject | “Launch Film” can’t be opened because it isn’t a Powermove project. | — |
+| PermissionDenied | You don’t have permission to open “Launch Film”. | Check its sharing and permissions in Finder. |
+| DiskFull | There isn’t enough disk space. | Free some space and try again. |
+| InvalidInput / InvalidData | “Launch Film” couldn’t be read. | The file may be damaged. |
+| Unavailable / Unknown | The operation couldn’t be completed. | Try again. If it keeps happening, choose Help ▸ Report a Problem. |

@@ -64,3 +64,28 @@ Scope: the eight generated `editions/v1/*.css` stylesheets that give compat
 Evidence (screenshots of a compat panel in each edition) is missing — supply
 light/dark/IC/RT captures of one legacy extension panel per the
 [review checklist](../review-checklist.md) §0 after regenerating.
+
+## Re-review — 2026-11-01
+
+Commits: `a28e93c77`, `e7818e80c`, `5269b4a2a` on `feat/na-cloud-editions`
+(based on the current `feat/native-engine`). **Verdict: APPROVE — merge
+`origin/feat/na-cloud-editions` as is.**
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Rebase, `native` arrays, regenerate fixture | Done. `fixtures/native-tokens-v1.json` contains `crates/design/tests/tokens.snapshot.json` verbatim (all eight appearances). |
+| 2 | `--bg-float` lifted | Done. Dark `#2c2c2c` (`colors.floating`), light `#ffffff`, in every edition, both root blocks. |
+| 3 | `--r-pill: 999px` | Done. |
+| 4 | Density relative to native | Done. Compact row 24 / header 26 / control 24 / gap 4 / pad 9; comfy 32 / 36 / 30 / 8 / 14. |
+| 5 | Opaque window ground | Done. `--bg-window` = `--bg-window-solid` = `colors.window` in every edition. |
+| 6 | Type roles | Done. `--fs-md` 13, `--fs-lg` 15, `--fs-xl` 18. |
+| 7 | `--bg-row` towards text | Done (`color-mix(... --tx 4%, --bg-panel)`). |
+| 8 | Translucent `--accent-dim` | Done (12 %, transparent). |
+| 9 | `--hairline: 0.5px` | Done. |
+| 10 | Tabular figures | Done on the edition `:root`. |
+| 11 | Edition names and contrast | Done: manifest records the four axes per edition; a per-edition contrast test (text/secondary/muted ≥ 4.5:1, lines ≥ 3:1). Ids stay `compat-v1/<scheme>[-contrast][-solid]`; they are not shown to users, so no display copy is needed. |
+
+Non-blocking: `--hit` stays at v1.2.0's 28 px (native `hit` is 24). Larger
+targets in compat DOM are harmless; leave it. The checklist §0 evidence
+(captures of one legacy panel per edition) is still owed by the compat-host
+integration, which is the first place the editions are rendered.
