@@ -146,3 +146,33 @@ it('rejects a corrupt existing object before deduplicating another import onto i
   await expect(upload(service, 'media:two')).rejects.toThrow('damaged');
   expect(await service.store.record('media:two')).toBeNull();
 });
+it('blocks a pass started during an IDB import, including the time before CAS upload begins', async () => {
+  const service = new TransitionMedia(options());
+  const token = await service.request(7, { action: 'importing' });
+  let pass = await service.request(8, { action: 'start', inventory: [] });
+  await expect(service.request(8, { action: 'complete', pass, inventory: [] })).rejects.toThrow('delta');
+  await expect(service.request(8, { action: 'imported', token })).rejects.toThrow('Unknown');
+  await service.request(7, { action: 'imported', token });
+  await expect(service.request(8, { action: 'complete', pass, inventory: [] })).rejects.toThrow('imports');
+  pass = await service.request(8, { action: 'start', inventory: [] });
+  expect(await service.request(8, { action: 'complete', pass, inventory: [] })).toMatchObject({ mediaComplete: true });
+});
+it('keeps completion blocked by a direct upload begun before a pass, and invalidates on finish', async () => {
+  const service = new TransitionMedia(options());
+  const data = new Uint8Array([1]);
+  const token = await service.request(7, { action: 'begin', payload: { key: 'new', size: 1, type: '' } });
+  const pass = await service.request(8, { action: 'start', inventory: [] });
+  await expect(service.request(8, { action: 'complete', pass, inventory: [] })).rejects.toThrow('delta');
+  await service.request(7, { action: 'chunk', token, offset: 0, data });
+  await service.request(7, { action: 'finish', token, hash: blake3Hex(data) });
+  await expect(service.request(8, { action: 'complete', pass, inventory: [] })).rejects.toThrow('imports');
+  expect(await service.request(7, { action: 'status' })).toMatchObject({ mediaComplete: false });
+});
+it('releases abandoned import leases when the document dies without losing the next delta', async () => {
+  const service = new TransitionMedia(options());
+  await service.request(7, { action: 'importing' });
+  await service.release(7);
+  expect(await service.request(8, { action: 'status' })).toMatchObject({ mediaComplete: false });
+  const pass = await service.request(8, { action: 'start', inventory: [] });
+  expect(await service.request(8, { action: 'complete', pass, inventory: [] })).toMatchObject({ mediaComplete: true });
+});

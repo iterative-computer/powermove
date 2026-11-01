@@ -33,6 +33,28 @@ it('enumerates every object store and resolves only after its read transaction c
   const records = await browserRecords(factory as unknown as IDBFactory);
   expect(records).toHaveLength(2); expect(committed && closed).toBe(true); expect(records.some(e => e.locator.includes('unknown'))).toBe(true);
 });
+it('preserves signed zero, sparse arrays and custom array fields containing Blobs', () => {
+  const array = Object.assign(new Array(3), { 1: -0, unknown: new Blob(['retained']) });
+  const result = logical(array);
+  expect(result.metadata).toMatchObject({ $type: 'array', value: [{ $type: 'hole' }, { $type: 'number', value: '-0' }, { $type: 'hole' }],
+    properties: { unknown: { $type: 'blob', path: '/unknown' } } });
+  expect(result.blobs).toHaveLength(1);
+});
+it('rejects a cursor encoding failure and closes the database instead of certifying a partial inventory', async () => {
+  const abort = vi.fn(), close = vi.fn();
+  const factory = { open() {
+    const request: any = { result: { objectStoreNames: ['unknown'], close, transaction() {
+      const tx: any = { abort, objectStore() {
+        const cursor: any = { result: { primaryKey: /unsupported-key/, value: null, continue: vi.fn() } };
+        queueMicrotask(() => cursor.onsuccess());
+        return { openCursor: () => cursor };
+      } }; return tx;
+    } } };
+    queueMicrotask(() => request.onsuccess()); return request;
+  } };
+  await expect(browserRecords(factory as unknown as IDBFactory)).rejects.toThrow('logical exporter');
+  expect(abort).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce();
+});
 it('refuses same-key Blob mutations during the final delta pass', async () => {
   const host = { request: vi.fn(async (command: any) => command.action === 'start' ? 'pass' : command.action === 'reuse' ? null : 'token') };
   let pass = 0;

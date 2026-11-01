@@ -8,10 +8,13 @@ export async function proxyReferences(directory: string): Promise<Record<string,
   const output: Record<string, ProxyOf[]> = Object.create(null);
   const visit = (value: any) => {
     if (!value || typeof value !== 'object') return;
-    const key = value.storageKey || value.id;
-    if (typeof key === 'string' && (value.playbackProxy || value.playbackProxyVersion > 0)) {
-      (output[key] ??= []).push({ fingerprint: typeof value.fingerprint === 'string' ? value.fingerprint : null,
-        sourcePath: typeof value.sourcePath === 'string' ? value.sourcePath : null });
+    if (value.playbackProxy || value.playbackProxyVersion > 0) {
+      // Legacy projects can resolve their bytes through the bare-id fallback.
+      // Preserve the binding under both identities, just as the reader does.
+      for (const key of new Set([value.storageKey, value.id])) if (typeof key === 'string') {
+        (output[key] ??= []).push({ fingerprint: typeof value.fingerprint === 'string' ? value.fingerprint : null,
+          sourcePath: typeof value.sourcePath === 'string' ? value.sourcePath : null });
+      }
     }
     for (const child of Object.values(value)) visit(child);
   };

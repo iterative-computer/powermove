@@ -14,6 +14,8 @@ export type TRStatus = {
 export type TRCommand =
   | { action: 'status' }
   | { action: 'secrets' }
+  | { action: 'importing' }
+  | { action: 'imported'; token: string }
   | { action: 'start'; inventory: string[] }
   | { action: 'localStorage'; values: Record<string, { raw: string; json?: unknown }> }
   | { action: 'reuse'; payload: TRPayload; hash: string; pass: string }

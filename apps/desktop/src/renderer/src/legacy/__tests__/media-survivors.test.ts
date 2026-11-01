@@ -77,6 +77,8 @@ describe('media oracle survivors', () => {
     expect(finish).toHaveBeenCalledOnce();
     expect(await PM.MediaStore.removeLegacyDuplicates()).toBe(0);
     expect(indexed.records.has('media:one')).toBe(true);
+    expect(request.mock.calls[0]![0].action).toBe('importing');
+    expect(request.mock.calls.at(-1)![0]).toEqual({ action: 'imported', token: 'receipt' });
   });
   it('retains the browser copy and reports failed imports when the content store rejects a write', async () => {
     const indexed = fakeIndexedDB();

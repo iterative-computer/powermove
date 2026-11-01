@@ -21,6 +21,7 @@ export class TransitionMedia {
   readonly store: MediaStore;
   private manifest: Manifest = { version: 1, state: 'pending', inventory: [], completed: [], records: {}, payloads: {}, localStorageComplete: false, secretsComplete: false };
   private generation = 0;
+  private imports = new Map<string, number>();
   private references: Record<string, ProxyOf[]> = Object.create(null);
   private pass: { id: string; owner: number; generation: number; seen: Set<string>; payloads: Set<string> } | undefined;
   private uploads = new Map<string, { owner: number; payload: TRPayload; pass?: string }>();
@@ -80,6 +81,18 @@ export class TransitionMedia {
     if (command.action !== 'status' && command.action !== 'abort') this.options.assertWritable?.();
     switch (command.action) {
       case 'status': return this.status();
+      case 'importing': {
+        const token = randomUUID();
+        this.imports.set(token, owner);
+        this.generation++;
+        this.manifest.state = 'pending'; await this.persist(); return token;
+      }
+      case 'imported': {
+        if (this.imports.get(command.token) !== owner) throw new Error('Unknown transition import.');
+        this.imports.delete(command.token);
+        this.generation++;
+        this.manifest.state = 'pending'; await this.persist(); return;
+      }
       case 'secrets': {
         this.manifest.secretsComplete = false; await this.persist();
         if (!this.options.secrets) throw new Error('Sign-in transfer is unavailable.');
@@ -156,7 +169,8 @@ export class TransitionMedia {
           // Checkpoint BEFORE the key, so a crash cannot lose provenance.
           this.manifest.payloads[id] = receipt; await this.persist();
           if (!conflict) await this.store.publishRecord({ ...record, key: job.payload.key });
-          this.pass?.payloads.add(id);
+          if (job.pass) this.checkPass(owner, job.pass).payloads.add(id);
+          else { this.generation++; this.manifest.state = 'pending'; }
           await this.persist(); return id;
         } finally { this.uploads.delete(command.token); }
       }
@@ -173,7 +187,7 @@ export class TransitionMedia {
         const pass = this.checkPass(owner, command.pass);
         if (pass.generation !== this.generation) throw new Error('New imports require a fresh delta pass.');
         if (JSON.stringify(this.inventory(command.inventory)) !== JSON.stringify(this.manifest.inventory)
-          || this.manifest.inventory.some(id => !pass.seen.has(id)) || [...this.uploads.values()].some(x => x.pass === pass.id)) throw new Error('Browser media changed; another delta pass is required.');
+          || this.manifest.inventory.some(id => !pass.seen.has(id)) || this.uploads.size || this.imports.size) throw new Error('Browser media changed; another delta pass is required.');
         for (const id of pass.payloads) {
           const receipt = this.manifest.payloads[id]!;
           const object = await hashFile(this.options.executor, this.store.objectPath(receipt.hash), { settleMs: 0 });
@@ -190,6 +204,10 @@ export class TransitionMedia {
   release(owner: number): Promise<void> {
     const task = this.queue.then(async () => {
       await this.store.abandon(owner);
+      for (const [token, importer] of this.imports) if (importer === owner) {
+        this.imports.delete(token); this.generation++;
+        this.manifest.state = 'paused'; await this.persist();
+      }
       for (const [token, job] of this.uploads) if (job.owner === owner) this.uploads.delete(token);
       if (this.pass?.owner === owner) { this.pass = undefined; this.manifest.state = 'paused'; await this.persist(); }
     });

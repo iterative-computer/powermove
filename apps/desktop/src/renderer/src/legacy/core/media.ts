@@ -162,15 +162,25 @@ if (transition) {
     async put(id: string, blob: Blob, meta: any = {}, revision?: string) {
       // Both persistence contracts must acknowledge; a failure leaves all copies.
       const savedRevision = revision || mediaRevision();
-      const browserSaved = await indexedMedia.put(id, blob, meta, savedRevision);
-      if (!browserSaved) return false;
-      const key = meta.storageKey || id;
+      // Lease before the IDB transaction: a pass started while that transaction
+      // or source hashing is pending must not certify the older inventory (N4).
+      let importToken: string | undefined;
+      try { importToken = await transition.request({ action: 'importing' }); } catch { /* still preserve the browser copy */ }
+      let saved = false;
       try {
+        const browserSaved = await indexedMedia.put(id, blob, meta, savedRevision);
+        if (!browserSaved || !importToken) return false;
+        const key = meta.storageKey || id;
         await transfer(transition, { key, size: blob.size, type: blob.type || meta.type || '', revision: savedRevision,
           metadata: meta, ...(meta.playbackProxy || meta.playbackProxyVersion > 0 ? { proxyOf: {
             fingerprint: meta.fingerprint || null, sourcePath: meta.sourcePath || null } } : {}) }, blob);
-        return await primary.put(id, blob, meta, savedRevision);
-      } catch { return false; }
+        saved = await primary.put(id, blob, meta, savedRevision);
+      } catch { saved = false; }
+      finally {
+        if (importToken) try { await transition.request({ action: 'imported', token: importToken }); }
+        catch { saved = false; }
+      }
+      return saved;
     },
     // Object and IndexedDB collection remain disabled during TR.
     removeLegacyDuplicates: async () => 0,

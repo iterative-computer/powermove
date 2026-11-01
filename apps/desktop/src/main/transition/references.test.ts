@@ -14,3 +14,14 @@ it('finds supplemental proxy bindings in compressed and unknown nested logical s
     await expect(proxyReferences(root)).rejects.toThrow();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+it('retains proxy provenance for old bare-id fallback records as well as content keys', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pm-tr-references-'));
+  try {
+    await writeFile(path.join(root, 'project.json'), JSON.stringify({ assets: {
+      a: { id: 'legacy-id', storageKey: 'media:one', playbackProxy: true, fingerprint: 'v2:3:synthetic' }
+    } }));
+    const references = await proxyReferences(root);
+    expect(references['legacy-id']).toEqual(references['media:one']);
+    expect(references['legacy-id']).toEqual([{ fingerprint: 'v2:3:synthetic', sourcePath: null }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

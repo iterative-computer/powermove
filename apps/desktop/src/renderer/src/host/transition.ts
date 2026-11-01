@@ -59,10 +59,12 @@ export async function browserRecords(factory: IDBFactory): Promise<Entry[]> {
         request.onsuccess = () => {
           const cursor = request.result;
           if (!cursor) return;
-          const key = typeof cursor.primaryKey === 'string' ? cursor.primaryKey : JSON.stringify(logical(cursor.primaryKey).metadata);
-          entries.push({ locator: JSON.stringify([location.origin, name, logical(cursor.primaryKey).metadata]), key,
-            value: cursor.value });
-          cursor.continue();
+          try {
+            const key = typeof cursor.primaryKey === 'string' ? cursor.primaryKey : JSON.stringify(logical(cursor.primaryKey).metadata);
+            entries.push({ locator: JSON.stringify([location.origin, name, logical(cursor.primaryKey).metadata]), key,
+              value: cursor.value });
+            cursor.continue();
+          } catch (error) { reject(error); tx.abort(); }
         };
       }
       tx.oncomplete = () => resolve(entries.sort((a, b) => a.locator.localeCompare(b.locator)));
@@ -76,7 +78,7 @@ export function logical(value: unknown): { metadata: unknown; blobs: { blob: Blo
   const visit = (v: any, path: string): any => {
     if (v === undefined) return { $type: 'undefined' };
     if (typeof v === 'bigint') return { $type: 'bigint', value: String(v) };
-    if (typeof v === 'number' && !Number.isFinite(v)) return { $type: 'number', value: String(v) };
+    if (typeof v === 'number' && (!Number.isFinite(v) || Object.is(v, -0))) return { $type: 'number', value: Object.is(v, -0) ? '-0' : String(v) };
     if (!v || typeof v !== 'object') return v;
     if (seen.has(v)) return { $ref: seen.get(v) };
     const id = seen.size; seen.set(v, id);
@@ -90,7 +92,11 @@ export function logical(value: unknown): { metadata: unknown; blobs: { blob: Blo
       value: Array.from(v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(v.buffer, v.byteOffset, v.byteLength)) };
     if (v instanceof Map) return { $id: id, $type: 'map', value: [...v].map(([k, x], i) => [visit(k, `${path}/key${i}`), visit(x, `${path}/value${i}`)]) };
     if (v instanceof Set) return { $id: id, $type: 'set', value: [...v].map((x, i) => visit(x, `${path}/${i}`)) };
-    if (Array.isArray(v)) return { $id: id, $type: 'array', value: Array.from({ length: v.length }, (_, i) => i in v ? visit(v[i], `${path}/${i}`) : { $type: 'hole' }) };
+    if (Array.isArray(v)) {
+      const properties = Object.keys(v).filter(k => !/^(0|[1-9][0-9]*)$/.test(k) || Number(k) >= v.length);
+      return { $id: id, $type: 'array', value: Array.from({ length: v.length }, (_, i) => i in v ? visit(v[i], `${path}/${i}`) : { $type: 'hole' }),
+        ...(properties.length ? { properties: Object.fromEntries(properties.sort().map(k => [k, visit((v as any)[k], `${path}/${k.replaceAll('~', '~0').replaceAll('/', '~1')}`)])) } : {}) };
+    }
     if (Object.getPrototypeOf(v) !== Object.prototype && Object.getPrototypeOf(v) !== null) throw new Error('An older media record requires a newer logical exporter. Its data has been preserved.');
     return { $id: id, $type: 'object', value: Object.fromEntries(Object.keys(v).sort().map(k => [k, visit(v[k], `${path}/${k.replaceAll('~', '~0').replaceAll('/', '~1')}`)])) };
   };
