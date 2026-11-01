@@ -397,6 +397,10 @@ impl Editor {
             cx.notify();
             return;
         }
+        if cmd.name.starts_with("shellTest:") {
+            self.test_command(&cmd, cx);
+            return;
+        }
         let mut handled = true;
         match cmd.name.as_str() {
             "palette" => {
@@ -486,6 +490,34 @@ impl Editor {
         self.layout.move_panel_to(&drag.id, target).ok()?;
         self.save();
         Some(target)
+    }
+    /// Test-driver commands (`PM_PERF_GATE=1` runs only): drag a tab to a point,
+    /// drop it, open a tab's context menu, close transients.
+    fn test_command(&mut self, cmd: &Command, cx: &mut Context<Self>) {
+        if std::env::var("PM_PERF_GATE").as_deref() != Ok("1") {
+            return;
+        }
+        let s = |i: usize| cmd.args.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let f = |i: usize| cmd.args.get(i).and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
+        match &cmd.name["shellTest:".len()..] {
+            "drag" => self.simulate_drag(&s(0), f(1), f(2)),
+            "drop" => {
+                self.simulate_drop();
+            }
+            "cancelDrag" => {
+                if let Some(g) = self.gesture.take() {
+                    self.layout = g.original();
+                }
+            }
+            "tabMenu" => self.tab_menu(&s(0), point(px(f(1)), px(f(2)))),
+            "dismiss" => {
+                if let Some(h) = &self.host {
+                    h.borrow().dismiss_transients();
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
     }
     /// Runs a shell command without an AppKit host (tests).
     #[doc(hidden)]

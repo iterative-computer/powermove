@@ -36,6 +36,8 @@ thread_local! {
     static WINDOW_IDS:RefCell<HashMap<isize,u64>>=RefCell::new(HashMap::new());
     /// Menu delegates must outlive their menus (NSMenu.delegate is weak).
     static MENU_DELEGATES:RefCell<Vec<Retained<MenuDelegate>>>=const{RefCell::new(Vec::new())};
+    /// The context menu being tracked, so a test driver can cancel it.
+    static OPEN_MENU:RefCell<Option<Retained<NSMenu>>>=const{RefCell::new(None)};
 }
 /// Snapshot of an editor window's shell state for menus, toolbar and palette.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -207,8 +209,11 @@ define_class!(
         }
         #[unsafe(method(showPendingMenu:))]
         fn show_pending_menu(&self, _: Option<&AnyObject>) {
-            if let Some((menu, at, view)) = self.ivars().pending_menu.borrow_mut().take() {
+            let pending = self.ivars().pending_menu.borrow_mut().take();
+            if let Some((menu, at, view)) = pending {
+                OPEN_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
                 let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&view));
+                OPEN_MENU.with(|m| m.borrow_mut().take());
             }
         }
         #[unsafe(method(validateMenuItem:))]
@@ -1381,6 +1386,31 @@ impl Host {
             }
         });
         alert.beginSheetModalForWindow_completionHandler(&self.window, Some(&handler));
+    }
+    /// Queues a command for this window's editor, as a menu item would.
+    pub fn send_command(&self, name: &str, args: Vec<serde_json::Value>) {
+        let _ = self.sender.try_send(Command {
+            name: name.into(),
+            args,
+            token: None,
+        });
+    }
+    /// Test driver: closes an open context menu and any attached sheet.
+    #[doc(hidden)]
+    pub fn dismiss_transients(&self) {
+        OPEN_MENU.with(|m| {
+            if let Some(menu) = &*m.borrow() {
+                menu.cancelTracking();
+            }
+        });
+        if let Some(sheet) = self.window.attachedSheet() {
+            self.window.endSheet_returnCode(&sheet, NSModalResponseCancel);
+        }
+        for popup in [&self.palette, &self.fields] {
+            if popup.borrow().model.open {
+                popup.borrow_mut().hide();
+            }
+        }
     }
     pub fn popup(&mut self, field: bool) {
         let other = if field { &self.palette } else { &self.fields };

@@ -127,6 +127,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         },
                         "save" => v.save(None, cx),
                         "quit" => cx.quit(),
+                        // Shell command by name (`palette`, `layout:save`, `shellTest:drag`, …).
+                        "shell" => {
+                            let name = r["command"].as_str().ok_or_else(|| anyhow::anyhow!("missing command"))?;
+                            let args = r["args"].as_array().cloned().unwrap_or_default();
+                            v.host.borrow().send_command(name, args);
+                        },
                         _ => anyhow::bail!("unknown perf operation"),
                     }
                     let status = v.viewer.as_ref().map(|v| v.status());
