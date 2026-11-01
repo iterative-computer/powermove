@@ -1,3 +1,4 @@
+import { installTransitionNotice } from '../host/transition';
 import {referenceParam,emptyReference} from '../core/effect-inputs';
 import { noticeDenseKeyframes } from './core/keyframe-simplification';
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
@@ -2024,7 +2025,10 @@ if (pendingBootId) {
   });
 }
 PM.bus.on('project:saved', () => PM.bus.emit('projects:open'));
-installStorageUpgradeNotice(PM);
+if (hostBridge()?.transition) {
+  const stop = installTransitionNotice(PM, hostBridge()!.transition!);
+  window.addEventListener('beforeunload', stop, { once: true });
+} else installStorageUpgradeNotice(PM);
 /* Another window renaming, trashing or saving a project changes what this one
    should be showing. Repaint on the keys that describe the shared library. */
 PM.bus.on('store:external', (keys: string[]) => {

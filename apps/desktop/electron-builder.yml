@@ -37,6 +37,8 @@ files:
   # install-time bin copy is the same executable and is not used by Powermove.
   - '!node_modules/esbuild/bin/esbuild'
 extraResources:
+  - from: out/transition
+    to: transition
   - from: resources/sounds
     to: sounds
   - from: node_modules/ffmpeg-static/ffmpeg
@@ -127,6 +129,9 @@ fileAssociations:
     isPackage: false
 
 mac:
+  binaries:
+    - Contents/Resources/transition/powermove-transition-lock
+    - Contents/Resources/transition/powermove-transition-keychain
   # Local dist:mac builds stay unsigned. scripts/release-mac.mjs flips
   # identity, hardenedRuntime and notarize on for CI releases.
   identity: null

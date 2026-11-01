@@ -5,6 +5,8 @@
   import { formatBytes } from '../transcription/format';
 
   let { PM, active }: { PM: Record<string, any>; active: boolean } = $props();
+  const transition = bridge()?.transition;
+  let transitionStatus = $state<import('../../../shared/transition').TRStatus | null>(null);
   const host = bridge()?.storage;
   let status = $state<StorageStatus | null>(null);
   let busy = $state(false);
@@ -41,6 +43,12 @@
       result = `Freed ${formatBytes(cleaned.freedBytes)}.${cleaned.warnings.length ? ` ${cleaned.warnings.join(' ')}` : ''}`;
     });
   }
+  $effect(() => {
+    if (!active || !transition) return;
+    const refreshTransition = () => { void transition.request({ action: 'status' }).then(value => transitionStatus = value).catch(() => {}); };
+    refreshTransition(); const timer = setInterval(refreshTransition, 2000);
+    return () => clearInterval(timer);
+  });
   $effect(() => { if (active && host) untrack(() => { void refresh(); }); });
 </script>
 
@@ -51,6 +59,26 @@
 {#if !host}
   <p class="settings-note">Storage management is available in the desktop app.</p>
 {:else}
+  {#if transition}
+    <section class="sg-section">
+      <h3 class="sg-section-title">Native transition</h3>
+      <div class="sg-group">
+        <div class="settings-row">
+          <div class="settings-copy">
+            <b>{transitionStatus?.mediaComplete ? 'Media prepared' : 'Preparing your library'}</b>
+            <span>{transitionStatus ? `${transitionStatus.done} of ${transitionStatus.total} media records verified.` : 'Checking preparation progress…'}</span>
+          </div>
+          <button class="btn" disabled={busy} onclick={() => run(async () => {
+            transitionStatus = await transition.request({ action: 'secrets' });
+          })}>Prepare Sign-ins</button>
+        </div>
+        <div class="settings-row">
+          <div class="settings-copy"><b>Native app</b><span>Available after library preparation and signed migration verification.</span></div>
+          <button class="btn" disabled>Switch to Native</button>
+        </div>
+      </div>
+    </section>
+  {/if}
   <section class="sg-section">
     <h3 class="sg-section-title">Space on this Mac</h3>
     <div class="sg-group" aria-busy={busy}>

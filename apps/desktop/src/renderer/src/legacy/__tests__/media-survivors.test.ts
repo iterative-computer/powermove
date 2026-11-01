@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { webcrypto } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -27,6 +28,7 @@ function fakeIndexedDB(abortWrite=false) {
     },
   };
   return {
+    records,
     open() {
       const req: any = { result: db };
       setImmediate(() => req.onsuccess?.());
@@ -40,7 +42,7 @@ function mediaPM(indexedDB: unknown = null) {
   return makePM('core/media');
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); resetBridgeForTests(); });
 
 describe('media oracle survivors', () => {
   it('does not report a request as durable when its transaction later aborts',async()=>{
@@ -59,6 +61,30 @@ describe('media oracle survivors', () => {
     expect(await restored.text()).toBe('exact media bytes');
   });
 
+  it('dual-writes new imports to IndexedDB and the BLAKE3 store while preserving rollback bytes', async () => {
+    const indexed = fakeIndexedDB();
+    const request = vi.fn(async (command: any) => command.action === 'begin' ? 'token' : 'receipt');
+    const finish = vi.fn(async () => ({ revision: 'r', size: 8, type: 'video/webm', url: 'app://powermove/_media/fixture' }));
+    const library = { begin: vi.fn(async () => 'library-token'), chunk: vi.fn(async () => {}), finish,
+      abort: vi.fn(async () => {}), get: vi.fn(async () => null), remove: vi.fn(async () => true) };
+    installBridgeForTests({ transition: { request }, libraryMedia: library } as any);
+    const PM = mediaPM(indexed), blob = new Blob(['original'], { type: 'video/webm' });
+    expect(await PM.MediaStore.put('media:one', blob, { sourcePath: '/synthetic/original.mov', playbackProxy: true,
+      fingerprint: 'v2:8:synthetic' }, 'revision-one')).toBe(true);
+    expect((indexed.records.get('media:one') as any)).toMatchObject({ blob, revision: 'revision-one', playbackProxy: true });
+    expect(request.mock.calls.find(([command]) => command.action === 'finish')?.[0].hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(request.mock.calls.find(([command]) => command.action === 'begin')?.[0].payload.proxyOf).toEqual({ fingerprint: 'v2:8:synthetic', sourcePath: '/synthetic/original.mov' });
+    expect(finish).toHaveBeenCalledOnce();
+    expect(await PM.MediaStore.removeLegacyDuplicates()).toBe(0);
+    expect(indexed.records.has('media:one')).toBe(true);
+  });
+  it('retains the browser copy and reports failed imports when the content store rejects a write', async () => {
+    const indexed = fakeIndexedDB();
+    installBridgeForTests({ transition: { request: async () => { throw new Error('disk full'); } } } as any);
+    const PM = mediaPM(indexed), blob = new Blob(['retained']);
+    expect(await PM.MediaStore.put('media:one', blob)).toBe(false);
+    expect((indexed.records.get('media:one') as any).blob).toBe(blob);
+  });
   it('uses content rather than file names and MIME metadata for fingerprints', async () => {
     const PM = mediaPM();
     const first: any = new Blob(['same media bytes'], { type: 'audio/mpeg' });

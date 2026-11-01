@@ -1,3 +1,4 @@
+import { TR_IPC } from '../shared/transition';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
@@ -498,6 +499,7 @@ const bridge: PowermoveBridge = {
     }) as Promise<StorageStatus>,
     reveal: () => ipcRenderer.invoke(STORAGE_IPC.reveal) as Promise<void>
   },
+  transition: { request: command => ipcRenderer.invoke(TR_IPC, command) },
   libraryMedia: {
     link: input => ipcRenderer.invoke(LIBRARY_MEDIA_IPC.link, { key: input.key, sourcePath: input.sourcePath,
       size: input.size, type: input.type, revision: input.revision, matchExisting: input.matchExisting }),

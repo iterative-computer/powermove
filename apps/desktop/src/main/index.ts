@@ -1,3 +1,9 @@
+import { signedKeychain } from './transition/keychain';
+import { SecretHandoff } from './transition/secrets';
+import { proxyReferences } from './transition/references';
+import { TransitionLock } from './transition/lock';
+import { TransitionMedia, registerTransition } from './transition/media';
+import { WorkerPool } from './media-store/hasher';
 import { createEditorClosePreparation } from './editor-close';
 import { watchMemoryPressure } from './memory-pressure';
 import { registerFontsIpc } from './fonts';
@@ -565,6 +571,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
     editorClose.cancel(window);
   });
   window.on('closed', () => {
+    for (const id of editors.tabsOf(window)) void projects?.releaseProject(id).catch(() => {});
     editorClose.forget(window);
     editors.remove(window);
     persistOpenWindows();
@@ -680,13 +687,13 @@ function registerWindowIpc(): void {
   });
 
   // Closing a tab frees its project for any window.
-  ipcMain.handle(IPC.windowReleaseProject, (event, payload: unknown): boolean => {
+  ipcMain.handle(IPC.windowReleaseProject, async (event, payload: unknown): Promise<boolean> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const window = senderWindow(event);
     const projectId = readProjectId(payload, IPC.windowReleaseProject);
     if (!window || !projectId) return false;
     const released = editors.release(window, projectId);
-    if (released) persistOpenWindows();
+    if (released) { persistOpenWindows(); await projects?.releaseProject(projectId); }
     return released;
   });
 
@@ -944,12 +951,31 @@ if (!hasSingleInstanceLock) {
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the settings and the active project must be ready before the window exists.
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
+    TransitionLock.configure(app.isPackaged
+      ? path.join(process.resourcesPath, 'transition', 'powermove-transition-lock')
+      : path.join(__dirname, '..', 'transition', 'powermove-transition-lock'));
+    const profileLock = await TransitionLock.acquire(path.join(app.getPath('userData'), 'store', 'library.lock'));
+    const mediaLock = await TransitionLock.acquire(path.join(app.getPath('userData'), 'Media Store', 'store.lock'));
+    const hashWorkers = new WorkerPool(path.join(__dirname, 'media-hash-worker.js'));
+    const keychain = await signedKeychain(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'));
+    const transition = new TransitionMedia({ root: path.join(app.getPath('userData'), 'Media Store'), executor: hashWorkers,
+      assertWritable: () => { profileLock.assertOwnedSync(); mediaLock.assertOwnedSync(); },
+      secrets: () => new SecretHandoff({ profile: app.getPath('userData'), safeStorage, ...keychain }).run(),
+      references: async () => { await store.flushAll({ strict: true }); return proxyReferences(path.join(app.getPath('userData'), 'store')); } });
+    await transition.initialize();
+    registerTransition(ipcMain, transition, isTrustedSender);
+    app.once('will-quit', () => {
+      void hashWorkers.close();
+      void projects?.dispose();
+      void mediaLock.release();
+      void profileLock.release();
+    });
     libraryMedia = new LibraryMedia(path.join(app.getPath('userData'), 'Media Store'), reference => validatedArtifactPath(
       path.join(agentWorkspaceRoot(app.getPath('userData'), reference.projectId), 'artifacts'), reference.path),
-      async source => await cloudFileState(source) === 'local');
+      async source => await cloudFileState(source) === 'local', true, () => mediaLock.assertOwnedSync());
     await libraryMedia.initialize();
     registerLibraryMedia(ipcMain, libraryMedia, isTrustedSender);
-    const store = createStore(path.join(app.getPath('userData'), 'store'));
+    const store = createStore(path.join(app.getPath('userData'), 'store'), { assertWritable: () => profileLock.assertOwnedSync() });
     await store.load();
     prefetchProject = async id => { if (id) await store.preloadProject?.(id); };
     const lastActive = store.get?.('lastActiveProject');
@@ -1087,7 +1113,7 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), { nativeVersions: process.platform === 'darwin' });
+    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), { nativeVersions: process.platform === 'darwin', transitionLocks: true });
     const recoveryProjects = new ProjectFiles(path.join(app.getPath('userData'), 'recovery', 'files.json'), path.join(app.getPath('userData'), 'recovery', 'versions'), { recoveryDirectory: path.join(app.getPath('userData'), 'recovery', 'documents') });
     let cleanupAgentCaches: (manual: boolean, dryRun?: boolean) => Promise<number> = async () => 0;
     let agentStorageBusy: () => boolean = () => true;
@@ -1100,9 +1126,9 @@ if (!hasSingleInstanceLock) {
       clearCaches: async () => { await session.defaultSession.clearCache(); await session.defaultSession.clearCodeCaches({}); },
       reveal: async () => { const error = await shell.openPath(app.getPath('userData')); if (error) throw new Error(error); },
       cleanupWorkspaces: manual => cleanupAgentCaches(manual),
-      cleanupMedia: () => libraryMedia!.collectUnused(),
+      cleanupMedia: async () => 0, // TR: media GC stays disabled through cutover + one release.
       workspaceCacheBytes: () => cleanupAgentCaches(true, true),
-      unusedMediaBytes: () => libraryMedia!.collectUnused(Date.now(), true),
+      unusedMediaBytes: async () => 0,
       isTrustedSender
     });
     app.once('will-quit', () => storageManagement.dispose());
@@ -1113,7 +1139,7 @@ if (!hasSingleInstanceLock) {
       recovery: () => store.optimizeStorage!(),
       sources: async () => {
         await store.optimizeStorage!(value => visitSourceReferences(value, (key, source) => libraryMedia!.optimizeSource(key, source)));
-        await libraryMedia!.collectLinkedDuplicates();
+        // TR retains all copies for rollback.
       },
       cleanup: async () => {
         if (agentStorageBusy()) throw new Error('AI work is active.');

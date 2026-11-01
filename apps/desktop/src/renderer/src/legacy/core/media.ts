@@ -1,3 +1,4 @@
+import { transfer } from '../../host/transition';
 import { sha256HexOf } from '../../../../shared/sha256';
 import { resolveContent } from './content-properties';
 import { clipCuesToEnd, rebaseCuesForStart } from '../../captions/model';
@@ -98,6 +99,9 @@ PM.MediaStore = {
       // import fingerprint collides. Verified file imports retain their identity.
       revision: savedRevision || mediaRevision(),
       fingerprint: meta.fingerprint || null,
+      sourcePath: meta.sourcePath || null,
+      playbackProxy: !!meta.playbackProxy,
+      playbackProxyVersion: meta.playbackProxyVersion || 0,
       size: Number(blob.size) || 0,
       type: blob.type || meta.type || '',
       at: Date.now(),
@@ -139,6 +143,7 @@ PM.MediaStore = {
   },
 };
 const fileMedia = hostBridge()?.libraryMedia;
+const indexedMedia = PM.MediaStore;
 if (fileMedia) PM.MediaStore = attachLibraryMedia(fileMedia, {
   record: readMediaRecord,
   keys: async () => {
@@ -146,21 +151,32 @@ if (fileMedia) PM.MediaStore = attachLibraryMedia(fileMedia, {
     if (!result.ok) throw new Error('The old media library could not be read. Its files have been preserved.');
     return (result.value || []).map(String);
   },
-  removeIfUnchanged: async (record) => {
-    let removed = false;
-    const result = await request('readwrite', (store: any) => {
-      const get = store.get(record.id);
-      get.addEventListener('success', () => {
-        const current = get.result;
-        if (current && current.revision === record.revision && current.at === record.at && current.size === record.size) {
-          store.delete(record.id); removed = true;
-        }
-      });
-      return get;
-    });
-    return result.ok && removed;
-  }
+  // TR retains every browser copy through cutover + one release (N4).
+  removeIfUnchanged: async () => false
 });
+const transition = hostBridge()?.transition;
+if (transition) {
+  const primary = PM.MediaStore;
+  PM.MediaStore = {
+    ...primary,
+    async put(id: string, blob: Blob, meta: any = {}, revision?: string) {
+      // Both persistence contracts must acknowledge; a failure leaves all copies.
+      const savedRevision = revision || mediaRevision();
+      const browserSaved = await indexedMedia.put(id, blob, meta, savedRevision);
+      if (!browserSaved) return false;
+      const key = meta.storageKey || id;
+      try {
+        await transfer(transition, { key, size: blob.size, type: blob.type || meta.type || '', revision: savedRevision,
+          metadata: meta, ...(meta.playbackProxy || meta.playbackProxyVersion > 0 ? { proxyOf: {
+            fingerprint: meta.fingerprint || null, sourcePath: meta.sourcePath || null } } : {}) }, blob);
+        return await primary.put(id, blob, meta, savedRevision);
+      } catch { return false; }
+    },
+    // Object and IndexedDB collection remain disabled during TR.
+    removeLegacyDuplicates: async () => 0,
+    optimizeLegacy: async () => {},
+  };
+}
 /* On a remote host this browser's IndexedDB is one device's cache: the host
    keeps the bytes for every device. Wrapped here, before the first project
    restore, so a miss is filled from the host. */

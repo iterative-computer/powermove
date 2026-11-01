@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'electron-vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'node:path';
@@ -7,13 +8,22 @@ export default defineConfig({
   // A sandboxed preload must be CommonJS; pin the format so a future
   // `"type": "module"` in package.json cannot silently flip it to .mjs.
   main: {
+    plugins: [{ name: 'transition-posix-lock', buildStart() {
+      const target = path.resolve(__dirname, 'out/transition');
+      mkdirSync(target, { recursive: true });
+      execFileSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+        path.resolve(__dirname, 'native/transition-lock.c'), '-lm', '-o', path.join(target, 'powermove-transition-lock')]);
+      if (process.platform === 'darwin') execFileSync('cc', ['-fobjc-arc', '-Wno-deprecated-declarations',
+        path.resolve(__dirname, 'native/transition-keychain.m'), '-framework', 'Foundation', '-framework', 'Security',
+        '-o', path.join(target, 'powermove-transition-keychain')]);
+    } }],
     build: {
       // @powermove/registry ships TypeScript sources, which Electron cannot
       // require at runtime: bundle it (and in the preload, which is sandboxed
       // and may only require electron).
       externalizeDeps: { exclude: ['@powermove/registry'] },
       outDir: 'out/main',
-      rollupOptions: { input: { index: path.resolve(__dirname, 'src/main/entry.ts'), editor: path.resolve(__dirname, 'src/main/index.ts'), 'transcription-worker': path.resolve(__dirname, 'src/main/transcription/worker.ts') }, output: { format: 'cjs', entryFileNames: '[name].js' } }
+      rollupOptions: { input: { index: path.resolve(__dirname, 'src/main/entry.ts'), editor: path.resolve(__dirname, 'src/main/index.ts'), 'media-hash-worker': path.resolve(__dirname, 'src/main/media-store/hash-worker.ts'), 'transcription-worker': path.resolve(__dirname, 'src/main/transcription/worker.ts') }, output: { format: 'cjs', entryFileNames: '[name].js' } }
     }
   },
   preload: {

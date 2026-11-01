@@ -956,6 +956,7 @@ export interface PowermoveBridge {
   transcription?: import('./transcription').TranscriptionBridge;
   /** Local profile storage and safe retention; absent on remote/older hosts. */
   storage?: import('./storage-management').StorageBridge;
+  transition?: import('./transition').TransitionBridge;
   libraryMedia?: import('./library-media').LibraryMediaBridge;
 }
 
