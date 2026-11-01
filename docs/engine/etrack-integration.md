@@ -211,3 +211,41 @@ performance gate require the Mac run; no Linux performance claim is made.
 - `engine/crates/pm-vector/src/canvas2d/context.rs`
 - `engine/crates/pm-vector/src/canvas2d/msaa.rs`
 - `engine/crates/pm-vector/src/canvas2d/shape.rs`
+
+## Merge 5: feat/ne-svg (`b1d10d3ec`)
+
+22 conflicts, listed below. The author branch implements Chromium bucket
+replay and adds SvgImage routing for text, filters and unsupported replay.
+The base already supersedes this with output-resolution native SVG at every
+compat level, including text, gradients, filters and depth-safe parsing.
+Preserve that implementation and its tests (N2/N3/N8). Do not reintroduce the
+deleted Canvas2D subsystem, SVG unsupported reason or GPU-specific Skia
+rounding/gradient/blur emulation. Inputs remain archived in merge ancestry;
+no legacy consumer on the base refers to the deleted replay modules.
+
+Retain the branch as an explicit no-ff merge with its disposition recorded.
+Current native SVG regressions, rather than the replay admission test, define
+the Mac and portable verification rows in the Gate E ledger.
+
+- `docs/engine/vector.md`
+- `engine/crates/pm-render/src/capability.rs`
+- `engine/crates/pm-render/src/plan.rs`
+- `engine/crates/pm-render/src/vector/svg.rs`
+- `engine/crates/pm-render/tests/vector.rs`
+- `engine/crates/pm-skia-path/src/blinksvg.rs`
+- `engine/crates/pm-skia-path/src/blur.rs`
+- `engine/crates/pm-skia-path/src/dash.rs`
+- `engine/crates/pm-skia-path/src/gradient.rs`
+- `engine/crates/pm-skia-path/src/m44.rs`
+- `engine/crates/pm-skia-path/src/skrrect.rs`
+- `engine/crates/pm-skia-path/src/svgrender.rs`
+- `engine/crates/pm-vector/Cargo.toml`
+- `engine/crates/pm-vector/examples/svg_compat_compare.rs`
+- `engine/crates/pm-vector/src/canvas2d/analytic.rs`
+- `engine/crates/pm-vector/src/canvas2d/mod.rs`
+- `engine/crates/pm-vector/src/canvas2d/skpath.rs`
+- `engine/crates/pm-vector/src/canvas2d/svg.rs`
+- `engine/crates/pm-vector/src/render/svg.rs`
+- `engine/crates/pm-vector/tests/svg.rs`
+- `engine/crates/pm-vector/tools/canvas-ref/page.ts`
+- `engine/crates/pm-vector/tools/canvas-ref/run.ts`
