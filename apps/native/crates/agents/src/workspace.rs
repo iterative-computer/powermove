@@ -137,8 +137,10 @@ impl<H: Host> Workspace<H> {
         match name {
             "list_files" => {
                 let file = self.open_path(args["path"].as_str().unwrap_or(""), true)?;
-                let path = descriptor_path(&file);
-                let mut entries=fs::read_dir(path)?.map(|v|v.map(|v|json!({"name":v.file_name().to_string_lossy(),"directory":v.file_type().is_ok_and(|v|v.is_dir())}))).collect::<io::Result<Vec<_>>>()?;
+                let mut entries = list_dir(&file)?
+                    .into_iter()
+                    .map(|(name, directory)| json!({"name": name, "directory": directory}))
+                    .collect::<Vec<_>>();
                 entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
                 let total = entries.len();
                 entries.truncate(1000);
@@ -301,26 +303,36 @@ impl<H: Host> Workspace<H> {
         }
         Ok(normalized)
     }
-    fn base<'a>(&'a self, path: &'a Path) -> (&'a Path, &'a Path) {
+    fn base(&self, path: &Path) -> (PathBuf, PathBuf) {
         if let Ok(relative) = path.strip_prefix(&self.root) {
-            (&self.root, relative)
+            (self.root.clone(), relative.to_path_buf())
         } else {
-            (
-                Path::new("/"),
-                path.strip_prefix("/").expect("absolute computer path"),
-            )
+            // Explicit computer paths: resolve system links above the target (macOS
+            // `/var` -> `/private/var`, `/tmp`) once, then walk with O_NOFOLLOW, so a
+            // link planted later still fails closed.
+            let resolved = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => fs::canonicalize(parent)
+                    .map(|p| p.join(name))
+                    .unwrap_or_else(|_| path.to_path_buf()),
+                _ => path.to_path_buf(),
+            };
+            let relative = resolved
+                .strip_prefix("/")
+                .expect("absolute computer path")
+                .to_path_buf();
+            (PathBuf::from("/"), relative)
         }
     }
     fn open_path(&self, path: &str, directory: bool) -> io::Result<File> {
         let logical = self.logical(path)?;
         let (root, relative) = self.base(&logical);
-        open_relative(root, relative, directory, false)
+        open_relative(&root, &relative, directory, false)
     }
     fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let logical = self.logical(path)?;
         let (base, rel) = self.base(&logical);
         let name = rel.file_name().ok_or_else(|| error("File path required"))?;
-        let parent = open_relative(base, rel.parent().unwrap_or(Path::new("")), true, true)?;
+        let parent = open_relative(&base, rel.parent().unwrap_or(Path::new("")), true, true)?;
         #[cfg(unix)]
         {
             use std::{
@@ -434,12 +446,54 @@ fn integer(v: &Value, key: &str, default: u64, min: u64, max: u64) -> io::Result
     };
     Ok(n.clamp(min, max))
 }
-fn descriptor_path(file: &File) -> PathBuf {
+/// Lists an already-opened directory descriptor without re-resolving its path.
+fn list_dir(file: &File) -> io::Result<Vec<(String, bool)>> {
     use std::os::fd::AsRawFd;
     #[cfg(target_os = "linux")]
-    return PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    {
+        fs::read_dir(format!("/proc/self/fd/{}", file.as_raw_fd()))?
+            .map(|v| {
+                v.map(|v| {
+                    (
+                        v.file_name().to_string_lossy().into_owned(),
+                        v.file_type().is_ok_and(|t| t.is_dir()),
+                    )
+                })
+            })
+            .collect()
+    }
     #[cfg(not(target_os = "linux"))]
-    return PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+    {
+        // macOS /dev/fd/N is not a directory link; read the descriptor itself.
+        let fd = unsafe { libc::dup(file.as_raw_fd()) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let dir = unsafe { libc::fdopendir(fd) };
+        if dir.is_null() {
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+        unsafe { libc::rewinddir(dir) };
+        let mut out = Vec::new();
+        loop {
+            let entry = unsafe { libc::readdir(dir) };
+            if entry.is_null() {
+                break;
+            }
+            let entry = unsafe { &*entry };
+            let name = unsafe { std::ffi::CStr::from_ptr(entry.d_name.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            if name == "." || name == ".." {
+                continue;
+            }
+            out.push((name, entry.d_type == libc::DT_DIR));
+        }
+        unsafe { libc::closedir(dir) };
+        Ok(out)
+    }
 }
 /// Every ancestor is opened relative to an owned directory descriptor. A rename
 /// or symlink swap cannot redirect later operations outside that directory.

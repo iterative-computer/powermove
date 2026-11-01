@@ -124,6 +124,9 @@ pub(crate) fn real_dir(path: &Path) -> io::Result<()> {
     }
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(()),
+        // System links such as macOS `/var` -> `/private/var` and `/tmp` are owned by
+        // root; a link a user (or another process running as the user) planted is not.
+        Ok(m) if m.file_type().is_symlink() && root_owned_dir_link(path, &m) => Ok(()),
         Ok(_) => Err(error("Refusing a linked or non-directory parent")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             fs::create_dir(path)?;
@@ -136,6 +139,15 @@ pub(crate) fn real_dir(path: &Path) -> io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+#[cfg(unix)]
+fn root_owned_dir_link(path: &Path, link: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    link.uid() == 0 && fs::metadata(path).is_ok_and(|target| target.is_dir() && target.uid() == 0)
+}
+#[cfg(not(unix))]
+fn root_owned_dir_link(_: &Path, _: &fs::Metadata) -> bool {
+    false
 }
 fn validate_version(v: &str) -> io::Result<()> {
     if v.is_empty()

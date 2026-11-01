@@ -3835,6 +3835,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-agents"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "pm-audio"
 version = "0.1.0"
 dependencies = [
@@ -4312,6 +4324,19 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-recorder"
+version = "0.1.0"
+dependencies = [
+ "i_overlay",
+ "kurbo",
+ "libm",
+ "pm-text",
+ "pm-vector",
+ "read-fonts 0.45.1",
+ "unicode-bidi",
 ]
 
 [[package]]
