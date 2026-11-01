@@ -1,3 +1,4 @@
+import { TransitionLock, projectLockPath } from './transition/lock';
 import { readWithRetry } from './read-retry';
 import { assertProjectDocument, ProjectDocumentWorkerError, validateProjectDocumentInWorker, WORKER_DOCUMENT_BYTES } from './project-document-validator';
 import { createHash, randomUUID } from 'node:crypto';
@@ -27,20 +28,21 @@ export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<
 }
 
 type Association = { path: string; hash: string; generation?: number };
-type OpenedProject = { path: string; projectId: string; token: string; size: number; media: ProjectMediaRange[] };
+type OpenedProject = { copy?: boolean; path: string; projectId: string; token: string; size: number; media: ProjectMediaRange[] };
 type FullProject = OpenedProject & { document: any; documentRange?: ProjectRecord };
 type RangeProject = OpenedProject & { document?: never; documentRange: ProjectRecord };
 type HashResult = { ok: true; hash: string } | { ok: false; error: unknown };
 
 /** Main-process-only grants: renderer data can never invent an overwrite path. */
 export class ProjectFiles {
+  private locks = new Map<string, TransitionLock>();
   private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; busy: boolean }>();
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
   private saving = new Set<string>();
   constructor(private readonly registryPath: string, private readonly backupDirectory: string,
-    private readonly options: { recoveryDirectory?: string; nativeVersions?: boolean } = {}) {
+    private readonly options: { recoveryDirectory?: string; nativeVersions?: boolean; transitionLocks?: boolean } = {}) {
     this.ready = this.load();
   }
   private async load(): Promise<void> {
@@ -74,6 +76,24 @@ export class ProjectFiles {
   private async persist(): Promise<void> {
     await mkdir(path.dirname(this.registryPath), { recursive: true });
     await atomicWrite(this.registryPath, Buffer.from(JSON.stringify(Object.fromEntries(this.associations))));
+  }
+  private async lock(file: string): Promise<void> {
+    if (!this.options.transitionLocks) return;
+    let lease = this.locks.get(file);
+    if (!lease) { lease = await TransitionLock.acquire(projectLockPath(file)); this.locks.set(file, lease); }
+    await lease.assertOwned();
+  }
+  releaseProject(id: string): Promise<void> {
+    return this.serial(async () => {
+      const file = this.associations.get(id)?.path;
+      const lease = file && this.locks.get(file);
+      if (file && lease && !this.saving.has(file)) { this.locks.delete(file); await lease.release(); }
+    });
+  }
+  async dispose(): Promise<void> {
+    await this.queue;
+    for (const lease of this.locks.values()) await lease.release();
+    this.locks.clear();
   }
   async destination(id: string): Promise<string | undefined> {
     await this.ready;
@@ -155,6 +175,7 @@ export class ProjectFiles {
     });
   }
   private async commit(id: string, destination: string, temporary: string, hash: string, previous?: FileVersion): Promise<string> {
+    await this.lock(destination);
     await checkVersion(destination, previous);
     const journal = `${this.registryPath}.pending-${randomUUID()}.json`;
     const generation = (this.associations.get(id)?.generation || 0) + 1;
@@ -163,7 +184,7 @@ export class ProjectFiles {
       if (previous) backup = await this.backup(id, destination);
       await checkVersion(destination, previous);
       await mkdir(path.dirname(this.registryPath), { recursive: true });
-      await atomicWrite(journal, Buffer.from(JSON.stringify({ id, path: destination, hash, generation })));
+      await atomicWrite(journal, Buffer.from(JSON.stringify({ id, path: destination, hash, generation, baseRevisionHash: previous?.hash ?? null })));
       await publishFile(temporary, destination, previous, hash, () => {
         // A finalization failure must compare the next retry with bytes that
         // actually reached the destination. The renderer still stays dirty.
@@ -202,6 +223,7 @@ export class ProjectFiles {
       const known = this.associations.get(id), destination = selectedPath || known?.path;
       if (!destination) throw new Error('Choose a destination with Save As.');
       if (this.saving.has(destination)) throw new Error('A save to this project file is already in progress.');
+      await this.lock(destination);
       const previous = await fileVersion(destination);
       if (!selectedPath && known && previous?.hash !== known.hash) throw changedFile();
       this.saving.add(destination);
@@ -219,6 +241,7 @@ export class ProjectFiles {
       const destination = selectedPath || known?.path;
       if (!destination) throw new Error('Choose a destination with Save As.');
       if (this.saving.has(destination)) throw new Error('A save to this project file is already in progress.');
+      await this.lock(destination);
       const previous = await fileVersion(destination);
       if (!selectedPath && known && previous?.hash !== known.hash) throw changedFile();
       const digest = createHash('sha256');
@@ -243,6 +266,10 @@ export class ProjectFiles {
   open(filePath: string, options: { allowDocumentRange?: boolean; copy?: boolean }): Promise<FullProject | RangeProject>;
   open(filePath: string, options: { allowDocumentRange?: boolean; copy?: boolean } = {}): Promise<FullProject | RangeProject> {
     return this.serial(async () => {
+      if (!options.copy) {
+        try { await this.lock(filePath); }
+        catch { options = { ...options, copy: true }; } // N4: locked originals still open as independent copies.
+      }
       const handle = await open(filePath, 'r');
       let hashing: Promise<HashResult> | undefined;
       let hashingAbort: AbortController | undefined;
@@ -309,7 +336,7 @@ export class ProjectFiles {
         const projectId = randomUUID(), token = randomUUID();
         if (!options.copy) { this.associations.set(projectId, { path: filePath, hash }); await this.persist(); }
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
-        const opened = { path: filePath, projectId, token, size: info.size };
+        const opened = { path: filePath, projectId, token, size: info.size, ...(options.copy ? { copy: true } : {}) };
         return rangeValidated ? { ...opened, media, documentRange: documentRange! }
           : { ...opened, document, media, ...(documentRange ? { documentRange } : {}) };
       } catch (error) { hashingAbort?.abort(); await hashing; await handle.close(); throw error; }

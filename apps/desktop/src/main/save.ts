@@ -99,6 +99,7 @@ export async function openProjectForWindow(
   try {
     if (isRendererUnavailable(webContents)) throw new Error('Project window is unavailable');
     const opened = await ctx.projects.open(filePath, { allowDocumentRange: true, copy });
+    copy ||= !!opened.copy;
     if (rendererGone || isRendererUnavailable(webContents)) {
       await ctx.projects.close(opened.token, false).catch(() => undefined);
       throw new Error('Project window is unavailable');
