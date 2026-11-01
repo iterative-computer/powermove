@@ -15,12 +15,13 @@ test("all native token destinations exist in the read-only pm-design API", () =>
     typography: "TypeScale",
   };
   for (const spec of Object.values(FOUNDATION_TOKENS)) {
-    if (!spec.native) continue;
-    const [group, field] = spec.native.split(".");
-    const body = rust.match(
-      new RegExp(`pub struct ${structs[group]} \\{([^}]+)\\}`),
-    )[1];
-    assert.match(body, new RegExp(`pub ${field}: (u32|f32),`), spec.native);
+    for (const target of spec.native ?? []) {
+      const [group, field] = target.split(".");
+      const body = rust.match(
+        new RegExp(`pub struct ${structs[group]} \\{([^}]+)\\}`),
+      )[1];
+      assert.match(body, new RegExp(`pub ${field}: (u32|f32),`), target);
+    }
   }
 });
 

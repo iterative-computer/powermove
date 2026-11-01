@@ -1,4 +1,9 @@
-//! Shell's only styling source. Theme translation targets these semantic names.
+//! Powermove Native's only styling source. Theme translation targets these semantic names.
+//!
+//! The language these values encode is `docs/native/design/language.md`; the
+//! generated table in `docs/native/design/tokens.md` is checked against this file
+//! by `tests/spec.rs`. Change a value here, then regenerate the table with
+//! `PM_UPDATE_DESIGN_SNAPSHOT=1 cargo test -p pm-design`.
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
@@ -29,6 +34,44 @@ pub struct Colors {
     pub selected_text: u32,
     pub selected_fill: u32,
     pub focus: u32,
+    /// Accent used as text or a thin mark on panels; meets 4.5:1 on `panel`.
+    pub accent_text: u32,
+    /// Opaque accent tint over `panel`: drop targets, the active snap guide bed.
+    pub accent_wash: u32,
+    pub danger: u32,
+    pub warning: u32,
+    pub success: u32,
+    /// Clip and layer label fills. Text on them is `text`.
+    pub labels: Labels,
+}
+/// Eight label colours, in menu order. Fills are muted so artwork stays the loudest thing on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Labels {
+    pub blue: u32,
+    pub violet: u32,
+    pub orange: u32,
+    pub red: u32,
+    pub yellow: u32,
+    pub green: u32,
+    pub teal: u32,
+    pub gray: u32,
+}
+impl Labels {
+    pub const NAMES: [&'static str; 8] = [
+        "blue", "violet", "orange", "red", "yellow", "green", "teal", "gray",
+    ];
+    pub fn all(&self) -> [u32; 8] {
+        [
+            self.blue,
+            self.violet,
+            self.orange,
+            self.red,
+            self.yellow,
+            self.green,
+            self.teal,
+            self.gray,
+        ]
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TypeScale {
@@ -37,6 +80,18 @@ pub struct TypeScale {
     pub label: f32,
     pub title: f32,
     pub display: f32,
+    /// Running prose: agent replies, sheet explanations, Settings descriptions.
+    pub reading: f32,
+    /// Sheet, Settings pane and empty-state headings.
+    pub heading: f32,
+    /// Transport and timeline timecode (SF Pro, tabular figures, medium).
+    pub timecode: f32,
+    pub regular_weight: f32,
+    pub medium_weight: f32,
+    pub semibold_weight: f32,
+    /// Line height multipliers. Leading is a multiplier, never a point size.
+    pub dense_leading: f32,
+    pub reading_leading: f32,
     pub text_optical_size: f32,
     pub display_optical_size: f32,
 }
@@ -72,6 +127,28 @@ pub struct Metrics {
     pub settings_sidebar: f32,
     pub menu_inset: f32,
     pub menu_row: f32,
+    /// Inner radius for a control nested in a control (segment in a segmented control).
+    pub inner_radius: f32,
+    /// Inspector value wells: height inside a `row`, and the shared column width.
+    pub field: f32,
+    pub value_column: f32,
+    /// Keyframe-toggle diamond and its column.
+    pub keyframe: f32,
+    /// Timeline geometry.
+    pub track_row: f32,
+    pub property_row: f32,
+    pub ruler: f32,
+    pub layer_column: f32,
+    pub playhead: f32,
+    /// SF Symbol point sizes: toolbar items, panel header buttons, inline row glyphs.
+    pub symbol_toolbar: f32,
+    pub symbol_panel: f32,
+    pub symbol_inline: f32,
+    /// Minimum pointer target. Smaller glyphs get padded hit areas.
+    pub hit: f32,
+    pub popover_width: f32,
+    pub sheet_width: f32,
+    pub agent_width: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Motion {
@@ -80,6 +157,8 @@ pub struct Motion {
     pub exit: f64,
     pub reduced: f64,
     pub start_scale: f64,
+    /// Hover, press and selection feedback.
+    pub interaction: f64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -95,6 +174,13 @@ pub enum Surface {
     InspectorRow,
     List,
     Panel,
+    /// Transient popovers anchored to a control (colour, easing, zoom).
+    Popover,
+    /// Small floating controls over the viewer image (zoom, safe areas, 3D view).
+    ViewerOverlay,
+    /// Agent conversation: dense text, so solid like every work surface.
+    AgentPanel,
+    StatusBar,
 }
 impl Surface {
     pub fn permits_glass(self) -> bool {
@@ -107,6 +193,8 @@ impl Surface {
                 | Self::Palette
                 | Self::Sheet
                 | Self::Sidebar
+                | Self::Popover
+                | Self::ViewerOverlay
         )
     }
 }
@@ -128,9 +216,43 @@ pub struct Tokens {
 pub const TEXT_FONT: &str = ".SystemUIFont";
 pub const DISPLAY_FONT: &str = "SF Pro Display";
 pub const MONO_FONT: &str = "SF Mono";
+
+/// A theme patch named a field pm-design does not have, or gave it an unusable value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatchError(pub String);
+
+macro_rules! patchable {
+    ($($group:ident . $field:ident : $kind:ident),* $(,)?) => {
+        /// Every field a theme may patch, as `group.field`. The JS theme pipeline's
+        /// `native` targets must be a subset of this list (see `tests/spec.rs`).
+        pub const PATCHABLE: &[&str] = &[$(concat!(stringify!($group), ".", stringify!($field))),*];
+        fn set_field(&mut self, name: &str, value: f64) -> Result<(), PatchError> {
+            match name {
+                $(concat!(stringify!($group), ".", stringify!($field)) => {
+                    patchable!(@set self.$group.$field, $kind, value, name)
+                })*
+                _ => Err(PatchError(format!("unknown token {name}"))),
+            }
+        }
+    };
+    (@set $target:expr, color, $value:ident, $name:ident) => {{
+        if !((0. ..=16_777_215.).contains(&$value) && $value.fract() == 0.) {
+            return Err(PatchError(format!("{} needs an opaque 0xRRGGBB colour", $name)));
+        }
+        $target = $value as u32;
+        Ok(())
+    }};
+    (@set $target:expr, size, $value:ident, $name:ident) => {{
+        if !($value.is_finite() && $value >= 0.) {
+            return Err(PatchError(format!("{} needs a finite, non-negative size", $name)));
+        }
+        $target = $value as f32;
+        Ok(())
+    }};
+}
 impl Tokens {
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
-        let mut colors = match scheme {
+        let colors = match scheme {
             Scheme::Dark => Colors {
                 window: 0x111111,
                 panel: 0x1a1a1a,
@@ -147,6 +269,21 @@ impl Tokens {
                 selected_text: 0xffffff,
                 selected_fill: 0x3a3a3a,
                 focus: 0xff8a55,
+                accent_text: 0xff8a55,
+                accent_wash: 0x3c241a,
+                danger: 0xf36357,
+                warning: 0xf59e0b,
+                success: 0x3fcf8e,
+                labels: Labels {
+                    blue: 0x3b4250,
+                    violet: 0x4a3b6b,
+                    orange: 0x7a3a1f,
+                    red: 0x6e2b2b,
+                    yellow: 0x5c4a17,
+                    green: 0x24503a,
+                    teal: 0x1f4b52,
+                    gray: 0x3a3a3a,
+                },
             },
             Scheme::Light => Colors {
                 window: 0xeeeef1,
@@ -160,28 +297,28 @@ impl Tokens {
                 text: 0x1b1d23,
                 secondary: 0x52545a,
                 muted: 0x62646a,
-                accent: 0xff6019,
+                accent: 0xf0580a,
                 selected_text: 0xffffff,
                 selected_fill: 0xd5d5da,
                 focus: 0xb93800,
+                accent_text: 0xb93800,
+                accent_wash: 0xfbe9e1,
+                danger: 0xc22a1f,
+                warning: 0xa15c00,
+                success: 0x117a52,
+                labels: Labels {
+                    blue: 0xc9d4e8,
+                    violet: 0xd8cff0,
+                    orange: 0xf7cfb6,
+                    red: 0xf2cac7,
+                    yellow: 0xefe0b2,
+                    green: 0xc5e3d1,
+                    teal: 0xc2e2e3,
+                    gray: 0xdcdce0,
+                },
             },
         };
-        if accessibility.increase_contrast {
-            match scheme {
-                Scheme::Dark => {
-                    colors.separator = 0x888888;
-                    colors.secondary = 0xdddddd;
-                    colors.muted = 0xbfbfbf;
-                    colors.focus = 0xffa073;
-                }
-                Scheme::Light => {
-                    colors.separator = 0x686868;
-                    colors.secondary = 0x303036;
-                    colors.muted = 0x414148;
-                }
-            }
-        }
-        Self {
+        let mut tokens = Self {
             scheme,
             accessibility,
             colors,
@@ -191,18 +328,14 @@ impl Tokens {
                 panel_radius: 12.,
                 control_radius: 6.,
                 capsule_radius: 17.,
-                header: 36.,
+                header: 32.,
                 row: 28.,
                 status: 30.,
                 toolbar: 52.,
                 toolbar_title_width: 160.,
                 toolbar_title_line: 14.,
                 control: 28.,
-                border: if accessibility.increase_contrast {
-                    2.
-                } else {
-                    1.
-                },
+                border: 1.,
                 min_panel: 72.,
                 min_center: 180.,
                 keyboard_step: 10.,
@@ -220,6 +353,22 @@ impl Tokens {
                 settings_sidebar: 180.,
                 menu_inset: 12.,
                 menu_row: 30.,
+                inner_radius: 4.,
+                field: 22.,
+                value_column: 128.,
+                keyframe: 9.,
+                track_row: 28.,
+                property_row: 22.,
+                ruler: 24.,
+                layer_column: 232.,
+                playhead: 1.5,
+                symbol_toolbar: 15.,
+                symbol_panel: 13.,
+                symbol_inline: 11.,
+                hit: 24.,
+                popover_width: 260.,
+                sheet_width: 480.,
+                agent_width: 360.,
             },
             typography: TypeScale {
                 minimum: 11.,
@@ -227,6 +376,14 @@ impl Tokens {
                 label: 12.,
                 title: 13.,
                 display: 22.,
+                reading: 13.,
+                heading: 15.,
+                timecode: 13.,
+                regular_weight: 400.,
+                medium_weight: 500.,
+                semibold_weight: 600.,
+                dense_leading: 1.3,
+                reading_leading: 1.45,
                 text_optical_size: 12.,
                 display_optical_size: 22.,
             },
@@ -236,8 +393,66 @@ impl Tokens {
                 exit: 0.12,
                 reduced: 0.15,
                 start_scale: 0.96,
+                interaction: 0.075,
             },
+        };
+        tokens.enforce_accessibility();
+        tokens
+    }
+    /// Increase Contrast always wins, including over a theme patch.
+    fn enforce_accessibility(&mut self) {
+        if !self.accessibility.increase_contrast {
+            return;
         }
+        let c = &mut self.colors;
+        match self.scheme {
+            Scheme::Dark => {
+                c.separator = 0x888888;
+                c.secondary = 0xdddddd;
+                c.muted = 0xbfbfbf;
+                c.focus = 0xffa073;
+                c.accent_text = 0xffa073;
+            }
+            Scheme::Light => {
+                c.separator = 0x686868;
+                c.secondary = 0x303036;
+                c.muted = 0x414148;
+                c.focus = 0x9a2f00;
+                c.accent_text = 0x9a2f00;
+            }
+        }
+        self.metrics.border = 2.;
+    }
+    patchable! {
+        colors.window: color, colors.panel: color, colors.panel_secondary: color,
+        colors.viewer: color, colors.field: color, colors.floating: color,
+        colors.hover: color, colors.separator: color, colors.text: color,
+        colors.secondary: color, colors.muted: color, colors.accent: color,
+        colors.selected_text: color, colors.selected_fill: color, colors.focus: color,
+        colors.accent_text: color, colors.accent_wash: color, colors.danger: color,
+        colors.warning: color, colors.success: color,
+        metrics.gap: size, metrics.inset: size, metrics.panel_radius: size,
+        metrics.control_radius: size, metrics.inner_radius: size, metrics.header: size,
+        metrics.row: size, metrics.control: size, metrics.field: size,
+        metrics.value_column: size, metrics.border: size, metrics.track_row: size,
+        typography.minimum: size, typography.body: size, typography.label: size,
+        typography.title: size, typography.reading: size, typography.heading: size,
+        typography.display: size,
+    }
+    /// Apply a translated theme's `nativePatch` (field name → number). Fields are
+    /// applied in order; accessibility overrides are re-applied afterwards, so a
+    /// theme can never lower contrast below the Increase Contrast floor.
+    pub fn apply_patch<'a>(
+        &mut self,
+        patch: impl IntoIterator<Item = (&'a str, f64)>,
+    ) -> Result<(), PatchError> {
+        let mut next = self.clone();
+        for (name, value) in patch {
+            next.set_field(name, value)?;
+        }
+        next.enforce_accessibility();
+        *self = next;
+        Ok(())
     }
     pub fn material(&self, surface: Surface, glass_available: bool) -> Material {
         if !surface.permits_glass() || self.accessibility.reduce_transparency {
