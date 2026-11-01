@@ -5100,6 +5100,8 @@ dependencies = [
 name = "pm-surface"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "pm-design",
  "serde",
  "serde_json",
 ]
