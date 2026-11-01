@@ -53,6 +53,11 @@ pub struct Options {
 }
 impl Options {
     pub fn validate(&self) -> Result<(), String> {
+        // Portable project export does not read rendering fields. Retain dormant
+        // settings even when they cannot describe an encodable raster.
+        if self.format == Format::Json && self.fps.is_finite() {
+            return Ok(());
+        }
         let scale = match &self.scale {
             Scale::Preset(n) => [0.5, 1., 2.].contains(n),
             Scale::Custom(s) => s == "custom",
@@ -100,6 +105,62 @@ pub struct Intent {
     pub motion_blur: bool,
     pub burn_captions: bool,
     pub sidecar: String,
+}
+impl Intent {
+    /// Apply panel intent to native planner settings for JobSpec::Export.
+    /// The planner owns tick range, output size, colour, precision and audio
+    /// index. They are retained verbatim. Sidecars stay explicit in `self` and
+    /// must be written/verified by the host before publishing completion.
+    pub fn engine_settings(
+        &self,
+        mut planned: pm_protocol::priority::ExportSettings,
+    ) -> Result<Option<pm_protocol::priority::ExportSettings>, String> {
+        use pm_protocol::priority::{
+            AlphaOutput, ExportFormat, ProResProfile, QualityTier, WebmCodec,
+        };
+        use pm_protocol::validate::Validate;
+        self.options.validate()?;
+        planned.format = match self.options.format {
+            Format::Json => return Ok(None),
+            Format::Prores => ExportFormat::ProRes {
+                profile: ProResProfile::P4444,
+            },
+            Format::Mp4 => ExportFormat::H264,
+            Format::Webm => ExportFormat::Webm {
+                codec: WebmCodec::Vp9,
+            },
+            Format::Png => ExportFormat::PngSequence { sixteen_bit: false },
+            Format::Still => ExportFormat::PngStill { sixteen_bit: false },
+        };
+        planned.alpha = if self.straight_alpha {
+            AlphaOutput::Straight
+        } else {
+            AlphaOutput::None
+        };
+        planned.quality = match self.options.quality.as_str() {
+            "draft" => QualityTier::Draft,
+            "high" => QualityTier::High,
+            "max" => QualityTier::Max,
+            _ => return Err("invalid export quality".into()),
+        };
+        planned.audio = self.audio;
+        planned.motion_blur = self.motion_blur;
+        planned.draft_from_proxies = false;
+        planned.delivery.hide_captions = !self.burn_captions;
+        planned.delivery.preview = true;
+        // Still-frame timing is entirely the planner's (current playhead).
+        if self.options.format != Format::Still {
+            let rate = pm_time::rate_from_document(None, self.options.fps)
+                .map_err(|e| e.to_string())?
+                .rate;
+            planned.frame_rate = pm_protocol::common::FrameRate::new(
+                u32::try_from(rate.num()).map_err(|_| "export rate numerator overflow")?,
+                u32::try_from(rate.den()).map_err(|_| "export rate denominator overflow")?,
+            );
+        }
+        planned.validate().map_err(|e| e.to_string())?;
+        Ok(Some(planned))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Destination {

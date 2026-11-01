@@ -180,3 +180,117 @@ fn web_export_is_not_admitted() {
     raw["format"] = json!("web");
     assert!(serde_json::from_value::<Options>(raw).is_err());
 }
+
+#[test]
+fn portable_project_does_not_validate_hidden_raster_fields() {
+    let mut o = options();
+    o.format = Format::Json;
+    o.width = 12000;
+    o.height = 2;
+    assert!(o.validate().is_ok());
+    let mut h = Host {
+        destination: Some(Destination::File("wide.pmv".into())),
+        ..Host::default()
+    };
+    assert_eq!(
+        begin(&mut h, "Wide", &o, false, 0).unwrap(),
+        BeginResult::Started(10)
+    );
+}
+
+fn planned() -> pm_protocol::priority::ExportSettings {
+    use pm_protocol::{
+        color::{OutputColor, Precision},
+        common::{FrameRate, Size, TickRange, Ticks},
+        priority::*,
+    };
+    ExportSettings {
+        format: ExportFormat::H264,
+        alpha: AlphaOutput::None,
+        quality: QualityTier::Draft,
+        size: Size::new(1280, 720),
+        frame_rate: FrameRate::new(24, 1),
+        range: TickRange {
+            start: Ticks::from_whole_seconds(2),
+            end: Ticks::from_whole_seconds(10),
+        },
+        audio: false,
+        audio_index_playhead: None,
+        motion_blur: false,
+        color: OutputColor::Rec709Broadcast,
+        precision: Precision::Float32,
+        dither: true,
+        draft_from_proxies: true,
+        delivery: Default::default(),
+    }
+}
+#[test]
+fn engine_mapping_preserves_native_plan_and_exact_rate_without_proxy_fallback() {
+    use pm_protocol::priority::*;
+    let i = options().intent(true, 1).unwrap();
+    let base = planned();
+    let settings = i.engine_settings(base.clone()).unwrap().unwrap();
+    assert_eq!(settings.format, ExportFormat::H264);
+    assert_eq!(
+        settings.frame_rate,
+        pm_protocol::common::FrameRate::new(30000, 1001)
+    );
+    assert_eq!(settings.range, base.range);
+    assert_eq!(settings.size, base.size);
+    assert_eq!(settings.color, base.color);
+    assert_eq!(settings.precision, base.precision);
+    assert_eq!(settings.alpha, AlphaOutput::None);
+    assert!(!settings.draft_from_proxies);
+    assert!(settings.audio);
+    assert!(settings.delivery.preview);
+    assert!(!settings.delivery.hide_captions);
+    assert_eq!(i.sidecar, "srt");
+}
+#[test]
+fn every_render_format_maps_to_real_engine_contract_and_pmv_does_not_render() {
+    use pm_protocol::{color::OutputColor, priority::*};
+    for format in [
+        Format::Prores,
+        Format::Mp4,
+        Format::Webm,
+        Format::Png,
+        Format::Still,
+        Format::Json,
+    ] {
+        let mut o = options();
+        o.format = format;
+        let i = o.intent(true, 0).unwrap();
+        let mut base = planned();
+        if matches!(format, Format::Png | Format::Still) {
+            base.color = OutputColor::SrgbImage;
+        }
+        let mapped = i.engine_settings(base.clone()).unwrap();
+        if format == Format::Json {
+            assert!(mapped.is_none());
+            continue;
+        }
+        let mapped = mapped.unwrap();
+        if format == Format::Prores {
+            assert_eq!(
+                mapped.format,
+                ExportFormat::ProRes {
+                    profile: ProResProfile::P4444
+                }
+            );
+            assert_eq!(mapped.alpha, AlphaOutput::Straight);
+        }
+        if format == Format::Webm {
+            assert_eq!(
+                mapped.format,
+                ExportFormat::Webm {
+                    codec: WebmCodec::Vp9
+                }
+            );
+            assert_eq!(mapped.alpha, AlphaOutput::None);
+        }
+        if format == Format::Still {
+            assert_eq!(mapped.frame_rate, base.frame_rate);
+        }
+        assert!(mapped.delivery.hide_captions);
+    }
+}

@@ -4980,6 +4980,7 @@ name = "pm-promedia"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pm-protocol",
  "pm-time",
  "serde",
  "serde_json",
