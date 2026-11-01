@@ -2,6 +2,8 @@ export * from "./appearance.mjs";
 export * from "./conditions.mjs";
 export * from "./css.mjs";
 export * from "./data.mjs";
+export * from "./editions.mjs";
+export * from "./edition-dom.mjs";
 export * from "./foundation.mjs";
 export * from "./publication.mjs";
 export * from "./selectors.mjs";

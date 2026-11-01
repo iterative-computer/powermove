@@ -26,7 +26,7 @@ await runtime.evaluate();
 // All inputs and all allocations inside the test originate in the same realm.
 const driver = new SourceTextModule(
   `
-  import { translateTheme, evaluateTheme, ThemeController, ThemePublication } from './index.mjs';
+  import { translateTheme, evaluateTheme, ThemeController, ThemePublication, createCompatEdition, compatThemeMessage, CompatThemeReceiver } from './index.mjs';
   if (typeof process !== 'undefined' || typeof document !== 'undefined' || typeof structuredClone !== 'undefined') throw Error('Non-V8 global injected');
   const registry = new ThemeController();
   const owner = registry.api('fixture-owner');
@@ -39,6 +39,12 @@ const driver = new SourceTextModule(
   const publication = new ThemePublication({ replace(value) { current = value; } });
   publication.commit(publication.request(), snapshot);
   if (current.snapshot.id !== 'fixture') throw Error('V8 publication failed');
+  const native = ${readFileSync(new URL("../fixtures/native-tokens-v1.json", import.meta.url), "utf8")}[7];
+  const edition = createCompatEdition(native);
+  let render;
+  const receiver = new CompatThemeReceiver('panel@1', {replaceTheme(value) {render = value;}});
+  if (!receiver.receive(compatThemeMessage('panel@1', 1, edition))) throw Error('Edition rejected');
+  if (render.id !== 'compat-v1/dark-contrast-solid' || !render.stylesheet.includes('--glass-backdrop:none')) throw Error('V8 edition failed');
   owner.dispose();
   if (registry.selection.activeId !== 'default') throw Error('V8 cleanup failed');
 `,
