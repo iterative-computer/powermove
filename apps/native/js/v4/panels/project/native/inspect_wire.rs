@@ -39,7 +39,7 @@ fn main() {
                     .as_ref()
                     .map(|ax| &ax.tree)
                     .unwrap_or(&p.accessibility);
-                let ax=tree.nodes.iter().map(|(id,node)| json!({"id":id.0,"role":format!("{:?}",node.role()),"label":node.label(),"value":node.value(),"selected":node.is_selected(),"disabled":node.is_disabled(),"rowCount":node.row_count(),"multiselectable":node.is_multiselectable(),"actions":node.custom_actions().iter().map(|a| a.description.as_ref()).collect::<Vec<_>>()})).collect::<Vec<_>>();
+                let ax=tree.nodes.iter().map(|(id,node)| json!({"id":id.0,"role":format!("{:?}",node.role()),"label":node.label(),"value":node.value(),"selected":node.is_selected(),"disabled":node.is_disabled(),"rowCount":node.row_count(),"multiselectable":node.is_multiselectable(),"actions":node.custom_actions().iter().map(|a| json!({"id":a.id,"label":a.description.as_ref()})).collect::<Vec<_>>()})).collect::<Vec<_>>();
                 println!(
                     "{}",
                     json!({"accepted":true,"diagnostics":p.diagnostics,"wireDiagnostics":wire,"nodes":surface.nodes(),"focusOrder":focus_order(&surface),"accessibility":ax})

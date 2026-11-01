@@ -77,7 +77,7 @@ export function meta(row: Row): string {
       a.bytes === null ? null : mediaSize(a.bytes),
     ]
       .filter(Boolean)
-      .join(" · ") || "Ready to use"
+      .join(" · ") || (runtime.availability === "Ready" ? "Ready to use" : "")
   );
 }
 export function accessibleName(row: Row): string {

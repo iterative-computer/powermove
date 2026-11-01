@@ -15,7 +15,7 @@ pub struct ProjectAccessibility {
     pub tree: TreeUpdate,
     revision: u64,
     owner: Stamp,
-    actions: BTreeMap<u64, Vec<Input>>,
+    actions: BTreeMap<u64, BTreeMap<i32, Input>>,
 }
 fn commands(row: &Row, composition_count: usize) -> Vec<(&'static str, Input)> {
     let invoke = |command| Input::Invoke(command);
@@ -86,6 +86,29 @@ fn commands(row: &Row, composition_count: usize) -> Vec<(&'static str, Input)> {
         }
     }
 }
+// Semantic IDs never depend on the current enabled-action order. Runtime-only
+// readiness changes may leave the surface/document revision unchanged (N3/N7).
+// Append new IDs; never recycle an ID for another intent.
+fn action_id(input: &Input) -> i32 {
+    match input {
+        Input::OpenFolder(_) => 1,
+        Input::BeginRename(_) => 2,
+        Input::DeleteAsset(_) => 3,
+        Input::Pointer { .. } => 4,
+        Input::Invoke(command) => match command {
+            MenuCommand::AddAsset(_) => 5,
+            MenuCommand::Reveal(_) => 6,
+            MenuCommand::Replace(_) => 7,
+            MenuCommand::Download(_) => 8,
+            MenuCommand::DeleteFolder(_) => 9,
+            MenuCommand::OpenComposition(_) => 10,
+            MenuCommand::NestComposition(_) => 11,
+            MenuCommand::DeleteComposition(_) => 12,
+            _ => unreachable!("custom action needs a stable semantic ID"),
+        },
+        _ => unreachable!("custom action needs a stable semantic ID"),
+    }
+}
 impl ProjectAccessibility {
     pub fn prepare(
         surface: &Surface,
@@ -138,9 +161,8 @@ impl ProjectAccessibility {
             node.set_custom_actions(
                 choices
                     .iter()
-                    .enumerate()
-                    .map(|(i, (label, _))| CustomAction {
-                        id: i as i32,
+                    .map(|(label, input)| CustomAction {
+                        id: action_id(input),
                         description: (*label).into(),
                     })
                     .collect::<Vec<_>>(),
@@ -150,7 +172,10 @@ impl ProjectAccessibility {
             }
             actions.insert(
                 node_id.0,
-                choices.into_iter().map(|(_, input)| input).collect(),
+                choices
+                    .into_iter()
+                    .map(|(_, input)| (action_id(&input), input))
+                    .collect(),
             );
         }
         for (node_id, node) in &mut tree.nodes {
@@ -192,10 +217,9 @@ impl ProjectAccessibility {
         let Some(ActionData::CustomAction(id)) = request.data else {
             return Err("missing custom action");
         };
-        let index = usize::try_from(id).map_err(|_| "invalid custom action")?;
         self.actions
             .get(&request.target_node.0)
-            .and_then(|a| a.get(index))
+            .and_then(|a| a.get(&id))
             .cloned()
             .ok_or("unavailable project accessibility action")
     }

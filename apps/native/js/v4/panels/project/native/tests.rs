@@ -192,11 +192,12 @@ fn ax_fixture() -> (Catalog, ProjectAccessibilityFixture) {
         &pm_surface::kit::Layout::new(),
         Some(1),
     );
-    (c, ProjectAccessibilityFixture { ax, view })
+    (c, ProjectAccessibilityFixture { ax, view, surface })
 }
 struct ProjectAccessibilityFixture {
     ax: accessibility::ProjectAccessibility,
     view: Projection,
+    surface: pm_surface::Surface,
 }
 #[test]
 fn accessibility_is_a_multiselect_list_of_real_cells_with_full_count() {
@@ -226,7 +227,7 @@ fn voiceover_folder_actions_use_exact_model_inputs_and_refuse_stale_owners() {
         action: accesskit::Action::CustomAction,
         target_tree: accesskit::TreeId::ROOT,
         target_node: accesskit::NodeId(2),
-        data: Some(accesskit::ActionData::CustomAction(1)),
+        data: Some(accesskit::ActionData::CustomAction(2)),
     };
     assert!(matches!(f.ax.input(1,&c.stamp,&request),Ok(Input::BeginRename(id)) if id=="f"));
     assert!(f.ax.input(2, &c.stamp, &request).is_err());
@@ -334,4 +335,71 @@ fn every_folder_activation_resets_the_virtual_window_to_its_new_scope() {
         assert_eq!(reply.view.page.rows.len(), 1);
         assert_eq!(reply.view.page.rows[0].id, ItemId::Asset("a".into()));
     }
+}
+
+#[test]
+fn runtime_only_action_changes_cannot_reinterpret_an_old_voiceover_intent() {
+    let (c, mut f) = ax_fixture();
+    let old_id =
+        f.ax.tree
+            .nodes
+            .iter()
+            .find(|(id, _)| id.0 == 4)
+            .unwrap()
+            .1
+            .custom_actions()[0]
+            .id;
+    for row in &mut f.view.page.rows {
+        if let RowData::Asset(_, state) = &mut row.data {
+            state.availability = Availability::Ready;
+        }
+    }
+    let ready = accessibility::ProjectAccessibility::prepare(
+        &f.surface,
+        &f.view,
+        &pm_surface::kit::Layout::new(),
+        None,
+    );
+    let request = accesskit::ActionRequest {
+        action: accesskit::Action::CustomAction,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node: accesskit::NodeId(4),
+        data: Some(accesskit::ActionData::CustomAction(old_id)),
+    };
+    assert!(matches!(ready.input(1,&c.stamp,&request),Ok(Input::DeleteAsset(id)) if id=="a"));
+    for row in &mut f.view.page.rows {
+        if let RowData::Asset(_, state) = &mut row.data {
+            state.availability = Availability::Offline;
+        }
+    }
+    let offline = accessibility::ProjectAccessibility::prepare(
+        &f.surface,
+        &f.view,
+        &pm_surface::kit::Layout::new(),
+        None,
+    );
+    let locate_id = offline
+        .tree
+        .nodes
+        .iter()
+        .find(|(id, _)| id.0 == 4)
+        .unwrap()
+        .1
+        .custom_actions()
+        .iter()
+        .find(|a| a.description.as_ref() == "Locate")
+        .unwrap()
+        .id;
+    assert!(
+        ready
+            .input(
+                1,
+                &c.stamp,
+                &accesskit::ActionRequest {
+                    data: Some(accesskit::ActionData::CustomAction(locate_id)),
+                    ..request
+                }
+            )
+            .is_err()
+    );
 }
