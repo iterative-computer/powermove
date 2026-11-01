@@ -188,19 +188,13 @@ pub fn write(
     stage: naga::ShaderStage,
     entries: &[Entry],
 ) -> Result<(String, String), String> {
-    let info = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(module)
-    .map_err(|e| format!("naga validation: {:?}", e.into_inner()))?;
-    let (source, entry) = pm_gpu::msl::write(
-        module,
-        &info,
-        stage,
-        &slots(entries),
-        pm_gpu::msl::MathMode::Fast,
-    )?;
+    let slots = slots(entries).into_iter().map(|s| pm_glsl::compiler::Slot {
+        group: s.group, binding: s.binding, buffer: s.buffer,
+        texture: s.texture, sampler: s.sampler,
+    }).collect();
+    let (source, entry) = pm_glsl::compiler::msl(
+        module, stage, slots, pm_glsl::cache::DEFAULT_DEADLINE,
+    ).map_err(|e| e.to_string())?;
     Ok((angle_calls(&source), entry))
 }
 

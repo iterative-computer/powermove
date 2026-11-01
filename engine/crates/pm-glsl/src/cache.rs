@@ -6,15 +6,11 @@
 //! the glslang and naga versions, and a caller context (the wgpu back end and
 //! driver). [`Prepared`] programs are backend-independent SPIR-V plus
 //! reflection, so a disk entry survives across processes; naga's parse and
-//! validation (step 5, about 0.03 ms) runs on every load, and the Metal
-//! compiler's own cache (keyed by its driver) makes the pipeline itself cheap
-//! after the first build.
+//! validation (step 5) runs in a compiler worker on finishing a cached entry.
 //!
-//! Translation runs on its own thread with a 1 GiB stack (a 100,000-deep
-//! swizzle chain overflows the default 8 MiB, S3.md "Resource limits") and a
-//! deadline. A program that misses the deadline fails with
-//! [`FailureStage::Deadline`]; its thread is left to finish on its own
-//! (glslang and naga cannot be interrupted) and its result is dropped.
+//! Translation runs in a bounded pool of killable compiler process slots.
+//! A deadline kills and reaps the worker before releasing its slot. Cache
+//! hits still finish in a worker; no compiler thread survives a timeout.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,7 +19,9 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::pipeline::{self, Failure, FailureStage, PIPELINE_REVISION, Prepared};
+#[cfg(test)]
+use crate::pipeline;
+use crate::pipeline::{Failure, FailureStage, PIPELINE_REVISION, Prepared};
 
 /// Default translation deadline. The slowest valid program measured in S3
 /// (a 256 KiB program at the statement budget) translated in 5.2 s cold,
@@ -64,42 +62,13 @@ impl Key {
     }
 }
 
-/// Runs [`pipeline::prepare`] on a large-stack thread within `deadline`.
+/// Runs preparation in a compiler process within `deadline`.
 pub fn prepare_isolated(
     fragment: &str,
     line_offset: u32,
     deadline: Duration,
 ) -> Result<Prepared, Failure> {
-    let fragment = fragment.to_owned();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("pm-glsl translate".into())
-        .stack_size(TRANSLATION_STACK)
-        .spawn(move || {
-            let result = std::panic::catch_unwind(|| pipeline::prepare(&fragment, line_offset))
-                .unwrap_or_else(|_| Err(Failure::new(FailureStage::Panic, "translation panicked")));
-            let _ = tx.send(result);
-        });
-    if let Err(e) = spawned {
-        return Err(Failure::new(
-            FailureStage::Panic,
-            format!("could not start the translation thread: {e}"),
-        ));
-    }
-    match rx.recv_timeout(deadline) {
-        Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(Failure::new(
-            FailureStage::Deadline,
-            format!(
-                "translation did not finish within {} s",
-                deadline.as_secs_f64()
-            ),
-        )),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(Failure::new(
-            FailureStage::Panic,
-            "the translation thread ended without a result",
-        )),
-    }
+    crate::compiler::prepare(fragment, line_offset, deadline)
 }
 
 type Entry = Arc<Result<Prepared, Failure>>;
@@ -157,7 +126,11 @@ impl Cache {
                 result
             }
         });
-        self.memory_put(key, entry.clone());
+        if !matches!(entry.as_ref(), Err(f) if matches!(f.stage,
+            FailureStage::CompilerBusy | FailureStage::CompilerProcess | FailureStage::CompilerResources | FailureStage::Deadline))
+        {
+            self.memory_put(key, entry.clone());
+        }
         entry
     }
 
@@ -194,7 +167,11 @@ impl Cache {
     }
 
     fn disk_get(&self, key: Key) -> Option<Prepared> {
-        let bytes = std::fs::read(self.path(key)?).ok()?;
+        let path = self.path(key)?;
+        if std::fs::metadata(&path).ok()?.len() > crate::compiler::MAX_FRAME as u64 {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
         // A damaged or foreign entry is a miss.
         serde_json::from_slice::<DiskEntry>(&bytes)
             .ok()

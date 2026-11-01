@@ -1,0 +1,41 @@
+# P0: decisions and failures for Jude
+
+Status 2026-11-01. Plan v6 §7: any S5 failure goes to Jude before P1 sizing.
+Each item names its evidence. Nothing here authorizes dropping a v1–3 member
+(N4) or changing the frozen reference.
+
+## Gates
+
+| Item | State | Evidence |
+|---|---|---|
+| S1 V8 | Not started. The sandbox build needs far more disk than this Mac has (~10 GB free vs §9's 80 GB). Owner: a machine with space or CI. | — |
+| S2 GPUI-CE | **Open.** P-DEVICE, P-HEADLESS, P-TEXTURE pass GPU tests. IME, VoiceOver, resize, display moves, glass and 120 Hz are unverified (Mac locked). 1,000-texture fixture met deadlines but not 50% headroom. P-A11Y not started. | `s2-gpui-ce.md` |
+| S3 Viewer (EDR) | Not started; needs an unlocked GUI session and S2's on-screen checks. | — |
+| S4 GLSL | Running. | `s4-glsl.md` (pending) |
+| S5 Compat | **Open, with failures** (below). | `s5-compat.md` |
+| S6 Migration readers | Running. | `s6-migration.md` (pending) |
+| Inventories | Done: W1, C-MATRIX, D-STATE, T1, OS base. | `w1-*.md`, `c-matrix.*`, `d-state.md`, `t1-themes.md`, `os-base.md` |
+
+## S5 failures (measured with the Mac locked; some may be inflated by WebKit background throttling and need a rerun in an unlocked session)
+
+1. **Pixels page ↔ app:** 1080p download/decode p95 135 ms, binary upload 51 ms, text upload 171 ms against the ≤ 10 ms sync-pixel budget. Recommendation in the spike: keep pixels in the engine and pass ids; the sync `renderFrameTo` canvas fill is the remaining cost.
+2. **Render continuations:** work without deadlock (inline override, nested capture, real canvas, JPEG), but p95 384 ms on the synthetic path.
+3. **Background activity:** with the visibility/throttling SPI, a page-driven job kept 74% (app hidden) and 69% (windowless) of foreground throughput, short of the ≥ 95% rule. Offscreen-window-only stalled.
+4. **Hang kill:** `_killWebContentProcess` and WebKit's own termination did not end a real infinite loop within 20 s; a different reset-state SPI restarted the page in 106 ms (old process confirmed gone).
+5. **Fallback** (trusted realm in V8 + remote DOM) is unimplemented and unmeasured; it depends on S1.
+
+Decision needed: accept S5 as "channels viable, pixel/continuation/background budgets need the engine-id design and an unlocked rerun", or trigger the V8 + remote-DOM fallback evaluation (blocked on S1).
+
+## Questions from the inventories
+
+1. **Reference build.** §2 says `renderFrameToAsync`, `snapshotAsync` and `rasterAsync` ship to every apiVersion; at tag `v1.2.0` they don't exist in `RenderAPI`/`makeRender` (only `PM.Export.snapshotAsync`). Which build is the frozen reference for traces? (C-MATRIX Q1)
+2. **Store-wide counts.** C-MATRIX has `NA` for Store counts: no complete Store catalog/source snapshot is in the repo. Provide an authorized snapshot? (C-MATRIX Q2)
+3. **Authored vs fixed.** Where today's code and §3.2.1 differ (async decline replay, literal-false/pre-cancel policy, partial workspace mutations, Promise-returning mutation callbacks), which are authored contract and which are bugs to fix? (C-MATRIX Q3)
+4. **Pro features missing at v1.2.0** (W1): J/K/L shuttle, ripple delete/trim, persistent linked A/V, slide/roll, source-monitor three-point editing. §1 makes them cutover items "if W1 shows any are missing today". Confirm they are new cutover work.
+5. **Eval specs** (§12, open): may anonymised behaviour specs of Chike's panels be used in the v4 eval?
+
+## Recorded owner decisions (Chike, 2026-11-01)
+
+- This Mac runs P0 except S1. The app grows from `feat/na-foundation` (`apps/native`).
+- Web-animation export is removed (2026-10-29), not a cutover requirement.
+- Verified lanes are pushed as `feat/na-*` and merged `--no-ff` into `feat/native-engine` as they finish.
