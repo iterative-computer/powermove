@@ -381,3 +381,12 @@ macOS denial coverage. Final hardened/signed helper JIT, other supported macOS
 versions, production adapters, compat corpus, UI-thread independence and product
 memory/performance gates remain open. This lane changes verification documents
 only.
+
+### Later P2 bundle integration — 2026-11-01
+
+`pm-compat-runner` now executes the actual compat bundle and remote-DOM event
+closures in this runtime, with eight native tests. The extension inventory and
+remaining kernel/WebKit/Store capture gates are recorded in
+[extcheck-p2.md](extcheck-p2.md). This supersedes only the missing executable
+loader blocker above; it does not certify extension parity or complete the
+production adapters.
