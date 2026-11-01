@@ -1,7 +1,7 @@
 use crate::{Error, Result, json_value, model};
 use pm_kernel::session::{SessionHandle, SessionSource, ShellCall, ShellReply};
 use pm_kernel::{
-    Ack, Call, Caller, Command, HistoryMark, Kernel, KernelConfig, KernelEvent, KernelHandle,
+    Ack, ActorHistoryMark, Call, Caller, Command, Kernel, KernelConfig, KernelEvent, KernelHandle,
     Origin, Published, Reply, Request, WriteBody,
 };
 use serde::{Deserialize, Serialize};
@@ -203,74 +203,82 @@ impl Automation {
         self.emit(id, "published");
         Ok(ack)
     }
-    pub fn select_layers(&mut self, id: &str, ids: &[String], add: bool) -> Result<Value> {
-        let all = self.store(id)?.layers();
-        if ids.iter().any(|id| !all.iter().any(|l| &l.id == id)) {
-            return Err(Error::invalid(
-                "Select existing layer IDs from get_project_state. No selection was changed.",
-            ));
-        }
-        self.kernel
-            .project_mut(id)
-            .unwrap()
-            .store_mut()
-            .select_layers(ids.iter().cloned(), add);
-        self.emit(id, "selection");
-        self.selection(id)
-    }
-    pub fn history_mark(&self, id: &str) -> Result<HistoryMark> {
-        Ok(self.store(id)?.history_mark())
-    }
-    pub fn squash(&mut self, id: &str, mark: &HistoryMark, label: &str) -> Result<Option<u64>> {
-        self.store(id)?;
-        if self.kernel.project(id).unwrap().open_entry().is_some() {
-            return Ok(None);
-        }
-        let entry = self
-            .kernel
-            .project_mut(id)
-            .unwrap()
-            .store_mut()
-            .squash_since(mark, label);
-        // Drain the store's durable squash tap through Kernel::handle before
-        // acknowledging it. No second history store or journal is introduced.
-        self.flush_store(id)?;
-        Ok(entry)
-    }
-    fn flush_store(&mut self, id: &str) -> Result<Ack> {
+    pub fn select_layers(
+        &mut self,
+        id: &str,
+        ids: &[String],
+        add: bool,
+        writer: u32,
+    ) -> Result<Value> {
         self.call(
             id,
             Request::new(
-                Caller::native(),
-                Call::Transact {
-                    label: None,
-                    body: WriteBody::Commands(vec![]),
-                    expected_revision: None,
+                Caller::realm(writer, 1, Origin::Mcp),
+                pm_kernel::SelectionCall::Layers {
+                    ids: ids.to_vec(),
+                    add,
                 },
             ),
-        )
+        )?;
+        self.selection(id)
     }
-    pub fn restore(&mut self, id: &str, value: Value, expected: u64, _writer: u32) -> Result<u64> {
-        if self.revision(id)? != expected {
-            return Err(Error::conflict(
-                "The project changed after the agent edit; all work was preserved.",
-            ));
+    pub fn history_mark(&mut self, id: &str, writer: u32) -> Result<ActorHistoryMark> {
+        match self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, Origin::Mcp),
+                    pm_kernel::HistoryCall::Mark,
+                ),
+            )?
+            .reply
+        {
+            Reply::Mark(mark) => Ok(mark),
+            other => Err(Error::kernel(other)),
         }
-        // restore_project validates the replacement and records one undo step.
-        // It cannot bypass the actor's open transaction/folding rules.
-        if self.kernel.project(id).unwrap().open_entry().is_some() {
-            return Err(Error::conflict(
-                "Finish the active edit before rolling back agent changes. All work was preserved.",
-            ));
+    }
+    pub fn squash(
+        &mut self,
+        id: &str,
+        mark: &ActorHistoryMark,
+        label: &str,
+    ) -> Result<Option<u64>> {
+        let revision = self.revision(id)?;
+        let writer = mark.writer();
+        match self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer.realm, writer.generation, Origin::Mcp),
+                    pm_kernel::HistoryCall::Squash {
+                        mark: mark.clone(),
+                        label: label.into(),
+                        expected_revision: revision,
+                    },
+                ),
+            )?
+            .reply
+        {
+            Reply::Entry(entry) => Ok(entry),
+            other => Err(Error::kernel(other)),
         }
-        self.kernel
-            .project_mut(id)
-            .unwrap()
-            .store_mut()
-            .restore_project(model(&value), "Roll back agent changes", Origin::Mcp)
-            .map_err(Error::kernel)?;
-        // Drain the restore's durable taps through the same kernel journal.
-        let ack = self.flush_store(id)?;
+    }
+    pub fn restore(&mut self, id: &str, value: Value, expected: u64, writer: u32) -> Result<u64> {
+        let document = self.store(id)?.doc_id();
+        let ack = self
+            .call(
+                id,
+                Request::new(
+                    Caller::realm(writer, 1, Origin::Mcp),
+                    Call::Restore {
+                        project: model(&value),
+                        label: "Roll back agent changes".into(),
+                        expected_revision: expected,
+                        expected_document: document,
+                    },
+                ),
+            )
+            .map_err(|e| Error::conflict(e.message))?;
         Ok(ack.revision)
     }
     pub fn undo(&mut self, id: &str, origin: Origin, writer: u32) -> Result<Ack> {
@@ -384,7 +392,7 @@ impl Automation {
         if !self.sessions.contains_key(id) {
             let reply = self
                 .kernel
-                .shell(ShellCall::Open {
+                .shell(ShellCall::PrepareOpen {
                     id: id.into(),
                     source: SessionSource::Library {
                         profile: self.profile.clone(),
@@ -489,7 +497,7 @@ mod tests {
                 .to_owned();
             let snapshot = host.read_document(&id).unwrap();
             let revision = host.revision(&id).unwrap();
-            let mark = host.history_mark(&id).unwrap();
+            let mark = host.history_mark(&id, 23).unwrap();
             host.kernel
                 .handle(
                     &id,
@@ -516,8 +524,7 @@ mod tests {
 }
 
 /// Adapter to the app's existing actor. Reads are immutable; edits are awaited.
-/// Selection, history marks/squash and guarded restore need actor messages
-/// before the MCP session host can share this actor (documented, not bypassed).
+/// Selection, history and restore use the same actor messages as standalone tools.
 #[derive(Clone)]
 pub struct ActorAutomation {
     pub kernel: KernelHandle,
@@ -531,6 +538,102 @@ impl ActorAutomation {
             engine: None,
             surfaces: None,
         }
+    }
+    pub fn for_actor(&self, caller: Caller) -> pm_kernel::ActorHandle {
+        self.kernel.for_actor(caller)
+    }
+    async fn actor_call(&self, id: &str, caller: Caller, call: impl Into<Call>) -> Result<Ack> {
+        let ack = self
+            .for_actor(caller)
+            .call(id, call)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)?;
+        if let Reply::Throw(e) = &ack.reply {
+            return Err(Error::kernel(e));
+        }
+        Ok(ack)
+    }
+    pub async fn select_layers(
+        &self,
+        id: &str,
+        caller: Caller,
+        ids: Vec<String>,
+        add: bool,
+    ) -> Result<Ack> {
+        self.actor_call(id, caller, pm_kernel::SelectionCall::Layers { ids, add })
+            .await
+    }
+    pub async fn history_mark(&self, id: &str, caller: Caller) -> Result<ActorHistoryMark> {
+        match self
+            .actor_call(id, caller, pm_kernel::HistoryCall::Mark)
+            .await?
+            .reply
+        {
+            Reply::Mark(mark) => Ok(mark),
+            other => Err(Error::kernel(other)),
+        }
+    }
+    pub async fn squash(
+        &self,
+        id: &str,
+        caller: Caller,
+        mark: ActorHistoryMark,
+        expected_revision: u64,
+        label: String,
+    ) -> Result<Ack> {
+        self.actor_call(
+            id,
+            caller,
+            pm_kernel::HistoryCall::Squash {
+                mark,
+                label,
+                expected_revision,
+            },
+        )
+        .await
+    }
+    pub async fn restore(
+        &self,
+        id: &str,
+        caller: Caller,
+        value: Value,
+        expected_revision: u64,
+        expected_document: u64,
+    ) -> Result<Ack> {
+        self.actor_call(
+            id,
+            caller,
+            Call::Restore {
+                project: model(&value),
+                label: "Roll back agent changes".into(),
+                expected_revision,
+                expected_document,
+            },
+        )
+        .await
+    }
+    /// The caller runs SessionSave::run on its worker and returns the completion.
+    pub async fn prepare_save(
+        &self,
+        session: SessionHandle,
+        path: Option<PathBuf>,
+    ) -> Result<pm_kernel::session::SessionSave> {
+        self.kernel
+            .prepare_save(session, path)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)
+    }
+    pub async fn finish_save(
+        &self,
+        completion: pm_kernel::session::SessionSaveCompletion,
+    ) -> Result<ShellReply> {
+        self.kernel
+            .finish_save(completion)
+            .await
+            .ok_or_else(|| Error::unavailable("kernel actor stopped"))?
+            .map_err(Error::kernel)
     }
     pub fn inspect_project(&self, id: &str) -> Result<Arc<Published>> {
         self.kernel

@@ -139,6 +139,14 @@ pub enum Call {
     Edit(EditCall),
     Gesture(GestureCall),
     Workspace(WorkspaceCall),
+    Selection(SelectionCall),
+    /// Validated whole-document restore; never folds across an open entry.
+    Restore {
+        project: Value,
+        label: String,
+        expected_revision: u64,
+        expected_document: u64,
+    },
     /// A short native edit (UI, MCP, agents): one step, or folded.
     Transact {
         label: Option<String>,
@@ -166,8 +174,43 @@ pub enum Call {
     },
 }
 
+/// Opaque actor/document-bound history position. Foreign edits prevent squash.
+#[derive(Clone, Debug)]
+pub struct ActorHistoryMark {
+    document: u64,
+    writer: Writer,
+    serial: u64,
+    mark: crate::HistoryMark,
+}
+
+impl ActorHistoryMark {
+    pub fn writer(&self) -> Writer {
+        self.writer
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum SelectionCall {
+    Layers { ids: Vec<String>, add: bool },
+    ToggleLayer(String),
+    Keys(Vec<String>),
+    Channel(Option<String>),
+    Clear,
+}
+impl From<SelectionCall> for Call {
+    fn from(value: SelectionCall) -> Self {
+        Self::Selection(value)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum HistoryCall {
+    Mark,
+    Squash {
+        mark: ActorHistoryMark,
+        label: String,
+        expected_revision: u64,
+    },
     /// `history.do` with a native body: atomic, nests into an open entry.
     Do {
         label: String,
@@ -297,6 +340,8 @@ pub enum Direction {
 pub enum Reply {
     /// `undefined`.
     Unit,
+    Mark(ActorHistoryMark),
+    Selection(crate::Selection),
     Bool(bool),
     /// `history.begin`: the before snapshot (`null` inside a scoped entry).
     Before(Option<Snapshot>),
@@ -358,6 +403,7 @@ pub enum KernelError {
     },
     UnknownTicket,
     NoSuchGesture,
+    Guard(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -372,6 +418,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Callback(m) => write!(f, "{m}"),
             KernelError::DirectWrite { message, .. } => f.write_str(message),
             KernelError::UnknownTicket => f.write_str("Unknown continuation"),
+            KernelError::Guard(message) => f.write_str(message),
             KernelError::NoSuchGesture => f.write_str("That drag is not in progress"),
         }
     }
@@ -534,6 +581,8 @@ pub struct Project {
     dead: HashSet<Writer>,
     workspace: Value,
     next_id: u64,
+    mutation_serial: u64,
+    mutations: VecDeque<(u64, Writer)>,
     /// Continuations waiting for a realm: ticket → (waiting caller, inline).
     tickets: HashMap<u64, Ticket>,
     outbox: Vec<RealmMessage>,
@@ -561,6 +610,8 @@ impl Project {
             dead: HashSet::new(),
             workspace: Value::Null,
             next_id: 1,
+            mutation_serial: 0,
+            mutations: VecDeque::new(),
             tickets: HashMap::new(),
             outbox: Vec::new(),
             notices: Vec::new(),
@@ -646,7 +697,42 @@ impl Project {
                 Reply::Throw(KernelError::StaleGeneration),
             ));
         }
+        let tracks_mutation = !matches!(
+            &call,
+            Call::Selection(_) | Call::Workspace(_) | Call::History(HistoryCall::Mark)
+        );
+        let before_revision = self.revision();
+        let before_mark = self.store.history_mark();
+        let before_cursor = self.store.history().applied();
         let handled = match call {
+            Call::Selection(selection) => {
+                let reply = self.select(selection);
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
+            Call::Restore {
+                project,
+                label,
+                expected_revision,
+                expected_document,
+            } => {
+                let reply = if self.entry.is_some()
+                    || expected_document != self.store.doc_id()
+                    || expected_revision != self.revision()
+                {
+                    Reply::Throw(KernelError::Guard(
+                        "Project changed or an edit is open; all work was preserved".into(),
+                    ))
+                } else {
+                    match self.store.restore_project(project, &label, caller.origin) {
+                        Ok(commit) => Reply::Applied {
+                            revision: self.revision(),
+                            changed: commit.is_some(),
+                        },
+                        Err(error) => Reply::Throw(error.into()),
+                    }
+                };
+                Handled::reply(self.ack(txid, None, None, reply))
+            }
             Call::History(h) => self.history(caller, txid, h),
             Call::Edit(e) => Handled::reply(self.edit(caller, txid, e)),
             Call::Gesture(g) => Handled::reply(self.gesture(caller, txid, g)),
@@ -665,6 +751,18 @@ impl Project {
             } => self.external_done(txid, ticket, ok, message),
             Call::QueryTx { .. } => unreachable!("answered above"),
         };
+        if tracks_mutation
+            && (before_revision != self.revision()
+                || before_mark != self.store.history_mark()
+                || before_cursor != self.store.history().applied())
+        {
+            self.mutation_serial += 1;
+            self.mutations
+                .push_back((self.mutation_serial, caller.writer));
+            if self.mutations.len() > 4096 {
+                self.mutations.pop_front();
+            }
+        }
         for retired in self.store.take_retired() {
             self.outbox.push(RealmMessage::Cleanup {
                 writer: Writer {
@@ -686,6 +784,31 @@ impl Project {
             self.notices.push(notice);
         }
         handled
+    }
+
+    fn select(&mut self, call: SelectionCall) -> Reply {
+        let ids = match &call {
+            SelectionCall::Layers { ids, .. } => ids.clone(),
+            SelectionCall::ToggleLayer(id) => vec![id.clone()],
+            _ => vec![],
+        };
+        let layers = self.store.layers();
+        if ids
+            .iter()
+            .any(|id| !layers.iter().any(|layer| &layer.id == id))
+        {
+            return Reply::Throw(KernelError::Guard(
+                "Select existing layer IDs; no selection was changed".into(),
+            ));
+        }
+        match call {
+            SelectionCall::Layers { ids, add } => self.store.select_layers(ids, add),
+            SelectionCall::ToggleLayer(id) => self.store.toggle_layer(&id),
+            SelectionCall::Keys(ids) => self.store.select_keys(ids),
+            SelectionCall::Channel(channel) => self.store.set_selected_channel(channel),
+            SelectionCall::Clear => self.store.clear_selection(),
+        }
+        Reply::Selection(self.store.selection().clone())
     }
 
     fn remember(&mut self, key: TxId, ack: Ack) {
@@ -977,6 +1100,36 @@ impl Project {
     fn history(&mut self, caller: Caller, txid: Option<TxId>, call: HistoryCall) -> Handled {
         let writer = caller.writer;
         let reply = match call {
+            HistoryCall::Mark => Reply::Mark(ActorHistoryMark {
+                document: self.store.doc_id(),
+                writer,
+                serial: self.mutation_serial,
+                mark: self.store.history_mark(),
+            }),
+            HistoryCall::Squash {
+                mark,
+                label,
+                expected_revision,
+            } => {
+                let valid = self.entry.is_none()
+                    && self.revision() == expected_revision
+                    && mark.document == self.store.doc_id()
+                    && mark.writer == writer
+                    && mark.serial <= self.mutation_serial
+                    && self
+                        .mutations
+                        .front()
+                        .is_none_or(|(serial, _)| mark.serial + 1 >= *serial)
+                    && self
+                        .mutations
+                        .iter()
+                        .all(|(serial, actor)| *serial <= mark.serial || *actor == writer);
+                Reply::Entry(if valid {
+                    self.store.squash_since(&mark.mark, &label)
+                } else {
+                    None
+                })
+            }
             HistoryCall::Do { label, body } => {
                 match self.write(writer, caller.origin, &label, &body, true) {
                     Ok((changed, folded)) => {

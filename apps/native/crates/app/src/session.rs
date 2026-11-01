@@ -204,10 +204,10 @@ impl Controller {
             self.mirror = Some(QueryMirror::new(&p));
         }
         self.layers = self.mirror.as_mut().unwrap().queries().layers(None);
-        self.selected = p.selection.layers().first().cloned().or_else(|| {
-            self.selected
-                .clone()
-                .filter(|id| self.layers.iter().any(|l| &l.id == id))
+        self.selected = p.selection.primary().map(str::to_owned);
+        self.path = p.session.as_ref().and_then(|s| match &s.destination {
+            SessionDestination::File(path) => Some(path.clone()),
+            _ => None,
         });
         let title = p
             .snapshot
@@ -264,8 +264,7 @@ impl Controller {
         );
     }
     pub fn select(&mut self, id: String, cx: &mut Context<Self>) {
-        self.selected = Some(id.clone());
-        cx.notify();
+        self.call(SelectionCall::Layers { ids: vec![id], add: false }.into(), cx);
     }
     pub fn time(&self) -> f64 {
         self.viewer
@@ -279,7 +278,14 @@ impl Controller {
                 .rate
                 .frame_of((seconds.clamp(0., self.duration) * TICKS_PER_SECOND as f64) as i64);
             if let Ok(time) = self.rate.frame_start(frame)
-                && let Err(e) = v.scrub(Ticks::new(time).unwrap_or(Ticks::ZERO))
+                && let Err(e) = v.scrub_at(
+                    Ticks::new(time).unwrap_or(Ticks::ZERO),
+                    objc2_app_kit::NSApplication::sharedApplication(
+                        objc2::MainThreadMarker::new().unwrap(),
+                    )
+                    .currentEvent()
+                    .map_or_else(pm_engine_service::trace::now, |e| e.timestamp()),
+                )
             {
                 self.message = e.to_string();
             }
@@ -342,25 +348,38 @@ impl Controller {
         self.opening = true;
         self.message = "Opening…".into();
         cx.spawn(async move |this, cx| {
-            let media_path = path.clone();
-            let library = match &source { SessionSource::Library {profile,project} => Some((profile.clone(),project.clone())), _=>None };
-            let media = cx.background_executor().spawn(async move {
-                let media_path = media_path.or_else(|| library.and_then(|(profile,id)| {
-                    LibraryStore::open(&profile).load(&id).ok().flatten()?.session?
-                        .get("file")?.get("path")?.as_str().map(PathBuf::from)
-                }));
-                media_path.as_deref().map(|p| crate::media::for_file(p, &cache)).transpose()
-            }).await;
-            if let Err(error) = &media {
-                let _ = this.update(cx, |v,cx| {v.opening=false;v.message=format!("Open failed: {error}");cx.notify();});
-                return;
-            }
             let open_id = match &source {
                 SessionSource::Library {project,..}=>project.clone(),
                 SessionSource::File(p)=>stable_id(p),
                 SessionSource::New(_)=>pm_kernel::new_id("app"),
             };
-            let result = kernel.shell(ShellCall::Open {id:open_id, source, electron_profile:None}).await;
+            let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile:None}).await;
+            if let Some(Ok(ShellReply::RecoveryRequired { ticket, recovery })) = &result {
+                let ticket = ticket.clone();
+                let description = format!("{recovery:?}\nRecovery data is retained until you choose.");
+                let choice = this.update(cx, |v, _| {
+                    v.recovery_pending = true;
+                    platform::choice(&v.host.borrow().window, "Unsaved work was found", &description,
+                        &["Recover", "Open as copy", "Discard"])
+                });
+                let choice = match choice { Ok(rx) => rx.recv().await.ok(), Err(_) => None };
+                let decision = match choice {
+                    Some(0) => Some(RecoveryDecision::Recover),
+                    Some(1) => Some(RecoveryDecision::OpenAsCopy),
+                    Some(2) => Some(RecoveryDecision::Discard),
+                    _ => None,
+                };
+                if let Some(decision) = decision {
+                    result = kernel.shell(ShellCall::DecideRecovery { ticket, decision }).await;
+                }
+            }
+            let media = if let Some(Ok(ShellReply::Opened { session, .. })) = &result {
+                let published = kernel.published(&session.project).unwrap();
+                cx.background_executor().spawn(async move {
+                    crate::media::for_session(&published.snapshot, &published.media,
+                        published.path.as_deref(), &cache)
+                }).await.map(Some)
+            } else { Ok(None) };
             let mut previous_save_failed = false;
             if matches!(&result, Some(Ok(ShellReply::Opened {..})))
                 && let Some(old)=old {
@@ -368,8 +387,9 @@ impl Controller {
             }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
+                v.recovery_pending = false;
                 match result {
-                    Some(Ok(ShellReply::Opened { session, recovery, decision, info })) => {
+                    Some(Ok(ShellReply::Opened { session, recovery: _, decision, info })) => {
                         if let Some(viewer)=v.viewer.take(){viewer.retire();}
                         v.path=path;
                         v.session = Some(session);
@@ -400,7 +420,6 @@ impl Controller {
                         v.show_library = false;
                         if previous_save_failed { v.message.push_str(" · Previous project could not be saved; its recovery journal is retained"); }
 
-                        v.recovery(recovery, cx);
                         v.load_recent(cx);
                     }
                     other => { v.message = format!("Open failed: {other:?}"); }
@@ -448,9 +467,20 @@ impl Controller {
                 path,
             },
         );
-        let pending = self.kernel.shell(call);
+        let kernel = self.kernel.clone();
+        let file_save = as_path.is_some() || self.published.as_ref().is_some_and(|p|
+            p.session.as_ref().is_some_and(|s| matches!(s.destination, SessionDestination::File(_))));
         cx.spawn(async move |this, cx| {
-            let result = pending.await;
+            let result = if file_save {
+                match kernel.prepare_save(session, as_path.clone()).await {
+                    Some(Ok(save)) => {
+                        let completion = cx.background_executor().spawn(async move { save.run() }).await;
+                        kernel.finish_save(completion).await
+                    }
+                    Some(Err(e)) => Some(Err(e)),
+                    None => None,
+                }
+            } else { kernel.shell(call).await };
             let _ = this.update(cx, |v, cx| {
                 match result {
                     Some(Ok(ShellReply::Saved {
@@ -472,46 +502,6 @@ impl Controller {
             });
         })
         .detach();
-    }
-    fn recovery(&mut self, result: RecoveryResult, cx: &mut Context<Self>) {
-        if result == RecoveryResult::None {
-            return;
-        }
-        self.recovery_pending = true;
-        let rx = platform::choice(
-            &self.host.borrow().window,
-            "Unsaved work was found",
-            &format!("{result:?}\nRecovery data is kept until you choose what to do."),
-            &["Recover", "Open as copy", "Discard"],
-        );
-        cx.spawn(async move |this, cx| {
-            let choice = rx.recv().await.unwrap_or(0);
-            let _ = this.update(cx, |v, cx| {
-                v.recovery_pending = false;
-                match (&result, choice) {
-                    (RecoveryResult::OfferCopy {project,..}, 0 | 1) => {
-                        v.open_library(project.clone(),cx);
-                    }
-                    (RecoveryResult::OfferCopy {project,..}, 2) => {
-                        let pending=v.kernel.shell(ShellCall::Trash(project.clone()));
-                        cx.spawn(async move|this,cx|{
-                            let result=pending.await;
-                            let _=this.update(cx,|v,cx|{v.message=format!("Recovery copy moved to library trash: {result:?}");cx.notify();});
-                        }).detach();
-                    }
-                    (RecoveryResult::Recovered {..}, 1) => v.save_dialog(cx),
-                    (RecoveryResult::Recovered {..}, 2) => {
-                        v.recovery_pending=true;
-                        v.message="Discard needs a kernel recovery-decision API. Unsaved recovery is retained; reopen to choose Recover or Open as copy.".into();
-                    }
-                    (RecoveryResult::Unrecoverable {..}, _) => {
-                        v.message="Recovery could not be replayed. The original is open and all recovery files are retained.".into();
-                    }
-                    _=>v.message="Recovered work is ready; save to keep it".into(),
-                }
-                cx.notify();
-            });
-        }).detach();
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
         let rx = platform::paths(&self.host.borrow().window, true);
@@ -653,6 +643,7 @@ impl Controller {
         let duration = self.duration;
         let rate = self.rate;
         let dimensions = self.dimensions;
+        let activity = self.engine.export_activity();
         let rx = platform::paths_named(&self.host.borrow().window, true, "Frames");
         self.message = "Export: choose a new PNG sequence folder".into();
         cx.spawn(async move |this, cx| {
@@ -696,9 +687,10 @@ impl Controller {
                         media,
                         destination,
                     )?;
-                    pm_engine_service::jobs::ExportHandle::start(
+                    pm_engine_service::jobs::ExportHandle::start_scheduled(
                         &std::env::current_exe()?,
                         request,
+                        activity,
                     )?
                     .wait()
                 })

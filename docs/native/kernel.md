@@ -1,9 +1,9 @@
-# pm-kernel: the kernel actor (P1 package 5, slices 1–2)
+# pm-kernel: the kernel actor (P1 package 5, slices 1–3)
 
 Crate: `apps/native/crates/kernel` (package `pm-kernel`). Pure Rust, no GPUI.
 Baseline: plan v6 §3.2 (kernel actor, transactions, history), §6 (library,
 journals keyed to base), §8 (behaviour oracle). "Today" means tag `v1.2.0`.
-Status 2026-11-01: slices 1 and 2 implemented and tested: actor, transactions,
+Status 2026-11-01: slices 1–3 implemented: actor, transactions,
 history, journal, recovery, library reads/writes, locks, state and shell session
 operations. Outstanding integration and history work is listed under
 [Remaining for P1](#remaining-for-p1).
@@ -269,7 +269,7 @@ sometimes one more, and undo works), 8 library, 1 trace replay.
 ## Remaining for P1
 
 * History: parked histories sharing one global budget (`history.ts:460–480`),
-  `history.selection`, `mark`/`squash` as calls (agent runs), export pinning
+  `history.selection`, export pinning
   of extension generations, v4 hot-reload staging (§3.2.1).
 * Index hazards: rebase index paths by id so more cancels revert instead of
   committing with notice.
@@ -399,3 +399,154 @@ failed-write retry, interrupted/invalid intents, copy crashes, independent embed
 media after deleting the original, settings deletion/restart, registry overrides,
 publication/events, save-as, stale sessions, recents/trash/restore/duplicates,
 base mismatch, rebase, and unopened library/file/offline rollback compaction.
+
+## Slice 3: integration, MCP and first-launch services
+
+The kernel remains the only document, history, session and profile writer.
+The new entry points are asynchronous on `KernelHandle`; synchronous `Kernel`
+methods are for dedicated workers and tests.
+
+### Recovery decisions and close
+
+* `ShellCall::PrepareOpen` reads the source and probes recovery. If work is
+  recoverable it returns `RecoveryRequired { ticket, recovery }` **before**
+  opening/publishing a document or saving a slot. Cancelling the sheet leaves
+  all data alone. A later preparation for the same ID invalidates the old ticket.
+* A clean rebase checkpoint does not prompt: document, saved history and
+  workspace must all match the base, and the journal must not be truncated.
+  History-only and workspace-only changes still require a decision.
+* `DecideRecovery { ticket, decision }` accepts `Recover`, `OpenAsCopy`, or
+  `Discard`. Tickets are single-use and bound to the observed source base,
+  journal session/revision/content and external file version. A changed base
+  refuses the choice and requires a fresh preparation. Recover on a mismatched
+  base opens the work as a named copy. A failed replay is never called recovery.
+* Discard archives only the rejected journal session under `discarded/`, syncs
+  both directories, and opens the unchanged base. It does not save recovered
+  content or call the saving Close operation. Archives are retained for future
+  user-managed cleanup. The existing `Open` entry point keeps its safe automatic
+  recover/copy behavior for worker clients; the app uses explicit preparation.
+* `DeferClose` flushes and releases a session's project lock while preserving its
+  journal, without saving. `Close` flushes, saves/compacts, waits for durability,
+  then releases the lock. Both refuse an active entry or an in-flight save.
+  Failures keep the document/session available. Low-level close also refuses
+  a live store save and a failed journal flush.
+* `PrepareQuit` checks all sessions before compaction, compacts active and
+  parked journals through existing shell operations, and waits on the library,
+  journal and checkpoint durability barrier. It reports failure instead of
+  certifying a completed shutdown. Application termination UI remains the shell
+  lane's responsibility.
+
+### Selection, actor identity and history
+
+* `SelectionCall::{Layers, ToggleLayer, Keys, Channel, Clear}` runs in an actor
+  turn, uses ordinary request generation fencing/txid deduplication, and returns
+  the resulting selection. Invalid layer IDs refuse the whole selection change.
+  Selection stays ephemeral, outside document undo and dirty state.
+  `SelectionChanged` follows publication, including pruning by document edits.
+* `KernelHandle::for_actor(Caller)` binds realm, generation and origin in an
+  immutable `ActorHandle`. UI, MCP clients and agents never change a global
+  "current actor". Their ordinary edits retain the existing fold/cancel rules.
+* `HistoryCall::Mark` returns an opaque `ActorHistoryMark` bound to the document
+  lifetime and writer. `Squash` checks that identity, the expected revision,
+  absence of an open entry and absence of foreign mutations after the mark.
+  Tracking is bounded to 4,096 mutations; older marks conservatively refuse.
+  Mark queries and selection do not invalidate another actor's grouping.
+* `Call::Restore` requires document identity and expected revision, validates
+  the complete replacement and refuses an open entry. A successful restore is
+  an ordinary undoable, journalled change with the caller's origin. Mark/squash
+  and restore use the same journal/publication boundary as Transact; there is
+  no caller-owned journal drain.
+
+### Save handoff and shell metadata
+
+`prepare_save(session, optional_save_as_path)` freezes a PMV save and acquires
+its destination lock on the actor. `SessionSave::run` runs on a worker, then
+`finish_save(completion)` adopts the receipt on the actor and coordinates the
+library association and journal. The session/ticket pair prevents stale adoption.
+Edits continue during the worker save and remain dirty if newer than its frozen
+revision. A failed completion clears the flight without claiming a successful
+save. Dropped handoffs require explicit `AbortSave` after the plan is dropped;
+running plans cannot be aborted out from under a disk writer.
+
+Library saves continue to use `ShellCall::Save`. Concurrent file-save edits keep
+an older journal base until the next full save; recovery offers a copy when the
+file and journal base differ. This preserves acknowledged work conservatively.
+
+`Published` includes session handle/destination/metadata, path, saving state and
+copy-on-write `MediaTable` read capabilities. The app streams those capabilities to
+its private media cache instead of reopening the PMV and rediscovering metadata.
+`MediaEntry::copy_to` uses exclusive destination creation, bounded streaming,
+length/digest checks and external-file version checks, removing failed outputs.
+
+### First-launch profile services
+
+`KernelHandle::profile(ProfileCall)` uses the attached native library lock.
+`ProfileStorage` borrows that same lock owner for the migration worker.
+
+* Logical localStorage reads/writes address exact origin/key pairs and preserve
+  exact DOM strings, empty strings and unrelated/unknown entries. Writes and
+  deletes publish atomically to the imported sidecar. Initial import preserves
+  existing native values and never activates legacy evaluator flags.
+* Secret registration stores versioned `SecretLocator { id, version, service,
+  account }` records, refuses differing locators for the same version, and
+  returns all retained versions. First-launch registers the locator after an
+  explicitly consented Keychain write and before its migration receipt. No
+  secret value enters the kernel, document, journal, or locator sidecar.
+  Consumer-specific Keychain resolution/updates remain host service work.
+* Extension source inventory identifies read-only shared and writable overlay
+  roots. Reads prefer overlay files, falling back to shared files. Writes
+  create/replace only overlay files. Absolute/traversing paths and linked roots
+  or ancestors are refused; the kernel never changes shared permissions.
+* `ExternalMedia` reads a PMV's media capabilities without creating a source-side
+  lock. Migration retains external associations as `embeddedMedia`, separate
+  from in-place save destinations. Opening such a library copy checks its
+  source hash when present and saves independent media into the native profile's
+  existing PMV companions. A later save never targets the external source.
+
+### Caller changes
+
+* `app/src/session.rs`: kernel selection, pre-adoption recovery sheet, published
+  destination/media, worker save handoff; removes local selection and recovery
+  Discard workaround. `app/src/media.rs` and `smoke.rs`: stream kernel media capabilities.
+* `mcp/src/automation.rs` and `session.rs`: actor-bound history marks, guarded
+  squash/restore and selection messages; removes direct store mutation and empty
+  transaction journal drains. `ActorAutomation` exposes the same operations and
+  worker save handoff. Full transport/session hosting in the app remains an MCP
+  integration task; standalone transport still owns its one dedicated kernel.
+  MCP library opens use PrepareOpen and leave recovery decisions to the host.
+* `first-launch/src/lib.rs`: kernel localStorage import, durable secret locators,
+  kernel extension-source inventory and read-only external media associations on library copies.
+
+### Decisions and selecting rules
+
+| # | Decision | Rule |
+|---|---|---|
+| K26 | Pre-adoption, single-use recovery choices; archive explicit Discard | N4: no silent discard, no changed-base replay, no save of rejected recovery |
+| K27 | Immutable per-caller actor handles and opaque history marks | §3.2 single writer; §3.2.1 foreign acknowledged edits retain their provenance/history |
+| K28 | Refuse grouping/restores across foreign mutations, stale identities or open entries | N4: an agent run cannot remove or relabel another writer's work |
+| K29 | Worker PMV save plans, actor completion and explicit close/durability barriers | §3.2 asynchronous hosts; N4 crash-safe work and lock ownership |
+| K30 | Native-profile sidecars under the existing library lock; locators only | §6 beta isolation/secret handoff; N8 no second runtime or profile writer |
+| K31 | Overlay-only extension writes and read capabilities for external PMV media | §6 shared roots read-only, named copies and rollback-safe media; N4 |
+
+### Verification
+
+The slice-3 regression suite uses synthetic documents and disposable temporary
+profiles only. It covers publication/selection/deduplication, actor-bound guarded
+history and journal replay, all recovery choices and stale tickets, saving with
+concurrent edits, failure/abort/close/quit, exact localStorage, secret locator
+versions, overlay traversal/symlink refusal, external media integrity and copy
+independence. No real profile, project or Keychain item is used.
+
+Verified with pinned Rust 1.96.1: **200 pm-kernel tests pass** (180 existing +
+20 slice-3 tests; 1 optional profile smoke ignored), **25 MCP tests**, **16
+first-launch tests**, and **1 app session workflow test** pass. The app and
+pm-mac-core re-export check pass. Strict Clippy for MCP/first-launch (`--all-targets
+--no-deps -- -D warnings`), formatting for kernel/MCP/first-launch, and diff
+whitespace checks pass. Kernel Clippy reports 14 existing slice-2 warnings;
+this slice introduces no new kernel lint warnings. The host dependency `block`
+continues to emit Cargo's existing future-compatibility warning.
+
+The three engine-service lane caller hunks in `app/src/session.rs` (scrub event
+timestamp, export activity capture and scheduled export start) are included by
+explicit lane agreement. Playback and performance-harness changes remain owned
+by their lanes. **All on-screen rows remain UNVERIFIED**; no GUI smoke was run.

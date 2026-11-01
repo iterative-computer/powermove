@@ -95,15 +95,16 @@ pub use queries::{Bounds, PickHit, PickOptions, QueryContext, QueryError};
 pub use selection::Selection;
 
 pub use actor::{
-    HistorySummary, KernelActor, KernelEvent, KernelHandle, OpenEntryInfo, Pending, Published,
-    QueryMirror, RealmEnvelope,
+    ActorHandle, HistorySummary, KernelActor, KernelEvent, KernelHandle, OpenEntryInfo, Pending,
+    Published, QueryMirror, RealmEnvelope,
 };
 pub use journal::{JournalConfig, Recovered, Recovery};
 pub use kernel::{Kernel, KernelConfig, KernelFailure, OpenInfo, OpenSource, base_hash_of};
 pub use library::{LibraryProject, LibraryStore};
 pub use tx::{
-    Ack, Call, Caller, Continuation, Direction, EditCall, EditResult, GestureCall, HistoryCall,
-    KernelError, Notice, Project, RealmMessage, Reply, Request, TxId, WorkspaceCall, Writer,
+    Ack, ActorHistoryMark, Call, Caller, Continuation, Direction, EditCall, EditResult,
+    GestureCall, HistoryCall, KernelError, Notice, Project, RealmMessage, Reply, Request,
+    SelectionCall, TxId, WorkspaceCall, Writer,
 };
 
 /// Compile-time checks of the threading contract.
@@ -123,3 +124,5 @@ pub mod locks;
 pub mod persistence;
 pub mod session;
 pub mod state;
+
+pub mod profile;

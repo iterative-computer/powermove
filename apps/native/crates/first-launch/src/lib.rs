@@ -305,7 +305,16 @@ fn run_inner(
         };
         // Preserve every origin/key and exact DOM value, including arbitrary
         // trusted-extension state; no browser evaluator flag activates native code.
-        disk::atomic(&native.join("local-storage.json"), &entries)?;
+        pm_kernel::profile::ProfileStorage::new(&writer).import_local_storage(
+            &entries
+                .into_iter()
+                .map(|e| pm_kernel::profile::LocalStorageEntry {
+                    origin: e.origin,
+                    key: e.key,
+                    value: e.value,
+                })
+                .collect::<Vec<_>>(),
+        )?;
         finish(&native, &mut state, Step::LocalStorage, &mut hook)?;
     }
     writer.flush()?;
@@ -340,6 +349,17 @@ fn run_inner(
                 }
                 let plain = secrets::decrypt_mac(&password, &payload.ciphertext)?;
                 access.put_native(&id, &plain)?;
+                // Persist only the native item's location; plaintext never enters the kernel.
+                pm_kernel::profile::ProfileStorage::new(
+                    &LibraryWriter::open(&native, pm_kernel::persistence::DiskFormat::V1_2, None)
+                        .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+                )
+                .register_secret(&pm_kernel::profile::SecretLocator {
+                    id: payload.id.clone(),
+                    version: blake3::hash(&payload.ciphertext).to_hex().to_string(),
+                    service: format!("{} migration secrets", BETA_BUNDLE_ID),
+                    account: blake3::hash(id.as_bytes()).to_hex().to_string(),
+                })?;
                 state.imported_secrets.insert(id);
                 publish(&native, &state)?;
             }
@@ -625,10 +645,12 @@ fn library(
             .map(as_json)
             .transpose()?
             .unwrap_or(serde_json::json!({}));
-        // Library copies must never reacquire/save an external association. The
-        // source association survives in the immutable 3-way checkpoint.
-        if let Some(m) = meta.as_object_mut() {
-            m.remove("file");
+        // A read-only media association is not an in-place save destination.
+        // The kernel can resolve it when this named copy is explicitly opened.
+        if let Some(m) = meta.as_object_mut()
+            && let Some(file) = m.remove("file")
+        {
+            m.insert("embeddedMedia".into(), file);
         }
         if writer.store().load(id)?.is_none() {
             let needed = serde_json::to_vec(&project)?.len() as u64
@@ -694,7 +716,23 @@ fn extensions(native: &Path) -> Result<()> {
                 continue;
             }
             let enabled = kernel.state().extensions.get(&id).is_none_or(|e| e.enabled);
-            ops.push(StateOp::Extension(ExtensionEntry{id,installed:true,enabled,version:manifest.get("version").and_then(serde_json::Value::as_str).unwrap_or("").into(),source:to_kernel(&serde_json::json!({"shared":e.path(),"readOnly":true,"overlay":native.join("extensions-overlay")}))?}));
+            let pm_kernel::profile::ProfileReply::Sources(sources) = kernel
+                .profile(pm_kernel::profile::ProfileCall::ExtensionSources { id: id.clone() })?
+            else {
+                unreachable!()
+            };
+            ops.push(StateOp::Extension(ExtensionEntry {
+                id,
+                installed: true,
+                enabled,
+                version: manifest
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .into(),
+                source: to_kernel(&serde_json::json!({"shared":sources.shared,
+                    "readOnly":sources.shared_read_only,"overlay":sources.overlay}))?,
+            }));
         }
     }
     if !ops.is_empty() {

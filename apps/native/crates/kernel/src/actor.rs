@@ -196,6 +196,10 @@ pub struct Published {
     pub workspace: Value,
     pub ui_state: crate::state::UiState,
     pub dirty: bool,
+    pub saving: bool,
+    pub session: Option<crate::session::SessionMetadata>,
+    pub media: crate::project_io::MediaTable,
+    pub path: Option<std::path::PathBuf>,
 }
 
 impl Published {
@@ -210,6 +214,10 @@ pub enum KernelEvent {
     StateChanged {
         revision: u64,
         change: crate::state::StateChange,
+    },
+    SelectionChanged {
+        project: String,
+        selection: Selection,
     },
     WorkspaceChanged {
         project: String,
@@ -253,6 +261,19 @@ struct Shared {
 type Reply<T> = Box<dyn FnOnce(T) + Send>;
 
 enum Msg {
+    Profile {
+        call: crate::profile::ProfileCall,
+        reply: Reply<Result<crate::profile::ProfileReply, KernelFailure>>,
+    },
+    PrepareSave {
+        session: crate::session::SessionHandle,
+        path: Option<std::path::PathBuf>,
+        reply: Reply<Result<crate::session::SessionSave, KernelFailure>>,
+    },
+    FinishSave {
+        completion: crate::session::SessionSaveCompletion,
+        reply: Reply<Result<crate::session::ShellReply, KernelFailure>>,
+    },
     State {
         tx: crate::state::StateTransaction,
         reply: Reply<Result<crate::state::StateAck, KernelFailure>>,
@@ -343,6 +364,13 @@ impl Drop for KernelActor {
 }
 
 impl KernelHandle {
+    /// Bind an immutable actor identity; cloned handles never change another caller's origin.
+    pub fn for_actor(&self, caller: crate::Caller) -> ActorHandle {
+        ActorHandle {
+            kernel: self.clone(),
+            caller,
+        }
+    }
     pub fn shell(
         &self,
         call: crate::session::ShellCall,
@@ -350,6 +378,41 @@ impl KernelHandle {
         let (r, p) = oneshot();
         self.send(Msg::Shell {
             call,
+            reply: Box::new(move |v| r.resolve(v)),
+        });
+        p
+    }
+    pub fn profile(
+        &self,
+        call: crate::profile::ProfileCall,
+    ) -> Pending<Result<crate::profile::ProfileReply, KernelFailure>> {
+        let (r, p) = oneshot();
+        self.send(Msg::Profile {
+            call,
+            reply: Box::new(move |v| r.resolve(v)),
+        });
+        p
+    }
+    pub fn prepare_save(
+        &self,
+        session: crate::session::SessionHandle,
+        path: Option<std::path::PathBuf>,
+    ) -> Pending<Result<crate::session::SessionSave, KernelFailure>> {
+        let (r, p) = oneshot();
+        self.send(Msg::PrepareSave {
+            session,
+            path,
+            reply: Box::new(move |v| r.resolve(v)),
+        });
+        p
+    }
+    pub fn finish_save(
+        &self,
+        completion: crate::session::SessionSaveCompletion,
+    ) -> Pending<Result<crate::session::ShellReply, KernelFailure>> {
+        let (r, p) = oneshot();
+        self.send(Msg::FinishSave {
+            completion,
             reply: Box::new(move |v| r.resolve(v)),
         });
         p
@@ -510,6 +573,10 @@ fn publish(kernel: &mut Kernel, shared: &Shared, project: &str) -> Option<u64> {
         workspace: p.workspace().clone(),
         ui_state: kernel.state().ui.get(project).cloned().unwrap_or_default(),
         dirty: store.is_dirty(),
+        saving: store.is_saving(),
+        session: kernel.session_metadata(project),
+        media: store.media().clone(),
+        path: store.path().map(std::path::Path::to_path_buf),
     };
     let revision = published.revision();
     shared
@@ -533,6 +600,43 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     let mut deferred: HashMap<(String, u64), Reply<Result<Ack, KernelFailure>>> = HashMap::new();
     for msg in rx {
         match msg {
+            Msg::Profile { call, reply } => reply(kernel.profile(call)),
+            Msg::PrepareSave {
+                session,
+                path,
+                reply,
+            } => {
+                let id = session.project.clone();
+                let result = kernel.prepare_session_save(session, path);
+                let revision = publish(&mut kernel, &shared, &id);
+                reply(result);
+                if let Some(revision) = revision {
+                    emit(
+                        &shared,
+                        KernelEvent::Published {
+                            project: id,
+                            revision,
+                        },
+                    );
+                }
+            }
+            Msg::FinishSave { completion, reply } => {
+                let result = kernel.finish_session_save(completion);
+                let ids: Vec<_> = kernel.projects().map(str::to_owned).collect();
+                for id in &ids {
+                    publish(&mut kernel, &shared, id);
+                }
+                reply(result);
+                for id in ids {
+                    emit(
+                        &shared,
+                        KernelEvent::Published {
+                            revision: kernel.project(&id).unwrap().store().revision(),
+                            project: id,
+                        },
+                    );
+                }
+            }
             Msg::State { tx, reply } => {
                 let result = kernel.state_transaction(tx);
                 *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
@@ -595,6 +699,9 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                 reply,
             } => {
                 let before_state = kernel.state().clone();
+                let before_selection = kernel
+                    .project(&project)
+                    .map(|p| p.store().selection().clone());
                 let handled = match kernel.handle(&project, request) {
                     Ok(h) => h,
                     Err(e) => {
@@ -655,6 +762,19 @@ fn run(mut kernel: Kernel, rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
                         KernelEvent::Published {
                             project: project.clone(),
                             revision,
+                        },
+                    );
+                }
+                if let Some(selection) = kernel
+                    .project(&project)
+                    .map(|p| p.store().selection().clone())
+                    && before_selection.as_ref() != Some(&selection)
+                {
+                    emit(
+                        &shared,
+                        KernelEvent::SelectionChanged {
+                            project: project.clone(),
+                            selection,
                         },
                     );
                 }
@@ -803,5 +923,21 @@ impl QueryMirror {
 
     pub fn queries(&mut self) -> &mut QueryContext {
         &mut self.queries
+    }
+}
+
+/// A realm/agent/MCP client's generation-bound view of the one kernel actor.
+#[derive(Clone)]
+pub struct ActorHandle {
+    pub kernel: KernelHandle,
+    pub caller: crate::Caller,
+}
+impl ActorHandle {
+    pub fn call(
+        &self,
+        project: &str,
+        call: impl Into<crate::Call>,
+    ) -> Pending<Result<Ack, KernelFailure>> {
+        self.kernel.call(project, Request::new(self.caller, call))
     }
 }
