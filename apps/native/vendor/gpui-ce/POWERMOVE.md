@@ -79,6 +79,17 @@ glider and all transient kinds remain incomplete. See docs/native/s2-gpui-ce.md.
 
 ### P-A11Y implementation and pin assumptions (S2b, 2026-11-01)
 
+Shell accessibility follow-up (2026-11-01): `composition_accessibility::focus`
+also forwards a native first responder outside the published slots (AppKit's
+standard toolbar). Previously its ring was visible but the content adapter
+returned no AX focused element because GPUI did not own focus. It uses the
+responder's real focused element or AppKit's unignored ancestor, without copying
+native controls into AccessKit. `apps/native/scripts/shell-ax.swift` checks the
+external AX focused element alongside the keyboard walkthrough. The fallback
+only considers native responders outside the content adapter, avoiding a call
+back into that same adapter when a popup restores the initial responder.
+
+
 The pinned `accesskit_macos` 0.26.3 `SubclassingAdapter` exposes only AccessKit
 platform nodes. It cannot accept an NSView child. We retain it, then wrap its
 **actual window content view**, which is separate from GPUIView. The adapter's
