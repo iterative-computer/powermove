@@ -864,3 +864,32 @@ fn key_drags_restart_from_the_pointer_down_state() {
     assert_eq!(num(&keys[0], &["t"]), 2.0);
     assert_eq!(s.history().len(), 1);
 }
+
+#[test]
+fn align_moves_the_common_box_to_the_frame_edge_once() {
+    use pm_mac_core::TransformCommand;
+    use pm_mac_core::commands::transform::AlignMode;
+    let mut s = store();
+    let align = || TransformCommand::Align {
+        layer_ids: vec!["box".into(), "top".into()],
+        mode: AlignMode::Right,
+        time: 0.0,
+    };
+    let (bx, tx) = (
+        num(&layer(&s, "box"), &["p", "position.x", "v"]),
+        num(&layer(&s, "top"), &["p", "position.x", "v"]),
+    );
+    run(&mut s, align());
+    let (bx2, tx2) = (
+        num(&layer(&s, "box"), &["p", "position.x", "v"]),
+        num(&layer(&s, "top"), &["p", "position.x", "v"]),
+    );
+    assert_ne!(bx, bx2, "the selection moved");
+    assert!(
+        ((bx2 - bx) - (tx2 - tx)).abs() < 1e-9,
+        "both by the same delta"
+    );
+    let before = s.revision();
+    run(&mut s, align());
+    assert_eq!(s.revision(), before, "already aligned");
+}

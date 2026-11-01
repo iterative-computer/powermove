@@ -147,7 +147,8 @@ returns `CommandError::NotImplemented` and changes nothing). Tests:
 | `CreateSection`, `UpdateSection` | `create_section`, `update_section` | done |
 | **Transform** `TransformCommand` | | |
 | `Nudge` | arrow keys (parent space) | done |
-| `CenterAnchor`, `Align`, `Distribute` | Cmd+Option+Home, alignment strip (need bounds and fonts) | todo |
+| `Align`, `Distribute` | alignment strip (`pm_edit::align`; not text layers yet: no fonts in the core) | done |
+| `CenterAnchor` | Cmd+Option+Home (needs bounds and fonts) | todo |
 
 Copy is not an edit (the clipboard lane serializes `snapshot()` layers);
 Cut is Copy + `LayerCommand::Delete`; Lock All / Unlock All and Show/Hide
