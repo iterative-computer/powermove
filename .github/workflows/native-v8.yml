@@ -47,24 +47,32 @@ jobs:
           rustup toolchain install 1.96.1 --profile minimal
           brew install llvm@21
           echo "LIBCLANG_PATH=$(brew --prefix llvm@21)/lib" >> "$GITHUB_ENV"
-      - name: Stabilize pinned-source timestamps for the GN cache
-        shell: bash
-        run: |
-          python3 - <<'PYCODE'
-          import os, pathlib, subprocess
-          root = pathlib.Path('upstream-v8')
-          stamp = int(subprocess.check_output(['git', '-C', str(root), 'show', '-s', '--format=%ct', 'HEAD']))
-          files = subprocess.check_output(['git', '-C', str(root), 'ls-files', '--recurse-submodules', '-z']).split(b'\0')
-          for name in filter(None, files):
-              os.utime(root / os.fsdecode(name), (stamp, stamp), follow_symlinks=False)
-          PYCODE
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             upstream-v8/target/release
           key: native-v8-arm64-152.2.0-sandbox-rust1.96.1-gn-v2-${{ runner.os }}
+      - name: Verify cached sandbox artifact bytes
+        id: cached-v8
+        shell: bash
+        run: |
+          set -euo pipefail
+          cached=upstream-v8/target/release/gn_out
+          if [[ -d "$cached" ]] && (
+            cd "$cached"
+            shasum -a 256 -c <<'HASHES' >/dev/null 2>&1
+          0cc50754a6bb75fa5fbf3d8e1742723a745ab47e2de260711a77ac2aa1519ea9  obj/librusty_v8.a
+          6da40ff4a76e455222ddf2a902ab60d2e0d69a76b652d90267de4a33e47ff31f  src_binding.rs
+          5705db00255b72e65f59d907f96fcb4d5ea53b1a6a97f4e7a778cd2b6ae62464  args.gn
+          HASHES
+          ); then
+            echo 'valid=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'valid=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Build sandbox and pointer compression from source
+        if: steps.cached-v8.outputs.valid != 'true'
         working-directory: upstream-v8
         env:
           V8_FROM_SOURCE: '1'
