@@ -17,11 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct Completion<T> {
+pub(crate) struct Completion<T> {
     value: Option<Result<T>>,
     waker: Option<Waker>,
 }
-type SharedCompletion<T> = Arc<Mutex<Completion<T>>>;
+pub(crate) type SharedCompletion<T> = Arc<Mutex<Completion<T>>>;
 /// Nonblocking result: poll as a Future or inspect with try_take. No wait/join API.
 pub struct Ticket<T> {
     pub execution: u64,
@@ -44,7 +44,7 @@ impl<T> Future for Ticket<T> {
         }
     }
 }
-fn ticket<T>(id: u64) -> (Ticket<T>, SharedCompletion<T>) {
+pub(crate) fn ticket<T>(id: u64) -> (Ticket<T>, SharedCompletion<T>) {
     let shared = Arc::new(Mutex::new(Completion {
         value: None,
         waker: None,
@@ -57,7 +57,7 @@ fn ticket<T>(id: u64) -> (Ticket<T>, SharedCompletion<T>) {
         shared,
     )
 }
-fn complete<T>(shared: SharedCompletion<T>, value: Result<T>) {
+pub(crate) fn complete<T>(shared: SharedCompletion<T>, value: Result<T>) {
     let waker = {
         let mut c = shared.lock().unwrap();
         c.value = Some(value);
@@ -82,7 +82,7 @@ pub struct ActiveExecution {
 #[derive(Clone)]
 pub struct GenerationPin {
     pub generation: Generation,
-    live: Arc<()>,
+    live: Option<Arc<()>>,
     notifier: Weak<SyncSender<Command>>,
 }
 impl std::fmt::Debug for GenerationPin {
@@ -92,6 +92,7 @@ impl std::fmt::Debug for GenerationPin {
 }
 impl Drop for GenerationPin {
     fn drop(&mut self) {
+        drop(self.live.take());
         if let Some(tx) = self.notifier.upgrade() {
             let _ = tx.try_send(Command::Wake);
         }
@@ -134,11 +135,15 @@ pub struct Realm {
     inner: Arc<Inner>,
 }
 enum Command {
+    Measure {
+        reply: SharedCompletion<Vec<GenerationMemory>>,
+    },
     Wake,
     Eval {
         id: u64,
         source: String,
         expected: Option<Generation>,
+        svelte: Option<(String, SvelteUnit)>,
         reply: SharedCompletion<Evaluation>,
     },
     Reload {
@@ -189,6 +194,25 @@ impl Realm {
             id,
             source,
             expected,
+            svelte: None,
+            reply,
+        })?;
+        Ok(ticket)
+    }
+    pub(crate) fn eval_svelte(
+        &self,
+        source: String,
+        filename: String,
+        unit: SvelteUnit,
+    ) -> Result<Ticket<Evaluation>> {
+        self.check_source(&source)?;
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
+        let (ticket, reply) = ticket(id);
+        self.send(Command::Eval {
+            id,
+            source,
+            expected: None,
+            svelte: Some((filename, unit)),
             reply,
         })?;
         Ok(ticket)
@@ -201,6 +225,12 @@ impl Realm {
         let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
         let (ticket, reply) = ticket(id);
         self.send(Command::Reload { id, source, reply })?;
+        Ok(ticket)
+    }
+    /// Sampling runs on the owner and includes every pinned retired generation.
+    pub fn measure(&self) -> Result<Ticket<Vec<GenerationMemory>>> {
+        let (ticket, reply) = ticket(0);
+        self.send(Command::Measure { reply })?;
         Ok(ticket)
     }
     pub fn pin(&self) -> Result<Ticket<GenerationPin>> {
@@ -338,6 +368,14 @@ impl RuntimePool {
     }
     /// Starting is asynchronous: the first task observes startup/load failures.
     pub fn realm(&self, kind: RealmKind) -> Result<Realm> {
+        if matches!(kind, RealmKind::Store(_)) {
+            return Err(Error::Invalid(
+                "Store realms require StorePool helper confinement",
+            ));
+        }
+        self.start_realm(kind)
+    }
+    pub(crate) fn start_realm(&self, kind: RealmKind) -> Result<Realm> {
         let mut realms = self.realms.lock().unwrap();
         if let Some(inner) = realms
             .get(&kind)
@@ -784,13 +822,31 @@ fn worker(
         };
         match command {
             Command::Wake => continue,
+            Command::Measure { reply } => {
+                let mut measurements = Vec::new();
+                if let Ok(live) = &current {
+                    measurements.push(GenerationMemory {
+                        generation: live.generation.clone(),
+                        retired: false,
+                        memory: live.vm.memory(),
+                    });
+                }
+                for live in retained.values() {
+                    measurements.push(GenerationMemory {
+                        generation: live.generation.clone(),
+                        retired: true,
+                        memory: live.vm.memory(),
+                    });
+                }
+                complete(reply, Ok(measurements));
+            }
             Command::Pin { reply } => complete(
                 reply,
                 current
                     .as_ref()
                     .map(|live| GenerationPin {
                         generation: live.generation.clone(),
-                        live: live.pins.clone(),
+                        live: Some(live.pins.clone()),
                         notifier: notifier.clone(),
                     })
                     .map_err(Clone::clone),
@@ -799,8 +855,20 @@ fn worker(
                 id,
                 source,
                 expected,
+                svelte,
                 reply,
             } => {
+                let source = if let Some((filename, unit)) = svelte {
+                    match crate::compiler::compile_expression(&source, &filename, unit) {
+                        Ok(source) => source,
+                        Err(e) => {
+                            complete(reply, Err(e));
+                            continue;
+                        }
+                    }
+                } else {
+                    source
+                };
                 let result = match &mut current {
                     Ok(live) if expected.as_ref().is_none_or(|g| g == &live.generation) => {
                         // Keep the watchdog armed through effect serialization and commit.
@@ -894,9 +962,10 @@ fn worker(
                         if let Ok(mut old) = std::mem::replace(&mut current, Ok(candidate)) {
                             old.cancel_io();
                             let guard = Guard::new(&old.vm, &old.generation, id, &config, &control);
-                            let retired = old.vm.text("__pm.retire()");
+                            let retired = old.vm.retire();
                             drop(guard);
                             config.kernel.revoke_generation(&old.generation);
+                            config.kernel.seal_open_gestures(&old.generation);
                             if retired.is_ok() && Arc::strong_count(&old.pins) > 1 {
                                 retained.insert(old.generation.number, old);
                             }
@@ -913,13 +982,15 @@ fn worker(
                 reply,
             } => {
                 let is_current = current.as_ref().is_ok_and(|v| {
-                    v.generation == pin.generation && Arc::ptr_eq(&v.pins, &pin.live)
+                    v.generation == pin.generation
+                        && pin.live.as_ref().is_some_and(|p| Arc::ptr_eq(&v.pins, p))
                 });
                 let live = if is_current {
                     current.as_mut().ok()
                 } else {
                     retained.get_mut(&pin.generation.number).filter(|v| {
-                        v.generation == pin.generation && Arc::ptr_eq(&v.pins, &pin.live)
+                        v.generation == pin.generation
+                            && pin.live.as_ref().is_some_and(|p| Arc::ptr_eq(&v.pins, p))
                     })
                 };
                 let result = if let Some(live) = live {
@@ -982,6 +1053,7 @@ fn worker(
     for command in rx.try_iter() {
         match command {
             Command::Wake => continue,
+            Command::Measure { reply } => complete(reply, Err(Error::Closed)),
             Command::Pin { reply } => complete(reply, Err(Error::Closed)),
             Command::Eval { reply, .. }
             | Command::Reload { reply, .. }

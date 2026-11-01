@@ -1,6 +1,8 @@
 //! Headless V8 realms. All JavaScript and disposal run on owner workers.
 //! No kernel, engine, UI, Node, or Chromium dependency is linked here.
 mod cache;
+mod compiler;
+pub use compiler::*;
 mod host;
 mod runtime;
 mod vm;

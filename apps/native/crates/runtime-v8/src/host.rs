@@ -186,3 +186,18 @@ pub trait EngineProxy: Send + Sync + 'static {
         budget: HostBudget,
     ) -> Result<Value>;
 }
+
+/// V8's statistics, not RSS or an admission reservation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IsolateMemory {
+    pub used_heap_bytes: usize,
+    pub physical_heap_bytes: usize,
+    pub external_bytes: usize,
+    pub snapshot_bytes: usize,
+}
+#[derive(Debug, Clone)]
+pub struct GenerationMemory {
+    pub generation: Generation,
+    pub retired: bool,
+    pub memory: IsolateMemory,
+}
