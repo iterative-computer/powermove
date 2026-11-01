@@ -155,3 +155,139 @@ as announced by VoiceOver**.
 All screenshots/raw UI evidence remain exclusively under `/tmp/pm-macverify/`
 and are not committed. The keyboard and VoiceOver rows remain open; this lane
 does not approve shell 3 for merge.
+
+## Shell accessibility implementation and verification — 2026-11-01
+
+Lane `feat/na-a11y`, based on `origin/feat/native-engine`. This supersedes the
+keyboard/announcement failures in the earlier Local Mac verification for the
+**tested shell surfaces only**. It is implementation evidence, not design sign-off
+or certification of loaded-project editing, every rotor, every OS, or IME.
+The panel geometry, materials and visible copy remain unchanged; focus uses
+`colors.focus` and AppKit's existing ring. The pre-existing palette label
+“Save Layout…” is retained under the no-visual-change constraint; it opens the
+Save Workspace sheet. The vocabulary mismatch remains a design/copy follow-up.
+
+### Implemented focus and AX contract
+
+- Tab: Sidebar → Tools (native arrow selection within its eight segments) →
+  Agent → Export → Inspector → Project group → Viewer group → Properties group
+  → Timeline group → Effects & Presets group → four splitters → Workspace.
+  Within a group, its tabs/close buttons, Add Panel or custom header controls
+  precede content. The default empty shell has **26 stops**, wrapping to Sidebar.
+  Shift-Tab is the exact inverse. A native toolbar handoff clears the previous
+  GPUI focus ring.
+- Control-Tab / Control-Shift-Tab and Control-F6 / Control-Shift-F6 cycle panel
+  groups. Hidden/collapsed panels are absent. Enter/Space activate focused
+  controls; splitter arrows resize and Enter collapses a dock splitter.
+- Save Workspace: Workspace Name → Cancel → Save → Name; reverse traversal,
+  Escape cancellation and Return saving remain native. The explicit key-view
+  loop and sheet-local Tab route fix the original field trap.
+- Command-K: Search → every filtered palette row → Search; Shift-Tab reverses,
+  arrows select, Return executes and Escape restores the prior responder.
+- AccessKit publishes panel groups/headers, selected tabs, controls and status
+  value; AppKit owns toolbar, sheet and palette roles/actions. The P-A11Y fallback
+  now forwards toolbar responder focus too: previously its ring was visible
+  while AXFocusedUIElement was empty.
+- Popup focus restoration runs after the native key monitor returns. Rapid
+  palette-to-sheet entry exposed a synchronous key-window callback crash;
+  deferring restoration fixes it and avoids stealing focus from a new sheet or
+  window. The external startup driver reproduced the old failure on its second
+  fresh launch; the fix passed ten consecutive fresh launches.
+
+### Tests and actual AX exposure
+
+**PASS: 44 Rust tests** (3 focus/activation regressions, 12 shell models/keyboard resolver,
+11 shell-2, 8 shell-3, 10 design). The final native/GPUI ring handoff adjustment
+also reran the focus regressions successfully; a keyboard close-button regression
+asserts the removed parent tab cannot be reactivated by click bubbling. Build: Rust **1.96.1**, locked
+native workspace, `engine/env.sh`, shared `~/Developer/pm-target`, Cargo under
+`flock /tmp/pm-build.lock`; test debug level matched the dev build.
+`check-shell-startup.py` adds an actual fresh-process native regression, with
+temporary profiles, screen-state/disk checks, its own GUI lock and cleanup. It
+asserts the fresh sheet's roles/labels/order/focus through AX before Escape and
+quits each owned app. The separate on-screen palette walkthrough covers
+Search → row → Search and restoring the prior responder.
+Formatting of changed Rust files and `git diff --check` pass. An unrelated
+pre-existing formatting difference in `app/src/smoke.rs` is outside this lane.
+
+New `apps/native/scripts/shell-ax.swift` walks the external AXUIElement tree,
+skips the system menu bar/Recent Items, and asserts roles, labels, values and
+reading order (`--main`, `--sheet`, `--palette`, `--expect-focus`). It primes
+AccessKit activation before testing. A missing Accessibility permission fails
+without prompting. This is the actual OS tree, not a parallel semantic model.
+All surface assertions and the 26-stop reverse comparison passed on screen.
+`final-cycle.log` repeats all 26 stops in both directions on the ring-handoff build;
+`final-native-handoff.png` shows Inspector alone focused and VoiceOver captioning
+“Inspector, button”, with no stale GPUI ring.
+Selected excerpt (normalised to omit addresses/frames):
+
+```text
+AXButton      Sidebar                 focused (native toolbar)
+AXRadioButton Select (V)              value=1, focused (native tool segment)
+AXGroup       Project                 id=shell.panel.assets
+AXRadioButton Project                 id=shell.tab.assets, value=1
+AXGroup       Viewer                  id=shell.panel.viewer
+AXGroup       Properties              id=shell.panel.inspector
+AXGroup       Timeline                id=shell.panel.timeline
+AXGroup       Effects & Presets       id=shell.panel.fxbrowser
+AXGroup       Status                  id=shell.status, value=No project
+AXButton      Workspace: Default
+AXSheet       Save Workspace
+  AXTextField Workspace Name          value=A11y Verification
+  AXButton    Cancel
+  AXButton    Save
+AXButton      Settings…               id=shell.palette.settings, value=Selected
+```
+
+### On-screen keyboard and VoiceOver results
+
+Unlocked macOS 27.2 (26B5086k), dev bundle, empty disposable profiles exclusively
+under `/tmp/pm-a11y/`; GUI lock held at `/tmp/pm-shots/gui.lock` throughout.
+Synthetic keyboard events used the normal AppKit/GPUI route; no AX focus setters
+were used for the walkthrough. Standard Keyboard navigation was already ON.
+Accessibility Full Keyboard Access mode was not changed; the shell traversal
+works independently of turning that setting on.
+
+| Check | Result / evidence under `/tmp/pm-a11y/` |
+| --- | --- |
+| Toolbar → all panels → splitters → status, including wrap | PASS: `keyboard-walk.log`, `forward-00`…`forward-29` AX dumps. Native toolbar focus is now reported by the OS. |
+| Exact reverse of all 26 stops | PASS: `reverse-walk.log`, `reverse-00`…`reverse-25` dumps; both native/GPUI boundaries included. |
+| Keyboard activation | PASS on the final build: Space on Close Effect Controls removes only that tab, preserves selected Project, and leaves the app responsive (`activation-before.txt`, `activation-after.txt`). |
+| Panel shortcuts | PASS: Control-Tab forward/wrap, Control-Shift-F6 reverse; unit tests also cover closed-panel removal. |
+| Palette to sheet without a pointer | PASS: Command-K, type Save Layout, Return; Tab through Name/Cancel/Save; type A11y Verification, Return saves only the temporary workspace. |
+| Sheet forward/reverse, Escape | PASS: `sheet-tab1.txt`, `sheet-tab2.txt`, `sheet-back.txt`; caption captures `vo-sheet-{name,cancel,save,value}.png`. |
+| Palette Search/row/reverse | PASS: `palette-{start,tab,back}.txt`; `vo-palette-{search,row}.png`. |
+| Visible focus | PASS for exercised groups, native toolbar, GPUI controls, palette rows and sheet controls; captures above. Final toolbar handoff rechecked after clearing the stale GPUI ring. |
+| VoiceOver actual announcements | PASS for the listed controls/groups, via the **real VoiceOver caption panel**, not inferred from AX labels. See phrases below. Rotor/exhaustive content navigation remains outside this pass. |
+
+Command-F5 enabled VoiceOver (`NSWorkspace.isVoiceOverEnabled=true`), then
+**Use VoiceOver** was selected in its welcome dialog without changing the
+welcome checkbox. VoiceOver-Right moved from Viewer to Properties and captioned
+“Properties, group” (`vo-project-next.png`). VoiceOver-F4 read the keyboard item.
+Actual caption output included:
+
+- “Sidebar, button, has keyboard focus” (`vo-toolbar-sidebar.png`).
+- “Select (V), selected, radio button, 1 of 8, has keyboard focus”
+  (`vo-toolbar-tool.png`).
+- “Viewer, group, has keyboard focus” (`vo-project-group.png`).
+- “Play, button, has keyboard focus” (`vo-viewer-zoom.png`; filename is historical,
+  the captured/AX-confirmed control is Play).
+- “Selected Settings, button, has keyboard focus” (`vo-palette-row.png`).
+- “Workspace Name, edit text, has keyboard focus”, “Cancel, button, has keyboard
+  focus”, and “Save, default, button, has keyboard focus” (sheet captures).
+- “Insertion at end of text. A11y Verification, Workspace Name, edit text, has
+  keyboard focus” (`vo-sheet-value.png`).
+
+The caption preference was initially ON; refreshing it OFF/ON after VoiceOver
+finished starting made captions capturable. AppleScript `last phrase`/cursor
+queries returned -1728 (and an initial startup timeout). Enabling VoiceOver
+scripting requested administrator authentication; it was **cancelled** without
+entering credentials, and the scripting preference remained OFF.
+The caption route supplied actual announcements without that permission.
+
+Restoration: caption panel ON (original value), VoiceOver scripting OFF
+(original value), welcome-dialog preference unchanged; Command-F5 turned
+VoiceOver OFF, verified through NSWorkspace. Owned test apps/VoiceOver Utility
+were quit and the GUI lock released. No user project, production Powermove
+profile or Keychain was accessed. Raw dumps, screenshots and temporary profiles
+are **not committed**; screenshots exist only under `/tmp/pm-a11y/`.
