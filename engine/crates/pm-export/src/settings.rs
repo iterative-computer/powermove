@@ -288,6 +288,10 @@ pub enum ColorTags {
     Rec709QuickTime,
     /// CICP 1-13-0, full range RGB: sRGB images (PNG `sRGB` and `cICP`).
     SrgbImage,
+    /// BT.2100 PQ, linear working value 1 maps to explicit diffuse white (nits).
+    Rec2100Pq { white_nits: u16 },
+    /// BT.2100 HLG, explicit diffuse white and mastering display peak (nits).
+    Rec2100Hlg { white_nits: u16, peak_nits: u16 },
     /// CICP 1-1-0, full range RGB: Rec.709 images (PNG `cICP`).
     Rec709Image,
 }
@@ -297,10 +301,16 @@ impl ColorTags {
     pub fn cicp(self) -> (u16, u16, u16) {
         match self {
             ColorTags::Rec709Broadcast => (1, 1, 1),
+            ColorTags::Rec2100Pq { .. } => (9, 16, 9),
+            ColorTags::Rec2100Hlg { .. } => (9, 18, 9),
             ColorTags::Rec709QuickTime => (1, 13, 1),
             ColorTags::SrgbImage => (1, 13, 0),
             ColorTags::Rec709Image => (1, 1, 0),
         }
+    }
+
+    pub fn is_hdr(self) -> bool {
+        matches!(self, Self::Rec2100Pq { .. } | Self::Rec2100Hlg { .. })
     }
 
     /// Image tags describe full-range RGB; video tags limited-range Y′CbCr.
@@ -533,6 +543,15 @@ impl ExportSpec {
         }
         if self.tags.is_image() != matches!(self.codec, Codec::Png { .. }) {
             return invalid("images use image tags and video uses video tags");
+        }
+        if self.tags.is_hdr() {
+            crate::hdr::validate(self.tags)?;
+            if !matches!(
+                self.codec,
+                Codec::ProRes(_) | Codec::Hevc { ten_bit: true, .. }
+            ) {
+                return invalid("HDR requires a 10-bit or higher ProRes or HEVC output");
+            }
         }
         if let Some(audio) = self.audio {
             if !pm_time::SUPPORTED_SAMPLE_RATES.contains(&(audio.sample_rate as i64)) {

@@ -314,6 +314,24 @@ pub fn convert(
     format: InputFormat,
     params: &ConvertParams,
 ) -> Result<EncoderInput, Error> {
+    convert_tagged(
+        frame,
+        format,
+        params,
+        crate::settings::ColorTags::Rec709Broadcast,
+    )
+}
+
+/// Applies the selected SDR/HDR output transform before quantization and chroma sampling.
+pub fn convert_tagged(
+    frame: &WorkingFrame,
+    format: InputFormat,
+    params: &ConvertParams,
+    tags: crate::settings::ColorTags,
+) -> Result<EncoderInput, Error> {
+    if tags.is_hdr() {
+        crate::hdr::validate(tags)?;
+    }
     let (w, h) = working_dimensions(frame)?;
     let horizontal = !matches!(
         format,
@@ -336,8 +354,12 @@ pub fn convert(
         }
     };
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
-        let (c, a) = output_rgba(pixel(frame, x, y), params.working, params.alpha);
-        (rgb_to_ycbcr(c), a)
+        if tags.is_hdr() {
+            crate::hdr::output_ycbcra(pixel(frame, x, y), params.working, params.alpha, tags)
+        } else {
+            let (c, a) = output_rgba(pixel(frame, x, y), params.working, params.alpha);
+            (rgb_to_ycbcr(c), a)
+        }
     };
     // Chroma of 4:2:0 sample (cx, cy): siting type 0, point decimation
     // horizontally (the even column), the declared filter vertically.

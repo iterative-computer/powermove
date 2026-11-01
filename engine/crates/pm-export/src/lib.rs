@@ -22,6 +22,7 @@ pub mod atomic;
 pub mod convert;
 pub mod dither;
 pub mod gpu_time;
+pub mod hdr;
 pub mod mp4box;
 pub(crate) mod par;
 pub mod pipeline;
