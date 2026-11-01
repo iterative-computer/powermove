@@ -41,8 +41,14 @@ export class EffectsHost {
         model.setTarget(this.adapter.target(project, selection));
     };
     const retain = async (stop: () => void | Promise<void>) => {
-      if (this.stopped) await stop();
-      else this.stops.push(stop);
+      if (this.stopped) {
+        try {
+          await stop();
+        } catch (error) {
+          this.stops.push(stop);
+          throw error;
+        }
+      } else this.stops.push(stop);
     };
     try {
       await retain(

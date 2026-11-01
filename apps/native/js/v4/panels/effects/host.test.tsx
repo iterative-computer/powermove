@@ -250,6 +250,33 @@ test("failed unsubscribe stays retryable and remaining cleanup is still attempte
     f.requests.filter((r) => r.operation.type === "unsubscribe"),
   ).toHaveLength(3);
 });
+
+test("a rejected late subscription detach stays available for retirement retry", async () => {
+  const pending = deferred<HostAck>(),
+    reached = deferred<void>();
+  let request!: HostRequest,
+    rejectDetach = true;
+  const f = setup(async (r) => {
+    if (r.operation.type === "subscribe") {
+      request = r;
+      reached.resolve();
+      return pending.promise;
+    }
+    if (r.operation.type === "unsubscribe" && rejectDetach)
+      return { ...ack(r), accepted: false, error: "detach unavailable" };
+    return ack(r, []);
+  });
+  const connecting = f.host.connect(f.model, "fx:late");
+  await reached.promise;
+  await f.host.dispose();
+  pending.resolve(ack(request, {}));
+  await expect(connecting).rejects.toThrow("connection and cleanup failed");
+  rejectDetach = false;
+  await f.host.dispose();
+  expect(
+    f.requests.filter((r) => r.operation.type === "unsubscribe"),
+  ).toHaveLength(3);
+});
 test("extension entry mounts a six-op surface, exposes headless IDs, and retires both lifecycles", async () => {
   const f = setup();
   const commits: unknown[] = [];

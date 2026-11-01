@@ -4937,6 +4937,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-panel-effects-conformance"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "pm-design",
+ "pm-surface",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-panel-inspector"
 version = "0.1.0"
 dependencies = [
