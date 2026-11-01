@@ -33,28 +33,130 @@ Then one row per correction:
 
 Rewrite a row when its numbers change. Keep no round history here.
 
-## 3D Library cards (C3)
+## SDR output gamut
 
-- **Reference:** the engine's render of the same pinned view at 4× per axis (each
-  sample 4× MSAA), box-averaged to card pixels in the card's encoding. It is the
-  engine's own 8-bit render averaged in gamma space; the 3D lane's linear-light
-  resolve should replace it with an independent f32 reference.
-- **Gate:** `e2e/library-card-parity.spec.ts`, 3D cases. Pixels away from edges are
-  exact. A differing edge pixel (3×3 span above 8 CV in today's card) must be, per
-  channel, no further from the reference than today's.
-- **Units:** CV, max channel difference, over the pixels where today and the engine
-  differ.
+- **Reference:** CSS Color 4 OKLCh chroma reduction with deltaEOK JND 0.02,
+  independently evaluated in f64 by `pm-reference`. Mapping operates on straight
+  encoded sRGB before output alpha and quantization. BT.709 output tags retain
+  their declared transfer; float and Display P3 outputs keep extended RGB.
+- **Gate:** `pm-render/tests/color_depth.rs` retains an extended shader value
+  through a depth-8 project's float frame, then verifies ordinary and snapshot
+  byte targets against the independent mapped result. CPU output, viewer alpha,
+  and exact GPU encoder half-byte rounding have separate boundary tests.
+- **Units:** CV; maximum, p99.9 and mean per-pixel error on the uniform fixture.
+
+| Correction (standard) | Clipped output vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Preserve extended color to one CSS Color 4 gamut mapping | 159.970, 159.970, 159.970 | 0.066, 0.066, 0.066 | Extended red shader, 8-bit ordinary and snapshot output |
+
+## 3D output and Library cards
+
+The scene pass writes linear RGBA16F samples (4× MSAA, memoryless on Apple GPUs),
+weights each by 1/(1 + L) after the last draw (L the luminance the tone curve sees,
+exposure included), resolves them in hardware
+(coverage stays the box mean) and applies the preserved r180 ACES curve once at the
+composite boundary, after transparent blending (decision `3D-TONEMAP-1`); masks and
+effects keep their layer boundaries. Metal truncates f32 to half at a render-target
+store, so every 3D color program and the encoded scene output store the IEEE
+nearest-even half computed in the shader.
+
+- **Reference:** independent Three.js r180 shading into RGBA32F at eight samples per
+  axis, averaged in linear light and output-converted with f64 arithmetic.
+- **Gate:** `tests/scene3d.rs` and `tests/scene3d_gltf.rs` (displayed pixels and
+  geometry), and the Editor-view Library cards (`e2e/library-card-parity.spec.ts`).
+- **Units:** CV; card statistics over the cube's pixels, signed mean per channel.
 
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
-| MSAA edge resolve: Metal hardware resolve instead of WebGL's (box filter over samples) | 1, 1, 1.00 | 0, 0, 0.00 | Camera view, 4 viewers × 2 themes (35 edge pixels) |
+| Masked object depth-tests itself (D-R5) | 135.06, 135.04, 1.436 | 0.95, 0.49, 0.003 | `layer-opacity-and-mask:0` interior |
+| X-ray translucency blended in linear light (D-R6, `3D-TONEMAP-1`) | 23.70, 23.66, 10.803 | 0.07, 0.07, 0.016 | `look-xray:2` interior |
+| Legacy scene shaded and resolved in linear light | 64.18, 61.66, 0.371 | 3.72, 0.33, 0.006 | `legacy-scene:0` interior |
+| Nearest-half 3D and working stores (Editor Library card) | 25, 5, 0.0072 (card, signed +0.0008) | 25, 5, 0.0122 (card, signed +0.0005) | Editor-view card, depth 16 |
+| Transmission samples the authored background (r180 `renderTransmissionPass`) | 92.57, 91.62, 2.856 | 5.61, 0.47, 0.004 | `khr-GlassVaseFlowers` interior |
+| Luminance-weighted MSAA resolve (Karis) | 175.55, 128.96, 5.747 | 195.71, 125.52, 5.241 (box resolve: 243.04, 129.58, 5.347) | `khr-ToyCar` edge |
+| Material slots and mesh groups ignored, as v1.2.0 (main 2b1fa379a; both slot cases re-recorded from v1.2.0) | 1.40, 1.17, 0.048 | 0.96, 0.84, 0.028 | `slots-draw-nothing:0` interior |
+| Old scenes carrying `slots` or mesh `groups` open (v1.2.0's strict `parseScene` throws on them) | no frame | 0.05, 0.04, 0.000 | `slots-and-groups:0` interior |
 
-Open, gate failing: in the Editor view, today is 20, 20, 5.02 and the engine is
-19, 19, 4.65 (132 edge pixels, 16 cards), but 4–5 pixels per card are one CV
-further from the reference than today's. Owner: 3D lane (linear-light resolve).
-The raw camera frame's one interior pixel, `(799, 448)`, is a rounding-midpoint tie:
-a surface fit over 2,805 face pixels gives 150.50 ± 0.02, and today (151) and the
-engine (150) are both 0.50 away.
+Library cards pass gate-policy's precision-bound rule (all 32). Their remaining
+one-code differences are the half-float working frame rounded again to 8 bits: the
+Editor card's interior mean is 0.0070 CV (today 0.0004) and its edge mean 0.1606
+(today 0.1587). The scene gate passes.
+
+The weighted resolve brings edges toward the reference: per pixel, `khr-ToyCar`'s
+largest excess over today's error falls from 134.37 to 71.71 CV (p99.9 59.22 to 32.04)
+and `khr-IridescenceLamp`'s from 177.30 to 64.39 (p99.9 72.96 to 31.73). Over all 165
+glTF outputs the pixel-weighted edge mean is 3.98 CV from the reference (today 6.12),
+and the engine's edge mean is at or below today's in 159. Two other resolves were
+measured and land further from the reference: tone mapping each sample (40 failing
+outputs; `khr-ToyCar` edge p99.9 excess 48.84) and tone mapping luminance only,
+w = T(L)/L inverted after the resolve (45; 48.48). The adapter (Apple M4 Max) offers
+1, 2 and 4 samples for RGBA16F and Depth32Float, not 8. 34 glTF outputs fail: 2
+geometry rows predate this work, the rest are p99.9 or per-pixel edge statistics over
+small edge sets, and 11 interiors miss the interior rule.
+
+**MSAA-SPEC-1 (owner beta decision, measured trade-off).** Where triangles meet inside
+a surface, a sample's triangle is shaded at the pixel center, outside the triangle,
+and a normal-mapped, iridescent or anisotropic highlight lands in one sample. Today
+shows the same sparkle and tones each sample before averaging; the reference shades
+each sample where it lies. No resolve that keeps one tone map after transparent
+blending brings these interiors to today + 1 CV. Interior, CV from the reference (max,
+p99.9, mean), and the worst pixel's excess over today's error (box resolve → weighted):
+
+| Case | Today | Engine | Worst excess |
+|---|---|---|---|
+| `khr-NormalTangentTest` | 124.00, 2.00, 0.031 | 195.56, 1.71, 0.032 | 112 → 72 |
+| `khr-NormalTangentMirrorTest` | 115.00, 0.36, 0.012 | 176.12, 0.05, 0.013 | 133 → 61 |
+| `khr-LightsPunctualLamp` | 58.53, 2.74, 0.016 | 69.52, 2.65, 0.017 | 39 → 22 |
+| `khr-IridescenceLamp` | 211.87, 90.90, 3.016 | 212.14, 4.28, 0.159 | 24 → 14 |
+| `khr-IridescenceSuzanne` | 131.83, 93.21, 0.917 | 132.06, 22.55, 0.071 | 14 → 8 |
+| `khr-AnisotropyBarnLamp` | 90.95, 90.77, 0.314 | 63.82, 14.96, 0.045 | 3.4 → 2.8 |
+| `khr-CompareAnisotropy` | 44.00, 7.88, 0.044 | 44.29, 7.51, 0.043 | 1.9 → 1.7 |
+
+Other interiors that miss the interior rule:
+
+- `khr-PlaysetLightTest` (3.93 CV, box 1.25): one sample of a lamp pixel is
+  genuinely bright, the reference keeps it, and the weight dims it.
+- One or two codes in a few pixels, the same with every resolve measured (so not the
+  weights' recovery) and present before the 8-bit encode:
+  - `webp-avif` (1.33 CV over 45 pixels, blue only): the AVIF texels' decode, owned
+    by L5 (stills).
+  - `khr-TextureCoordinateTest` (1.57, one pixel 5% darker). The texture is
+    512 × 512 with r180's default trilinear sampler, no LOD bias on either side, and
+    the program is r180's own; neither LOD bias nor mip generation explains it.
+  - `khr-CompareTransmission` (1.62) and `transmission-background` (1.43), two pixels
+    each in the transmission sample. The transmission mips equal ANGLE's
+    `generateMipmap` at 480 × 270 (odd levels 135 → 67 → 33, bilinear at texel
+    centers) to the last bit, so mip generation is ruled out.
+
+## Raster sampling and masks
+
+- **Reference:** decoded level-1 source texels, independent f64 affine Lanczos-3
+  with the declared anti-ringing clamp and exact outline coverage; parametric
+  mask distance, feather and compositing formulas evaluated in f64.
+- **Gate:** `pm-render/tests/corpus.rs`, still and parametric-mask cases. Pixel
+  classes and precision bounds follow [gate-policy.md](gate-policy.md). Original
+  working pixels also have to equal the same-size paused preview/export. Geometry
+  is measured separately at Float32 to avoid treating half-float alpha rounding
+  as shifted positions.
+- **Units:** CV; each entry gives max, p99.9, mean. Other corpus cases remain
+  subject to the unchanged bounds, including cases without a complete reference.
+
+| Correction (declared kernel / authored mask formula) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Float sampling and analytic quad coverage | 10.10, 10.10, 0.063 | 0.02, 0.02, <0.001 | Transparent alpha still |
+| Same sampling through opaque output quantization | 9.08, 9.08, 0.057 | 0.27, 0.27, 0.002 | Same alpha still, opaque view |
+| Parametric mask coverage with float sampling | 144.06, 110.89, 10.156–10.621 | 0.25, 0.22–0.23, 0.068 | Three transparent rectangle/ellipse-mask frames |
+| Minified stills read their own box mip chain (declared Lanczos-3 / trilinear kernel) | zone plate min PSNR 17 dB (bilinear, no mips) | min 70.78 dB vs the declared kernel; 29.67 dB Final, 23.08 dB Playback vs the output-space low-pass | `antialiasing_bar_zone_plate`, level 1 and 2, Float16/32 (units: dB) |
+
+A still is uploaded with its full mip chain in the same texture, filled once by
+the compute downsampler with nearest-rounded box means. That costs a third more
+still memory and no extra texture; `export_120`'s texture-byte baseline was
+raised by the two stills' chains (174,760 bytes), the only ratchet change.
+
+The still subset passes all six frames and the mask subset all three. Broader
+blend cases expose the existing hard pixel-centre edges of level-1 solids; they
+remain red against exact coverage, including at Float32. This is independent of
+mask alpha quantization and is not waived.
 
 ## Text raster
 
@@ -127,17 +229,10 @@ layer effects with effects. They are rechecked after those owners integrate.
 - **Gate:** `pm-render/tests/video_reading.rs` (engine within 0.59 / 0.063 / 0.004 CV of
   the reference at 8 / 16 / 32-bit on pixels whose chroma is flat over the
   reconstruction footprint, and at least as close as today everywhere), and
-  `pm-render/tests/chroma_truth.rs` for the filter. `e2e/engine-viewer-canvas.spec.ts`
-  checks the untagged SD fixture's native viewer colour against the same
-  independent f64 H.273 / SMPTE 170M reference. It compares every pixel in
-  the video box, including its scaled border, using today's original-video
-  coverage with only the source colour corrected. Whole-stage geometry and
-  nonvideo pixel parity retain their original bounds; the native snapshot's
-  video interior is checked against the reference and the displayed frame.
-  The viewer gate uses the largest RGB-channel error per pixel for aggregate
-  max, p99.9 and mean, and checks the native-minus-today error at every pixel
-  (99.9% at most 1 CV, none beyond 4 CV).
-  `video_reading.rs` proves the same video reading in paused preview and export.
+  `pm-render/tests/chroma_truth.rs` for the filter. `video_reading.rs` proves
+  the same video reading in paused preview and export. The G-C4 presentation
+  gate separately checks exact equal-size viewer/export pixels and snapped
+  device geometry; it no longer reproduces the legacy viewer's canvas scaling.
 - **Units:** CV. Engine columns are 16-bit projects; their max and p99.9 sit at chroma
   edges, where the engine's Catmull-Rom and the reference's Lanczos-3 legitimately
   differ.

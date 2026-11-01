@@ -11,10 +11,10 @@ use pm_protocol::common::{Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::snapshot::SourceFit;
 
 use crate::media::MediaFailure;
-use crate::pipelines::{PassBlend, QuadUniform, UNIFORM_STRIDE, bytes_of};
+use crate::pipelines::{PassBlend, UNIFORM_STRIDE, bytes_of};
 use crate::sampling::{
     Sampling,
-    gpu::{Pyramid, affine3, bounds_quad, placement},
+    gpu::{affine3, mip_levels, placement},
 };
 
 use super::Renderer;
@@ -37,10 +37,6 @@ pub(super) struct SourceReuse {
     target: Option<Target>,
     readback: pm_gpu::readback::ReadbackRing,
     batch_buffer: Option<(wgpu::Buffer, u64)>,
-    /// The last minified draw's mip pyramid, rebuilt in place by the next
-    /// draw of a source with the same extent (playback, scrubbing and each
-    /// frame of a batch), so neither allocates a pyramid per frame.
-    pyramid: Option<Pyramid>,
 }
 
 impl SourceReuse {
@@ -48,21 +44,12 @@ impl SourceReuse {
         self.target.as_ref().map_or(0, Target::bytes)
             + self.readback.capacity_bytes()
             + self.batch_buffer.as_ref().map_or(0, |(_, bytes)| *bytes)
-            + self.pyramid.as_ref().map_or(0, Pyramid::bytes)
     }
 
     pub(super) fn trim(&mut self, bytes: u64) {
         if self.bytes() > bytes {
-            self.pyramid = None;
-        }
-        if self.bytes() > bytes {
             *self = Self::default();
         }
-    }
-
-    /// Drops the kept pyramid (a monitor at rest); returns its bytes.
-    pub(super) fn release_pyramid(&mut self) -> u64 {
-        self.pyramid.take().map_or(0, |p| p.bytes())
     }
 }
 
@@ -520,59 +507,52 @@ impl Renderer {
         // Source readbacks are top-down, unlike composition intermediates.
         // The same placement and kernel apply, with the output Y axis flipped.
         let uv = [0.0, 0.0, 1.0, 1.0];
-        let placement = placement(
-            affine3(&[dw, 0.0, 0.0, -dh, (ow - dw) * 0.5, (oh + dh) * 0.5]),
-            uv,
-        )
-        .expect("a source has nonzero dimensions");
-        let uniform = bounds_quad(
-            placement
-                .bounds_matrix(w, h)
-                .expect("source intersects output"),
-            w,
-            h,
-        );
-        // One GPU pyramid per decoded source draw, shared by playback's
-        // trilinear filter and Final's bounded-support Lanczos-3. Never read
-        // back or build mips on the CPU, or retain mutable decoder textures;
-        // the levels are rebuilt each draw into one kept texture.
-        let pyramid = if f64::from(source.0.width()) > dw || f64::from(source.0.height()) > dh {
-            let pyramid = self.pipelines.resample.rebuild(
-                &self.device,
-                encoder,
-                &source.0,
-                self.source_reuse.pyramid.take(),
-            );
-            self.source_reuse.pyramid = Some(pyramid.clone());
-            pyramid
-        } else {
-            Pyramid::base(&source.0)
-        };
-        let tex = self.pipelines.resample.bind(
+        let affine = [dw, 0.0, 0.0, -dh, (ow - dw) * 0.5, (oh + dh) * 0.5];
+        let placement = placement(affine3(&affine), uv).expect("a source has nonzero dimensions");
+        // One GPU pyramid per minified decoded source draw, shared by
+        // playback's trilinear filter and Final's bounded-support Lanczos-3,
+        // rebuilt each draw into the renderer's pooled tail storage. Never
+        // read back or build mips on the CPU.
+        let texture = &source.0;
+        let levels = mip_levels(&affine, uv, texture, sampling);
+        // Each source draw is its own pass after its levels: the previous
+        // draw's reads precede this rebuild in queue order, so its tail is free.
+        self.pyramids.begin_frame();
+        let pyramid = self.pipelines.resample.pyramid_for(
             &self.device,
-            &self.queue,
-            &pyramid,
-            &placement.uniform(uv, 1.0, false, sampling, (0, 0), h, &pyramid),
+            encoder,
+            texture,
+            None,
+            levels,
+            None,
+            &mut self.pyramids,
         );
+        let uniform = placement
+            .uniform(uv, 1.0, false, sampling, (0, 0), h, (w, h), &pyramid)
+            .expect("source intersects output");
         let params = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm source snapshot quad"),
+            label: Some("pm source snapshot draw"),
             size: UNIFORM_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&params, 0, bytes_of(&uniform));
-        let quad = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm source snapshot quad"),
-            layout: &self.pipelines.quad_layout,
+        let draw = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pm source snapshot draw"),
+            layout: self.pipelines.resample.uniform_layout(),
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &params,
                     offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<QuadUniform>() as u64),
+                    size: wgpu::BufferSize::new(crate::sampling::gpu::DRAW_UNIFORM_SIZE),
                 }),
             }],
         });
+        let tex = self
+            .pipelines
+            .resample
+            .bind(&self.device, &mut self.binds, &pyramid);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pm source snapshot draw"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -594,7 +574,7 @@ impl Renderer {
                 .resample
                 .pipeline(target.format(), PassBlend::Over),
         );
-        pass.set_bind_group(0, &quad, &[0]);
+        pass.set_bind_group(0, &draw, &[0]);
         pass.set_bind_group(1, &tex, &[]);
         pass.draw(0..4, 0..1);
     }

@@ -12,28 +12,30 @@
 //! - [`describe`]: the passes and draws three.js issues for a layer.
 //! - [`lights`]: `WebGLLights` and the light shadows.
 //! - [`gpu`]: executes the draws (MSAA, shared prepass, shadow maps).
+//! - [`karis`]: the luminance-weighted MSAA resolve.
 //! - [`textures`]: material maps, shadow-map samplers, LTC tables.
 //! - [`legacy`]: legacy `scene3d` and OBJ mesh layers.
 //!
-//! A 3D layer's output is premultiplied, E-encoded RGBA8 (the WebGL
-//! canvas), drawn into the 2D graph per layer so masks, effects, opacity,
-//! and blending stay per layer; with linear blending on, the compositor's
-//! draw of it unpremultiplies, decodes, and re-premultiplies (section 9).
+//! A 3D object or scene layer resolves premultiplied linear RGBA16F,
+//! luminance-weighted ([`karis`]). The compositing seam unweights, tone maps and encodes once before 2D masks and effects.
+//! Legacy OBJ mesh layers retain their own encoded output contract.
 
+mod color_round;
 pub mod describe;
 pub mod gltf;
 pub mod gpu;
+pub mod karis;
 pub mod layers;
 pub mod legacy;
 pub mod lights;
-pub mod model;
 pub(crate) mod metadata;
+pub mod model;
 pub mod studio;
 pub mod textures;
 
 use std::sync::Arc;
 
-pub use gpu::{Error3d, MathMode, Rendered3d, Resident3d, SAMPLES, Scene3dRenderer};
+pub use gpu::{Error3d, MathMode, OutputColor3d, Rendered3d, Resident3d, SAMPLES, Scene3dRenderer};
 pub use model::{
     Camera3d, Light3d, LightKind, Look, Material3d, MaterialKind, Materials, Mesh3d, Object3d,
     Projection, Scene3d, Texture3d,
@@ -120,11 +122,7 @@ impl Object3dPlan {
         // Map images are files: their version is part of the content.
         for o in &self.scene.objects {
             for m in &o.meshes {
-                let list: Vec<&Material3d> = match &m.materials {
-                    Materials::Single(x) => vec![x.as_ref()],
-                    Materials::Slots(v) => v.iter().collect(),
-                };
-                for mat in list {
+                for mat in m.materials.iter() {
                     for (_, t) in mat.maps.all() {
                         if let Some(t) = t
                             && let Ok(meta) = std::fs::metadata(&t.path)

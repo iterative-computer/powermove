@@ -1,16 +1,27 @@
-# Compositing: design notes
+# Compositing
 
-The compositing half of Phase 3a (plan sections 8, 9, 10, 25, and 26 Phase 3a):
-layer masks, track mattes, the nine blend modes, adjustment layers, styled groups
-as compositing boundaries, linear blending, 16- and 32-bit precision, region of
-interest with effect padding, and isolation. Code: `engine/crates/pm-render/src/composite/`
-(plan nodes, executor, passes, effect seam, regions, project color),
-`engine/crates/pm-color/src/linear.rs` and `wgsl.rs` (blend formulas and
-linear-light conversions in f64 and WGSL), and Settings › Project › Color in the
-app. The plan stays the authority; this file records what is drawn, how it matches
-today, and what is not done.
+The graph preserves the document's nine blend formulas, masks, mattes, group
+boundaries, adjustment layers, effect order, opacity and timing. Standard projects
+composite premultiplied display values; linear projects decode inputs and encode
+the finished frame. Gradients retain their authored interpolation space. Project
+color depth selects delivery depth and float precision. Eight-bit delivery uses
+RGBA16F intermediates so extended colors survive to gamut mapping; 16/32-bit
+projects use RGBA16F/RGBA32F.
 
-## What it draws
+A layer boundary draws content, applies masks, runs effects, applies its matte,
+then composites. Fused mask/matte arithmetic stays in f32 until an actual texture
+store. There are no synthetic intermediate quantizations or GPU rounding probes.
+Effect programs continue to receive their declared display-encoded inputs.
+
+Blend layers render into conservative device bounds, including analytic sampling
+coverage. The compositor snapshots only the covered destination into scratch
+storage and writes the blend into that region with a load/scissor pass. Uncovered
+accumulator pixels keep their exact bits. Unmasked layer targets and scratch
+storage return to the pool after their last recorded read; depth/ID readers retain
+what they need until submission. Effects and transitions retain the complete pass
+rectangle because they can read the backdrop or produce pixels beyond the input.
+Region-of-interest output keeps full-frame coordinates and expands for effect
+padding, so a region equals the corresponding full-frame pixels.
 
 | Feature | Status | Parity evidence |
 |---|---|---|
@@ -33,33 +44,48 @@ today, and what is not done.
 | Masks that are not an array | A named layer failure, as today's `.some` throws | `tests/composite.rs` |
 | Motion blur with masks, blend modes, mattes, effects, styled groups | Drawn (the accumulated samples are the layer target) | `motion/blur-slow`: bit-exact float, opaque ≤ 1 CV |
 
-Corpus figures are from captures `composite-20261016-042859-be1e4467`,
-`compclose-20261018-121218-230f9731`, `compclose2-20261018-124247-4857382c`, and
-`compclose3-20261018-174842-bcfa91ad`
-(Chromium, ANGLE Metal, Apple M4 Max), compared by `tests/corpus.rs` under
-section 25's Standard class (≤ 1 CV for 99.9% of pixels, ≤ 4 CV anywhere) and,
-for transparent captures, the float frames within 1 CV. The corpus tests fail
-any project routed for masks, motion blur, 2.5D, `compat` level 2, the
-`requiresEngine` stamp, or project color (`support::routing_forbidden`). Bezier
-path masks no longer have a routing reason (`Feature::PathMasks` is removed),
-and neither do level 1 shapes on 2.5D planes (`Feature::PlaneShapeRaster`, a
-route of the previous round, is removed: the Canvas2D emulation's residual it
-stood for is closed; motion.md, "2.5D"). Level 2 text now draws animators,
-range typography and typography anchoring natively. The old text routing
-reason remains forbidden as a regression defence.
+Image, video, precomp, shader and extension raster layers use the same sampler at
+every compatibility level. Final and paused frames use the declared Lanczos-3
+kernel with its anti-ringing clamp; playback uses trilinear filtering. Quad edges
+use exact pixel-area coverage. Draws whose kernel reads only mip zero borrow the
+source directly; minification uses a box-filtered pyramid. Retained pyramids
+are bounded by both 16 sources and 128 MiB. Mip zero borrows the source; physical
+levels retain only a float downsample tail. The first box level can be evaluated
+in the draw. Known source revisions reuse texels; changed or unknown revisions
+regenerate before use.
+Authored text layout, vector geometry and extension raster override semantics
+remain separate contracts.
 
-## Graph
+The viewer renders Full directly at its snapped device box in the project's
+working format, without an intermediate opaque RGBA8 canvas. Half/Quarter are
+explicit resolution choices. Pinned snapshots keep project precision until their
+API output conversion. At 100%, paused preview and export use the same frame
+pipeline. Equality requires the same motion-blur sample count and scene view;
+viewer-only camera/look overrides and the authored per-output sample settings
+remain explicit request inputs. Video frame selection follows source timestamps
+and holds the last source frame on every output. Paused compatibility lookahead
+starts after the exact visible frame presents; a seek invalidates that warmup,
+and future rasters yield to current-frame dependencies.
 
-`plan::draw_layer` reads a layer's compositing properties as `renderProject` does
-(`composite::build`: `BLEND_ID`, `applyMasks`'s filtering and coercions,
-`matteMode || 'alpha'` with `startsWith`/`endsWith`, `proj.layers.find`). A layer
-that leaves today's fast path (masks, effects, a blend mode, or a matte) becomes a
-`plan::Content::Composite` draw holding a `composite::Node`:
+3D color reaches the compositor as resolved, premultiplied linear float values.
+The output boundary applies the authored ACES curve once after 3D blending and
+resolve, joins the display-referred background in linear light, and encodes once
+for Standard compositing. Masks and effects then run in their existing layer
+order. Legacy OBJ shader output has a separate encoded contract.
 
-- `LayerNode`: the layer's normal draw (with its opacity; a group's boundary at
-  opacity 1 with the group's opacity kept for the composite), masks, effects, the
-  matte pass, the blend mode, the composite alpha.
-- `AdjustmentNode`: prepared effects, masks, blend mode, opacity.
+At an 8-bit sRGB output, the shared CSS Color 4 mapper reduces OKLCh chroma
+before final quantization. It operates on straight encoded RGB, then restores
+premultiplication when requested. Float and Display P3 outputs retain their
+extended values. BT.709-tagged delivery converts the mapped sRGB result to the
+declared transfer. Genuine byte rasters retain their existing byte contract.
+
+The correctness gates are described in [gate-policy.md](gate-policy.md).
+`tests/composite.rs` guards formulas, isolation, region equivalence, exact identity
+outside blend bounds and the cold blend-stack texture budget. `tests/sampling.rs`
+applies the declared-kernel quality and flicker bars to both compatibility levels.
+`tests/corpus.rs` keeps today's captures as authored-intent witnesses and compares
+modeled content with the independent f64 reference. Unmodeled content retains its
+previous bound and remains a failing gate when the bound is exceeded.
 
 The matte pass is a `CompPlan` holding only the source, drawn with `{ ...source,
 on: true }` (`Scope::active_forced_on`), carrying today's `matteDepth` (8, carried

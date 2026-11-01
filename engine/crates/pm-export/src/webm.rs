@@ -30,7 +30,7 @@ use crate::atomic::AtomicOutput;
 use crate::convert::{EncoderInput, Plane, PlaneData};
 use crate::pipeline::Sink;
 use crate::settings::{
-    AlphaOutput, AudioCodec, Codec, Container, ExportSpec, InputFormat, Overwrite,
+    AlphaOutput, AudioCodec, Codec, ColorTags, Container, ExportSpec, InputFormat, Overwrite,
 };
 use crate::verify::{self, AudioReport, BlockSample, PixelCheck, VerifyReport};
 

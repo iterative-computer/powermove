@@ -301,12 +301,11 @@ fn editor_camera_projection_follows_the_contract() {
 }
 
 #[test]
-fn linear_blending_decodes_the_3d_canvas_once() {
-    // The 3D pass's E-encoded output is decoded once when drawn with linear
-    // blending on, and the frame is encoded with E on output. A single 3D
-    // layer is the bottom of its set and draws the solid 3D background, so
-    // its output is opaque everywhere and comes out as with linear blending
-    // off (a second decode would darken every lit pixel).
+fn linear_scene_output_uses_one_tone_map_in_both_blend_modes() {
+    // The 3D pass stays linear until the composite seam. The authored scene
+    // background bypasses ACES, while lit object pixels receive it once.
+    // An isolated opaque layer therefore reads the same in either working
+    // blend mode.
     let frame = |r: &mut Renderer, on: bool| {
         let mut cam = camera("cam", [0.0, 0.0, 6.0], false, 2.0);
         cam["d"]["data"]["environment"]["background"] = json!("#203040");
@@ -351,7 +350,7 @@ fn linear_blending_decodes_the_3d_canvas_once() {
         }
     }
     assert!(lit > 1000, "{lit} lit pixels");
-    // f32 decode and encode of 8-bit E values.
+    // f32 transfer precision around a single post-blend tone map.
     assert!(worst < 1e-4, "worst {worst}");
 }
 
@@ -360,8 +359,15 @@ f 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
 
 #[test]
 fn obj_models_and_mesh_layers_render() {
+    struct RemoveDir(std::path::PathBuf);
+    impl Drop for RemoveDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let dir = std::env::temp_dir().join(format!("pm-render-obj-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    let _cleanup = RemoveDir(dir.clone());
     let path = dir.join("cube.obj");
     std::fs::write(&path, CUBE_OBJ).unwrap();
     let mut resolver = MapResolver::default();
@@ -482,7 +488,6 @@ fn obj_models_and_mesh_layers_render() {
         .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
         .unwrap();
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The 3D pass's frame time at 1920 × 1080 with shadows of every kind:
@@ -639,6 +644,9 @@ fn frame(r: &mut Renderer, doc: &pm_model::Document) -> (Vec<f32>, Vec<String>) 
             &MapResolver::default(),
         )
         .unwrap();
+    if !f.failures.is_empty() {
+        eprintln!("3D layer failures: {:?}", f.failures);
+    }
     let failures = f.failures.iter().map(|l| l.layer.clone()).collect();
     (r.read_rgba(&f).unwrap(), failures)
 }

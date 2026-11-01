@@ -30,7 +30,8 @@
 
 use crate::Error;
 use crate::dither::dither_offset;
-use crate::settings::{AlphaOutput, InputFormat, WorkingEncoding};
+use crate::settings::{AlphaOutput, ColorTags, InputFormat, WorkingEncoding};
+use pm_color::css_srgb;
 
 pub const KR: f64 = 0.2126;
 pub const KB: f64 = 0.0722;
@@ -150,6 +151,8 @@ impl EncoderInput {
 pub struct ConvertParams {
     pub working: WorkingEncoding,
     pub alpha: AlphaOutput,
+    /// Output transfer/tag; mapping always happens in sRGB E first.
+    pub tags: ColorTags,
     pub dither: bool,
     /// Frame index: the dither seed.
     pub frame: u32,
@@ -221,6 +224,61 @@ pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) ->
     }
 }
 
+/// Resolve output alpha and transfer while RGB is floating. For 8-bit
+/// Rec.709-primary delivery, map once in straight sRGB E before any requested
+/// encoded-domain premultiplication. Wider formats skip that CSS mapping.
+fn tagged_output_rgba(
+    w: [f32; 4],
+    working: WorkingEncoding,
+    alpha: AlphaOutput,
+    tags: ColorTags,
+    map_css: bool,
+) -> ([f64; 3], f64) {
+    if !map_css && !tags.bt709_transfer() {
+        return output_rgba(w, working, alpha);
+    }
+    let straight_alpha = if alpha == AlphaOutput::Premultiplied {
+        AlphaOutput::Straight
+    } else {
+        alpha
+    };
+    let (rgb, a) = output_rgba(w, working, straight_alpha);
+    let rgb = if map_css { css_srgb(rgb) } else { rgb };
+    let rgb = if tags.bt709_transfer() {
+        rgb.map(|v| pm_color::transfer::bt709_oetf(e_decode(v)))
+    } else {
+        rgb
+    };
+    let scale = if alpha == AlphaOutput::Premultiplied {
+        a
+    } else {
+        1.0
+    };
+    (rgb.map(|v| v * scale), a)
+}
+
+/// Quantize one mapped, transfer-encoded SDR output pixel. Call only at an
+/// 8-bit Rec.709-primary output boundary; never on float or Display P3.
+pub fn rgba8_pixel(
+    w: [f32; 4],
+    working: WorkingEncoding,
+    alpha: AlphaOutput,
+    tags: ColorTags,
+    dither: [f64; 3],
+) -> [u8; 4] {
+    let (rgb, a) = tagged_output_rgba(w, working, alpha, tags, true);
+    let a8 = code(a * 255.0, 0.0, 255.0) as u8;
+    if alpha == AlphaOutput::Straight && a8 == 0 {
+        return [0; 4];
+    }
+    [
+        code(rgb[0] * 255.0 + dither[0], 0.0, 255.0) as u8,
+        code(rgb[1] * 255.0 + dither[1], 0.0, 255.0) as u8,
+        code(rgb[2] * 255.0 + dither[2], 0.0, 255.0) as u8,
+        a8,
+    ]
+}
+
 fn code(v: f64, lo: f64, hi: f64) -> f64 {
     v.round_ties_even().clamp(lo, hi)
 }
@@ -278,7 +336,7 @@ fn rgba_quant(
     scale: f64,
 ) -> [f64; 4] {
     let p = pixel(frame, x, y);
-    let (c, a) = output_rgba(p, params.working, params.alpha);
+    let (c, a) = tagged_output_rgba(p, params.working, params.alpha, params.tags, false);
     let d = |ch| {
         if params.dither {
             dither_offset(params.frame, x as u32, y as u32, ch)
@@ -298,10 +356,21 @@ fn fill_rgba8(frame: &WorkingFrame, params: &ConvertParams, out: &mut [u8]) {
     let w = frame.width as usize;
     crate::par::rows(out, w * 4, |y, row| {
         for x in 0..w {
-            let q = rgba_quant(frame, params, x, y, 255.0);
-            for k in 0..4 {
-                row[x * 4 + k] = q[k] as u8;
-            }
+            let dither = std::array::from_fn(|ch| {
+                if params.dither {
+                    dither_offset(params.frame, x as u32, y as u32, ch as u32)
+                } else {
+                    0.0
+                }
+            });
+            let q = rgba8_pixel(
+                pixel(frame, x, y),
+                params.working,
+                params.alpha,
+                params.tags,
+                dither,
+            );
+            row[x * 4..x * 4 + 4].copy_from_slice(&q);
         }
     });
 }
@@ -335,8 +404,17 @@ pub fn convert(
             0.0
         }
     };
+    // Y′CbCr carries extended RGB within its codable range (superwhites,
+    // sub-blacks and footage's own out-of-gamut colors), so untouched
+    // footage keeps its luma; only RGB 8-bit outputs take the CSS mapping.
     let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
-        let (c, a) = output_rgba(pixel(frame, x, y), params.working, params.alpha);
+        let (c, a) = tagged_output_rgba(
+            pixel(frame, x, y),
+            params.working,
+            params.alpha,
+            params.tags,
+            false,
+        );
         (rgb_to_ycbcr(c), a)
     };
     // Chroma of 4:2:0 sample (cx, cy): siting type 0, point decimation
@@ -585,14 +663,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn srgb8_boundary_maps_straight_rgb_before_alpha_and_rounding() {
+        let source = [0.6f32, -0.1, 0.2, 0.5];
+        let straight = [
+            f64::from(source[0]) / f64::from(source[3]),
+            f64::from(source[1]) / f64::from(source[3]),
+            f64::from(source[2]) / f64::from(source[3]),
+        ];
+        let mapped = pm_reference::color::css_gamut_map_srgb(straight);
+        let quantize = |v: f64| (v * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+        let straight_bytes = rgba8_pixel(
+            source,
+            WorkingEncoding::Standard,
+            AlphaOutput::Straight,
+            ColorTags::SrgbImage,
+            [0.0; 3],
+        );
+        for ch in 0..3 {
+            assert!(straight_bytes[ch].abs_diff(quantize(mapped[ch])) <= 1);
+        }
+        assert_eq!(straight_bytes[3], 128);
+        let premultiplied_bytes = rgba8_pixel(
+            source,
+            WorkingEncoding::Standard,
+            AlphaOutput::Premultiplied,
+            ColorTags::SrgbImage,
+            [0.0; 3],
+        );
+        for ch in 0..3 {
+            assert!(premultiplied_bytes[ch].abs_diff(quantize(mapped[ch] * 0.5)) <= 1);
+        }
+        assert_eq!(premultiplied_bytes[3], 128);
+        let opaque = rgba8_pixel(
+            source,
+            WorkingEncoding::Standard,
+            AlphaOutput::None,
+            ColorTags::SrgbImage,
+            [0.0; 3],
+        );
+        let over_black = pm_reference::color::css_gamut_map_srgb(
+            [source[0], source[1], source[2]].map(f64::from),
+        );
+        for ch in 0..3 {
+            assert!(opaque[ch].abs_diff(quantize(over_black[ch])) <= 1);
+        }
+        assert_eq!(opaque[3], 255);
+    }
+
+    #[test]
+    fn rgb16_output_keeps_its_separate_non_css_boundary() {
+        let pixel = [1.2f32, -0.2, 0.4, 1.0];
+        let frame = WorkingFrame {
+            width: 1,
+            height: 1,
+            rgba: &pixel,
+        };
+        let result = convert(
+            &frame,
+            InputFormat::Rgba16,
+            &params(AlphaOutput::None, false),
+        )
+        .unwrap();
+        let rgb = result.planes[0].u16().unwrap();
+        assert_eq!(rgb[0], 65535);
+        assert_eq!(rgb[1], 0);
+        assert_eq!(
+            rgb[2],
+            (f64::from(pixel[2]) * 65535.0).round_ties_even() as u16
+        );
+    }
+
+    #[test]
+    fn bt709_tags_reencode_after_one_css_mapping() {
+        use pm_reference::color::Transfer;
+
+        let source = [0.6f32, -0.1, 0.2, 0.5];
+        let straight =
+            [source[0], source[1], source[2]].map(|v| f64::from(v) / f64::from(source[3]));
+        let mapped = pm_reference::color::css_gamut_map_srgb(straight);
+        let expected = mapped.map(|v| {
+            let linear = Transfer::Srgb.to_linear(v);
+            (Transfer::Bt709.from_linear(linear) * 255.0)
+                .round_ties_even()
+                .clamp(0.0, 255.0) as u8
+        });
+        for tags in [ColorTags::Rec709Broadcast, ColorTags::Rec709Image] {
+            let actual = rgba8_pixel(
+                source,
+                WorkingEncoding::Standard,
+                AlphaOutput::Straight,
+                tags,
+                [0.0; 3],
+            );
+            for ch in 0..3 {
+                assert!(
+                    actual[ch].abs_diff(expected[ch]) <= 1,
+                    "{tags:?} channel {ch}: {actual:?} vs {expected:?}"
+                );
+            }
+            assert_eq!(actual[3], 128);
+        }
+        let quicktime = rgba8_pixel(
+            [0.25, 0.5, 0.75, 1.0],
+            WorkingEncoding::Standard,
+            AlphaOutput::None,
+            ColorTags::Rec709QuickTime,
+            [0.0; 3],
+        );
+        let broadcast = rgba8_pixel(
+            [0.25, 0.5, 0.75, 1.0],
+            WorkingEncoding::Standard,
+            AlphaOutput::None,
+            ColorTags::Rec709Broadcast,
+            [0.0; 3],
+        );
+        assert_ne!(quicktime[..3], broadcast[..3]);
+        assert_eq!(quicktime[3], 255);
+        assert_eq!(broadcast[3], 255);
+    }
+
+    #[test]
     fn transparent_png_unpremultiplies_the_working_floats() {
-        // Straight RGB is the premultiplied float divided by alpha, rounded
-        // once: no 8-bit premultiplied value is unpremultiplied.
-        for (values, expected) in [
-            ([0.2f32, 0.1, 0.0, 0.5], [102u8, 51, 0, 128]),
-            ([0.0003, 0.0006, 0.0009, 0.003], [26, 51, 76, 1]),
-            ([0.7, 0.0, 0.0, 0.5], [255, 0, 0, 128]),
-            ([0.2, 0.4, 0.6, 1.0], [51, 102, 153, 255]),
+        // Straight RGB is the premultiplied float divided by alpha while
+        // still extended, then gamut-mapped and rounded once. The reference
+        // mapper is independent of pm_color.
+        for values in [
+            [0.2f32, 0.1, 0.0, 0.5],
+            [0.0003, 0.0006, 0.0009, 0.003],
+            [0.7, 0.0, 0.0, 0.5],
+            [0.2, 0.4, 0.6, 1.0],
         ] {
             let frame = WorkingFrame {
                 width: 1,
@@ -601,13 +800,20 @@ mod tests {
             };
             let p = params(AlphaOutput::Straight, false);
             let byte = convert(&frame, InputFormat::Rgba8, &p).unwrap();
-            assert_eq!(byte.planes[0].u8().unwrap(), expected, "{values:?}");
-            // The f64 reference: one division, one rounding.
             let a = f64::from(values[3]);
-            for c in 0..3 {
-                let want = (f64::from(values[c]) / a).clamp(0.0, 1.0) * 255.0;
-                assert!((f64::from(expected[c]) - want).abs() <= 0.5 + 1e-9);
-            }
+            let straight = [values[0], values[1], values[2]].map(|v| f64::from(v) / a);
+            let mapped = pm_reference::color::css_gamut_map_srgb(straight);
+            let expected = mapped.map(|v| (v * 255.0).round_ties_even() as u8);
+            assert_eq!(
+                byte.planes[0].u8().unwrap(),
+                &[
+                    expected[0],
+                    expected[1],
+                    expected[2],
+                    (a * 255.0).round_ties_even() as u8
+                ],
+                "{values:?}"
+            );
         }
     }
 
@@ -622,8 +828,114 @@ mod tests {
         ConvertParams {
             working: WorkingEncoding::Standard,
             alpha,
+            tags: ColorTags::Rec709QuickTime,
             dither,
             frame: 0,
+        }
+    }
+
+    #[test]
+    fn reusable_rgba8_matches_convert_for_modes_and_special_values() {
+        let values = [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.2,
+            0.1,
+            0.0,
+            0.5,
+            0.0003,
+            0.0006,
+            0.0009,
+            0.003,
+            -0.25,
+            1.25,
+            0.5,
+            1.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            0.5,
+            -0.0,
+            1.0,
+            f32::INFINITY,
+            1.0,
+            0.0,
+            0.0,
+            1.0 / 8192.0,
+            0.7,
+            0.0,
+            0.0,
+            0.5,
+        ];
+        let frame = WorkingFrame {
+            width: 4,
+            height: 2,
+            rgba: &values,
+        };
+        let mut reused = vec![0xaa; 128];
+        for working in [WorkingEncoding::Standard, WorkingEncoding::Linear] {
+            for alpha in [
+                AlphaOutput::None,
+                AlphaOutput::Straight,
+                AlphaOutput::Premultiplied,
+            ] {
+                for dither in [false, true] {
+                    let params = ConvertParams {
+                        working,
+                        alpha,
+                        tags: ColorTags::Rec709QuickTime,
+                        dither,
+                        frame: 37,
+                    };
+                    let expected = convert(&frame, InputFormat::Rgba8, &params).unwrap();
+                    convert_rgba8_into(&frame, &params, &mut reused).unwrap();
+                    assert_eq!(
+                        reused.as_slice(),
+                        expected.planes[0].u8().unwrap(),
+                        "{params:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_rgba8_resizes_and_rejects_invalid_frames_without_changing_buffer() {
+        let mut out = Vec::with_capacity(128);
+        let allocation = out.as_ptr();
+        let params = params(AlphaOutput::Straight, false);
+        for (width, height, pixel) in [(2, 2, 0.2), (4, 3, 0.8), (1, 1, 0.4)] {
+            let values = [pixel, pixel * 0.5, 0.0, 0.5].repeat((width * height) as usize);
+            let frame = WorkingFrame {
+                width,
+                height,
+                rgba: &values,
+            };
+            convert_rgba8_into(&frame, &params, &mut out).unwrap();
+            assert_eq!(out.len(), (width * height * 4) as usize);
+            assert_eq!(out.as_ptr(), allocation);
+            assert_eq!(
+                out.as_slice(),
+                convert(&frame, InputFormat::Rgba8, &params).unwrap().planes[0]
+                    .u8()
+                    .unwrap()
+            );
+        }
+        let before = out.clone();
+        for (width, height, values) in [(0, 1, vec![]), (2, 2, vec![0.0; 15])] {
+            let frame = WorkingFrame {
+                width,
+                height,
+                rgba: &values,
+            };
+            assert!(matches!(
+                convert_rgba8_into(&frame, &params, &mut out),
+                Err(Error::InvalidFrame(_))
+            ));
+            assert_eq!(out, before);
         }
     }
 

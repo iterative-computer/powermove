@@ -210,7 +210,8 @@ pub struct Rendered {
 }
 
 /// Row order in a snapshot target. `Gl` rows are inverted while the mapped
-/// readback is encoded; other callers always receive top-down targets.
+/// readback is encoded or the viewer places the frame; other callers always
+/// receive top-down targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotRows {
     TopDown,
@@ -1200,15 +1201,16 @@ impl Renderer {
         self.text_gpu.trim(bytes);
     }
 
-    /// Frees every idle intermediate target and the source monitor's kept
-    /// mip pyramid (a viewer at rest), and returns the bytes freed. Targets
-    /// in use, such as the kept bottom of the last frame
-    /// (`crate::frame_prefix`), and every content cache stay; the next
-    /// frame takes fresh targets from the device.
+    /// Frees every idle intermediate target and kept mip pyramid (a viewer
+    /// at rest), and returns the bytes freed. Targets in use, such as the
+    /// kept bottom of the last frame (`crate::frame_prefix`), and every
+    /// content cache stay; the next frame takes fresh targets from the device.
     pub fn release_idle_targets(&mut self) -> u64 {
-        let before = self.pool.bytes();
+        let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);
-        before - self.pool.bytes() + self.source_reuse.release_pyramid()
+        self.pyramids.clear();
+        self.binds.clear();
+        before - self.pool.bytes()
     }
 
     /// Native SVG fallback diagnostic for the most recently resolved SVG.
@@ -1251,7 +1253,7 @@ impl Renderer {
             Some(Ok(c)) => effective_precision(request.precision, c.precision),
             _ => request.precision,
         };
-        working_format(precision)
+        working_format(storage_precision(precision))
     }
 
     /// The actual output format on this device. Main's compositor falls
@@ -1749,6 +1751,7 @@ impl Renderer {
             self.uniforms.reset();
             self.binds.begin_frame();
             self.text_gpu.begin_frame();
+            self.pyramids.begin_frame();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
@@ -1778,12 +1781,14 @@ impl Renderer {
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
-            let pooled_gl_rows = (rows == SnapshotRows::TopDown).then(|| {
+            let pooled_gl_rows = (rows == SnapshotRows::TopDown
+                || target.format() != working_format(precision))
+            .then(|| {
                 exec.pool.take(
                     exec.device,
                     size.width,
                     size.height,
-                    target.format(),
+                    working_format(precision),
                     pm_gpu::target::working_usage(),
                 )
             });
@@ -1795,7 +1800,7 @@ impl Renderer {
                     composition: composition.to_owned(),
                     width: size.width,
                     height: size.height,
-                    format: target.format(),
+                    format: gl_rows.format(),
                     region,
                     precision,
                     working: color.working,
@@ -1828,8 +1833,8 @@ impl Renderer {
                 && exec.effects.fallback.pending.is_empty()
                 && exec.effects.fallback.fatal.is_none()
                 && !held;
-            if complete && rows == SnapshotRows::TopDown {
-                exec.flip_color(&mut encoder, gl_rows, target);
+            if complete && pooled_gl_rows.is_some() {
+                exec.finish_color(&mut encoder, gl_rows, target, rows == SnapshotRows::TopDown);
             }
             if let Some(gl_rows) = pooled_gl_rows {
                 exec.taken.push(gl_rows);
@@ -2057,7 +2062,13 @@ impl Renderer {
         let [draw] = plan.draws.as_slice() else {
             return Ok(None);
         };
-        let plan::Content::Texture { source, uv, alpha } = &draw.content else {
+        // Raster content reaches the sampler as a placed draw; only a flat
+        // (non-2.5D) placement can be a 1:1 copy.
+        let content = match &draw.content {
+            plan::Content::Placed(p) if p.plane.is_none() => &p.content,
+            other => other,
+        };
+        let plan::Content::Texture { source, uv, alpha } = content else {
             return Ok(None);
         };
         // An interpreted source is read differently from its file (color,
@@ -2305,8 +2316,17 @@ pub fn effective_precision(_request: Precision, project: Precision) -> Precision
 /// The shipped compositor's hardware fallback: 32 → 16 on devices without
 /// float32 filtering and blending. The saved project depth is unchanged.
 fn available_precision(precision: Precision, float32: bool) -> Precision {
-    match (precision, float32) {
+    match (storage_precision(precision), float32) {
         (Precision::Float32, false) => Precision::Float16,
+        (storage, _) => storage,
+    }
+}
+
+/// Eight-bit delivery still needs floating intermediates: CSS gamut mapping
+/// must see extended values before the final display or encoder quantization.
+fn storage_precision(precision: Precision) -> Precision {
+    match precision {
+        Precision::Unorm8 => Precision::Float16,
         _ => precision,
     }
 }
@@ -2315,17 +2335,21 @@ fn available_precision(precision: Precision, float32: bool) -> Precision {
 mod depth_device_tests {
     use super::*;
     #[test]
-    fn float32_hardware_fallback_matches_main_without_promoting_other_depths() {
+    fn storage_preserves_extended_color_until_output_and_handles_float32_fallback() {
+        assert_eq!(
+            available_precision(Precision::Unorm8, true),
+            Precision::Float16
+        );
         assert_eq!(
             available_precision(Precision::Float32, false),
             Precision::Float16
         );
-        for depth in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+        for depth in [Precision::Float16, Precision::Float32] {
             assert_eq!(available_precision(depth, true), depth);
         }
         assert_eq!(
             available_precision(Precision::Unorm8, false),
-            Precision::Unorm8
+            Precision::Float16
         );
         assert_eq!(
             available_precision(Precision::Float16, false),

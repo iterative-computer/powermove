@@ -9,7 +9,8 @@
 //   rounded to the nearest f16 before the write: Apple GPUs truncate on
 //   render-target writes, which would add up to one f16 step after the
 //   P3 conversion (0.5 CV10 near 1.0, measured on a grey ramp).
-// - bgra pools clamp to 0..1 and quantize to 8 bits with a blue-noise RPDF
+// - sRGB bgra pools CSS Color 4 gamut-map extended RGB once, then quantize
+//   to 8 bits with a blue-noise RPDF
 //   dither of ±0.5 LSB. Values on the 8-bit grid stay exact: a working value
 //   within one f16 step of a grid code is that code (an 8-bit color stored in
 //   an rgba16float working texture lands up to one step off; Apple GPUs
@@ -76,6 +77,16 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let eight_bit = (p.flags & 1u) != 0u;
     let linear_in = (p.flags & 2u) != 0u;
     let p3 = (p.flags & 4u) != 0u;
+    let srgb8 = eight_bit && !p3;
+    // The source is premultiplied. Map straight RGB, including at translucent
+    // canvas edges, and leave hidden color at tiny alpha black.
+    if srgb8 {
+        if coverage >= 0.000244140625 {
+            c /= coverage;
+        } else {
+            c = vec3f(0.0);
+        }
+    }
     if p3 {
         var l = c;
         if !linear_in { l = e_decode(c); }
@@ -84,7 +95,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         c = e_encode(c);
     }
     if eight_bit {
-        c = clamp(c, vec3f(0.0), vec3f(1.0));
+        if p3 {
+            c = clamp(c, vec3f(0.0), vec3f(1.0));
+        } else {
+            c = pm_css_gamut_srgb(c);
+            c *= coverage;
+        }
         let t = (xy + p.noise_off) % vec2u(64u);
         let n = textureLoad(noise, vec2i(t), 0).r - 0.5;
         let s = c * 255.0;
@@ -94,5 +110,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     } else {
         c = quantizeToF16(c);
     }
+    // sRGB8 rounded after the requested premultiplication. Wide/float
+    // delivery retains its established precision and coverage behavior.
+    if srgb8 { return vec4f(c, coverage); }
     return vec4f(c * coverage, coverage);
 }

@@ -1119,8 +1119,8 @@ fn source_batch_matches_individual_video_frames_in_order() {
     );
 }
 
-/// Minified source draws rebuild one kept mip pyramid: each frame of a
-/// batch reuses it within one submission, playback allocates no texture per
+/// Minified source draws rebuild one kept mip tail: each frame of a batch
+/// reuses it within one submission, playback allocates no texture per
 /// frame, and a viewer at rest releases it.
 #[test]
 fn minified_source_draws_reuse_one_pyramid() {
@@ -1202,10 +1202,12 @@ fn minified_source_draws_reuse_one_pyramid() {
         "playback rebuilds the kept pyramid: {}",
         counters.to_json()
     );
-    let pyramid = 320 * 180 * 8 * 4 / 3;
-    let kept = renderer.frame_reuse_bytes();
-    assert!(renderer.release_idle_targets() >= pyramid);
-    assert_eq!(renderer.frame_reuse_bytes(), kept - pyramid);
+    // The decoded frame is the pyramid's base; only its half-float tail
+    // (160×90 and 80×45 for this 4× playback minification) is kept.
+    let tail = (160 * 90 + 80 * 45) * 8;
+    assert_eq!(renderer.pyramid_bytes(), tail);
+    assert!(renderer.release_idle_targets() >= tail);
+    assert_eq!(renderer.pyramid_bytes(), 0);
 }
 
 /// The source monitor shows Interpret Footage's reading exactly as the

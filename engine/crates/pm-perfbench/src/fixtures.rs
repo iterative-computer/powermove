@@ -508,7 +508,11 @@ pub fn animated_svg() -> Fixture {
     set(
         &mut image,
         "position.x",
-        keys(json!(320), &[(0.0, json!(260)), (3.0, json!(380))], EASES[0]),
+        keys(
+            json!(320),
+            &[(0.0, json!(260)), (3.0, json!(380))],
+            EASES[0],
+        ),
     );
     set(
         &mut image,
@@ -547,7 +551,11 @@ fn svg_layer_fixture(name: &str, svg: &str, (w, h): (f64, f64), (bw, bh): (f64, 
         set(
             &mut image,
             axis,
-            keys(json!(100), &[(0.0, json!(100)), (1.0, json!(110))], EASES[0]),
+            keys(
+                json!(100),
+                &[(0.0, json!(100)), (1.0, json!(110))],
+                EASES[0],
+            ),
         );
     }
     let mut doc = project(960, 540, 30.0, 10.0, solid_fill("#141821"), vec![image]);
@@ -642,6 +650,14 @@ pub fn video_doc() -> Value {
         "id": "clip", "name": "clip.mp4", "kind": "video", "format": "mp4", "w": 320, "h": 180,
         "dur": 2, "fps": 30, "persisted": true
     });
+    doc
+}
+
+/// The public video drawn small enough to require a physical raster pyramid.
+pub fn pyramid_video_doc() -> Value {
+    let mut doc = video_doc();
+    doc["layers"][1]["d"]["w"] = json!(64);
+    doc["layers"][1]["d"]["h"] = json!(36);
     doc
 }
 

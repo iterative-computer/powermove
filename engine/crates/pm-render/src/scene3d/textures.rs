@@ -94,6 +94,7 @@ pub struct Textures {
     ltc: Option<(wgpu::TextureView, wgpu::TextureView)>,
     pub repeat_trilinear: Option<wgpu::Sampler>,
     pub clamp_nearest: Option<wgpu::Sampler>,
+    pub shadow_compare: Option<wgpu::Sampler>,
     pub ltc_sampler: Option<wgpu::Sampler>,
     linear_clamp: Option<wgpu::Sampler>,
 }
@@ -108,6 +109,7 @@ impl Default for Textures {
             ltc: None,
             repeat_trilinear: None,
             clamp_nearest: None,
+            shadow_compare: None,
             ltc_sampler: None,
             linear_clamp: None,
         }
@@ -148,6 +150,17 @@ impl Textures {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        }));
+        self.shadow_compare = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("3d depth comparison"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         }));
         self.ltc_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
