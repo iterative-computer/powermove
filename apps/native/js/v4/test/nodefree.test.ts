@@ -1,8 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { test, expect } from "bun:test";
 import { runInNewContext } from "node:vm";
 test("browser-target runtime bundle mounts and updates without Node, Chromium or global document", async () => {
   const build = await Bun.build({
-    entrypoints: [new URL("./nodefree-fixture.ts", import.meta.url).pathname],
+    entrypoints: [
+      fileURLToPath(new URL("./nodefree-fixture.ts", import.meta.url)),
+    ],
     target: "browser",
     format: "iife",
     minify: true,

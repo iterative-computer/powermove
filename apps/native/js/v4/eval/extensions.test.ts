@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { test, expect } from "bun:test";
 import { runExtension, consultations } from "./extensions";
 import { tasks } from "./tasks";
@@ -77,7 +78,7 @@ wireTest(
         "-e",
         `import "powermove-v4/refresh"; import {runExtension} from "./eval/extensions"; const r=await runExtension("held-out-07",${JSON.stringify(wire)}); console.log(JSON.stringify(r)); process.exitCode=r.status==="pass"?0:1;`,
       ],
-      { cwd: new URL("..", import.meta.url).pathname },
+      { cwd: fileURLToPath(new URL("..", import.meta.url)) },
     );
     expect(child.exitCode, new TextDecoder().decode(child.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(child.stdout)).status).toBe(
