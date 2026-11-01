@@ -81,6 +81,7 @@ pub mod pro_edit;
 pub mod pro_links;
 pub mod pro_source;
 mod pro_support;
+pub mod pro_transport;
 
 mod channels;
 mod cx;

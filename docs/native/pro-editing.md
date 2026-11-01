@@ -113,3 +113,66 @@ undo through the existing PMV writer. N8 keeps all planning independent of
 media decoders, JS and the renderer. Tests cover all four missing-point cases,
 insert/overwrite boundaries and fragments, stream targeting, source/lock/id
 failure, pair fragments and actual PMV reopen with persisted undo/redo.
+
+## Shuttle transport facts (W079)
+
+`commands::pro_transport` exposes `ShuttleState`, `ShuttleInput` and
+`ShuttleOutcome`. This is UI/transport state, not an undoable document command.
+`dispatch` is pure; the actor owns publication through the existing
+`StateOp::Ui` / `StateTransaction`. `from_transport` hydrates old `{time,playing}`
+facts and richer `{rate,playRange,returnTime}` facts, with clock availability
+and composition FPS supplied by the host. `transport_value` validates and merges
+the result while retaining unrelated/extension transport fields. Capability is
+never asserted by persisted data. The actor integration test proves publication
+without document revision, tree, dirty-state or history changes.
+
+J/L during playback select reverse/forward 1×, advancing to 2× for another
+press in the same direction (capped at 2×); switching direction starts at 1×.
+K stops and snaps the time to a composition frame. When paused or the native
+clock is unavailable, J/K/L return `Declined` so the legacy event/property
+binding may run once. Explicit Reverse (Control-J) starts from paused.
+PlayAround (Control-Shift-Space) takes explicit before/after/duration bounds,
+starts at the clamped range start at +1×, and records the original return time.
+`observe_clock` consumes the engine's actual observed time, stops at the
+composition/range boundary and restores the return time after play-around.
+It does not invent a wall-clock/audio scheduler. Nonfinite/malformed ranges
+return errors rather than panicking or requesting fallback replay.
+
+Decision: N1/N2 require usable pro shuttle rates and play-around; N6/W079 require
+state-dependent decline, never double execution; N7 makes state transitions
+inspectable data; N8 keeps JS/audio/UI work out of the planner. Kernel session
+facts remain separate from document history, consistent with `kernel.md`.
+Mac verification must connect the result to `pm-engine-service`'s actual clock,
+check reverse audio/source sampling and ±1×/±2× rates, frame-aligned stopping,
+work-area bounds, play-around return and single key consumption/fallback.
+
+## Completion and remaining integration
+
+Implemented entry points: ripple delete, ripple trim, slip, slide, roll,
+link/unlink, linked selection, linked move/trim/split/delete, sync-offset data,
+source insert/overwrite with three-point marks and track/stream targeting,
+and J/K/L/explicit reverse/play-around transport facts. All are native Rust.
+The command variants are reachable through the kernel's existing typed command
+transaction route; no kernel actor, legacy command, renderer, vendor or app
+host source was edited. Adapter/UI work outside the owned paths remains:
+map tool/menu/MCP argument decoding to the new types; apply linked selection;
+publish shuttle facts and drive the engine clock; display target tracks and
+sync badges. Direct legacy timing calls retain their existing behavior.
+
+The safe timing admission boundary remains static video/audio. Other layer
+kinds, time remapping, animated source timing and mismatched linked-fragment
+edits are explicitly refused by these new media commands. They continue to
+open unchanged and can use existing general/property commands. Broader pro
+source-time editing for those kinds needs its own intent-preserving design.
+No existing implementation is removed and no user profile or media is touched.
+
+Final Linux validation: `cd apps/native && cargo test --locked -p pm-kernel`
+passed **257 tests**, with **1 pre-existing ignored profile test**. The additions
+are **25 pro timing/link tests, 16 source-edit tests and 9 transport tests**
+(**50 new tests**). `cargo fmt -p pm-kernel -- --check` passes.
+`cargo clippy --locked -p pm-kernel --tests` passes with no warnings in the new
+files; existing warnings remain in out-of-lane files. Repository hook and staged
+`gitleaks git --pre-commit --staged --redact --ignore-gitleaks-allow` pass before
+each logical commit. The environment initially lacked the activation/tooling
+and required parity tags; local tools were installed outside Git and the public
+v1.2.0/v1.3.0 tag objects were fetched for the existing parity tests.
