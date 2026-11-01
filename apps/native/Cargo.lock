@@ -4936,6 +4936,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-panel-media"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
+ "pm-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-panel-viewerchrome"
 version = "0.1.0"
 dependencies = [

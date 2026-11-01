@@ -167,6 +167,12 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
         Some(&Available),
     )
     .unwrap();
+    if std::env::var_os("PM_UPDATE_BLOCKERS").is_some() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/remaining-blockers.csv");
+        std::fs::write(path, report.blockers_csv()).unwrap();
+        eprintln!("counts {:?}", report.counts());
+        return;
+    }
     assert_eq!(report.counts(), (1439, 0, 3159));
     assert_eq!(
         report.blockers_csv(),
