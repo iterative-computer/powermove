@@ -334,6 +334,8 @@ pub struct Scene3dRenderer {
     cache_write_failures: u64,
     pub(crate) legacy: super::legacy::MeshRenderer,
     gltf: super::gltf::gpu::GltfGpu,
+    /// Studio renders object layers when on (path traced, scene3d/studio.rs).
+    studio: Option<super::studio::StudioPass>,
 }
 
 impl Default for Scene3dRenderer {
@@ -362,6 +364,7 @@ impl Default for Scene3dRenderer {
             cache_write_failures: 0,
             legacy: Default::default(),
             gltf: Default::default(),
+            studio: std::env::var_os("PM_STUDIO").filter(|v| v != "0").map(|_| super::studio::StudioPass::default()),
         }
     }
 }
@@ -451,6 +454,12 @@ impl Scene3dRenderer {
     /// Starts a frame. Its first 3D render releases the meshes and maps no
     /// 3D frame drew in the last [`KEEP_FRAMES`] 3D frames, so the
     /// resident set follows the scenes being drawn.
+    /// Renders object layers with Studio (path traced) instead of the
+    /// three.js port; `samples` per pixel (Studio's Final quality).
+    pub fn set_studio(&mut self, on: bool, samples: u32) {
+        self.studio = on.then(|| super::studio::StudioPass::with_samples(samples));
+    }
+
     pub fn begin_frame(&mut self) {
         self.frame_started = true;
         self.warning_scenes
@@ -1738,6 +1747,12 @@ impl Scene3dRenderer {
         precision: pm_protocol::color::Precision,
     ) -> Result<Rendered3d, Error3d> {
         self.start_generation();
+        // Studio traces object layers (perspective cameras; no depth surface).
+        if let (Some(studio), super::Render3d::Layer { object, depth_set, background }, false) = (self.studio.as_mut(), &plan.kind, depth_surface) {
+            if let Some(color) = studio.render_layer(device, queue, pool, &plan.scene, *object, depth_set, *background) {
+                return Ok(Rendered3d { color, depth: None });
+            }
+        }
         match &plan.kind {
             super::Render3d::Layer {
                 object,

@@ -800,3 +800,75 @@ fn programs_come_from_the_disk_cache_and_keys_follow_content() {
     }
     assert_ne!(key, bg.content_key());
 }
+
+/// Studio (pm-studio, path traced) renders the same object layers: each
+/// layer covers its own object's silhouette (within a few percent of the
+/// rasterizer's) and nothing of the others, and shades it differently.
+#[test]
+fn studio_renders_object_layers_with_their_own_pixels() {
+    let gpu = pm_gpu::Gpu::new("pm-render studio test").expect("a Metal device");
+    let render = |r: &mut Scene3dRenderer, plan: &Object3dPlan| {
+        let mut pool = pm_gpu::TargetPool::new();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let out = r.render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, plan, false).unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        (pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap(), out.color.width(), out.color.height())
+    };
+    for id in ["primitives", "area-light", "point-shadow"] {
+        let c = fixture().iter().find(|c| text(obj(c).get("id")) == Some(id.into())).map(|c| case(c, Path::new("/nonexistent"))).expect("case");
+        let mut raster = Scene3dRenderer::default();
+        let mut studio = Scene3dRenderer::default();
+        studio.set_studio(true, 16);
+        let mut sheet: Vec<(Vec<u8>, Vec<u8>, u32, u32)> = Vec::new();
+        let mut studio_union: Vec<u32> = Vec::new();
+        for (plan, _) in &c.outputs {
+            if !matches!(plan.kind, Render3d::Layer { .. }) {
+                continue;
+            }
+            let (a, w, h) = render(&mut raster, plan);
+            let (b, _, _) = render(&mut studio, plan);
+            let cover = |px: &[u8]| px.chunks(4).filter(|p| p[3] > 128).count();
+            let (ca, cb) = (cover(&a), cover(&b));
+            // Same geometry, same camera: same silhouette (Studio anti-aliases by sampling).
+            if ca > 50 {
+                assert!((cb as f64 - ca as f64).abs() / (ca as f64) < 0.12, "{id} {}: raster {ca} vs studio {cb}", plan.layer);
+            }
+            if studio_union.is_empty() {
+                studio_union = vec![0; b.len() / 4];
+            }
+            for (i, p) in b.chunks(4).enumerate() {
+                if p[3] > 128 {
+                    studio_union[i] += 1;
+                }
+            }
+            sheet.push((a, b, w, h));
+        }
+        // No pixel is claimed by two layers of the same depth set.
+        assert!(studio_union.iter().all(|&n| n <= 1), "{id}: overlapping layers");
+        assert!(sheet.iter().any(|(a, b, ..)| a != b), "{id}: Studio shaded like the rasterizer");
+        // A contact sheet for looking at: raster layers over studio layers, composited (GL rows bottom-up).
+        if let Some(dir) = std::env::var_os("PM_STUDIO_SHEET") {
+            let (w, h) = (sheet[0].2 as usize, sheet[0].3 as usize);
+            let mut out = vec![0u8; w * 2 * h * 4];
+            for (a, b, ..) in &sheet {
+                for y in 0..h {
+                    for x in 0..w {
+                        let s = ((h - 1 - y) * w + x) * 4;
+                        for (col, src) in [(0, a), (w, b)] {
+                            let d = (y * w * 2 + x + col) * 4;
+                            let al = f32::from(src[s + 3]) / 255.0;
+                            for k in 0..3 {
+                                out[d + k] = (f32::from(src[s + k]) + f32::from(out[d + k]) * (1.0 - al)).min(255.0) as u8;
+                            }
+                            out[d + 3] = 255;
+                        }
+                    }
+                }
+            }
+            let file = std::fs::File::create(std::path::Path::new(&dir).join(format!("{id}.png"))).unwrap();
+            let mut e = png::Encoder::new(file, (w * 2) as u32, h as u32);
+            e.set_color(png::ColorType::Rgba);
+            e.write_header().unwrap().write_image_data(&out).unwrap();
+        }
+    }
+}

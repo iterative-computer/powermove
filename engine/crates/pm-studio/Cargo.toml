@@ -1,0 +1,21 @@
+[package]
+name = "pm-studio"
+description = "Studio: the product-shot renderer (docs/3d-studio-redesign.md). Phase 0: Live and Refine on one GPU path tracer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.18"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Final-frame denoising with Intel Open Image Denoise (Apache-2.0), linked
+# from OIDN_DIR or Homebrew's open-image-denoise.
+oidn = []

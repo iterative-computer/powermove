@@ -1,0 +1,27 @@
+[package]
+name = "pm-mac-panel-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-mac-engine-host = { path = "../engine-host" }
+gpui.workspace = true
+core-video = "0.5.2"
+core-foundation = "0.10"
+
+[dev-dependencies]
+gpui_platform.workspace = true
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-time = { path = "../../../../engine/crates/pm-time" }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-render = { path = "../../../../engine/crates/pm-render" }
+tempfile = "3"
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.8", features = ["test-support", "runtime_shaders"] }
+parking_lot = "0.12"
+serde_json = "1"
+
+[[test]]
+name = "rgb_surface"
+harness = false

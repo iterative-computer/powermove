@@ -1,0 +1,25 @@
+[package]
+name = "pm-mac-engine-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-gpu = { path = "../../../../engine/crates/pm-gpu" }
+pm-render = { path = "../../../../engine/crates/pm-render" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+pm-node = { path = "../../../../engine/crates/pm-node", default-features = false }
+pm-protocol = { path = "../../../../engine/crates/pm-protocol", default-features = false }
+pm-time = { path = "../../../../engine/crates/pm-time" }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+async-channel = "2.5"
+metal = "0.33"
+pollster = "0.4"
+
+[dev-dependencies]
+serde_json = "1"
+
+[[test]]
+name = "surface"
+harness = false

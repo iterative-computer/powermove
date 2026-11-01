@@ -2496,6 +2496,7 @@ dependencies = [
  "pm-perf",
  "pm-protocol",
  "pm-reference",
+ "pm-studio",
  "pm-text",
  "pm-time",
  "pm-vector",
@@ -2528,6 +2529,18 @@ name = "pm-stretch"
 version = "0.1.0"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "pm-studio"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "png",
+ "pollster",
+ "serde",
+ "serde_json",
+ "wgpu",
 ]
 
 [[package]]

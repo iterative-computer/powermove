@@ -1,0 +1,22 @@
+[package]
+name = "pm-kit"
+description = "GPUI component kit: Powermove's controls, tokens and layout primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+unicode-segmentation = "1.12"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform.workspace = true
+# The color-managed GPUI Apple renderer needs this API in the gallery/test graph.
+# Keep it explicit here while the shared vendored backend is integrated.
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["objc2-core-graphics"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true

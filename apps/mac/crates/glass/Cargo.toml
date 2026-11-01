@@ -1,0 +1,15 @@
+[package]
+name = "pm-glass"
+description = "AppKit Liquid Glass chrome around GPUI windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+raw-window-handle.workspace = true
+async-channel.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
