@@ -209,6 +209,7 @@ export class HostClient {
       pending?: Json;
     } = { revision: this.revision, sequence: -1, callback, ready: false };
     this.subscriptions.set(subscription, entry);
+    let registered = false;
     try {
       const ack = await this.request({
         type: "subscribe",
@@ -217,6 +218,7 @@ export class HostClient {
         channels,
       });
       this.usedSubscriptions.add(subscription);
+      registered = true;
       entry.ready = true;
       // A publication delivered before the ack wins over its initial snapshot.
       if (entry.pending !== undefined && entry.revision >= ack.revision)
@@ -227,6 +229,16 @@ export class HostClient {
       delete entry.pending;
     } catch (error) {
       this.subscriptions.delete(subscription);
+      if (registered && !this.retired) {
+        try {
+          await this.request({ type: "unsubscribe", subscription });
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Subscriber failed and native cleanup failed",
+          );
+        }
+      }
       throw error;
     }
     return async () => {

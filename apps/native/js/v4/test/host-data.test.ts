@@ -199,3 +199,59 @@ test("edit validation never invokes getters in authored commands", async () => {
   ).rejects.toThrow("accessors");
   expect(invoked).toBe(0);
 });
+test("a throwing initial subscriber releases its acknowledged native subscription", async () => {
+  const requests: HostRequest[] = [];
+  const client = new HostClient(identity, async (request) => {
+    requests.push(request);
+    return { ...ack(request), value: [] };
+  });
+  await expect(
+    client.subscribe("selection", "selection", () => {
+      throw new Error("subscriber failed");
+    }),
+  ).rejects.toThrow("subscriber failed");
+  expect(requests.map((request) => request.operation.type)).toEqual([
+    "subscribe",
+    "unsubscribe",
+  ]);
+  expect(
+    client.publish({
+      ...identity,
+      version: 1,
+      subscription: "selection",
+      revision: 0,
+      sequence: 1,
+      value: [],
+    }),
+  ).toBe(false);
+});
+test("malformed publications do not consume cursors or invoke accessors", async () => {
+  const seen: Json[] = [];
+  let invoked = 0;
+  const client = new HostClient(identity, async (request) => ({
+    ...ack(request),
+    value: [],
+  }));
+  await client.subscribe("selection", "selection", (value) => seen.push(value));
+  const publication = {
+    ...identity,
+    version: 1 as const,
+    subscription: "selection",
+    revision: 0,
+    sequence: 1,
+    value: ["valid"],
+  };
+  expect(() =>
+    client.publish({
+      ...publication,
+      get value() {
+        invoked++;
+        return [];
+      },
+    }),
+  ).toThrow("accessors");
+  expect(client.publish({ ...publication, sequence: 0 })).toBe(false);
+  expect(client.publish(publication)).toBe(true);
+  expect(invoked).toBe(0);
+  expect(seen).toEqual([[], ["valid"]]);
+});

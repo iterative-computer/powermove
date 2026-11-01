@@ -313,3 +313,26 @@ fn malformed_atomic_edit_never_enters_actor_queue() {
     }
     assert!(state.borrow().pending.is_empty());
 }
+#[test]
+fn active_subscription_capacity_refuses_without_reading_or_discarding_existing_entries() {
+    let (mut service, state) = setup();
+    for id in 0..256 {
+        send(&mut service, subscribe(&format!("clock-{id}"), Query::Time));
+    }
+    let (tx, _) = mpsc::sync_channel(1);
+    assert!(
+        service
+            .enqueue(request(subscribe("overflow", Query::Time)), tx)
+            .is_err()
+    );
+    assert_eq!(state.borrow().queries.len(), 256);
+    state.borrow_mut().time = 1.;
+    assert_eq!(service.publications().unwrap().len(), 256);
+    send(
+        &mut service,
+        HostOperation::Unsubscribe {
+            subscription: "clock-0".into(),
+        },
+    );
+    assert!(send(&mut service, subscribe("replacement", Query::Time)).accepted);
+}
