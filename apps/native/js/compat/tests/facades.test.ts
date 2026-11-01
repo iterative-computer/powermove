@@ -119,3 +119,59 @@ test("missing native facilities fail explicitly at invocation", () => {
   ])
     expect(invoke).toThrow("not attached");
 });
+test("all native-only asset, scene and extension operations preserve arguments, callbacks and exact results", async () => {
+  const declarations = await contract(),
+    backends: Data = {},
+    trace: any[] = [],
+    marker = { dispose() {} };
+  for (const family of ["assets", "scene3d", "extensions"])
+    backends[family] = Object.fromEntries(
+      declarations[family].map(({ member }) => [
+        member,
+        (...args: any[]) => {
+          trace.push([family, member, args]);
+          return marker;
+        },
+      ]),
+    );
+  const host = new FakeHost(),
+    realm = new CompatRealm({
+      id: "native-delegates",
+      generation: 1,
+      host,
+      initial: host.publication(),
+      capabilities: backends,
+    });
+  const api = realm.extension("native-delegates").api,
+    argument = {},
+    callback = () => argument;
+  let count = 0;
+  for (const family of ["assets", "scene3d", "extensions"])
+    for (const { member } of declarations[family]) {
+      expect(api[family][member](argument, callback)).toBe(marker);
+      const call = trace.at(-1);
+      expect(call.slice(0, 2)).toEqual([family, member]);
+      expect(call[2][0]).toBe(argument);
+      expect(call[2][1]).toBe(callback);
+      count++;
+    }
+  expect(count).toBe(38);
+  // These delegates are intentionally unguarded like the tagged HostDeps APIs.
+  const error = {},
+    promise = Promise.resolve(marker);
+  backends.assets.import = () => {
+    throw error;
+  };
+  const later = realm.extension("later-native", 2).api;
+  let caught: unknown;
+  try {
+    later.assets.import(argument);
+  } catch (value) {
+    caught = value;
+  }
+  expect(caught).toBe(error);
+  backends.assets.import = () => promise;
+  expect(realm.extension("async-native", 3).api.assets.import(argument)).toBe(
+    promise,
+  );
+});

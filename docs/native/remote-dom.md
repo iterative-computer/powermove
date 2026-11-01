@@ -272,3 +272,45 @@ fixtures and frozen-reference traces before claiming N4/N6 cutover.
 | Standards-oriented events/namespaces/form state rather than browser-specific quirks | N3 and quirk policy; library shortcuts are not authored intent |
 | Explicit cached geometry and explicit default-action policies, with unresolved cases blocking cutover | N3/N4/N6: do not claim fresh synchronous layout or conditional default cancellation that this channel cannot provide |
 | No existing runtime/consumer removal, no profile/project mutation, no parent lock edit | Prune rule and lane ownership; N4 preserve current users/data until compatibility gates pass |
+
+
+## Package 9 part 2 realm connection
+
+The shim now directly implements the compat package's local `connect` contract.
+Session panel id equals realm id and generation; mismatched or duplicate
+connections are refused before globals are exposed. All incoming page feedback
+runs through the owning realm's task boundary. The realm host still drains V8
+microtasks and flushes after timers/async checkpoints.
+
+`inspect()` exposes created/connected/faulted/retired lifecycle and the host's
+foreground/background/headless visibility fact. `setVisibility` is metadata;
+hidden/headless pages never pause V8 logic. A page fault retires pending reads
+and old messages while the independent realm can continue editing. Recreating a
+native page and recovering mounted panel-local state remain host work.
+
+Protocol **v1 is unchanged**; no Rust router/page-applier operation was modified.
+The unused hypothetical synchronous compat DOM types were removed after checking
+consumers. The reserved canvas factory is not yet wired to DOM canvas promotion.
+The two semantic blockers above—fresh synchronous geometry and conditional
+browser-default cancellation—remain cutover blockers.
+
+Linux integration in compat's `tests/panels.test.ts` executes an original compiled
+Svelte 5.56.10 panel using the shared client/subscriber runtime: mount, native
+publication/reactivity, native input→PM/history edit, rebuild, immediate component
+registration cleanup and retirement. It also verifies generation mismatch,
+visibility transitions, faulted reads and document editing after page failure.
+This adds four integration tests, including target-before-kernel key ordering and field exclusion; remote-DOM's existing **36 tests** and the
+unchanged Rust router's **22 tests** remain green. It does not establish real
+WebKit scheduling, page recovery, IME, AX or latency. See
+[compat-realm.md](compat-realm.md) for the per-family coverage and native handoff.
+
+Rules: N4/N6 select stable identities, shared synchronous closures and task-boundary
+flushing; N7 selects metadata inspection and generation-fenced ids; N8 selects
+visibility-independent V8 work and an unchanged nonblocking protocol. N2/N3 select
+unmount on component registration disposal, as explicitly promised by the tag's
+host comment, instead of retaining a leaked mount until extension unload. No
+macOS UI, vendor/spike code or existing runtime consumer is changed.
+
+The current merged workspace also passes `cargo test --locked -p pm-remote-dom`
+(22 tests); the earlier lock-entry limitation above no longer applies to this
+base. Standalone strict Clippy/rustfmt still pass, with no Rust/lock edits.
