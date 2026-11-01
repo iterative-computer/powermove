@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -28,4 +28,12 @@ it('locks an external project for its full session; a competing editor opens a d
   await a.releaseProject('one');
   expect(JSON.parse(await readFile(projectLockPath(destination), 'utf8')).pid).toBe(0);
   await b.save('two', document('after-close'), destination);
+});
+it('does not create a missing project destination directory while acquiring its lock', async () => {
+  const files = registry('writer'), destination = path.join(root, 'missing-parent', 'project.pmv');
+  await expect(files.save('one', document('unsaved'), destination)).rejects.toThrow();
+  await expect(stat(path.dirname(destination))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await files.destination('one')).toBeUndefined();
+  await files.save('one', document('retry'), path.join(root, 'valid.pmv'));
+  expect(await readFile(path.join(root, 'valid.pmv'))).toEqual(document('retry'));
 });

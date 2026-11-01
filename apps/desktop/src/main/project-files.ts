@@ -80,7 +80,7 @@ export class ProjectFiles {
   private async lock(file: string): Promise<void> {
     if (!this.options.transitionLocks) return;
     let lease = this.locks.get(file);
-    if (!lease) { lease = await TransitionLock.acquire(projectLockPath(file)); this.locks.set(file, lease); }
+    if (!lease) { lease = await TransitionLock.acquire(projectLockPath(file), { createParent: false }); this.locks.set(file, lease); }
     await lease.assertOwned();
   }
   releaseProject(id: string): Promise<void> {

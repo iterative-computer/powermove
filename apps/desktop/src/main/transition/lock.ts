@@ -10,9 +10,9 @@ export class TransitionLock {
     child.on('exit', () => { if (!this.released) this.failed = true; });
   }
   static configure(executable: string): void { this.executable = executable; }
-  static async acquire(file: string): Promise<TransitionLock> {
+  static async acquire(file: string, options: { createParent?: boolean } = {}): Promise<TransitionLock> {
     if (!this.executable) throw new Error('The transition lock helper is unavailable.');
-    await mkdir(path.dirname(file), { recursive: true });
+    if (options.createParent !== false) await mkdir(path.dirname(file), { recursive: true });
     const child = spawn(this.executable, [file, String(process.pid)], { stdio: 'pipe' });
     return new Promise((resolve, reject) => {
       let output = '', settled = false;
