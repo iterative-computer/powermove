@@ -172,6 +172,7 @@ export class SettingsModel {
     return this.filtered.slice(...this.range);
   }
   async hydrate() {
+    if (!this.alive) return;
     const epoch = this.epoch;
     await Promise.all(
       generalRows(this.publication.multiWindow)
@@ -214,19 +215,20 @@ export class SettingsModel {
     this.changed();
   }
   close() {
-    if (!this.open) return;
+    if (!this.alive || !this.open) return;
     this.open = false;
     this.window.closeAndRestoreFocus();
     this.changed();
   }
   select(section: Section) {
-    if (!this.visibleSections.includes(section)) return;
+    if (!this.alive || !this.visibleSections.includes(section)) return;
     this.active = section;
     this.window.title(section);
     this.window.scrollTo(section, { reduceMotion: this.reduceMotion });
     this.changed();
   }
   trackSection(section: Section) {
+    if (!this.alive) return;
     if (!this.visibleSections.includes(section) || this.active === section)
       return;
     this.active = section;
@@ -250,6 +252,7 @@ export class SettingsModel {
     if (next >= 0 && visible[next]) this.select(visible[next]);
   }
   key(event: EventDetail): boolean {
+    if (!this.alive) return false;
     const command = event.metaKey || event.ctrlKey;
     const exact = command && !event.altKey && !event.shiftKey;
     if (exact && event.key === ",") {
@@ -411,6 +414,7 @@ export class SettingsModel {
     return true;
   }
   async write(id: string, value: Json) {
+    if (!this.alive) return false;
     const row = this.rows.find((r) => r.id === id);
     if (
       !row ||

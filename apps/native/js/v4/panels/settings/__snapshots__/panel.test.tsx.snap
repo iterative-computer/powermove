@@ -1,0 +1,3353 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`empty: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`loading: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              div progress-row progressbar label="Checking…"
+                text "Checking…"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div progress-row progressbar label="Checking…"
+          text "Checking…"
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General"
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts" selected
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="Accounts"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`disabled: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Optional for local models."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`error: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Try Again",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              text
+                text
+            div status label="Couldn’t connect. Check the address and model."
+              text "Couldn’t connect. Check the address and model."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="Extensions couldn’t be loaded."
+          text heading
+            text "Extensions couldn’t be loaded."
+          text
+            text
+          button toolbar-item label="Try Again"
+            text "Try Again"
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="Extensions are unavailable in this session."
+          text heading
+            text "Extensions are unavailable in this session."
+          text
+            text
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`no-search-results: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value="no-fixture-match"
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div empty-state group label="No settings found."
+        text heading
+          text "No settings found."
+        text
+          text"
+,
+}
+`;
+
+exports[`extension-detail: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Extensions",
+    "Show in Finder",
+    "Delete…",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        div group label="Fixture 0"
+          button toolbar-item label="Extensions"
+            text "Extensions"
+          text
+            text "Fixture 0"
+          div group label="About"
+            text
+              text "About"
+            text
+              text "Fixture detail"
+          div group label="Includes"
+            text
+              text "Includes"
+            text
+              text "Fixture effect"
+          div group label="Keyboard Shortcuts"
+            text
+              text "Keyboard Shortcuts"
+          div group label="Files"
+            text
+              text "Files"
+            button toolbar-item label="Show in Finder"
+              text "Show in Finder"
+          button toolbar-item label="Delete…"
+            text "Delete…""
+,
+}
+`;
+
+exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "settings.extension.fixture-29980",
+    "settings.extension.fixture-29981",
+    "settings.extension.fixture-29982",
+    "settings.extension.fixture-29983",
+    "settings.extension.fixture-29984",
+    "settings.extension.fixture-29985",
+    "settings.extension.fixture-29986",
+    "settings.extension.fixture-29987",
+    "settings.extension.fixture-29988",
+    "settings.extension.fixture-29989",
+    "settings.extension.fixture-29990",
+    "settings.extension.fixture-29991",
+    "settings.extension.fixture-29992",
+    "settings.extension.fixture-29993",
+    "settings.extension.fixture-29994",
+    "settings.extension.fixture-29995",
+    "settings.extension.fixture-29996",
+    "settings.extension.fixture-29997",
+    "settings.extension.fixture-29998",
+    "settings.extension.fixture-29999",
+    "settings.extension.fixture-30000",
+    "settings.extension.fixture-30001",
+    "settings.extension.fixture-30002",
+    "settings.extension.fixture-30003",
+    "settings.extension.fixture-30004",
+    "settings.extension.fixture-30005",
+    "settings.extension.fixture-30006",
+    "settings.extension.fixture-30007",
+    "settings.extension.fixture-30008",
+    "settings.extension.fixture-30009",
+    "settings.extension.fixture-30010",
+    "settings.extension.fixture-30011",
+    "settings.extension.fixture-30012",
+    "settings.extension.fixture-30013",
+    "settings.extension.fixture-30014",
+    "settings.extension.fixture-30015",
+    "settings.extension.fixture-30016",
+    "settings.extension.fixture-30017",
+    "settings.extension.fixture-30018",
+    "settings.extension.fixture-30019",
+    "settings.extension.fixture-30020",
+    "settings.extension.fixture-30021",
+    "settings.extension.fixture-30022",
+    "settings.extension.fixture-30023",
+    "settings.extension.fixture-30024",
+    "settings.extension.fixture-30025",
+    "settings.extension.fixture-30026",
+    "settings.extension.fixture-30027",
+    "settings.extension.fixture-30028",
+    "settings.extension.fixture-30029",
+    "settings.extension.fixture-30030",
+    "settings.extension.fixture-30031",
+    "settings.extension.fixture-30032",
+    "settings.extension.fixture-30033",
+    "settings.extension.fixture-30034",
+    "settings.extension.fixture-30035",
+    "settings.extension.fixture-30036",
+    "settings.extension.fixture-30037",
+    "settings.extension.fixture-30038",
+    "settings.extension.fixture-30039",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
+          div list-item listitem settings.extension.fixture-29980 label="Fixture 29980"
+            text
+              text "Fixture 29980"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29981 label="Fixture 29981"
+            text
+              text "Fixture 29981"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29982 label="Fixture 29982"
+            text
+              text "Fixture 29982"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29983 label="Fixture 29983"
+            text
+              text "Fixture 29983"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29984 label="Fixture 29984"
+            text
+              text "Fixture 29984"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29985 label="Fixture 29985"
+            text
+              text "Fixture 29985"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29986 label="Fixture 29986"
+            text
+              text "Fixture 29986"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29987 label="Fixture 29987"
+            text
+              text "Fixture 29987"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29988 label="Fixture 29988"
+            text
+              text "Fixture 29988"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29989 label="Fixture 29989"
+            text
+              text "Fixture 29989"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29990 label="Fixture 29990"
+            text
+              text "Fixture 29990"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29991 label="Fixture 29991"
+            text
+              text "Fixture 29991"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29992 label="Fixture 29992"
+            text
+              text "Fixture 29992"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29993 label="Fixture 29993"
+            text
+              text "Fixture 29993"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29994 label="Fixture 29994"
+            text
+              text "Fixture 29994"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29995 label="Fixture 29995"
+            text
+              text "Fixture 29995"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29996 label="Fixture 29996"
+            text
+              text "Fixture 29996"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29997 label="Fixture 29997"
+            text
+              text "Fixture 29997"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29998 label="Fixture 29998"
+            text
+              text "Fixture 29998"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-29999 label="Fixture 29999"
+            text
+              text "Fixture 29999"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30000 label="Fixture 30000"
+            text
+              text "Fixture 30000"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30001 label="Fixture 30001"
+            text
+              text "Fixture 30001"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30002 label="Fixture 30002"
+            text
+              text "Fixture 30002"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30003 label="Fixture 30003"
+            text
+              text "Fixture 30003"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30004 label="Fixture 30004"
+            text
+              text "Fixture 30004"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30005 label="Fixture 30005"
+            text
+              text "Fixture 30005"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30006 label="Fixture 30006"
+            text
+              text "Fixture 30006"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30007 label="Fixture 30007"
+            text
+              text "Fixture 30007"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30008 label="Fixture 30008"
+            text
+              text "Fixture 30008"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30009 label="Fixture 30009"
+            text
+              text "Fixture 30009"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30010 label="Fixture 30010"
+            text
+              text "Fixture 30010"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30011 label="Fixture 30011"
+            text
+              text "Fixture 30011"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30012 label="Fixture 30012"
+            text
+              text "Fixture 30012"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30013 label="Fixture 30013"
+            text
+              text "Fixture 30013"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30014 label="Fixture 30014"
+            text
+              text "Fixture 30014"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30015 label="Fixture 30015"
+            text
+              text "Fixture 30015"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30016 label="Fixture 30016"
+            text
+              text "Fixture 30016"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30017 label="Fixture 30017"
+            text
+              text "Fixture 30017"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30018 label="Fixture 30018"
+            text
+              text "Fixture 30018"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30019 label="Fixture 30019"
+            text
+              text "Fixture 30019"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30020 label="Fixture 30020"
+            text
+              text "Fixture 30020"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30021 label="Fixture 30021"
+            text
+              text "Fixture 30021"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30022 label="Fixture 30022"
+            text
+              text "Fixture 30022"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30023 label="Fixture 30023"
+            text
+              text "Fixture 30023"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30024 label="Fixture 30024"
+            text
+              text "Fixture 30024"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30025 label="Fixture 30025"
+            text
+              text "Fixture 30025"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30026 label="Fixture 30026"
+            text
+              text "Fixture 30026"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30027 label="Fixture 30027"
+            text
+              text "Fixture 30027"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30028 label="Fixture 30028"
+            text
+              text "Fixture 30028"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30029 label="Fixture 30029"
+            text
+              text "Fixture 30029"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30030 label="Fixture 30030"
+            text
+              text "Fixture 30030"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30031 label="Fixture 30031"
+            text
+              text "Fixture 30031"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30032 label="Fixture 30032"
+            text
+              text "Fixture 30032"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30033 label="Fixture 30033"
+            text
+              text "Fixture 30033"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30034 label="Fixture 30034"
+            text
+              text "Fixture 30034"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30035 label="Fixture 30035"
+            text
+              text "Fixture 30035"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30036 label="Fixture 30036"
+            text
+              text "Fixture 30036"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30037 label="Fixture 30037"
+            text
+              text "Fixture 30037"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30038 label="Fixture 30038"
+            text
+              text "Fixture 30038"
+            text
+              text "Effects · Installed"
+          div list-item listitem settings.extension.fixture-30039 label="Fixture 30039"
+            text
+              text "Fixture 30039"
+            text
+              text "Effects · Installed"
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.project label="Project" selected
+          text "Project"
+        div list-item listitem settings.nav.general label="General"
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="Project"
+      div group settings.section.project label="Project"
+        text heading
+          text "Project"
+        text
+          text "Settings for “Fixture”."
+        div group label="Project"
+          div group settings.row.project.name label="Name"
+            div
+              text
+                text "Name"
+            text
+              text "Shown in the title bar and used for exported file names."
+        div group label="Composition"
+          div group settings.row.project.size label="Size"
+            div
+              text
+                text "Size"
+            text
+              text "Pick a common size, or set your own pixel dimensions."
+          div group settings.row.project.fps label="Frame Rate"
+            div
+              text
+                text "Frame Rate"
+            text
+              text "Frames rendered per second of the composition — any rate from 1 to 240."
+          div group settings.row.project.duration label="Duration"
+            div
+              text
+                text "Duration"
+          div group settings.row.project.background label="Background"
+            div
+              text
+                text "Background"
+            text
+              text "Colour shown behind every layer of the composition."
+          div group settings.row.project.depth label="Color Depth"
+            div
+              text
+                text "Color Depth"
+            text
+              text "Precision per color channel. Applies to every composition in this project."
+        div group label="Export defaults"
+          div group settings.row.project.format label="Format"
+            div
+              text
+                text "Format"
+            text
+              text "Container and codec of the exported file."
+          div group settings.row.project.resolution label="Resolution"
+            div
+              text
+                text "Resolution"
+            text
+              text "Rendered size relative to the composition, or any pixel size."
+          div group settings.row.project.export-fps label="Frame Rate"
+            div
+              text
+                text "Frame Rate"
+            text
+              text "Frames written per second of exported video."
+          div group settings.row.project.range label="Range"
+            div
+              text
+                text "Range"
+            text
+              text "Export the work area or the whole composition."
+          div group settings.row.project.quality label="Quality"
+            div
+              text
+                text "Quality"
+            text
+              text "Video bitrate used for video exports."
+          div group settings.row.project.motion-blur label="Motion Blur"
+            div
+              text
+                text "Motion Blur"
+            text
+              text "Render motion blur for moving layers."
+          div group settings.row.project.audio label="Include Audio"
+            div
+              text
+                text "Include Audio"
+            text
+              text "Mix composition audio into the video."
+          div group settings.row.project.alpha label="Transparent Background"
+            div
+              text
+                text "Transparent Background"
+            text
+              text "Keep the background see-through, with straight alpha."
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`transcription available wire/AX state 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Download",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+        div group label="Fixture speech"
+          text
+            text "Fixture speech"
+          text
+            text "Fixture size"
+          button toolbar-item label="Download"
+            text "Download"
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`transcription downloading wire/AX state 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Cancel",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+        div group label="Fixture speech"
+          text
+            text "Fixture speech"
+          text
+            text "Fixture size"
+          div progress-row progressbar label="Fixture speech" value=0.25
+            text "Fixture speech"
+          button toolbar-item label="Cancel"
+            text "Cancel"
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`transcription installed wire/AX state 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Remove…",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+        div group label="Fixture speech"
+          text
+            text "Fixture speech"
+          text
+            text "Fixture size"
+          text
+            text "Installed"
+          button toolbar-item label="Remove…"
+            text "Remove…"
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;
+
+exports[`transcription error wire/AX state 1`] = `
+{
+  "focus": [
+    "settings.search",
+    "settings.sections",
+    "Bring My Workspace…",
+    "Retry",
+    "Filter extensions",
+    "Filter extensions",
+    "Open Store",
+  ],
+  "tree": 
+"root
+  div group settings label="Settings"
+    div group label="Settings sections"
+      input text-field settings.search label="Search" value=""
+      div list list settings.sections label="Settings sections"
+        div list-item listitem settings.nav.general label="General" selected
+          text "General"
+        div list-item listitem settings.nav.accounts label="Accounts"
+          text "Accounts"
+        div list-item listitem settings.nav.transcription label="Transcription"
+          text "Transcription"
+        div list-item listitem settings.nav.extensions label="Extensions"
+          text "Extensions"
+    scroll group settings.detail label="General"
+      div group settings.section.general label="General"
+        text heading
+          text "General"
+        text
+          text "How Powermove looks and works on this Mac."
+        div group label="Appearance"
+          div group settings.row.appearance label="Appearance"
+            div
+              text
+                text "Appearance"
+            text
+              text "Follow your system setting, or pick a light or dark theme."
+          div group settings.row.density label="Density"
+            div
+              text
+                text "Density"
+            text
+              text "Spacing of panels, rows and controls."
+        div group label="Workspace"
+          div group settings.row.workspace label="After Effects Workspace"
+            div
+              text
+                text "After Effects Workspace"
+              button toolbar-item label="Bring My Workspace…"
+                text "Bring My Workspace…"
+            text
+              text "Bring your saved panels and tools into Powermove with your agent."
+        div group label="Playback"
+          div group settings.row.preview-memory label="Preview Memory Limit"
+            div
+              text
+                text "Preview Memory Limit"
+            text
+              text "Frames kept in memory so replays are instant."
+        div group label="Media"
+          div group settings.row.cloud-media label="Automatically Download Cloud Media"
+            div
+              text
+                text "Automatically Download Cloud Media"
+            text
+              text "Download offloaded files when opening a project."
+        div group label="Windows"
+          div group settings.row.restore-windows label="Reopen Last Project on Launch"
+            div
+              text
+                text "Reopen Last Project on Launch"
+            text
+              text "Open only the project you were last working on."
+      div group settings.section.accounts label="Accounts"
+        text heading
+          text "Accounts"
+        text
+          text "Your Powermove account, and the models your agent works with."
+        div group label="Powermove Account"
+          div group settings.row.account.sign-in label="Powermove Account"
+            div
+              text
+                text "Powermove Account"
+              button toolbar-item label="Sign In…" disabled
+                text "Sign In…"
+            text
+              text "Remember installs and publish to the Store."
+          div group settings.row.account.remember label="Remember Installs on This Account"
+            div
+              text
+                text "Remember Installs on This Account"
+        div group label="Subscriptions"
+          div group settings.row.account.chatgpt label="ChatGPT"
+            div
+              text
+                text "ChatGPT"
+              text
+                text "Restart needed"
+          div group settings.row.account.claude label="Claude"
+            div
+              text
+                text "Claude"
+              text
+                text "Restart needed"
+        div group label="API or Local Model"
+          div group settings.row.account.provider label="Connection Type"
+            div
+              text
+                text "Connection Type"
+          div group settings.row.account.url label="API Base URL"
+            div
+              text
+                text "API Base URL"
+            text
+              text "Base URL of the API, ending in /v1."
+          div group settings.row.account.key label="API Key"
+            div
+              text
+                text "API Key"
+            text
+              text "Key saved securely. Leave blank to keep it."
+          div group settings.row.account.model label="Model Name"
+            div
+              text
+                text "Model Name"
+            text
+              text "The exact model name your provider expects."
+          div group settings.row.account.vision label="This Model Supports Images"
+            div
+              text
+                text "This Model Supports Images"
+            text
+              text "The model can read pictures you attach to a message."
+          div group settings.row.account.status label="Status"
+            div
+              text
+                text "Status"
+              button toolbar-item label="Test and Connect" disabled
+                text "Test and Connect"
+            text
+              text "Restart Powermove to enable API and local connections."
+      div group settings.section.transcription label="Transcription"
+        text heading
+          text "Transcription"
+        text
+          text "Turn speech into text for captions and your agent, on this Mac."
+        div group label="Fixture speech"
+          text
+            text "Fixture speech"
+          text
+            text "Fixture size"
+          div status label="Fixture service error"
+            text "Fixture service error"
+          button toolbar-item label="Retry"
+            text "Retry"
+      div group settings.section.extensions label="Extensions"
+        text heading
+          text "Extensions"
+        text
+          text "Manage extensions and turn them on or off."
+        input text-field label="Filter extensions" value=""
+        button pop-up-button label="Filter extensions" value="All Types"
+        div empty-state group label="No Extensions"
+          text heading
+            text "No Extensions"
+          text
+            text "Extensions you install appear here."
+        text
+          text "Publish and manage your extensions on the Store."
+        button toolbar-item label="Open Store"
+          text "Open Store""
+,
+}
+`;

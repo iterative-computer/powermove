@@ -313,3 +313,18 @@ test("in-flight duplicate writes are suppressed and retired project results are 
   expect(await pending).toBe(false);
   expect(model.publication.revision).toBe(3);
 });
+
+test("retired controller cannot enqueue new preference writes or native effects", async () => {
+  const { model, effects, requests } = fixture();
+  model.show();
+  model.dispose();
+  const before = effects.length;
+  expect(await model.write("appearance", "dark")).toBe(false);
+  await model.hydrate();
+  model.select("accounts");
+  model.close();
+  model.trackSection("accounts");
+  expect(model.key({ key: "f", metaKey: true })).toBe(false);
+  expect(requests).toEqual([]);
+  expect(effects).toHaveLength(before);
+});
