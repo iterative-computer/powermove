@@ -2,7 +2,6 @@ use crate::{panels, platform};
 use gpui::{prelude::*, *};
 use pm_engine_service::{EngineService, MediaCatalog, Viewer, ViewerConfig};
 use pm_kernel::{
-    persistence::DiskFormat,
     session::*,
     state::{StateOp, StateTransaction},
     *,
@@ -37,6 +36,12 @@ pub struct Controller {
     pub zoom: Option<f64>,
     pub drag: Option<panels::NumericDrag>,
     pub recovery_pending: bool,
+    pub mcp: Arc<crate::mcp::Host>,
+    pub close_pending: bool,
+    pub close_window: Option<gpui::AnyWindowHandle>,
+    pub close_operation: Option<crate::mcp::Operation>,
+    pub save_pending: bool,
+    pub close_after_save: Option<crate::lifecycle::Intent>,
 }
 
 pub struct Bridge(pub Entity<Controller>);
@@ -77,6 +82,7 @@ impl Controller {
         kernel: KernelHandle,
         engine: Arc<EngineService>,
         profile: PathBuf,
+        mcp: Arc<crate::mcp::Host>,
         host: Rc<RefCell<Host>>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -160,30 +166,19 @@ impl Controller {
             zoom: None,
             drag: None,
             recovery_pending: false,
+            mcp,
+            close_pending: false,
+            close_window: None,
+            close_operation: None,
+            save_pending: false,
+            close_after_save: None,
         }
     }
     pub fn initialize(&mut self, launch: Option<PathBuf>, cx: &mut Context<Self>) {
-        let pending = self.kernel.shell(ShellCall::AttachLibrary {
-            profile: self.profile.clone(),
-            format: DiskFormat::V1_2,
-            electron_profile: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let result = pending.await;
-            let _ = this.update(cx, |v, cx| {
-                match result {
-                    Some(Ok(ShellReply::Library(pm_kernel::locks::OpenDecision::Writable))) => {
-                        v.load_recent(cx);
-                        if let Some(path) = launch {
-                            v.open_file(path, cx);
-                        }
-                    }
-                    other => v.message = format!("Could not attach isolated library: {other:?}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.load_recent(cx);
+        if let Some(path) = launch {
+            self.open_file(path, cx);
+        }
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
@@ -233,6 +228,9 @@ impl Controller {
         cx.notify();
     }
     pub fn call(&mut self, call: Call, cx: &mut Context<Self>) {
+        if self.close_pending {
+            return;
+        }
         let Some(session) = &self.session else { return };
         let pending = self
             .kernel
@@ -264,7 +262,14 @@ impl Controller {
         );
     }
     pub fn select(&mut self, id: String, cx: &mut Context<Self>) {
-        self.call(SelectionCall::Layers { ids: vec![id], add: false }.into(), cx);
+        self.call(
+            SelectionCall::Layers {
+                ids: vec![id],
+                add: false,
+            }
+            .into(),
+            cx,
+        );
     }
     pub fn time(&self) -> f64 {
         self.viewer
@@ -321,7 +326,7 @@ impl Controller {
         }
     }
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.open(SessionSource::File(path.clone()), Some(path), cx);
+        self.open(SessionSource::File(path), cx);
     }
     pub fn open_library(&mut self, id: String, cx: &mut Context<Self>) {
         self.open(
@@ -329,15 +334,25 @@ impl Controller {
                 profile: self.profile.clone(),
                 project: id,
             },
-            None,
             cx,
         );
     }
-    fn open(&mut self, source: SessionSource, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.opening || self.recovery_pending || self.drag.is_some() {
+    fn open(&mut self, source: SessionSource, cx: &mut Context<Self>) {
+        if self.opening
+            || self.recovery_pending
+            || self.close_pending
+            || self.save_pending
+            || self.drag.is_some()
+        {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
+        let Some(operation) = self.mcp.try_operation() else {
+            self.message =
+                "A project operation is in progress. Try opening again when it finishes.".into();
+            cx.notify();
+            return;
+        };
         // Switching is explicitly saved through the session API; never drop dirty work.
         let old = self.session.clone();
         let kernel = self.kernel.clone();
@@ -348,6 +363,7 @@ impl Controller {
         self.opening = true;
         self.message = "Opening…".into();
         cx.spawn(async move |this, cx| {
+            let _operation=operation;
             let open_id = match &source {
                 SessionSource::Library {project,..}=>project.clone(),
                 SessionSource::File(p)=>stable_id(p),
@@ -356,11 +372,16 @@ impl Controller {
             let mut result = kernel.shell(ShellCall::PrepareOpen {id:open_id, source, electron_profile:None}).await;
             if let Some(Ok(ShellReply::RecoveryRequired { ticket, recovery })) = &result {
                 let ticket = ticket.clone();
-                let description = format!("{recovery:?}\nRecovery data is retained until you choose.");
+                let description = match recovery {
+                    RecoveryResult::Recovered { truncated: true } => "Some recent changes could not be read. You can recover earlier changes, open them as a copy, or discard them. The original project is kept.",
+                    RecoveryResult::OfferCopy { .. } => "The original project has changed. Recovered work will open as a separate copy so the original stays safe.",
+                    RecoveryResult::Unrecoverable { .. } => "Recovery data could not be read. It will be kept if recovery cannot complete. Discard archives it and opens the original project.",
+                    _ => "Unsaved changes are available. Recover them, open them as a copy, or discard them and open the original project.",
+                };
                 let choice = this.update(cx, |v, _| {
                     v.recovery_pending = true;
-                    platform::choice(&v.host.borrow().window, "Unsaved work was found", &description,
-                        &["Recover", "Open as copy", "Discard"])
+                    platform::choice(&v.host.borrow().window, "Unsaved work was found", description,
+                        &["Recover", "Open as Copy", "Discard"])
                 });
                 let choice = match choice { Ok(rx) => rx.recv().await.ok(), Err(_) => None };
                 let decision = match choice {
@@ -390,34 +411,9 @@ impl Controller {
                 v.recovery_pending = false;
                 match result {
                     Some(Ok(ShellReply::Opened { session, recovery: _, decision, info })) => {
-                        if let Some(viewer)=v.viewer.take(){viewer.retire();}
-                        v.path=path;
-                        v.session = Some(session);
-                        v.mirror = None;
-                        v.selected = None;
-                        v.refresh(cx);
-                        let p = v.published.as_ref().unwrap();
-                        let comp = p.snapshot.open_comp().unwrap_or_default();
-                        let root = p.snapshot.document.root().unwrap();
-                        let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
-                        let number = |key: &str, default| composition.get(key).and_then(crate::node_number).unwrap_or(default);
-                        v.duration = number("dur", 1.).max(0.001);
-                        v.dimensions = [number("w",1920.), number("h",1080.)];
-                        let fps = number("fps",30.);
-                        v.rate = pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
-                        let media = match media { Ok(m) => m.unwrap_or_default(), Err(e) => { v.message = format!("Media could not be resolved: {e}"); MediaCatalog::default() } };
-                        v.media = media.clone();
-                        v.message = format!("Opened · {decision:?}{}", if info.history_rejected { " · Saved undo history could not be imported" } else { "" });
-                        match v.engine.viewer(ViewerConfig { snapshot: p.snapshot.clone(), composition: comp, media,
-                            output: pm_engine_service::Output { width: 640, height: 360, display: 0, headroom: 1. },
-                            layer: Some(v.host.borrow().viewer_layer()), rate: v.rate, end: Some((v.duration * TICKS_PER_SECOND as f64) as i64), audio: true }) {
-                            Ok(viewer) => v.viewer = Some(viewer), Err(e) => v.message = format!("Viewer failed: {e}"),
-                        }
-                        if let Some(ui) = v.published.as_ref().map(|p| p.ui_state.clone()) {
-                            let time = ui.transport.get("time").and_then(|v| v.as_f64()).unwrap_or(0.);
-                            v.seek(time);
-                        }
-                        v.show_library = false;
+                        let media = match media { Ok(m) => m, Err(e) => { v.message = format!("Media could not be resolved: {e}"); None } };
+                        v.adopt(session, decision, info.history_rejected, media, cx);
+
                         if previous_save_failed { v.message.push_str(" · Previous project could not be saved; its recovery journal is retained"); }
 
                         v.load_recent(cx);
@@ -427,6 +423,119 @@ impl Controller {
                 cx.notify();
             });
         }).detach();
+    }
+    fn adopt(
+        &mut self,
+        session: SessionHandle,
+        decision: pm_kernel::locks::OpenDecision,
+        history_rejected: bool,
+        media: Option<MediaCatalog>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(viewer) = self.viewer.take() {
+            viewer.retire();
+        }
+        self.session = Some(session);
+        self.mirror = None;
+        self.selected = None;
+        self.refresh(cx);
+        let p = self.published.as_ref().unwrap();
+        let comp = p.snapshot.open_comp().unwrap_or_default();
+        let root = p.snapshot.document.root().unwrap();
+        let composition = pm_kernel::model::comp_node(root, Some(&comp)).unwrap_or(root);
+        let number = |key: &str, default| {
+            composition
+                .get(key)
+                .and_then(crate::node_number)
+                .unwrap_or(default)
+        };
+        self.duration = number("dur", 1.).max(0.001);
+        self.dimensions = [number("w", 1920.), number("h", 1080.)];
+        let fps = number("fps", 30.);
+        self.rate =
+            pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
+        let media = media.unwrap_or_default();
+        self.media = media.clone();
+        self.message = format!(
+            "Opened · {decision:?}{}",
+            if history_rejected {
+                " · Saved undo history could not be imported"
+            } else {
+                ""
+            }
+        );
+        match self.engine.viewer(ViewerConfig {
+            snapshot: p.snapshot.clone(),
+            composition: comp,
+            media,
+            output: pm_engine_service::Output {
+                width: 640,
+                height: 360,
+                display: 0,
+                headroom: 1.,
+            },
+            layer: Some(self.host.borrow().viewer_layer()),
+            rate: self.rate,
+            end: Some((self.duration * TICKS_PER_SECOND as f64) as i64),
+            audio: true,
+        }) {
+            Ok(viewer) => self.viewer = Some(viewer),
+            Err(e) => self.message = format!("Viewer failed: {e}"),
+        }
+        if let Some(ui) = self.published.as_ref().map(|p| p.ui_state.clone()) {
+            let time = ui
+                .transport
+                .get("time")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.);
+            self.seek(time);
+        }
+        self.show_library = false;
+        self.mcp.bind(self.session.clone());
+    }
+    pub fn follow_mcp(&mut self, cx: &mut Context<Self>) {
+        let current = self.mcp.current();
+        if self.opening || self.close_pending || current == self.session {
+            return;
+        }
+        let Some(session) = current else {
+            return;
+        };
+        let Some(p) = self.kernel.published(&session.project) else {
+            return;
+        };
+        let cache = self
+            .profile
+            .join("media-cache")
+            .join(pm_kernel::new_id("app"));
+        self.opening = true;
+        cx.spawn(async move |this, cx| {
+            let history_rejected = false;
+            let media = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::media::for_session(&p.snapshot, &p.media, p.path.as_deref(), &cache)
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.opening = false;
+                if v.mcp.current().as_ref() == Some(&session) {
+                    match media {
+                        Ok(media) => v.adopt(
+                            session,
+                            pm_kernel::locks::OpenDecision::Writable,
+                            history_rejected,
+                            Some(media),
+                            cx,
+                        ),
+                        Err(e) => v.message = format!("Media could not be resolved: {e}"),
+                    }
+                    cx.notify();
+                }
+                v.follow_mcp(cx);
+            });
+        })
+        .detach();
     }
     pub fn load_recent(&mut self, cx: &mut Context<Self>) {
         let pending = self.kernel.shell(ShellCall::Recent);
@@ -452,13 +561,14 @@ impl Controller {
         .detach();
     }
     pub fn save(&mut self, as_path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.recovery_pending {
-            self.message = "Choose how to recover this project before saving".into();
+        if self.recovery_pending || self.save_pending {
+            self.message = "Finish the recovery decision or current save first".into();
             return;
         }
         let Some(session) = self.session.clone() else {
             return;
         };
+        self.save_pending = true;
         self.persist_ui();
         let call = as_path.clone().map_or_else(
             || ShellCall::Save(session.clone()),
@@ -468,20 +578,38 @@ impl Controller {
             },
         );
         let kernel = self.kernel.clone();
-        let file_save = as_path.is_some() || self.published.as_ref().is_some_and(|p|
-            p.session.as_ref().is_some_and(|s| matches!(s.destination, SessionDestination::File(_))));
+        let file_save = as_path.is_some()
+            || self.published.as_ref().is_some_and(|p| {
+                p.session
+                    .as_ref()
+                    .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
+            });
         cx.spawn(async move |this, cx| {
             let result = if file_save {
                 match kernel.prepare_save(session, as_path.clone()).await {
                     Some(Ok(save)) => {
-                        let completion = cx.background_executor().spawn(async move { save.run() }).await;
+                        let completion = cx
+                            .background_executor()
+                            .spawn(async move { save.run() })
+                            .await;
                         kernel.finish_save(completion).await
                     }
                     Some(Err(e)) => Some(Err(e)),
                     None => None,
                 }
-            } else { kernel.shell(call).await };
+            } else {
+                kernel.shell(call).await
+            };
             let _ = this.update(cx, |v, cx| {
+                v.save_pending = false;
+                let close = v.close_after_save.take();
+                let saved = matches!(
+                    &result,
+                    Some(Ok(ShellReply::Saved {
+                        recovery_copy: None,
+                        ..
+                    }))
+                );
                 match result {
                     Some(Ok(ShellReply::Saved {
                         session,
@@ -499,6 +627,13 @@ impl Controller {
                     other => v.message = format!("Save failed; recovery data retained: {other:?}"),
                 }
                 v.refresh(cx);
+                if let Some(intent) = close {
+                    if saved {
+                        v.complete_close(intent, cx);
+                    } else {
+                        v.cancel_close(cx);
+                    }
+                }
             });
         })
         .detach();
@@ -514,6 +649,8 @@ impl Controller {
     }
     pub fn command(&mut self, cmd: &ShellCommand, _: &mut Window, cx: &mut Context<Self>) -> bool {
         match cmd.name.as_str() {
+            "quit" => cx.defer(crate::lifecycle::begin_quit),
+            "closeWindow" | "closeTab" => self.request_close(crate::lifecycle::Intent::Window, cx),
             "open" => {
                 let rx = platform::paths(&self.host.borrow().window, false);
                 cx.spawn(async move |this, cx| {
@@ -608,14 +745,13 @@ impl Controller {
                     self.message = e.to_string();
                 }
             }
-            // Kernel Close saves; a window close leaves journal recovery intact.
             _ => return false,
         }
         cx.notify();
         true
     }
 }
-fn stable_id(path: &std::path::Path) -> String {
+pub(crate) fn stable_id(path: &std::path::Path) -> String {
     // Stable across crashes; no random per-open journal namespace.
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

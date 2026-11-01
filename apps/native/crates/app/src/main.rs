@@ -1,3 +1,5 @@
+mod lifecycle;
+mod mcp;
 mod media;
 mod panels;
 mod perf_gate;
@@ -32,13 +34,16 @@ fn main() -> Result<()> {
             .context("Usage: powermove-native --gate-p1-smoke <manifest.json>")?;
         return smoke::run(PathBuf::from(manifest));
     }
+    let mcp_mode = args.iter().any(|a| a == "--powermove-mcp");
     let mut launch = None;
     let mut profile = std::env::var_os("PM_NATIVE_PROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("powermove-native-integration"));
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--profile" {
+        if args[i] == "--powermove-mcp" {
+            // Same app executable and newline-delimited stdio contract.
+        } else if args[i] == "--profile" {
             i += 1;
             profile = PathBuf::from(args.get(i).context("--profile needs a directory")?);
         } else if args[i].to_string_lossy().starts_with('-') {
@@ -48,6 +53,23 @@ fn main() -> Result<()> {
             launch = Some(PathBuf::from(&args[i]));
         }
         i += 1;
+    }
+    anyhow::ensure!(
+        profile.is_absolute(),
+        "Use an absolute isolated native profile"
+    );
+    if mcp_mode {
+        if profile.join("mcp/connection.json").exists() {
+            anyhow::ensure!(
+                launch.is_none(),
+                "Open projects in the running app before attaching MCP"
+            );
+            return std::thread::spawn(move || pm_mcp::transport::proxy_stdio(&profile))
+                .join()
+                .map_err(|_| anyhow::anyhow!("MCP proxy panicked"))?
+                .map_err(Into::into);
+        }
+        return mcp::headless(profile, launch);
     }
     std::fs::create_dir_all(&profile)?;
     // Set before any worker exists. This also disables shell NSUserDefaults restoration.
@@ -61,16 +83,22 @@ fn main() -> Result<()> {
     }));
     let fonts = RenderFonts::new(broker.clone());
     let worker_profile = profile.clone();
-    let (actor, engine) = std::thread::spawn(move || -> Result<_> {
+    let (actor, engine, mcp_host, server) = std::thread::spawn(move || -> Result<_> {
         let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig {
             journal_root: Some(worker_profile.join("journals")),
             ..Default::default()
         });
+        mcp::attach(&actor.handle(), &worker_profile)?;
+        let (mcp_host, _changes) = mcp::Host::new(actor.handle(), worker_profile.clone());
+        let host = mcp_host.clone();
+        let server = pm_mcp::transport::LoopbackServer::start_with(&worker_profile, move || {
+            mcp::Connection::new(host.clone())
+        })?;
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu, fonts,
         )?);
-        Ok((actor, engine))
+        Ok((actor, engine, mcp_host, server))
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
@@ -85,7 +113,7 @@ fn main() -> Result<()> {
         Rc::new({
             let engine = engine.clone();
             let broker = broker.clone();
-            move |host, _window, cx| {
+            move |host, window, cx| {
                 if !started.replace(true) {
                     let rx = wake_rx.clone();
                     let broker = broker.clone();
@@ -105,10 +133,22 @@ fn main() -> Result<()> {
                         handle.clone(),
                         engine.clone(),
                         profile.clone(),
+                        mcp_host.clone(),
                         host,
                         cx,
                     )
                 });
+                lifecycle::install(&entity, window, cx);
+                let weak = entity.downgrade();
+                let rx = mcp_host.subscribe();
+                cx.spawn(async move |cx| {
+                    while rx.recv().await.is_ok() {
+                        if weak.update(cx, |v, cx| v.follow_mcp(cx)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
                 playback::install(&entity, cx);
                 entity.update(cx, |v, cx| v.initialize(launch.clone(), cx));
                 perf_gate::install(&entity, cx);
@@ -118,6 +158,7 @@ fn main() -> Result<()> {
     );
     broker.close();
     std::thread::spawn(move || {
+        drop(server);
         drop(engine);
         actor.shutdown();
     })

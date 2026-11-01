@@ -170,13 +170,16 @@ fn constant_eq(a: &str, b: &str) -> bool {
         .fold(0u8, |diff, (a, b)| diff | (a ^ b))
         == 0
 }
-fn connection(mut stream: TcpStream, token: String, host: Arc<Mutex<Automation>>) -> Result<()> {
+fn connection<T: ToolConnection>(
+    mut stream: TcpStream,
+    token: String,
+    mut session: T,
+) -> Result<()> {
     // macOS accepted sockets inherit the listener's nonblocking flag.
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut authorized = false;
-    let mut session = McpSession::new(host);
     while let Some(bytes) = line(&mut reader)? {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             continue;
@@ -208,10 +211,10 @@ fn connection(mut stream: TcpStream, token: String, host: Arc<Mutex<Automation>>
             continue;
         }
         let reply = match m["method"].as_str() {
-            Some("tools/list") => json!({"id":id,"result":session.tools()}),
+            Some("tools/list") => json!({"id":id,"result":session.list()?}),
             Some("tools/call") => {
                 if let (Some(name), true) = (m["name"].as_str(), m["arguments"].is_object()) {
-                    json!({"id":id,"result":session.call(name,m["arguments"].clone())})
+                    json!({"id":id,"result":session.invoke(name,m["arguments"].clone())?})
                 } else {
                     json!({"id":id,"error":"Invalid tool arguments."})
                 }
@@ -220,7 +223,7 @@ fn connection(mut stream: TcpStream, token: String, host: Arc<Mutex<Automation>>
         };
         write_json(&mut stream, &reply)?;
     }
-    session.close()
+    session.disconnect()
 }
 /// Lifetime guard. Explicit shutdown joins clients, rolls their sessions back,
 /// and removes only this instance's descriptor. It never logs the credential.
@@ -233,6 +236,15 @@ pub struct LoopbackServer {
 }
 impl LoopbackServer {
     pub fn start(profile: &Path, host: Arc<Mutex<Automation>>) -> Result<Self> {
+        Self::start_with(profile, move || McpSession::new(host.clone()))
+    }
+    /// Bind an existing application actor without introducing another kernel.
+    /// The factory and all connection operations run exclusively on workers.
+    pub fn start_with<T: ToolConnection + Send + 'static>(
+        profile: &Path,
+        factory: impl Fn() -> T + Send + Sync + 'static,
+    ) -> Result<Self> {
+        let factory = Arc::new(factory);
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let token = random_hex()?;
@@ -284,9 +296,9 @@ impl LoopbackServer {
                         let active_sockets = sockets.clone();
                         children.retain(|child| !child.is_finished());
                         let token = token.clone();
-                        let host = host.clone();
+                        let factory = factory.clone();
                         children.push(thread::spawn(move || {
-                            if let Err(e) = connection(stream, token, host) {
+                            if let Err(e) = connection(stream, token, factory()) {
                                 eprintln!("MCP connection ended: {e}");
                             }
                             active_sockets.lock().unwrap().remove(&client_id);
