@@ -1,0 +1,28 @@
+# Linux harness: same source/tests, independent of macOS workspace resolution.
+[package]
+name = "pm-surface"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+path = "../src/lib.rs"
+
+[[test]]
+name = "surface"
+path = "../tests/surface.rs"
+
+[[example]]
+name = "wire"
+path = "../examples/wire.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+
+[[example]]
+name = "budget"
+path = "../examples/budget.rs"
