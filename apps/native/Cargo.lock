@@ -4940,9 +4940,13 @@ dependencies = [
 name = "pm-panel-inspector"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "pm-design",
  "pm-eval",
  "pm-kernel",
  "pm-model",
+ "pm-surface",
+ "serde_json",
 ]
 
 [[package]]
