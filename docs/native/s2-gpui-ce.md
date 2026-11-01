@@ -538,3 +538,42 @@ Remaining S2 work is still open: arbitrary affine/shape native placement, measur
 combinations, display moves, spoken VoiceOver traversal and the complete menu/
 transient/motion/system-appearance matrix. P-A11Y's screen-free bridge results are
 retained; they do not certify those visible behaviors. No release, push or tag.
+
+## On-screen IME and P-120 batch (2026-11-01, 09:59–10:02)
+
+**OS IME in the native text slot: PASS (Japanese Romaji and Simplified Pinyin,
+synthetic keys). P-120 GUI pacing: NOT RUN (the Mac locked at ~10:17, before the
+quiet window).** S2 remains OPEN. Binary: existing dev `pm-native-s2-spike`
+(built 09:19, sources of `93638bf7b`), `S2_TEXT=1`, built-in 120 Hz panel, AC power,
+one-minute load 7–8 (other lanes compiling). One GUI lock per run (`onscreen`).
+
+Why the earlier probes returned −50: `TISSelectInputSource` fails on an input
+*mode* whose parent input method is disabled. Enabling the parent
+(`com.apple.inputmethod.Kotoeri.RomajiTyping` / `com.apple.inputmethod.SCIM`) and
+then selecting the mode (`…RomajiTyping.Japanese` / `…SCIM.ITABC`) returns 0.
+
+| Check | Result |
+|---|---|
+| Focus | AX `set focused` on the native field: PASS (`focused = true`, frontmost `pm-native-s2-spike`). Latin control `abc` reached the field. |
+| Japanese compose → convert → commit | PASS (run 1): `nihon`, Space, Return gave `abc日本語`. Marked text was underlined in the field, and the candidate window was anchored directly under the caret. Run 2 typed literal `nihon` with the mode reported as selected: Kotoeri stayed in direct input after the rapid enable/select. Recorded as a test-harness flake, not an app failure. |
+| Japanese cancel | PASS: with live conversion, Escape #1 reverted to kana (`かな`, still marked), and Escape #2 removed the marked text. |
+| Pinyin compose → convert → commit | PASS: `zhongwen`, Space, Return gave `abc中文`. |
+| Pinyin cancel | PASS: Escape removed the marked `kan a`. Return had selected the whole committed value (standard `NSTextField` end-editing), so the new composition replaced it and the field ends empty. Escape did not roll back committed text. |
+| Click-to-focus via System Events `click at` | **Observation, not certified:** the AX click resolved to “text field 1 of group 1”, but the field did not become first responder. The IME then composed against the GPUI view, and its candidate window appeared at the window's bottom-left corner (no caret rect). A real HID click was not tested. If a real click reproduces it, the GPUI view's `firstRectForCharacterRange` with no focused input handler needs a sane rect. |
+| Services / dictation / Writing Tools / emoji | UNVERIFIED |
+| P-120 display A/B (`check-ptext-120.sh --display --no-build --runs 1`) | NOT RUN: screen locked |
+
+Restoration: the U.S. layout is selected and both temporary parent methods are
+disabled. The *effective* enabled/selectable set (U.S., Character Palette,
+Press-and-Hold, ironwood) equals the pre-test set. Two inert plist differences remain
+in `com.apple.HIToolbox`: an `AppleEnabledInputSources` row for
+`SCIM`/`ITABC` (parent disabled, so not in the input menu; `TISDisableInputSource`
+returns 0 but does not remove it), and a new `AppleInputSourceHistory` key. The
+auto-enabled `com.apple.50onPaletteIM` was disabled again. Captures stay outside Git,
+under `/tmp/pm-onscreen/s2/`.
+
+Reproduce: `/tmp/pm-onscreen/s2/ime.py [pinyin]` is a local, untracked driver. It
+launches the spike, AX-focuses `text field 1 of group 1`, types through System
+Events, captures each step and restores input sources. Rerun P-120 with the
+documented `check-ptext-120.sh --display --no-build --runs 1` on a quiet, unlocked
+machine.

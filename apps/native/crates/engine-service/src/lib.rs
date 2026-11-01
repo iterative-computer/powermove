@@ -655,7 +655,7 @@ struct Runtime {
     content: u64,
     interval: f64,
     next: f64,
-    /// Observed presentedTime − requested target for timed presents: the
+    /// Observed presentedTime − link target for timed presents: the
     /// WindowServer/compositor queue the picture cannot avoid. Media time is
     /// chosen for target + this lag, so a frame lands when its audio plays.
     lag: VecDeque<f64>,
@@ -669,13 +669,19 @@ struct Runtime {
 }
 impl Runtime {
     fn lag(&self) -> f64 {
-        if self.lag.len() < 3 {
-            return 0.;
-        }
-        let mut v: Vec<_> = self.lag.iter().copied().collect();
-        v.sort_by(f64::total_cmp);
-        v[v.len() / 2]
+        present_lag(&self.lag)
     }
+}
+/// Upper decile of recent target → glass lags, 0 until three exist. Presents
+/// land 1 or (≈10%) 2 refreshes after target; the median would leave every
+/// slow one a refresh late. The timed present then holds frames to this slot.
+fn present_lag(samples: &VecDeque<f64>) -> f64 {
+    if samples.len() < 3 {
+        return 0.;
+    }
+    let mut v: Vec<_> = samples.iter().copied().collect();
+    v.sort_by(f64::total_cmp);
+    v[(v.len() * 9).div_ceil(10) - 1]
 }
 struct Flight {
     id: u64,
@@ -1245,5 +1251,23 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+}
+
+#[cfg(test)]
+mod lag_tests {
+    use super::*;
+    #[test]
+    fn lag_is_the_upper_decile_once_three_samples_exist() {
+        let i = 1. / 120.;
+        let mut samples: VecDeque<f64> = std::iter::repeat_n(i, 13).collect();
+        assert_eq!(present_lag(&samples), i);
+        samples.extend([2. * i, 2. * i]);
+        assert_eq!(
+            present_lag(&samples),
+            2. * i,
+            "two slow presents of 15 select the slow slot"
+        );
+        assert_eq!(present_lag(&VecDeque::from([i, i])), 0.);
     }
 }

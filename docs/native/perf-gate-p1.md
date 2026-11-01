@@ -392,6 +392,35 @@ sampled against the link target. Limitation: a lag estimate that ratchets up
 screen.** In the on-screen lane's sampler, 60 Hz playback CPU was ~12.5%
 (legacy) vs ~9.7% (new), one core = 100%.
 
+**Re-run after the loop-wrap fix + two-ahead encoding** (release `ca2950b3a`, on-screen
+lane, load 7.6–7.8 from other lanes' builds, so not a quiet machine):
+
+| Row (120 Hz) | New schedule at `c1dbf3bc9` | At `ca2950b3a` | Verdict |
+|---|---|---|---|
+| Onset A/V mean signed / abs (ms) | −0.063 / 0.588 | **0.646 / 0.728** | PASS ≤ 1 ms (n=1 run) |
+| Onset jitter p50 / p95 (ms) | 0.021 / 8.291 | 0.688 / **3.453** | FAIL ≤ 2 ms |
+| Late onsets, audio clip (of 600) | 30 | 20 | FAIL zero |
+| Late / skipped onsets, 60 s shape (of 1,800) | 36 / 0 | **18 / 0** | FAIL zero |
+| Cached scrub p50 / p95 (ms) | 22.712 / 24.489 | 23.263 / 24.357 | FAIL; floor |
+| Edit p50 / p95 (ms) | 22.958 / 24.533 | 23.175 / 30.385 | FAIL; tail under load 7.8 |
+| Worker → completion p95 (ms) | 4.061 | 4.392 (audio 4.729) | Above the 4.167 local bound under this load |
+| Process CPU, sampled window incl. open/edit, 1 core = 100% | 14.3% (audio) | 16.7% audio / 12.1% shape | Legacy audio 27.1% (window incl. open) |
+
+The loop-wrap outliers are gone. Encoding two refreshes ahead made presents
+normally land **1** refresh after target, with ≈10% at 2. That gives 1,454 / 333 /
+13 presents at 1 / 2 / 3 refreshes in the shape run, and 575 / 22 / 2 in the
+audio run. The median lag estimate therefore sat on the fast slot, and every
+slow present was a refresh late: 63 of 600 audio onsets were > 4 ms late, 1 was
+early. **Follow-up (headless-tested only):** the lag estimate is now the
+**upper decile** of the last 15 samples. Combined with the timed present
+(`73b91610c`), every frame is held to the slower slot, the samples then all
+read that slot, and onsets stop alternating. This adds one refresh of
+picture latency during playback only; A/V is unaffected. A residual of
+presents slower than that slot (~0.7% at 3 refreshes here) remains.
+**Neither `73b91610c` nor this change was measured on screen:** the session
+locked again at ~10:17. A release binary of `73b91610c` is in
+`~/Developer/pm-target/release`; rebuild for the decile change.
+
 Headless service (dev, offscreen) after the change: exactly **1,800** submissions
 per 60 s at 120 and 60 Hz, **5,290 / 1,796** held ticks, worker → completion p95
 **1.806 / 2.657 ms** (earlier 3.445 / 4.147 ms), 0 GPU failures.

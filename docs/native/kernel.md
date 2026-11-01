@@ -656,3 +656,9 @@ The three engine-service lane caller hunks in `app/src/session.rs` (scrub event
 timestamp, export activity capture and scheduled export start) are included by
 explicit lane agreement. Playback and performance-harness changes remain owned
 by their lanes. **All on-screen rows remain UNVERIFIED**; no GUI smoke was run.
+
+**On-screen save-in-flight (2026-11-01):** with a 1.2–1.6 s MCP save in flight,
+Command-W and Command-Q were refused and the save completed intact. The refusal
+note never appeared on screen, and the editor did not reflect the MCP edit on a
+60k-layer fixture. Details and repro are in `integration.md`, “Save-in-flight
+close/quit on screen”.

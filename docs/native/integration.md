@@ -310,3 +310,36 @@ mode 150 / 240 Hz is verified. Reference worktrees/node_modules and the shared
 release directory are absent; approximately 15 GiB is free. Multi-window ownership,
 save-flight feedback, broader shortcut/focus coverage and P1's physical gates
 remain open. No product code, push, tag, release or workflow dispatch.
+
+## Save-in-flight close/quit on screen (2026-11-01, 09:53–09:54)
+
+Release `powermove-native` built at `c1dbf3bc9` (09:48), fresh `/tmp` profile and
+project per run, GUI lock `onscreen`, one-minute load 4.5 → 9.6. To make the save
+long enough to hit, the disposable project had 60,001 shape layers (8.9 MB
+JSON); a windowless save of it took 0.914 s. Steps per run:
+
+1. Open the project and wait for the window title (12–13 s).
+2. Over the app's own `--powermove-mcp` connection to the same profile: run
+   `start_session`, `add_layer "Flight edit"`, `finish_session commit`, then
+   `start_session` again.
+3. Start `save_project` (worker save handoff) and send Command-W or Command-Q
+   through System Events 54–344 ms after the save began.
+
+| Check | Result |
+|---|---|
+| Command-W during save (save 1.611 s) | **PASS refusal:** the window stayed open, the process stayed alive, the save completed, and the file is PMV4 containing `flight-layer`. |
+| Command-Q during save (save 1.209 s) | **PASS refusal:** the process stayed alive through the save. |
+| Quit after the save | PASS: Command-Q exited 0 with no dirty sheet. The project lock heartbeat was released (`pid: 0`). |
+| Progress/refusal note visible | **FAIL / open.** No “Saving in progress…” (or “A project operation is in progress…”) text appeared in captures 150 ms after the key or 0.8 s after the save. The status bar kept `Opened · Writable`. In the Command-W run, the during-save capture is byte-identical to the pre-save capture, so the window did not repaint at all. Which guard refused is unknown: `CloseState::Saving` and the MCP operation fence both apply while an MCP save runs. |
+| MCP edit visible in the editor before saving | **FAIL / open on this fixture.** About 2 s after the committed MCP edit, the window showed neither `Flight edit` nor the edited state, and it still did not after the save. The saved file does contain the layer. A first attempt that edited while the project was still “Opening…” did show `Untitled — Edited`. It is unknown whether a small project refreshes; that check was queued but the Mac locked (~10:17) first. |
+
+Likely area for the open rows: `Controller::refresh` (mirror sync and layer query
+over 60k layers on the main thread) and status-bar repaint after
+`lifecycle::request_close` sets `message`. This needs instrumentation (timestamp
+the `refresh` duration, and `cx.notify` → shell paint) before any fix.
+
+Reproduce: the local untracked driver `/tmp/pm-onscreen/lifecycle/saveflight.py
+<binary> <layers> close|quit|timeonly` creates everything under
+`/tmp/pm-native-saveflight.*` and writes window captures to
+`/tmp/pm-onscreen/lifecycle/` (outside Git). Run it under one GUI lock. Use
+`layers=0` for the small-project refresh check.
