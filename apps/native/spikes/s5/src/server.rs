@@ -17,8 +17,11 @@ pub struct State {
     pub done: AtomicBool,
     pub blocked: AtomicBool,
     pub pings: AtomicUsize,
+    pub failures: AtomicUsize,
     pub cancelled_tasks: Mutex<std::collections::HashSet<usize>>,
     pub epoch: Instant,
+    pub pixels: Vec<u8>,
+    pub renders: Mutex<crate::pixels::Renders>,
 }
 impl State {
     pub fn ns(&self) -> u64 {
@@ -43,8 +46,11 @@ pub fn start() -> Arc<State> {
         done: AtomicBool::new(false),
         blocked: AtomicBool::new(false),
         pings: AtomicUsize::new(0),
+        failures: AtomicUsize::new(0),
         cancelled_tasks: Mutex::new(std::collections::HashSet::new()),
         epoch: Instant::now(),
+        pixels: crate::pixels::frame(),
+        renders: Mutex::new(crate::pixels::Renders::default()),
     });
     let s = state.clone();
     std::thread::Builder::new()
@@ -147,6 +153,7 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
             "" => {
                 let page = include_str!("page.html")
                     .replace("__BASE__", &base)
+                    .replace("__PIXELS_JS__", include_str!("pixels.js"))
                     .replace(
                         "__CASE__",
                         &std::env::var("S5_CASE").unwrap_or_else(|_| "http".into()),
@@ -158,6 +165,88 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
                     page.as_bytes(),
                 )?;
             }
+            "outer-pixels" => {
+                let renders = s.renders.lock().unwrap();
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "text/plain; charset=x-user-defined",
+                    renders.output.as_deref().unwrap_or(&[]),
+                )?;
+            }
+            "render-override" => {
+                let query = route.split('?').nth(1).unwrap_or("");
+                let parts: Vec<_> = query.split(',').collect();
+                let id = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let rev = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let ok = s.renders.lock().unwrap().upload(id, rev, &body);
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    json!({"ok":ok}).to_string().as_bytes(),
+                )?;
+            }
+            "pixels" => respond(
+                reader.get_mut(),
+                200,
+                "text/plain; charset=x-user-defined",
+                &s.pixels,
+            )?,
+            "pixels-upload" | "pixels-text-upload" => {
+                let valid = if path == "pixels-upload" {
+                    crate::pixels::valid(&body)
+                } else {
+                    match std::str::from_utf8(&body) {
+                        Ok(text) => crate::pixels::valid(
+                            &text.chars().map(|c| c as u32 as u8).collect::<Vec<_>>(),
+                        ),
+                        Err(_) => false,
+                    }
+                };
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    json!({"ok":valid,"bytes":crate::pixels::BYTES})
+                        .to_string()
+                        .as_bytes(),
+                )?;
+            }
+            "frame-ref" | "consume-ref" => {
+                let ok = path == "frame-ref" || body == b"frame0";
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    json!({"ok":ok,"id":"frame0","bytes":s.pixels.len(),"revision":7})
+                        .to_string()
+                        .as_bytes(),
+                )?;
+            }
+            "render-begin" | "render-nested" => {
+                let result = s.renders.lock().unwrap().begin(path == "render-nested");
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    result.to_string().as_bytes(),
+                )?;
+            }
+            "render-resume" => {
+                let input: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let result = s.renders.lock().unwrap().resume(
+                    input["render"].as_u64().unwrap_or(0),
+                    input["revision"].as_u64().unwrap_or(0),
+                    input["dependency"].as_bool().unwrap_or(false),
+                );
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    result.to_string().as_bytes(),
+                )?;
+            }
             "ping" => {
                 if s.pings.fetch_add(1, Ordering::SeqCst) == 0 {
                     s.record(json!({"test":"first_http_ping"}));
@@ -165,7 +254,14 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
                 respond(reader.get_mut(), 200, "application/json", b"{\"ok\":true}")?;
             }
             "report" => {
-                if let Ok(v) = serde_json::from_slice(&body) {
+                if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+                    if v["test"] == "fatal"
+                        || v["test"] == "script_error"
+                        || v["status"] == "failed"
+                        || v["status"] == "fail"
+                    {
+                        s.failures.fetch_add(1, Ordering::SeqCst);
+                    }
                     s.record(v);
                 }
                 respond(reader.get_mut(), 200, "text/plain", b"ok")?;

@@ -111,20 +111,63 @@ request is not yet instrumented; no claim that snapshot completed during the hol
 
 ## 2. Binary over sync
 
-Not yet measured. Required payload: 1920×1080×4 = **8,294,400 bytes** in each
-direction, with byte-integrity checks. Engine-held ID references must be reported
-separately from actual pixel transfer; returning an ID does not provide pixels
-to a page that needs a real canvas.
+Payload: **8,294,400 bytes (1920×1080 RGBA)**. RGB covers all byte values;
+alpha is opaque to avoid premultiply/unpremultiply loss during canvas verification.
+Each transfer checks every byte. One warmup, 30 measured transfers per direction;
+2,000 ID operations. All numbers below use HTTP, the off-main reference path,
+**not the provisional scheme handler**, and include synthetic Rust/JS validation.
+These unoptimized results do not isolate transport copies from validation cost.
+
+| Operation | p50 / p95 / p99 (ms) | Result |
+|---|---|---|
+| App→page x-user-defined response → decoded buffer + verification | 81.980 / **137.440** / 139.800 | Integrity PASS; too slow for 10-ms sync-pixel budget even before canvas fill |
+| Page→app typed-array request body + native verification | 51.140 / **54.560** / 55.880 | Integrity PASS; synchronous upload does support binary request bodies |
+| Page→app text string (UTF-8 on wire), native text decode + verification | 170.680 / **175.680** / 179.960 | Integrity PASS; much slower; text-string construction excluded |
+| App→page engine-held reference | 0.720 / **0.920** / 1.340 | Reference correctness PASS; no pixel bytes crossed |
+| Page→app consume engine-held reference | 0.820 / **1.140** / 1.660 | Reference correctness PASS; no pixel bytes crossed |
+
+**Choice: keep pixels native and pass IDs whenever possible** (§3.5.2 preferred
+option, N8). The synthetic frame really remains in Rust, and the ID resolves to
+its buffer. IDs do not solve synchronous APIs that expose canvas pixels. That
+route **FAILS the provisional 10-ms budget** in this fixture. Optimized builds,
+scheme-handler binary transfer, real engine readback and frozen-reference paired
+timings remain unverified; no exclusion from N4 follows from this result.
 
 ## 3. Render continuations
 
-Not yet measured. Reference pattern inspected at
-`apps/desktop/src/renderer/src/engine-connection/render-transport.ts:1215`:
-bounded dependency rounds answer inline, upload dependencies and resume a pinned
-render. An async callback into the blocked page would deadlock and is disallowed.
-A synthetic engine stub must not be reported as real engine or frozen-Electron
-performance. C-MATRIX also flags a shipped-reference mismatch in async render
-siblings; frozen-reference timing/behavior remains unverified.
+**PASS synthetic no-deadlock/correctness; FAIL provisional latency budget.**
+Inspected the pattern at
+`apps/desktop/src/renderer/src/engine-connection/render-transport.ts:1215`.
+The actual WebKit stack executes:
+
+1. Synchronous outer render returns `needs_dependency`, render ID, revision 7.
+2. JS runs a real Canvas2D raster override inline and makes a nested sync capture.
+3. Nested capture returns a real 1080p canvas; its pixels are read and uploaded
+   back to the native stub, which verifies every byte.
+4. The 16×16 override pixels are uploaded under the pinned render/revision. Rust
+   validates and copies them into its output buffer, then resumes the outer job.
+5. Outer result is fetched through x-user-defined and filled with putImageData.
+   Checks confirm the override appears in the returned real canvas. A real JPEG
+   data URL is also produced in the correctness probe.
+
+Observed trace: `outer needs_dependency → nested rendered → outer rendered`.
+Unknown/stale/replayed resumes are rejected. The synthetic stub has fixed
+revision 7 and one retained output; it does not implement production frame-ID
+lifetimes, a real dependency graph or cancellation. No event-loop callback into
+the blocked page is needed and the native scrub continues.
+
+**30 measured nested captures:** p50/p95/p99 **260.120/357.240/371.740 ms**,
+including two 1080p canvas fills, nested readback/upload, native pattern generation
+and byte checks. This is a heavier synthetic operation than the plan's ordinary
+paused renderFrameTo row, but plainly cannot certify ≤10 ms. The JPEG correctness
+probe is outside this timed loop. Two Rust tests pass for byte corruption and
+pinned/single-use/stale resume behavior.
+
+**Decision:** use bounded same-stack continuations (N8, §3.2.1/§3.5.2), with native
+IDs until pixels are demanded. Do not approve this pixel transport for production.
+Real engine integration, cycle graph, override exceptions/cancellation,
+frozen-Electron renderFrameTo+canvas timing and its stricter 70% margin remain
+**UNVERIFIED**. C-MATRIX's reference-version mismatch also remains open.
 
 ## 4. Lifecycle, hang and restart
 

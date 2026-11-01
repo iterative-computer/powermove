@@ -1,4 +1,5 @@
 //! Standalone AppKit host for S5. The timer never calls or waits on JavaScript.
+mod pixels;
 mod server;
 use block2::{DynBlock, RcBlock};
 use objc2::{
@@ -271,7 +272,7 @@ fn run() {
             .collect();
         state.record(json!({"test":name,"stats":server::stats(values)}));
     }
-    let success = state.done.load(Ordering::SeqCst);
+    let success = state.done.load(Ordering::SeqCst) && state.failures.load(Ordering::SeqCst) == 0;
     state.record(json!({"test":"host_finished","page_done":success,"pings":state.pings.load(Ordering::SeqCst),"snapshot_done":snapshot_done.load(Ordering::SeqCst),"elapsed_s":started.elapsed().as_secs_f64()}));
     window.orderOut(None);
     if !success {
