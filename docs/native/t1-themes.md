@@ -3860,8 +3860,9 @@ Implementation is limited to `apps/native/js/themes` and this document. The
 edition format version is **1**, shared by **apiVersion 1–3** DOM panels; it is
 not a new extension API version. Baseline remains shipped `v1.2.0`
 (`07ed5fa17ee640659cb075f9cad1af2095011d60`), read through `git show`, plus the
-current public `pm-design::Tokens` definition. No installed extension, user
-profile, project, private corpus or private plan is an input to these artifacts.
+current public `pm-design::Tokens` JSON snapshot in
+`apps/native/crates/design/tests/tokens.snapshot.json`. No installed extension,
+user profile, project, private corpus or private plan is an input to these artifacts.
 
 `createCompatEdition(nativeTokens, {theme?, workspace?, trust?})` reverses the
 existing foundation-token/native-field map. Supply a **serialized, resolved**
@@ -3899,15 +3900,25 @@ contributions and then workspace contributions. Stylesheet `!important` still
 beats normal inline values. A later normal `:root` theme rule does not beat an
 earlier `:root[data-theme="dark"]` rule. Radius and colour aliases remain live
 expressions; derived accent hover moves toward white, as in both shipped palettes.
-The app's authored dark `--bg-float:var(--bg-panel)` continues to
-win over the foundation floating colour. Root `style` retains its shipped
-replacement semantics, followed by workspace tokens. Arbitrary custom variables,
+Per [design review](design/reviews/na-cloud-editions.md), floating surfaces
+always use `colors.floating`, including the tagged app root rule that formerly
+aliased them to the panel. Compat documents occupy solid panels/sheets, so
+`--bg-window` uses opaque `colors.window` in all eight editions; AppKit owns
+the window material. Mapped density lengths move by the difference from the
+shipped normal density: native + (density − v1.2.0 normal). Compact is row 24,
+gap 4, header 26, control 24 and pad 9. Unmapped density values remain shipped.
+Root `style` retains its shipped replacement semantics, followed by workspace tokens. Arbitrary custom variables,
 attributes, classes and authored CSS stay available to compat content.
 
-Increase Contrast uses the native stronger separator, secondary/muted ink,
-focus colour and border width; related separator aliases and fourth-level ink
-also strengthen. Reduce Transparency makes window/content/control/glass fills
-opaque and sets `--glass-backdrop:none`. Explicit authored contributions retain
+Increase Contrast uses the native stronger separator, secondary/muted ink
+and focus colour; related separator aliases and fourth-level ink also
+strengthen. CSS `--hairline` stays at the foundation 0.5 px in every edition;
+it is not the native separator width. `--r-pill` remains the shipped 999 px
+capsule shape. Normal `--fs-md`/`--fs-lg` are native 13/15 px; unmapped
+`--fs-xl` stays at the shipped 18 px. List rows use the review's reactive
+`color-mix(in srgb,var(--tx) 4%,var(--bg-panel))`; `--accent-dim` retains its
+12% translucent accent mix instead of the opaque native wash. Reduce
+Transparency makes window/content/control/glass fills opaque and sets `--glass-backdrop:none`. Explicit authored contributions retain
 their normal cascade priority; an accessibility edition does not silently
 rewrite user-authored colours. Project pixels are never recoloured.
 
@@ -3992,7 +4003,9 @@ const receiver = new CompatThemeReceiver(
 | Decision | Rule that picked it |
 | --- | --- |
 | Native tokens are the input; dark surfaces use neutral grey; contrast and opaque material editions compose. | N1 pro-grade accessibility, N2 better than shipped, N3 explicit intended palette. |
-| Preserve custom-property names, original selector specificity/order, density, inline/workspace priority and authored CSS/attributes. Keep dark float/panel and radius alias chains live. | N3 authored intent exact; N6 v1–3 contract. |
+| Preserve custom-property names, original selector specificity/order, density, inline/workspace priority and authored CSS/attributes. Keep radius and accent alias chains live; apply the recorded design-review surface corrections. | N3 authored intent exact; N6 v1–3 contract. |
+| Read the design crate’s serialized snapshot (including labels, semantics and new type/metric roles), validate every native target and use the first target as its CSS role. | N3 one authoritative token source; N7 inspectable fixtures. |
+| Apply review items 2–9: lift floats, keep pill/hairline/final heading foundation values, make density relative, use solid compat grounds, native type roles, lifted rows and translucent accent tints. | N1 pro-grade readability/density; N2 better than shipped; N3 recorded design intent wins over tagged material quirks. |
 | Define the five missing semantic aliases instead of reproducing invalid computed-value accidents. | N3/spec wins; N2 usable controls and typography. |
 | Full snapshots, stable edition/document ids, bounded safe generation numbers, version rejection and stale-message filtering. | N7 inspectable and drivable by id; N3 no mixed/stale theme state. |
 | Pure V8-compatible generation; WebKit only applies data to existing content. Host publication is queued. | N8 no Node/Chromium in the app or native main-thread JS waits; adopted S1/S5 architecture. |
@@ -4011,10 +4024,11 @@ node --experimental-vm-modules apps/native/js/themes/test/bare-v8.mjs
 node apps/native/js/themes/scripts/editions.mjs
 ```
 
-The edition suite adds **23 tests** to the existing **3,401**. It verifies all
-eight exact CSS goldens/digests; current native Rust source literals and tagged
+The edition suite contains **27 tests**. It verifies all
+eight exact CSS goldens/digests; current native Rust-serialized snapshots and tagged
 root CSS; native-input changes; neutral dark surfaces; opaque material fallbacks;
 text contrast ≥4.5 on panel surfaces and Increase Contrast separators ≥3;
+review items 1–9 across all eight editions, including changed host metrics;
 density, specificity, inline/workspace/important precedence and alias chains;
 root-style and Store semantics; copied versioned messages; stale/duplicate/wrong
 incarnation rejection; retries/reentrant delivery; complete popout initialization;

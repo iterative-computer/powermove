@@ -10,7 +10,7 @@
   --bg-panel:#fdfdfe;
   --bg-panel-2:#f5f5f7;
   --bg-sunken:#e6e6ea;
-  --bg-row:#f5f5f7;
+  --bg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel));
   --bg-row-hi:#ebebef;
   --bg-field:#f3f3f6;
   --bg-float:#ffffff;
@@ -25,14 +25,14 @@
   --tx-2:#52545a;
   --tx-3:#62646a;
   --tx-4:rgb(var(--ink-rgb) / .32);
-  --accent:#ff6019;
+  --accent:#f0580a;
   --accent-hover:color-mix(in srgb,var(--accent) 90%,white);
   --accent-dim:color-mix(in srgb,var(--accent) 12%,transparent);
   --accent-tx:color-mix(in oklab,var(--accent) 82%,var(--tx));
   --on-accent:#ffffff;
-  --danger:#D93025;
-  --warning:#A15C00;
-  --success:#148F5E;
+  --danger:#c22a1f;
+  --warning:#a15c00;
+  --success:#117a52;
   --blue:#2B6FE3;
   --blue-deep:#2B4FD8;
   --cream:#A89B76;
@@ -43,17 +43,17 @@
   --red:var(--danger);
   --yellow:var(--warning);
   --r-base:4px;
-  --r-xs:var(--r-base);
+  --r-xs:4px;
   --r-sm:calc(var(--r-base) * 1.5);
   --r-md:calc(var(--r-base) * 2);
   --r-lg:calc(var(--r-base) * 3);
   --r-xl:calc(var(--r-base) * 4);
-  --r-pill:17px;
+  --r-pill:999px;
   --fw-regular:400;
   --fw-medium:500;
   --fw-semibold:600;
   --row-h:28px;
-  --hdr-h:36px;
+  --hdr-h:32px;
   --ctl-h:28px;
   --gut:10px;
   --panel-edge-inset:10px;
@@ -65,12 +65,12 @@
   --f-mono:"SF Mono",ui-monospace,Menlo,monospace;
   --fs-xs:11px;
   --fs-sm:12px;
-  --fs-md:12px;
-  --fs-lg:13px;
-  --fs-xl:22px;
+  --fs-md:13px;
+  --fs-lg:15px;
+  --fs-xl:18px;
   --lh:1.45;
   --lh-tight:1.3;
-  --hairline:1px;
+  --hairline:0.5px;
   --ctl-edge:none;
   --ctl-raised:var(--bg-field);
   --ctl-edge-inset:inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
@@ -91,22 +91,22 @@
   --disabled:.5;
 }
 :root[data-density="compact"]{
-  --row-h:26px;
-  --hdr-h:32px;
+  --row-h:24px;
+  --hdr-h:26px;
   --ctl-h:24px;
   --fs-md:12px;
   --gut:7px;
   --pad:9px;
-  --gap:8px;
+  --gap:4px;
 }
 :root[data-density="comfy"]{
-  --row-h:34px;
-  --hdr-h:42px;
+  --row-h:32px;
+  --hdr-h:36px;
   --ctl-h:30px;
   --fs-md:14px;
   --gut:12px;
   --pad:14px;
-  --gap:12px;
+  --gap:8px;
 }
 :root{
   --ui-corner-smoothing:superellipse(1.6);

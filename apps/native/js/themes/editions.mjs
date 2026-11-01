@@ -2,7 +2,7 @@ import { FOUNDATION_CSS } from "./foundation.mjs";
 import { APP_ROOT_CSS } from "./edition-foundation.mjs";
 import { parseCss, parseDeclarations, ThemeError } from "./css.mjs";
 import { copyData } from "./data.mjs";
-import { FOUNDATION_TOKENS } from "./tokens.mjs";
+import { FOUNDATION_TOKENS, scalar } from "./tokens.mjs";
 import { translateTheme } from "./translator.mjs";
 
 export const COMPAT_THEME_VERSION = 1;
@@ -32,9 +32,13 @@ function nativeValues(native) {
   const values = {};
   for (const [name, spec] of Object.entries(FOUNDATION_TOKENS)) {
     if (!spec.native) continue;
-    const [group, key] = spec.native.split(".");
-    const value = native[group]?.[key];
-    values[name] = spec.kind === "color" ? hex(value) : px(value);
+    const projected = spec.native.map((target) => {
+      const [group, key] = target.split(".");
+      const value = native[group]?.[key];
+      return spec.kind === "color" ? hex(value) : px(value);
+    });
+    // One CSS token can feed several native roles; the first is its CSS role.
+    values[name] = projected[0];
   }
   // Keep authored alias chains reactive to theme/workspace overrides.
   const base = native.metrics.panel_radius / 3;
@@ -45,7 +49,7 @@ function nativeValues(native) {
   values["--r-lg"] = "calc(var(--r-base) * 3)";
   values["--ink-rgb"] = channels(native.colors.text);
   values["--bg-rail"] = hex(native.colors.window);
-  values["--bg-row"] = hex(native.colors.panel_secondary);
+  values["--bg-row"] = "color-mix(in srgb,var(--tx) 4%,var(--bg-panel))";
   values["--gray"] = "var(--tx-3)";
   values["--accent-hover"] = "color-mix(in srgb,var(--accent) 90%,white)";
   values["--accent-dim"] = "color-mix(in srgb,var(--accent) 12%,transparent)";
@@ -95,11 +99,16 @@ export function createCompatEdition(nativeInput, options = {}) {
   const values = nativeValues(native);
   const solid = native.accessibility.reduce_transparency;
   const window = hex(native.colors.window);
-  const tint = `rgb(${channels(native.colors.window)} / .86)`;
   const id = `compat-v1/${scheme}${native.accessibility.increase_contrast ? "-contrast" : ""}${solid ? "-solid" : ""}`;
   let stylesheet = `/* Powermove ${id}; generated from pm-design::Tokens. */\n`;
-  // Preserve original rule order/specificity: density beats base, dark beats
-  // base, app material follows foundation, authored theme CSS follows app CSS.
+  const foundation = parseCss(FOUNDATION_CSS);
+  const normal = Object.fromEntries(
+    foundation
+      .filter((rule) => rule.selector === ":root")
+      .flatMap((rule) => rule.declarations.map((d) => [d.property, d.value])),
+  );
+  // Preserve rule order/specificity, with the review's native surface and
+  // relative-density corrections. Authored theme CSS still follows app CSS.
   for (const rule of parseCss(FOUNDATION_CSS + "\n" + APP_ROOT_CSS)) {
     const density = rule.selector.includes("data-density");
     const dark = rule.selector.includes("data-theme");
@@ -109,13 +118,19 @@ export function createCompatEdition(nativeInput, options = {}) {
       let value = density
         ? declaration.value
         : (values[property] ?? declaration.value);
+      const spec = FOUNDATION_TOKENS[property];
+      if (density && spec?.native && spec.kind === "length") {
+        const before = scalar(normal[property]);
+        const after = scalar(declaration.value);
+        const current = scalar(values[property]);
+        if (before?.unit !== "px" || after?.unit !== "px" || !current)
+          invalid(`Invalid density metric ${property}`);
+        value = px(Math.max(0, current.value + after.value - before.value));
+      }
       if (property === "color-scheme") value = scheme;
       if (property === "--bg-window-solid") value = window;
-      // The app's material layer deliberately wins over foundation colours.
-      if (property === "--bg-window" && declaration.value.startsWith("rgb("))
-        value = solid ? window : tint;
-      if (property === "--bg-float" && declaration.value === "var(--bg-panel)")
-        value = declaration.value;
+      // Compat documents occupy solid panels; AppKit owns window materials.
+      if (property === "--bg-window") value = window;
       if (solid) {
         const replacements = {
           "--bg-content": "var(--bg-panel)",

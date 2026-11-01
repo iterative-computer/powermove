@@ -29,89 +29,31 @@ export function appRootCss() {
     .join("\n");
 }
 
-// Fail closed on new native field syntax. No Rust expressions are evaluated.
+// The design crate owns serialization, including nested labels and new roles.
+// Expand its four appearance snapshots with the material-only RT axis.
 // Fixture generation is not a replacement for the design crate's Rust tests.
 export function nativeSnapshots() {
-  const rust = readFileSync(
-    `${root}/apps/native/crates/design/src/lib.rs`,
-    "utf8",
+  const snapshots = JSON.parse(
+    readFileSync(
+      `${root}/apps/native/crates/design/tests/tokens.snapshot.json`,
+      "utf8",
+    ),
   );
-  const number = (text) => {
-    if (!/^(?:0x[\da-f]+|\d+(?:\.\d*)?)$/.test(text))
-      throw Error(`Unrecognised native literal ${text}`);
-    return Number(text);
-  };
-  const fields = (name) =>
-    [
-      ...rust
-        .match(new RegExp(`pub struct ${name} \\{([^}]+)\\}`))[1]
-        .matchAll(/pub (\w+):/g),
-    ].map((m) => m[1]);
-  function literals(struct, body) {
-    return Object.fromEntries(
-      fields(struct).map((key) => {
-        const text = body
-          .match(new RegExp(`\\b${key}:\\s*([^,]+),`))?.[1]
-          .trim();
-        return [key, number(text ?? "missing")];
-      }),
-    );
-  }
-  const snapshots = [];
-  for (const scheme of ["Light", "Dark"])
-    for (const increase_contrast of [false, true])
-      for (const reduce_transparency of [false, true]) {
-        const colors = literals(
-          "Colors",
-          rust.match(
-            new RegExp(`Scheme::${scheme} => Colors \\{([^}]+)\\}`),
-          )[1],
-        );
-        if (increase_contrast) {
-          const block = rust.slice(
-            rust.indexOf("if accessibility.increase_contrast"),
-          );
-          const changes = block.match(
-            new RegExp(`Scheme::${scheme} => \\{([^}]+)\\}`),
-          )[1];
-          if (changes.replace(/colors\.\w+ = 0x[\da-f]+;/g, "").trim())
-            throw Error("Native contrast expression syntax changed");
-          for (const m of changes.matchAll(/colors\.(\w+) = (0x[\da-f]+);/g))
-            colors[m[1]] = number(m[2]);
-        }
-        const metricBody = rust.match(
-          /metrics: Metrics \{([\s\S]+?)\n            \},/,
-        )[1];
-        const border = metricBody.match(
-          /border: if accessibility.increase_contrast \{\s*([\d.]+)\s*\} else \{\s*([\d.]+)\s*\}/,
-        );
-        if (!border) throw Error("Native border syntax changed");
-        snapshots.push({
-          scheme,
-          accessibility: {
-            reduce_transparency,
-            increase_contrast,
-            reduce_motion: false,
-          },
-          colors,
-          metrics: literals(
-            "Metrics",
-            metricBody.replace(
-              border[0],
-              `border: ${border[increase_contrast ? 1 : 2]}`,
-            ),
-          ),
-          typography: literals(
-            "TypeScale",
-            rust.match(/typography: TypeScale \{([^}]+)\}/)[1],
-          ),
-          motion: literals(
-            "Motion",
-            rust.match(/motion: Motion \{([^}]+)\}/)[1],
-          ),
-        });
-      }
-  return snapshots;
+  return ["Light", "Dark"].flatMap((scheme) =>
+    [false, true].flatMap((increase_contrast) => {
+      const native = snapshots.find(
+        (snapshot) =>
+          snapshot.scheme === scheme &&
+          snapshot.accessibility.increase_contrast === increase_contrast,
+      );
+      if (!native)
+        throw Error(`Missing native snapshot ${scheme} ${increase_contrast}`);
+      return [false, true].map((reduce_transparency) => ({
+        ...native,
+        accessibility: { ...native.accessibility, reduce_transparency },
+      }));
+    }),
+  );
 }
 
 export function panelSources() {

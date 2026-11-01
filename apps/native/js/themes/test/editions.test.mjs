@@ -115,6 +115,8 @@ for (const input of natives) {
     for (const [token, field] of [
       ["--bg-panel", "panel"],
       ["--bg-panel-2", "panel_secondary"],
+      ["--bg-float", "floating"],
+      ["--bg-window", "window"],
       ["--tx", "text"],
       ["--tx-2", "secondary"],
       ["--tx-3", "muted"],
@@ -134,7 +136,6 @@ for (const input of natives) {
         "--bg-rail",
         "--bg-panel",
         "--bg-panel-2",
-        "--bg-row",
         "--bg-row-hi",
         "--bg-field",
         "--bg-float",
@@ -164,16 +165,135 @@ test("native values are inputs, not a frozen second palette", () => {
   const input = native("Dark");
   input.colors.panel = 0x123456;
   input.colors.window = 0x345678;
+  input.colors.floating = 0x456789;
   input.colors.accent = 0x987654;
   input.metrics.row = 47;
   input.typography.body = 17;
+  input.typography.label = 18;
+  input.typography.title = 19;
+  input.typography.reading = 23;
   const values = variables(createCompatEdition(input));
   assert.equal(values["--bg-panel"], "#123456");
-  assert.equal(values["--bg-float"], "#123456"); // shipped app dark alias beats foundation
-  assert.equal(values["--bg-window"], "rgb(52 86 120 / .86)");
+  assert.equal(values["--bg-float"], "#456789");
+  assert.equal(values["--bg-window"], "#345678");
   assert.equal(values["--accent"], "#987654");
   assert.equal(values["--row-h"], "47px");
-  assert.equal(values["--fs-md"], "17px");
+  assert.equal(values["--fs-sm"], "17px");
+  assert.equal(values["--fs-md"], "19px");
+});
+
+test("review 1: edition fixtures expand the design crate's serialized snapshots", () => {
+  const snapshots = json("../../../crates/design/tests/tokens.snapshot.json");
+  for (const input of natives) {
+    const expected = structuredClone(
+      snapshots.find(
+        (snapshot) =>
+          snapshot.scheme === input.scheme &&
+          snapshot.accessibility.increase_contrast ===
+            input.accessibility.increase_contrast,
+      ),
+    );
+    expected.accessibility.reduce_transparency =
+      input.accessibility.reduce_transparency;
+    assert.deepEqual(input, expected);
+  }
+  assert.deepEqual(FOUNDATION_TOKENS["--fs-md"].native, [
+    "typography.title",
+    "typography.reading",
+  ]);
+});
+
+test("reviews 2, 3, 5, 6, 9: native surfaces, capsules, type and CSS hairlines in every edition", () => {
+  for (const input of natives) {
+    const values = variables(createCompatEdition(input));
+    for (const [name, field] of [
+      ["--bg-float", "floating"],
+      ["--bg-window", "window"],
+    ]) {
+      const expected = `#${input.colors[field].toString(16).padStart(6, "0")}`;
+      assert.equal(values[name], expected);
+      assert.equal(color(values[name]).alpha, 1);
+    }
+    assert.notEqual(values["--bg-float"], values["--bg-panel"]);
+    assert.equal(values["--r-pill"], "999px");
+    assert.equal(values["--fs-xs"], "11px");
+    assert.equal(values["--fs-sm"], "12px");
+    assert.equal(values["--fs-md"], "13px");
+    assert.equal(values["--fs-lg"], "15px");
+    assert.equal(values["--fs-xl"], "18px");
+    assert.equal(values["--hairline"], "0.5px");
+  }
+});
+
+test("review 4: density uses native-relative lengths for both schemes and accessibility axes", () => {
+  const names = ["--row-h", "--gap", "--hdr-h", "--ctl-h", "--pad", "--fs-md"];
+  for (const source of natives) {
+    const input = structuredClone(source);
+    for (const [density, expected] of [
+      ["normal", [28, 6, 32, 28, 12, 13]],
+      ["compact", [24, 4, 26, 24, 9, 12]],
+      ["comfy", [32, 8, 36, 30, 14, 14]],
+    ]) {
+      const values = variables(
+        createCompatEdition(input, { workspace: { density } }),
+      );
+      assert.deepEqual(
+        names.map((name) => scalar(values[name]).value),
+        expected,
+      );
+    }
+    input.metrics.row += 10;
+    input.metrics.gap += 10;
+    input.metrics.header += 10;
+    input.metrics.control += 10;
+    input.metrics.inset += 10;
+    input.typography.title += 10;
+    for (const [density, expected] of [
+      ["compact", [34, 14, 36, 34, 19, 22]],
+      ["comfy", [42, 18, 46, 40, 24, 24]],
+    ]) {
+      const values = variables(
+        createCompatEdition(input, { workspace: { density } }),
+      );
+      assert.deepEqual(
+        names.map((name) => scalar(values[name]).value),
+        expected,
+      );
+    }
+  }
+});
+
+test("reviews 7 and 8: row lift and translucent accent remain reactive to authored backgrounds", () => {
+  for (const input of natives) {
+    const edition = createCompatEdition(input);
+    assert.ok(
+      edition.stylesheet.includes(
+        "--bg-row:color-mix(in srgb,var(--tx) 4%,var(--bg-panel));",
+      ),
+    );
+    assert.ok(
+      edition.stylesheet.includes(
+        "--accent-dim:color-mix(in srgb,var(--accent) 12%,transparent);",
+      ),
+    );
+    const authored = createCompatEdition(input, {
+      theme: {
+        id: "authored",
+        scheme: "auto",
+        tokens: {
+          "--tx": "#ffffff",
+          "--bg-panel": "#202020",
+          "--accent": "#ff0000",
+        },
+      },
+    });
+    const values = variables(authored);
+    assert.equal(values["--bg-row"], "color-mix(in srgb,#ffffff 4%,#202020)");
+    assert.equal(
+      values["--accent-dim"],
+      "color-mix(in srgb,#ff0000 12%,transparent)",
+    );
+  }
 });
 
 test("density, source specificity, inline/workspace, important and radius alias cascade", () => {
@@ -193,7 +313,7 @@ test("density, source specificity, inline/workspace, important and radius alias 
   const values = result.surfaces.root.base.variables.values;
   assert.equal(values["--accent"], "#000000"); // !important wins over normal inline
   assert.equal(values["--bg-panel"], "#1a1a1a"); // dark specificity beats later :root
-  assert.equal(values["--row-h"], "26px");
+  assert.equal(values["--row-h"], "24px");
   assert.equal(scalar(values["--r-lg"]).value, 24);
   assert.equal(scalar(values["--r-sm"]).value, 12);
   assert.equal(result.surfaces.panel.base.style.background, "#123456");
@@ -214,7 +334,7 @@ test("density, source specificity, inline/workspace, important and radius alias 
     variables(
       createCompatEdition(native(), { workspace: { density: "comfy" } }),
     )["--row-h"],
-    "34px",
+    "32px",
   );
 });
 
@@ -468,7 +588,7 @@ test("accessibility modes compose and preserve explicit authored colours", () =>
   assert.equal(values["--bg-panel"], "#123456");
   assert.equal(values["--line-strong"], values["--line"]);
   assert.equal(values["--dur-1"], "75ms"); // existing extension media/motion rules remain in charge
-  assert.equal(values["--hairline"], "2px");
+  assert.equal(values["--hairline"], "0.5px");
   assert.equal(values["--focus-ring"], "0 0 0 2px #123456,0 0 0 5px #ffa073");
 });
 
@@ -478,6 +598,7 @@ test("bad native inputs and unresolved fixed scheme fail visibly", () => {
     (n) => (n.accessibility.increase_contrast = 1),
     (n) => (n.colors.accent = -1),
     (n) => (n.metrics.row = Infinity),
+    (n) => (n.typography.reading = Infinity),
     (n) => (n.metrics.panel_radius = 0),
   ]) {
     const input = native();
