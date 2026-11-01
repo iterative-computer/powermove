@@ -1535,3 +1535,27 @@ outside Git under `/tmp/ne-w5/audioa7-r10`.
   (about 0.1 ms for 290 keys); an edit of one key re-prepares every voice whose channel
   changed. Sharing prepared tracks across revisions for unchanged channels, and moving
   the preparation off the producer, are open.
+
+## E-track device lifecycle boundary (AUDIO-DEV-1)
+
+`device_policy` is independent of CoreAudio/FFmpeg. `DeviceProbe` supplies an
+id/format/latency/buffer snapshot; `DeviceMonitor` decides unchanged, unavailable,
+reanchor, or reopen. A same-device rate/channel change requires reopen. Losing
+a device retains the last committed snapshot and reopening is required even
+when the same id returns. Failed probes and failed opens cannot commit a format.
+`SystemDeviceProbe` is the CoreAudio adapter and rejects a device switch during
+the snapshot query. It is **not yet wired into Playback's stream lifecycle**;
+the old `(id, latency)` watch cannot prove rate/channel switching.
+
+The production policy's five tests run unchanged on Linux with:
+
+```sh
+rustc --edition 2024 --test engine/crates/pm-audio/src/device_policy.rs -o /tmp/pm-device-policy-tests
+/tmp/pm-device-policy-tests
+```
+
+Full crate/device/clock validation needs the Apple backend. The Gate E section
+of e2e-ledger.md lists physical routes, format changes, epoch and large-buffer
+checks, plus the remaining native decode and export-time blockers. N1/N3/N7/N8
+select an explicit worker-owned lifecycle; no main-thread waits or JS device
+ownership were introduced.

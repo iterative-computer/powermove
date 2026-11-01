@@ -630,3 +630,29 @@ fn test_quota(_: &std::path::Path) -> pm_proxy::Result<(u64, u64)> {
 
 #[cfg(all(target_os = "macos", feature = "generation"))]
 const TEST_QUOTA: fn(&std::path::Path) -> pm_proxy::Result<(u64, u64)> = test_quota;
+
+#[test]
+fn machine_profile_uses_injected_power_and_propagates_probe_failures() {
+    struct Probe(bool);
+    impl pm_proxy::PowerProbe for Probe {
+        fn on_battery(&self) -> pm_proxy::Result<bool> {
+            Ok(self.0)
+        }
+    }
+    struct Failed;
+    impl pm_proxy::PowerProbe for Failed {
+        fn on_battery(&self) -> pm_proxy::Result<bool> {
+            Err(pm_proxy::ProxyError::InvalidMedia("probe failed".into()))
+        }
+    }
+    let dir = tempdir().unwrap();
+    for battery in [true, false] {
+        let profile =
+            pm_proxy::probe_machine_profile_with(dir.path(), 4.0, &Probe(battery)).unwrap();
+        assert_eq!(profile.on_battery, battery);
+        assert!(profile.disk_write_mib_s.is_finite() && profile.disk_write_mib_s > 0.0);
+    }
+    assert!(pm_proxy::probe_machine_profile_with(dir.path(), 4.0, &Failed).is_err());
+    assert!(pm_proxy::probe_machine_profile_with(dir.path(), f64::NAN, &Probe(false)).is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}

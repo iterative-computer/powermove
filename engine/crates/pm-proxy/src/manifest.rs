@@ -31,6 +31,7 @@ impl SequenceManifest {
             || self.rate.num == 0
             || self.rate.den == 0
             || self.rate.num > i32::MAX as u32
+            || self.rate.den > i32::MAX as u32
             || self.frames.is_empty()
             || self.frames.len() > 1_000_000
         {

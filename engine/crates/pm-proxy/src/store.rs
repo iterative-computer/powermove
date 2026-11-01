@@ -259,7 +259,7 @@ impl ProxyStore {
                 matches.push((modified, record.recipe));
             }
         }
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
+        matches.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (_, recipe) in matches {
             if cancelled() {
                 return Err(ProxyError::Cancelled);
@@ -347,26 +347,8 @@ fn hash_reader_cancel(reader: &mut impl Read, cancelled: &impl Fn() -> bool) -> 
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-#[cfg(test)]
-mod cancel_tests {
-    use super::*;
-    use std::cell::Cell;
-
-    #[test]
-    fn checksum_can_stop_between_chunks() {
-        let bytes = vec![7_u8; 3 * 1024 * 1024];
-        let mut input = std::io::Cursor::new(bytes);
-        let checks = Cell::new(0);
-        let result = hash_reader_cancel(&mut input, &|| {
-            checks.set(checks.get() + 1);
-            checks.get() > 1
-        });
-        assert!(matches!(result, Err(ProxyError::Cancelled)));
-        assert!(input.position() < 3 * 1024 * 1024);
-    }
-}
-
 /// (available, capacity) on the volume containing `path`.
+#[allow(clippy::useless_conversion)] // fsblkcnt_t differs between Darwin and Linux.
 pub fn free_bytes(path: &Path) -> Result<(u64, u64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -425,4 +407,23 @@ fn disk_reserve(capacity: u64) -> u64 {
         }
     }
     (20u64 << 30).max(capacity / 10)
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn checksum_can_stop_between_chunks() {
+        let bytes = vec![7_u8; 3 * 1024 * 1024];
+        let mut input = std::io::Cursor::new(bytes);
+        let checks = Cell::new(0);
+        let result = hash_reader_cancel(&mut input, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        });
+        assert!(matches!(result, Err(ProxyError::Cancelled)));
+        assert!(input.position() < 3 * 1024 * 1024);
+    }
 }

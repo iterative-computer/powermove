@@ -20,8 +20,9 @@ pub use generate::{
 pub use manifest::{SequenceFrame, SequenceManifest, SequenceRate};
 pub use policy::{
     AutomaticInput, DecodeMeasurement, MachineProfile, MediaAvailability, MediaUse, PlaybackMoment,
-    Representation, RepresentationChoice, RepresentationIntent, ResolutionIntent,
-    choose_representation, probe_machine_profile, source_for,
+    PowerProbe, Representation, RepresentationChoice, RepresentationIntent, ResolutionIntent,
+    SystemPowerProbe, choose_representation, probe_machine_profile, probe_machine_profile_with,
+    source_for,
 };
 #[cfg(feature = "test-hooks")]
 pub use store::set_test_disk_reserve;

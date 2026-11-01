@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Instant;
 
@@ -27,9 +28,45 @@ pub struct DecodeMeasurement {
     pub proxy_p95_ms: Option<f64>,
 }
 
+/// Power observations supplied by the platform host. Linux tests inject a
+/// probe; a failed observation never silently becomes AC power.
+pub trait PowerProbe {
+    fn on_battery(&self) -> Result<bool>;
+}
+
+pub struct SystemPowerProbe;
+impl PowerProbe for SystemPowerProbe {
+    fn on_battery(&self) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        {
+            let batt = Command::new("pmset").args(["-g", "batt"]).output()?;
+            if !batt.status.success() {
+                return Err(ProxyError::InvalidMedia(
+                    "power state measurement failed".into(),
+                ));
+            }
+            Ok(String::from_utf8_lossy(&batt.stdout).contains("Battery Power"))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(ProxyError::InvalidMedia(
+                "system power probing requires macOS".into(),
+            ))
+        }
+    }
+}
+
 /// GPU p95 and per-asset decode samples are supplied by the playback engine;
 /// the store volume's disk write throughput and power state are sampled here.
 pub fn probe_machine_profile(store_root: &Path, gpu_frame_p95_ms: f64) -> Result<MachineProfile> {
+    probe_machine_profile_with(store_root, gpu_frame_p95_ms, &SystemPowerProbe)
+}
+
+pub fn probe_machine_profile_with(
+    store_root: &Path,
+    gpu_frame_p95_ms: f64,
+    power: &dyn PowerProbe,
+) -> Result<MachineProfile> {
     if !gpu_frame_p95_ms.is_finite() || gpu_frame_p95_ms < 0.0 {
         return Err(ProxyError::InvalidMedia("invalid GPU measurement".into()));
     }
@@ -41,13 +78,7 @@ pub fn probe_machine_profile(store_root: &Path, gpu_frame_p95_ms: f64) -> Result
     }
     file.as_file().sync_all()?;
     let elapsed = start.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
-    let batt = Command::new("pmset").args(["-g", "batt"]).output()?;
-    if !batt.status.success() {
-        return Err(ProxyError::InvalidMedia(
-            "power state measurement failed".into(),
-        ));
-    }
-    let on_battery = String::from_utf8_lossy(&batt.stdout).contains("Battery Power");
+    let on_battery = power.on_battery()?;
     Ok(MachineProfile {
         gpu_frame_p95_ms,
         gpu_headroom_ms: (16.667 - gpu_frame_p95_ms).max(0.0),
