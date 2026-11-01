@@ -1,0 +1,18 @@
+[package]
+name = "pm-mcp"
+description = "Headless automation and the frozen Powermove MCP contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-kernel = { path = "../kernel" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+
+[[bin]]
+name = "powermove-mcp"
+path = "src/main.rs"

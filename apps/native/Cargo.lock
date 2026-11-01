@@ -3927,6 +3927,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-mcp"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
+ "pm-model",
+ "regex",
+ "serde",
+ "serde_json 1.0.150",
+]
+
+[[package]]
 name = "pm-media"
 version = "0.1.0"
 dependencies = [
