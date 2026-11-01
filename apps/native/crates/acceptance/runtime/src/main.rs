@@ -126,7 +126,12 @@ fn check(id: &str, bundle: Option<&str>) -> Result<()> {
             assert_eq!(eval(&other, "40+2")?.value, "42");
             other.close();
         }
-        "W037.compat-services" | "W040.compat-recorder" | "W040.compat-remote-dom" => {
+        "W037.compat-services"
+        | "W040.compat-recorder"
+        | "W040.compat-remote-dom"
+        | "A659"
+        | "A689"
+        | "A691" => {
             let bundle = bundle.ok_or(Error::Invalid("compat bundle required"))?;
             eval(&realm, bundle)?;
             assert_eq!(

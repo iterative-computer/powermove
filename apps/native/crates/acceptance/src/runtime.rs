@@ -7,6 +7,24 @@ use std::{
 };
 pub const CASES: &[(&str, &str, &str, bool)] = &[
     (
+        "A659",
+        "W040",
+        "Actual v1–3 CommandsAPI registrations, exact returns and override/disposal in V8",
+        true,
+    ),
+    (
+        "A689",
+        "W040",
+        "Actual v1–3 ServicesAPI live object identity and owned stack disposal in V8",
+        true,
+    ),
+    (
+        "A691",
+        "W040",
+        "Actual v1–3 EventsAPI synchronous payload identity, reentrancy and owned disposal in V8",
+        true,
+    ),
+    (
         "W040.compat-remote-dom",
         "W040",
         "Current remote DOM shim in real V8 preserves input identity, callback state and refused-batch retry; WebKit remains open",

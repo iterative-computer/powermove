@@ -167,13 +167,13 @@ fn configured_blocker_snapshot_and_workflow_status_columns_cannot_drift() {
         Some(&Available),
     )
     .unwrap();
-    assert_eq!(report.counts(), (1436, 0, 3162));
+    assert_eq!(report.counts(), (1439, 0, 3159));
     assert_eq!(
         report.blockers_csv(),
         include_str!("../data/remaining-blockers.csv")
     );
     let rows = csv_rows(&report.blockers_csv()).unwrap();
-    assert_eq!(rows.len(), 3163);
+    assert_eq!(rows.len(), 3160);
     assert!(rows.iter().all(|r| r.len() == 6));
     for workflow in &report.workflows {
         let row = format!(

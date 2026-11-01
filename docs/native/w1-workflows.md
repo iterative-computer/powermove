@@ -107,7 +107,7 @@ All 396 legacy spec replacements remain blocked. See [acceptance.md](acceptance.
 | W037 | blocked-by | 2 | 0 | 30 | compat-runtime; mcp:capture_panel; mcp:fork_builtin_extension; mcp:import_media; mcp:inspect_creative_extension; mcp:inspect_creative_workspace; mcp:publish_extensions; mcp:validate_effect |
 | W038 | blocked-by | 2 | 0 | 13 | compat-runtime |
 | W039 | blocked-by | 0 | 0 | 3 | compat-runtime |
-| W040 | blocked-by | 4 | 0 | 51 | compat-runtime |
+| W040 | blocked-by | 7 | 0 | 48 | compat-runtime |
 | W041 | blocked-by | 0 | 0 | 16 | transcription-service |
 | W042 | blocked-by | 0 | 0 | 17 | shell-integration |
 | W043 | blocked-by | 0 | 0 | 7 | shell-integration |

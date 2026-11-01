@@ -259,6 +259,41 @@ const KEY_CONTEXTS: &[&str] = &[
     "prior-decline",
     "menu-once",
 ];
+fn runtime_case(
+    case: (&str, &str, &str, bool),
+    kind: &str,
+    title: &str,
+    runtime: Option<&dyn crate::runtime::RuntimeHook>,
+) -> CaseResult {
+    let (id, workflow, _, requires_bundle) = case;
+    if let Some(runtime) = runtime.filter(|r| !requires_bundle || r.has_compat_bundle()) {
+        execute(id, workflow, kind, title, || runtime.check(id))
+    } else {
+        CaseResult {
+            id: id.into(),
+            workflow: workflow.into(),
+            kind: kind.into(),
+            status: Status::BlockedBy,
+            reason: format!(
+                "{title}; supply --runtime-runner{}",
+                if requires_bundle {
+                    " and --compat-bundle"
+                } else {
+                    ""
+                }
+            ),
+            blocked_by: Some(
+                if requires_bundle {
+                    "compat-bundle"
+                } else {
+                    "native-v8-backing"
+                }
+                .into(),
+            ),
+            needs_macos: false,
+        }
+    }
+}
 pub fn run(catalog: &Catalog, filter: &Filter, corpus: &[PathBuf]) -> Result<Report, String> {
     run_with_runtime(catalog, filter, corpus, None)
 }
@@ -286,6 +321,8 @@ pub fn run_with_runtime(
             }
             if let Some(s) = scenarios.iter().find(|s| s.id == c.id) {
                 cases.push(execute(s.id, s.workflow, "original", s.title, s.run));
+            } else if let Some(s) = crate::runtime::CASES.iter().find(|s| s.0 == c.id) {
+                cases.push(runtime_case(*s, "original", &c.expected, runtime));
             } else {
                 cases.push(blocked_original(c, &w.id));
             }
@@ -335,37 +372,17 @@ pub fn run_with_runtime(
         }
     }
     for &(id, workflow, title, requires_bundle) in crate::runtime::CASES {
+        if id.starts_with(['A', 'B']) {
+            continue;
+        }
         known.insert(id.into());
         if filter.accepts(id, workflow) {
-            if let Some(runtime) = runtime.filter(|r| !requires_bundle || r.has_compat_bundle()) {
-                cases.push(execute(id, workflow, "runtime-probe", title, || {
-                    runtime.check(id)
-                }));
-            } else {
-                cases.push(CaseResult {
-                    id: id.into(),
-                    workflow: workflow.into(),
-                    kind: "runtime-probe".into(),
-                    status: Status::BlockedBy,
-                    reason: format!(
-                        "{title}; supply --runtime-runner{}",
-                        if requires_bundle {
-                            " and --compat-bundle"
-                        } else {
-                            ""
-                        }
-                    ),
-                    blocked_by: Some(
-                        if requires_bundle {
-                            "compat-bundle"
-                        } else {
-                            "native-v8-backing"
-                        }
-                        .into(),
-                    ),
-                    needs_macos: false,
-                });
-            }
+            cases.push(runtime_case(
+                (id, workflow, title, requires_bundle),
+                "runtime-probe",
+                title,
+                runtime,
+            ));
         }
     }
     for (name, _) in crate::fixture::CORPUS {
@@ -583,6 +600,19 @@ fn validate_scenarios(catalog: &Catalog) -> Result<(), String> {
                 "scenario {} does not match authoritative workflow",
                 s.id
             ));
+        }
+    }
+    for &(id, workflow, _, _) in crate::runtime::CASES {
+        if !ids.insert(id) {
+            return Err(format!("duplicate native case {id}"));
+        }
+        let group = catalog
+            .workflows
+            .iter()
+            .find(|w| w.id == workflow)
+            .ok_or("native case has unknown workflow")?;
+        if id.starts_with(['A', 'B']) && !group.cases.iter().any(|c| c.id == id) {
+            return Err(format!("native case {id} has no authoritative contract"));
         }
     }
     Ok(())
