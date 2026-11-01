@@ -137,7 +137,10 @@ export class RemoteRange {
   }
   selectNodeContents(node: N) {
     this.setStart(node, 0);
-    this.setEnd(node, node.nodeType === 3 ? node.data.length : node.childNodes.length);
+    this.setEnd(
+      node,
+      node.nodeType === 3 || node.nodeType === 8 ? node.data.length : node.childNodes.length
+    );
   }
   selectNode(node: N) {
     const parent = node.parentNode;
