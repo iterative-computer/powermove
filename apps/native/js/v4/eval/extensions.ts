@@ -1,6 +1,8 @@
 // Development evaluation host: Refresh must be installed before creating any root.
 import "powermove-v4/refresh";
 import { Evaluation } from "./harness";
+import { exerciseOwner } from "./scenarios";
+import { createRoot } from "powermove-v4";
 import { tasks } from "./tasks";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -91,6 +93,7 @@ export async function runExtension(id: string, wire?: string) {
   const task = tasks.find((task) => task.id === id);
   if (!task) throw Error(`Unknown task ${id}`);
   if (task.status === "pending-owner") return { id, status: "pending-owner" };
+  if (task.group === "owner") return runOwner(id, wire);
   const path = new URL(`../examples/tasks/${id}.tsx`, import.meta.url);
   const source = await readFile(path, "utf8");
   const lines = source
@@ -118,6 +121,49 @@ export async function runExtension(id: string, wire?: string) {
     return { ...metrics(), status: "pass" };
   } catch (error) {
     return { ...metrics(), status: "fail", error: String(error) };
+  } finally {
+    await e.dispose();
+  }
+}
+
+/** Full owner acceptance fails on documented API gaps even when the synthetic
+ * behavior fixture passes. These are authored service seams, not independent
+ * extension ports or measured evidence that the missing services work.
+ */
+export async function runOwner(
+  id: string,
+  wire?: string,
+  factory = createRoot,
+) {
+  const task = tasks.find((task) => task.id === id && task.group === "owner");
+  if (!task?.behavior) throw Error(`Unknown owner specification ${id}`);
+  const e = new Evaluation(wire, factory);
+  const metrics = () => ({
+    id,
+    scope: "synthetic owner behavior fixture; full host integration required",
+    wire: !!wire,
+    commits: e.commits.length,
+    ops: e.commits.reduce((count, commit) => count + commit.ops.length, 0),
+  });
+  try {
+    await exerciseOwner(Number(id.slice(-2)), e);
+    e.compareNative();
+    const blockedBy = task.behavior.apiGaps;
+    return {
+      ...metrics(),
+      status: blockedBy.length ? "fail" : "pass",
+      fixtureStatus: "pass",
+      failureKind: blockedBy.length ? "api-gap" : undefined,
+      blockedBy,
+    };
+  } catch (error) {
+    return {
+      ...metrics(),
+      status: "fail",
+      fixtureStatus: "fail",
+      failureKind: "fixture",
+      error: String(error),
+    };
   } finally {
     await e.dispose();
   }

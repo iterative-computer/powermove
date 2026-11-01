@@ -8,7 +8,7 @@ const knownFailures: Record<string, string> = {
   "builtin-06": "complete accepted snapshot",
   "wild-10": "complete accepted snapshot",
 };
-for (const task of tasks) {
+for (const task of tasks.filter((task) => task.group !== "owner")) {
   wireTest(`independent extension ${task.id}`, async () => {
     const result = await runExtension(task.id, wire);
     if (task.status === "pending-owner") {
@@ -26,11 +26,11 @@ wireTest("unknown spec cannot become a fabricated pass", async () => {
   expect(runExtension("unknown", wire)).rejects.toThrow("Unknown task");
 });
 wireTest(
-  "all available specs have explicit public reference consultations",
+  "all independent public briefs have explicit public reference consultations",
   () => {
     expect(Object.keys(consultations).sort()).toEqual(
       tasks
-        .filter((task) => task.status === "ready")
+        .filter((task) => task.status === "ready" && task.group !== "owner")
         .map((task) => task.id)
         .sort(),
     );
@@ -97,3 +97,20 @@ wireTest(
     );
   },
 );
+
+for (const task of tasks.filter((task) => task.group === "owner")) {
+  test(`owner default evaluation ${task.id} keeps API gaps visible`, async () => {
+    const result = await runExtension(task.id);
+    expect(result).toMatchObject({
+      id: task.id,
+      status: "fail",
+      fixtureStatus: "pass",
+      failureKind: "api-gap",
+      wire: false,
+    });
+    expect("blockedBy" in result && result.blockedBy).toEqual(
+      task.behavior!.apiGaps,
+    );
+    expect("commits" in result && result.commits).toBeGreaterThan(0);
+  });
+}

@@ -38,8 +38,11 @@ export class Evaluation {
   // without manufacturing a JS op or consuming a surface revision.
   readonly nativeObservations = new Map<number, Json>();
   readonly timings: number[] = [];
-  constructor(readonly wire?: string) {
-    this.root = createRoot(
+  constructor(
+    readonly wire?: string,
+    factory: typeof createRoot = createRoot,
+  ) {
+    this.root = factory(
       async (commit) => {
         const result = this.wire
           ? this.replay([...this.commits, commit]).at(-1)!
