@@ -47,12 +47,17 @@ impl Renders {
     pub fn resume(&mut self, id: u64, revision: u64, dependency: bool) -> Value {
         match self.pending.remove(&id) {
             Some((r, Some(override_pixels))) if r == revision && dependency => {
+                let render_started = std::time::Instant::now();
                 let mut out = frame();
                 for row in 0..16 {
                     out[row * 1920 * 4..row * 1920 * 4 + 64]
                         .copy_from_slice(&override_pixels[row * 64..row * 64 + 64]);
                 }
                 self.output = Some(out);
+                println!(
+                    "{}",
+                    json!({"test":"profile_native_pattern_render","ms":render_started.elapsed().as_secs_f64()*1000.})
+                );
                 json!({"status":"rendered","id":"outer0","revision":r})
             }
             _ => json!({"status":"failed","code":"dependency_cycle_or_stale"}),
