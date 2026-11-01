@@ -163,7 +163,7 @@ absent. Snapshots normalize only Preact-generated label prefixes.
 
 Linux results: **110 inspector model tests** (100 existing + 10 adapter),
 **95 surface tests**, **10 design tests**, and **43 inspector panel tests with
-21 snapshots**. **214 total parent v4 tests** (including the 43 panel tests) pass.
+21 snapshots**. **215 total parent v4 tests** (including the 43 panel tests) pass.
 
 ## macOS review gate
 
@@ -177,3 +177,16 @@ VoiceOver through the real window subtree and all accessibility appearances.
 Measure real 60k-selection responsiveness, playback cadence, exact pause and no
 UI-thread JS waits. Capture the review checklist's screenshots and obtain Opus
 review. None of these gates is self-certified by this Linux lane.
+
+## Merge verification (2026-11-01)
+
+Merged `origin/feat/native-engine` at
+`4204a153dbf8af916ef2b92d7ca01858e363516a` and
+`origin/feat/na-v4-integrate` at
+`e5e209928817cb9434823ebf6ddf7d64f2213441`. The Cargo.lock conflict retained
+both model registration and v4 pins. Both base commits are ancestors of this
+branch. Re-ran the locked 215-test Rust gate and 215-test parent v4 suite after
+the merges: no failures or skipped tests. Inspector and parent typechecks,
+inspector formatting/browser build, strict inspector Clippy and rustfmt pass.
+The test probe's target path uses file-URL decoding, including spaces and URL
+delimiters; the runner retains no assumptions about macOS system temp links.

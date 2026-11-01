@@ -12,7 +12,7 @@ const child = Bun.spawnSync(
     "--example",
     "inspector_wire",
     "--target-dir",
-    new URL("target/", new URL("../../../../../", import.meta.url)).pathname,
+    fileURLToPath(new URL("../../../../../target/", import.meta.url)),
   ],
   {
     cwd: workspace,
