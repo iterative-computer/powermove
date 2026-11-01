@@ -3853,3 +3853,198 @@ Keyframe names are source identifiers, not a requirement to preserve browser ani
 | `apps/desktop/src/renderer/index.html` | 40 | `@keyframes boot-ghost-in` |
 | `apps/desktop/src/renderer/index.html` | 41 | `@keyframes boot-ghost-breathe` |
 | `apps/desktop/src/extensions/viewer/source-preview.ts` | 24 | `@keyframes sp-in` |
+
+## Package 12 part 2: compat theme editions
+
+Implementation is limited to `apps/native/js/themes` and this document. The
+edition format version is **1**, shared by **apiVersion 1–3** DOM panels; it is
+not a new extension API version. Baseline remains shipped `v1.2.0`
+(`07ed5fa17ee640659cb075f9cad1af2095011d60`), read through `git show`, plus the
+current public `pm-design::Tokens` definition. No installed extension, user
+profile, project, private corpus or private plan is an input to these artifacts.
+
+`createCompatEdition(nativeTokens, {theme?, workspace?, trust?})` reverses the
+existing foundation-token/native-field map. Supply a **serialized, resolved**
+`pm-design::Tokens`: `scheme: "Light" | "Dark"`, snake-case accessibility flags,
+colours as opaque sRGB RGB integers, metrics/typography as numbers. The kernel
+resolves system/user/fixed-theme preference before constructing this snapshot;
+a fixed theme inconsistent with the supplied native scheme is rejected. Runtime
+generation accepts current token values rather than a second frozen native
+palette. Existing theme/workspace translation supplies root attributes and
+inline contributions; it still enforces the Store registration gate.
+
+The checked-in `editions/v1/manifest.json` identifies eight CSS goldens and their
+SHA-256 digests: light/dark × Increase Contrast on/off × Reduce Transparency
+on/off. Dark neutral surfaces and ink derive from the native neutral-grey
+palette, replacing the tag's Stone/brown neutrals. Native text, separators,
+focus, mapped geometry and type sizes are projected into the legacy namespace.
+Unmapped legacy font, timing, status and expression tokens retain the shipped
+foundation. The native Reduce Motion flag travels as metadata; existing extension
+media/motion rules retain their timing responsibility in this colour/material adapter.
+
+All **82 foundation names**, **10 app-root additions**, and **5 explicit repair
+aliases** are defined: 97 variables in each edition. The app-root additions are
+`--ui-corner-smoothing`, `--bg-window-solid`, `--bg-content`, `--glass-fill`,
+`--glass-edge`, `--glass-rim`, `--glass-fill-hi`, `--glass-edge-hi`,
+`--glass-rim-hi`, `--glass-backdrop`. Root rules are extracted from the tagged
+`apps/desktop/css/app.css`; no shell selectors or shell rendering enter WebKit.
+The repair aliases are `--bg-hover → --bg-row-hi`, `--font-mono → --f-mono`,
+`--orange → --accent`, `--tx-1 → --tx`, `--bg-2 → --bg-panel-2`. These names had
+consumers but no global definitions at the tag; this is an explicit spec/intent
+correction, not a claim of identical invalid-value browser output.
+
+Cascade order and specificity remain foundation → density/dark overrides → app
+root material rules → authored theme CSS, with normal theme/dark-token inline
+contributions and then workspace contributions. Stylesheet `!important` still
+beats normal inline values. A later normal `:root` theme rule does not beat an
+earlier `:root[data-theme="dark"]` rule. Radius and colour aliases remain live
+expressions; derived accent hover moves toward white, as in both shipped palettes.
+The app's authored dark `--bg-float:var(--bg-panel)` continues to
+win over the foundation floating colour. Root `style` retains its shipped
+replacement semantics, followed by workspace tokens. Arbitrary custom variables,
+attributes, classes and authored CSS stay available to compat content.
+
+Increase Contrast uses the native stronger separator, secondary/muted ink,
+focus colour and border width; related separator aliases and fourth-level ink
+also strengthen. Reduce Transparency makes window/content/control/glass fills
+opaque and sets `--glass-backdrop:none`. Explicit authored contributions retain
+their normal cascade priority; an accessibility edition does not silently
+rewrite user-authored colours. Project pixels are never recoloured.
+
+### Live replacement protocol
+
+The worker creates an edition and `compatThemeMessage(documentId, generation,
+edition)`. The complete JSON data shape is:
+
+```js
+{
+  type: "powermove.compat-theme.replace",
+  version: 1,
+  documentId: "panel/inspector@document-incarnation",
+  generation: 42, // positive safe integer; reserve before scheduling generation
+  edition: {
+    version: 1,
+    id: "compat-v1/dark-contrast-solid",
+    themeId: "default",
+    scheme: "dark",
+    accessibility: {
+      increase_contrast: true,
+      reduce_transparency: true,
+      reduce_motion: false
+    },
+    stylesheet: "/* full generated foundation edition CSS */",
+    themeCss: "/* full authored theme CSS, or empty string */",
+    rootAttributes: { "data-theme": "dark", "data-density": "normal" },
+    inlineTokens: { /* current theme + workspace custom properties */ }
+  }
+}
+```
+
+`documentId` identifies one document **incarnation**, not merely a reusable
+panel id; navigation/recreation gets a fresh id. `generation` increases per
+publication stream. Messages are full replacements, so coalescing/skipping an
+intermediate generation needs no delta replay. Unknown message/edition versions
+and malformed input fail before publication; wrong document ids, duplicate and
+older generations return false. Publication copies data; later retained-reference
+mutations cannot change the rendered edition. A failing port can retry the same
+generation. Popouts and newly attached documents receive the full current
+snapshot rather than copying stale styles once.
+
+`CompatThemeReceiver(documentId, host)` uses the `replaceTheme(edition)` port.
+`createWebKitThemeHost(document, afterReplace?)` implements its render side:
+validate root attribute names before mutation, insert the foundation before
+panel styles, retain a separate `style[data-powermove-theme]` after existing
+styles, then replace both style nodes' **textContent** and tracked root
+attributes/inline tokens in one JavaScript task. No navigation, content DOM
+replacement or HTML string parsing occurs. Prior theme-only keys disappear;
+unrelated panel-owned root state survives unless the theme explicitly replaces
+`style`, matching the shipped attribute operation. Observers/paint run after the
+complete task. Focused content, selection and scroll nodes are retained.
+
+The optional callback reports render completion only. Do not emit a second
+kernel `theme:changed`, move extension logic into WebKit, delay synchronous V8
+reads until the callback, or wait on JavaScript from the native main thread.
+The existing kernel event/facade and native appearance authority stay in place.
+The document receiver belongs on an authenticated host transport; this message
+does not grant a Store extension permission to modify the application theme.
+
+Example worker-side publication using the existing generation guard:
+
+```js
+const publisher = new ThemePublication({
+  replace({ generation, snapshot }) {
+    bridge.enqueue(compatThemeMessage(documentId, generation, snapshot));
+  }
+});
+const generation = publisher.request(); // before async/worker work begins
+const edition = createCompatEdition(nativeTokens, { theme, workspace });
+publisher.commit(generation, edition); // obsolete computations cannot publish
+// WebKit render-side bootstrap, once per document incarnation:
+const receiver = new CompatThemeReceiver(
+  documentId,
+  createWebKitThemeHost(panelDocument)
+);
+// Authenticated bridge delivery calls receiver.receive(message).
+```
+
+### Decisions and picking rules
+
+| Decision | Rule that picked it |
+| --- | --- |
+| Native tokens are the input; dark surfaces use neutral grey; contrast and opaque material editions compose. | N1 pro-grade accessibility, N2 better than shipped, N3 explicit intended palette. |
+| Preserve custom-property names, original selector specificity/order, density, inline/workspace priority and authored CSS/attributes. Keep dark float/panel and radius alias chains live. | N3 authored intent exact; N6 v1–3 contract. |
+| Define the five missing semantic aliases instead of reproducing invalid computed-value accidents. | N3/spec wins; N2 usable controls and typography. |
+| Full snapshots, stable edition/document ids, bounded safe generation numbers, version rejection and stale-message filtering. | N7 inspectable and drivable by id; N3 no mixed/stale theme state. |
+| Pure V8-compatible generation; WebKit only applies data to existing content. Host publication is queued. | N8 no Node/Chromium in the app or native main-thread JS waits; adopted S1/S5 architecture. |
+| Existing appearance ownership, private archives and migration remain with the kernel; no project/user state is written by this adapter. Retain all replaced Electron paths. | N4 no user left behind; prune only after the last consumer is gone. |
+
+### Linux verification and remaining host gates
+
+Run from the repository root:
+
+```sh
+node --test apps/native/js/themes/test/*.test.mjs
+node apps/native/js/themes/scripts/catalog.mjs --check
+node apps/native/js/themes/scripts/editions.mjs --check
+node --experimental-vm-modules apps/native/js/themes/test/bare-v8.mjs
+# Intentional, reviewed regeneration only:
+node apps/native/js/themes/scripts/editions.mjs
+```
+
+The edition suite adds **23 tests** to the existing **3,401**. It verifies all
+eight exact CSS goldens/digests; current native Rust source literals and tagged
+root CSS; native-input changes; neutral dark surfaces; opaque material fallbacks;
+text contrast ≥4.5 on panel surfaces and Increase Contrast separators ≥3;
+density, specificity, inline/workspace/important precedence and alias chains;
+root-style and Store semantics; copied versioned messages; stale/duplicate/wrong
+incarnation rejection; retries/reentrant delivery; complete popout initialization;
+and in-place replacement through a Linux Document double. Bare-V8 isolation
+also exercises generation and delivery without Node, DOM or structuredClone
+runtime globals. Node is build/test tooling only. This lane changes no Rust
+crate; Cargo formatting/tests/Clippy are not substitutes for these JS checks.
+
+The source inventory checks **390 literal variable read sites** in shipped
+built-in extension sources, including `var()`, `getPropertyValue()` and the
+timeline's `css(name)` helper calls. Every read has an edition definition or an
+explicit same-source CSS declaration/runtime `setProperty` writer. Local names
+stay local rather than inventing global panel geometry. A synthetic corpus-style
+panel reads **all 97 edition variables** and tests local aliases/fallbacks in all
+eight editions; a negative fixture proves that an unknown read is detected.
+This is a public-source static coverage check, not arbitrary dynamic-key or
+private installed-corpus conformance. The generator never reads an installation.
+
+**Still required outside these owned paths:** wire kernel-resolved native token
+and appearance snapshots into worker generation and production remote-DOM
+message delivery, load the renderer adapter into each compat document, deliver
+current snapshots on attach/popout/recreation, and preserve the V8 synchronous
+computed-style/event facade. Any native design-token changes must regenerate
+and review the goldens. No production kernel, shell or bridge source was edited.
+
+**Verify on macOS:** real WKWebView computed styles, colour-mix/calc/font support
+on supported OS versions; light/dark, system/fixed, both accessibility switches
+and combinations during typing/IME, scroll and popouts; visual comparison of
+actual built-in and frozen installed/forked panels; custom root attributes,
+`!important`, enable/disable/reload/restart and two workspaces; real focus,
+selection, VoiceOver, mutation-observer/event ordering, no reload/flicker and
+asynchronous main-thread delivery. Linux doubles do not establish any WebKit
+pixel, latency, accessibility or cutover gate.

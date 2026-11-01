@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "catalog": "node scripts/catalog.mjs --check"
+    "catalog": "node scripts/catalog.mjs --check",
+    "editions": "node scripts/editions.mjs --check",
+    "editions:update": "node scripts/editions.mjs"
   }
 }
