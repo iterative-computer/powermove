@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import { createRoot, type Commit } from "../src";
 import { tasks } from "./tasks";
 import { exercise } from "./scenarios";
@@ -79,8 +80,11 @@ if (import.meta.main) {
       (args.includes("--wire") ? nativeWire().surface : undefined);
     const candidate = args.find((a) => a.startsWith("--candidate="))?.slice(12);
     const factory: typeof createRoot = candidate
-      ? (await import(new URL(candidate, `file://${process.cwd()}/`).href))
-          .createRoot
+      ? (
+          await import(
+            new URL(candidate, pathToFileURL(`${process.cwd()}/`)).href
+          )
+        ).createRoot
       : createRoot;
     if (typeof factory !== "function")
       throw new Error("Candidate must export createRoot");
