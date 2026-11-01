@@ -22,6 +22,7 @@ pub struct Host {
     layer: metal::MetalLayer,
     queue: metal::CommandQueue,
     pattern: metal::RenderPipelineState,
+    viewer_size: Option<(NSSize, f64)>,
     menu: Retained<NSWindow>,
     menu_open: bool,
     registration: Option<gpui_macos::composition::CompositionRegistration>,
@@ -155,6 +156,7 @@ impl Host {
             layer,
             queue: device.new_command_queue(),
             pattern,
+            viewer_size: None,
             menu,
             menu_open: false,
             registration: None,
@@ -233,14 +235,22 @@ impl Host {
             let r = Rect::new(x, y, s.bounds.w, s.bounds.h);
             match s.id {
                 1 => {
-                    self.viewer.setFrame(nsrect(r, height));
+                    if self.viewer.frame() != nsrect(r, height) {
+                        self.viewer.setFrame(nsrect(r, height));
+                    }
                     self.viewer.clip(&s.clip);
                 }
                 2 => {
-                    self.web.setFrame(nsrect(r, height));
+                    if self.web.frame() != nsrect(r, height) {
+                        self.web.setFrame(nsrect(r, height));
+                    }
                     self.web.clip(&s.clip);
                 }
-                3 => self.field.setFrame(nsrect(r, height)),
+                3 => {
+                    if self.field.frame() != nsrect(r, height) {
+                        self.field.setFrame(nsrect(r, height));
+                    }
+                }
                 _ => {}
             }
         }
@@ -307,6 +317,11 @@ impl Host {
         }
         let scale = self.window.backingScaleFactor();
         let size = self.viewer.bounds().size;
+        // Static native viewer pattern: do not acquire/present a second drawable for
+        // unchanged content on every GPUI tick. Real viewer invalidation belongs to S3.
+        if self.viewer_size == Some((size, scale)) && std::env::var_os("S2_BASELINE").is_none() {
+            return;
+        }
         self.layer
             .set_drawable_size(core_graphics::geometry::CGSize::new(
                 (size.width * scale).max(1.),
@@ -334,6 +349,7 @@ impl Host {
             cmd.commit();
             cmd.wait_until_scheduled();
             d.present();
+            self.viewer_size = Some((size, scale));
         }
     }
     pub fn toggle_menu(&mut self) {
@@ -468,3 +484,60 @@ fn animate_menu(window: &NSWindow, enter: bool) -> f64 {
 }
 #[link(name = "WebKit", kind = "framework")]
 unsafe extern "C" {}
+
+/// S2 text-services harness: ordinary nil-target AppKit responder-chain commands.
+pub fn install_text_menu() {
+    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    let root = NSMenu::new(mtm);
+    for (title, items) in [
+        (
+            "Powermove",
+            vec![("Services", "services", ""), ("Quit", "terminate:", "q")],
+        ),
+        (
+            "Edit",
+            vec![
+                ("Undo", "undo:", "z"),
+                ("Redo", "redo:", ""),
+                ("Cut", "cut:", "x"),
+                ("Copy", "copy:", "c"),
+                ("Paste", "paste:", "v"),
+                ("Select All", "selectAll:", "a"),
+                ("Spelling and Grammar…", "showGuessPanel:", ""),
+                (
+                    "Check Spelling While Typing",
+                    "toggleContinuousSpellChecking:",
+                    "",
+                ),
+                ("Writing Tools…", "showWritingTools:", ""),
+                ("Emoji & Symbols", "orderFrontCharacterPalette:", ""),
+            ],
+        ),
+    ] {
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        for (label, action, key) in items {
+            let selector =
+                objc2::runtime::Sel::register(std::ffi::CString::new(action).unwrap().as_c_str());
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(label),
+                    Some(selector),
+                    &NSString::from_str(key),
+                )
+            };
+            if action == "services" {
+                let services = NSMenu::new(mtm);
+                item.setSubmenu(Some(&services));
+                app.setServicesMenu(Some(&services));
+            }
+            menu.addItem(&item);
+        }
+        let top = NSMenuItem::new(mtm);
+        top.setSubmenu(Some(&menu));
+        root.addItem(&top);
+    }
+    app.setMainMenu(Some(&root));
+}

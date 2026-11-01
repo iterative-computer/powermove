@@ -80,7 +80,7 @@ fn shell_window_appearance_matrix() {
             );
             std::fs::create_dir_all("/tmp/pm-shots").unwrap();
             image
-                .save(format!("/tmp/pm-shots/shell-headless-{name}.png"))
+                .save(format!("/tmp/pm-shots/ptext-shell-headless-{name}.png"))
                 .unwrap();
             outputs.push(image);
         }

@@ -5,6 +5,7 @@ pub mod keyboard;
 pub mod layout;
 pub mod menu;
 mod native;
+pub mod text;
 pub mod transient;
 pub mod view;
 use gpui::{prelude::*, *};

@@ -683,30 +683,40 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        let drawable = if let Some(drawable) = layer.next_drawable() {
-            drawable
-        } else {
-            log::error!(
-                "failed to retrieve next drawable, drawable size: {:?}",
-                viewport_size
-            );
-            return;
-        };
-
-        let mut instance_buffer = self.acquire_instance_buffer(scene);
-        let command_buffer =
-            match self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size) {
-                Ok(command_buffer) => command_buffer,
-                Err(error) => {
-                    log::error!("failed to render pre-sized scene: {error}");
-                    return;
-                }
+        let drawable =
+            if let Some(drawable) = measure_native("GPUI drawable", || layer.next_drawable()) {
+                drawable
+            } else {
+                log::error!(
+                    "failed to retrieve next drawable, drawable size: {:?}",
+                    viewport_size
+                );
+                return;
             };
+
+        // Powermove P-120: opt-in timestamps of the actual GPUI drawable, not a sibling viewer.
+        if std::env::var_os("PM_FRAME_PACING").is_some() {
+            let handler = ConcreteBlock::new(|d: &metal::DrawableRef| {
+                println!("PM_GPUI_PRESENT {:.9}", d.presented_time());
+            })
+            .copy();
+            drawable.add_presented_handler(&handler);
+        }
+        let mut instance_buffer = self.acquire_instance_buffer(scene);
+        let command_buffer = match measure_native("GPUI encode", || {
+            self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size)
+        }) {
+            Ok(command_buffer) => command_buffer,
+            Err(error) => {
+                log::error!("failed to render pre-sized scene: {error}");
+                return;
+            }
+        };
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
 
         if self.presents_with_transaction {
             command_buffer.commit();
-            command_buffer.wait_until_scheduled();
+            measure_native("GPUI scheduled", || command_buffer.wait_until_scheduled());
             drawable.present();
         } else {
             command_buffer.present_drawable(drawable);
@@ -3054,5 +3064,18 @@ mod tests {
             }),
             "triangle edges are antialiased",
         );
+    }
+}
+
+// Powermove opt-in CPU diagnostics; no timing/log work in ordinary draws.
+fn measure_native<R>(label: &str, f: impl FnOnce() -> R) -> R {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var("ZED_MEASUREMENTS").as_deref() == Ok("1")) {
+        let start = std::time::Instant::now();
+        let result = f();
+        eprintln!("{label}: {:?}", start.elapsed());
+        result
+    } else {
+        f()
     }
 }

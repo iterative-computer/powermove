@@ -572,6 +572,12 @@ impl Host {
                     for popup in [&palette, &fields] {
                         let mut p = popup.borrow_mut();
                         if e.windowNumber() == p.window.windowNumber() && p.model.open {
+                            if p.search
+                                .currentEditor()
+                                .is_some_and(|r| unsafe { msg_send![&*r, hasMarkedText] })
+                            {
+                                return event.as_ptr();
+                            }
                             if e.r#type() == NSEventType::KeyDown {
                                 let key = chord(e);
                                 if matches!(
@@ -613,6 +619,15 @@ impl Host {
                     let field = responder.as_ref().is_some_and(|r| unsafe {
                         msg_send![&**r,isKindOfClass:NSTextView::class()]
                     });
+                    // P-TEXT: composition keystrokes belong to the OS input method.
+                    // Never queue/replay a key that changes an active marked range.
+                    if field
+                        && responder
+                            .as_ref()
+                            .is_some_and(|r| unsafe { msg_send![&**r, hasMarkedText] })
+                    {
+                        return event.as_ptr();
+                    }
                     let mut h = host.borrow_mut();
                     h.next_token += 1;
                     let token = h.next_token;
@@ -1328,7 +1343,7 @@ pub fn install_menus() {
     let mut index = 0;
     for (title, items) in menu::menus() {
         let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
-        submenu.setAutoenablesItems(false);
+        submenu.setAutoenablesItems(title == "Edit");
         for spec in items {
             if spec.label.is_empty() {
                 submenu.addItem(&NSMenuItem::separatorItem(mtm));

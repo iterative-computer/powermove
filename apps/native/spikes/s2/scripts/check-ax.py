@@ -24,14 +24,14 @@ spike = native / 'spikes/s2'
 target = Path.home() / 'Developer/pm-target'
 os.environ['CARGO_TARGET_DIR'] = str(target)
 os.chdir(native)  # Select the pinned toolchain, even with a /tmp manifest.
-MIN_FREE = 4 * 1024**3
+MIN_FREE = 6 * 1024**3
 
 def guarded(command):
     def free():
         stat = os.statvfs('/')
         return stat.f_bavail * stat.f_frsize
     if free() < MIN_FREE:
-        raise SystemExit('S2b stopped: less than 4 GiB free; no build started')
+        raise SystemExit('S2b stopped: less than 6 GiB free; no build started')
     process = subprocess.Popen(command, start_new_session=True)
     try:
         while True:
@@ -42,7 +42,7 @@ def guarded(command):
                 return
             except subprocess.TimeoutExpired:
                 if free() < MIN_FREE:
-                    raise SystemExit('S2b stopped own build: less than 4 GiB free')
+                    raise SystemExit('S2b stopped own build: less than 6 GiB free')
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
@@ -70,7 +70,7 @@ if not args.no_build and not args.pid:
     metadata = Path(tempfile.gettempdir()) / 's2b-build'
     metadata.mkdir(exist_ok=True)
     manifest = (spike / 'Cargo.toml').read_text()
-    manifest = re.sub(r'path = "(../../vendor/[^"]+)"',
+    manifest = re.sub(r'path = "(../../(?:vendor|crates)/[^"]+)"',
                       lambda m: 'path = "' + str((spike / m[1]).resolve()) + '"', manifest)
     manifest += '\n[workspace]\n[profile.dev]\ndebug = 0\nincremental = false\n[profile.test]\ndebug = 0\nincremental = false\n'
     (metadata / 'Cargo.toml').write_text(manifest)

@@ -411,3 +411,130 @@ off VoiceOver and its Quickstart process were both verified absent at the end.
 No product/vendor code changed in this lane. All foreground processes were owned,
 time-bounded and closed. Remaining prior layout, menu, performance and display
 contracts are not promoted to passes by these appearance/AX observations.
+
+## 2026-11-01 — P-TEXT/P-120 pass
+
+**Implementation / screen-free verification PASS; display and OS IME gates OPEN.**
+“Pass” in this heading does not certify S2, 120-Hz headroom, or P1 approval. The
+user explicitly requested finishing with visible checks unverified after the Mac
+locked. No after-patch performance or actual Japanese/Pinyin conversion is claimed.
+
+### Changes and evidence
+
+- Native primary/multiline and dense text/number slot APIs now share the composition
+  transaction, rectangular clipping, retained accessibility order and AppKit responder
+  chain. Multiline uses a scrollable `NSTextView`. Dense editing uses a borderless
+  `NSTextField` in the same fixed rectangle; commit-only number validation and
+  Escape rollback preserve intermediate/marked input. Shell key and popup navigation
+  monitors stop intercepting marked-text events. Spelling/correction, native undo,
+  Writing Tools default behavior, Services and emoji use AppKit's implementations.
+- Frame-source start is idempotent on the same display; the existing per-display
+  CVDisplayLink remains responsible for rate and display transitions. Actual GPUI
+  drawable timestamp instrumentation replaces inference from the sibling viewer.
+- The texture-headroom fix candidate caches the static native viewer, unchanged
+  clip masks and static 1,000-tile GPUI subtree. Its 60-Hz producer remains separate.
+  `S2_BASELINE=1` restores the previous fixture's repeated work for paired A/B runs.
+  `S2_TIMELINE=1` scrolls a real 5,000-row virtual list every requested frame.
+- Rust **1.96.1**, shared `~/Developer/pm-target`: build PASS; **24 Rust tests PASS**
+  (2 design, 8 S2 contracts, 12 shell models, 1 appearance/Metal capture, 1 cache
+  regression). AppKit text/AX probe PASS: real UTF-16 marked range and commit,
+  multiline, spell/undo configuration, numeric parsing, clipped placement,
+  dense/native equal rectangle, teardown, and the prior foreign-child AX probes.
+  These test APIs are not a Japanese or Chinese input method.
+- No display mode, microphone permission, VoiceOver setting or persistent input
+  source was changed for these tests. The GUI lock is released; test app is closed.
+
+### Before/after measurements
+
+| Workload / condition | Before | After |
+|---|---|---|
+| Earlier unlocked S2 1,000 tiles + producer, CPU p95 | **6.884 ms**, FAIL against 4.167 ms | UNVERIFIED |
+| This session's unlocked pre-patch reproduction, shared machine, development binary, 619 samples after 30 warmups | p50 **10.527**, p95 **13.040**, p99 **14.143 ms**; **511/619** CPU frames >8.333 ms | UNVERIFIED — lock screen observed before after-patch run |
+| Actual GPUI-layer presentations / zero dropped UI frames | No valid pre-patch GPUI-layer timestamp series | UNVERIFIED |
+| Scrolling 5,000 virtual rows, 120 Hz / ≤4.167 ms CPU p95 | Ready-to-run A/B baseline | Ready-to-run patched workload; UNVERIFIED |
+| Real OS IME / Services / dictation / Writing Tools / emoji | Previous TIS selection returned -50 | UNVERIFIED; capability and manual checks below |
+
+The second baseline is a diagnostic, not a settled/paired corpus result. Do not
+compare it as an improvement/regression against the earlier run. Locked-session
+single-frame logs are excluded. The headroom failure is **not closed** by a code
+change or model test. The fixture's unchanged-view cache is tested, but its visible
+frame-time benefit still needs measurement. No 0-drop claim is made.
+
+### Exact reproduction commands and pass criteria
+
+From the repository root:
+
+```sh
+# Pinned build, GPU verifier, all 24 Rust tests, native text/AX probe; no visible window.
+apps/native/spikes/s2/scripts/check-ptext-120.sh
+
+# Unlocked display: one diagnostic A/B batch (4 runs, ~4.5 minutes, lock released).
+apps/native/spikes/s2/scripts/check-ptext-120.sh --display --no-build --runs 1
+
+# Required repeated matrix after the diagnostic passes; one bounded batch at a time.
+apps/native/spikes/s2/scripts/check-ptext-120.sh --display --no-build --runs 30
+
+# Unlocked text demo, TIS capability probe, then 45 seconds for the manual check.
+apps/native/spikes/s2/scripts/check-ptext-120.sh --ime --no-build
+```
+
+The wrapper sources `engine/env.sh`, selects Rust 1.96.1 from `apps/native`, uses
+only the shared target and refuses/stops its own build below **6 GiB** free. It
+creates temporary metadata under `/tmp` with exact source symlinks, avoiding
+another lane's unfinished manifest/lock. It never edits the shared lock. GUI runs
+atomically create `/tmp/pm-shots/gui.lock` containing `ptext`, retry held locks every
+30 seconds and release it on normal/error exit. Each acquired batch is <5 minutes.
+Locked sessions fail immediately; no unlock is attempted. Screenshots are only
+`/tmp/pm-shots/ptext-*.png`; logs/results are `/tmp/ptext-*.log` and
+`/tmp/ptext-120-results.json`, all outside Git.
+
+Display pass criteria, **for both patched workloads separately**, on a confirmed
+120-Hz display: ≥60 seconds of measured presentations after 30 warmup samples,
+CPU frame p95 **≤4.166667 ms**, and **0 missed 8.333333-ms presentation intervals**.
+A gap ≥1.5 intervals counts as missed refreshes; zero/duplicate/missing drawable
+timestamps invalidate the evidence instead of counting as successful presents.
+The script requires ≥6,000 CPU samples and at least as many valid presentations.
+Keep the app visible and the machine on power/settled without competing timing
+apps. Maximum display capability alone does not prove 120-Hz pacing: actual GPUI
+presentation timestamps must pass. The baseline workloads are measured and
+reported but need not pass. Formal acceptance requires all 30 repetitions, the
+specified machines/conditions and paired reference/corpus runs; this synthetic
+fixture alone does not certify long-form project playback.
+
+`S2_TILE_RENDER` should occur once per stable-size patched tile run; more render
+calls are expected for baseline, resize or genuine child invalidation. Pixel
+correctness and producer fence/lease tests must continue to pass. Display moves,
+mixed scale and rate changes require a separate two-display check; unavailable
+hardware is not a pass.
+
+The TIS helper tries installed Japanese and Simplified Chinese modes, reports
+`TISEnableInputSource` / `TISSelectInputSource` statuses, restores the previous input
+source and disables only sources it temporarily enabled. It does **not** synthesize
+composition or report an IME pass. The demo remains open after that capability
+probe; choose Japanese Kana/Romaji or Simplified Pinyin from the input menu for the
+following **30-second manual check** (especially if selection reports `-50`):
+
+1. In the multiline Caption field, type `nihon` (Japanese Romaji) or `nihao`
+   (Pinyin). Verify marked underline and the OS candidate panel at the caret.
+   Space/select a candidate, Return to commit. Pass: expected converted text,
+   one insertion, no GPUI shortcut/action firing, working undo.
+2. Start a second composition and press Escape. Pass: candidate/composition cancels
+   before any field-level Escape action. Tab/click between Caption, Native name
+   and Layer name; repeat composition in the dense Layer name field.
+3. Click Scale, enter a decimal, Return, then reopen/edit/Escape. Pass: committed
+   value survives, Escape restores it, invalid/non-finite input restores it, and
+   the field rectangle and neighboring rows never move during either swap.
+
+Additional native-service checks: select text and invoke a system Services action;
+show Spelling and Grammar and correct a misspelling; insert one emoji via Edit →
+Emoji & Symbols; invoke dictation using the configured macOS shortcut and confirm
+insertion; invoke Writing Tools where available and confirm replacement/undo.
+Pass only each feature actually exercised. Microphone/account/model availability
+or OS settings can make a feature unavailable; record that explicitly. These
+checks and keyboard traversal remain UNVERIFIED in this pass.
+
+Remaining S2 work is still open: arbitrary affine/shape native placement, measured
+≤1-frame live resize/DOM reflow or snapshot-stretch fallback, all native drag/capture
+combinations, display moves, spoken VoiceOver traversal and the complete menu/
+transient/motion/system-appearance matrix. P-A11Y's screen-free bridge results are
+retained; they do not certify those visible behaviors. No release, push or tag.

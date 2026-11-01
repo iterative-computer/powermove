@@ -4193,6 +4193,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "parking_lot",
+ "pm-design",
+ "pm-shell",
  "raw-window-handle",
 ]
 

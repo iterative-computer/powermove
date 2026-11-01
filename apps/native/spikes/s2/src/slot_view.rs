@@ -10,23 +10,30 @@ define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMS2SlotView"]
-    #[ivars = RefCell<Clip>]
+    #[ivars = RefCell<(Clip, f64)>]
     pub struct SlotView;
     impl SlotView {
         #[unsafe(method_id(hitTest:))]
         fn hit(&self,point:NSPoint)->Option<Retained<NSView>> {
             let local=self.convertPoint_fromView(point,unsafe {self.superview()}.as_deref());
-            if self.ivars().borrow().contains([local.x,self.bounds().size.height-local.y]){unsafe {msg_send![super(self),hitTest:point]}}else{None}
+            if self.ivars().borrow().0.contains([local.x,self.bounds().size.height-local.y]){unsafe {msg_send![super(self),hitTest:point]}}else{None}
         }
     }
 );
 impl SlotView {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let view = Self::alloc(mtm).set_ivars(RefCell::new(Clip::Rect(Rect::new(0., 0., 0., 0.))));
+        let view =
+            Self::alloc(mtm).set_ivars(RefCell::new((Clip::Rect(Rect::new(0., 0., 0., 0.)), -1.)));
         unsafe { msg_send![super(view),initWithFrame:NSRect::ZERO] }
     }
     pub fn clip(&self, clip: &Clip) {
-        *self.ivars().borrow_mut() = clip.clone();
+        let height = self.bounds().size.height;
+        if *self.ivars().borrow() == (clip.clone(), height)
+            && std::env::var_os("S2_BASELINE").is_none()
+        {
+            return;
+        }
+        *self.ivars().borrow_mut() = (clip.clone(), height);
         self.setWantsLayer(true);
         let path = CGMutablePath::new();
         let h = self.bounds().size.height;
