@@ -1,0 +1,11 @@
+[package]
+name = "pm-panel-viewerchrome"
+description = "Headless viewer chrome model, input behaviours and kernel command plans"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pm-kernel = { path = "../kernel" }
+pm-model = { path = "../../../../engine/crates/pm-model" }
