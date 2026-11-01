@@ -1,3 +1,4 @@
+import { beforeAll } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { createRoot, type Commit } from "../../../src";
 /** Local synthetic wire recorder; never an application host or model fallback. */
@@ -48,3 +49,9 @@ export function nativeValidators() {
   };
   return binaries;
 }
+
+// Cold Rust builds (or another workspace Cargo process holding the build lock)
+// are setup work, outside Bun's default five-second per-interaction timeout.
+beforeAll(() => {
+  nativeValidators();
+}, 120_000);

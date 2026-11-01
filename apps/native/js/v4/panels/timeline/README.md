@@ -182,3 +182,29 @@ services/IME, menus/sheets/popovers, live gesture capture/cancel/Undo, clip/key/
 graph timing, media/transport/render bar behavior, logical scrollers/60k latency,
 accessibility system changes and absence of main-thread JS waits. These are
 completion gates, not Linux claims.
+
+## Final Linux validation — 2026-11-01
+
+Merged `feat/native-engine` at `4204a153dbf8af916ef2b92d7ca01858e363516a`
+and `feat/na-v4-integrate` at `e5e209928817cb9434823ebf6ddf7d64f2213441`.
+The only merge conflict was the native workspace lock; all integrated panel
+entries were retained. The final fetch/merge found both bases already current.
+Only the timeline package's dependency entries changed subsequently.
+
+- `cargo test --locked -p pm-panel-timeline -p pm-kernel`: **404 passed**:
+  131 timeline (114 existing + 17 adapter) and 273 kernel. One existing optional
+  private-profile kernel test is ignored; no failures.
+- `cargo test --locked --manifest-path crates/panel-timeline/isolated/Cargo.toml -p pm-panel-timeline --target-dir target`:
+  **131 passed**, no failures or ignored tests. Both owned lockfiles are current.
+- `bun test` in `apps/native/js/v4`: **226 passed**, including **54 timeline
+  tests**, **18 snapshots**; no failures/skips. All specified states have
+  validated tree snapshots; incomplete visuals remain identified above.
+- Package rustfmt, all-target strict Clippy, base/panel TypeScript, panel Prettier,
+  frozen Bun installation, base browser build and timeline browser build pass.
+- Gitleaks staged scans run before each commit; no leaks.
+
+Native fixture compilation runs in a 120-second setup hook outside Bun's
+five-second interaction-test timeout. The first final parallel run exposed
+Cargo build-lock waiting inside that short timeout; after fixing the harness,
+the complete sequential suite passed. This is setup tolerance, not a relaxed
+interaction/performance budget or a macOS gate pass.
