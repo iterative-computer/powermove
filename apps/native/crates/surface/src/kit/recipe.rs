@@ -122,6 +122,9 @@ pub struct Recipe {
     pub width: Option<f32>,
     /// None means system-owned shape or an unspecified neutral container.
     pub radius: Option<f32>,
+    /// Inset between a segmented track and its segments: concentric math
+    /// (`control_radius − inner_radius`), panels/README.md §5.1.
+    pub track_padding: Option<f32>,
     pub value_column: Option<f32>,
     pub inset: f32,
     pub font: &'static str,
@@ -155,7 +158,9 @@ impl Recipe {
             SegmentedControl => Widget::SegmentedControl,
             Segment => Widget::Segment,
             Checkbox => Widget::Checkbox,
-            Toggle => Widget::Switch,
+            // Design review 2026-11-01 (panels/README.md §5.5): panels and
+            // inspector rows use checkboxes; switches belong to Settings only.
+            Toggle => Widget::Checkbox,
             ColourWell => Widget::ColourWell,
             DisclosureGroup => Widget::DisclosureGroup,
             DisclosureButton => Widget::DisclosureButton,
@@ -197,7 +202,11 @@ impl Recipe {
             border_color: t.colors.separator,
             border: t.metrics.border,
             visual_height: match kind {
-                NumberField | TextField | SegmentedControl | Segment => Some(t.metrics.field),
+                NumberField | TextField | SegmentedControl | Segment | ColourWell => {
+                    Some(t.metrics.field)
+                }
+                // Standalone pop-ups are `control` tall; inside an InspectorRow
+                // `Panel::prepare` narrows them to `field` (language §9 rows).
                 PopUpButton => Some(t.metrics.control),
                 InspectorRow | ListItem | TreeItem | ProgressRow => Some(t.metrics.row),
                 _ => None,
@@ -210,9 +219,15 @@ impl Recipe {
             },
             radius: match kind {
                 Segment => Some(t.metrics.inner_radius),
-                NumberField | TextField | SegmentedControl => Some(t.metrics.control_radius),
+                NumberField | TextField | SegmentedControl | PopUpButton | ColourWell => {
+                    Some(t.metrics.control_radius)
+                }
+                // Selection shape of a row (panels/README.md §3 Selected).
+                ListItem | TreeItem => Some(t.metrics.control_radius),
                 _ => None,
             },
+            track_padding: (kind == SegmentedControl)
+                .then_some(t.metrics.control_radius - t.metrics.inner_radius),
             value_column: (kind == InspectorRow).then_some(t.metrics.value_column),
             inset: t.metrics.inset,
             font: TEXT_FONT,
@@ -252,5 +267,7 @@ impl Recipe {
         }
     }
 }
-// DESIGN-TODO(opus): pm-design has no segmented-track padding token; use the
-// system NSSegmentedControl, leaving custom inspector track padding unspecified.
+// Resolved (design review 2026-11-01, docs/native/design/reviews/na-cloud-uikit.md):
+// segmented-track padding is `track_padding` above; Toggle draws as a checkbox at
+// the leading edge of the value column; tree indentation follows NSOutlineView's
+// default until pm-design adds `metrics.tree_indent` (follow-up F2).

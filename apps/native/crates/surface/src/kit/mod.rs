@@ -31,12 +31,31 @@ impl Panel {
         focus: Option<Id>,
         glass_available: bool,
     ) -> Self {
+        // Controls nested in an InspectorRow sit in its `field`-high value well.
+        let mut in_row = std::collections::BTreeSet::new();
+        for node in surface.nodes().values() {
+            if Component::of(node) == Some(Component::InspectorRow) {
+                let mut pending: Vec<Id> = node.children.clone();
+                while let Some(id) = pending.pop() {
+                    if in_row.insert(id)
+                        && let Some(child) = surface.node(id)
+                    {
+                        pending.extend(child.children.iter().copied());
+                    }
+                }
+            }
+        }
         let components = surface
             .nodes()
             .values()
             .filter_map(|node| {
-                Component::of(node)
-                    .map(|kind| (node.id, Recipe::new(kind, tokens, glass_available)))
+                Component::of(node).map(|kind| {
+                    let mut recipe = Recipe::new(kind, tokens, glass_available);
+                    if kind == Component::PopUpButton && in_row.contains(&node.id) {
+                        recipe.visual_height = Some(tokens.metrics.field);
+                    }
+                    (node.id, recipe)
+                })
             })
             .collect();
         Self {

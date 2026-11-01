@@ -146,10 +146,13 @@ export function PopUpButton(
     options: (string | Option)[];
   },
 ) {
+  // Inside an InspectorRow a pop-up is a `field`-high value well; standalone
+  // it is a `control`-high button (language.md §9).
+  const inRow = useContext(Label) !== undefined;
   return field("pop-up-button", "select", "button", {
     ...props,
     style: {
-      height: token("metrics.control"),
+      height: token(inRow ? "metrics.field" : "metrics.control"),
       ...props.style,
     },
   });
@@ -174,7 +177,8 @@ export function Toggle(props: Bound<boolean>) {
     "button",
     {
       ...props,
-      role: "switch",
+      // Panels use checkboxes; switches are for Settings only (design review).
+      role: "checkbox",
       "aria-checked": props.mixed ? "mixed" : props.value,
     },
     { ...text, ...target },
@@ -189,7 +193,12 @@ export function ColourWell(props: Bound<string>) {
       ...props,
       "aria-haspopup": "dialog",
     },
-    { ...text, ...target },
+    {
+      ...text,
+      ...target,
+      height: token("metrics.field"),
+      borderRadius: token("metrics.control_radius"),
+    },
   );
 }
 export interface SegmentOption {
@@ -404,7 +413,7 @@ export function SheetAnchor(props: Common & { anchor: number; open: boolean }) {
           role: "dialog",
           "aria-modal": true,
           focusScope: true,
-          "data-pm-system-placement": "below-toolbar",
+          "data-pm-system-placement": "system",
         },
         {
           width: token("metrics.sheet_width"),
@@ -520,5 +529,7 @@ export {
   SegmentedControl as Segmented,
   DisclosureGroup as Disclosure,
 };
-// DESIGN-TODO(opus): colour picker contents, tree indentation/glyph metrics and
-// checkbox/switch placement within an inspector well are neutral system placeholders.
+// Resolved in docs/native/design/reviews/na-cloud-uikit.md: the colour picker is
+// specified in panels/inspector.md §7 (host-provided popover); Toggle and Checkbox
+// sit at the leading edge of the value column; tree indentation follows the
+// system outline default until pm-design adds metrics.tree_indent (follow-up F2).

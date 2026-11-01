@@ -20,15 +20,15 @@ recipe (`None`), rather than overriding AppKit with invented dimensions.
 | `InspectorRow` (`Row`) | §§5–6,9 Inspector rows | Flexible label slot, ellipsis + full-name tooltip; fixed `value_column` slot, optional leading keyframe/trailing linked-axis action slots outside it, panel `inset`, `row` height; context label association |
 | `NumberField` (`NumField`) | §9 Scrubbable numbers | Scrubbable native text input, tabular figures, left alignment, trailing muted units; native transactional scrub and existing Controls typing/arithmetic |
 | `TextField` | §9 Controls; §16 | Native text input, opaque binding; existing live editing, commit/cancel and native composition observations |
-| `PopUpButton` (`SelectField`) | §9 Buttons and pop-ups | `NSPopUpButton`, control-height token; typed option values preserved, including null/false |
-| `SegmentedControl` (`Segmented`) | §9 Segmented controls | System segmented control; field track, floating selected segment, inner radius; arrow/Home/End navigation skips disabled choices, one Tab stop |
-| `Checkbox` / `Toggle` (`ToggleField`) | §§1,9,16 | Native checkbox/switch; boolean/mixed state and native binding driver, no custom well styling |
-| `ColourWell` (`ColorField`) | §9 Popovers | System colour well, authored colour string retained; opens a host-provided picker anchored by stable node ID |
+| `PopUpButton` (`SelectField`) | §9 Buttons and pop-ups | `NSPopUpButton`, `control` height standalone, `field` height inside an `InspectorRow`; typed option values preserved, including null/false |
+| `SegmentedControl` (`Segmented`) | §9 Segmented controls | System segmented control; field track, `track_padding` = `control_radius − inner_radius`, floating selected segment, inner radius; arrow/Home/End navigation skips disabled choices, one Tab stop |
+| `Checkbox` / `Toggle` (`ToggleField`) | §§1,9,16 | Native **checkbox** for both (switches are Settings-only); placed at the leading edge of the value column with no title (row label is its AX label); boolean/mixed state and native binding driver |
+| `ColourWell` (`ColorField`) | §9 Popovers | `field`-square swatch, `control_radius`, authored colour string retained; opens the host colour popover ([panels/inspector.md §7](design/panels/inspector.md#7-colour-popover)) anchored by stable node ID |
 | `DisclosureGroup` (`Disclosure`) | §9 Inspector rows | Labelled disclosure button, expanded state, token section typography/insets; collapsed descendants removed atomically |
-| `List` / `ListItem` | §9 Lists and tabs | Row height, neutral `selected_fill`, selection state; Tab, Enter/Space and disabled guards |
+| `List` / `ListItem` | §9 Lists and tabs | Row height, neutral `selected_fill` in a `control_radius` selection shape, selection state; Tab, Enter/Space and disabled guards |
 | `Tree` / `TreeItem` | §9 Lists and tabs | Outline/tree roles; the same row/selection rules, explicit expanded state and Left/Right collapse/expand callbacks |
 | `ToolbarItem` | §§2–3,8–9 | Native toolbar item; caller supplies symbol/content/copy; active glyph uses accent, rest secondary, padded hit target |
-| `SheetAnchor` | §9 Sheets and alerts | Window-modal system placement below toolbar; sheet-width token; panel-solid content and separate system frame material |
+| `SheetAnchor` | §9 Sheets and alerts | Window-modal system sheet, **placed by the system** (centred in the window on macOS 26+); sheet-width token; panel-solid content and separate system frame material |
 | `PopoverAnchor` | §9 Popovers | Control anchor, popover-width token, solid floating content; live edit declaration, Esc/outside-dismiss contract, focus scope |
 | `ProgressRow` | §9 Progress, tasks and status | System determinate indicator with a finite fraction or indeterminate spinner; no synthetic percentage; AccessKit range only when determinate |
 | `EmptyState` | §5; review checklist §3 | Centred heading/reading text with caller-supplied explanation and one action; no lane-authored product copy |
@@ -157,20 +157,28 @@ unchanged. These counts do not establish native rendering or visual acceptance.
 | Validate actual hit geometry as well as token references; expose all descendants to AccessKit | N1/N2/N7: a token annotation alone does not prove usable targets or accessibility |
 | Keep native renderer and export/alias cutover explicit integration requirements | Ownership and N3: Linux contracts cannot certify AppKit/GPUI behavior |
 
-## Every DESIGN-TODO(opus)
+## DESIGN-TODO(opus) resolutions (design review 2026-11-01)
 
-1. **Segmented-track padding token.** The spec says 2 pt but pm-design has no
-   semantic token for it. No literal or token arithmetic from an unrelated metric
-   is substituted. Use the system control; custom inspector padding is unspecified.
-2. **Wheel-rest timing and affordance.** The spec requires pointer rest before
-   adjusting a numeric value but defines no threshold/token. Wheel edits remain
-   unbound pending the approved timing/gesture contract.
-3. **Colour-picker contents.** The well and popover anchor exist; no new picker
-   arrangement, controls or copy is designed in this lane.
-4. **Tree indentation and disclosure glyph metrics.** Roles, rows, selection and
-   expansion are implemented; detailed tree geometry remains a system placeholder.
-5. **Checkbox/switch placement inside inspector value columns.** System controls
-   and padded hit targets exist; custom alignment/placement remains unspecified.
+Review: [design/reviews/na-cloud-uikit.md](design/reviews/na-cloud-uikit.md).
+Rules: [design/panels/README.md §5](design/panels/README.md#5-resolutions-of-the-ui-kit-design-todos).
+
+1. **Segmented-track padding** = `control_radius − inner_radius` (concentric
+   math, no new token). Implemented as `Recipe::track_padding`.
+2. **Wheel editing** — designed: a wheel event edits a hovered number only
+   after the pointer rests `motion.wheel_rest` (0.5 s, new token) with no
+   scroll of the container in that time; discrete wheel, or trackpad with ⌥;
+   one undo step. Still unbound in code until the token and gesture land
+   (follow-up F1).
+3. **Colour picker contents** — specified in
+   [design/panels/inspector.md §7](design/panels/inspector.md#7-colour-popover);
+   the host owns the popover.
+4. **Tree indentation** = `metrics.tree_indent` (16, new token; AppKit's outline
+   default). Disclosure `chevron.right` at `symbol_inline` in a `hit` square.
+   Until the token lands, hosts use the system outline indentation (also 16)
+   (follow-up F2).
+5. **Checkbox/switch placement** — inspector and panel rows use a checkbox at
+   the leading edge of the value column, untitled; `Toggle` now renders and
+   announces as a checkbox. Switches appear only in Settings.
 
 ## macOS verification and integration still required
 

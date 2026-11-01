@@ -5,6 +5,19 @@ use accesskit::{
 };
 use serde_json::Value;
 
+/// VoiceOver reads units as words (language §16: `Opacity, 100 percent`).
+pub fn spoken_unit(unit: &str) -> &str {
+    match unit {
+        "px" => "pixels",
+        "%" => "percent",
+        "°" | "deg" => "degrees",
+        "s" => "seconds",
+        "ms" => "milliseconds",
+        "fps" => "frames per second",
+        "pt" => "points",
+        other => other,
+    }
+}
 fn role(node: &Node) -> Role {
     use Component::*;
     match Component::of(node) {
@@ -14,7 +27,7 @@ fn role(node: &Node) -> Role {
         Some(SegmentedControl) => Role::RadioGroup,
         Some(Segment) => Role::RadioButton,
         Some(Checkbox) => Role::CheckBox,
-        Some(Toggle) => Role::Switch,
+        Some(Toggle) => Role::CheckBox,
         Some(ColourWell) => Role::ColorWell,
         Some(DisclosureButton) => Role::DisclosureTriangle,
         Some(List) => Role::List,
@@ -107,7 +120,7 @@ fn project(surface: &Surface, source: &Node, layout: &Layout) -> accesskit::Node
         node.set_value(if unit.is_empty() {
             text
         } else {
-            format!("{text} {unit}")
+            format!("{text} {}", spoken_unit(unit))
         });
         if let Some(number) = value.as_f64() {
             node.set_numeric_value(number);

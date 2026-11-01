@@ -158,5 +158,7 @@ impl NumericScrub {
         }
     }
 }
-// DESIGN-TODO(opus): wheel-rest timing/affordance has no token/spec threshold.
-// Wheel changes stay unbound until approved; scrolling past a field cannot edit it.
+// Wheel editing is designed (docs/native/design/panels/README.md §5.2: rest for
+// `motion.wheel_rest` without scrolling, discrete wheel or ⌥ on a trackpad, one
+// undo step) but stays unbound until pm-design adds `motion.wheel_rest` and the
+// gesture lands (review follow-up F1). Scrolling past a field cannot edit it.

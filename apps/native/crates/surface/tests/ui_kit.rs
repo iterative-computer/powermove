@@ -115,7 +115,7 @@ component_test!(
 );
 component_test!(segment, Segment, RadioButton, Segment);
 component_test!(checkbox, Checkbox, CheckBox, Checkbox);
-component_test!(toggle, Toggle, Switch, Switch);
+component_test!(toggle, Toggle, CheckBox, Checkbox);
 component_test!(colour_well, ColourWell, ColorWell, ColourWell);
 component_test!(disclosure_group, DisclosureGroup, Group, DisclosureGroup);
 component_test!(
@@ -333,7 +333,7 @@ fn accessibility_actions_are_typed_revision_guarded_and_disabled_aware() {
     let mut s = surface(Component::NumberField);
     let tree = accessibility_tree(&s, &Layout::new(), None);
     let node = &tree.nodes[1].1;
-    assert_eq!(node.value(), Some("10.0 px"));
+    assert_eq!(node.value(), Some("10.0 pixels"));
     assert_eq!(node.numeric_value(), Some(10.));
     assert_eq!(
         accessibility_action(&s, s.revision(), request(Action::Increment, None)).unwrap(),
@@ -681,4 +681,31 @@ fn accessibility_popups_use_authored_choice_labels_and_toolbar_sheet_states() {
             .1
             .is_modal()
     );
+}
+
+#[test]
+fn design_review_shapes_follow_the_panel_specs() {
+    let t = tokens();
+    let seg = Recipe::new(Component::SegmentedControl, &t, false);
+    assert_eq!(
+        seg.track_padding,
+        Some(t.metrics.control_radius - t.metrics.inner_radius)
+    );
+    let well = Recipe::new(Component::ColourWell, &t, false);
+    assert_eq!(well.visual_height, Some(t.metrics.field));
+    assert_eq!(well.radius, Some(t.metrics.control_radius));
+    assert_eq!(
+        Recipe::new(Component::ListItem, &t, false).radius,
+        Some(t.metrics.control_radius)
+    );
+    assert_eq!(
+        Recipe::new(Component::Toggle, &t, false).widget,
+        Widget::Checkbox
+    );
+    assert_eq!(
+        Recipe::new(Component::PopUpButton, &t, false).visual_height,
+        Some(t.metrics.control)
+    );
+    assert_eq!(pm_surface::kit::spoken_unit("%"), "percent");
+    assert_eq!(pm_surface::kit::spoken_unit("°"), "degrees");
 }
