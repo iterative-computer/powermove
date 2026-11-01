@@ -168,6 +168,7 @@ fn fixture_with(change: impl FnOnce(&mut Config)) -> Fixture {
         admission: admission.clone(),
     };
     change(&mut config);
+    let admission = config.admission.clone();
     Fixture {
         pool: RuntimePool::new("synthetic-window", config).unwrap(),
         kernel,
@@ -276,12 +277,12 @@ fn one_isolate_per_extension_and_all_snapshot_kinds() {
     for (kind, name) in [
         (RealmKind::BuiltinAgent, "agent"),
         (RealmKind::Compiler, "compiler"),
-        (RealmKind::Store("synthetic".into()), "store"),
     ] {
         let r = f.pool.realm(kind).unwrap();
         assert_eq!(eval(&r, "__kind"), name);
         close(&r);
     }
+    assert!(f.pool.realm(RealmKind::Store("synthetic".into())).is_err());
     close(&a);
     close(&b);
 }
@@ -1174,5 +1175,333 @@ fn clone_transfer_errors_keep_buffers_attached_and_url_prefixes_are_exact() {
         ),
         "??x=1|##a"
     );
+    close(&r);
+}
+
+fn compile_wait(mut ticket: SvelteTicket) -> Result<SvelteOutput> {
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            return result;
+        }
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+#[test]
+fn svelte_snapshot_compiles_real_components_css_modules_and_reports_errors() {
+    let f = fixture();
+    let compiler = SvelteCompiler::new(&f.pool, 1024 * 1024, 1024 * 1024).unwrap();
+    assert_eq!(eval(compiler.realm(), "svelte.VERSION"), SVELTE_VERSION);
+    assert_eq!(
+        eval(compiler.realm(), "typeof process+':'+typeof require"),
+        "undefined:undefined"
+    );
+    let source = "<script lang='ts'>let count: number = $state(0)</script><button onclick={() => count++}>{count}</button><style>button{color:red}</style>";
+    let first = compile_wait(
+        compiler
+            .compile(source, "Panel.svelte", SvelteUnit::Component)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!first.cache_hit);
+    assert!(first.javascript.contains("svelte/internal/client"));
+    assert!(first.javascript.contains("powermove:styles"));
+    assert!(
+        first.compiled["css"]["code"]
+            .as_str()
+            .unwrap()
+            .contains("red")
+    );
+    let second = compile_wait(
+        compiler
+            .compile(source, "Panel.svelte", SvelteUnit::Component)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(second.cache_hit);
+    assert_eq!(first.javascript, second.javascript);
+    let other = compile_wait(
+        compiler
+            .compile(source, "Other.svelte", SvelteUnit::Component)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!other.cache_hit);
+    let module = compile_wait(
+        compiler
+            .compile(
+                "export const state = $state({n:1});",
+                "state.svelte.js",
+                SvelteUnit::Module,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(module.javascript.contains("svelte/internal/client"));
+    assert!(
+        compile_wait(
+            compiler
+                .compile("<div>", "Broken.svelte", SvelteUnit::Component)
+                .unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        compiler
+            .compile(
+                &"x".repeat(1024 * 1024 + 1),
+                "Huge.svelte",
+                SvelteUnit::Component
+            )
+            .is_err()
+    );
+    close(compiler.realm());
+}
+#[test]
+fn svelte_cache_is_version_source_options_sensitive_and_bounded() {
+    let f = fixture();
+    let compiler = SvelteCompiler::new(&f.pool, 1, 1024).unwrap();
+    for _ in 0..2 {
+        assert!(
+            !compile_wait(
+                compiler
+                    .compile("<p>one</p>", "P.svelte", SvelteUnit::Component)
+                    .unwrap()
+            )
+            .unwrap()
+            .cache_hit
+        );
+    }
+    assert_ne!(
+        CacheKey::new("5.56.10", b"compiler", b"source", "options"),
+        CacheKey::new("5.56.11", b"compiler", b"source", "options")
+    );
+    close(compiler.realm());
+}
+#[test]
+fn reload_releases_all_effect_kinds_but_preserves_history_and_export_pins() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("effects".into()))
+        .unwrap();
+    eval(
+        &r,
+        "globalThis.events=new EventTarget();globalThis.fired=0;events.addEventListener('test',()=>fired++);globalThis.ticks=0;setInterval(()=>ticks++,2);runtime.stage({kind:'registration',id:'old'});runtime.stage({kind:'gesture',id:'open'});globalThis.undo=()=>{events.dispatchEvent(new Event('test'));runtime.stage({kind:'undo'});return fired};globalThis.payload=new Uint8Array(1024*1024);payload[0]=37;globalThis.exportFrame=()=>payload[0]",
+    );
+    let history = wait(r.pin().unwrap()).unwrap();
+    let export = wait(r.pin().unwrap()).unwrap();
+    let old = history.generation.clone();
+    wait(
+        r.reload("runtime.stage({kind:'registration',id:'new'});globalThis.fresh=true")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(f.kernel.revoked.lock().unwrap().contains(&old));
+    assert!(f.kernel.sealed.lock().unwrap().contains(&old));
+    assert_eq!(
+        wait(r.invoke_retained(&history, "undo()").unwrap())
+            .unwrap()
+            .value,
+        "0"
+    );
+    let ticks = wait(r.invoke_retained(&history, "ticks").unwrap())
+        .unwrap()
+        .value;
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        wait(r.invoke_retained(&history, "ticks").unwrap())
+            .unwrap()
+            .value,
+        ticks
+    );
+    assert!(wait(r.invoke_retained(&history, "setTimeout(()=>{},0)").unwrap()).is_err());
+    assert_eq!(
+        wait(r.invoke_retained(&export, "exportFrame()").unwrap())
+            .unwrap()
+            .value,
+        "37"
+    );
+    let stats = wait(r.measure().unwrap()).unwrap();
+    assert_eq!(stats.len(), 2);
+    assert!(
+        stats
+            .iter()
+            .any(|s| s.retired && s.memory.external_bytes >= 1024 * 1024)
+    );
+    drop(history);
+    eval(&r, "1");
+    assert_eq!(wait(r.measure().unwrap()).unwrap().len(), 2);
+    drop(export);
+    eval(&r, "1");
+    assert_eq!(wait(r.measure().unwrap()).unwrap().len(), 1);
+    close(&r);
+    assert_eq!(f.admission.used(), 0);
+}
+#[test]
+fn repeated_reload_accounts_for_history_retirement_and_failed_candidate_effects() {
+    let f = fixture_with(|c| c.admission = Admission::new(3 * 1024 * 1024 * 1024));
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("waves".into()))
+        .unwrap();
+    let heap = 64 * 1024 * 1024;
+    let mut history = Vec::new();
+    for i in 0..20 {
+        eval(
+            &r,
+            &format!(
+                "globalThis.buf=new Uint8Array(1024*1024);buf[0]={i};globalThis.undo=()=>buf[0]"
+            ),
+        );
+        history.push(wait(r.pin().unwrap()).unwrap());
+        wait(r.reload("42").unwrap()).unwrap();
+    }
+    eprintln!(
+        "RELOAD_MEASUREMENT reserved_peak_bytes={} generations=21",
+        f.admission.used()
+    );
+    assert_eq!(f.admission.used(), 21 * heap);
+    let stats = wait(r.measure().unwrap()).unwrap();
+    assert_eq!(stats.len(), 21);
+    eprintln!(
+        "RELOAD_HEAPS used={} physical={} external={}",
+        stats
+            .iter()
+            .map(|s| s.memory.used_heap_bytes)
+            .sum::<usize>(),
+        stats
+            .iter()
+            .map(|s| s.memory.physical_heap_bytes)
+            .sum::<usize>(),
+        stats.iter().map(|s| s.memory.external_bytes).sum::<usize>()
+    );
+    assert!(
+        stats
+            .iter()
+            .filter(|s| s.retired)
+            .map(|s| s.memory.external_bytes)
+            .sum::<usize>()
+            >= 20 * 1024 * 1024
+    );
+    for (i, pin) in history.iter().enumerate() {
+        assert_eq!(
+            wait(r.invoke_retained(pin, "undo()").unwrap())
+                .unwrap()
+                .value,
+            i.to_string()
+        );
+    }
+    let export = history[0].clone();
+    history.clear();
+    eval(&r, "1");
+    assert_eq!(f.admission.used(), 2 * heap);
+    drop(export);
+    eval(&r, "1");
+    assert_eq!(f.admission.used(), heap);
+    assert!(wait(r.reload("setInterval(()=>console.log('leak'),1);const t=new EventTarget();t.addEventListener('x',()=>{});runtime.stage({kind:'registration',id:'failed'});throw Error('reject')").unwrap()).is_err());
+    assert_eq!(f.admission.used(), heap);
+    assert_eq!(wait(r.measure().unwrap()).unwrap().len(), 1);
+    close(&r);
+    assert_eq!(f.admission.used(), 0);
+}
+
+#[test]
+fn native_typescript_module_path_preserves_runes_and_never_executes_source() {
+    let f = fixture();
+    let compiler = SvelteCompiler::new(&f.pool, 1024 * 1024, 4096).unwrap();
+    let source = "import type {Missing} from './types'; interface Counter { n: number }; export const counter = $state<Counter>({n:3}); export function value(): number { return counter.n; }";
+    let compiled = compile_wait(
+        compiler
+            .compile(source, "counter.svelte.ts", SvelteUnit::Module)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(compiled.javascript.contains("svelte/internal/client"));
+    assert!(!compiled.javascript.contains("interface Counter"));
+    assert!(!compiled.javascript.contains("import type"));
+    assert!(compiled.javascript.contains("counter"));
+    let compiled = compile_wait(
+        compiler
+            .compile(
+                "throw Error('must not run');export let value: number = 9;",
+                "safe.svelte.ts",
+                SvelteUnit::Module,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(compiled.javascript.contains("must not run"));
+    assert!(
+        compile_wait(
+            compiler
+                .compile(
+                    "export const value: = ;",
+                    "bad.svelte.ts",
+                    SvelteUnit::Module
+                )
+                .unwrap()
+        )
+        .is_err()
+    );
+    let error = compile_wait(
+        compiler
+            .compile("<div>", "bad.svelte", SvelteUnit::Component)
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error,Error::JavaScript(ref text) if text.contains("element_unclosed") && text.contains("start"))
+    );
+    let stats = wait(compiler.realm().measure().unwrap()).unwrap();
+    assert_eq!(stats.len(), 1);
+    assert!(stats[0].memory.snapshot_bytes > 1024 * 1024);
+    eprintln!("COMPILER_MEASUREMENT {:?}", stats[0].memory);
+    close(compiler.realm());
+}
+#[test]
+fn last_history_pin_retires_idle_generation_without_another_submission() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("idle-history".into()))
+        .unwrap();
+    eval(&r, "globalThis.undo=()=>42");
+    let pin = wait(r.pin().unwrap()).unwrap();
+    wait(r.reload("1").unwrap()).unwrap();
+    assert_eq!(f.admission.used(), 128 * 1024 * 1024);
+    drop(pin);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while f.admission.used() != 64 * 1024 * 1024 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    close(&r);
+}
+#[test]
+fn reload_cleanup_does_not_depend_on_mutable_control_globals() {
+    let f = fixture();
+    let r = f
+        .pool
+        .realm(RealmKind::V4Extension("private-cleanup".into()))
+        .unwrap();
+    eval(
+        &r,
+        "globalThis.events=new EventTarget();globalThis.fired=0;events.addEventListener('test',()=>fired++);globalThis.undo=()=>{events.dispatchEvent(new Event('test'));return fired}",
+    );
+    let pin = wait(r.pin().unwrap()).unwrap();
+    eval(
+        &r,
+        "globalThis.__pm={take:()=>JSON.stringify({ops:[],storage:{},hot:{}}),nextDelay:()=>null,retire(){throw Error('replaced global')}}",
+    );
+    wait(r.reload("2").unwrap()).unwrap();
+    assert_eq!(
+        wait(r.invoke_retained(&pin, "undo()").unwrap())
+            .unwrap()
+            .value,
+        "0"
+    );
+    drop(pin);
     close(&r);
 }
