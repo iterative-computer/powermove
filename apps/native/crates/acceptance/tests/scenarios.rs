@@ -1,0 +1,81 @@
+use pm_acceptance::{fixture, keyboard, scenarios};
+macro_rules! checks {
+    ($($name:ident => $id:literal),* $(,)?)=>{$(
+        #[test] fn $name() {let s=scenarios::all().into_iter().find(|s|s.id==$id).unwrap();(s.run)().unwrap();}
+    )*}
+}
+checks! {
+    composition_settings => "W009.settings", authored_mask => "W048.mask", authored_text => "W049.text", authored_easing => "W061.easing",
+    mcp_list => "A495", mcp_create => "A496", mcp_open => "A497",
+    mcp_start => "A498", mcp_finish => "A501", mcp_selection => "A517",
+    mcp_rollback => "A531", library_lifecycle => "W006.library",
+    portable_history => "W007.portable", journal_recovery => "W004.journal",
+    atomic_batch => "W030.atomic", interleaved_writers => "W030.interleaved",
+    lock_admission => "W030.lock", disconnect_rollback => "W033.disconnect",
+    pending_errors => "W033.unavailable", selection_transient => "W046.selection",
+    work_area => "W052.work", markers => "W053.markers", strips => "W055.strips",
+    split_continuity => "W056.split", source_handles => "W057.slip",
+    keyframe_identity => "W060.keys", group_identity => "W062.groups",
+    authored_f64 => "W063.properties", actor_history => "W075.history",
+    engine_double => "W076.engine-hook", surface_double => "W032.surface-hook",
+}
+#[test]
+fn corpus_json() {
+    fixture::corpus_fixture("json").unwrap();
+}
+#[test]
+fn corpus_pmv3() {
+    fixture::corpus_fixture("pmv3").unwrap();
+}
+#[test]
+fn corpus_pmv4() {
+    fixture::corpus_fixture("pmv4").unwrap();
+}
+#[test]
+fn all_195_real_bindings_under_seven_routing_contexts() {
+    let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
+    assert_eq!(keyboard::production::shipped().len(), 195);
+    for binding in &c.bindings {
+        for context in keyboard::CONTEXTS {
+            keyboard::check(binding, context).unwrap();
+        }
+    }
+}
+#[test]
+fn corpus_copy_refuses_symlinks_and_never_overwrites_source() {
+    let source = fixture::Scratch::new().unwrap();
+    let dest = fixture::Scratch::new().unwrap();
+    let path = source.0.join("synthetic.pmv");
+    std::fs::write(&path, b"not a project").unwrap();
+    assert!(scenarios::corpus_copy(&path, 0).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"not a project");
+    let copy = dest.copy(&path, 0).unwrap();
+    assert_ne!(copy, path);
+    assert!(dest.copy(&path, 0).is_err());
+    #[cfg(unix)]
+    {
+        let link = source.0.join("link.pmv");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(dest.copy(&link, 1).is_err());
+    }
+}
+
+/// This is a measured product failure, never an acceptance pass or skip. Remove
+/// this baseline expectation when the owning kernel lane fixes fractional fps;
+/// the runner's strict authored-value assertion must stay unchanged.
+#[test]
+fn fractional_fps_defect_is_reported_as_failure() {
+    let scenario = scenarios::all()
+        .into_iter()
+        .find(|s| s.id == "W071.fractional-rate")
+        .unwrap();
+    let result = pm_acceptance::runner::execute(
+        scenario.id,
+        scenario.workflow,
+        "supporting-probe",
+        scenario.title,
+        scenario.run,
+    );
+    assert_eq!(result.status, pm_acceptance::runner::Status::Fail);
+    assert!(result.reason.contains("authored fps=29.97 became 30"));
+}
