@@ -155,3 +155,27 @@ accessibility settings, 1×/2× hit rectangles, no UI-thread JS waits and Opus r
   conflict was the lockfile's added panel-package list; all additions survived.
   The lane's own lock changes add the test inspector and pm-promedia's protocol
   dependency without upgrading packages. No engine lockfile change is needed.
+
+## Frozen-contract reconciliation — 2026-11-01
+
+The export lane now merges native-engine freeze
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005` (p0-decisions.md: integrated
+headless eval 40/40). Its v4-api.md, ui-kit.md, surface implementation and JS API
+match the already consumed v4-integrate contract. No export implementation
+adaptation or lockfile update is required; no surface or JS API source is edited.
+The export lane's 189 native tests, 219 full-suite JS tests (47 export tests),
+21 snapshots, strict Clippy, rustfmt, TypeScript, Prettier and browser builds
+were rerun against this merged base and pass.
+
+The host/API gaps above remain **additive API requests**, not changes to the
+frozen contract: an export projection/command adapter and registered bindings;
+sheet form/group/push-button recipes and specified tokens; and typed native
+support for option subtitles, placeholders, accessibility help/announcements,
+progress value descriptions, initial focus, sheet dismissal and modifier-aware
+shortcut defaults. Native engine/picker/resource/completion wiring and the three
+DESIGN-TODO(opus) questions remain application/design integration gates. The
+40/40 API eval does not certify this panel's native appearance or delivery.
+
+Rule selection: consume the frozen API unchanged (orchestrator freeze, N4/N6);
+request additions without editing another lane (ownership); retain explicit
+macOS and design acceptance gates (N1/N3).
