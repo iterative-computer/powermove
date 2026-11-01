@@ -3727,6 +3727,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-design"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-edit"
 version = "0.1.0"
 dependencies = [
@@ -3966,6 +3974,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-native-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "block2 0.6.2",
+ "foreign-types",
+ "gpui-ce",
+ "metal",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "pm-design",
+ "pm-engine-service",
+ "pm-gpu",
+ "pm-kernel",
+ "pm-model",
+ "pm-node",
+ "pm-protocol",
+ "pm-shell",
+ "pm-time",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "pm-native-migrate"
 version = "0.1.0"
 dependencies = [
@@ -4094,6 +4129,31 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "pm-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "block2 0.6.2",
+ "core-graphics",
+ "foreign-types",
+ "gpui-ce",
+ "gpui_ce_apple",
+ "gpui_ce_macos",
+ "gpui_ce_parley",
+ "image",
+ "metal",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "pm-design",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
