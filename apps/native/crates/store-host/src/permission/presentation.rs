@@ -54,6 +54,18 @@ pub const PERMISSION_COPY: [PermissionCopy; 5] = [
 pub const FULL_ACCESS_DETAIL: &str = "It will run with the same access as the app: your projects, files you open, the network, and other extensions’ values. Only trust extensions from people you know. You can revoke this from the Library.";
 pub const SETTINGS_ALLOW_LABEL: &str = "Allow";
 
+/// Missing-metadata presentation (design re-review 2026-11-01). Older records
+/// can lack a signed display name, host publisher name or icon; these stand in.
+/// Never substitute an extension ID, bundle hash or publisher ID.
+pub const NAMELESS_SHEET_TITLE: &str = "Allow This Extension To:";
+pub const NAMELESS_ALERT_TITLE: &str = "Give this extension full access to Powermove?";
+pub const UNIDENTIFIED_PUBLISHER_LINE: &str = "From an unidentified developer";
+/// SF Symbol drawn in place of a missing bundle icon (`symbol_panel` size,
+/// `secondary` colour, centred in the icon well).
+pub const PLACEHOLDER_ICON_SYMBOL: &str = "puzzlepiece.extension";
+/// Trailing badge after a verified publisher name (`accent_text` colour).
+pub const VERIFIED_PUBLISHER_SYMBOL: &str = "checkmark.seal.fill";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PermissionSurface {
     /// Window-modal, attached below the parent toolbar, never centred.
@@ -79,8 +91,16 @@ pub struct PermissionButton {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PermissionPresentation {
     pub surface: PermissionSurface,
-    /// None is a neutral placeholder for an older nameless manifest.
-    pub title: Option<String>,
+    /// Always present: nameless records use `NAMELESS_*_TITLE`.
+    pub title: String,
+    /// Secondary line under the title: `From Acme` / `From Acme · Unverified`
+    /// / `From an unidentified developer`. `muted`, never the publisher ID.
+    pub publisher_line: String,
+    /// `VERIFIED_PUBLISHER_SYMBOL` only when the host verified a named publisher.
+    pub publisher_badge: Option<&'static str>,
+    /// `PLACEHOLDER_ICON_SYMBOL` when the manifest has no icon; `None` means
+    /// draw the request's bundle `icon` asset.
+    pub icon_symbol: Option<&'static str>,
     pub informative_text: Option<&'static str>,
     pub rows: Vec<PermissionCopy>,
     pub buttons: [PermissionButton; 2],
@@ -98,13 +118,26 @@ impl PermissionRequest {
             .into_iter()
             .filter(|row| self.permissions.contains(&row.permission))
             .collect();
-        // DESIGN-TODO(opus): presentation for old records without a signed
-        // display name. Leave the title absent; never show an ID/hash instead.
         let name = (!self.extension_name.is_empty()).then_some(&self.extension_name);
+        let named_publisher = !self.publisher_name.is_empty();
+        let publisher_line = match (named_publisher, self.publisher_verified) {
+            (false, _) => UNIDENTIFIED_PUBLISHER_LINE.to_owned(),
+            (true, true) => format!("From {}", self.publisher_name),
+            (true, false) => format!("From {} · Unverified", self.publisher_name),
+        };
+        let publisher_badge =
+            (named_publisher && self.publisher_verified).then_some(VERIFIED_PUBLISHER_SYMBOL);
+        let icon_symbol = self.icon.is_none().then_some(PLACEHOLDER_ICON_SYMBOL);
         if self.requires_trusted_realm {
             PermissionPresentation {
                 surface: PermissionSurface::NsAlertWarning,
-                title: name.map(|name| format!("Give {name} full access to Powermove?")),
+                title: name.map_or_else(
+                    || NAMELESS_ALERT_TITLE.to_owned(),
+                    |name| format!("Give {name} full access to Powermove?"),
+                ),
+                publisher_line,
+                publisher_badge,
+                icon_symbol,
                 informative_text: Some(FULL_ACCESS_DETAIL),
                 rows,
                 buttons: [
@@ -126,7 +159,13 @@ impl PermissionRequest {
         } else {
             PermissionPresentation {
                 surface: PermissionSurface::WindowModalSheet,
-                title: name.map(|name| format!("Allow “{name}” To:")),
+                title: name.map_or_else(
+                    || NAMELESS_SHEET_TITLE.to_owned(),
+                    |name| format!("Allow “{name}” To:"),
+                ),
+                publisher_line,
+                publisher_badge,
+                icon_symbol,
                 informative_text: None,
                 rows,
                 buttons: [

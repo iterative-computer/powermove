@@ -222,12 +222,20 @@ for custom content, and the app AccentColor; only the isolated Allow button is
 the accent default. Linux tests validate the output contract, not an AppKit
 implementation. All resulting visual output remains provisional until Opus review.
 
-**DESIGN-TODO(opus):** older admitted records can lack a signed display name or
-host publisher display name, and manifests may omit an icon. The neutral
-placeholder is an absent title/icon and empty display names; never substitute
-the extension ID, bundle hash or publisher ID as a primary label. Opus must
-specify the missing-metadata presentation before a UI binds these cases. No new
-fallback copy, icon or layout has been invented.
+**Missing metadata (design re-review 2026-11-01).** Older admitted records can
+lack a signed display name or host publisher display name, and manifests may
+omit an icon. `presentation()` always returns a title and publisher line:
+
+| Missing | Shown |
+|---|---|
+| Extension name | Sheet `Allow This Extension To:`; alert `Give this extension full access to Powermove?` |
+| Publisher name | `From an unidentified developer` (no badge) |
+| Icon | SF Symbol `puzzlepiece.extension` (`icon_symbol`), `secondary` colour |
+
+A named publisher reads `From Example Publisher`, with the trailing
+`checkmark.seal.fill` badge only when the host verified it, otherwise
+`From Example Publisher · Unverified`. Never substitute the extension ID,
+bundle hash or publisher ID as a label.
 
 ### Settings, stale prompts and accessibility (review items 5–7)
 

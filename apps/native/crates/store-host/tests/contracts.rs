@@ -926,6 +926,15 @@ fn prompt_display_data_comes_from_signed_manifest_and_host_publisher_identity() 
             release.manifest().extra["publisher_verified"],
             json!(!verified_publisher)
         );
+        let shown = prompt.presentation();
+        assert_eq!(shown.icon_symbol, None);
+        if verified_publisher {
+            assert_eq!(shown.publisher_line, "From Example Publisher");
+            assert_eq!(shown.publisher_badge, Some(VERIFIED_PUBLISHER_SYMBOL));
+        } else {
+            assert_eq!(shown.publisher_line, "From Example Publisher · Unverified");
+            assert_eq!(shown.publisher_badge, None);
+        }
         let json = serde_json::to_vec(&prompt).unwrap();
         assert_eq!(
             serde_json::from_slice::<PermissionRequest>(&json).unwrap(),
@@ -1061,7 +1070,7 @@ fn isolated_permissions_specify_a_window_modal_sheet_and_accent_allow_default() 
     };
     let sheet = prompt.presentation();
     assert_eq!(sheet.surface, PermissionSurface::WindowModalSheet);
-    assert_eq!(sheet.title.as_deref(), Some("Allow “Glass Blur” To:"));
+    assert_eq!(sheet.title, "Allow “Glass Blur” To:");
     assert_eq!(sheet.informative_text, None);
     assert_eq!(sheet.rows, vec![PERMISSION_COPY[2], PERMISSION_COPY[3]]);
     assert_eq!(sheet.buttons.map(|b| b.label), ["Don’t Allow", "Allow"]);
@@ -1094,10 +1103,7 @@ fn full_access_specifies_a_warning_nsalert_with_exact_copy_and_cancel_default() 
     assert!(prompt.requires_trusted_realm);
     let alert = prompt.presentation();
     assert_eq!(alert.surface, PermissionSurface::NsAlertWarning);
-    assert_eq!(
-        alert.title.as_deref(),
-        Some("Give Glass Blur full access to Powermove?")
-    );
+    assert_eq!(alert.title, "Give Glass Blur full access to Powermove?");
     assert_eq!(
         alert.informative_text,
         Some(
@@ -1150,8 +1156,20 @@ fn older_displayless_records_are_preserved_without_using_ids_as_labels() {
         assert!(prompt.extension_name.is_empty());
         assert!(prompt.publisher_name.is_empty());
         assert!(!prompt.publisher_verified);
-        assert_eq!(prompt.presentation().title, None);
         assert_eq!(prompt.icon, None);
+        let shown = prompt.presentation();
+        let expected = if permission == Permission::FullAccess {
+            NAMELESS_ALERT_TITLE
+        } else {
+            NAMELESS_SHEET_TITLE
+        };
+        assert_eq!(shown.title, expected);
+        assert_eq!(shown.publisher_line, "From an unidentified developer");
+        assert_eq!(shown.publisher_badge, None);
+        assert_eq!(shown.icon_symbol, Some("puzzlepiece.extension"));
+        for label in [&shown.title, &shown.publisher_line] {
+            assert!(!label.contains("sample-ext"), "{label}");
+        }
     }
 }
 
