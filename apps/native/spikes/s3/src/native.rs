@@ -3,16 +3,35 @@ use crate::{
     policy::Output,
     worker::{Host, Update},
 };
-use foreign_types::{ForeignType, ForeignTypeRef};
-use objc2::{MainThreadMarker, MainThreadOnly, class, msg_send, rc::Retained, runtime::AnyObject};
+use foreign_types::ForeignType;
+use objc2::{
+    MainThreadMarker, MainThreadOnly, class, define_class, msg_send, rc::Retained,
+    runtime::AnyObject,
+};
 use objc2_app_kit::{NSScreen, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{cell::RefCell, rc::Rc};
+// Timecode and playhead are visual chrome. Their above-slot view must not
+// swallow mouse events intended for the GPUI scrub strip underneath it.
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMS3PassiveOverlay"]
+    struct PassiveOverlay;
+    impl PassiveOverlay {
+        #[unsafe(method_id(hitTest:))]
+        fn hit(&self, _: NSPoint) -> Option<Retained<NSView>> { None }
+    }
+);
 pub struct Native {
+    _pacer: crate::pacing::Pacer,
+    pub playback_ready: bool,
+    pub layer_updates: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub clock: Option<std::sync::mpsc::Receiver<crate::pacing::Tick>>,
     window: Retained<NSWindow>,
     view: Retained<NSView>,
-    above: Retained<NSView>,
+    above: Retained<PassiveOverlay>,
     timecode: Retained<AnyObject>,
     playhead: Retained<AnyObject>,
     pub layer: metal::MetalLayer,
@@ -43,9 +62,11 @@ pub fn screen_output(window: &NSWindow, width: u32, height: u32) -> Output {
     }
 }
 impl Native {
-    pub fn install(window: &gpui::Window, device: &metal::Device) -> Rc<RefCell<Self>> {
+    pub fn install(window: &gpui::Window, device: &metal::Device, hz: f64) -> Rc<RefCell<Self>> {
         let mtm = MainThreadMarker::new().unwrap();
-        let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() else {
+        let RawWindowHandle::AppKit(handle) =
+            HasWindowHandle::window_handle(window).unwrap().as_raw()
+        else {
             panic!("macOS")
         };
         let gpui: Retained<NSView> =
@@ -71,7 +92,9 @@ impl Native {
             let _: () = msg_send![&*view,setLayer:p];
         }
         content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, Some(&gpui));
-        let above = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        let allocated = PassiveOverlay::alloc(mtm).set_ivars(());
+        let above: Retained<PassiveOverlay> =
+            unsafe { msg_send![super(allocated), initWithFrame:NSRect::ZERO] };
         above.setWantsLayer(true);
         content.addSubview_positioned_relativeTo(&above, NSWindowOrderingMode::Above, Some(&gpui));
         let (timecode, playhead) = unsafe {
@@ -87,7 +110,12 @@ impl Native {
             let _: () = msg_send![&*above.layer().unwrap(),addSublayer:&*p];
             (t, p)
         };
+        let (pacer, clock) = crate::pacing::Pacer::new(&view, hz);
         let this = Rc::new(RefCell::new(Self {
+            _pacer: pacer,
+            playback_ready: false,
+            layer_updates: Default::default(),
+            clock: Some(clock),
             window: native,
             view,
             above,
@@ -124,6 +152,10 @@ impl Native {
         }
     }
     pub fn place(&mut self) {
+        if let Some(host) = &self.host {
+            host.presents
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         let w = (self.width - 48.).max(32.);
         let h = (self.height - 150.).max(32.);
         self.view
@@ -133,7 +165,10 @@ impl Native {
             .setFrame(NSRect::new(NSPoint::new(24., 30.), NSSize::new(w, 50.)));
         let scale = self.window.backingScaleFactor();
         self.layer
-            .set_drawable_size(metal::CGSize::new((w * scale).round(), (h * scale).round()));
+            .set_drawable_size(core_graphics_types::geometry::CGSize::new(
+                (w * scale).round(),
+                (h * scale).round(),
+            ));
         self.layer.set_contents_scale(scale);
         self.poll_output();
     }
@@ -153,7 +188,10 @@ impl Native {
         }
     }
     pub fn update(&mut self, update: &Update) {
+        self.playback_ready |= !update.finished;
         self.poll_output();
+        self.layer_updates
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         unsafe {
             let _: () = msg_send![class!(CATransaction), begin];
             let _: () = msg_send![class!(CATransaction),setDisableActions:true];
@@ -184,19 +222,43 @@ impl Native {
         self.last_output.unwrap()
     }
     pub fn seek(&mut self, time: f64) {
+        self.seek_at(time, objc2_quartz_core::CACurrentMediaTime(), false);
+    }
+    fn seek_at(&mut self, time: f64, input: f64, appkit: bool) {
         if let Some(host) = &self.host {
             let mut c = host.control.lock().unwrap();
             let revision = c.policy.stamp.revision;
             let stamp = c.policy.request(revision);
-            c.seek = Some((time, std::time::Instant::now(), stamp));
+            c.appkit_inputs += u64::from(appkit);
+            c.seek = Some((time, input, stamp));
         }
+    }
+    pub fn seek_input(&mut self, x: f64) {
+        let time = ((x - 24.) / (self.width - 48.)).clamp(0., 1.) * 2.5;
+        // Capture the NSEvent origin BEFORE publishing the request. The worker
+        // must never consume a request with a provisional enqueue timestamp.
+        let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        let input = app.currentEvent().map_or_else(
+            || objc2_quartz_core::CACurrentMediaTime(),
+            |e| e.timestamp(),
+        );
+        self.seek_at(time, input, true);
     }
     pub fn identity(&self) {
         eprintln!(
-            "S3 window_id={} displays={} max_hz={}",
+            "S3 window_id={} displays={} max_hz={} current_headroom={} potential_headroom={} pixel_format={:?}",
             self.window.windowNumber(),
             NSScreen::screens(MainThreadMarker::new().unwrap()).len(),
-            self.window.screen().unwrap().maximumFramesPerSecond()
+            self.window.screen().unwrap().maximumFramesPerSecond(),
+            self.window
+                .screen()
+                .unwrap()
+                .maximumExtendedDynamicRangeColorComponentValue(),
+            self.window
+                .screen()
+                .unwrap()
+                .maximumPotentialExtendedDynamicRangeColorComponentValue(),
+            self.layer.pixel_format()
         );
     }
 }

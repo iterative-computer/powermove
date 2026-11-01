@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "${0:A:h}/../../../.."
 source engine/env.sh
+export DYLD_LIBRARY_PATH="$PM_FFMPEG_DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export CARGO_TARGET_DIR="$HOME/Developer/pm-target"
 python3 - <<'PYGUARD'
 import os
@@ -20,5 +21,7 @@ import os,subprocess,sys
 s=os.statvfs('/')
 assert s.f_bavail*s.f_frsize >= 4*1024**3, 'S3 STOP: below 4 GiB after GUI wait'
 # A crashed worker must not strand this lane's GUI lock indefinitely.
-sys.exit(subprocess.run(sys.argv[1:], timeout=540).returncode)
+env = os.environ.copy()
+env["DYLD_LIBRARY_PATH"] = env["PM_FFMPEG_DIR"] + "/lib"
+sys.exit(subprocess.run(sys.argv[1:], env=env, timeout=540).returncode)
 PYRUN

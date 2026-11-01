@@ -12,4 +12,4 @@ for name in ['policy','color']:
     subprocess.run(['rustc','--edition=2024','--test','src/'+name+'.rs','-o',binary],check=True)
     subprocess.run([binary],check=True)
 PY
-cargo fmt --check
+cargo fmt --manifest-path isolated/Cargo.toml --check

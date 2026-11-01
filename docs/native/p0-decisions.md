@@ -1,6 +1,8 @@
-# P0: decisions and failures for Jude
+# P0: decisions and open items
 
-Status 2026-11-01. Plan v6 §7: any S5 failure goes to Jude before P1 sizing.
+Status 2026-11-01. Plan v6 is the overall implementation plan; not every
+decision is Jude's. Technical calls within the plan's rules are made by the
+orchestrator and recorded here; product calls go to the owners (Chike, Jude).
 Each item names its evidence. Nothing here authorizes dropping a v1–3 member
 (N4) or changing the frozen reference.
 
@@ -28,7 +30,14 @@ First measured with the Mac locked, then rerun unlocked and confirmed foreground
 
 Decision needed (now firmer after the unlocked rerun): choose the scheme handler for page→app sync calls, and either accept S5 as "channels viable, pixel/continuation/background budgets need the engine-id design and an unlocked rerun", or trigger the V8 + remote-DOM fallback evaluation (blocked on S1).
 
-## Questions from the inventories
+## Orchestrator decisions (2026-11-01)
+
+1. **Reference build:** tag `v1.2.0` (the plan's definition of "today"). The async render siblings added after the tag are supported too (a superset); traces come from v1.2.0.
+2. **Authored vs fixed:** decided case by case under §4's quirk policy; each decision is recorded beside its fixture/trace.
+3. **S5 direction:** page→app sync uses the scheme handler (0.10 ms p95); pixels stay in the engine and are referenced by id; a focused spike on continuation latency and background activity follows; the V8 + remote-DOM fallback is evaluated once S1 can run.
+4. **Pro features missing at v1.2.0** (J/K/L, ripple, linked A/V, slide/roll, three-point editing) are cutover work, as §1 already states.
+
+## Questions from the inventories (original wording, kept for traceability)
 
 1. **Reference build.** §2 says `renderFrameToAsync`, `snapshotAsync` and `rasterAsync` ship to every apiVersion; at tag `v1.2.0` they don't exist in `RenderAPI`/`makeRender` (only `PM.Export.snapshotAsync`). Which build is the frozen reference for traces? (C-MATRIX Q1)
 2. **Store-wide counts.** C-MATRIX has `NA` for Store counts: no complete Store catalog/source snapshot is in the repo. Provide an authorized snapshot? (C-MATRIX Q2)

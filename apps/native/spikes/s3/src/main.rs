@@ -1,5 +1,6 @@
 mod color;
 mod native;
+mod pacing;
 mod policy;
 mod render;
 mod worker;
@@ -12,7 +13,20 @@ struct Viewer {
 impl Render for Viewer {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let host = self.native.clone();
+        let click = self.native.clone();
+        let drag = self.native.clone();
         div()
+            .on_mouse_down(MouseButton::Left, move |event, _, _| {
+                click
+                    .borrow_mut()
+                    .seek_input(f32::from(event.position.x) as f64);
+            })
+            .on_mouse_move(move |event, _, _| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    drag.borrow_mut()
+                        .seek_input(f32::from(event.position.x) as f64);
+                }
+            })
             .size_full()
             .text_color(rgb(0xe7e9ee))
             .font_family(".AppleSystemUIFont")
@@ -87,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     );
     let verify = std::env::args().any(|a| a == "--verify");
     let exercise = std::env::args().any(|a| a == "--exercise");
+    let measure_overlays = std::env::args().any(|a| a == "--measure-overlays");
     let report = arg("report").unwrap_or("/tmp/s3-report.json".into());
     let gpu = pm_gpu::Gpu::new("S3 engine-owned GPU")?;
     let device = render::metal_device(&gpu);
@@ -120,24 +135,44 @@ fn main() -> anyhow::Result<()> {
                     )))),
                 move |window, cx| {
                     window.set_window_title("Powermove Native S3 Viewer");
-                    let native = native::Native::install(window, &device);
+                    let native = native::Native::install(window, &device, hz);
                     // Initial placement is applied again at the first GPUI present hook.
                     native.borrow_mut().publish(688., 510.);
                     native.borrow_mut().place();
                     native.borrow().identity();
+                    let layer = native.borrow().layer.clone();
+                    let output = native.borrow().output();
+                    let layer_updates = native.borrow().layer_updates.clone();
+                    let clock = native.borrow_mut().clock.take().unwrap();
                     let host = worker::Host::start(
                         gpu,
-                        native.borrow().layer.clone(),
-                        native.borrow().output(),
+                        layer,
+                        output,
+                        clock,
+                        layer_updates,
                         worker::Options {
                             scene,
                             pq,
                             seconds,
                             hz,
                             verify,
+                            measure_overlays,
                             report,
                         },
                     );
+                    let poll = Rc::downgrade(&native);
+                    cx.spawn(async move |cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(100))
+                                .await;
+                            let Some(native) = poll.upgrade() else {
+                                break;
+                            };
+                            native.borrow_mut().poll_output();
+                        }
+                    })
+                    .detach();
                     let updates = host.updates.clone();
                     native.borrow_mut().host = Some(host);
                     let failed = failed.clone();
@@ -174,23 +209,43 @@ fn main() -> anyhow::Result<()> {
                     )))),
                 move |window, cx| {
                     window.set_window_title("Powermove Native S3 Popout");
-                    let native = native::Native::install(window, &popout_device);
+                    let native = native::Native::install(window, &popout_device, hz);
                     native.borrow_mut().publish(480., 420.);
                     native.borrow_mut().place();
                     native.borrow().identity();
+                    let layer = native.borrow().layer.clone();
+                    let output = native.borrow().output();
+                    let layer_updates = native.borrow().layer_updates.clone();
+                    let clock = native.borrow_mut().clock.take().unwrap();
                     let host = worker::Host::start(
                         gpu,
-                        native.borrow().layer.clone(),
-                        native.borrow().output(),
+                        layer,
+                        output,
+                        clock,
+                        layer_updates,
                         worker::Options {
                             scene,
                             pq: None,
                             seconds: seconds.min(10.),
                             hz,
                             verify: false,
+                            measure_overlays: false,
                             report: "/tmp/s3-popout.json".into(),
                         },
                     );
+                    let poll = Rc::downgrade(&native);
+                    cx.spawn(async move |cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(100))
+                                .await;
+                            let Some(native) = poll.upgrade() else {
+                                break;
+                            };
+                            native.borrow_mut().poll_output();
+                        }
+                    })
+                    .detach();
                     let updates = host.updates.clone();
                     native.borrow_mut().host = Some(host);
                     let view = cx.new(|_| Viewer {
@@ -214,6 +269,13 @@ fn main() -> anyhow::Result<()> {
         if exercise {
             let view = entity.read(cx).unwrap().native.clone();
             cx.spawn(async move |cx| {
+                // Accuracy readbacks are deliberately slow under Metal validation.
+                // Do not resize or simulate a display change during that phase.
+                while !view.borrow().playback_ready {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 view.borrow_mut().simulate();
                 cx.background_executor().timer(Duration::from_secs(2)).await;
