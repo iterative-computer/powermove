@@ -174,9 +174,39 @@ pub(crate) fn materialize(layer: &mut Value, channel: &str) -> Option<Vec<Step>>
     find(layer, channel)
 }
 
+/// Vector path channels (`structuredProperties`): `g.<pathId>.<key>` and
+/// `g.<pathId>.v.<vertexId>.<key>` on a shape layer's `d.paths`,
+/// `mp.<maskId>…` on a mask's `path`.
+fn structured(layer: &Value, channel: &str) -> Option<Vec<Step>> {
+    let (base, rest) = if let Some(rest) = channel.strip_prefix("g.") {
+        let (path_id, rest) = rest.split_once('.')?;
+        let i = index_by_id(layer.get("d").and_then(|d| d.get("paths")), path_id)?;
+        (vec![key("d"), key("paths"), Step::Index(i)], rest)
+    } else if let Some(rest) = channel.strip_prefix("mp.") {
+        let (mask_id, rest) = rest.split_once('.')?;
+        let i = index_by_id(layer.get("masks"), mask_id)?;
+        (vec![key("masks"), Step::Index(i), key("path")], rest)
+    } else {
+        return None;
+    };
+    let path_node = get(layer, &base)?;
+    let mut out = base.clone();
+    if let Some(vrest) = rest.strip_prefix("v.") {
+        let (vertex_id, k) = vrest.split_once('.')?;
+        let j = index_by_id(path_node.get("vertices"), vertex_id)?;
+        out.extend([key("vertices"), Step::Index(j), key("p"), key(k)]);
+    } else {
+        out.extend([key("p"), key(rest)]);
+    }
+    get(layer, &out).filter(|v| is_property(v)).map(|_| out)
+}
+
 /// `PM.findProp(layer, key) || layer.p[key]`, read only.
 pub(crate) fn find(layer: &Value, channel: &str) -> Option<Vec<Step>> {
     let found = |path: Vec<Step>| get(layer, &path).filter(|v| is_property(v)).map(|_| path);
+    if channel.starts_with("g.") || channel.starts_with("mp.") {
+        return structured(layer, channel);
+    }
     for edge in ["transitionIn", "transitionOut"] {
         if let Some(param) = channel
             .strip_prefix(edge)

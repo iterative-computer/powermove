@@ -78,7 +78,6 @@ mod channels;
 mod cx;
 mod spine;
 mod track;
-#[allow(dead_code)] // helpers for the commands being ported
 mod values;
 
 pub mod captions;
@@ -276,5 +275,141 @@ impl Command {
             Command::Transform(c) => c.plan(&mut cx)?,
         }
         Ok(cx.finish())
+    }
+}
+
+#[cfg(test)]
+mod undo_roundtrip {
+    //! Every implemented domain through `execute` → `undo` → `redo`. Test
+    //! builds also check each captured inverse against the real previous tree
+    //! (`assert_inverse_restores` in the store).
+
+    use pm_model::json::parse;
+    use pm_model::{Map, Value};
+
+    use super::*;
+    use crate::DocumentStore;
+
+    const PROJECT: &str = r##"{
+      "id": "P", "name": "Undo", "compId": "C1", "compName": "Main",
+      "w": 200, "h": 100, "fps": 30, "dur": 10, "bg": "#000000", "assets": {"a1": {"id": "a1", "kind": "video", "dur": 9}},
+      "layers": [
+        {"id": "a", "type": "shape", "name": "A", "from": 0, "dur": 10, "on": true,
+         "d": {"shape": "rect", "w": 20, "h": 20, "color": "#ffffff"}, "fx": [], "masks": [],
+         "p": {"opacity": {"v": 100, "kf": [{"t": 1, "v": 0, "i": "k1"}, {"t": 2, "v": 100, "i": "k2"}], "expr": null},
+               "position.x": {"v": 10, "kf": [], "expr": null}, "position.y": {"v": 10, "kf": [], "expr": null},
+               "anchor.x": {"v": 0, "kf": [], "expr": null}, "anchor.y": {"v": 0, "kf": [], "expr": null},
+               "scale.x": {"v": 100, "kf": [], "expr": null}, "scale.y": {"v": 100, "kf": [], "expr": null},
+               "rotation": {"v": 0, "kf": [], "expr": null}, "skew": {"v": 0, "kf": [], "expr": null}}},
+        {"id": "b", "type": "video", "name": "B", "from": 1, "dur": 5,
+         "d": {"asset": "a1", "trim": 0, "speed": 1, "w": 10, "h": 10}, "p": {}}
+      ]
+    }"##;
+
+    fn commands() -> Vec<Command> {
+        let mut content = Map::new();
+        content.insert("w", Value::Number(33.0));
+        vec![
+            PropertyCommand::Set(properties::SetProperty::new("a", "opacity", 50.0, 1.5)).into(),
+            KeyframeCommand::Move {
+                key_ids: vec!["k1".into()],
+                delta: 1.0,
+            }
+            .into(),
+            KeyframeCommand::Delete {
+                key_ids: vec!["k2".into()],
+            }
+            .into(),
+            LayerCommand::Duplicate {
+                layer_ids: vec!["a".into()],
+                new_ids: vec!["a2".into()],
+            }
+            .into(),
+            LayerCommand::Reorder {
+                layer_id: "b".into(),
+                index: 0,
+                time: 0.0,
+            }
+            .into(),
+            LayerCommand::Delete {
+                layer_ids: vec!["b".into()],
+            }
+            .into(),
+            TimingCommand::Split {
+                layer_ids: vec!["b".into()],
+                time: 3.0,
+                new_ids: vec!["b2".into()],
+            }
+            .into(),
+            TimingCommand::TrimIn {
+                layer_ids: vec!["b".into()],
+                time: 2.0,
+            }
+            .into(),
+            GroupCommand::Group {
+                layer_ids: vec!["a".into()],
+                group_id: "g".into(),
+                name: None,
+                time: 0.0,
+            }
+            .into(),
+            MarkerCommand::Add {
+                comp: None,
+                id: "m".into(),
+                time: 2.0,
+                name: None,
+            }
+            .into(),
+            CompCommand::Create {
+                comp_id: "C9".into(),
+                settings: comps::NewComp::default(),
+            }
+            .into(),
+            ContentCommand::Set {
+                layer_id: "a".into(),
+                patch: content,
+                time: 0.0,
+            }
+            .into(),
+            MaskCommand::Add {
+                layer_id: "a".into(),
+                mask_id: "K".into(),
+                shape: masks::MaskShape::Rect,
+            }
+            .into(),
+            TransformCommand::Nudge {
+                layer_ids: vec!["a".into()],
+                dx: 1.0,
+                dy: 0.0,
+                time: 0.0,
+            }
+            .into(),
+        ]
+    }
+
+    #[test]
+    fn every_domain_undoes_and_redoes_exactly() {
+        for command in commands() {
+            let mut store = DocumentStore::new_untitled(parse(PROJECT).unwrap());
+            let before = store.root().map(pm_model::Node::to_value);
+            store
+                .execute(command.clone(), Origin::Interface)
+                .unwrap_or_else(|e| panic!("{command:?}: {e}"))
+                .unwrap_or_else(|| panic!("{command:?} changed nothing"));
+            let after = store.root().map(pm_model::Node::to_value);
+            assert_ne!(before, after, "{command:?}");
+            store.undo().unwrap();
+            assert_eq!(
+                store.root().map(pm_model::Node::to_value),
+                before,
+                "undo {command:?}"
+            );
+            store.redo().unwrap();
+            assert_eq!(
+                store.root().map(pm_model::Node::to_value),
+                after,
+                "redo {command:?}"
+            );
+        }
     }
 }

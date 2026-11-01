@@ -725,10 +725,141 @@ fn unported_commands_say_so_and_change_nothing() {
     let mut s = store();
     let e = refused(
         &mut s,
+        PropertyCommand::Reset {
+            layer_id: "s1".into(),
+            channel: "opacity".into(),
+            time: 0.0,
+        }
+        .into(),
+        Origin::Interface,
+    );
+    assert_eq!(e, CommandError::NotImplemented("reset_property"));
+}
+
+#[test]
+fn simplify_drops_only_constant_interior_keys() {
+    let mut s = store();
+    let mut keys_in = Vec::new();
+    for (t, v) in [
+        (0.0, 0.0),
+        (1.0, 50.0),
+        (1.5, 50.0),
+        (2.0, 50.0),
+        (3.0, 100.0),
+    ] {
+        keys_in.push(KeyframeSpec::new(t, v));
+    }
+    run(
+        &mut s,
+        kc(KeyframeCommand::Replace(Box::new(ReplaceKeyframes {
+            layer_id: "s1".into(),
+            channel: "opacity".into(),
+            keyframes: keys_in,
+            replace: true,
+            expression: None,
+            preserve_hand_edits: true,
+            time: 0.0,
+        }))),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::Simplify {
+            scope: pm_mac_core::commands::keyframes::SimplifyScope::Layers(vec!["s1".into()]),
+        }),
+    );
+    let k = keys(&s, "s1", "opacity");
+    let times: Vec<f64> = k.iter().map(|k| num(k, &["t"])).collect();
+    assert_eq!(times, vec![0.0, 1.0, 2.0, 3.0], "the flat middle key goes");
+    assert_eq!(s.history().undo_label(), Some("Simplify Keyframes"));
+    // Any expression in the project keeps every key.
+    let mut s = store();
+    run(
+        &mut s,
+        PropertyCommand::SetExpression {
+            layer_id: "anim".into(),
+            channel: "opacity".into(),
+            expression: Some("value".into()),
+        }
+        .into(),
+    );
+    let before = s.revision();
+    run(
+        &mut s,
         kc(KeyframeCommand::Simplify {
             scope: pm_mac_core::commands::keyframes::SimplifyScope::All,
         }),
-        Origin::Interface,
     );
-    assert_eq!(e, CommandError::NotImplemented("simplify_keyframes"));
+    assert_eq!(s.revision(), before);
+}
+
+#[test]
+fn graph_moves_stop_a_frame_before_keys_they_do_not_own() {
+    let mut s = store();
+    // k1 (0 s) towards k2 (1 s): stops at 29/30 s, never replacing it.
+    run(
+        &mut s,
+        kc(KeyframeCommand::GraphMove {
+            key_ids: vec!["k1".into()],
+            delta: 5.0,
+            value_delta: 10.0,
+        }),
+    );
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!(k.len(), 2);
+    assert_eq!(num(&k[0], &["t"]), 29.0 / 30.0);
+    assert_eq!(num(&k[0], &["v"]), 10.0);
+    assert_eq!(s.history().undo_label(), Some("Edit curve"));
+}
+
+#[test]
+fn the_transform_box_scales_times_values_and_speeds() {
+    let mut s = store();
+    // Give k1 a speed to follow the scale.
+    run(
+        &mut s,
+        kc(KeyframeCommand::SetHandle {
+            key_id: "k1".into(),
+            side: EaseSide::Out,
+            value: HandleValue::Ease(TemporalEase {
+                speed: 40.0,
+                influence: 50.0,
+            }),
+            split: false,
+        }),
+    );
+    run(
+        &mut s,
+        kc(KeyframeCommand::Transform {
+            key_ids: vec!["k1".into(), "k2".into()],
+            anchor_time: 0.0,
+            time_scale: 2.0,
+            anchor_value: 0.0,
+            value_scale: 0.5,
+        }),
+    );
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!((num(&k[1], &["t"]), num(&k[1], &["v"])), (2.0, 50.0));
+    assert_eq!(num(&k[0], &["outEase", "speed"]), 10.0, "speed × 0.5 / 2");
+    assert_eq!(
+        num(&k[0], &["outEase", "influence"]),
+        50.0,
+        "influence is a ratio"
+    );
+    // Never mirrored through the anchor.
+    run(
+        &mut s,
+        kc(KeyframeCommand::Transform {
+            key_ids: vec!["k1".into(), "k2".into()],
+            anchor_time: 0.0,
+            time_scale: -1.0,
+            anchor_value: 0.0,
+            value_scale: 1.0,
+        }),
+    );
+    let k = keys(&s, "anim", "opacity");
+    assert_eq!(
+        num(&k[1], &["t"]),
+        1.0 / 30.0,
+        "clamped to a frame from the anchor key"
+    );
 }

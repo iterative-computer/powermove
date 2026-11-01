@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<title>S5 synthetic compat page</title>
+<style>body{font:14px system-ui;background:#202126;color:white}input,button{font:inherit}</style>
+<h1>S5 compat transport probe</h1><input id="ime" aria-label="Composition probe"><button>Next accessible element</button>
+<script>
+'use strict';
+const base='__BASE__',testCase='__CASE__';
+const report=v=>fetch(base+'report',{method:'POST',body:JSON.stringify(v)});
+window.addEventListener('error',e=>report({test:'script_error',error:e.message}));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function sync(path,body){const x=new XMLHttpRequest();x.open(body===undefined?'GET':'POST',base+path,false);x.send(body);if(x.status!==200)throw Error('HTTP '+x.status);return x.responseText;}
+function stats(a){a.sort((a,b)=>a-b);const p=q=>a[Math.min(a.length-1,Math.ceil(q*a.length)-1)];return {n:a.length,p50_ms:p(.5),p95_ms:p(.95),p99_ms:p(.99),max_ms:p(1)};}
+async function bench(name,fn){const a=[];try{for(let i=0;i<10;i++)fn();for(let batch=0;batch<20;batch++){for(let i=0;i<100;i++){const t=performance.now();if(fn()===null)throw Error('bridge returned null');a.push(performance.now()-t);}}await report({test:name,status:'measured',...stats(a)});}catch(e){await report({test:name,status:'failed',error:String(e),...stats(a)});}}
+__PIXELS_JS__
+async function channels(){
+ if(testCase==='http') await bench('sync_http',()=>sync('ping'));
+ if(testCase==='scheme') await bench('sync_scheme',()=>{const x=new XMLHttpRequest();x.open('GET','s5probe://kernel/ping',false);x.send();if(x.responseText!=='{"ok":true}')throw Error('no scheme response');return x.responseText;});
+ if(testCase==='prompt') await bench('sync_text_input_prompt',()=>prompt('s5:ping',''));
+ // Native main thread schedules takeSnapshot and accessibility enumeration during this call.
+ document.querySelector('#ime').focus();
+ await report({test:'deadlock_prepare'});await sleep(100);
+ const t=performance.now();let reply;if(testCase==='prompt')reply=prompt('s5:hold','');else if(testCase==='scheme'){const x=new XMLHttpRequest();x.open('GET','s5probe://kernel/hold',false);x.send();reply=x.responseText;}else reply=sync('hold');
+ await report({test:'blocked_transport_return',transport:testCase,elapsed_ms:performance.now()-t,reply});
+ // DOM-only composition proxy cannot certify OS input-method behavior.
+ const input=document.querySelector('#ime');const order=[];
+ for(const name of ['compositionstart','compositionupdate','compositionend']) input.addEventListener(name,e=>{order.push(name);if(testCase==='prompt')prompt('s5:ping','');else if(testCase==='scheme'){const x=new XMLHttpRequest();x.open('GET','s5probe://kernel/ping',false);x.send();}else sync('ping');});
+ input.dispatchEvent(new CompositionEvent('compositionstart',{data:''}));input.dispatchEvent(new CompositionEvent('compositionupdate',{data:'日本'}));input.value='日本';input.dispatchEvent(new CompositionEvent('compositionend',{data:'日本'}));
+ await report({test:'synthetic_composition',status:order.length===3?'pass':'fail',order});
+ if(testCase!=='app')return;
+ const a=[];
+ for(let i=0;i<400;i++){const t=await (await fetch(base+'poll')).text();await fetch(base+'ack',{method:'POST',body:t});}
+ await report({test:'long_poll_done',n:400});
+ await new Promise(resolve=>{const ws=new WebSocket(location.origin.replace('http:','ws:')+base+'ws');let n=0;ws.onmessage=e=>{ws.send(e.data);n++;};ws.onclose=()=>{report({test:'websocket_done',n}).then(resolve);};ws.onerror=()=>report({test:'websocket_error'});});
+}
+(async()=>{try{await report({test:'page_started',isolated:crossOriginIsolated,timer_resolution_ms:(()=>{let t=performance.now(),next=t;while(next===t)next=performance.now();return next-t;})()});if(testCase==='binary')await binary();else if(testCase==='continuation')await continuations();else await channels();}catch(e){await report({test:'fatal',error:String(e)});}finally{await fetch(base+'done');}})();
+</script>
