@@ -165,7 +165,8 @@ held-out, ten reserved owner-panel specs. Owner entries always report
 tracked. The held-out group runs only when explicitly selected; because its specs
 are public this is a separation of evaluation sets, not a claim of secret tests.
 `eval/scenarios.tsx` provides runnable behavior fixtures for the 30 available
-specs. The runner reports failures and returns nonzero. `--wire` additionally
+specs. The runner reports failures and returns nonzero. `--candidate=./module.ts` selects
+a module exporting the same `createRoot` adapter API for reconciler comparisons. `--wire` additionally
 replays every emitted batch into the real Rust validator and compares final
 native types/children; this is a headless protocol subset, not visual acceptance.
 The webview fixture opts in only in its test process.
@@ -212,3 +213,45 @@ are claimed verified by these Linux checks.
 
 Performance evidence and final verification counts follow in the lane result
 update below. Linux timings do not approve the signed V8/GPUI/physical macOS gate.
+
+## Verified lane result (Linux, 2026-11-01)
+
+- Rust 1.96.1: **35 tests passed** using the locked standalone manifest; clippy
+  with `--all-targets -- -D warnings` and rustfmt check passed.
+- Bun 1.4.4: **55 tests passed, zero skipped** with `PM_SURFACE_WIRE` set. This
+  includes all 30 available eval cases replayed into the Rust validator, a
+  rejection-tail/controlled-prop regression, compatible/incompatible Refresh,
+  asynchronous hook publication and a document-free browser bundle smoke test.
+- TypeScript typecheck, Prettier check, browser-target builds and frozen Bun
+  install passed. CLI eval using `--candidate=./src/index.ts` and `--wire`
+  reports **30 passed / 0 failed / 10 pending-owner**. These fixture checks do
+  not establish full built-in conversion, visual parity or 40 owner passes.
+
+CPU diagnostics (30 warmups, 100 samples; synthetic data only):
+
+| Path | Native nodes | p50 / p95 ms | Scope/verdict |
+|---|---:|---:|---|
+| JS Preact, production runtime bundle 19,497 bytes minified | 1,000 | 1.737 / 3.145 | Pass provisional separate 4-ms diagnostic |
+| JS Preact, same adapter, S1-size workload | 2,002 | 4.239 / 5.654 | **Fails** that provisional ceiling |
+| Rust release atomic commit | 1,000 | 1.633 / 2.037 | JSON decode/staging/validation/publication only |
+
+The JS runtime size excludes UI, JSX-runtime and development Refresh entry
+bundles. Timing includes JS op generation and accepted inspector snapshots with
+an immediate synthetic acknowledgement. Rust timing is a separate run/workload;
+**do not add these percentiles or call either an end-to-end budget pass**. Earlier
+JS 1,000-node p95 readings were 3.308 and 2.861 ms; the S1-size diagnostic remains
+over budget. Preact is the smallest provisional candidate passing the available
+1,000-node subset and Refresh here. N1/N2 keep final reconciler selection open
+until signed V8, real transport, native validation/layout/paint and stable macOS
+measurements pass the intended complete eval.
+
+Remaining integration (outside owned paths): reconcile native Cargo.lock; add
+compiler aliases and Refresh instrumentation; connect runtime generation/ack
+recovery, kernel binding queues and live query/time publications; implement the
+GPUI/AppKit `NativeHost` and every primitive/control renderer with pm-design
+materials/tokens; apply focus/anchor/virtual-list/resource handling. On macOS verify
+accessibility, IME/selection/clipboard and field shortcut ownership; default
+cancellation and pointer capture/lock at display scales; layout/grid, anchored
+menus and material accessibility fallbacks; no main-thread waits and physical
+commit/presentation latency. Supply the ten owner specs before claiming the full
+eval. See the DESIGN-TODO(opus) above for the provisional visual surfaces.
