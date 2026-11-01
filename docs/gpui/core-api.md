@@ -94,7 +94,7 @@ returns `CommandError::NotImplemented` and changes nothing). Tests:
 | **Keyframes** `KeyframeCommand` | | |
 | `Replace(ReplaceKeyframes)` | `replace_keyframes` | done |
 | `SetEasing { key_ids, curve }` | `set_easing`, easing panel apply | done |
-| `Simplify { scope }` | `simplify_keyframes` | todo |
+| `Simplify { scope }` | `simplify_keyframes` (evaluator-verified) | done |
 | `Add`, `Toggle` | Add Keyframe Here, the diamond | done |
 | `Delete { key_ids }` | Delete on keys (`PM.removeKey`) | done |
 | `ClearAll` | Clear All Keyframes / Remove Animation | done |
@@ -104,7 +104,8 @@ returns `CommandError::NotImplemented` and changes nothing). Tests:
 | `EasyEase`, `SetInterpolation`, `SetHold` | F9 family, interpolation, hold | done |
 | `SetHandle` | graph editor handles (ease or point) | done |
 | `SetSpring` | spring easing | done |
-| `Transform` | graph transform box / Option-stretch | todo |
+| `GraphMove { key_ids, delta, value_delta }` | Graph Editor drag (`planGraphKeyframeMove`, never replaces keys) | done |
+| `Transform` | graph transform box / Option-stretch (`planGraphKeyframeScale`) | done |
 | **Timing** `TimingCommand` | | |
 | `Move { layer_ids, delta }` | strip drag (group strips move members) | done |
 | `TrimIn`, `TrimOut` | edge drags, Option+[ ] | done |
@@ -242,6 +243,8 @@ selected layer (`PM.firstSel()`). Selection is never saved and never undone.
     applied.
   * Agents and MCP may pass `preserve_hand_edits: false`; extensions never
     can (the old `generated-*` origins).
+  * The Graph Editor's speed-graph drag (speeds follow the pointer) is the
+    timeline's: send `SetHandle` per key.
   * Expressions are checked by the engine's parser (`pm-expr`), not the old
     name/function allowlist.
   * Not ported yet: 3D scene validation in `set_content`/`set_property`,

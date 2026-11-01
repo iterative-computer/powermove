@@ -164,8 +164,14 @@ pub enum KeyframeCommand {
         key_ids: Vec<String>,
         curve: EaseSpec,
     },
-    /// `simplify_keyframes` (`simplifyProperties`): removes keys the curve
-    /// does not need within tolerance. Not ported.
+    /// `simplify_keyframes` (`simplifyProperties`, `simplifyKeyframes`):
+    /// drops only analytically constant interior keys, then proves the
+    /// result with the real evaluator at every frame (and shutter samples);
+    /// any difference keeps the track as it was. Tracks are left alone when
+    /// any expression exists in the project, on locked layers, structured,
+    /// shader, extension, audio and pre-comp channels, non-numeric tracks,
+    /// auto/continuous Bézier keys and unknown key fields. Label "Simplify
+    /// Keyframes".
     Simplify { scope: SimplifyScope },
     /// Add Keyframe at Playhead / the diamond on a channel without a key at
     /// `time`: a key holding the channel's current value (`value`, or the
@@ -266,13 +272,30 @@ pub enum KeyframeCommand {
         key_ids: Vec<String>,
         spring: Option<Value>,
     },
-    /// The graph editor's transform box: scale key times about
-    /// `time_pivot` and values about `value_pivot`. Not ported.
+    /// A Graph Editor drag of selected keys (`planGraphKeyframeMove`): one
+    /// rigid time delta, snapped to a frame and clamped so no key leaves the
+    /// composition and none comes within a frame of a key it does not own
+    /// (the graph never replaces keys); numeric values move by
+    /// `value_delta` (rounded to 0.001). Send totals with
+    /// `update_gesture_from_start`. Label "Edit curve" / "Edit keyframes".
+    GraphMove {
+        key_ids: Vec<String>,
+        delta: f64,
+        value_delta: f64,
+    },
+    /// The graph transform box and Option-stretch
+    /// (`planGraphKeyframeScale`): key times scale about `anchor_time`
+    /// (composition seconds), clamped so keys never cross each other or
+    /// come within a frame of unselected neighbours, snapped to frames
+    /// (a value-only scale keeps exact times); numeric values scale about
+    /// `anchor_value` (rounded to 0.001); stored ease speeds follow
+    /// `value_scale / time_scale` so the curve keeps its shape. Label "Scale
+    /// keyframes".
     Transform {
         key_ids: Vec<String>,
-        time_pivot: f64,
+        anchor_time: f64,
         time_scale: f64,
-        value_pivot: f64,
+        anchor_value: f64,
         value_scale: f64,
     },
 }
@@ -295,7 +318,9 @@ impl KeyframeCommand {
             KeyframeCommand::SetHold { .. } => "Toggle Hold Keyframe",
             KeyframeCommand::SetHandle { .. } => "Adjust Handle",
             KeyframeCommand::SetSpring { .. } => "Set Spring",
-            KeyframeCommand::Transform { .. } => "Transform Keyframes",
+            KeyframeCommand::GraphMove { key_ids, .. } if key_ids.len() > 1 => "Edit keyframes",
+            KeyframeCommand::GraphMove { .. } => "Edit curve",
+            KeyframeCommand::Transform { .. } => "Scale keyframes",
         }
         .to_owned()
     }
@@ -304,9 +329,7 @@ impl KeyframeCommand {
         match self {
             KeyframeCommand::Replace(c) => replace_keyframes(cx, c),
             KeyframeCommand::SetEasing { key_ids, curve } => set_easing(cx, key_ids, curve),
-            KeyframeCommand::Simplify { .. } => {
-                Err(CommandError::NotImplemented("simplify_keyframes"))
-            }
+            KeyframeCommand::Simplify { scope } => simplify(cx, scope),
             KeyframeCommand::Add {
                 layer_id,
                 channel,
@@ -390,9 +413,34 @@ impl KeyframeCommand {
                     }
                 })
             }
-            KeyframeCommand::Transform { .. } => {
-                Err(CommandError::NotImplemented("transform_keyframes"))
-            }
+            KeyframeCommand::GraphMove {
+                key_ids,
+                delta,
+                value_delta,
+            } => graph_edit(
+                cx,
+                key_ids,
+                GraphEdit::Move {
+                    delta: *delta,
+                    value_delta: *value_delta,
+                },
+            ),
+            KeyframeCommand::Transform {
+                key_ids,
+                anchor_time,
+                time_scale,
+                anchor_value,
+                value_scale,
+            } => graph_edit(
+                cx,
+                key_ids,
+                GraphEdit::Scale {
+                    anchor_time: *anchor_time,
+                    time_scale: *time_scale,
+                    anchor_value: *anchor_value,
+                    value_scale: *value_scale,
+                },
+            ),
         }
     }
 }
@@ -1108,4 +1156,603 @@ pub(crate) fn normalize_keyframes(raw: Vec<Value>, fallback: &Value) -> Vec<Valu
         }
     }
     out
+}
+
+// ── graph editor ────────────────────────────────────────────────────────────
+
+enum GraphEdit {
+    Move {
+        delta: f64,
+        value_delta: f64,
+    },
+    Scale {
+        anchor_time: f64,
+        time_scale: f64,
+        anchor_value: f64,
+        value_scale: f64,
+    },
+}
+
+/// One key of `captureKeyframeGesture`.
+struct GraphItem {
+    property: usize,
+    id: String,
+    time: f64,
+    value: Option<f64>,
+    selected: bool,
+    from: f64,
+    min: f64,
+    max: f64,
+}
+
+/// `lowerBound(times, t, upper)`.
+fn lower_bound(times: &[f64], t: f64, upper: bool) -> usize {
+    times.partition_point(|x| if upper { *x <= t } else { *x < t })
+}
+
+/// `graphNeighbours(items)`: per property, the unselected times around a
+/// key, and the smallest gap between distinct selected times.
+struct Neighbours {
+    fixed: Vec<Vec<f64>>,
+    gap: f64,
+}
+
+impl Neighbours {
+    fn new(items: &[GraphItem], properties: usize) -> Neighbours {
+        let mut fixed = vec![Vec::new(); properties];
+        let mut selected = vec![Vec::new(); properties];
+        for i in items.iter().filter(|i| i.time.is_finite()) {
+            if i.selected {
+                selected[i.property].push(i.time);
+            } else {
+                fixed[i.property].push(i.time);
+            }
+        }
+        let by = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        for t in &mut fixed {
+            t.sort_by(by);
+        }
+        let mut gap = f64::INFINITY;
+        for times in &mut selected {
+            times.sort_by(by);
+            let mut next = 1;
+            for i in 0..times.len() {
+                next = next.max(i + 1);
+                while next < times.len() && times[next] - times[i] <= 1e-9 {
+                    next += 1;
+                }
+                if next < times.len() {
+                    gap = gap.min(times[next] - times[i]);
+                }
+            }
+        }
+        Neighbours { fixed, gap }
+    }
+
+    fn before(&self, item: &GraphItem) -> Option<f64> {
+        let times = &self.fixed[item.property];
+        lower_bound(times, item.time, false)
+            .checked_sub(1)
+            .map(|i| times[i])
+    }
+
+    fn after(&self, item: &GraphItem) -> Option<f64> {
+        let times = &self.fixed[item.property];
+        times.get(lower_bound(times, item.time, true)).copied()
+    }
+}
+
+/// The Graph Editor's move and scale, rebuilt from the tracks holding the
+/// selected keys.
+fn graph_edit(cx: &mut Cx<'_>, key_ids: &[String], edit: GraphEdit) -> Result<(), CommandError> {
+    let ids: HashSet<&str> = key_ids.iter().map(String::as_str).collect();
+    let mut items: Vec<GraphItem> = Vec::new();
+    let mut properties = 0usize;
+    let mut fps = None;
+    for loc in cx.all_layers() {
+        let layer = cx.layer_node(&loc)?.to_value();
+        let from = values::num(&layer, "from").unwrap_or(0.0);
+        let dur = cx.duration(loc.comp_id.as_deref());
+        for (_, path) in channels::all(&layer) {
+            let Some(prop) = channels::get(&layer, &path) else {
+                continue;
+            };
+            let keys = track::keys_of(prop);
+            if !keys.iter().any(|k| {
+                k.get("i")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| ids.contains(i))
+            }) {
+                continue;
+            }
+            fps.get_or_insert_with(|| track::safe_fps(cx.fps(loc.comp_id.as_deref())));
+            for k in keys {
+                let t = track::js_number(k.get("t").unwrap_or(&Value::Null));
+                let id = track::key_id(k);
+                items.push(GraphItem {
+                    property: properties,
+                    selected: ids.contains(id.as_str()),
+                    id,
+                    time: t,
+                    value: k.get("v").and_then(Value::as_f64),
+                    from,
+                    min: t.min(-from),
+                    max: t.max(0f64.max(dur - from)),
+                });
+            }
+            properties += 1;
+        }
+    }
+    let Some(rate) = fps else {
+        return Ok(());
+    };
+    let frame = 1.0 / rate;
+    let neighbours = Neighbours::new(&items, properties);
+    let selected: Vec<&GraphItem> = items
+        .iter()
+        .filter(|i| i.selected && i.time.is_finite())
+        .collect();
+    // id → (time, value)
+    let mut moves: Vec<(String, f64, Option<f64>)> = Vec::new();
+    let mut speed_ratio = 1.0;
+    match edit {
+        GraphEdit::Move { delta, value_delta } => {
+            let mut d =
+                values::js_round((if delta.is_finite() { delta } else { 0.0 }) * rate) / rate;
+            let min_d = selected
+                .iter()
+                .map(|i| i.min - i.time)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let max_d = selected
+                .iter()
+                .map(|i| i.max - i.time)
+                .fold(f64::INFINITY, f64::min);
+            d = min_d.max(max_d.min(d));
+            if d != 0.0 {
+                for m in &selected {
+                    if d > 0.0 {
+                        if let Some(a) = neighbours.after(m) {
+                            d = d.min((a - m.time - frame).max(0.0));
+                        }
+                    } else if let Some(b) = neighbours.before(m) {
+                        d = d.max((b - m.time + frame).min(0.0));
+                    }
+                }
+            }
+            d = values::js_round(d * rate) / rate;
+            let dv = values::finite(value_delta, "value delta")?;
+            for m in &selected {
+                let v = m.value.map(|v| track::round3(v + dv));
+                moves.push((m.id.clone(), m.time + d, v));
+            }
+        }
+        GraphEdit::Scale {
+            anchor_time,
+            time_scale,
+            anchor_value,
+            value_scale,
+        } => {
+            let (mut low, mut high) = (0f64, f64::INFINITY);
+            for m in &selected {
+                let anchor = anchor_time - m.from;
+                let span = m.time - anchor;
+                let mut min = m.min;
+                let mut max = m.max;
+                if let Some(b) = neighbours.before(m) {
+                    min = min.max(b + frame);
+                }
+                if let Some(a) = neighbours.after(m) {
+                    max = max.min(a - frame);
+                }
+                if span.abs() < 1e-9 {
+                    continue;
+                }
+                let (a, b) = ((min - anchor) / span, (max - anchor) / span);
+                low = low.max(a.min(b));
+                high = high.min(a.max(b));
+            }
+            low = low.max(frame / neighbours.gap);
+            low = low.min(1.0);
+            high = high.max(1.0);
+            let requested = if time_scale.is_finite() {
+                time_scale
+            } else {
+                1.0
+            };
+            let ts = low.max(high.min(requested));
+            let vs = if value_scale.is_finite() {
+                value_scale
+            } else {
+                1.0
+            };
+            for m in &selected {
+                let anchor = anchor_time - m.from;
+                let t = if ts == 1.0 {
+                    m.time
+                } else {
+                    values::js_round((anchor + (m.time - anchor) * ts) * rate) / rate
+                };
+                let v = m
+                    .value
+                    .filter(|_| vs != 1.0)
+                    .map(|v| anchor_value + (v - anchor_value) * vs)
+                    .filter(|v| v.is_finite())
+                    .map(track::round3);
+                moves.push((m.id.clone(), if t == 0.0 { 0.0 } else { t }, v));
+            }
+            speed_ratio = if ts > 1e-6 { vs / ts } else { 1.0 };
+        }
+    }
+    let scaled = matches!(edit, GraphEdit::Scale { .. });
+    edit_tracks(cx, &ids, |_, prop, _| {
+        let keys = track::keys_mut(prop);
+        for k in keys.iter_mut() {
+            let id = track::key_id(k);
+            let Some((_, t, v)) = moves.iter().find(|(m, _, _)| *m == id) else {
+                continue;
+            };
+            let m = values::obj(k);
+            m.insert("t", Value::Number(*t));
+            if let Some(v) = v {
+                m.insert("v", Value::Number(*v));
+            }
+            if scaled && speed_ratio != 1.0 {
+                for side in ["inEase", "outEase"] {
+                    if let Some(e) = m.get_mut(side).and_then(Value::as_object_mut)
+                        && let Some(speed) = e.get("speed").and_then(Value::as_f64)
+                    {
+                        e.insert("speed", Value::Number(speed * speed_ratio));
+                    }
+                }
+            }
+        }
+        track::sort_keys(keys);
+        Ok(())
+    })
+}
+
+// ── simplify ────────────────────────────────────────────────────────────────
+
+const KNOWN_KEY_FIELDS: [&str; 13] = [
+    "i",
+    "t",
+    "v",
+    "inInterp",
+    "outInterp",
+    "inEase",
+    "outEase",
+    "autoBezier",
+    "continuous",
+    "eo",
+    "ei",
+    "hold",
+    "bezierMode",
+];
+
+/// `flat(a, b)` of `simplify-keyframes.ts`.
+fn flat(a: &pm_eval::temporal::EaseKeyframe, b: &pm_eval::temporal::EaseKeyframe) -> bool {
+    if a.v != b.v {
+        return false;
+    }
+    if pm_eval::temporal::is_held_segment(a, b)
+        || (a.out_interp == Interp::Linear && b.in_interp == Interp::Linear)
+    {
+        return true;
+    }
+    let value = a.v.unwrap_or(f64::NAN);
+    (a.out_interp != Interp::Bezier || a.out_ease.speed == 0.0)
+        && (b.in_interp != Interp::Bezier || b.in_ease.speed == 0.0)
+        && value - 2.0 * value + value == 0.0
+        && value - 3.0 * value + 3.0 * value - value == 0.0
+}
+
+struct SimplifyOptions {
+    fps: f64,
+    from: f64,
+    duration: f64,
+    composition_duration: f64,
+    shutter: Option<f64>,
+    trim_outside: bool,
+}
+
+/// `evalKfs(keys, t)` over a prepared track.
+struct Evaluator {
+    node: pm_model::Node,
+    track: pm_eval::keyframes::PreparedTrack,
+    springs: pm_eval::easing::SpringTables,
+}
+
+impl Evaluator {
+    fn new(keys: &[Value]) -> Evaluator {
+        let node = pm_model::Node::from_value(Value::Array(keys.to_vec()), 0);
+        let track = pm_eval::keyframes::PreparedTrack::prepare(Some(&node));
+        Evaluator {
+            node,
+            track,
+            springs: pm_eval::easing::SpringTables::new(),
+        }
+    }
+
+    fn at(&mut self, t: f64) -> Option<pm_eval::JsValue> {
+        self.track
+            .value(Some(&self.node), t, false, &mut self.springs)
+            .ok()
+    }
+}
+
+/// `a === b` for evaluator results.
+fn strictly_equal(a: &Option<pm_eval::JsValue>, b: &Option<pm_eval::JsValue>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => pm_eval::js_sem::strict_eq(a, b),
+        _ => false,
+    }
+}
+
+/// `simplifyKeyframes(source, options)`: `None` keeps the source.
+fn simplify_track(source: &[Value], o: &SimplifyOptions) -> Option<Vec<Value>> {
+    if source.len() < 3
+        || !(o.fps.is_finite() && o.fps > 0.0)
+        || ![o.from, o.duration, o.composition_duration]
+            .iter()
+            .all(|x| x.is_finite())
+        || o.duration <= 0.0
+        || o.composition_duration <= 0.0
+    {
+        return None;
+    }
+    let mut previous_t = f64::NEG_INFINITY;
+    for (i, key) in source.iter().enumerate() {
+        let t = key.get("t").and_then(Value::as_f64).unwrap_or(f64::NAN);
+        let ok = key
+            .get("v")
+            .and_then(Value::as_f64)
+            .is_some_and(f64::is_finite)
+            && t.is_finite()
+            && (i == 0 || t > previous_t)
+            && !values::flag(key, "autoBezier")
+            && !values::flag(key, "continuous")
+            && key.as_object().is_some_and(|m| {
+                m.keys()
+                    .all(|k| KNOWN_KEY_FIELDS.contains(&k.to_string_lossy().as_str()))
+            });
+        if !ok {
+            return None;
+        }
+        previous_t = t;
+    }
+    let mut before = source.to_vec();
+    track::adopt(&mut before);
+    if before
+        .iter()
+        .any(|k| values::flag(k, "autoBezier") || values::flag(k, "continuous"))
+    {
+        return None;
+    }
+    let eased: Vec<_> = before.iter().map(track::ease_key).collect();
+    let radius = o
+        .shutter
+        .filter(|s| *s != 0.0 && !s.is_nan())
+        .unwrap_or(0.5)
+        .max(0.5)
+        / o.fps;
+    let (mut first, mut last) = (0usize, before.len() - 1);
+    if o.trim_outside {
+        let (start, end) = (-radius, o.duration + radius);
+        while first + 1 < before.len() && eased[first + 1].t < start {
+            first += 1;
+        }
+        while last - 1 > first && eased[last - 1].t > end {
+            last -= 1;
+        }
+    }
+    let mut candidate = vec![first];
+    for i in first + 1..last {
+        let a = &eased[*candidate.last().expect("seeded")];
+        let (b, c) = (&eased[i], &eased[i + 1]);
+        if !(flat(a, b) && flat(b, c) && flat(a, c)) {
+            candidate.push(i);
+        }
+    }
+    if last > first {
+        candidate.push(last);
+    }
+    if candidate.len() == source.len() {
+        return None;
+    }
+    let after: Vec<Value> = candidate.iter().map(|&i| before[i].clone()).collect();
+    let mut eb = Evaluator::new(&before);
+    let mut ea = Evaluator::new(&after);
+    let mut identical = |t: f64| strictly_equal(&eb.at(t), &ea.at(t));
+    let start = if o.trim_outside {
+        -radius
+    } else {
+        -o.from - radius
+    };
+    let end = if o.trim_outside {
+        o.duration + radius
+    } else {
+        o.composition_duration - o.from + radius
+    };
+    let shutter = o
+        .shutter
+        .filter(|s| *s != 0.0 && !s.is_nan())
+        .unwrap_or(0.5)
+        / o.fps;
+    let mut offsets = vec![0.0, -0.5 / o.fps, -0.25 / o.fps, 0.25 / o.fps, 0.5 / o.fps];
+    offsets.extend((0..10).map(|s| ((f64::from(s) + 0.5) / 10.0 - 0.5) * shutter));
+    let frame_start = ((start + o.from) * o.fps).floor() as i64;
+    let frame_end = ((end + o.from) * o.fps).ceil() as i64;
+    if frame_end - frame_start > 1_000_000 {
+        return None;
+    }
+    for frame in frame_start..=frame_end {
+        let time = frame as f64 / o.fps - o.from;
+        for offset in &offsets {
+            let t = time + offset;
+            if t >= start && t <= end && !identical(t) {
+                return None;
+            }
+        }
+    }
+    for i in 0..eased.len() {
+        let time = eased[i].t;
+        if time >= start && time <= end && !identical(time) {
+            return None;
+        }
+        if let Some(next) = eased.get(i + 1) {
+            for f in [0.25, 0.5, 0.75] {
+                let t = time + (next.t - time) * f;
+                if t >= start && t <= end && !identical(t) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(after)
+}
+
+/// `simplifyProperties(PM, simplificationRefs(command))`.
+fn simplify(cx: &mut Cx<'_>, scope: &SimplifyScope) -> Result<(), CommandError> {
+    let locs = cx.all_layers();
+    let mut layers: Vec<(crate::model::LayerLoc, Value)> = Vec::with_capacity(locs.len());
+    for loc in locs {
+        let v = cx.layer_node(&loc)?.to_value();
+        layers.push((loc, v));
+    }
+    let find = |id: &str| {
+        layers
+            .iter()
+            .position(|(_, l)| values::text(l, "id") == Some(id))
+    };
+    let mut refs: Vec<(usize, String)> = Vec::new();
+    match scope {
+        SimplifyScope::All | SimplifyScope::Layers(_) => {
+            if let SimplifyScope::Layers(ids) = scope
+                && ids.iter().any(|id| find(id).is_none())
+            {
+                return Err(CommandError::Invalid(
+                    "Simplification layer not found".into(),
+                ));
+            }
+            for (i, (_, l)) in layers.iter().enumerate() {
+                if let SimplifyScope::Layers(ids) = scope
+                    && !ids
+                        .iter()
+                        .any(|id| Some(id.as_str()) == values::text(l, "id"))
+                {
+                    continue;
+                }
+                for (key, _) in channels::all(l) {
+                    refs.push((i, key));
+                }
+            }
+        }
+        SimplifyScope::Properties(list) => {
+            for (id, path) in list {
+                let i = find(id)
+                    .filter(|&i| channels::find(&layers[i].1, values::channel_key(path)).is_some())
+                    .ok_or_else(|| {
+                        CommandError::Invalid("Simplification property not found".into())
+                    })?;
+                refs.push((i, values::channel_key(path).to_owned()));
+            }
+        }
+    }
+    refs.dedup();
+    let expression_consumer = layers.iter().any(|(_, l)| {
+        channels::all(l).iter().any(|(_, p)| {
+            channels::get(l, p)
+                .and_then(|c| c.get("expr"))
+                .is_some_and(Value::is_truthy)
+        })
+    });
+    if expression_consumer {
+        return Ok(());
+    }
+    let comp_count = match cx.root().get("comps").map(pm_model::Node::kind) {
+        Some(pm_model::NodeKind::Object(m)) => m.len(),
+        _ => 1,
+    };
+    let nested_or_mapped = comp_count > 1
+        || layers.iter().any(|(_, l)| {
+            values::text(l, "type") == Some("precomp")
+                || l.get("d")
+                    .and_then(|d| d.get("timeRemap"))
+                    .is_some_and(Value::is_truthy)
+                || l.get("d")
+                    .and_then(|d| d.get("stretch"))
+                    .is_some_and(|v| !v.is_null())
+                || l.get("timeStretch").is_some_and(|v| !v.is_null())
+        });
+    let mut touched: Vec<usize> = Vec::new();
+    for (i, path) in refs {
+        let (loc, layer) = &layers[i];
+        let id = values::text(layer, "id").unwrap_or_default().to_owned();
+        if cx.check_lock(loc, &id).is_err() {
+            continue;
+        }
+        let Some(steps) = channels::find(layer, &path) else {
+            continue;
+        };
+        let prop = channels::get(layer, &steps).cloned().unwrap_or_default();
+        let structured = [
+            "g.",
+            "mp.",
+            "ta.",
+            "ts.",
+            "u.",
+            "x.",
+            "transitionIn.",
+            "transitionOut.",
+        ]
+        .iter()
+        .any(|p| path.starts_with(p));
+        let t = values::text(layer, "type").unwrap_or_default();
+        let supported = !structured
+            && !["extension", "shader", "audio", "precomp"].contains(&t)
+            && prop.get("v").and_then(Value::as_f64).is_some();
+        if !supported || prop.get("expr").is_some_and(Value::is_truthy) {
+            continue;
+        }
+        let all: Vec<&Value> = layers
+            .iter()
+            .filter(|(l, _)| l.comp_id == loc.comp_id)
+            .map(|(_, v)| v)
+            .collect();
+        let parent_rig = t == "group"
+            || all.iter().any(|o| {
+                ["parent", "group", "matteSource"]
+                    .iter()
+                    .any(|f| values::text(o, f) == Some(id.as_str()))
+            });
+        let comp = cx.comp_node(loc.comp_id.as_deref())?;
+        let comp_num = |k: &str| comp.get(k).and_then(crate::model::number_of);
+        let options = SimplifyOptions {
+            fps: comp_num("fps").unwrap_or(30.0),
+            from: values::num(layer, "from").unwrap_or(0.0),
+            duration: values::num(layer, "dur").unwrap_or(0.0),
+            composition_duration: comp_num("dur").unwrap_or(0.0),
+            shutter: comp_num("shutter"),
+            trim_outside: !nested_or_mapped
+                && !parent_rig
+                && !values::flag(layer, "threeD")
+                && layer
+                    .get("p")
+                    .and_then(|p| p.get(&path))
+                    .is_some_and(Value::is_truthy),
+        };
+        if let Some(next) = simplify_track(track::keys_of(&prop), &options) {
+            let layer = &mut layers[i].1;
+            let slot = channels::get_mut(layer, &steps).expect("found");
+            values::obj(slot).insert("kf", Value::Array(next));
+            if !touched.contains(&i) {
+                touched.push(i);
+            }
+        }
+    }
+    for i in touched {
+        let (loc, layer) = layers[i].clone();
+        cx.put_layer(&loc, layer)?;
+    }
+    Ok(())
 }
