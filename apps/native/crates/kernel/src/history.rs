@@ -550,31 +550,53 @@ impl History {
     /// compositions (`paths` other than `"composition"`) are canonicalized
     /// against `open_comp`, as the old app did.
     pub fn from_saved(saved: &Value, open_comp: Option<&str>) -> Option<History> {
-        let unpacked = unpack(saved)?;
-        let map = unpacked.as_object()?;
+        History::import(saved, open_comp).ok()
+    }
+
+    /// [`from_saved`](Self::from_saved) with the reason for a refusal
+    /// (generic wording; never quotes the history's content).
+    pub fn import(saved: &Value, open_comp: Option<&str>) -> Result<History, String> {
+        let unpacked = unpack(saved).ok_or("invalid history dictionary")?;
+        let map = unpacked.as_object().ok_or("history is not an object")?;
         if map.get("version") != Some(&Value::Number(1.0)) {
-            return None;
+            return Err("history version is not 1".into());
         }
-        let entries = map.get("entries")?.as_array()?;
+        let entries = map
+            .get("entries")
+            .and_then(Value::as_array)
+            .ok_or("history has no entries list")?;
         if entries.len() > MAX_ENTRIES {
-            return None;
+            return Err(format!("history has more than {MAX_ENTRIES} entries"));
         }
-        let index = map.get("index")?.as_f64()?;
+        let index = map
+            .get("index")
+            .and_then(Value::as_f64)
+            .ok_or("history has no index")?;
         if index.fract() != 0.0 || index < -1.0 || index >= entries.len() as f64 {
-            return None;
+            return Err("history index is out of range".into());
         }
         let root_relative = map.get("paths").and_then(Value::as_str) != Some("composition");
         let mut history = History::new();
         for entry in entries {
-            let e = entry.as_object()?;
-            let label = e.get("label")?.as_str()?.to_owned();
-            let patches = |side: &str| -> Option<Vec<Patch>> {
-                e.get(side)?
-                    .as_array()?
+            let e = entry.as_object().ok_or("a history entry is not an object")?;
+            let label = e
+                .get("label")
+                .and_then(Value::as_str)
+                .ok_or("a history entry has no label")?
+                .to_owned();
+            let patches = |side: &str| -> Result<Vec<Patch>, String> {
+                e.get(side)
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("a history entry has no {side} list"))?
                     .iter()
                     .map(|p| {
-                        let patch = Patch::from_value(p).ok()?;
-                        valid_patch(&patch).then_some(patch)
+                        let patch = Patch::from_value(p)
+                            .map_err(|_| format!("a {side} patch is malformed"))?;
+                        if valid_patch(&patch) {
+                            Ok(patch)
+                        } else {
+                            Err(format!("a {side} patch has an invalid path"))
+                        }
                     })
                     .collect()
             };
@@ -607,7 +629,7 @@ impl History {
             history.total_bytes -= removed.bytes;
         }
         history.trim();
-        Some(history)
+        Ok(history)
     }
 }
 

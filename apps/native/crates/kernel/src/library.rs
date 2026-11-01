@@ -241,9 +241,13 @@ impl LibraryStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        parse(&text).map(Some).map_err(|e| LibraryError::Json {
+        let value = parse(&text).map_err(|e| LibraryError::Json {
             key: key.to_owned(),
             message: e.to_string(),
+        })?;
+        decode_disk_value(value, value_limit(key)).map(Some).map_err(|message| LibraryError::Json {
+            key: key.to_owned(),
+            message,
         })
     }
 
@@ -392,6 +396,57 @@ impl LibraryStore {
         s.missing_slots = index.iter().filter(|e| !slots.contains(&e.id)).count();
         Ok(s)
     }
+}
+
+/// Per-key value ceilings (`shared/ipc.ts`): the heavy project keys 256 MiB,
+/// `takes` 768 MiB, everything else 32 MiB.
+fn value_limit(key: &str) -> usize {
+    const MIB: usize = 1024 * 1024;
+    match key.split_once('.').map_or(key, |(prefix, _)| prefix) {
+        "project" | "projectState" | "projectHistory" => 256 * MIB,
+        "takes" => 768 * MIB,
+        _ => 32 * MIB,
+    }
+}
+
+/// `decodeStorageJSON` (v1.3.0+, `main/storage-codec.ts`): values of 32 KiB
+/// or more may be stored as `{__powermoveDiskValue: 1, encoding: "gzip",
+/// bytes, data: base64(gzip(json))}` under the same file name. Not in
+/// v1.2.0's D-STATE inventory, but present in real profiles; without it
+/// those histories and projects would not open (N4).
+pub fn decode_disk_value(value: Value, limit: usize) -> Result<Value, String> {
+    let Some(map) = value.as_object() else {
+        return Ok(value);
+    };
+    if map.get("__powermoveDiskValue").is_none() {
+        return Ok(value);
+    }
+    let invalid = || "Invalid compressed recovery record.".to_owned();
+    let bytes = map.get("bytes").and_then(Value::as_f64).ok_or_else(invalid)?;
+    if map.get("__powermoveDiskValue") != Some(&Value::Number(1.0))
+        || map.get("encoding").and_then(Value::as_str) != Some("gzip")
+        || bytes.fract() != 0.0
+        || bytes < 2.0
+        || bytes > limit as f64
+    {
+        return Err(invalid());
+    }
+    let data = map.get("data").and_then(Value::as_str).ok_or_else(invalid)?;
+    let compressed = crate::project_io::base64::decode(data).ok_or_else(invalid)?;
+    let expected = bytes as usize;
+    let mut out = Vec::with_capacity(expected);
+    {
+        use std::io::Read;
+        flate2::read::GzDecoder::new(compressed.as_slice())
+            .take(expected as u64 + 1)
+            .read_to_end(&mut out)
+            .map_err(|_| invalid())?;
+    }
+    if out.len() != expected {
+        return Err("The compressed recovery record is incomplete.".into());
+    }
+    let text = String::from_utf8(out).map_err(|_| invalid())?;
+    parse(&text).map_err(|e| e.to_string())
 }
 
 /// `R.unwrap`: `{v, proj}`, a bare project, or a JSON string of either.

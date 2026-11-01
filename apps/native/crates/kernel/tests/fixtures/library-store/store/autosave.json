@@ -1,0 +1,37 @@
+{
+ "v": "1.0.0",
+ "proj": {
+  "id": "legacy",
+  "name": "Legacy",
+  "compId": "C1",
+  "compName": "Main",
+  "w": 200,
+  "h": 100,
+  "fps": 30,
+  "dur": 2,
+  "bg": "#000000",
+  "assets": {},
+  "layers": [
+   {
+    "id": "A1",
+    "type": "shape",
+    "name": "Autosaved",
+    "from": 0,
+    "dur": 2,
+    "on": true,
+    "p": {
+     "opacity": {
+      "v": 100,
+      "kf": [],
+      "expr": null
+     }
+    }
+   }
+  ],
+  "comps": {},
+  "revision": 1,
+  "futureField": {
+   "kept": true
+  }
+ }
+}

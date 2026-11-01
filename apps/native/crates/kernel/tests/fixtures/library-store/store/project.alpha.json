@@ -1,0 +1,52 @@
+{
+ "v": "1.2.0",
+ "proj": {
+  "id": "alpha",
+  "name": "Alpha",
+  "compId": "C1",
+  "compName": "Main",
+  "w": 200,
+  "h": 100,
+  "fps": 30,
+  "dur": 2,
+  "bg": "#000000",
+  "assets": {},
+  "layers": [
+   {
+    "id": "L1",
+    "type": "shape",
+    "name": "One",
+    "from": 0,
+    "dur": 2,
+    "on": true,
+    "p": {
+     "opacity": {
+      "v": 100,
+      "kf": [],
+      "expr": null
+     }
+    }
+   },
+   {
+    "id": "L2",
+    "type": "shape",
+    "name": "Two",
+    "from": 0,
+    "dur": 2,
+    "on": true,
+    "p": {
+     "opacity": {
+      "v": 100,
+      "kf": [],
+      "expr": null
+     }
+    }
+   }
+  ],
+  "comps": {},
+  "revision": 5,
+  "futureField": {
+   "kept": true
+  }
+ }
+}

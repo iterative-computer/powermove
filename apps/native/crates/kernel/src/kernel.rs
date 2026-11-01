@@ -62,6 +62,8 @@ pub struct OpenInfo {
     /// Persisted history that could not be imported (never silently: the
     /// project opens with empty undo and this notice).
     pub history_rejected: bool,
+    /// Why (generic wording).
+    pub history_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,7 +138,7 @@ impl Kernel {
         }
         let mut supersedes = Vec::new();
         let mut workspace = Value::Null;
-        let mut history_rejected = false;
+        let mut history_error = None;
         let store = match source {
             OpenSource::Untitled(project) => DocumentStore::new_untitled(project),
             OpenSource::File(opened) => DocumentStore::open(opened),
@@ -148,8 +150,8 @@ impl Kernel {
                     .map(str::to_owned);
                 let history = match &lib.history {
                     None => History::new(),
-                    Some(saved) => History::from_saved(saved, open_comp.as_deref()).unwrap_or_else(|| {
-                        history_rejected = true;
+                    Some(saved) => History::import(saved, open_comp.as_deref()).unwrap_or_else(|e| {
+                        history_error = Some(e);
                         History::new()
                     }),
                 };
@@ -197,7 +199,8 @@ impl Kernel {
             base_hash: base_hash.clone(),
             journal: journal.as_ref().map(|j| j.dir().to_path_buf()),
             history_entries: project.store().history().len(),
-            history_rejected,
+            history_rejected: history_error.is_some(),
+            history_error,
         };
         self.slots.insert(
             id.to_owned(),
