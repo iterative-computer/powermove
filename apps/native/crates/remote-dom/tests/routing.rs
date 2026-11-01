@@ -121,6 +121,12 @@ fn mounts_routes_and_inspects_without_entering_js() {
 #[test]
 fn serde_roundtrips_every_operation_and_feedback_shape() {
     let ops = vec![
+        Op::Range {
+            anchor: Some(6),
+            anchor_offset: 0,
+            focus: Some(6),
+            focus_offset: 1,
+        },
         create(6),
         insert(BODY, 6),
         Op::Remove {
@@ -589,6 +595,12 @@ fn executable_page_content_is_refused() {
         Op::Create {
             id: 6,
             kind: NodeKind::Element,
+            name: "svg:script".into(),
+            namespace: Some("http://www.w3.org/2000/svg".into()),
+        },
+        Op::Create {
+            id: 6,
+            kind: NodeKind::Element,
             name: "script".into(),
             namespace: None,
         },
@@ -611,4 +623,78 @@ fn executable_page_content_is_refused() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn range_validation_preserves_exact_endpoints_and_refuses_incomplete_pairs() {
+    let mut r = router();
+    mounted(&mut r);
+    assert!(
+        r.route_batch(
+            batch(
+                2,
+                vec![Op::Range {
+                    anchor: Some(6),
+                    anchor_offset: 0,
+                    focus: None,
+                    focus_offset: 0
+                }]
+            ),
+            &mut batch_queue()
+        )
+        .is_err()
+    );
+    r.route_batch(
+        batch(
+            2,
+            vec![Op::Range {
+                anchor: Some(6),
+                anchor_offset: 0,
+                focus: Some(6),
+                focus_offset: 1,
+            }],
+        ),
+        &mut batch_queue(),
+    )
+    .unwrap();
+    r.route_batch(
+        batch(
+            3,
+            vec![Op::Range {
+                anchor: None,
+                anchor_offset: 0,
+                focus: None,
+                focus_offset: 0,
+            }],
+        ),
+        &mut batch_queue(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn bounded_host_queue_is_nonblocking_and_preserves_order_on_retry() {
+    let (mut sink, receiver) = bounded_channel(1).unwrap();
+    let mut r = router();
+    r.route_batch(batch(1, vec![create(6)]), &mut sink).unwrap();
+    assert_eq!(
+        r.route_batch(batch(2, vec![insert(BODY, 6)]), &mut sink),
+        Err(Error::Backpressure)
+    );
+    assert_eq!(receiver.try_recv().unwrap().seq, 1);
+    r.route_batch(batch(2, vec![insert(BODY, 6)]), &mut sink)
+        .unwrap();
+    assert_eq!(receiver.try_recv().unwrap().seq, 2);
+    assert!(bounded_channel::<Batch>(0).is_err());
+}
+#[test]
+fn closed_host_queue_does_not_publish_or_advance_router_state() {
+    let (mut sink, receiver) = bounded_channel(1).unwrap();
+    drop(receiver);
+    let mut r = router();
+    assert_eq!(
+        r.route_batch(batch(1, vec![create(6)]), &mut sink),
+        Err(Error::TransportClosed)
+    );
+    assert_eq!(r.inspect().sent, 0);
 }

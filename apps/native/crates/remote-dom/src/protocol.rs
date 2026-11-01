@@ -96,6 +96,12 @@ pub enum Op {
         end: u32,
         direction: String,
     },
+    Range {
+        anchor: Option<NodeId>,
+        anchor_offset: u32,
+        focus: Option<NodeId>,
+        focus_offset: u32,
+    },
     Scroll {
         id: NodeId,
         x: f64,

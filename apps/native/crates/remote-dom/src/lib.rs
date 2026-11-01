@@ -13,6 +13,7 @@ pub enum Error {
     Sequence,
     TooLarge,
     Backpressure,
+    TransportClosed,
     PageFault(String),
 }
 impl fmt::Display for Error {
@@ -26,6 +27,27 @@ impl std::error::Error for Error {}
 /// Failure MUST leave the queue unchanged. Accepted messages remain ordered.
 pub trait TrySink<T> {
     fn try_send(&mut self, message: T) -> Result<(), Error>;
+}
+
+/// Queue-backed host adapter. Receive and enter WebKit/V8 on their owning threads.
+/// The router only performs try_send; it never waits for those threads.
+pub struct ChannelSink<T>(std::sync::mpsc::SyncSender<T>);
+impl<T> TrySink<T> for ChannelSink<T> {
+    fn try_send(&mut self, message: T) -> Result<(), Error> {
+        self.0.try_send(message).map_err(|error| match error {
+            std::sync::mpsc::TrySendError::Full(_) => Error::Backpressure,
+            std::sync::mpsc::TrySendError::Disconnected(_) => Error::TransportClosed,
+        })
+    }
+}
+pub fn bounded_channel<T>(
+    capacity: usize,
+) -> Result<(ChannelSink<T>, std::sync::mpsc::Receiver<T>), Error> {
+    if capacity == 0 {
+        return Err(Error::Invalid("queue capacity"));
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(capacity);
+    Ok((ChannelSink(sender), receiver))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -217,8 +239,14 @@ impl Router {
                 }
                 if *kind == NodeKind::Element
                     && (!valid_name(name)
-                        || ["script", "iframe", "object", "embed", "base"]
-                            .contains(&name.to_ascii_lowercase().as_str())
+                        || ["script", "iframe", "object", "embed", "base"].contains(
+                            &name
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or_default()
+                                .to_ascii_lowercase()
+                                .as_str(),
+                        )
                         || namespace.as_ref().is_some_and(|s| s.len() > 2048))
                 {
                     return Err(Error::Invalid("element name"));
@@ -236,7 +264,9 @@ impl Router {
                 if *id <= WINDOW {
                     return Err(Error::Invalid("reserved root"));
                 }
-                self.node(*id)?;
+                if self.node(*id)?.kind == Some(NodeKind::Fragment) {
+                    return Err(Error::Invalid("insert fragment children explicitly"));
+                }
                 if !matches!(
                     self.node(*parent)?.kind,
                     Some(NodeKind::Element | NodeKind::Fragment)
@@ -314,6 +344,17 @@ impl Router {
                 self.element(*id)?;
                 if start > end || !["forward", "backward", "none"].contains(&direction.as_str()) {
                     return Err(Error::Invalid("selection"));
+                }
+            }
+            Op::Range { anchor, focus, .. } => {
+                if anchor.is_some() != focus.is_some() {
+                    return Err(Error::Invalid("range"));
+                }
+                for id in [anchor, focus].into_iter().flatten() {
+                    if *id == WINDOW {
+                        return Err(Error::Invalid("range endpoint"));
+                    }
+                    self.node(*id)?;
                 }
             }
             Op::Scroll { id, x, y, behavior } => {
