@@ -76,10 +76,13 @@ pub enum TaskFailureCode {
 impl TaskFailureCode {
     pub fn ui_message(self) -> Option<&'static str> {
         match self {
+            // Copy from the design re-review (2026-11-01); sentence case, `danger`.
+            Self::SourceOffline => Some("The source media is offline. Reconnect it and try again."),
             Self::DiskFull => Some("Not enough disk space. Free some space and try again."),
-            // DESIGN-TODO(opus): review supplies no approved copy for these
-            // codes. None is a neutral placeholder, never a raw-log fallback.
-            _ => None,
+            Self::CodecUnsupported => Some("This media’s format isn’t supported."),
+            Self::Unknown => Some("The task couldn’t be completed. Try again."),
+            // Not an error to the user: the row leaves the list like a completed task.
+            Self::Cancelled => None,
         }
     }
 }
@@ -156,6 +159,11 @@ impl Task {
     pub fn diagnostic_for_log(&self) -> Option<&str> {
         self.error.as_deref()
     }
+    /// Legacy records carrying only a raw diagnostic classify as `Unknown`.
+    fn failure_code(&self) -> Option<TaskFailureCode> {
+        self.error_code
+            .or_else(|| self.error.as_ref().map(|_| TaskFailureCode::Unknown))
+    }
     pub fn presentation(&self) -> TaskPresentation<'_> {
         let transitional = matches!(
             self.state,
@@ -192,10 +200,8 @@ impl Task {
             },
             pause_resume_enabled: !transitional && !self.state.terminal(),
             cancel_enabled: !transitional && !self.state.terminal(),
-            error_code: self
-                .error_code
-                .or_else(|| self.error.as_ref().map(|_| TaskFailureCode::Unknown)),
-            error_message: self.error_code.and_then(TaskFailureCode::ui_message),
+            error_code: self.failure_code(),
+            error_message: self.failure_code().and_then(TaskFailureCode::ui_message),
         }
     }
 }

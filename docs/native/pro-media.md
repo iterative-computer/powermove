@@ -231,9 +231,13 @@ Review must-fix items 4–7 are implemented in `tasks.rs`:
   diagnostic as `Unknown`. `diagnostic_for_log` is the explicit logging accessor;
   serialization/debug retain model facts but must never be used for UI copy.
   DiskFull uses exactly: "Not enough disk space. Free some space and try again."
-  `DESIGN-TODO(opus)`: the review supplies no approved copy for SourceOffline,
-  CodecUnsupported, Cancelled or Unknown. Their `ui_message()` is `None`, a
-  neutral placeholder; hosts must never fall back to log strings or enum names.
+  Design re-review copy (2026-11-01): SourceOffline "The source media is
+  offline. Reconnect it and try again."; CodecUnsupported "This media’s format
+  isn’t supported."; Unknown (including legacy raw-diagnostic records) "The
+  task couldn’t be completed. Try again." Cancelled has no message: it is not
+  an error to the user, and the row leaves the list like a completed task.
+  Hosts never fall back to log strings or enum names. A legacy task with an
+  empty title shows its kind label alone.
 - Older serialized task facts remain readable: missing title stays empty,
   missing unit stays `None` (host leaves the unit unspecified), and a legacy raw
   error is classified `Unknown`. These records are host persistence inputs, not

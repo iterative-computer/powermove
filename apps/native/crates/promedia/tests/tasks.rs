@@ -377,10 +377,14 @@ fn typed_failure_keeps_diagnostics_out_of_ui_and_uses_only_approved_copy() {
         assert_eq!(view.error_code, Some(code));
         assert_eq!(
             view.error_message,
-            if code == TaskFailureCode::DiskFull {
-                Some("Not enough disk space. Free some space and try again.")
-            } else {
-                None
+            match code {
+                TaskFailureCode::SourceOffline =>
+                    Some("The source media is offline. Reconnect it and try again."),
+                TaskFailureCode::DiskFull =>
+                    Some("Not enough disk space. Free some space and try again."),
+                TaskFailureCode::CodecUnsupported => Some("This media’s format isn’t supported."),
+                TaskFailureCode::Unknown => Some("The task couldn’t be completed. Try again."),
+                TaskFailureCode::Cancelled => None,
             }
         );
         assert!(!format!("{view:?}").contains("worker-only diagnostic"));
@@ -410,7 +414,10 @@ fn legacy_task_record_retains_log_without_treating_it_as_ui_copy() {
         legacy.presentation().error_code,
         Some(TaskFailureCode::Unknown)
     );
-    assert_eq!(legacy.presentation().error_message, None);
+    assert_eq!(
+        legacy.presentation().error_message,
+        Some("The task couldn’t be completed. Try again.")
+    );
     assert_eq!(legacy.presentation().title, "");
     assert_eq!(legacy.unit, None);
 }
