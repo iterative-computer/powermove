@@ -125,11 +125,11 @@ does not change any value; it changes `Tokens::material` to `Solid`.
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
 | `metrics.field_menu_width` | Field menu width | 300 | 300 | 300 | 300 |
-| `metrics.gap` | Gap between panels | 6 | 6 | 6 | 6 |
+| `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.header` | Panel header, viewer bar and timeline header height | 32 | 32 | 32 | 32 |
 | `metrics.hit` | Minimum pointer target | 24 | 24 | 24 | 24 |
 | `metrics.inner_radius` | Control nested in a control (segment in a track) | 4 | 4 | 4 | 4 |
-| `metrics.inset` | Panel content inset; outer window padding | 12 | 12 | 12 | 12 |
+| `metrics.inset` | Content inset inside a panel | 12 | 12 | 12 | 12 |
 | `metrics.keyboard_step` | Splitter arrow-key step | 10 | 10 | 10 | 10 |
 | `metrics.keyframe` | Keyframe diamond size | 9 | 9 | 9 | 9 |
 | `metrics.layer_column` | Timeline layer list column width | 232 | 232 | 232 | 232 |

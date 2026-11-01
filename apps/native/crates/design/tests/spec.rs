@@ -78,8 +78,8 @@ const ROLES: &[(&str, &str)] = &[
     ("colors.labels.green", "Label: audio"),
     ("colors.labels.teal", "Label: video and image media"),
     ("colors.labels.gray", "Label: guides, nulls, cameras"),
-    ("metrics.gap", "Gap between panels"),
-    ("metrics.inset", "Panel content inset; outer window padding"),
+    ("metrics.gap", "Gap between panels and to the window edge"),
+    ("metrics.inset", "Content inset inside a panel"),
     ("metrics.panel_radius", "Panel corner radius"),
     (
         "metrics.control_radius",
