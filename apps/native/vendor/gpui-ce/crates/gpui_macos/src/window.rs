@@ -597,6 +597,10 @@ unsafe fn build_window_class(
         let mut decl =
             ClassBuilder::new(CString::new(name).unwrap().as_c_str(), superclass).unwrap();
         decl.add_ivar::<*mut c_void>(CString::new(WINDOW_STATE_IVAR).unwrap().as_c_str());
+        decl.add_method(
+            sel!(makeFirstResponder:),
+            composition_make_first_responder as unsafe extern "C" fn(_, _, _) -> _,
+        );
         if is_panel {
             decl.add_method(sel!(dealloc), dealloc_panel as unsafe extern "C" fn(_, _));
         } else {
@@ -4102,6 +4106,29 @@ mod tests {
                 NSCursorFrameResizeDirections::All
             ))
         );
+    }
+}
+
+// Powermove P-A11Y: keep AccessKit's host-focus flag aligned with the real
+// responder, including native-to-native handoffs inside the same key window.
+unsafe extern "C" fn composition_make_first_responder(
+    this: &Objc2Object,
+    _: Sel,
+    responder: ObjcId,
+) -> Bool {
+    unsafe {
+        let panel: bool = msg_send![this, isKindOfClass: class!(NSPanel)];
+        let base = if panel {
+            class!(NSPanel)
+        } else {
+            class!(NSWindow)
+        };
+        let accepted: Bool = msg_send![super(this, base), makeFirstResponder: responder];
+        if accepted.as_bool() {
+            let content: ObjcId = msg_send![this, contentView];
+            crate::composition_accessibility::responder_changed(content as usize);
+        }
+        accepted
     }
 }
 

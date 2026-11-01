@@ -137,6 +137,9 @@ if exercise {
             print("FOCUS_REPORT role=\(text(element, "AXRole")) id=\(text(element, "AXIdentifier")) title=\(text(element, "AXTitle"))")
         }
         require(error == .success && focused && matches, "focus \(name): set=\(error.rawValue), AXFocused=\(focused), application focus matches=\(matches)")
+        if name == "WebKit inner text field" || name == "native text field", let gpui = markers.first(where: { $0.id == "s2-navigation" }) {
+            require(!(attribute(gpui.element, "AXFocused").0 as? Bool ?? true), "previous GPUI node loses AXFocused while native slot owns responder")
+        }
     }
     if let gpui = markers.first(where: { $0.id == "s2-navigation" }), let input = input, let field = markers.first(where: { $0.id == "s2-field" }) {
         focus(gpui, "GPUI before slot")

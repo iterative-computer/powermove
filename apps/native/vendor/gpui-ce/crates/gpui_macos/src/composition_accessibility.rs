@@ -50,6 +50,7 @@ struct State {
     content: Retained<NSView>,
     previous: &'static AnyClass,
     root: Option<WrappedRoot>,
+    upstream: Rc<RefCell<accesskit_macos::SubclassingAdapter>>,
 }
 thread_local! {
     static VIEWS: RefCell<HashMap<usize, Weak<RefCell<State>>>> = RefCell::new(HashMap::new());
@@ -297,7 +298,6 @@ unsafe extern "C" fn focus(this: &AnyObject, _: Sel) -> *mut AnyObject {
 /// Neither callbacks nor native AX queries acquire MacWindowState's mutex.
 pub(crate) struct Adapter {
     state: Rc<RefCell<State>>,
-    upstream: accesskit_macos::SubclassingAdapter,
 }
 impl Adapter {
     pub unsafe fn for_window(
@@ -306,8 +306,9 @@ impl Adapter {
         activation: impl 'static + accesskit::ActivationHandler,
         actions: impl 'static + accesskit::ActionHandler,
     ) -> Self {
-        let upstream =
-            unsafe { accesskit_macos::SubclassingAdapter::for_window(window, activation, actions) };
+        let upstream = Rc::new(RefCell::new(unsafe {
+            accesskit_macos::SubclassingAdapter::for_window(window, activation, actions)
+        }));
         let content: Retained<NSView> = unsafe { msg_send![window as *mut AnyObject, contentView] };
         let previous: &'static AnyClass = unsafe { &*(content.class() as *const AnyClass) };
         let class = subclass(previous, false);
@@ -316,6 +317,7 @@ impl Adapter {
             content,
             previous,
             root: None,
+            upstream,
         }));
         let content = state.borrow().content.clone();
         VIEWS.with(|views| {
@@ -326,19 +328,26 @@ impl Adapter {
         unsafe {
             AnyObject::set_class(&content, class);
         }
-        Self { state, upstream }
+        Self { state }
     }
     pub fn update_if_active(
         &mut self,
         update: impl FnOnce() -> accesskit::TreeUpdate,
     ) -> Option<accesskit_macos::QueuedEvents> {
-        self.upstream.update_if_active(update)
+        let upstream = self.state.borrow().upstream.clone();
+        let events = upstream.borrow_mut().update_if_active(update);
+        events
     }
     pub fn update_view_focus_state(
         &mut self,
         focused: bool,
     ) -> Option<accesskit_macos::QueuedEvents> {
-        self.upstream.update_view_focus_state(focused)
+        let state = self.state.borrow();
+        let focused = focused && gpui_owns_focus(&state);
+        let upstream = state.upstream.clone();
+        drop(state);
+        let events = upstream.borrow_mut().update_view_focus_state(focused);
+        events
     }
 }
 impl Drop for Adapter {
@@ -400,4 +409,36 @@ pub(crate) fn has_adapter(content: usize) -> bool {
             .get(&content)
             .is_some_and(|state| state.strong_count() > 0)
     })
+}
+
+fn gpui_owns_focus(state: &State) -> bool {
+    state
+        .content
+        .window()
+        .and_then(|window| window.firstResponder())
+        .is_some_and(|responder| Retained::as_ptr(&responder) as usize == state.gpui)
+}
+
+/// NSWindow key status alone is insufficient: an embedded native view may own
+/// the first responder in that same key window. Sync after the responder action
+/// unwinds, since an AccessKit action can still hold its consumer tree borrowed.
+pub(crate) fn responder_changed(content: usize) {
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        let state = VIEWS.with(|views| views.borrow().get(&content).and_then(Weak::upgrade));
+        let Some(state) = state else {
+            return;
+        };
+        let state = state.borrow();
+        let focused = gpui_owns_focus(&state)
+            && state
+                .content
+                .window()
+                .is_some_and(|window| window.isKeyWindow());
+        let upstream = state.upstream.clone();
+        drop(state);
+        let events = upstream.borrow_mut().update_view_focus_state(focused);
+        if let Some(events) = events {
+            events.raise();
+        }
+    });
 }
