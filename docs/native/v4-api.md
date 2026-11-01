@@ -160,12 +160,17 @@ no new visual defaults. All future visual output remains provisional until revie
 ## Eval and verification
 
 `eval/tasks.ts` has 40 synthetic task records: ten built-in-style, ten wild, ten
-held-out, ten reserved owner-panel specs. Owner entries always report
-`pending-owner`, never pass. No private owner panel name, ID, code or source is
-tracked. The held-out group runs only when explicitly selected; because its specs
-are public this is a separation of evaluation sets, not a claim of secret tests.
-`eval/scenarios.tsx` provides runnable behavior fixtures for the 30 available
-specs. The runner reports failures and returns nonzero. `--candidate=./module.ts` selects
+held-out, ten owner-approved anonymized panel specs. The owner records include
+inputs, interactions, required host reads/writes, edge cases and acceptance checks.
+Their synthetic fixtures report `fixtureStatus` separately from full API
+acceptance: unavailable host capabilities yield `status: fail`,
+`failureKind: api-gap` and a `blockedBy` list. No private owner panel name, ID,
+code or source is tracked. The held-out group runs only when explicitly selected;
+because its specs are public this is a separation of evaluation sets, not a claim of secret tests.
+`eval/scenarios.tsx` provides the original 30 scaffold fixtures and ten authored
+owner behavior fixtures. Owner service responses and writes are test seams, not
+working host services or independent extension ports. The runner reports failures
+and returns nonzero. `--candidate=./module.ts` selects
 a module exporting the same `createRoot` adapter API for reconciler comparisons. `--wire` additionally
 replays every emitted batch into the real Rust validator and compares final
 native types/children; this is a headless protocol subset, not visual acceptance.

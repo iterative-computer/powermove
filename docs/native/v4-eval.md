@@ -1,5 +1,87 @@
 # v4 API evaluation before freeze — package 14
 
+## Owner specification follow-up
+
+The ten reserved owner tasks now have owner-approved, anonymized behavior briefs
+and runnable synthetic fixtures. The current **JS-only** run on macOS arm64 with
+Bun 1.4.4 reports **27 pass / 13 fail / 0 pending**, exits 1, and includes held-out
+tasks. No Rust build or wire validator was used for this follow-up. This is a
+separate evidence scope from the historical wire-backed results below.
+
+All **10/10 owner fixtures pass their synthetic behavior checks**. Full owner
+acceptance is **0/10 pass, 10/10 fail (`failureKind: api-gap`)**. The runner reports
+`fixtureStatus` separately and includes each task's `blockedBy` list; passing
+locally authored decision logic never certifies unavailable host services. No API
+implementation was changed to obtain these results.
+
+| Task | Generic behavior title | Synthetic fixture | Full API acceptance / main gap |
+|---|---|---|---|
+| owner-01 | Curve segment editor | pass | fail: project edits, preferences, pointer/clipboard payload |
+| owner-02 | Video cutout with brush guidance | pass | fail: decoding/analysis lifecycle, mask insertion, brush coordinates |
+| owner-03 | Audio take recovery workflow | pass | fail: capture, transport, asset import and acknowledged insertion |
+| owner-04 | Paged media search and import | pass | fail: catalog access, previews, file picker and import |
+| owner-05 | Verified transparent asset picker | pass | fail: alpha inspection, catalog/attribution and import |
+| owner-06 | Read-only frame comparison | pass | fail: evaluated geometry, frame readback and preview lifecycle |
+| owner-07 | Position-preserving pivot grid | pass | fail: evaluated geometry/transforms, project edits and preferences |
+| owner-08 | Selective effect batch action | pass | fail: project/selection services and command/control modifiers |
+| owner-09 | Keyboard arcade with saved score | pass | fail: durable settings, visibility/frame lifecycle and key-repeat field |
+| owner-10 | Playhead annotation form | pass | fail: time/document subscriptions, edits and native-input inspection |
+
+Selection favored distinct panel workflows by interaction, state and data-flow
+complexity: complex editors and asynchronous media workflows through batch tools
+and a small time-based form. Redundant interaction patterns and non-panel effects
+were excluded. Source references were inspected read-only. No source mapping,
+name, identifier, path, literal UI copy, code, artwork or user project data is
+included; every fixture label, numeric example and resource handle is synthetic.
+
+Each registry record describes what is shown, inputs, interactions, required
+reads/writes, edge cases, acceptance checks and current API gaps. The owner
+fixtures live in `eval/scenarios.tsx` and use the public snapshot/event API via
+`Evaluation`; command logs, service responses, notification delivery, frame ticks
+and resource disposal are explicitly test seams. Some notifications are modeled
+by republishing a view. They do not perform real host reads/writes, networking,
+permission requests, capture, analysis or file import. Unknown properties and
+resource descriptors prove no native renderer behavior. Native focus, rendering,
+performance and all descriptive edge cases beyond the enumerated checks remain
+unverified. For annotation input, the host observation overlay retains the draft;
+this does not fix the public accepted-snapshot limitation. With wire validation,
+that existing mismatch can fail the fixture before the API-gap classification.
+
+The other three JS-only failures are `builtin-06` (current controlled text is not
+observable in the accepted snapshot), `wild-09` (default-deny validation requires
+the wire binary), and `held-out-10` (atomic native rejection requires that binary).
+The last two are missing validation infrastructure in this run, not new API
+regressions. Without wire, `wild-10` cannot detect the previously reported native
+stylesheet mismatch; its headless pass does not resolve that finding.
+
+Follow-up checks: **74 Bun tests passed, 45 wire-dependent tests skipped, zero
+failed**; base and eval/examples TypeScript checks, formatting and diff whitespace
+checks passed. The locked install required Bun 1.4.4; no lockfile was changed.
+
+Reproduction (use Bun 1.4.4; an older Bun may not understand this lockfile):
+
+```sh
+cd apps/native/js/v4
+bun install --frozen-lockfile
+bun run eval --include-held-out
+bun run eval --group=owner
+bun test
+bun run typecheck
+bun x tsc --noEmit -p eval/tsconfig.json
+bun run format
+```
+
+The CLI default and `--scaffold`/`--candidate` paths all route owner records to the
+same fixture and full-acceptance reporting. This is an authored behavior evaluation,
+not a blinded independent owner-panel port. No LOC or lookup metric is invented
+for these fixtures. Public API basis: `v4-api.md` sections Protocol and ownership,
+Interaction and bindings, and powermove/ui, plus the exported `SurfaceEvent`
+declaration. Those document the missing host services and typed-event limits.
+The recommendation remains **not ready**; the private plan threshold and native
+acceptance gates remain unverified.
+
+## Historical package 14 wire-backed evaluation
+
 Recommendation: **not ready**. The independent public-API attempt passes **28/30
 available briefs (93.33%)**, fails two inspection/drive checks, and leaves **10/10
 owner-panel specifications pending-owner**. Only 28/40 records currently have

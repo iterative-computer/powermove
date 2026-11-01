@@ -1,7 +1,7 @@
 import { createRoot, type Commit } from "../src";
 import { tasks } from "./tasks";
 import { exercise } from "./scenarios";
-import { runExtension } from "./extensions";
+import { runExtension, runOwner } from "./extensions";
 export async function runTask(
   id: string,
   wire?: string,
@@ -10,6 +10,7 @@ export async function runTask(
   const task = tasks.find((t) => t.id === id);
   if (!task) throw Error(`Unknown task ${id}`);
   if (task.status !== "ready") return { id, status: "pending-owner" };
+  if (task.group === "owner") return runOwner(id, wire, factory);
   const commits: Commit[] = [];
   const root = factory(async (c) => {
     commits.push(c);
@@ -92,8 +93,8 @@ if (import.meta.main) {
         {
           scope:
             args.includes("--scaffold") || candidate
-              ? "original scaffold; headless protocol subset; not visual or macOS acceptance"
-              : "independent public-API extensions; headless behavior/wire subset; not visual or macOS acceptance",
+              ? "original scaffold plus authored owner fixtures; headless protocol subset; not visual or macOS acceptance"
+              : "independent public briefs plus authored owner fixtures; headless behavior/wire subset; not visual or macOS acceptance",
           mode:
             args.includes("--scaffold") || candidate
               ? "scaffold"
