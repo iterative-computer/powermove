@@ -259,10 +259,9 @@ changed the engine service's playback schedule and the harness's A/V/drop
 definitions, and measured on screen. The session was locked 09:00–09:45; after
 unlock, two probe batches (120/60 Hz) and the 120 Hz app A/B ran under the
 `latency` GUI lock (each < 10 min, display mode restored). The 60 Hz A/B ran
-next (same binary) under the on-screen lane's lock. **The audio A/B did not
-run:** the harness refused it twice, first for < 8 GiB free disk and then for
-active builds. The two follow-up fixes were not rebuilt for an on-screen run;
-a release rebuild needs ≥ 8 GiB free afterwards and a quiet machine. An earlier probe run made behind
+next (same binary) under the on-screen lane's lock, then the audio A/B. The
+follow-up fixes (loop wrap, render-ahead, timed present) were not measured on
+screen by this lane. An earlier probe run made behind
 the lock screen is superseded by the on-screen repeat.
 
 Conditions: Apple M5 / 16 GiB, macOS 27.2 (26B5086k), AC power, built-in
@@ -334,7 +333,7 @@ Existing apps retained, as in earlier passes. Quantiles are nearest rank.
 | Raw scanout gaps > 1.5 refresh | 34 | 19 | 1,799 (expected: held frames) | Not a drop measure any more |
 | Dropped content frames (skipped + late onsets) | — | 12 (0 + 12) | **36 (0 + 36)** | FAIL zero; see below |
 | Worker → completion p95, new frames only (ms) | 1.511 (all presents) | 2.624 | 4.061 | PASS 4.167 local bound, barely |
-| A/V | 34.634 / 12.558 (all presentations) | not run | not run | UNVERIFIED (disk guard) |
+| A/V | 34.634 / 12.558 (all presentations) | see audio table | see audio table | mean PASS, jitter FAIL |
 
 The 36 dropped onsets break down as follows.
 - **19 are a bug in this change, at the loop wrap (every 3.00 s).** The
@@ -364,8 +363,34 @@ load 10.7 → 7.0 legacy, 7.0 → 6.8 default):
 | Dropped content frames | 3 raw gaps | **0** | 5 (all loop wraps after 47 s; bug fixed afterwards) | Re-run needed |
 | Worker → completion p95 (ms) | 1.725 | 2.964 | **3.209** | PASS 8.333 local bound |
 
-The audio A/B (legacy and new) was refused by the harness because other lanes
-had build processes running. **A/V remains unmeasured on screen.**
+The audio A/B was first refused (active builds) and then run by the on-screen lane;
+see below.
+
+**Audio A/B, 120 Hz, 20 s, n≈600 onsets** (on-screen lane, binary `c1dbf3bc9`, i.e.
+before the loop-wrap fix; load 6.2 → 5.3 legacy, 5.3 → 4.8 default):
+
+| Row | Fix pass | Legacy schedule | New schedule | Verdict |
+|---|---|---|---|---|
+| Onset A/V mean signed / abs (ms) | 34.634 abs (all presentations) | 20.680 / 20.680 | **−0.063 / 0.588** | PASS ≤ 1 ms mean (diagnostic, n=1 run) |
+| Onset jitter p50 / p95 about mean (ms) | 12.558 (all presentations) | 0.279 / 0.315 | 0.021 / **8.291** | FAIL ≤ 2 ms |
+| All-presentation mean / jitter p95 (ms) | 34.634 / 12.558 | 33.058 / 12.681 | — | Old metric artefact |
+| Late / skipped onsets | — | 11 / 0 of 601 | 30 / 0 of 600 | FAIL zero |
+
+Legacy's onsets were consistently 20.7 ms late (one target-to-glass lag) with low
+jitter. The new schedule removed the bias. Its 36 outliers above 2 ms are one
+refresh each:
+- **10 at media time 0** are the loop-wrap bug, fixed in `751f09522`.
+- **~20 are early (−8.35 ms):** the compositor latched the commit one refresh
+  sooner than usual (display − target 0.99 instead of 1.98 refreshes).
+- **~6 are compositor misses (+8 to +17 ms).**
+
+The early latch is fixed afterwards by presenting `atTime:` the predicted glass
+time minus half a refresh, never earlier than the target. A frame can then no
+longer appear before the instant its picture was chosen for. Lag is still
+sampled against the link target. Limitation: a lag estimate that ratchets up
+(≥ 8 of 15 late samples) does not correct downward. **Not re-measured on
+screen.** In the on-screen lane's sampler, 60 Hz playback CPU was ~12.5%
+(legacy) vs ~9.7% (new), one core = 100%.
 
 Headless service (dev, offscreen) after the change: exactly **1,800** submissions
 per 60 s at 120 and 60 Hz, **5,290 / 1,796** held ticks, worker → completion p95
