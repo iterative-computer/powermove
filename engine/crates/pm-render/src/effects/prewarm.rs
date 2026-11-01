@@ -68,6 +68,17 @@ pub(crate) struct Prewarm {
     pub waited_us: u64,
 }
 
+impl Drop for Prewarm {
+    fn drop(&mut self) {
+        // The worker can finish its current build, but queued work must not
+        // keep a retiring device alive. Missing claims skip those jobs.
+        self.started
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+}
+
 impl std::fmt::Debug for Prewarm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Prewarm")

@@ -9,7 +9,12 @@ fn table(n: usize) -> String {
         .join(",")
 }
 
+// The compiler service deliberately has fewer slots than libtest workers.
+// These tests assert MSL output, not overload admission.
+static COMPILER_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn msl(body: &str) -> String {
+    let _slot = COMPILER_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let frag = format!(
         "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n{body}"
     );

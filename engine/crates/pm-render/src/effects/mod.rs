@@ -613,7 +613,7 @@ impl Effects {
             .filter(|k| self.entries.contains_key(*k))
             .cloned()
             .collect();
-        for (key, _) in &self.entries {
+        for key in self.entries.keys() {
             let user = self
                 .get(key.0, key.1.as_str())
                 .is_some_and(|d| d.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn);
