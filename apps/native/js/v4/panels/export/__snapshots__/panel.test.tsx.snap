@@ -1810,7 +1810,6 @@ exports[`wire snapshot: selected video 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -3643,7 +3642,6 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -5474,7 +5472,6 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -7284,7 +7281,6 @@ exports[`wire snapshot: ProRes alpha 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -8874,7 +8870,6 @@ exports[`wire snapshot: PNG sequence 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -10212,7 +10207,6 @@ exports[`wire snapshot: still 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -10722,7 +10716,6 @@ exports[`wire snapshot: project 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -12300,7 +12293,6 @@ exports[`wire snapshot: no captions 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -14131,7 +14123,6 @@ exports[`wire snapshot: multiple captions 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -16180,7 +16171,6 @@ exports[`wire snapshot: custom size 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -18251,7 +18241,6 @@ exports[`wire snapshot: inline invalid size 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -20085,7 +20074,6 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -20263,7 +20251,6 @@ exports[`wire snapshot: preparing 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -20490,7 +20477,6 @@ exports[`wire snapshot: rendering with preview and ETA 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -20670,7 +20656,6 @@ exports[`wire snapshot: finishing 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -20848,7 +20833,6 @@ exports[`wire snapshot: cancelling 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -21026,7 +21010,6 @@ exports[`wire snapshot: failed 1`] = `
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",
@@ -22861,7 +22844,6 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
           "keydown": [
             "Enter",
             "Escape",
-            ".",
           ],
         },
         "role": "dialog",

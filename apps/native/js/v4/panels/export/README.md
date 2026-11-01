@@ -85,7 +85,7 @@ not implement the export backend. This lane does not edit surface/src or js/v4/s
   require changes in the prohibited surface/src and js/v4/src paths.
 - Typed kit/AX support is needed for option subtitles, placeholder, help,
   live announcements, progress value-description/ETA, default buttons, initial
-  radio focus and sheet dismissal policy. `metadata.export` records requests;
+  radio focus, modifier-aware default prevention for ⌘. and sheet dismissal policy. Ordinary periods in text fields are never suppressed. `metadata.export` records requests;
   it is not interpreted by the current kit, and tests never claim it is.
 
 ## DESIGN-TODO(opus)

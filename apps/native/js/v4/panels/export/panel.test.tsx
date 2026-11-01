@@ -277,6 +277,15 @@ test("keyboard kind navigation and popup/checkbox interactions reach the model a
 });
 test("Return in preset field saves without starting export; Save joins focus order when named", async () => {
   const f = await mounted();
+  // The protocol's key filter has no modifier predicates. Suppressing '.' at
+  // sheet scope would prevent ordinary periods in the preset name field.
+  const sheet = named(f.root, "export.sheet");
+  const listeners = f.commits
+    .flatMap((c) => c.ops)
+    .find((op) => op.op === "setListeners" && op.id === sheet.id);
+  if (!listeners || listeners.op !== "setListeners")
+    throw new Error("missing sheet listeners");
+  expect(listeners.flags.keydown.keys).not.toContain(".");
   await event(f.root, named(f.root, "export.presetName").id, "input", {
     value: "Delivery",
   });

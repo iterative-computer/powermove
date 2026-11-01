@@ -197,7 +197,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       }}
       focusRequest={progressSheet ? undefined : "export.kind"}
       onKeyDown={keyboard}
-      preventDefault={{ keydown: ["Enter", "Escape", "."] }}
+      preventDefault={{ keydown: ["Enter", "Escape"] }}
     >
       <text
         role="heading"
