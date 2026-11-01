@@ -64,7 +64,7 @@ impl Picker {
     pub fn navigate(&mut self, key: &str) -> Option<String> {
         let n = self.filtered().len();
         match key {
-            "escape" | "tab" => self.open = false,
+            "escape" => self.open = false,
             "up" if n > 0 => self.selected = (self.selected + n - 1) % n,
             "down" if n > 0 => self.selected = (self.selected + 1) % n,
             "home" => self.selected = 0,

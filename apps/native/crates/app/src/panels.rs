@@ -767,6 +767,8 @@ pub fn header(
                     .child(
                         div()
                             .id("viewer-zoom")
+                            .tab_index(10)
+                            .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                             .role(Role::Button)
                             .aria_label(format!("Zoom: {title}"))
                             .h(px(m.field))
@@ -801,6 +803,8 @@ pub fn header(
                 bar.child(
                     div()
                         .id("timeline-play")
+                        .tab_index(10)
+                        .focus_style(|s| s.ring(px(m.border * 2.)).ring_color(rgb(c.focus)))
                         .role(Role::Button)
                         .aria_label(if playing { "Pause" } else { "Play" })
                         .flex_none()

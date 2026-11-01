@@ -827,7 +827,7 @@ pub fn panel_title(id: &str) -> &str {
         "viewer" => "Viewer",
         "timeline" => "Timeline",
         "inspector" => "Properties",
-        "fxbrowser" => "Effects & Presets",
+        "fxbrowser" => "Effects",
         "gradient-controls" => "Gradient",
         "takes" => "Takes",
         "shader" => "Shader",
