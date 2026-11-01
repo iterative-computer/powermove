@@ -1,0 +1,23 @@
+{
+  "baseline": "v1.2.0:bun.lock",
+  "codex": "0.159.1",
+  "claude": "2.1.280",
+  "pins": [
+    {
+      "package": "@anthropic-ai/claude-code-darwin-arm64",
+      "integrity": "sha512-ctkNgja8Yi2kngVFPO2667k6zbtJwjQ+dOTeEp1XmzHcoDFdaee4h4WVgZllsewm/Io+pPPPSFQVdGHOtdE/1A=="
+    },
+    {
+      "package": "@anthropic-ai/claude-code-darwin-x64",
+      "integrity": "sha512-991qNyZVC/ra6THRMLDJ1mB1a+/C/bpKEA1w5ttNJA0mTvVm012kAbS3Pf7zrvRBFe7fU1KeHkGlTTq49519qA=="
+    },
+    {
+      "package": "@openai/codex-darwin-arm64",
+      "integrity": "sha512-asbXtXQerzPO8CL3t/5++Whj00k+NkbE4ngT56pCwx2/5JJVCI0glEjCECGK8rA0v4zb94EAZonxAcfOd+/1MA=="
+    },
+    {
+      "package": "@openai/codex-darwin-x64",
+      "integrity": "sha512-aCcslg6PejQSE/FhEFNk5JMQuiUYYTwWK2W/kAIZ18qSHFV0UHqqmSnHDSPOx1xClUGc9RhtAB6y9TO99hHk2Q=="
+    }
+  ]
+}
