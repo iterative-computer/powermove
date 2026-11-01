@@ -862,30 +862,19 @@ ProRes Y′CbCr is limited range with full-range alpha. MOV and MP4 write `colr`
 
 ## 11. Effects, transitions, and the shader contract
 
-### No shader is dropped
+### Compatibility and gate
 
-- **Gate:** every GLSL source in the repository, the Store, the docs samples, and a
-  generated corpus of agent-authored shaders (prompts covering every contract
-  feature, written by the same agent harness users use) compiles and matches its WebGL
-  output within the parity tolerances before cutover.
-- **Runtime fallback:** a shader that fails translation on a user's machine renders
-  through a minimal GLSL runner in the renderer (one WebGL2 context, the contract
-  below, no compositor), uploaded to the engine like the `raster` override; it is
-  reported and marked not headless-renderable (decision 19).
-- A failure is fixed in the pipeline, never by changing the user's shader.
+Keep valid authored GLSL, its formulas, logical resolution, `u_res`, coordinates,
+uniform calls and sampling semantics. Fix translation failures in the pipeline;
+do not rewrite user shaders to hide malformed GLSL. The cutover gate requires
+previously accepted valid programs to keep drawing and match the classified visual
+oracle. [S4](native/s4-glsl.md) records the current inventory and remaining gaps;
+its available-corpus draw regression passes, but the complete gate remains open.
 
-### Built-in effects keep today's look
-
-The 16 effects, 4 transitions, and Studio Cube keep their GLSL source, which runs
-through the compatibility pipeline and is the reference. An engine-side WGSL path may
-accelerate a built-in only when it is output-identical to the GLSL on `compat` level 1
-effect instances. Visual fixes (a correct Gaussian at every radius, Glow and Drop
-Shadow on it, analytic edges) apply only to `compat` level 2 effect instances. The five
-shader-layer presets are user GLSL copied into `d.code` and stay GLSL.
-
-Forks of built-ins (`effects-basic`, `layers-3d`, updated by local merge in
-`main/extensions/update-fork.ts`) register their own GLSL under the built-in ids; the
-engine uses the fork's definition snapshot. The Phase 0 audit covers local forks.
+The built-in effects, transitions and Studio Cube retain their GLSL definitions;
+shader-layer presets remain user GLSL. A built-in WGSL acceleration must be
+output-identical for `compat` level 1; visual improvements apply to level 2.
+Forks use their own winning definition snapshot.
 
 ### The GLSL contract (normative)
 
@@ -896,52 +885,52 @@ engine uses the fork's definition snapshot. The Phase 0 audit covers local forks
 | Shader layers and extension fragment layers | `iResolution`, `iTime` (layer-local), `iGlobalTime`, `iProgress`, `iFrame` (root fps), `iMouse` = (0, 0), `uv`, `fragColor`, and the header helpers (SDF, noise, palette); extension-layer toggles are `uniform bool`; `@param` annotations |
 | Enables | Effect and mask enables are animatable (`<fx>.$enabled`) |
 
-Shader-layer uniform types come from `@param` annotations stored in
-`UIState.shaderMeta.udefs`; numeric controls send one float, so `vec2`, `vec4`, and
-`int` uniforms stay at 0 (`compositor.ts:1024-1030`). The engine ports
-`parseUniforms` exactly and reproduces this binding.
+Preserve parameter metadata and GL uniform binding rules, including the distinct
+effect float toggles and extension-layer Boolean toggles. Origin, derivatives and
+sampler state retain the authored GL semantics. Legacy GLSL receives E-encoded
+values independent of the display; values above 1.0 survive unless the effect
+explicitly clamps them.
 
-### The pipeline
+### Current shader pipeline
 
-1. **Wrap** with the existing generators (`kernel/glsl.ts`, `extension-layers.ts`).
-2. **Normalize:** `#version 300 es` → `#version 450`; remove precision qualifiers;
-   inject `pm_FragCoord` for `gl_FragCoord`.
-3. **Compile** with glslang (relaxed Vulkan rules, automatic bindings and locations).
-4. **Split combined samplers** at the SPIR-V level.
-5. **Translate** with naga, derivative-uniformity checks off (`ShaderSource::Naga`); S3
-   compares against SPIRV-Cross to MSL through passthrough shaders.
-6. **Cache** by source hash, backend, driver.
-7. **Errors** map to the user's line numbers.
+1. **Wrap and validate.** Use the effect/fragment-layer generators, enforce source
+   limits, then compile and link the unmodified GLSL ES 3.00 program with glslang's
+   ES front end. Malformed programs fail with author-line diagnostics.
+2. **Normalize and compile.** Normalize to GLSL 4.50, remove precision qualifiers,
+   rename conflicting keywords and inject required polyfills; glslang emits SPIR-V
+   with relaxed Vulkan rules and automatic bindings/locations.
+3. **Rewrite and reflect.** Apply SPIR-V interface, binding, sampler-array,
+   combined-sampler and compatibility rewrites, then resource limits and binding
+   checks. Cache prepared SPIR-V plus reflection by source, line offset, pipeline
+   revision, compiler versions and backend/driver context.
+4. **naga and Metal.** Parse/validate with naga, applying GL coordinate adjustment
+   and disabling derivative-uniformity checks. Production GLSL MSL writing uses the
+   isolated compiler pool and the renderer's existing Metal math options.
 
-**Origin and sampling:** GL conventions (bottom-left origin, `dFdy` as in WebGL);
-sampler state per effect type reproduced. **Color domain:** legacy GLSL receives
-E-encoded values independent of the display; values above 1.0 pass through unless an
-effect declares `clamp: true`. **Store GLSL is untrusted input:** the pipeline is
-fuzzed and resource-limited, and compile failures stay per definition.
+`pm-glsl` runs translation, cached `Prepared::finish()` and production naga-to-MSL
+writing in **two killable compiler process slots**, with no waiting queue. Each
+request has a 20-second deadline; expired or over-budget workers are killed and
+reaped. Busy, process, resource and deadline failures are named and transient
+failures are not cached. **Native Metal pipeline compilation still runs in the
+production device owner and is not yet contained by that process boundary.**
 
-### Definition snapshots
+SPIRV-Cross is not an enabled alternate route: S4 found no remaining naga failure
+warranting it. Any future route needs S4's reflection, bounds, resource, timeout
+and device-recovery contract. **WebGL is the last compatibility route before a
+placeholder**, for otherwise-valid programs the native path cannot draw. The
+existing fallback runner remains; the new native compat-page route is still
+unimplemented and unverified. A fallback does not count as native headless parity.
 
-- The kernel pushes a snapshot per registered definition to every session:
-  `{id, version, renderer (verbatim, including role and assetField), glsl?, params,
-  flags}`. UI-only fields (`ui`, `advanced`, `options`, widget hints) are stripped.
-- Snapshots follow the winning registration per id (last registered wins; disabling
-  restores the previous one) and are re-pushed on every register, dispose, and hot
-  reload.
-- 3D roles and `scene3d` behavior keep today's id-based rules (`powermove.3d.{object,
-  light,camera}`, `powermove.3d.scene`). When a fork registers a built-in id with a
-  different renderer kind, the snapshot's kind wins and the layer leaves the 3D scene.
-  The Phase 0 audit lists third-party `layer3d`, `scene3d`, and `mesh` definitions.
-- **Missing definitions** behave as today: a missing effect is skipped with its data
-  kept; a missing extension layer shows the checkerboard placeholder.
-- Export jobs and Collect Project embed the snapshots they use. `pm-cli` fails only
-  when a definition has no snapshot and is not already marked missing.
-- `uiState.getShaderMeta` (`shaderKey`, `missing`, `missingAsset`, `sceneWarnings`,
-  `sceneError`) is filled from engine render events at the frame's revision.
-- The `raster` override keeps working fully (section 20).
+### Definitions and future contract
 
-### Contract v2
+Snapshots retain verbatim renderer/role/asset fields, GLSL, parameters and flags;
+UI-only fields are stripped. The winning registration is refreshed on register,
+dispose and reload, including forks that change renderer kind. Missing effects
+retain their data and are skipped; missing extension layers use the placeholder.
+Exports pin/embed their definition snapshots; render metadata belongs to the
+frame's revision. The `raster` override remains supported (section 20).
 
-A WGSL contract for new extensions at apiVersion 4. GLSL stays supported indefinitely.
+A WGSL contract for apiVersion 4 is planned and unshipped. GLSL remains supported.
 
 ## 12. Text
 
