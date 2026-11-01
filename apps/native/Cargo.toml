@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["spikes/s2"]
+exclude = ["vendor/gpui-ce"]
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
