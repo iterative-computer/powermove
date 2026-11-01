@@ -10,9 +10,9 @@ mod raster;
 mod text;
 
 pub use composite::Composite;
-pub use image::{ImageData, Source, SourceKey, Sources};
+pub use image::{ImageData, MAX_PIXELS, Source, SourceKey, Sources};
 pub use kurbo::{Affine, Cap, Join, Point, Rect, Stroke, Vec2};
-use kurbo::{BezPath, Shape};
+use kurbo::{BezPath, ParamCurveNearest, Shape};
 use paint::FrozenPaint;
 pub use paint::{Gradient, GradientKind, Paint, Pattern, Repetition};
 pub use path::Path;
@@ -21,11 +21,13 @@ pub use pm_vector::render::{color::CanvasColor as Color, scene::FillRule};
 pub use raster::CpuRasterizer;
 use std::sync::Arc;
 pub use text::{
-    Direction, Font, TextAlign, TextBaseline, TextEngine, TextLayout, TextMetrics, TextProvider,
+    Direction, Font, FontBaselines, FontContext, TextAlign, TextBaseline, TextEngine, TextLayout,
+    TextMetrics, TextProvider,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Type,
     IndexSize,
     Range,
     Syntax,
@@ -237,15 +239,17 @@ impl Canvas {
     pub fn set_stroke(&mut self, p: Paint) {
         self.state.stroke = p;
     }
-    pub fn set_fill_color(&mut self, s: &str) {
-        if let Some(c) = pm_vector::render::color::parse(s) {
+    pub fn set_fill_color(&mut self, s: &str) -> Result<()> {
+        if let Some(c) = paint::parse_color(s)? {
             self.set_fill(Paint::Solid(c));
         }
+        Ok(())
     }
-    pub fn set_stroke_color(&mut self, s: &str) {
-        if let Some(c) = pm_vector::render::color::parse(s) {
+    pub fn set_stroke_color(&mut self, s: &str) -> Result<()> {
+        if let Some(c) = paint::parse_color(s)? {
             self.set_stroke(Paint::Solid(c));
         }
+        Ok(())
     }
     pub fn set_global_alpha(&mut self, a: f64) {
         if (0. ..=1.).contains(&a) {
@@ -292,10 +296,29 @@ impl Canvas {
             self.state.line.dash_offset = d;
         }
     }
+    /// Detached canvas defaults. DOM bindings should supply the font style source sizes.
     pub fn set_font(&mut self, s: &str) -> Result<()> {
-        match Font::parse(s, 16., 16.) {
-            Ok(f) => {
-                self.state.font = f;
+        self.set_font_with_context(s, 16., 16.)
+    }
+    pub fn set_font_with_context(
+        &mut self,
+        s: &str,
+        element_font_size: f32,
+        root_font_size: f32,
+    ) -> Result<()> {
+        self.set_font_with_source(
+            s,
+            FontContext {
+                element_size: element_font_size,
+                root_size: root_font_size,
+                ..FontContext::default()
+            },
+        )
+    }
+    pub fn set_font_with_source(&mut self, s: &str, source: FontContext) -> Result<()> {
+        match Font::parse_with_context(s, source) {
+            Ok(font) => {
+                self.state.font = font;
                 Ok(())
             }
             Err(Error::Syntax) => Ok(()),
@@ -402,18 +425,20 @@ impl Canvas {
         if !p.is_finite() {
             return false;
         }
-        let item = self.stroke_item(self.path.data.clone());
-        item.is_some_and(|(path, transform)| {
-            CoverageItem {
-                path,
-                transform,
-                style: ItemStyle::Stroke(self.state.line.clone()),
-                color: [1.; 4],
-            }
-            .device_outline()
-            .winding(p)
-                != 0
-        })
+        self.stroke_item(self.path.data.clone())
+            .is_some_and(|(path, transform)| {
+                let outline = CoverageItem {
+                    path,
+                    transform,
+                    style: ItemStyle::Stroke(self.state.line.clone()),
+                    color: [1.; 4],
+                }
+                .device_outline();
+                outline.winding(p) != 0
+                    || outline
+                        .segments()
+                        .any(|s| s.nearest(p, 1e-9).distance_sq <= 1e-18)
+            })
     }
     pub fn fill(&mut self, rule: FillRule) -> Result<()> {
         self.draw(

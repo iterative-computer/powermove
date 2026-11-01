@@ -18,7 +18,7 @@ fn near(a: f64, b: f64) {
     assert!((a - b).abs() < 1e-5, "{a} != {b}");
 }
 fn fill(c: &mut Canvas, color: &str, r: [f64; 4]) {
-    c.set_fill_color(color);
+    c.set_fill_color(color).unwrap();
     c.fill_rect(r[0], r[1], r[2], r[3]).unwrap();
 }
 
@@ -38,7 +38,7 @@ fn default_state_and_context_attributes() {
 fn state_stack_preserves_current_path() {
     let mut c = canvas(4, 1);
     c.save();
-    c.set_fill_color("red");
+    c.set_fill_color("red").unwrap();
     c.translate(2., 0.);
     c.rect(0., 0., 2., 1.);
     c.restore();
@@ -78,8 +78,8 @@ fn rect_paint_does_not_change_current_path() {
 #[test]
 fn invalid_setters_and_nonfinite_geometry_are_ignored() {
     let mut c = canvas(2, 2);
-    c.set_fill_color("red");
-    c.set_fill_color("bad color");
+    c.set_fill_color("red").unwrap();
+    c.set_fill_color("bad color").unwrap();
     c.set_global_alpha(-1.);
     c.set_global_alpha(f64::NAN);
     c.set_line_width(0.);
@@ -746,7 +746,7 @@ fn css_font_shorthand_quoted_families_and_units() {
 fn invalid_font_assignment_keeps_previous_value() {
     let mut c = canvas(1, 1);
     c.set_font("20px serif").unwrap();
-    c.set_font("not a font").ok();
+    c.set_font("not a font").unwrap();
     assert_eq!(c.state().font.desc.size, 20.);
 }
 #[test]
@@ -830,7 +830,7 @@ fn empty_text_has_zero_ink_and_advance() {
 fn stroke_text_uses_same_shaped_outlines_and_stroke_state() {
     let mut c = canvas(8, 10);
     c.set_font("10px serif").unwrap();
-    c.set_stroke_color("blue");
+    c.set_stroke_color("blue").unwrap();
     c.set_line_width(2.);
     let mut engine = TextEngine::new(TestFonts::new());
     c.stroke_text(&[65], 1., 8., None, &mut engine).unwrap();
@@ -1005,7 +1005,7 @@ fn stroke_rect_degenerate_dimension_is_open_capped_line() {
 #[test]
 fn promoted_edit_import_retains_state_and_rejects_second_stale_commit() {
     let mut c = canvas(1, 1);
-    c.set_fill_color("blue");
+    c.set_fill_color("blue").unwrap();
     let key = c.promote(&mut Target::default()).unwrap();
     c.import_promoted(
         key,
@@ -1041,7 +1041,7 @@ fn hsl_blends_have_spec_primary_color_results() {
 #[test]
 fn recorded_commands_replay_on_an_independent_worker_with_identical_pixels() {
     let mut c = canvas(8, 8);
-    c.set_fill_color("#8452b080");
+    c.set_fill_color("#8452b080").unwrap();
     c.fill_rect(0.25, 0.75, 5.5, 3.25).unwrap();
     c.translate(2., 1.);
     c.arc(Point::new(2., 2.), 1.75, 0., 7., false).unwrap();
@@ -1133,4 +1133,208 @@ fn readback_mutation_invalidates_canonical_metadata_without_affecting_equality()
     c.draw_image(s, Rect::new(0., 0., 1., 1.), Rect::new(0., 0., 1., 1.))
         .unwrap();
     assert_eq!(pixel(&mut c, 0, 0), [0; 4]);
+}
+fn text_engine_with_font(data: &[u8]) -> TextEngine<TestFonts> {
+    let mut resolver = TestFonts::new();
+    resolver.info.data = pm_text::font::FontBytes::new(data.to_vec());
+    resolver.info.facts = pm_text::font::FaceFacts::of(data, 0);
+    TextEngine::new(resolver)
+}
+#[test]
+fn text_em_box_is_one_em_even_when_hhea_box_is_larger() {
+    let mut engine = text_engine_with_font(include_bytes!("fixtures/recorder-metrics.ttf"));
+    let mut c = canvas(1, 1);
+    c.set_font("10px serif").unwrap();
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.font_bounding_box_ascent, 12.);
+    near(m.font_bounding_box_descent, 3.);
+    near(m.em_height_ascent, 8.);
+    near(m.em_height_descent, 2.);
+    c.set_text_baseline(TextBaseline::Middle);
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.em_height_ascent, 5.);
+    near(m.em_height_descent, 5.);
+}
+#[test]
+fn text_uses_opentype_hanging_and_ideographic_baselines() {
+    let mut engine = text_engine_with_font(include_bytes!("fixtures/recorder-baselines.ttf"));
+    let mut c = canvas(1, 1);
+    c.set_font("10px serif").unwrap();
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.hanging_baseline, 6.);
+    near(m.ideographic_baseline, -2.5);
+    near(m.em_height_ascent, 7.5);
+    near(m.em_height_descent, 2.5);
+    c.set_text_baseline(TextBaseline::Hanging);
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.hanging_baseline, 0.);
+    near(m.alphabetic_baseline, -6.);
+    c.set_text_baseline(TextBaseline::Ideographic);
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.ideographic_baseline, 0.);
+    near(m.alphabetic_baseline, 2.5);
+}
+#[test]
+fn text_top_and_bottom_use_em_box_not_hhea_extents() {
+    let mut engine = text_engine_with_font(include_bytes!("fixtures/recorder-baselines.ttf"));
+    let mut c = canvas(1, 1);
+    c.set_font("10px serif").unwrap();
+    c.set_text_baseline(TextBaseline::Top);
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.em_height_ascent, 0.);
+    near(m.font_bounding_box_ascent, 4.5);
+    near(m.em_height_descent, 10.);
+    c.set_text_baseline(TextBaseline::Bottom);
+    let m = c.measure_text(&[65], &mut engine).unwrap();
+    near(m.em_height_ascent, 10.);
+    near(m.em_height_descent, 0.);
+}
+#[test]
+fn font_parser_rejects_invalid_families_and_negative_line_height() {
+    for s in [
+        "20px 'Test' Extra",
+        "20px 123",
+        "20px inherit",
+        "20px/ -1 serif",
+        "20px/ -1px serif",
+        "20px serif,",
+    ] {
+        assert_eq!(Font::parse(s, 16., 16.).unwrap_err(), Error::Syntax, "{s}");
+    }
+}
+#[test]
+fn font_keywords_and_units_are_ascii_case_insensitive() {
+    let f = Font::parse("ITALIC BOLD 12PT SERIF", 16., 16.).unwrap();
+    assert!(f.desc.italic);
+    assert_eq!(f.desc.weight, 700.);
+    assert_eq!(f.desc.size, 16.);
+    assert!(matches!(
+        f.families[0],
+        pm_text::blink::measure::Family::Generic("serif")
+    ));
+}
+#[test]
+fn zero_font_size_is_valid_and_has_zero_advance() {
+    let mut c = canvas(1, 1);
+    c.set_font("0px serif").unwrap();
+    let mut engine = TextEngine::new(TestFonts::new());
+    assert_eq!(c.state().font.desc.size, 0.);
+    near(c.measure_text(&[65], &mut engine).unwrap().width, 0.);
+}
+#[test]
+fn relative_font_sizes_resolve_against_explicit_style_source() {
+    let mut c = canvas(1, 1);
+    c.set_font_with_context("150% serif", 20., 12.).unwrap();
+    near(c.state().font.desc.size as f64, 30.);
+    c.set_font_with_context("2rem serif", 20., 12.).unwrap();
+    near(c.state().font.desc.size as f64, 24.);
+}
+#[test]
+fn font_relative_weights_use_style_source_instead_of_previous_canvas_font() {
+    let mut c = canvas(1, 1);
+    c.set_font("100 10px serif").unwrap();
+    c.set_font_with_source(
+        "bolder 10px serif",
+        FontContext {
+            weight: 700.,
+            ..FontContext::default()
+        },
+    )
+    .unwrap();
+    near(c.state().font.desc.weight as f64, 900.);
+    c.set_font_with_source(
+        "lighter 10px serif",
+        FontContext {
+            weight: 700.,
+            ..FontContext::default()
+        },
+    )
+    .unwrap();
+    near(c.state().font.desc.weight as f64, 400.);
+}
+#[test]
+fn zero_length_segments_are_pruned_before_stroking_as_the_spec_requires() {
+    let mut c = canvas(4, 4);
+    c.set_line_width(2.);
+    c.set_line_cap(Cap::Round);
+    c.move_to(2., 2.);
+    c.line_to(2., 2.);
+    c.stroke().unwrap();
+    assert_eq!(pixel(&mut c, 1, 1)[3], 0);
+    assert_eq!(pixel(&mut c, 0, 0)[3], 0);
+}
+#[test]
+fn stroke_hit_test_counts_boundary_points_as_inside() {
+    let mut c = canvas(4, 4);
+    c.set_line_width(2.);
+    c.move_to(0., 2.);
+    c.line_to(4., 2.);
+    assert!(c.is_point_in_stroke(Point::new(2., 3.)));
+    assert!(!c.is_point_in_stroke(Point::new(2., 3.01)));
+}
+#[test]
+fn eight_k_canvas_admission_uses_sparse_backing_without_downscaling() {
+    let mut c = canvas(8192, 8192);
+    assert_eq!(c.size(), (8192, 8192));
+    fill(&mut c, "red", [8191., 8191., 1., 1.]);
+    assert_eq!(pixel(&mut c, 8191, 8191), [255, 0, 0, 255]);
+    assert_eq!(pixel(&mut c, 0, 0), [0; 4]);
+}
+#[test]
+fn valid_unimplemented_font_forms_report_a_gate_without_mutating_font() {
+    let mut c = canvas(1, 1);
+    c.set_font("20px serif").unwrap();
+    for s in ["caption", "SMALL-CAPS 12px serif", "condensed 12px serif"] {
+        assert_eq!(c.set_font(s), Err(Error::NotSupported));
+        assert_eq!(c.state().font.desc.size, 20.);
+    }
+}
+#[test]
+fn restricted_gradient_numbers_throw_type_error_before_algorithm_validation() {
+    assert!(matches!(
+        Gradient::new(GradientKind::Radial {
+            start: Point::new(f64::NAN, 0.),
+            r0: -1.,
+            end: Point::ZERO,
+            r1: 1.
+        }),
+        Err(Error::Type)
+    ));
+    let g = Gradient::new(GradientKind::Linear(Point::ZERO, Point::new(1., 0.))).unwrap();
+    assert_eq!(g.add_color_stop(f64::NAN, "red"), Err(Error::Type));
+    assert_eq!(g.add_color_stop(f64::INFINITY, "red"), Err(Error::Type));
+}
+#[test]
+fn css_color_four_in_gamut_paint_and_gradient_stops_use_native_conversion() {
+    let mut c = canvas(1, 1);
+    fill(&mut c, "color(srgb 0.2 0.4 0.6 / 50%)", [0., 0., 1., 1.]);
+    assert_eq!(pixel(&mut c, 0, 0), [51, 102, 153, 128]);
+    let g = Gradient::new(GradientKind::Linear(Point::ZERO, Point::new(1., 0.))).unwrap();
+    g.add_color_stop(0., "lab(0% 0 0)").unwrap();
+    g.add_color_stop(1., "color(srgb 1 1 1)").unwrap();
+    c.reset().unwrap();
+    c.set_fill(Paint::Gradient(g));
+    c.fill_rect(0., 0., 1., 1.).unwrap();
+    assert_eq!(pixel(&mut c, 0, 0), [128, 128, 128, 255]);
+}
+#[test]
+fn unsupported_color_conversion_is_explicit_and_preserves_the_previous_paint() {
+    let mut c = canvas(1, 1);
+    c.set_fill_color("red").unwrap();
+    assert!(matches!(
+        c.set_fill_color("color(display-p3 1 0 0)"),
+        Err(Error::NeedsPromotion(_))
+    ));
+    c.fill_rect(0., 0., 1., 1.).unwrap();
+    assert_eq!(pixel(&mut c, 0, 0), [255, 0, 0, 255]);
+}
+#[test]
+fn css_system_colors_are_resolved_by_the_host_not_chromium_color_tables() {
+    let mut c = canvas(1, 1);
+    for color in ["Highlight", "light-dark(white, black)"] {
+        assert!(matches!(
+            c.set_fill_color(color),
+            Err(Error::NeedsPromotion(_))
+        ));
+    }
 }

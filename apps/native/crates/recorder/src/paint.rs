@@ -2,6 +2,37 @@ use crate::{Color, Error, Result, Source, path::finite};
 use kurbo::{Affine, Point};
 use std::sync::{Arc, RwLock};
 
+/// Invalid CSS retains the previous paint. Unsupported color-space conversion is
+/// explicit so a host can promote before drawing, rather than silently drop it.
+pub(crate) fn parse_color(s: &str) -> Result<Option<Color>> {
+    if let Some(c) = pm_vector::render::color::parse(s) {
+        return Ok(Some(c));
+    }
+    use pm_text::render::color::{Rejected, classify};
+    if s.trim().to_ascii_lowercase().starts_with("light-dark(") {
+        return Err(Error::NeedsPromotion("style-source CSS color"));
+    }
+    match classify(s) {
+        Ok(c) => {
+            if !s.contains('(') {
+                return Err(Error::NeedsPromotion("style-source CSS color"));
+            }
+            if c.iter().any(|v| !v.is_finite())
+                || c[..3].iter().any(|v| *v < -1e-5 || *v > 1. + 1e-5)
+            {
+                return Err(Error::NeedsPromotion("wide-gamut color mapping"));
+            }
+            Ok(Some(Color {
+                r: c[0].clamp(0., 1.) as f32,
+                g: c[1].clamp(0., 1.) as f32,
+                b: c[2].clamp(0., 1.) as f32,
+                a: c[3].clamp(0., 1.) as f32,
+            }))
+        }
+        Err(Rejected::Invalid) => Ok(None),
+        Err(Rejected::Unsupported) => Err(Error::NeedsPromotion("CSS color")),
+    }
+}
 #[derive(Debug, Clone)]
 pub enum GradientKind {
     Linear(Point, Point),
@@ -28,15 +59,17 @@ impl Gradient {
         let valid = match kind {
             GradientKind::Linear(a, b) => a.is_finite() && b.is_finite(),
             GradientKind::Radial { start, r0, end, r1 } => {
-                if r0 < 0. || r1 < 0. {
-                    return Err(Error::IndexSize);
-                }
                 start.is_finite() && end.is_finite() && finite(&[r0, r1])
             }
             GradientKind::Conic { angle, center } => angle.is_finite() && center.is_finite(),
         };
         if !valid {
-            return Err(Error::NotSupported);
+            return Err(Error::Type);
+        }
+        if matches!(kind,GradientKind::Radial{r0,..} if r0<0.)
+            || matches!(kind,GradientKind::Radial{r1,..} if r1<0.)
+        {
+            return Err(Error::IndexSize);
         }
         Ok(Self(Arc::new(RwLock::new(GradientData {
             kind,
@@ -44,10 +77,13 @@ impl Gradient {
         }))))
     }
     pub fn add_color_stop(&self, offset: f64, color: &str) -> Result<()> {
-        if !offset.is_finite() || !(0. ..=1.).contains(&offset) {
+        if !offset.is_finite() {
+            return Err(Error::Type);
+        }
+        if !(0. ..=1.).contains(&offset) {
             return Err(Error::IndexSize);
         }
-        let color = pm_vector::render::color::parse(color).ok_or(Error::Syntax)?;
+        let color = parse_color(color)?.ok_or(Error::Syntax)?;
         let mut data = self.0.write().map_err(|_| Error::Poisoned)?;
         // Stable sorting keeps equal-offset discontinuities in insertion order.
         data.stops.push((offset, color));

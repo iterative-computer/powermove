@@ -30,5 +30,38 @@ fb.setupNameTable({'familyName': 'Recorder Test', 'styleName': 'Regular',
                   'fullName': 'Recorder Test', 'psName': 'RecorderTest'})
 fb.setupPost()
 fb.setupMaxp()
+fb.font.recalcTimestamp = False
 fb.font['head'].created = fb.font['head'].modified = 2082844800  # 1970-01-01
 fb.save(Path(__file__).with_name('recorder-test.ttf'))
+
+# A second font separates the hhea box from the em box, with explicit BASE
+# hanging/ideographic/roman coordinates. No external typeface is copied.
+from fontTools.ttLib import newTable
+from fontTools.ttLib.tables import otTables
+fb.font['hhea'].ascent, fb.font['hhea'].descent = 1200, -300
+fb.save(Path(__file__).with_name('recorder-metrics.ttf'))
+base = newTable('BASE')
+base.table = otTables.BASE()
+base.table.Version = 0x00010000
+axis = otTables.Axis()
+axis.BaseTagList = otTables.BaseTagList()
+axis.BaseTagList.BaselineTag = ['hang', 'ideo', 'idtp', 'romn']
+axis.BaseScriptList = otTables.BaseScriptList()
+record = otTables.BaseScriptRecord()
+record.BaseScriptTag = 'latn'
+record.BaseScript = otTables.BaseScript()
+record.BaseScript.DefaultMinMax = None
+record.BaseScript.BaseLangSysRecord = []
+values = otTables.BaseValues()
+values.DefaultIndex = 3
+values.BaseCoord = []
+for value in (600, -250, 750, 0):
+    coord = otTables.BaseCoord()
+    coord.Format = 1
+    coord.Coordinate = value
+    values.BaseCoord.append(coord)
+record.BaseScript.BaseValues = values
+axis.BaseScriptList.BaseScriptRecord = [record]
+base.table.HorizAxis, base.table.VertAxis = axis, None
+fb.font['BASE'] = base
+fb.save(Path(__file__).with_name('recorder-baselines.ttf'))

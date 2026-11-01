@@ -78,10 +78,11 @@ impl ImageData {
         ]
     }
 }
+pub const MAX_PIXELS: u64 = 67_108_864;
 pub(crate) fn byte_len(w: u32, h: u32) -> Result<usize> {
     let n = u64::from(w) * u64::from(h);
     // Admission limit, not a silent resolution reduction. Host can choose a tiled backend later.
-    if n > 16_777_216 {
+    if n > MAX_PIXELS {
         return Err(Error::Capacity);
     }
     usize::try_from(n * 4).map_err(|_| Error::Capacity)

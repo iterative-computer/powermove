@@ -28,11 +28,13 @@ fn main() -> Result<()> {
         frame.set_composite("source-over");
         for (i, layer) in layers.iter_mut().enumerate() {
             let t = Instant::now();
-            layer.set_fill_color(if iteration % 2 == 0 {
-                "#4070c080"
-            } else {
-                "#d0b020a0"
-            });
+            layer
+                .set_fill_color(if iteration % 2 == 0 {
+                    "#4070c080"
+                } else {
+                    "#d0b020a0"
+                })
+                .unwrap();
             layer.clear_rect(0., 0., 16., 16.)?;
             layer.fill_rect(0.25, 0.25, 15.5, 15.5)?;
             layer.begin_path();
