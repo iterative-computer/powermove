@@ -219,3 +219,25 @@ final v4 merge was conflict-free. The complete `check.sh` passed after both merg
 Only the test harness's local package was added to the lockfile; no registry
 package was upgraded, and engine/Cargo.lock needed no change. Native rendering
 and G1–G6 / T1–T5 above remain open; this branch is not a production activation.
+
+### Frozen-contract revalidation — 2026-11-01
+
+Merged the frozen `feat/native-engine` contract at
+`f7844ebc007c17900cb2d65f4ef63c6bd3f8b005` without conflicts. Its surface,
+v4 runtime, API and UI-kit sources are identical to the versions this panel
+already used; the incoming change records the freeze in p0-decisions.md. No
+implementation, golden or lockfile adaptation was necessary. The complete
+`check.sh` passed again: 384 Rust tests (11 adapter, 100 inspector, 273 kernel;
+one existing optional real-profile smoke ignored), 211 v4 tests, strict Clippy,
+formatting, TypeScript and frozen install/build checks.
+
+**API requests (additive only):** G2 needs target-scoped native key cancellation
+and focus/reveal routing; G3 needs token expressions and per-kind virtual-row
+offsets; G4 needs full row-count/multiselect/custom-action and spoken keyframe
+state projection; G5/G6 need the missing system-control, drag/hover and inherited
+widget/picker/expression recipes. G1 is application activation/binding integration,
+not a request to change the frozen envelope. Preserve the existing contract and
+request additive support rather than changing crates/surface or js/v4/src
+(N3/N7/N8, ownership and the recorded API freeze). T1–T5 and the macOS/Opus gates
+remain unchanged; the upstream 40/40 headless eval does not certify this panel's
+native rendering or application activation.
