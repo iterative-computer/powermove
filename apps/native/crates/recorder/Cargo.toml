@@ -1,0 +1,15 @@
+[package]
+name = "pm-recorder"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+pm-vector = { path = "../../../../engine/crates/pm-vector", features = ["render"] }
+pm-text = { path = "../../../../engine/crates/pm-text", default-features = false, features = ["ink"] }
+kurbo = "0.13.1"
+i_overlay = "9.1"
+libm = "0.2"
+read-fonts = "0.45"
+unicode-bidi = "0.3.18"
