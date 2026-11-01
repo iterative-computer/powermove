@@ -1,0 +1,43 @@
+[package]
+name = "pm-native-cli"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# Lane-local lock: parent workspace integration requires changing that
+# workspace's lockfile, outside this lane's ownership.
+[workspace]
+resolver = "3"
+
+[patch.crates-io]
+wgpu = { path = "../../../third_party/wgpu" }
+
+[[bin]]
+name = "pm-cli"
+path = "src/main.rs"
+
+[dependencies]
+pm-kernel = { path = "../../../../apps/native/crates/kernel" }
+pm-mcp = { path = "../../../../apps/native/crates/mcp" }
+pm-first-launch = { path = "../../../../apps/native/crates/first-launch" }
+pm-model = { path = "../../pm-model" }
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+base64 = "0.22"
+png = "0.18"
+blake3 = "1"
+fs2 = "0.4"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-engine-service = { path = "../../../../apps/native/crates/engine-service" }
+pm-protocol = { path = "../../pm-protocol", default-features = false }
+pm-time = { path = "../../pm-time" }
+pm-export = { path = "../../pm-export" }
+pm-media = { path = "../../pm-media" }
+pm-node = { path = "../../pm-node", default-features = false }
+
+[profile.dev]
+debug = 0
+incremental = false
