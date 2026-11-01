@@ -11,7 +11,7 @@ publish.workspace = true
 glslang = "0.8.1"
 glslang-sys = "0.8.1"
 rspirv = "0.13.0"
-naga = { version = "30.0.1", features = ["spv-in", "msl-out"] }
+naga = { version = "30.0.1", features = ["spv-in", "msl-out", "serialize", "deserialize"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["std"] }
@@ -19,3 +19,13 @@ sha2 = { workspace = true, features = ["std"] }
 [[bin]]
 name = "pm-glsl-fuzz"
 path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "pm-glsl-compiler"
+path = "src/bin/compiler.rs"
+
+[dev-dependencies]
+pm-render = { path = "../pm-render" }
+pm-gpu = { path = "../pm-gpu", default-features = false, features = ["glsl"] }
+wgpu = { version = "30", default-features = false, features = ["metal", "naga-ir"] }
+pollster = "0.4"

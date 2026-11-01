@@ -85,6 +85,16 @@ pub enum FailureStage {
     NagaValidate,
     /// Translation did not finish within its deadline.
     Deadline,
+    /// All compiler process slots are occupied (there is no waiting queue).
+    CompilerBusy,
+    /// The helper is missing, crashed, or violated the IPC protocol.
+    CompilerProcess,
+    /// Compiler resident memory exceeded its budget.
+    CompilerResources,
+    /// Native shader or render pipeline compilation failed.
+    Metal,
+    /// Submission, readback, or device recovery failed.
+    Draw,
     /// A stage panicked.
     Panic,
 }
@@ -101,6 +111,11 @@ impl FailureStage {
             FailureStage::NagaParse => "naga-parse",
             FailureStage::NagaValidate => "naga-validate",
             FailureStage::Deadline => "deadline",
+            FailureStage::CompilerBusy => "compiler-busy",
+            FailureStage::CompilerProcess => "compiler-process",
+            FailureStage::CompilerResources => "compiler-resources",
+            FailureStage::Metal => "metal",
+            FailureStage::Draw => "draw",
             FailureStage::Panic => "panic",
         }
     }
@@ -166,7 +181,7 @@ pub struct Prepared {
 }
 
 /// A stage ready for wgpu.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageModule {
     pub module: naga::Module,
     pub reflection: Reflection,
@@ -174,7 +189,7 @@ pub struct StageModule {
 }
 
 /// A translated program.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub vertex: StageModule,
     pub fragment: StageModule,
@@ -311,6 +326,10 @@ fn vertex_stage() -> Result<PreparedStage, Failure> {
 /// `line_offset` is the number of program lines before the author's first
 /// line (`WrappedGlsl::body_line_offset`).
 pub fn prepare(fragment: &str, line_offset: u32) -> Result<Prepared, Failure> {
+    crate::compiler::prepare(fragment, line_offset, crate::cache::DEFAULT_DEADLINE)
+}
+
+pub(crate) fn prepare_local(fragment: &str, line_offset: u32) -> Result<Prepared, Failure> {
     prepare_timed(fragment, line_offset, &mut BTreeMap::new())
 }
 
@@ -403,6 +422,11 @@ fn naga_module(words: &[u32]) -> Result<naga::Module, Failure> {
 impl Prepared {
     /// Step 5: naga modules for wgpu.
     pub fn finish(&self) -> Result<Program, Failure> {
+        crate::compiler::finish(self, crate::cache::DEFAULT_DEADLINE)
+    }
+
+    /// Compiler-worker entry; never called on the host thread.
+    pub(crate) fn finish_local(&self) -> Result<Program, Failure> {
         let start = Instant::now();
         let vertex = naga_module(&self.vertex.words)?;
         let fragment = naga_module(&self.fragment.words)?;
@@ -429,9 +453,13 @@ impl Prepared {
 
 /// Steps 0 to 5.
 pub fn translate(fragment: &str, line_offset: u32) -> Result<Program, Failure> {
+    crate::compiler::translate(fragment, line_offset, crate::cache::DEFAULT_DEADLINE)
+}
+
+pub(crate) fn translate_local(fragment: &str, line_offset: u32) -> Result<Program, Failure> {
     let mut timings = BTreeMap::new();
     let prepared = prepare_timed(fragment, line_offset, &mut timings)?;
-    let mut program = prepared.finish()?;
+    let mut program = prepared.finish_local()?;
     timings.append(&mut program.timings_ms);
     program.timings_ms = timings;
     Ok(program)

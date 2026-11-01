@@ -404,34 +404,37 @@ pub struct Outcome {
 
 /// Translates `source` and writes naga's MSL for both stages (wgpu runs the
 /// same writer at pipeline creation). Panics are outcomes, not crashes.
+/// This is the raw fuzz-worker entry: the fuzz binary owns its killable
+/// process boundary. It must not spawn a nested helper that could outlive it.
 pub fn outcome(source: &str, line_offset: u32) -> Outcome {
-    let result = std::panic::catch_unwind(|| match pipeline::translate(source, line_offset) {
-        Err(f) => Outcome {
-            result: format!("reject:{}", f.stage.name()),
-            detail: f
-                .message
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or_default()
-                .chars()
-                .take(400)
-                .collect(),
-        },
-        Ok(program) => {
-            for module in [&program.vertex.module, &program.fragment.module] {
-                if let Err(e) = pipeline::msl(module) {
-                    return Outcome {
-                        result: "reject:naga-msl".into(),
-                        detail: e.chars().take(400).collect(),
-                    };
+    let result =
+        std::panic::catch_unwind(|| match pipeline::translate_local(source, line_offset) {
+            Err(f) => Outcome {
+                result: format!("reject:{}", f.stage.name()),
+                detail: f
+                    .message
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .chars()
+                    .take(400)
+                    .collect(),
+            },
+            Ok(program) => {
+                for module in [&program.vertex.module, &program.fragment.module] {
+                    if let Err(e) = pipeline::msl(module) {
+                        return Outcome {
+                            result: "reject:naga-msl".into(),
+                            detail: e.chars().take(400).collect(),
+                        };
+                    }
+                }
+                Outcome {
+                    result: "ok".into(),
+                    detail: String::new(),
                 }
             }
-            Outcome {
-                result: "ok".into(),
-                detail: String::new(),
-            }
-        }
-    });
+        });
     result.unwrap_or_else(|_| Outcome {
         result: "panic".into(),
         detail: String::new(),

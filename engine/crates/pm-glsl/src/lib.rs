@@ -10,7 +10,7 @@
 //!
 //! - [`translate`], [`prepare`]: the pipeline ([`pipeline`]).
 //! - [`Cache`]: step 6, by source hash and back end, in memory and on disk,
-//!   with translation isolated on a large-stack thread under a deadline.
+//!   with translation isolated in bounded, killable compiler processes.
 //! - [`Failure`]: the stage and the diagnostics in the author's lines (step
 //!   7); [`FailureStage::webgl_refuses`] separates programs WebGL refuses
 //!   too (today they render nothing) from engine-only failures (the
@@ -21,6 +21,7 @@
 
 pub mod cache;
 pub mod compile;
+pub mod compiler;
 pub mod errors;
 pub mod fuzz;
 pub mod limits;
