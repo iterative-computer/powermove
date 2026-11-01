@@ -104,6 +104,11 @@ pub(crate) fn correctly_rounded_pow(x: f64, y: f64) -> f64 {
             (false, false) => f64::INFINITY,
         };
     }
+    // pxfm's inverse-square-root path overflows its intermediate near
+    // f64::MAX. Avoid changing its well-conditioned, near-one results.
+    if x > f64::MAX / 2.0 && y == -0.5 {
+        return 1.0 / x.sqrt();
+    }
     if x < 0.0 {
         if !y_integer {
             return f64::NAN;
@@ -179,5 +184,14 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+    #[test]
+    fn inverse_square_root_at_extreme_finite_bases_is_not_nan() {
+        for x in [f64::MAX, f64::MAX * 0.75] {
+            let got = correctly_rounded_pow(x, -0.5);
+            let wanted = x.powf(-0.5);
+            assert!(got.is_finite() && got > 0.0);
+            assert!((got - wanted).abs() <= wanted * 2.0 * f64::EPSILON);
+        }
     }
 }

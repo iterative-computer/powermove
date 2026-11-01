@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use pm_model::{Node, NodeKind};
 
-use crate::easing::SpringTables;
 use crate::keyframes::PreparedTrack;
 
 /// Tracks shorter than this are prepared on every read (it costs less
@@ -53,7 +52,7 @@ pub struct TrackCache {
 impl TrackCache {
     /// The prepared track of `kf`, from the cache when it holds this array.
     /// `None` when `kf` is not an array long enough to keep.
-    pub fn get(&mut self, kf: Option<&Node>, springs: &mut SpringTables) -> Option<&PreparedTrack> {
+    pub fn get(&mut self, kf: Option<&Node>) -> Option<&PreparedTrack> {
         let node = kf?;
         let NodeKind::Array(keys) = node.kind() else {
             return None;
@@ -62,6 +61,14 @@ impl TrackCache {
             return None;
         }
         let address = Arc::as_ptr(keys) as usize;
+        if self.tick == u64::MAX {
+            let mut order: Vec<_> = self.entries.iter().map(|(k, v)| (v.used, *k)).collect();
+            order.sort_unstable();
+            for (age, (_, key)) in order.into_iter().enumerate() {
+                self.entries.get_mut(&key).expect("present").used = age as u64;
+            }
+            self.tick = self.entries.len() as u64;
+        }
         self.tick += 1;
         let tick = self.tick;
         if self.entries.contains_key(&address) {
@@ -70,7 +77,7 @@ impl TrackCache {
             entry.used = tick;
             return Some(&entry.track);
         }
-        let track = PreparedTrack::prepare(kf, springs);
+        let track = PreparedTrack::prepare(kf);
         self.prepared += 1;
         let bytes = keys.len() * BYTES_PER_KEY;
         if bytes > MAX_BYTES {
@@ -105,6 +112,13 @@ impl TrackCache {
         }
     }
 
+    /// Release document nodes and their prepared tracks when the evaluator resets.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+        self.tick = 0;
+    }
+
     /// Tracks held.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -123,6 +137,7 @@ impl TrackCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::easing::SpringTables;
     use crate::keyframes::evaluate;
 
     fn track(values: &[f64]) -> Node {
@@ -144,7 +159,7 @@ mod tests {
         for k in 0..400 {
             let t = k as f64 / 61.0 - 0.5;
             let kept = cache
-                .get(Some(&kf), &mut springs)
+                .get(Some(&kf))
                 .expect("a long track is kept")
                 .clone()
                 .value(Some(&kf), t, false, &mut springs)
@@ -163,7 +178,7 @@ mod tests {
         let a = track(&(0..20).map(f64::from).collect::<Vec<_>>());
         let b = track(&(0..20).map(|i| f64::from(i) * 2.0).collect::<Vec<_>>());
         let at = |cache: &mut TrackCache, kf: &Node, springs: &mut SpringTables| {
-            let track = cache.get(Some(kf), springs).unwrap().clone();
+            let track = cache.get(Some(kf)).unwrap().clone();
             track.value(Some(kf), 0.25, false, springs).unwrap()
         };
         let first = at(&mut cache, &a, &mut springs);
@@ -179,6 +194,21 @@ mod tests {
         assert_eq!(cache.prepared, 2);
         // Short tracks are not kept.
         let short = track(&[1.0, 2.0, 3.0]);
-        assert!(cache.get(Some(&short), &mut springs).is_none());
+        assert!(cache.get(Some(&short)).is_none());
+    }
+    #[test]
+    fn reset_releases_tracks_and_counter_wrap_preserves_the_cache() {
+        let mut cache = TrackCache::default();
+        let keys = track(&(0..20).map(f64::from).collect::<Vec<_>>());
+        cache.get(Some(&keys)).unwrap();
+        cache.tick = u64::MAX;
+        assert!(cache.get(Some(&keys)).is_some());
+        assert_eq!(cache.prepared, 1);
+        assert_eq!(cache.hits, 1);
+        cache.clear();
+        assert_eq!(cache.bytes(), 0);
+        assert!(cache.is_empty());
+        cache.get(Some(&keys)).unwrap();
+        assert_eq!(cache.prepared, 2);
     }
 }

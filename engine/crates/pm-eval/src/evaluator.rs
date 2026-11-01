@@ -515,6 +515,7 @@ impl Evaluator {
         self.last_revision = 0;
         self.last_root = 0;
         self.channel_memo.clear();
+        self.tracks.clear();
     }
 
     /// Follows the document the by-id API is called with: a lower revision or
@@ -666,7 +667,7 @@ impl Evaluator {
     ) -> JsResult<JsValue> {
         // A long track is prepared once per array, as today's
         // `temporalEvaluate` caches it per array and version.
-        if let Some(track) = self.tracks.get(kf, &mut self.springs) {
+        if let Some(track) = self.tracks.get(kf) {
             return track.value(kf, t, interpolate_color, &mut self.springs);
         }
         crate::keyframes::evaluate(kf, t, interpolate_color, &mut self.springs)
