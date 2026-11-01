@@ -1,0 +1,27 @@
+{
+  "runtime": "1.4.4",
+  "results": [
+    {
+      "widgets": 499,
+      "nativeNodes": 1000,
+      "samples": 100,
+      "p50Ms": 1.551760999999999,
+      "p95Ms": 3.5773609999999962,
+      "provisionalBudgetMs": 4,
+      "provisionalPass": true,
+      "runtimeBundleBytes": 19497,
+      "scope": "JS reconciliation, op generation and inspector snapshot; synthetic immediate ack; excludes Rust, IPC, layout, paint, presentation"
+    },
+    {
+      "widgets": 1000,
+      "nativeNodes": 2002,
+      "samples": 100,
+      "p50Ms": 3.739720000000034,
+      "p95Ms": 5.977171999999996,
+      "provisionalBudgetMs": 4,
+      "provisionalPass": false,
+      "runtimeBundleBytes": 19497,
+      "scope": "JS reconciliation, op generation and inspector snapshot; synthetic immediate ack; excludes Rust, IPC, layout, paint, presentation"
+    }
+  ]
+}

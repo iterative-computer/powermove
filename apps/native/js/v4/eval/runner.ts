@@ -1,6 +1,7 @@
 import { createRoot, type Commit } from "../src";
 import { tasks } from "./tasks";
 import { exercise } from "./scenarios";
+import { runExtension } from "./extensions";
 export async function runTask(
   id: string,
   wire?: string,
@@ -81,12 +82,22 @@ if (import.meta.main) {
       throw new Error("Candidate must export createRoot");
     const results = [];
     for (const task of selected)
-      results.push(await runTask(task.id, wire, factory));
+      results.push(
+        args.includes("--scaffold") || candidate
+          ? await runTask(task.id, wire, factory)
+          : await runExtension(task.id, wire),
+      );
     console.log(
       JSON.stringify(
         {
           scope:
-            "headless protocol/semantic subset; not visual or macOS acceptance",
+            args.includes("--scaffold") || candidate
+              ? "original scaffold; headless protocol subset; not visual or macOS acceptance"
+              : "independent public-API extensions; headless behavior/wire subset; not visual or macOS acceptance",
+          mode:
+            args.includes("--scaffold") || candidate
+              ? "scaffold"
+              : "extensions",
           results,
           passed: results.filter((r) => r.status === "pass").length,
           failed: results.filter((r) => r.status === "fail").length,
