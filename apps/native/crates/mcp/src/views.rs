@@ -57,6 +57,16 @@ pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
     let p = host.read_document(id)?;
     let selection = host.selection(id)?;
     let time = host.playhead(id);
+    project_state_data(p, selection, time, host.revision(id)?, a)
+}
+/// Shared frozen digest for an immutable actor publication.
+pub fn project_state_data(
+    p: Value,
+    selection: Value,
+    time: f64,
+    revision: u64,
+    a: &Value,
+) -> Result<Value> {
     let mut mirror = DocumentStore::new_untitled(model(&p));
     let comp = mirror
         .open_comp()
@@ -159,7 +169,7 @@ pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
         assets.iter().filter(|a|a["kind"]=="video"||a["kind"]=="audio").map(|a|{let mut v=json!({"id":a["id"],"name":a["name"],"kind":a["kind"],"duration":a["dur"],"available":false,"hasAudio":false});for k in ["w","h"]{if let Some(n)=a.get(k){v[if k=="w"{"width"}else{"height"}]=n.clone();}}v}).collect()
     };
     Ok(
-        json!({"composition":{"id":p["id"],"name":p["name"],"width":p["w"],"height":p["h"],"fps":p["fps"],"duration":p["dur"],"workArea":p["work"],"background":p.get("backgroundFill").unwrap_or(&p["bg"]),"playhead":round(time),"revision":host.revision(id)?},"layerCount":layers.len(),"mediaAssets":media,"videoEditingTool":"edit_video","threeDEditingTool":"edit_3d","modelAssets":if index_only{vec![]}else{assets.iter().filter(|a|a["kind"]=="model"||a["kind"]=="image").map(|a|{let mut o=json!({"id":a["id"],"name":a["name"],"kind":a["kind"]});if let Some(f)=a.get("format"){o["format"]=f.clone();}o}).collect::<Vec<_>>()},"selection":selection,"layers":page,"parameters":if index_only{json!({})}else{p.get("params").cloned().unwrap_or(json!({}))},"markers":if index_only{json!([])}else{p.get("markers").cloned().unwrap_or(json!([]))},"availableOperations":crate::commands::OPERATIONS,"availableCapabilities":null,"pagination":{"layerOffset":offset,"layerLimit":limit,"matchingLayerCount":matching.len(),"nextLayerOffset":if offset.saturating_add(page.len())<matching.len(){Some(offset+page.len())}else{None},"indexOnly":index_only,"keyframeOffset":key_offset,"propertyOffset":prop_offset,"propertyLimit":prop_limit,"note":"This page is not the whole composition. Discover all targets with indexOnly=true and follow nextLayerOffset until null, or search with layerSearch. Then read layerId and nextPropertyOffset/keyframeOffset for complete target properties. Omitted layers and channels still exist. inputs/powermove-project.json is only the run-start snapshot."}}),
+        json!({"composition":{"id":p["id"],"name":p["name"],"width":p["w"],"height":p["h"],"fps":p["fps"],"duration":p["dur"],"workArea":p["work"],"background":p.get("backgroundFill").unwrap_or(&p["bg"]),"playhead":round(time),"revision":revision},"layerCount":layers.len(),"mediaAssets":media,"videoEditingTool":"edit_video","threeDEditingTool":"edit_3d","modelAssets":if index_only{vec![]}else{assets.iter().filter(|a|a["kind"]=="model"||a["kind"]=="image").map(|a|{let mut o=json!({"id":a["id"],"name":a["name"],"kind":a["kind"]});if let Some(f)=a.get("format"){o["format"]=f.clone();}o}).collect::<Vec<_>>()},"selection":selection,"layers":page,"parameters":if index_only{json!({})}else{p.get("params").cloned().unwrap_or(json!({}))},"markers":if index_only{json!([])}else{p.get("markers").cloned().unwrap_or(json!([]))},"availableOperations":crate::commands::OPERATIONS,"availableCapabilities":null,"pagination":{"layerOffset":offset,"layerLimit":limit,"matchingLayerCount":matching.len(),"nextLayerOffset":if offset.saturating_add(page.len())<matching.len(){Some(offset+page.len())}else{None},"indexOnly":index_only,"keyframeOffset":key_offset,"propertyOffset":prop_offset,"propertyLimit":prop_limit,"note":"This page is not the whole composition. Discover all targets with indexOnly=true and follow nextLayerOffset until null, or search with layerSearch. Then read layerId and nextPropertyOffset/keyframeOffset for complete target properties. Omitted layers and channels still exist. inputs/powermove-project.json is only the run-start snapshot."}}),
     )
 }
 fn caption_digest(l: &Value, a: &Value) -> Value {
@@ -171,11 +181,26 @@ fn caption_digest(l: &Value, a: &Value) -> Value {
 }
 pub fn timeline(host: &Automation, id: &str, a: &Value) -> Result<Value> {
     let p = host.read_document(id)?;
+    timeline_data(
+        p,
+        host.selection(id)?,
+        host.playhead(id),
+        host.revision(id)?,
+        a,
+    )
+}
+/// Shared frozen timeline digest for an immutable actor publication.
+pub fn timeline_data(
+    p: Value,
+    selection: Value,
+    time: f64,
+    revision: u64,
+    a: &Value,
+) -> Result<Value> {
     let layers = p["layers"].as_array().unwrap();
     let offset = count(a, "offset", 0);
     let limit = count(a, "limit", 100);
     let fps = p["fps"].as_f64().unwrap_or(30.);
-    let time = host.playhead(id);
     let mut mirror = DocumentStore::new_untitled(model(&p));
     let mut strips = vec![];
     for (i, l) in layers.iter().enumerate().skip(offset).take(limit) {
@@ -231,6 +256,6 @@ pub fn timeline(host: &Automation, id: &str, a: &Value) -> Result<Value> {
         strips.push(v);
     }
     Ok(
-        json!({"projectId":p["id"],"revision":host.revision(id)?,"fps":p["fps"],"duration":p["dur"],"playhead":time,"workArea":p["work"],"selection":host.selection(id)?["layers"],"total":layers.len(),"offset":offset,"nextOffset":if offset.saturating_add(limit)<layers.len(){Some(offset+limit)}else{None},"stackOrder":"Topmost first. Each layer has its own strip; overlaps are composited in stack order.","strips":strips}),
+        json!({"projectId":p["id"],"revision":revision,"fps":p["fps"],"duration":p["dur"],"playhead":time,"workArea":p["work"],"selection":selection["layers"],"total":layers.len(),"offset":offset,"nextOffset":if offset.saturating_add(limit)<layers.len(){Some(offset+limit)}else{None},"stackOrder":"Topmost first. Each layer has its own strip; overlaps are composited in stack order.","strips":strips}),
     )
 }

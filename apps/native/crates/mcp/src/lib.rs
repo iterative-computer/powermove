@@ -7,7 +7,7 @@ pub mod automation;
 pub mod catalog;
 pub mod commands;
 pub mod session;
-mod strips;
+pub mod strips;
 pub mod transport;
 pub mod views;
 

@@ -67,22 +67,84 @@ Host/Command access, custom panel bodies, command completion, external paths,
 project layout identity and observation. The shell retains its standalone
 entrypoints, layout structure, native menus, keyboard resolver and slot owner.
 
-## Recovery and safety limits
+## App MCP transport
 
-Every nonempty recovery result produces an AppKit sheet with Recover, Open as
-copy and Discard. A base-mismatch recovery copy can open from its kernel library
-slot; Discard moves that unopened copy to kernel trash. An adopted recovery can
-be kept or saved to a new path. **Discard of already-adopted recovery is blocked
-with a visible explanation and retains all data.** The kernel currently adopts
-before returning and `ShellCall::Close` saves, so closing cannot safely emulate
-Discard. Unrecoverable data is explicitly reported and kept.
+The application executable accepts the shipped `--powermove-mcp` flag and serves
+newline-delimited JSON-RPC on stdio. With an app already using the selected native
+profile, it proxies to that app's authenticated loopback descriptor. With no host,
+it starts a windowless kernel host; an optional launch path opens a disposable
+project copy before the first request. Both use the same actor-backed connection.
+No Electron profile or installed app is discovered implicitly.
 
-Window close/quit currently retain journals rather than completing the full
-kernel close/compaction workflow. Multi-window document ownership, clean
-termination barriers, Finder/Dock open events and restoration remain incomplete.
-Temporary layer selection is app-local because the actor has no selection
-mutation call yet; it is not presented as complete kernel selection integration.
-Work-area navigation currently uses composition boundaries.
+```sh
+"$CARGO_TARGET_DIR/debug/powermove-native" --powermove-mcp --profile /tmp/pm-native-mcp /tmp/project-copy.pmv
+```
+
+Windowed and windowless hosts publish a private, mode-0600 connection descriptor
+under the explicit profile and remove their own descriptor on orderly shutdown.
+A stale descriptor produces an error; it is never silently replaced or used to
+start a second writer. Diagnostics go to stderr; stdout contains JSON-RPC only.
+
+All 67 frozen tools are listed unchanged. The 13 existing P1 bodies are bound to
+the app actor: library/project operations, session start/finish, project/timeline
+inspection, selection, typed commands/strips, save and guarded rollback. The other
+54 tools keep their explicit unavailable errors. This does not implement extension
+activation, rendering, surface automation or the P2 headless-extension gate.
+
+Each connection binds an immutable `Origin::Mcp` actor identity and pins the
+current generation-bound document session. Reads consume published snapshots;
+command planning reuses pm-mcp's frozen planner and state/timeline digests. UI and
+MCP selection share kernel publications. MCP writes fold into an active UI gesture
+under ordinary kernel rules. Folded/interleaved runs are never snapshot-restored
+over foreign work or regrouped into a different history entry. Uninterrupted runs
+can group at commit; rollback and disconnect use identity/revision guards.
+
+File saves use the worker save handoff and the current kernel destination. MCP
+project switches notify the editor, which adopts the publication and resolves its
+media on a worker. The host remains available with the last editor window closed.
+MCP calls are refused while the native close decision is pending. A nonblocking
+app fence prevents a project open/close from replacing a session during a tool
+call; ordinary UI gestures never take that fence. Window activation binds MCP to
+the focused document, and project-switch notices reach each registered editor.
+
+## Native close, quit and recovery
+
+Traffic-light close, File close and Command-W use GPUI's cancellable window-close
+hook. Command-Q and native termination requests enter the app coordinator before
+GPUI's non-cancellable shutdown notification. Quit visits registered editor
+windows before requesting final compaction; cancellation or a busy editor stops
+the quit. The app retains and forwards the existing application delegate's other
+selectors.
+
+Dirty documents show an asynchronous AppKit sheet: **Save / Don’t Save / Cancel**.
+Return saves, Escape cancels and Command-D chooses Don’t Save. Saving uses the
+worker handoff. A save in flight refuses close/quit and shows a progress note;
+an open edit, project open or recovery choice also defers closing. Failed saves,
+recovery-copy fallbacks and durability failures retain the window with a message.
+Don’t Save calls kernel `DiscardClose`: rejected work is archived, never deleted,
+and the original project is not saved. Close waits on `DurabilityBarrier`; quit
+also requires `PrepareQuit` compaction and durability to succeed.
+
+Launch recovery uses `PrepareOpen`, then a native **Recover / Open as Copy /
+Discard** sheet before adoption. The chosen single-use ticket goes directly to
+`DecideRecovery`. Discard archives only rejected recovery data and opens the
+unchanged base. Cancellation or a failed choice preserves recovery data. The UI
+uses published session destination/media and kernel selection; no local document
+or selection writer is introduced.
+
+**On-screen checks for this addition are UNVERIFIED.** The Mac was locked; no
+window or sheet was shown for verification. Run the prepared disposable fixture
+script on an unlocked Mac:
+
+```sh
+apps/native/crates/app/tools/check-lifecycle-ui.sh close
+apps/native/crates/app/tools/check-lifecycle-ui.sh recovery
+```
+
+Repeat recovery for each choice, and close for traffic lights, Command-W and
+Command-Q, including Cancel, save-flight feedback and native Quit with no editor
+window. Multi-window document ownership/restoration, Finder/Dock open events and
+full native accessibility/menu ordering remain broader integration gates.
 
 ## Reproducible smoke
 
@@ -139,6 +201,34 @@ Verification on 2026-11-01:
 - The recovery sheet was observed after interrupting the isolated test app;
   Recover reopened its project. That is smoke evidence, not a journal-kill gate.
 
+## Verification of MCP and lifecycle wiring
+
+Headless verification for this addition:
+
+- `cargo test -p pm-native-app -p pm-mcp`: 14 app unit tests, 2 app integration
+  tests and 25 existing MCP tests pass. The executable test creates a disposable
+  corpus-project copy, spawns `powermove-native --powermove-mcp`, and runs initialize,
+  tools/list, start_session, get_project_state, apply_commands and both commit and
+  rollback finishes. It repeats through a second executable attached to the live
+  host's authenticated loopback descriptor and checks orderly descriptor cleanup.
+- App tests verify MCP origin in durable history, live-gesture folding, normal
+  history grouping, no-op baselines, interleaved rollback refusal, disconnect,
+  reopened-session fencing, editor permissions, shared selection/timeline/strips,
+  library operations, worker saves and the app session-transition fence.
+- Lifecycle tests verify original PMV bytes and library content remain unchanged
+  after Don’t Save followed by quit compaction; rejected journals are archived;
+  active saves refuse close/quit; completion permits them; dirty/open-edit states
+  and cancelled AppKit responses cannot silently choose Save or Recover.
+- Shell/design regression suite: 15 tests pass. These are headless checks, including
+  renderer capture, and do not verify the new native sheets on screen.
+
+The kernel-owned discard-close/durability additions are a prerequisite; no kernel
+or core source was edited by the app lane. The app lane's only MCP seam changes
+are `transport.rs` (generic connection factory on workers), `views.rs` (shared
+snapshot-data digests) and `lib.rs` (export the existing strips planner). No shell
+files changed. Shared Cargo.lock reconciliation remains with the integration owner;
+the only app dependency addition is pm-mcp.
+
 ## Decisions and picking rules
 
 | Decision | Rule |
@@ -149,22 +239,20 @@ Verification on 2026-11-01:
 | Direct Metal presenter and native transport layers | P-DEVICE and §3.3; no CPU viewer readback or per-frame GPUI notification |
 | Asynchronous kernel calls and AppKit sheets; worker file/media/export IO | §3.2 asynchronous hosts; §5 main-thread budget |
 | Isolated explicit native library; never discover a real profile | Explicit task safety rule and §6 beta/library isolation |
-| Keep recovery data when no safe decision API exists | N4 no data loss; never silently discard acknowledged work |
+| Recovery choices and Don’t Save archive through kernel-owned operations | N4 no data loss; generation fencing; no app-owned file deletion |
+| One app actor for stdio, loopback, windowed and windowless access | N7 agent-native; §3.8 MCP; §3.11 headless; §3.2 single writer |
+| Immutable MCP actor identity; preserve ordinary gesture folding | Kernel slice 3 identity/restore contracts and §3.2.1; D10 stays off |
+| Native cancellable sheets and termination guard | §3.10 native behaviors; Save / Don’t Save / Cancel; main-thread waits stay asynchronous |
+| Keep 54 pending tools explicit and leave extension activation to P2 | N3 correctness over imitation; existing pm-mcp implementation boundary |
 | Report partial evidence instead of declaring Gate P1 | §7 requires the whole corpus workflow and §5 paired measurements |
 
 ## Remaining Gate P1 work and requested APIs
 
 Kernel requests:
 
-1. A generation-bound recovery-decision operation (Recover / OpenAsCopy /
-   Discard), ideally before adopting/publishing recovered content. Discard
-   needs to reopen the unchanged base and retire only the explicitly rejected
-   journal, without the save side effect of Close.
-2. Actor selection mutations that publish the resulting selection summary.
-3. A quit/close coordinator or non-saving close/defer primitive, plus explicit
-   completion of durability/compaction before application termination.
-4. Expose session destination and resolved media metadata/catalog with open
-   results, avoiding duplicate file reads/cache extraction in the host.
+1. Broader multi-window document ownership and restore coordination. The app now
+   consumes explicit recovery choices, selection, published destination/media,
+   worker save handoff, discard-close and durability/quit APIs.
 
 Engine-service requests:
 
@@ -174,6 +262,6 @@ Engine-service requests:
    changes inside the shell's present transaction, including display/EDR changes.
 
 Still open: broader corpus playback/scrub/export coverage, GUI drop/zoom/readout
-and keymap edge cases, recovery Discard, library media fixtures, journal kill tests,
+and keymap edge cases, library media fixtures, journal kill tests,
 full-resolution export/visual checks, migration gates, and every §5 paired
 latency/playback/A-V/CPU/GPU/energy/idle/memory budget. No release, tag or push.

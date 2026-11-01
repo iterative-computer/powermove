@@ -56,15 +56,41 @@ pub fn choice(
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(detail));
-    for b in buttons {
-        alert.addButtonWithTitle(&NSString::from_str(b));
+    for (index, b) in buttons.iter().enumerate() {
+        let button = alert.addButtonWithTitle(&NSString::from_str(b));
+        if *b == "Cancel" {
+            button.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+        } else if index == 0 {
+            button.setKeyEquivalent(&NSString::from_str("\r"));
+        }
+        if *b == "Don’t Save" {
+            button.setKeyEquivalent(&NSString::from_str("d"));
+            button.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        }
     }
     let (tx, rx) = async_channel::bounded(1);
     let done = block2::RcBlock::new(move |r: NSModalResponse| {
-        let _ = tx.try_send((r - 1000).max(0) as usize);
+        let _ = tx.try_send(choice_index(r));
     });
     alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
     rx
+}
+
+fn choice_index(response: NSModalResponse) -> usize {
+    usize::try_from(response - NSAlertFirstButtonReturn).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn alert_buttons_keep_their_order_and_aborted_sheets_never_choose_save_or_recover() {
+        assert_eq!(choice_index(NSAlertFirstButtonReturn), 0);
+        assert_eq!(choice_index(NSAlertSecondButtonReturn), 1);
+        assert_eq!(choice_index(NSAlertThirdButtonReturn), 2);
+        assert_eq!(choice_index(NSModalResponseAbort), usize::MAX);
+        assert_eq!(choice_index(NSModalResponseCancel), usize::MAX);
+    }
 }
 
 pub fn field(
@@ -112,5 +138,64 @@ pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
                 }
             }
         }
+    }
+}
+
+// Preserve GPUI's existing application delegate while intercepting termination
+// before its non-cancellable shutdown callback. All other selectors forward.
+use objc2::{
+    DefinedClass, define_class, msg_send,
+    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
+};
+use std::cell::Cell;
+pub struct QuitState {
+    previous: Retained<ProtocolObject<dyn NSApplicationDelegate>>,
+    sender: async_channel::Sender<()>,
+    allowed: Cell<bool>,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMNativeQuitDelegate"]
+    #[ivars = QuitState]
+    pub struct QuitDelegate;
+    unsafe impl NSObjectProtocol for QuitDelegate {
+        #[unsafe(method(respondsToSelector:))]
+        fn responds_to_selector(&self, selector: Sel) -> bool {
+            selector == objc2::sel!(applicationShouldTerminate:)
+                || unsafe { msg_send![&*self.ivars().previous, respondsToSelector: selector] }
+        }
+    }
+    unsafe impl NSApplicationDelegate for QuitDelegate {
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _: &NSApplication) -> NSApplicationTerminateReply {
+            if self.ivars().allowed.get() { NSApplicationTerminateReply::TerminateNow }
+            else { let _=self.ivars().sender.try_send(()); NSApplicationTerminateReply::TerminateCancel }
+        }
+    }
+    impl QuitDelegate {
+        #[unsafe(method(forwardingTargetForSelector:))]
+        fn forward(&self, _: Sel) -> *const AnyObject {
+            &*self.ivars().previous as *const _ as *const AnyObject
+        }
+    }
+);
+pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    let (sender, rx) = async_channel::bounded(1);
+    let previous = app.delegate().expect("GPUI application delegate");
+    let this = QuitDelegate::alloc(mtm).set_ivars(QuitState {
+        previous,
+        sender,
+        allowed: Cell::new(false),
+    });
+    let guard: Retained<QuitDelegate> = unsafe { objc2::msg_send![super(this), init] };
+    app.setDelegate(Some(ProtocolObject::from_ref(&*guard)));
+    (guard, rx)
+}
+impl QuitDelegate {
+    pub fn allow(&self) {
+        self.ivars().allowed.set(true);
     }
 }
