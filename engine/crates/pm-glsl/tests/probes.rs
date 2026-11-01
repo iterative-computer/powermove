@@ -104,7 +104,7 @@ fn every_probe_gets_webgls_verdict() {
     assert!(unexpected.is_empty(), "{unexpected:#?}");
 }
 
-/// The fuzz target in-process, as a smoke test (`pm-glsl-fuzz` runs the long
+/// The fuzz target in compiler processes, as a smoke test (`pm-glsl-fuzz` runs the long
 /// campaigns in a worker process): deterministic mutants of the probes never
 /// panic and every outcome is a verdict.
 #[test]
@@ -132,12 +132,8 @@ fn mutants_of_the_probes_never_panic() {
     let mut tally = std::collections::BTreeMap::<String, usize>::new();
     for index in 0..300 {
         let (source, _, offset) = pm_glsl::fuzz::mutant(&seeds, 5, index);
-        let outcome = std::thread::Builder::new()
-            .stack_size(pm_glsl::cache::TRANSLATION_STACK)
-            .spawn(move || pm_glsl::fuzz::outcome(&source, offset))
-            .unwrap()
-            .join()
-            .expect("the outcome catches panics itself");
+        let outcome = pm_glsl::fuzz::outcome_isolated(&source, offset)
+            .expect("the worker returns a compiler verdict");
         assert_ne!(
             outcome.result, "panic",
             "mutant {index}: {}",

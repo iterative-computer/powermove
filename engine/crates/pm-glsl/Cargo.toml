@@ -24,8 +24,18 @@ path = "src/bin/fuzz.rs"
 name = "pm-glsl-compiler"
 path = "src/bin/compiler.rs"
 
-[dev-dependencies]
+[features]
+# The production Metal inventory also pulls the macOS renderer/media stack.
+macos-inventory = []
+
+[[example]]
+name = "inventory"
+required-features = ["macos-inventory"]
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 pm-render = { path = "../pm-render" }
 pm-gpu = { path = "../pm-gpu", default-features = false, features = ["glsl"] }
+
+[dev-dependencies]
 wgpu = { version = "30", default-features = false, features = ["metal", "naga-ir"] }
 pollster = "0.4"
