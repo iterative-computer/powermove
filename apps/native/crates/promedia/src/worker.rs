@@ -2,13 +2,14 @@
 use crate::{
     media::{Artifact, MediaCatalog, MediaInfo, MediaJob, MediaProbe, Rational, RenditionKind},
     proxy::{Control, EncodeOutcome, EncodeRequest, Probe, RenditionEncoder},
-    storage::{invalid, no_links},
+    storage::{invalid, no_links, regular},
     tasks::{
         BackgroundTasks, ProgressUnit, TaskFailure, TaskFailureCode, TaskKind, TaskState, Ticket,
     },
 };
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -113,11 +114,14 @@ impl RenditionWork {
         staging_root: &Path,
         observe: impl FnMut(u64) -> Control,
     ) -> WorkReport {
+        let last_control = std::cell::Cell::new(Control::Continue);
         let mut completed = self.progress_floor;
         let mut observer = observe;
         let mut observe = |frames: u64| {
             completed = completed.max(frames);
-            observer(completed)
+            let control = observer(completed);
+            last_control.set(control);
+            control
         };
         let mut staging = None;
         let result = (|| -> io::Result<WorkOutcome> {
@@ -131,8 +135,9 @@ impl RenditionWork {
             if !staging_root.is_dir() {
                 return Err(invalid("staging root must be a directory"));
             }
-            let source_probe = encoder.probe(&self.source.path)?;
-            let actual = Artifact::inspect(&self.source.path, &EngineProbe(encoder))?;
+            regular(&self.source.path)?;
+            let source_probe = encoder.probe_controlled(&self.source.path, &mut || observe(0))?;
+            let actual = inspect(&self.source.path, info(&source_probe), &mut || observe(0))?;
             if actual != self.source {
                 return Err(invalid("source changed before encode"));
             }
@@ -158,17 +163,27 @@ impl RenditionWork {
                 Control::Cancel => return Ok(WorkOutcome::Stopped(EncodeOutcome::Cancelled)),
                 _ => {}
             }
-            let output_probe = encoder.probe(&output)?;
+            let output_probe = encoder.probe_controlled(&output, &mut || observe(0))?;
             source_probe.verify_rendition(&output_probe, request.width, request.height)?;
             // Lease is required; this second identity check additionally catches
             // accidental host misuse. Output remains private if anything differs.
-            if Artifact::inspect(&self.source.path, &EngineProbe(encoder))? != self.source {
+            if inspect(&self.source.path, self.source.info.clone(), &mut || {
+                observe(0)
+            })? != self.source
+            {
                 return Err(invalid("source changed during encode"));
             }
-            let artifact = Artifact::inspect(&output, &EngineProbe(encoder))?;
+            let artifact = inspect(&output, info(&output_probe), &mut || observe(0))?;
             Ok(WorkOutcome::Ready(artifact))
         })();
         let outcome = result.unwrap_or_else(|e| {
+            if e.kind() == io::ErrorKind::Interrupted {
+                match last_control.get() {
+                    Control::Pause => return WorkOutcome::Stopped(EncodeOutcome::Paused),
+                    Control::Cancel => return WorkOutcome::Stopped(EncodeOutcome::Cancelled),
+                    Control::Continue => {}
+                }
+            }
             WorkOutcome::Failed(TaskFailure {
                 code: match e.kind() {
                     io::ErrorKind::NotFound => TaskFailureCode::SourceOffline,
@@ -228,4 +243,31 @@ impl WorkReport {
             )),
         }
     }
+}
+
+// Probe once, then hash streamed bytes with cooperative checkpoints. The caller
+// holds the source lease; metadata and content can never come from two sources.
+fn inspect(
+    path: &Path,
+    info: MediaInfo,
+    control: &mut dyn FnMut() -> Control,
+) -> io::Result<Artifact> {
+    regular(path)?;
+    info.validate()?;
+    let mut file = fs::File::open(path)?;
+    let mut digest = blake3::Hasher::new();
+    let mut block = [0u8; 65536];
+    loop {
+        control().check()?;
+        let n = file.read(&mut block)?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&block[..n]);
+    }
+    Ok(Artifact {
+        path: path.to_owned(),
+        fingerprint: *digest.finalize().as_bytes(),
+        info,
+    })
 }

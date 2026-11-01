@@ -26,7 +26,12 @@ fn fixture(root: &Path, audio: bool, offset: bool) -> std::path::PathBuf {
         "pipe:0",
     ]);
     if audio {
-        cmd.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
+        cmd.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.1*sin(2*PI*440*t)|0.2*sin(2*PI*660*t):s=48000",
+        ]);
     }
     if offset {
         cmd.args(["-output_ts_offset", "5"]);
@@ -138,6 +143,19 @@ fn real_proxy_preserves_alpha_audio_pts_and_original_identity() {
         .unwrap()
         .verify_rendition(&backend.probe(&output.path).unwrap(), 2, 1)
         .unwrap();
+    let pcm = |path: &Path| {
+        let output = Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(path)
+            .args(["-map", "0:a:0", "-f", "f32le", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    let original_pcm = pcm(&source);
+    assert!(original_pcm.iter().any(|v| *v != 0));
+    assert_eq!(pcm(&output.path), original_pcm);
     assert_eq!(catalog.resolve("m", None).unwrap(), &original);
     assert_eq!(fs::read(source).unwrap(), original_bytes);
     assert!(frames.windows(2).all(|n| n[0] <= n[1]));
@@ -194,9 +212,13 @@ fn pause_and_restart_have_fresh_jobs_and_private_outputs() {
     let dir = TempDir::new().unwrap();
     let source = fixture(dir.path(), false, false);
     let (mut catalog, mut tasks, ticket, job) = setup(&source, RenditionKind::Proxy, profile());
+    tasks.progress(ticket, 2, 4).unwrap();
     let work = RenditionWork::prepare(&catalog, &mut tasks, ticket, &job).unwrap();
     tasks.pause(ticket.id).unwrap();
-    let report = work.run(&SoftwareEncoder::default(), dir.path(), |_| Control::Pause);
+    let report = work.run(&SoftwareEncoder::default(), dir.path(), |n| {
+        assert_eq!(n, 2);
+        Control::Pause
+    });
     assert!(report.staging.is_none());
     report.accept(&mut catalog, &mut tasks).unwrap();
     assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Paused);
@@ -323,4 +345,152 @@ fn native_trait_output_with_altered_sample_timing_is_refused() {
     report.accept(&mut catalog, &mut tasks).unwrap();
     assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Failed);
     assert!(catalog.get("m").unwrap().renditions.is_empty());
+}
+
+#[cfg(unix)]
+fn blocking_tool(root: &Path, encode: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("synthetic tool.py");
+    let pid = root.join("pid");
+    let script = format!(
+        "#!/usr/bin/python3\nimport os,sys,time\nfrom pathlib import Path\nPath({:?}).write_text(str(os.getpid()))\n{}\nwhile True: time.sleep(0.05)\n",
+        pid.to_str().unwrap(),
+        if encode {
+            "Path(sys.argv[-1]).write_bytes(b'private partial')\nprint('frame=1',flush=True)"
+        } else {
+            ""
+        }
+    );
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    (path, pid)
+}
+#[cfg(unix)]
+fn assert_reaped(pid: &Path) {
+    let pid = fs::read_to_string(pid).unwrap();
+    assert!(
+        !Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+#[test]
+#[cfg(unix)]
+fn blocked_probe_observes_control_and_reaps_its_process() {
+    let dir = TempDir::new().unwrap();
+    let (tool, pid) = blocking_tool(dir.path(), false);
+    let backend = SoftwareEncoder {
+        ffprobe: tool,
+        ffmpeg: "unused".into(),
+    };
+    let start = std::time::Instant::now();
+    let err = backend
+        .probe_controlled(&dir.path().join("synthetic"), &mut || {
+            assert!(start.elapsed().as_secs() < 5);
+            if pid.exists() {
+                Control::Pause
+            } else {
+                Control::Continue
+            }
+        })
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    assert_reaped(&pid);
+}
+#[test]
+#[cfg(unix)]
+fn running_encode_cancel_releases_process_and_retains_partial_output() {
+    let dir = TempDir::new().unwrap();
+    let (tool, pid) = blocking_tool(dir.path(), true);
+    let backend = SoftwareEncoder {
+        ffmpeg: tool,
+        ffprobe: "unused".into(),
+    };
+    let output = dir.path().join("partial.mkv");
+    let request = EncodeRequest {
+        source: dir.path().join("source"),
+        output: output.clone(),
+        width: 2,
+        height: 1,
+        codec: "ffv1".into(),
+        container: "mkv".into(),
+    };
+    let start = std::time::Instant::now();
+    let result = backend
+        .encode(&request, &mut |n| {
+            assert!(start.elapsed().as_secs() < 5);
+            if n >= 1 {
+                Control::Cancel
+            } else {
+                Control::Continue
+            }
+        })
+        .unwrap();
+    assert_eq!(result, EncodeOutcome::Cancelled);
+    assert_reaped(&pid);
+    assert_eq!(fs::read(output).unwrap(), b"private partial");
+}
+#[test]
+fn unverifiable_variable_duration_is_refused_without_inventing_timing() {
+    let dir = TempDir::new().unwrap();
+    let cfr = fixture(dir.path(), false, false);
+    let source = dir.path().join("variable.mkv");
+    assert!(
+        Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(cfr)
+            .args([
+                "-vf",
+                "setpts=N*N/(25*TB)",
+                "-fps_mode",
+                "passthrough",
+                "-c:v",
+                "ffv1",
+                "-level",
+                "3",
+                "-threads:v",
+                "1"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bytes = fs::read(&source).unwrap();
+    let error = SoftwareEncoder::default().probe(&source).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exact sample duration"));
+    assert_eq!(fs::read(source).unwrap(), bytes);
+}
+
+#[test]
+fn control_during_probe_settles_without_failure_or_output() {
+    let dir = TempDir::new().unwrap();
+    let source = fixture(dir.path(), false, false);
+    let (mut catalog, mut tasks, ticket, job) = setup(&source, RenditionKind::Proxy, profile());
+    let work = RenditionWork::prepare(&catalog, &mut tasks, ticket, &job).unwrap();
+    let mut polls = 0;
+    let report = work.run(&SoftwareEncoder::default(), dir.path(), |_| {
+        polls += 1;
+        if polls == 4 {
+            tasks.pause(ticket.id).unwrap();
+        }
+        if polls >= 4 {
+            Control::Pause
+        } else {
+            Control::Continue
+        }
+    });
+    assert!(
+        matches!(report.outcome, WorkOutcome::Stopped(EncodeOutcome::Paused)),
+        "{:?}",
+        report.outcome
+    );
+    assert!(report.staging.is_none());
+    report.accept(&mut catalog, &mut tasks).unwrap();
+    assert_eq!(tasks.get(ticket.id).unwrap().state, TaskState::Paused);
+    assert!(catalog.status("m").unwrap().failures.is_empty());
 }

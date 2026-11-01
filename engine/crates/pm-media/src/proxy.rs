@@ -96,6 +96,18 @@ pub enum Control {
     Pause,
     Cancel,
 }
+impl Control {
+    pub fn check(self) -> io::Result<()> {
+        if self == Self::Continue {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "media work interrupted",
+            ))
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncodeOutcome {
     Complete,
@@ -107,6 +119,18 @@ pub enum EncodeOutcome {
 /// for the host's archive policy. No adapter attaches media or mutates models.
 pub trait RenditionEncoder: Send + Sync {
     fn probe(&self, path: &Path) -> io::Result<Probe>;
+    /// Native adapters override this when probing can block. Interrupted is
+    /// returned only after releasing probe resources; callers retain control.
+    fn probe_controlled(
+        &self,
+        path: &Path,
+        control: &mut dyn FnMut() -> Control,
+    ) -> io::Result<Probe> {
+        control().check()?;
+        let result = self.probe(path)?;
+        control().check()?;
+        Ok(result)
+    }
     fn encode(
         &self,
         request: &EncodeRequest,
@@ -161,6 +185,75 @@ fn bounded_output(command: &mut Command, limit: u64) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+// Bounded streaming records with cooperative control even while the tool is
+// blocked in decoding and emits no stdout. No whole-movie timing allocation.
+fn records(
+    command: &mut Command,
+    max_record: u64,
+    control: &mut dyn FnMut() -> Control,
+    mut consume: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    control().check()?;
+    let mut process = child(command)?;
+    let stdout = process.0.stdout.take().expect("piped");
+    let (tx, rx) = mpsc::sync_channel(8);
+    let reader = thread::spawn(move || {
+        let mut input = BufReader::new(stdout);
+        loop {
+            let mut line = Vec::new();
+            let record = match input
+                .by_ref()
+                .take(max_record + 1)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) => break,
+                Ok(_) if line.len() as u64 > max_record => {
+                    Err(invalid("oversized media tool record"))
+                }
+                Ok(_) => Ok(line),
+                Err(e) => Err(e),
+            };
+            let failed = record.is_err();
+            if tx.send(record).is_err() || failed {
+                break;
+            }
+        }
+    });
+    let result = (|| {
+        loop {
+            control().check()?;
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(line) => consume(&line?)?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Some(status) = process.0.try_wait()? {
+                        return if status.success() {
+                            Ok(())
+                        } else {
+                            Err(invalid("media tool failed"))
+                        };
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    })();
+    drop(process);
+    drop(rx);
+    let _ = reader.join();
+    result
+}
+fn metadata(command: &mut Command, control: &mut dyn FnMut() -> Control) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    records(command, 4 * 1024 * 1024, control, |line| {
+        if data.len() + line.len() > 4 * 1024 * 1024 {
+            return Err(invalid("oversized media metadata"));
+        }
+        data.extend_from_slice(line);
+        Ok(())
+    })?;
+    Ok(data)
+}
 fn field<'a>(value: &'a serde_json::Value, name: &str) -> io::Result<&'a str> {
     value[name]
         .as_str()
@@ -173,45 +266,39 @@ fn integer(value: &serde_json::Value, name: &str) -> io::Result<u32> {
         .ok_or_else(|| invalid(format!("missing {name}")))
 }
 impl SoftwareEncoder {
-    fn timing(&self, path: &Path, stream: &str) -> io::Result<Timing> {
-        let mut process = child(
-            Command::new(&self.ffprobe)
-                .args([
-                    "-v",
-                    "error",
-                    "-select_streams",
-                    stream,
-                    "-show_frames",
-                    "-show_entries",
-                    "frame=best_effort_timestamp,pkt_duration,duration,nb_samples",
-                    "-of",
-                    "compact=p=0",
-                ])
-                .arg(path),
-        )?;
-        let mut reader = BufReader::new(process.0.stdout.take().expect("piped"));
-        let mut line = Vec::new();
+    fn timing(
+        &self,
+        path: &Path,
+        stream: &str,
+        control: &mut dyn FnMut() -> Control,
+    ) -> io::Result<Timing> {
+        let mut command = Command::new(&self.ffprobe);
+        command
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                stream,
+                "-show_frames",
+                "-show_entries",
+                "frame=best_effort_timestamp,pkt_duration,duration,nb_samples",
+                "-of",
+                "compact=p=0",
+            ])
+            .arg(path);
         let mut digest = blake3::Hasher::new();
         let mut samples = 0u64;
         let mut start = i64::MAX;
         let mut end = i64::MIN;
-        loop {
-            line.clear();
-            // Limit each record, never materialize a whole movie's frame table.
-            if reader.by_ref().take(4097).read_until(b'\n', &mut line)? == 0 {
-                break;
-            }
-            if line.len() > 4096 {
-                return Err(invalid("oversized frame timing record"));
-            }
-            let text = std::str::from_utf8(&line).map_err(|_| invalid("invalid timing text"))?;
+        records(&mut command, 4096, control, |line| {
+            let text = std::str::from_utf8(line).map_err(|_| invalid("invalid timing text"))?;
             let fields: std::collections::BTreeMap<_, _> = text
                 .trim()
                 .split('|')
                 .filter_map(|s| s.split_once('='))
                 .collect();
             if fields.is_empty() {
-                continue;
+                return Ok(());
             }
             let number = |key: &str| fields.get(key).and_then(|s| s.parse::<i64>().ok());
             let pts =
@@ -231,8 +318,9 @@ impl SoftwareEncoder {
             samples = samples
                 .checked_add(1)
                 .ok_or_else(|| invalid("sample count overflow"))?;
-        }
-        if !process.0.wait()?.success() || samples == 0 {
+            Ok(())
+        })?;
+        if samples == 0 {
             return Err(invalid("no decoded samples"));
         }
         Ok(Timing {
@@ -298,11 +386,18 @@ impl SoftwareEncoder {
 }
 impl RenditionEncoder for SoftwareEncoder {
     fn probe(&self, path: &Path) -> io::Result<Probe> {
-        let bytes = bounded_output(
+        self.probe_controlled(path, &mut || Control::Continue)
+    }
+    fn probe_controlled(
+        &self,
+        path: &Path,
+        control: &mut dyn FnMut() -> Control,
+    ) -> io::Result<Probe> {
+        let bytes = metadata(
             Command::new(&self.ffprobe)
                 .args(["-v", "error", "-show_streams", "-of", "json"])
                 .arg(path),
-            4 * 1024 * 1024,
+            control,
         )?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
         let streams = value["streams"]
@@ -355,7 +450,7 @@ impl RenditionEncoder for SoftwareEncoder {
                         .parse()
                         .map_err(|_| invalid("sample rate"))?,
                     time_base: Fraction::parse(field(a, "time_base")?)?,
-                    timing: self.timing(path, "a:0")?,
+                    timing: self.timing(path, "a:0", control)?,
                 })
             })
             .transpose()?;
@@ -366,7 +461,7 @@ impl RenditionEncoder for SoftwareEncoder {
             time_base: Fraction::parse(field(v, "time_base")?)?,
             alpha,
             colour: serde_json::to_string(&interpretation)?,
-            video: self.timing(path, "v:0")?,
+            video: self.timing(path, "v:0", control)?,
             audio,
         })
     }
@@ -403,7 +498,15 @@ impl RenditionEncoder for SoftwareEncoder {
         // directory. Do not use -y or publish into a user-selected destination.
         let mut process = child(
             Command::new(&self.ffmpeg)
-                .args(["-v", "error", "-nostdin", "-n", "-copyts", "-i"])
+                .args([
+                    "-v",
+                    "error",
+                    "-nostdin",
+                    "-n",
+                    "-copyts",
+                    "-noautorotate",
+                    "-i",
+                ])
                 .arg(&request.source)
                 .args([
                     "-map",
@@ -414,6 +517,10 @@ impl RenditionEncoder for SoftwareEncoder {
                     &format!("scale={}:{}:flags=lanczos", request.width, request.height),
                     "-c:v",
                     "ffv1",
+                    "-threads:v",
+                    "4",
+                    "-g",
+                    "1",
                     "-level",
                     "3",
                     "-c:a",

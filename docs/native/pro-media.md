@@ -373,3 +373,28 @@ must verify actual GPU readback, LUT/scopes reference vectors, graph publication
 races, native encoder cancellation, HDR/alpha/audio tags, APFS publication and
 real playback/seek performance. No visual surface or unprovided UX copy is added;
 there are no new `DESIGN-TODO(opus)` placeholders in this slice.
+
+### Worker control and sample verification follow-up
+
+Probing now streams bounded records through a bounded channel and checks control
+while waiting for output, including a blocked decoder. `probe_controlled` is the
+native trait's override point; the software implementation kills/reaps and joins
+its reader before returning Interrupted. Source/output hashing checks controls
+at 64 KiB boundaries and reuses verified probe metadata instead of repeatedly
+scanning entire movie frame tables. Interrupted probing/hashing settles as the
+requested control, not a task failure. The software encoder uses four codec
+threads and all-intra frames; it disables autorotation so stored interpretation
+is not accidentally baked into pixels.
+
+| Decision | Selecting rule |
+| --- | --- |
+| Poll controls while probes are blocked; acknowledge only after process release, including before/after encoding. | N1/N2/N8: useful native pause/cancel without main-thread waits. |
+| Hash with bounded checkpoints and reuse one probe per source/output. | N1/N3: bounded memory and fewer redundant decodes without weakening byte identity. |
+| Preserve resumed frame-progress floors and verify non-silent stereo samples byte-for-byte in integration tests. | N1/N3/N7: honest monotone progress and explicit audio-fidelity evidence. |
+| Refuse a synthetic variable-PTS stream whose last duration is absent. | N3: frame-rate inference cannot establish exact authored timing; originals remain available under N4. |
+
+The locked native suite passes **106 tests**, including blocked-probe/process
+release, running encode cancellation with retained partials, cancellation during
+probing, resume progress and missing-duration refusal. Clippy with warnings denied
+and formatting pass. General VFR/container support still requires a native probe
+that provides exact sample durations; this FFV1 test path does not infer them.
