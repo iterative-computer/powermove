@@ -8,26 +8,26 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     let r = run(&c, &Filter::default(), &[]).unwrap();
     assert_eq!(r.workflows.len(), 83);
     assert_eq!(r.specs.len(), 396);
-    assert_eq!(r.counts(), (1399, 1, 3175));
-    assert_eq!(r.exit_code(false), 1);
-    assert_eq!(r.exit_code(true), 1);
+    assert_eq!(r.counts(), (1411, 0, 3175));
+    assert_eq!(r.exit_code(false), 0);
+    assert_eq!(r.exit_code(true), 2);
     assert_eq!(
         r.workflows
             .iter()
             .filter(|w| w.status == Status::BlockedBy)
             .count(),
-        82
+        83
     );
     assert_eq!(
         r.workflows.iter().find(|w| w.id == "W071").unwrap().status,
-        Status::Fail
+        Status::BlockedBy
     );
     assert_eq!(
         r.cases
             .iter()
             .filter(|x| x.kind == "original" && x.status == Status::Pass)
             .count(),
-        7
+        11
     );
     assert_eq!(
         r.cases
@@ -58,6 +58,32 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     );
     for spec in &r.specs {
         assert!(!spec.acceptance_ids.is_empty());
+        assert_eq!(
+            spec.acceptance_ids, spec.legacy.native_triage.acceptance_ids,
+            "{} triage acceptance drift",
+            spec.legacy.file
+        );
+        assert_eq!(
+            spec.supporting_probe_ids, spec.legacy.native_triage.supporting_probe_ids,
+            "{} triage probe drift",
+            spec.legacy.file
+        );
+        let targeted = r
+            .cases
+            .iter()
+            .filter(|c| spec.acceptance_ids.contains(&c.id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spec.legacy.native_triage.needs_macos,
+            targeted.iter().any(|c| c.needs_macos)
+        );
+        let blockers = targeted
+            .iter()
+            .filter_map(|c| c.blocked_by.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(spec.legacy.native_triage.blocked_by, blockers);
         assert!(
             spec.acceptance_ids
                 .iter()
@@ -82,7 +108,7 @@ fn full_run_keeps_partial_evidence_separate_and_maps_every_spec() {
     assert!(csv.iter().all(|row| row.len() == 7));
     assert!(
         r.markdown()
-            .contains("1399 pass / 1 fail / 3175 blocked-by")
+            .contains("1411 pass / 0 fail / 3175 blocked-by")
     );
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["format"], "powermove.acceptance");
@@ -161,6 +187,28 @@ fn cli_filters_formats_and_strict_exit_are_machine_drivable() {
         .output()
         .unwrap();
     assert_eq!(bad.status.code(), Some(3));
+    for args in [
+        vec!["--runtime-runner"],
+        vec!["--compat-bundle", "synthetic.js"],
+    ] {
+        assert_eq!(
+            Command::new(bin).args(args).output().unwrap().status.code(),
+            Some(3)
+        );
+    }
+    let unavailable = Command::new(bin)
+        .args([
+            "--case",
+            "W037.v8-reload",
+            "--runtime-runner",
+            "/no/such/native-backing",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(unavailable.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(json["cases"][0]["status"], "fail");
+    assert!(json["cases"][0]["blocked_by"].is_null());
     let catalog = Command::new(bin)
         .args(["--format", "catalog"])
         .output()

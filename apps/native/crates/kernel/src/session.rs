@@ -603,7 +603,7 @@ impl Kernel {
         let mut meta = p.session.unwrap_or(Value::Null);
         let ws = p.workspace.unwrap_or(Value::Null);
         let history = p.history.unwrap_or(Value::Null);
-        if let Some(file) = file.filter(|f| f.media.len() > 0) {
+        if let Some(file) = file.filter(|f| !f.media.is_empty()) {
             let canonical = crate::model::to_canonical(p.project.clone());
             let comp = canonical.get("compId").and_then(Value::as_str);
             let imported = crate::History::import(&history, comp).unwrap_or_default();
@@ -725,10 +725,10 @@ impl Kernel {
             if let RecoveryResult::OfferCopy { project, .. } = recovery {
                 recovery_copies.push(project);
             }
-            if let Destination::Library(slot) = &self.sessions[&session.project].destination {
-                if slot != &session.project {
-                    recovery_copies.push(slot.clone());
-                }
+            if let Destination::Library(slot) = &self.sessions[&session.project].destination
+                && slot != &session.project
+            {
+                recovery_copies.push(slot.clone());
             }
             let saved = self.shell(ShellCall::Close(session))?;
             if let ShellReply::Closed { recovery_copy } = saved {
@@ -915,19 +915,19 @@ impl Kernel {
 
             SessionSource::File(path) => {
                 if let Some(s) = self.sessions.values().find(|s| matches!(&s.destination, Destination::File(p) if p.canonicalize().ok().is_some() && p.canonicalize().ok() == path.canonicalize().ok())) { return Err(KernelFailure::AlreadyOpen(s.handle.project.clone())); }
-                if let Some(w) = &self.library {
-                    if let Some(existing) = w.store().load(&id).map_err(failure)? {
-                        let associated = existing
-                            .session
-                            .as_ref()
-                            .and_then(|m| m.get("file"))
-                            .and_then(|m| m.get("path"))
-                            .and_then(Value::as_str);
-                        if associated != path.to_str() {
-                            return Err(failure(
-                                "Project id belongs to another library project; open with a fresh session id",
-                            ));
-                        }
+                if let Some(w) = &self.library
+                    && let Some(existing) = w.store().load(&id).map_err(failure)?
+                {
+                    let associated = existing
+                        .session
+                        .as_ref()
+                        .and_then(|m| m.get("file"))
+                        .and_then(|m| m.get("path"))
+                        .and_then(Value::as_str);
+                    if associated != path.to_str() {
+                        return Err(failure(
+                            "Project id belongs to another library project; open with a fresh session id",
+                        ));
                     }
                 }
                 decision = locks::open_decision(&path, electron_profile.as_deref());
@@ -1184,12 +1184,12 @@ impl Kernel {
             }
             info.journal = self.journal_dir(&handle.project);
             info.base_hash = self.base_hash(&handle.project).unwrap().into();
-        } else if self.library.is_some() {
-            if let Err(e) = self.save_library_slot(&handle.project, &handle.project, false) {
-                self.sessions.remove(&handle.project);
-                self.close(&handle.project);
-                return Err(e);
-            }
+        } else if self.library.is_some()
+            && let Err(e) = self.save_library_slot(&handle.project, &handle.project, false)
+        {
+            self.sessions.remove(&handle.project);
+            self.close(&handle.project);
+            return Err(e);
         }
         Ok(ShellReply::Opened {
             session: handle,
@@ -1218,7 +1218,7 @@ impl Kernel {
         let history = recovered.history.snapshot().to_saved_packed();
         let workspace = recovered.workspace.clone();
         let mut meta = Value::Object(Map::new());
-        if let Some(file) = file.filter(|f| f.media.len() > 0) {
+        if let Some(file) = file.filter(|f| !f.media.is_empty()) {
             let mut store = crate::DocumentStore::recovered(recovered.document, recovered.history);
             store.inherit_file(file);
             store.set_workspace(Some(workspace.clone()));
@@ -1352,7 +1352,7 @@ impl Kernel {
             None
         };
         value = with_identity(value, slot, name.as_deref());
-        if self.project(id).unwrap().store().media().len() > 0
+        if !self.project(id).unwrap().store().media().is_empty()
             && (recovery || matches!(self.sessions[id].destination, Destination::Library(_)))
         {
             let w = self
@@ -1391,7 +1391,7 @@ impl Kernel {
         let history = session
             .rejected_history
             .clone()
-            .filter(|_| p.store().history().len() == 0)
+            .filter(|_| p.store().history().is_empty())
             .unwrap_or_else(|| p.store().history().snapshot().to_saved_packed());
         let mut meta = self
             .state

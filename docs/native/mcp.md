@@ -1,7 +1,10 @@
 # MCP and automation core (Phase 1)
 
 Crate: `apps/native/crates/mcp` (`pm-mcp`); binary: `powermove-mcp`.
-Status: **67 tools / 67 schema-identical / 14 implemented / 53 pending**.
+Status: **67 tools / 67 schema-identical / 20 standalone bodies + 6 host-backed adapters / 41 pending**.
+`catalog::IMPLEMENTED` contains 26 bodies/adapters; `HOST_BACKED` identifies the
+six that still require an injected engine/export worker. The standalone binary
+does not fabricate a renderer, decoder, export child or loaded media registry.
 This is the standalone automation core, with an asynchronous adapter to the
 application's kernel actor. It does not yet provide the complete agent runtime,
 extension activation, rendering or surface automation of the windowed app.
@@ -64,15 +67,15 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `edit_layer_strips` | Yes | Implemented | Kernel timing/layer commands + atomic id-keyed operations |
 | `manage_project` | Yes | Implemented | Kernel shell library operations; active-project rename via CompCommand |
 | `save_project` | Yes | Implemented | Generation-bound shell SaveAs / Save; PMV4 writer and locks |
-| `export_video` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
-| `get_3d_scene` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
+| `export_video` | Yes | Adapter | ExportChild video worker; frozen options, immutable snapshot and verified output path |
+| `get_3d_scene` | Yes | Implemented | Kernel allProps/evaluation/compositionScene queries; frozen v1.2.0 result projection |
 | `edit_3d` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
 | `fork_builtin_extension` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
 | `get_project_state` | Yes | Implemented | Kernel snapshot, selection, query evaluation; paged digest |
-| `list_media` | Yes | Pending | Durable media import/version/Undo service |
+| `list_media` | Yes | Implemented | Kernel asset/folder/reference digest; optional MediaRegistry reports real runtime availability |
 | `replace_media` | Yes | Pending | Durable media import/version/Undo service |
 | `import_media` | Yes | Pending | Durable media import/version/Undo service |
-| `manage_media` | Yes | Pending | Durable media import/version/Undo service |
+| `manage_media` | Yes | Implemented | Guarded kernel metadata edits and native Undo; never deletes stored/source bytes |
 | `select_layers` | Yes | Implemented | Kernel SelectionCall; ephemeral selection publication |
 | `inspect_creative_workspace` | Yes | Pending | Creative-app inventory and bounded source reader |
 | `set_panel_layout` | Yes | Pending | Workspace editing state and external workspace Undo/Redo callback host; settings alone are insufficient |
@@ -84,18 +87,18 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `capture_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
 | `computer_use_panel` | Yes | Pending | Shell/surface host, semantic controls, image/input or thread attachment |
 | `get_workspace_state` | Yes | Pending | Kernel identity/selection/effects exist; viewport, renderer errors, projects-screen state and extension health require shell/runtime |
-| `render_frames` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
+| `render_frames` | Yes | Adapter | EngineHook snapshot capture; encoded images and revision/document fence; host absent by default |
 | `apply_commands` | Yes | Implemented | Frozen JSON adapter → typed kernel commands → guarded Transact |
-| `edit_video` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
+| `edit_video` | Yes | Implemented | All nine frozen operations; source bounds, static-timing guards, exact key rebasing, locks and rollback |
 | `rollback_changes` | Yes | Implemented | Document/revision guard + validated kernel Restore + journal publication |
 | `validate_effect` | Yes | Pending | Extension registration validator |
 | `stage_fork_rebase` | Yes | Pending | Extension runtime/compiler, API pack, isolated sandbox and promotion |
-| `probe_media` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
-| `sample_media_frames` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
-| `media_contact_sheet` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
-| `media_waveform` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
+| `probe_media` | Yes | Adapter | EngineHook original resolver and native probe; frozen Rust result adapter |
+| `sample_media_frames` | Yes | Adapter | EngineHook decoding/scan; kernel Legacy sourceTime samples; frozen time/quality/result adapter |
+| `media_contact_sheet` | Yes | Adapter | EngineHook labelled sheet assembler; frozen source/composition time and grid planner |
+| `media_waveform` | Yes | Adapter | EngineHook measured audio/image worker; frozen windows, silence/loudness and time mapping |
 | `transcribe_media` | Yes | Pending | Engine-service adapter, media resolution and encoded results/jobs |
-| `check_project` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
+| `check_project` | Yes | Implemented | Kernel active/worldOpacity/sourceTime queries; optional media status and measured peaks |
 | `store_search` | Yes | Pending | Remote Store catalog/query service; local registry is not the catalog |
 | `store_extension` | Yes | Pending | Remote release/detail service; installed/version/source metadata lacks listing and releases |
 | `store_source` | Yes | Pending | Remote release tree/file service; kernel overlay inventory is not release-ID addressed |
@@ -106,40 +109,62 @@ listed below. Every row's input schema, description and name match v1.2.0.
 | `store_publish_prepare` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
 | `store_publish` | Yes | Pending | Store service, permissions, verified install/publish lifecycle |
 | `generate_captions` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
-| `export_captions` | Yes | Pending | Editor domain adapter; captions/3D/video/lint runtime or engine support |
+| `export_captions` | Yes | Implemented | ExportChild caption method; default pure Rust SRT/WebVTT exporter |
 
-## Kernel-backed pending-tool audit
+## Wave 2 kernel/engine audit
 
-This lane starts with 13 implemented / 54 pending and ends with **14 / 53**.
-Project/library management, project/timeline reads, selection, session history and
-rollback were already implemented on the base branch; the new body is
-`get_panel_layout`. It uses the kernel's project workspace when attached, or the
-selected named workspace in app context, plus the winning panel providers.
-It returns the exact tagged digest fields and null size defaults. It reads saved
-layout data without activating panels, changing selection, refreshing a run's
-revision guard, dirtying the document or adding history. No surface runtime is
-needed to enumerate registered IDs and titles. The standalone host reports only
-registrations actually present; it does not invent built-in panels.
+Wave 2 adds twelve bodies/adapters: `list_media`, `manage_media`, `edit_video`,
+`get_3d_scene`, `check_project`, `export_captions`, and the six `HOST_BACKED`
+tools above. Project/library/timeline reads, selection and existing edits continue
+using their existing kernel authority. All 67 public names, descriptions and
+input schemas remain byte-identical to the tagged catalog.
 
-The pending tools above cannot return complete v1.2.0 results from kernel data:
-`get_workspace_state` additionally requires real viewport, renderer diagnostics,
-projects-screen state and extension health. `set_panel_layout` promises external
-workspace Undo/Redo and checks workspace editing state; persisting settings
-without those callbacks would falsely claim that Undo works. Panel interaction,
-inspection and capture still require real surfaces. Store reads require the
-remote catalog/releases or full extension records, provenance, trust and update
-services shown in tagged `cloud/store-agent.ts` and `cloud/store-ipc.ts`;
-`ExtensionEntry { installed, enabled, version, source }` is not that contract.
-Kernel extension-source inventory addresses overlay/shared files, not Store
-release IDs. Creative inventory inspects After Effects, not native extensions.
-There is no project-memory tool or memory operation in the frozen 67-tool
-catalog; no new schema or tool is introduced to expose opaque project metadata.
-Engine/media/3D/agent tools retain their explicit structured unavailable errors.
+`list_media` pages metadata, folders, recursive structured references and inherited
+parent/group locks. Persisted metadata alone never becomes “available”: only a
+host MediaRegistry can report a decoded runtime. `get_project_state` uses that
+same optional registry for its media digest. `manage_media` implements every
+frozen asset/folder operation, validates the whole operation first and publishes
+one guarded id-keyed kernel transaction. Referenced deletion checks locks and
+unsupported structured references before removing layers. It never removes a
+source file, immutable media object or old byte version. Native Undo retains the
+metadata/layer tree. Like the tag, any media action prevents run snapshot rollback
+and run squash; ordinary composition rollback cannot restore media bytes.
 
-**Deliberate differences:** no new public schema or result-shape differences.
-The layout read reports the native kernel's saved/current facts; no claim of a
-live DOM, captured pixels or running extension health is made. Existing adapter
-limitations below remain in force.
+`edit_video` supports insert, split, trim, move, speed, remove, separate_audio,
+audio and slip. Scratch planning preserves complete layer metadata, masks,
+effects, transitions and keyframe timing. Source-handle limits, embedded-audio
+retiming refusal, animated/remapped timing refusal, inherited group locks and
+protected hand edits are checked before publication. Errors apply no partial
+work. The existing document identity, revision, rollback and history-group guards
+also cover these edits.
+
+`get_3d_scene` evaluates the kernel's compositionScene/allProps/evP queries. The
+engine contains later scene fields (object slots and light width/height); the
+frozen response projection omits those fields without changing project data.
+`check_project` evaluates real active/worldOpacity queries over the tagged bounded
+frame sampling schedule, with media/source bounds and measured peak checks when
+a MediaRegistry is injected. It does not guess drawing coverage from geometry.
+
+Import/replacement remain pending: kernel AddAsset records metadata but does not
+verify persisted bytes, fingerprint a file, retain runtime versions or coordinate
+media Undo. SetAssetFolder, full transform_layers, caption edit and 3D command
+variants also remain unimplemented in the kernel. Metadata-only “import” and
+partial transform success would violate N3/N4/N6. No new public tool or schema is
+introduced to bypass these gaps.
+
+`get_workspace_state` still needs the actual viewport, renderer diagnostics,
+projects-screen state and complete extension-health records. `set_panel_layout`
+needs workspace editing state and external Undo/Redo continuations. Panel and
+computer-use tools retain precise structured unavailable errors until their
+macOS hosts exist. Store/creative/agent/extension tools still need their respective
+services; generic registry inventory is not a substitute for those contracts.
+
+Acceptance integration: **do not use `edit_video` as W033.unavailable**.
+`render_frames` has an adapter but remains unavailable without EngineHook;
+`get_workspace_state` remains pending in every standalone configuration. Other
+stable pending choices are `import_media`, `replace_media`, `edit_3d`,
+`generate_captions`, `capture_panel`, `computer_use_panel` and the Store/agent
+families. This lane does not edit pm-acceptance.
 
 ## Implemented adapter limits
 
@@ -206,9 +231,12 @@ returns the full ShellReply so app callers can present recovery-copy decisions.
    validated `Call::Restore`, adds an undoable restore entry and publishes
    through the kernel's journal boundary. Refusal preserves all work. Disconnect logs a
    refusal; the client is already gone. Undo can recover a successful rollback.
-7. Finish removes extension staging; false finish/disconnect removes the run
-   workspace. Committed artifacts/API/input files remain. Finish errors also
-   end the run, preserving the document and its ordinary Undo history.
+7. Finish archives extension staging under `mcp-archives/<runId>/extensions`;
+   false finish/disconnect archives the whole run under
+   `mcp-archives/<runId>/workspace`. Committed artifacts/API/input files stay
+   in the original run directory. No authored workspace file is deleted.
+   Finish errors also end the run, preserving the document and ordinary Undo
+   history; failed archival leaves the source files in place.
 
 Applied acknowledgements are retained when the kernel reports a notice such as
 NotDurable. Mutation results include the notice and subscribers/stderr receive
@@ -241,16 +269,37 @@ a second writer. Full McpSession/transport binding to the application's actor
 is pending the actor operations below.
 
 `SurfaceHook` specifies panel listing, semantic inspection, stable-ID drive and
-capture. `EngineHook` specifies revision-bound frame capture. Both adapters are
-explicitly absent by default; no empty screenshot or fabricated panel succeeds.
-Their presence does not automatically implement the frozen panel/render tools.
-Surface IDs must be stable and shared between windowed and headless activation,
-with credentials and other sensitive controls omitted.
+capture, but no frozen panel tool claims success from this generic hook alone.
+`EngineHook` now supplies worker primitives: frozen capture, original media
+resolution/probe, source decoding/scan, labelled sheet assembly and measured
+waveform/loudness. Rust owns frozen result shapes, dimensions, sample/grid
+planning, time-base conversion, partial-sheet omitted-time reports and validated MCP image blocks. Layer source-time samples
+come from kernel queries with `retiming: "legacy"`, including animated speed and
+remapping, at the tag's precision/density/bounds. Snapshot requests carry project
+ID, document-open identity and revision; stale results are rejected. Source tools
+and render/export reads do not refresh the agent's edit baseline.
+
+`ExportChild` receives an immutable project and frozen VideoOptions plus the
+explicit export directory. The host owns original/proxy provenance, fonts,
+extension definitions, cancellation, atomic no-clobber output publication and
+child draining/reaping. The adapter refuses absent/empty/outside-destination
+outputs. The default video method is explicitly unavailable; its caption method
+uses Rust normalization, visible-layer clipping and SRT/WebVTT escaping. Caption
+text requires no subprocess or JS. These are worker interfaces, not permission
+to block the UI thread or create another kernel writer.
 
 ## Decisions
 
 | Decision | Reason |
 |---|---|
+| Keep frozen response adapters separate from optional native worker primitives | N6 freezes the public contract; N7/N8 permit headless tests without Node or UI-thread waits. |
+| Plan full video/media edits in scratch state, then publish one guarded transaction | N3 exact authored timing; N4 no partial edits; kernel single-writer architecture. |
+| Archive retired run/staging files instead of deleting them | N4 protects authored artifacts even on cancel, disconnect and failed finish; N6 keeps response schemas unchanged. |
+| Preserve all bytes/versions on metadata deletion; block run restore/squash after media actions | N4 archive, never delete; N6 native media Undo contract. |
+| Refuse import/replacement and full transform/caption/3D edits until complete backing exists | N1/N3/N4/N6 forbid success with missing durable bytes, validation or authored intent. |
+| Evaluate source timing and structural checks through kernel queries | N3 one evaluated truth; N7 deterministic headless inspection. |
+| Keep later engine scene fields out of the frozen digest, retaining document data | N6 response compatibility and N4 data preservation. |
+| Export captions as pure native text through ExportChild's default method | N3 exact visible cue text; N8 no JS/process dependency for a pure operation. |
 | Keep all 67 frozen public schemas, including pending tools | Existing clients can discover the same contract; unsupported bodies fail explicitly. |
 | Reuse kernel transactions, history, persistence and sessions | One document/history authority; no MCP-owned save or undo format. |
 | Guard whole-run restores conservatively | A cancelled run must not remove acknowledged foreign work. |
@@ -279,16 +328,16 @@ with credentials and other sensitive controls omitted.
 
 ### Engine and media
 
-* `pm-engine-service` already provides Headless frame rendering and export
-  infrastructure. MCP still needs its adapter: revision-bound snapshots, fonts,
-  active extension definitions, media resolution, capture dimensions/times,
-  encoded PNG/JPEG MCP image blocks, and cancellable export jobs/results.
-  The current core has no engine-service dependency and no render tool body.
-* Durable media catalog/import/replace with asset identity, retained versions,
-  missing/cloud/loading status and native Undo. Source sampling/contact sheets,
-  waveform/probe/transcription and caption jobs need their service adapters.
-* The actual effect registration validator; generic JSON registry storage alone
-  is not the shipped validator.
+* Bind the existing pm-engine-service Headless renderer and export-child jobs to
+  EngineHook/ExportChild in the app, with original media resolution, project fonts,
+  active extension definitions, encoded PNG/JPEG and child cancellation/reaping.
+  The Linux standalone binary has no real engine service. Decoder/probe, measured
+  loudness and sheet/scan primitives need the corresponding native media workers.
+* Durable import/replace needs retained versions, verified fingerprints/storage,
+  availability and native Undo; metadata AddAsset is insufficient. Source bytes
+  and immutable objects must remain archived, never collected by MCP metadata edits.
+* The actual extension registration validator and transcription/caption job host
+  remain required; generic JSON registration is not a validator.
 
 ### Shell, extensions and agent runtime
 
@@ -305,34 +354,44 @@ with credentials and other sensitive controls omitted.
 
 ## Validation
 
-Verified in this lane: **29 passing MCP tests** (5 unit + 24 integration),
-**207 passing kernel tests + 1 ignored optional smoke test**, formatting and strict
-Clippy (`--all-targets --no-deps -- -D warnings`). Recovery checks prove that
-both grouped history and snapshot rollback reach the kernel journal. A forced
-rotation failure verifies that a NotDurable notice keeps applied work tracked.
-The four new tests cover frozen layout schema validation, tagged digest results
-on an isolated corpus project copy in editor/app sessions, empty registry and
-provider override/disposal, and corpus state/timeline source pairs plus guarded
-selection/edit/rollback and library duplicate/trash/restore/save. The corpus
-source is checked unchanged. `layout-pairs.mjs` executes the actual tagged digest;
-these are source-backed conformance checks, not live Electron captures.
+Wave 2 verification: **51 MCP tests pass** (5 unit + 24 existing integration +
+22 new integration tests); **267 kernel tests pass, 1 optional test ignored**.
+The required combined default test run passed; one earlier kernel selection-event
+ordering failure passed its exact retry and the full rerun without kernel edits.
+Package formatting and strict all-target Clippy pass with no pm-mcp warnings;
+Linux still reports the existing unused `path` warning in kernel locks.rs.
+Verification runs on Linux with pinned Rust 1.96.1 and Node 24.19.0.
+Node is test-only. All runtime additions are Rust; no Node/Chromium dependency or
+new Cargo dependency/lockfile change is introduced. See `tests/wave2.rs` for the
+new source-paired cases and worker doubles, alongside the existing conformance,
+transport, history, durability and library tests.
 
-Required command passed: `cargo test --locked -p pm-mcp -p pm-kernel`.
-Verification used pinned Rust 1.96.1, Node 24.19.0 (which supports the tagged
-TypeScript oracle), and both `v1.2.0` and `v1.3.0` tags for existing parity tests.
-Strict Clippy applies to pm-mcp; the Linux build reports the kernel's existing
-unused `path` warning in `locks.rs`.
+`domain-pairs.mjs` executes actual tagged media-management, video-editing, caption
+normalization/export, render-time selection and structural-check bodies against
+explicit synthetic services. `engine-pairs.mjs` executes tagged media orchestration
+with synthetic decoder/process seams; native Rust plans/results are compared to
+its outputs. Those image bytes prove transport integrity, not Metal/FFmpeg pixel
+correctness. The checked-in PNG/JPEG fixture contains only synthetic flat colour.
+`scene-v1.2.0.json` and `export-v1.2.0.json` are generated by tagged code and the
+tag's Zod 4.6.5, never by native output. The 3D fixtures canonicalize object-key
+ordering before digesting, matching pm-model's documented unordered-object
+semantics; arrays retain their order. No live app/profile/project was captured.
 
-From `apps/native`, with toolchain `1.96.1` pinned by rust-toolchain.toml:
+Regenerate those two fixtures with `scripts/scene-fixtures.mjs` and a disposable
+npm prefix containing Zod 4.6.5; set `PM_ORACLE_MODULE_ROOT` to that prefix.
+Ordinary Rust tests consume the committed fixtures and require only Node with
+`stripTypeScriptTypes`, not npm or Zod. The frozen 67-tool catalog and stored
+installed transport replay remain unchanged.
+
+Required commands, from `apps/native`:
 
 ```sh
-source ../../engine/env.sh
-export CARGO_TARGET_DIR=~/Developer/pm-target
-~/.cargo/bin/cargo test -p pm-mcp
-~/.cargo/bin/cargo fmt -p pm-mcp -- --check
+cargo test --locked -p pm-mcp -p pm-kernel
+cargo fmt -p pm-mcp -- --check
+cargo clippy --locked -p pm-mcp --all-targets --no-deps -- -D warnings
 ```
 
-The conformance suite requires Node with `node:module.stripTypeScriptTypes`
-(the reference scripts use Node 26) and the local `v1.2.0` tag. Runtime code
-requires neither Node nor Electron. Do not use a real user profile/project for
-these checks or commit runtime descriptors, artifacts or captures.
+macOS verification still required: real Headless pixels/fonts/extension producers,
+source media decode/rotation/retiming/scan, labelled sheets, measured waveforms,
+original-only child exports, no-clobber/cancel/reap behavior and full app-actor
+hosting. Linux doubles do not certify those integrations or physical UI behavior.

@@ -11,6 +11,10 @@ fn reply(value: Value) {
     let _ = out.flush();
 }
 
+fn output_json(o: pm_engine_service::Output) -> Value {
+    json!({"width":o.width,"height":o.height,"display":o.display,"headroom":o.headroom})
+}
+
 fn temporary(path: &std::path::Path) -> bool {
     [std::env::temp_dir(), std::path::PathBuf::from("/tmp")]
         .iter()
@@ -50,6 +54,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 let result = (|| -> anyhow::Result<Value> {
                     let r = request?;
                     let op = r["op"].as_str().unwrap_or("");
+                    let r_layer = r["layer"].as_str().map(str::to_owned);
                     match op {
                         "status" => {},
                         "open" => {
@@ -60,7 +65,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         },
                         "seek" => v.seek_at(r["seconds"].as_f64().ok_or_else(|| anyhow::anyhow!("missing seconds"))?, now),
                         "edit" => {
-                            let layer = v.layers.iter().find(|l| !l.effectively_locked && l.kind != "audio").ok_or_else(|| anyhow::anyhow!("no editable layer"))?;
+                            let layer = v.layers().iter().find(|l| !l.effectively_locked && l.kind != "audio").ok_or_else(|| anyhow::anyhow!("no editable layer"))?;
                             v.call_at(pm_kernel::Call::Transact {
                                 label: None, expected_revision: None,
                                 body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::SetStaticOpacity {
@@ -81,12 +86,52 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             }
                             viewer.command(if op == "play" { TransportCommand::Play { rate: PlaybackRate::NORMAL } } else { TransportCommand::Pause })?;
                         },
+                        "close" => v.request_close(crate::lifecycle::Intent::Window, cx),
+                        "output" => {
+                            let mode = r["mode"].as_str().and_then(crate::viewer2::OutputMode::parse)
+                                .ok_or_else(|| anyhow::anyhow!("mode must be sdr, pq or hlg"))?;
+                            v.set_output_mode(mode, cx);
+                        },
+                        "overlays" => {
+                            let safe = r["safe"].as_bool().unwrap_or(v.safe_areas);
+                            let guides = r["guides"].as_bool().unwrap_or(v.guides);
+                            v.set_overlays(safe, guides, cx);
+                        },
+                        "popout" => {
+                            if r["open"].as_bool().unwrap_or(v.popout.is_none()) != v.popout.is_some() {
+                                v.toggle_popout(cx);
+                            }
+                        },
+                        "move" => {
+                            let screen = r["screen"].as_u64().ok_or_else(|| anyhow::anyhow!("missing screen"))? as usize;
+                            if r["window"].as_str() == Some("popout") {
+                                let p = v.popout.as_ref().ok_or_else(|| anyhow::anyhow!("no popout"))?;
+                                crate::viewer2::move_to_screen(&p.window, screen)?;
+                            } else {
+                                crate::viewer2::move_to_screen(&v.host.borrow().window, screen)?;
+                            }
+                        },
+                        "screens" => {},
+                        // Paint one frame now, even while the window is occluded
+                        // (locked screen): GPUI's displayLayer: renders synchronously.
+                        // Deferred so the frame callback never runs inside this update.
+                        "redraw" => {
+                            let view = v.host.borrow().gpui.clone();
+                            cx.spawn(async move |_, _| unsafe {
+                                let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+                                if !layer.is_null() {
+                                    let _: () = objc2::msg_send![layer, setNeedsDisplay];
+                                    let _: () = objc2::msg_send![layer, displayIfNeeded];
+                                }
+                            }).detach();
+                        },
+                        "save" => v.save(None, cx),
                         "quit" => cx.quit(),
                         _ => anyhow::bail!("unknown perf operation"),
                     }
                     let status = v.viewer.as_ref().map(|v| v.status());
                     let frame = status.as_ref().and_then(|s| s.frame.as_ref());
-                    Ok(json!({
+                    let mut out = json!({
                         "accepted_host_s":now, "opening":v.opening,
                         "opened":v.session.is_some(), "message":v.message,
                         "revision":v.published.as_ref().map(|p| p.revision()),
@@ -101,7 +146,38 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         "held_frames":status.as_ref().map(|s| s.held_frames),
                         "metal_allocated_bytes":v.engine.metal_device().current_allocated_size(),
                         "duration":v.duration,
-                    }))
+                    });
+                    // Viewer-2 / lifecycle fields (a second object keeps json! shallow).
+                    let more = json!({
+                        "layer_count":v.layers().len(),
+                        "has_layer":r_layer.as_deref().map(|id| v.layers().iter().any(|l| l.id == id)),
+                        "saving":v.published.as_ref().map(|p| p.saving),
+                        "save_pending":v.save_pending,
+                        "dirty":v.published.as_ref().map(|p| p.dirty),
+                        "output_mode":v.output_mode.name(),
+                        "safe_areas":v.safe_areas,
+                        "guides":v.guides,
+                        "main_output":v.main_output.get().map(output_json),
+                        "screens":(op == "screens").then(crate::viewer2::screens),
+                        "popout":v.popout.as_ref().map(|p| {
+                            let status = p.viewer.borrow().as_ref().map(|v| v.status());
+                            json!({
+                                "output":p.output.get().map(output_json),
+                                "frames":status.as_ref().and_then(|s| s.frame.as_ref()).map(|f| json!({"ticks":f.time.get(),"gpu_ok":f.gpu_ok,"display_host_s":f.display_host_seconds,"revision":f.stamp.revision,"generation":f.stamp.generation})),
+                                "error":status.as_ref().and_then(|s| s.error.clone()),
+                                "playing":status.as_ref().and_then(|s| s.clock).map(|c| c.state != pm_protocol::clock::TransportState::Stopped),
+                                "stale_rejections":status.as_ref().map(|s| s.stale_rejections),
+                                "no_drawable":status.as_ref().map(|s| s.no_drawable),
+                            })
+                        }),
+                        "stale_rejections":status.as_ref().map(|s| s.stale_rejections),
+                        "represented":status.as_ref().map(|s| s.represented),
+                        "generation":frame.map(|f| f.stamp.generation),
+                    });
+                    if let (Value::Object(base), Value::Object(more)) = (&mut out, more) {
+                        base.extend(more);
+                    }
+                    Ok(out)
                 })();
                 match result {
                     Ok(value) => reply(value),

@@ -199,3 +199,59 @@ impl QuitDelegate {
         self.ivars().allowed.set(true);
     }
 }
+
+pub struct MenuChoice {
+    sender: async_channel::Sender<isize>,
+}
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMNativeMenuTarget"]
+    #[ivars = MenuChoice]
+    pub struct MenuTarget;
+    unsafe impl NSObjectProtocol for MenuTarget {}
+    impl MenuTarget {
+        #[unsafe(method(choose:))]
+        fn choose(&self, item: &NSMenuItem) {
+            let _ = self.ivars().sender.try_send(item.tag());
+        }
+    }
+);
+
+/// A native pop-up menu at a point in window content coordinates (top-left
+/// origin, as GPUI reports them). Items are `(title, checked)`. Returns the
+/// chosen index. Call outside GPUI event dispatch: the menu tracks modally.
+pub fn pop_up_menu(window: &NSWindow, items: &[(String, bool)], x: f64, y: f64) -> Option<usize> {
+    let mtm = MainThreadMarker::new()?;
+    let view = window.contentView()?;
+    let (sender, rx) = async_channel::bounded(1);
+    let target = MenuTarget::alloc(mtm).set_ivars(MenuChoice { sender });
+    let target: Retained<MenuTarget> = unsafe { msg_send![super(target), init] };
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(""));
+    menu.setAutoenablesItems(false);
+    for (index, (title, checked)) in items.iter().enumerate() {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(objc2::sel!(choose:)),
+                &NSString::from_str(""),
+            )
+        };
+        unsafe { item.setTarget(Some(&target)) };
+        item.setTag(index as isize);
+        item.setState(if *checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        menu.addItem(&item);
+    }
+    let height = view.bounds().size.height;
+    let point = NSPoint::new(x, if view.isFlipped() { y } else { height - y });
+    menu.popUpMenuPositioningItem_atLocation_inView(None, point, Some(&view));
+    rx.try_recv()
+        .ok()
+        .and_then(|tag| usize::try_from(tag).ok())
+        .filter(|&i| i < items.len())
+}

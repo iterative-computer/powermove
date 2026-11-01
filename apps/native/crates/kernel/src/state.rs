@@ -119,10 +119,10 @@ impl StateSnapshot {
                     if !is_setting(&key) {
                         return Err(format!("Not a settings key: {key}"));
                     }
-                    if key == "workspaces" || key == "workspaceTrash" {
-                        if value.as_ref().is_some_and(|v| v.as_array().is_none()) {
-                            return Err("Workspaces must be an array".into());
-                        }
+                    if (key == "workspaces" || key == "workspaceTrash")
+                        && value.as_ref().is_some_and(|v| v.as_array().is_none())
+                    {
+                        return Err("Workspaces must be an array".into());
                     }
                     match value {
                         Some(v) => {
@@ -200,10 +200,9 @@ impl StateSnapshot {
         {
             for (id, v) in enabled {
                 if let Some(e) = Arc::make_mut(&mut next.extensions).get_mut(&id.to_string_lossy())
+                    && let Some(b) = v.as_bool()
                 {
-                    if let Some(b) = v.as_bool() {
-                        e.enabled = b;
-                    }
+                    e.enabled = b;
                 }
             }
         }
@@ -382,10 +381,10 @@ impl UiState {
         if let Some(viewer) = ui.session.get("view").filter(|v| v.as_object().is_some()) {
             ui.viewer = viewer.clone();
         }
-        if let Some(time) = ui.session.get("time").cloned() {
-            if let Value::Object(m) = &mut ui.transport {
-                m.insert("time", time);
-            }
+        if let Some(time) = ui.session.get("time").cloned()
+            && let Value::Object(m) = &mut ui.transport
+        {
+            m.insert("time", time);
         }
         ui
     }

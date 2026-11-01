@@ -667,7 +667,7 @@ test("disposed extension history callbacks can still read the live services regi
   realm.history.undo();
   expect(observed).toBe(provider);
 });
-test("owned onDispose handlers run once with original error attribution", () => {
+test("owned onDispose handlers run once without reporting retired-owner health failures (v1.2.0)", () => {
   const { realm, host } = setup(),
     extension = realm.extension("lifecycle"),
     error = {};
@@ -681,9 +681,5 @@ test("owned onDispose handlers run once with original error attribution", () => 
   extension.dispose();
   extension.dispose();
   expect(called).toBe(1);
-  expect(host.errors[0]).toEqual({
-    extensionId: "lifecycle",
-    label: "onDispose handler",
-    error,
-  });
+  expect(host.errors).toEqual([]);
 });

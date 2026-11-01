@@ -1,0 +1,2762 @@
+{
+  "tag": "v1.2.0",
+  "commit": "07ed5fa17ee640659cb075f9cad1af2095011d60",
+  "blobs": {
+    "apps/desktop/src/extensions/effects-basic/effects.ts": "63163418ef77f335e03c39f24391fb64bce125f6",
+    "apps/desktop/src/extensions/transitions-basic/transitions.ts": "0c2e5e1f4efc3746fe04f171e53f23934cbebae2",
+    "apps/desktop/src/renderer/src/legacy/core/space-3d.ts": "98da14e2a47012684c954af0d99a196de021e6d2",
+    "apps/desktop/src/renderer/src/legacy/core/model.ts": "cb97f8dfe83190274477a7bb2971a44e1bc53cef",
+    "apps/desktop/src/extensions/inspector/ChannelRow.svelte": "bb297e4069ba1473c27ac17191f7f08e8c9fd537"
+  },
+  "effects": [
+    {
+      "label": "Gaussian Blur",
+      "group": "Blur & Sharpen",
+      "passes": 2,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Blurriness",
+          "def": 24,
+          "min": 0,
+          "max": 400,
+          "step": 0.5,
+          "unit": "px"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0; uniform int u_pass;\nvoid main(){\n\n      float r = u_p0;\n      if (r < .25) { o = texture(u_tex, v_st); return; }\n      vec2 dir = u_pass == 0 ? vec2(1.,0.) : vec2(0.,1.);\n      float sigma = r * .5;\n      vec4 sum = vec4(0.); float wsum = 0.;\n      int N = int(clamp(r*.6, 3., 28.));\n      for (int i = -28; i <= 28; i++) {\n        if (i < -N || i > N) continue;\n        float x = float(i) / float(N) * r;\n        float w = exp(-(x*x)/(2.*sigma*sigma+1e-4));\n        sum += texture(u_tex, v_st + dir * u_texel * x) * w; wsum += w;\n      }\n      o = sum / max(wsum, 1e-4);\n}",
+      "id": "blur",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": [
+        "amount"
+      ]
+    },
+    {
+      "label": "Directional Blur",
+      "group": "Blur & Sharpen",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Length",
+          "def": 30,
+          "min": 0,
+          "max": 300,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "k": "angle",
+          "label": "Direction",
+          "def": 0,
+          "min": -360,
+          "max": 360,
+          "step": 1,
+          "unit": "°"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1;\nvoid main(){\n\n      float a = radians(u_p1); vec2 dir = vec2(cos(a), sin(a)) * u_texel * u_p0;\n      vec4 s = vec4(0.);\n      for (int i = 0; i < 17; i++) { float t = (float(i)/16.0 - .5); s += texture(u_tex, v_st + dir * t); }\n      o = s / 17.0;\n}",
+      "id": "motionblurDir",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": [
+        "amount"
+      ]
+    },
+    {
+      "label": "Sharpen",
+      "group": "Blur & Sharpen",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 40,
+          "min": 0,
+          "max": 300,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st);\n      vec4 b = texture(u_tex,v_st+vec2(u_texel.x,0.))+texture(u_tex,v_st-vec2(u_texel.x,0.))\n             + texture(u_tex,v_st+vec2(0.,u_texel.y))+texture(u_tex,v_st-vec2(0.,u_texel.y));\n      o = vec4(clamp(c.rgb + (c.rgb - b.rgb*.25) * (u_p0/100.), 0., 4.), c.a);\n}",
+      "id": "sharpen",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Glow",
+      "group": "Light & Shadow",
+      "passes": 3,
+      "params": [
+        {
+          "k": "threshold",
+          "advanced": true,
+          "label": "Threshold",
+          "def": 55,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "radius",
+          "label": "Radius",
+          "def": 60,
+          "min": 0,
+          "max": 400,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "k": "intensity",
+          "label": "Intensity",
+          "def": 90,
+          "min": 0,
+          "max": 400,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2; uniform int u_pass; uniform sampler2D u_orig;\nvoid main(){\n\n      if (u_pass == 0) {\n        vec4 c = texture(u_tex, v_st);\n        float l = luma(c.rgb / max(c.a, .001));\n        float k = smoothstep(u_p0/100. - .08, u_p0/100. + .08, l);\n        o = c * k; return;\n      }\n      vec2 dir = u_pass == 1 ? vec2(1.,0.) : vec2(0.,1.);\n      float r = max(u_p1, .5); float sigma = r * .5;\n      vec4 sum = vec4(0.); float ws = 0.;\n      for (int i = -20; i <= 20; i++) {\n        float x = float(i)/20.0*r; float w = exp(-(x*x)/(2.*sigma*sigma+1e-4));\n        sum += texture(u_tex, v_st + dir*u_texel*x) * w; ws += w;\n      }\n      o = sum / max(ws,1e-4);\n      if (u_pass == 2) o = texture(u_orig, v_st) + o * (u_p2/100.);\n}",
+      "keepOrig": true,
+      "id": "glow",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": [
+        "radius"
+      ]
+    },
+    {
+      "label": "Color",
+      "group": "Color",
+      "passes": 1,
+      "params": [
+        {
+          "k": "exposure",
+          "label": "Exposure",
+          "def": 0,
+          "min": -4,
+          "max": 4,
+          "step": 0.01,
+          "unit": "ev"
+        },
+        {
+          "k": "contrast",
+          "label": "Contrast",
+          "def": 0,
+          "min": -100,
+          "max": 100,
+          "step": 1,
+          "unit": ""
+        },
+        {
+          "k": "saturation",
+          "label": "Saturation",
+          "def": 0,
+          "min": -100,
+          "max": 200,
+          "step": 1,
+          "unit": ""
+        },
+        {
+          "k": "hue",
+          "label": "Hue",
+          "def": 0,
+          "min": -180,
+          "max": 180,
+          "step": 1,
+          "unit": "°"
+        },
+        {
+          "k": "temperature",
+          "advanced": true,
+          "label": "Temperature",
+          "def": 0,
+          "min": -100,
+          "max": 100,
+          "step": 1,
+          "unit": ""
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2,u_p3,u_p4;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a;\n      x *= pow(2., u_p0);\n      x = (x - .5) * (1. + u_p1/100.) + .5;\n      float l = luma(x); x = mix(vec3(l), x, 1. + u_p2/100.);\n      if (abs(u_p3) > .01) { vec3 hsv = rgb2hsv(max(x,0.)); hsv.x = fract(hsv.x + u_p3/360.); x = hsv2rgb(hsv); }\n      x += vec3(u_p4, u_p4*.06, -u_p4) * .0035;\n      o = vec4(clamp(x,0.,8.) * c.a, c.a);\n}",
+      "id": "color",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Levels",
+      "group": "Color",
+      "passes": 1,
+      "params": [
+        {
+          "k": "inBlack",
+          "label": "Input Black",
+          "def": 0,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "unit": ""
+        },
+        {
+          "k": "inWhite",
+          "label": "Input White",
+          "def": 100,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "unit": ""
+        },
+        {
+          "k": "gamma",
+          "label": "Gamma",
+          "def": 1,
+          "min": 0.1,
+          "max": 4,
+          "step": 0.01,
+          "unit": ""
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a;\n      x = clamp((x - u_p0/100.) / max(u_p1/100. - u_p0/100., 1e-3), 0., 1.);\n      x = pow(x, vec3(1./max(u_p2,.01)));\n      o = vec4(x * c.a, c.a);\n}",
+      "id": "levels",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Duotone",
+      "group": "Color",
+      "passes": 1,
+      "params": [
+        {
+          "k": "shadow",
+          "label": "Shadow",
+          "def": "#1B2A4A",
+          "type": "color"
+        },
+        {
+          "k": "highlight",
+          "label": "Highlight",
+          "def": "#FFD66B",
+          "type": "color"
+        },
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 100,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform vec3 u_c0,u_c1; uniform float u_p2;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a; float l = luma(x);\n      vec3 t = mix(u_c0, u_c1, smoothstep(0., 1., l));\n      o = vec4(mix(x, t, u_p2/100.) * c.a, c.a);\n}",
+      "id": "duotone",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Film Grain",
+      "group": "Stylize",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 12,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "size",
+          "label": "Size",
+          "def": 1.4,
+          "min": 0.3,
+          "max": 8,
+          "step": 0.1,
+          "unit": ""
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st);\n      float n = hash(floor(v_px/max(u_p1,.1)) + fract(u_time)*137.0) - .5;\n      o = vec4(clamp(c.rgb + n * (u_p0/100.) * c.a, 0., 8.), c.a);\n}",
+      "id": "grain",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Vignette",
+      "group": "Light & Shadow",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 45,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "feather",
+          "label": "Feather",
+          "def": 60,
+          "min": 1,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st);\n      vec2 q = (v_uv - .5) * 2.0;\n      float d = length(q) * .72;\n      float v = 1. - smoothstep(1. - u_p1/100., 1.0, d) * (u_p0/100.);\n      o = vec4(c.rgb * v, c.a);\n}",
+      "id": "vignette",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Chromatic Aberration",
+      "group": "Distort",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 6,
+          "min": 0,
+          "max": 80,
+          "step": 0.5,
+          "unit": "px"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec2 dir = (vec2(v_uv.x, 1. - v_uv.y) - .5);\n      vec2 d = dir * u_texel * u_p0 * 2.0;\n      float r = texture(u_tex, v_st + d).r;\n      vec4 g = texture(u_tex, v_st);\n      float b = texture(u_tex, v_st - d).b;\n      o = vec4(r, g.g, b, g.a);\n}",
+      "id": "chroma",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": [
+        "amount"
+      ]
+    },
+    {
+      "label": "Mosaic",
+      "group": "Stylize",
+      "passes": 1,
+      "params": [
+        {
+          "k": "size",
+          "label": "Block Size",
+          "def": 16,
+          "min": 1,
+          "max": 200,
+          "step": 1,
+          "unit": "px"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      float block = max(u_p0, 1.);\n      vec2 local = v_px - u_pxOrigin;\n      vec2 center = (floor(local / block) + .5) * block;\n      vec2 uv = vec2(center.x / u_res.x, 1. - center.y / u_res.y);\n      o = texture(u_tex, uv);\n}",
+      "id": "pixelate",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Posterize",
+      "group": "Color",
+      "passes": 1,
+      "params": [
+        {
+          "k": "levels",
+          "label": "Levels",
+          "def": 6,
+          "min": 2,
+          "max": 64,
+          "step": 1,
+          "unit": ""
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a<.0005){o=c;return;}\n      vec3 x = c.rgb/c.a; float n = max(u_p0,2.);\n      o = vec4(floor(x*n+.5)/n*c.a, c.a);\n}",
+      "id": "posterize",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Turbulent Displace",
+      "group": "Distort",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 24,
+          "min": 0,
+          "max": 400,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "k": "scale",
+          "label": "Size",
+          "def": 2.2,
+          "min": 0.2,
+          "max": 20,
+          "step": 0.1,
+          "unit": ""
+        },
+        {
+          "k": "speed",
+          "label": "Evolution",
+          "def": 0.4,
+          "min": -4,
+          "max": 4,
+          "step": 0.05,
+          "unit": ""
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2;\nvoid main(){\n\n      vec2 p = vec2(v_uv.x, 1. - v_uv.y) * u_p1 * 3.0 + vec2(u_time * u_p2, u_time * u_p2 * .7);\n      vec2 d = vec2(fbm(p) - .5, fbm(p + 31.7) - .5) * u_p0 * u_texel * 2.0;\n      o = texture(u_tex, v_st + d);\n}",
+      "id": "displace",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": [
+        "amount"
+      ]
+    },
+    {
+      "label": "Drop Shadow",
+      "group": "Light & Shadow",
+      "passes": 3,
+      "params": [
+        {
+          "k": "distance",
+          "label": "Distance",
+          "def": 20,
+          "min": 0,
+          "max": 400,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "k": "angle",
+          "label": "Angle",
+          "def": 135,
+          "min": -360,
+          "max": 360,
+          "step": 1,
+          "unit": "°"
+        },
+        {
+          "k": "softness",
+          "label": "Softness",
+          "def": 40,
+          "min": 0,
+          "max": 300,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "k": "opacity",
+          "label": "Opacity",
+          "def": 60,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "color",
+          "label": "Color",
+          "def": "#000000",
+          "type": "color"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0,u_p1,u_p2,u_p3; uniform vec3 u_c4; uniform int u_pass; uniform sampler2D u_orig;\nvoid main(){\n\n      if (u_pass == 0) {\n        float a = radians(u_p1); vec2 off = vec2(cos(a), -sin(a)) * u_p0 * u_texel;\n        o = vec4(0.,0.,0., texture(u_tex, v_st - off).a);\n        return;\n      }\n      vec2 dir = u_pass == 1 ? vec2(1.,0.) : vec2(0.,1.);\n      float r = max(u_p2, .5); float sigma = r*.5; vec4 sum = vec4(0.); float ws = 0.;\n      for (int i=-18;i<=18;i++){ float x=float(i)/18.*r; float w=exp(-(x*x)/(2.*sigma*sigma+1e-4));\n        sum += texture(u_tex, v_st + dir*u_texel*x)*w; ws+=w; }\n      vec4 sh = sum/max(ws,1e-4);\n      if (u_pass == 2) {\n        vec4 o0 = texture(u_orig, v_st);\n        float sa = sh.a * (u_p3/100.);\n        vec3 sc = u_c4 * sa;\n        o = vec4(o0.rgb + sc * (1.-o0.a), o0.a + sa * (1.-o0.a));\n      } else o = sh;\n}",
+      "keepOrig": true,
+      "id": "shadow",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": [
+        "distance",
+        "softness"
+      ]
+    },
+    {
+      "label": "Invert",
+      "group": "Color",
+      "passes": 1,
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 100,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform float u_p0;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a<.0005){o=c;return;}\n      vec3 x = c.rgb/c.a; o = vec4(mix(x, 1.-x, u_p0/100.)*c.a, c.a);\n}",
+      "id": "invert",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    },
+    {
+      "label": "Gradient Ramp",
+      "group": "Generate",
+      "passes": 1,
+      "ui": [
+        {
+          "kind": "ramp",
+          "start": "startColor",
+          "end": "endColor",
+          "midpoint": "midpoint",
+          "mode": "radial"
+        },
+        {
+          "kind": "point",
+          "x": "centerX",
+          "y": "centerY",
+          "label": "Center",
+          "advanced": true
+        }
+      ],
+      "params": [
+        {
+          "k": "startColor",
+          "label": "Start Color",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "endColor",
+          "label": "End Color",
+          "def": "#000000",
+          "type": "color"
+        },
+        {
+          "k": "angle",
+          "label": "Angle",
+          "def": 90,
+          "min": -360,
+          "max": 360,
+          "step": 1,
+          "unit": "°"
+        },
+        {
+          "k": "centerX",
+          "advanced": true,
+          "label": "Center X",
+          "def": 0,
+          "min": -100,
+          "max": 100,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "centerY",
+          "advanced": true,
+          "label": "Center Y",
+          "def": 0,
+          "min": -100,
+          "max": 100,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "spread",
+          "advanced": true,
+          "label": "Spread",
+          "def": 100,
+          "min": 1,
+          "max": 400,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "midpoint",
+          "label": "Midpoint",
+          "def": 50,
+          "min": 1,
+          "max": 99,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "radial",
+          "label": "Radial",
+          "def": false,
+          "type": "toggle"
+        },
+        {
+          "k": "shade",
+          "advanced": true,
+          "label": "Keep Luminance",
+          "def": false,
+          "type": "toggle"
+        },
+        {
+          "k": "dither",
+          "advanced": true,
+          "label": "Dither",
+          "def": 1,
+          "min": 0,
+          "max": 20,
+          "step": 0.1,
+          "unit": ""
+        },
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 100,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;\nuniform vec2 u_pxOrigin;\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\nuniform vec3 u_startColor,u_endColor;\n       uniform float u_angle,u_centerX,u_centerY,u_spread,u_midpoint,u_radial,u_shade,u_dither,u_amount;\nvoid main(){\n\n      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }\n      vec3 x = c.rgb / c.a;\n      vec2 p = (vec2(v_uv.x, 1. - v_uv.y) - .5) - vec2(u_centerX, -u_centerY) / 200.;\n      float span = max(u_spread / 100., .001);\n      float a = radians(u_angle);\n      /* Aspect-correct the radial distance so the rings stay circular. */\n      float t = u_radial > .5\n        ? length(p * vec2(u_coordRes.x / max(u_coordRes.y, 1.), 1.)) * 2. / span\n        : dot(p, vec2(cos(a), -sin(a))) / span + .5;\n      /* Static per-pixel jitter breaks 8-bit banding without shimmering. */\n      t = clamp(t + (hash(v_px) - .5) * u_dither * .004, 0., 1.);\n      t = pow(t, log(.5) / log(clamp(u_midpoint / 100., .01, .99)));\n      vec3 g = mix(u_startColor, u_endColor, t);\n      if (u_shade > .5) { vec3 h = rgb2hsv(g); g = hsv2rgb(vec3(h.x, h.y, rgb2hsv(max(x, 0.)).z)); }\n      o = vec4(mix(x, g, u_amount / 100.) * c.a, c.a);\n}",
+      "id": "gradient",
+      "rawShader": true,
+      "viewportSafe": true,
+      "viewportPadding": []
+    }
+  ],
+  "transitions": [
+    {
+      "id": "crossfade",
+      "label": "Crossfade",
+      "group": "Basic",
+      "params": [],
+      "frag": "o = mix(texture(u_from, v_st), texture(u_to, v_st), clamp(u_prog, 0.0, 1.0));"
+    },
+    {
+      "id": "wipe",
+      "label": "Wipe",
+      "group": "Basic",
+      "params": [
+        {
+          "k": "angle",
+          "label": "Angle",
+          "def": 0,
+          "min": -360,
+          "max": 360,
+          "step": 1,
+          "unit": "°"
+        },
+        {
+          "k": "softness",
+          "label": "Softness",
+          "def": 8,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "\n      float a = radians(u_angle);\n      vec2 dir = vec2(cos(a), sin(a));\n      float span = max(abs(dir.x) + abs(dir.y), 0.0001);\n      float pos = dot(v_st - 0.5, dir) / span + 0.5;\n      float feather = max(u_softness / 200.0, 0.0001);\n      float edge = mix(-feather, 1.0 + feather, clamp(u_prog, 0.0, 1.0));\n      float reveal = 1.0 - smoothstep(edge - feather, edge + feather, pos);\n      o = mix(texture(u_from, v_st), texture(u_to, v_st), reveal);"
+    },
+    {
+      "id": "slide",
+      "label": "Slide",
+      "group": "Movement",
+      "params": [
+        {
+          "k": "direction",
+          "label": "Direction",
+          "def": 0,
+          "min": 0,
+          "max": 360,
+          "step": 1,
+          "unit": "°"
+        }
+      ],
+      "frag": "\n      float p = clamp(u_prog, 0.0, 1.0);\n      float a = radians(u_direction);\n      vec2 dir = vec2(cos(a), -sin(a));\n      vec2 fromUV = v_st - dir * p;\n      vec2 toUV = v_st + dir * (1.0 - p);\n      float fromInside = step(0.0, fromUV.x) * step(fromUV.x, 1.0) * step(0.0, fromUV.y) * step(fromUV.y, 1.0);\n      float toInside = step(0.0, toUV.x) * step(toUV.x, 1.0) * step(0.0, toUV.y) * step(toUV.y, 1.0);\n      vec4 fromColor = texture(u_from, clamp(fromUV, 0.0, 1.0)) * fromInside;\n      vec4 toColor = texture(u_to, clamp(toUV, 0.0, 1.0)) * toInside;\n      o = toColor + fromColor * (1.0 - toColor.a);"
+    },
+    {
+      "id": "zoom",
+      "label": "Zoom",
+      "group": "Movement",
+      "params": [
+        {
+          "k": "amount",
+          "label": "Amount",
+          "def": 25,
+          "min": 0,
+          "max": 200,
+          "step": 1,
+          "unit": "%"
+        }
+      ],
+      "frag": "\n      float p = clamp(u_prog, 0.0, 1.0);\n      float amount = u_amount / 100.0;\n      vec2 fromUV = 0.5 + (v_st - 0.5) * (1.0 - p * amount);\n      vec2 toUV = 0.5 + (v_st - 0.5) * (1.0 + (1.0 - p) * amount);\n      o = mix(texture(u_from, fromUV), texture(u_to, toUV), p);"
+    }
+  ],
+  "channels": {
+    "perspective": {
+      "label": "Perspective",
+      "group": "Transform",
+      "unit": "mm",
+      "step": 1,
+      "min": 0.001
+    },
+    "position.z": {
+      "label": "Position Z",
+      "group": "Transform",
+      "unit": "px",
+      "step": 1
+    },
+    "anchor.z": {
+      "label": "Anchor Z",
+      "group": "Transform",
+      "unit": "px",
+      "step": 1
+    },
+    "scale.z": {
+      "label": "Scale Z",
+      "group": "Transform",
+      "unit": "%",
+      "step": 1
+    },
+    "rotation.x": {
+      "label": "Rotation X",
+      "group": "Transform",
+      "unit": "°",
+      "step": 1
+    },
+    "rotation.y": {
+      "label": "Rotation Y",
+      "group": "Transform",
+      "unit": "°",
+      "step": 1
+    },
+    "orientation.x": {
+      "label": "Orientation X",
+      "group": "Transform",
+      "unit": "°",
+      "step": 1
+    },
+    "orientation.y": {
+      "label": "Orientation Y",
+      "group": "Transform",
+      "unit": "°",
+      "step": 1
+    },
+    "orientation.z": {
+      "label": "Orientation Z",
+      "group": "Transform",
+      "unit": "°",
+      "step": 1
+    },
+    "anchor.x": {
+      "label": "Anchor X",
+      "group": "Transform",
+      "unit": "px",
+      "step": 1
+    },
+    "anchor.y": {
+      "label": "Anchor Y",
+      "group": "Transform",
+      "unit": "px",
+      "step": 1
+    },
+    "position.x": {
+      "label": "Position X",
+      "group": "Transform",
+      "unit": "px",
+      "step": 1
+    },
+    "position.y": {
+      "label": "Position Y",
+      "group": "Transform",
+      "unit": "px",
+      "step": 1
+    },
+    "scale.x": {
+      "label": "Scale X",
+      "group": "Transform",
+      "unit": "%",
+      "step": 0.5
+    },
+    "scale.y": {
+      "label": "Scale Y",
+      "group": "Transform",
+      "unit": "%",
+      "step": 0.5
+    },
+    "rotation": {
+      "label": "Rotation",
+      "group": "Transform",
+      "unit": "°",
+      "step": 1
+    },
+    "opacity": {
+      "label": "Opacity",
+      "group": "Transform",
+      "unit": "%",
+      "step": 1,
+      "min": 0,
+      "max": 100
+    },
+    "skew": {
+      "label": "Skew",
+      "group": "Transform",
+      "unit": "°",
+      "step": 0.5,
+      "min": -80,
+      "max": 80
+    }
+  },
+  "layerDefaults": {
+    "solid": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.color": {
+        "kind": "literal",
+        "value": "#1b1b1f"
+      },
+      "c.w": {
+        "kind": "width"
+      },
+      "c.h": {
+        "kind": "height"
+      },
+      "c.radius": {
+        "kind": "literal",
+        "value": 0
+      }
+    },
+    "text": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.text": {
+        "kind": "literal",
+        "value": "Powermove"
+      },
+      "c.boxWidth": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.boxHeight": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.font": {
+        "kind": "literal",
+        "value": "SF Pro Display"
+      },
+      "c.weight": {
+        "kind": "literal",
+        "value": 600
+      },
+      "c.size": {
+        "kind": "literal",
+        "value": 128
+      },
+      "c.tracking": {
+        "kind": "literal",
+        "value": -2
+      },
+      "c.leading": {
+        "kind": "literal",
+        "value": 1.1
+      },
+      "c.color": {
+        "kind": "literal",
+        "value": "#F2F2F2"
+      },
+      "c.align": {
+        "kind": "literal",
+        "value": "center"
+      },
+      "c.italic": {
+        "kind": "literal",
+        "value": false
+      }
+    },
+    "shape": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.shape": {
+        "kind": "literal",
+        "value": "rect"
+      },
+      "c.color": {
+        "kind": "literal",
+        "value": "#E8E2CF"
+      },
+      "c.w": {
+        "kind": "literal",
+        "value": 480
+      },
+      "c.h": {
+        "kind": "literal",
+        "value": 480
+      },
+      "c.radius": {
+        "kind": "literal",
+        "value": 24
+      },
+      "c.stroke": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.strokeColor": {
+        "kind": "literal",
+        "value": "#ffffff"
+      },
+      "c.points": {
+        "kind": "literal",
+        "value": 5
+      }
+    },
+    "image": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.asset": {
+        "kind": "literal",
+        "value": null
+      },
+      "c.fit": {
+        "kind": "literal",
+        "value": "cover"
+      },
+      "c.w": {
+        "kind": "literal",
+        "value": 1920
+      },
+      "c.h": {
+        "kind": "literal",
+        "value": 1080
+      }
+    },
+    "video": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.asset": {
+        "kind": "literal",
+        "value": null
+      },
+      "c.fit": {
+        "kind": "literal",
+        "value": "cover"
+      },
+      "c.trim": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.speed": {
+        "kind": "literal",
+        "value": 1
+      },
+      "c.embeddedAudio": {
+        "kind": "literal",
+        "value": false
+      },
+      "c.w": {
+        "kind": "literal",
+        "value": 1920
+      },
+      "c.h": {
+        "kind": "literal",
+        "value": 1080
+      }
+    },
+    "audio": {
+      "c.asset": {
+        "kind": "literal",
+        "value": null
+      },
+      "c.gain": {
+        "kind": "literal",
+        "value": 1
+      },
+      "c.trim": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.fadeIn": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.fadeOut": {
+        "kind": "literal",
+        "value": 0
+      }
+    },
+    "adjustment": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      }
+    },
+    "shader": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.w": {
+        "kind": "width"
+      },
+      "c.h": {
+        "kind": "height"
+      }
+    },
+    "extension": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.definition": {
+        "kind": "literal",
+        "value": ""
+      },
+      "c.version": {
+        "kind": "literal",
+        "value": 1
+      },
+      "c.w": {
+        "kind": "width"
+      },
+      "c.h": {
+        "kind": "height"
+      }
+    },
+    "null": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 50
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 0
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.color": {
+        "kind": "literal",
+        "value": "#6A6A70"
+      },
+      "c.w": {
+        "kind": "literal",
+        "value": 100
+      },
+      "c.h": {
+        "kind": "literal",
+        "value": 100
+      },
+      "c.radius": {
+        "kind": "literal",
+        "value": 0
+      }
+    },
+    "group": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      }
+    },
+    "precomp": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "c.comp": {
+        "kind": "literal",
+        "value": null
+      },
+      "c.w": {
+        "kind": "width"
+      },
+      "c.h": {
+        "kind": "height"
+      }
+    },
+    "captions": {
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      }
+    }
+  },
+  "resetDefaults": {
+    "solid": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "text": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "shape": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "image": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "video": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "audio": {},
+    "adjustment": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "shader": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "extension": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "null": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 50
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 50
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 0
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "group": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "precomp": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    },
+    "captions": {
+      "anchor.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "anchor.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "position.x": {
+        "kind": "halfWidth"
+      },
+      "position.y": {
+        "kind": "halfHeight"
+      },
+      "position.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "scale.x": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.y": {
+        "kind": "literal",
+        "value": 100
+      },
+      "scale.z": {
+        "kind": "literal",
+        "value": 100
+      },
+      "rotation": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "rotation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.x": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.y": {
+        "kind": "literal",
+        "value": 0
+      },
+      "orientation.z": {
+        "kind": "literal",
+        "value": 0
+      },
+      "opacity": {
+        "kind": "literal",
+        "value": 100
+      },
+      "skew": {
+        "kind": "literal",
+        "value": 0
+      },
+      "perspective": {
+        "kind": "literal",
+        "value": 50
+      }
+    }
+  }
+}

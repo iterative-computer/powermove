@@ -4,12 +4,10 @@ P2 package 9 lives in `apps/native/js/compat` as `@powermove/compat-realm`.
 The production entry is `src/index.ts`; `bun run build` produces the
 `PowermoveCompat` IIFE in ignored `dist/compat-realm.js`. It has no runtime
 package dependencies, Node/Bun imports, Chromium, or required DOM global.
-Bun, TypeScript and Happy DOM are development/test tools only.
+Bun, TypeScript, Happy DOM, jsdom, Prettier and the Svelte compiler are development/test tools only. The shared Svelte runtime is injected by the embedder.
 
 This is an embeddable realm package with Linux test doubles, **not a complete
-native extension runtime or a cutover gate**. The Rust V8/kernel adapter,
-remote-DOM implementation, complete PM capability backends and native recorder
-rasterizer are integration work. No desktop runtime, Rust crate, vendor, spike,
+native extension runtime or a cutover gate**. The Rust V8/kernel adapter, WebKit transport, complete native PM capability backends and native recorder rasterizer are integration work. The merged remote-DOM shim now connects directly to the realm. No desktop runtime, Rust crate, vendor, spike,
 profile or existing consumer is replaced or removed.
 
 ## Frozen extraction
@@ -36,6 +34,14 @@ The complete frozen `powermove` helper export graph is also extracted under
 `__powermove_runtime.powermove`. The embedding compiler/runtime supplies its shared
 Svelte modules through `runtimeModules`. DOM helper bodies use only bridge globals
 when called; they do not require a document at bundle load.
+
+`src/frozen/host` additionally extracts the complete public host/contribution
+registry graph and PM-backed facade factories from the pinned commit.
+`bun run freeze-host` reproduces these files using TypeScript 5.9.3 and Prettier
+3.6.2. The regression checks regeneration against the tag. App imports for
+Svelte mounting/subscriptions, haptics and optional profiling are dependency
+injections; elapsed-time diagnostics fall back to Date.now when no performance
+clock is attached. Runtime code has no Node/Bun imports or eval.
 
 Pure model factories keep unknown authored data when cloning; IDs are issued in
 the realm/generation namespace. Native evaluation, composition/group operations,
@@ -152,21 +158,38 @@ payloads over the remote-DOM channel. Snapshot JPEG correctness, full canvas
 creation/promotion, alpha/colour/text behavior, WebGL/presenter and OffscreenCanvas
 still require native/DOM adapters and spec fixtures.
 
-## Remote DOM interface
+## Remote DOM connection
 
-`src/remote-dom.ts` defines `RemoteDOMBridge`, stable node IDs, ordered batches,
-event paths, generation fences, read/invoke acknowledgement sequences and
-cancellable-default tokens. The other lane supplies DOM globals via `connect`.
-It receives this realm's task boundary and recorder canvas factory so parser,
-clone, popout and imperative canvas creation can preserve element/context identity.
-There is deliberately no fake document installed when no bridge is attached.
+`src/remote-dom.ts` now describes only the realm-local `connect` interface.
+The previously hypothetical string-id/synchronous DOM wire types had no consumers
+and were removed. Transport is exclusively `remote-dom/src/protocol.ts` **v1**;
+no Rust/page wire operation or version changed. A session's panel id must match
+the owning realm id, with the same generation, and connects once.
 
-Synchronous layout/style reads require a flush/acknowledged batch; returning stale
-zeroes is not acceptable. WebKit must defer a cancellable default until the V8
-result resolves its token; an asynchronous mutation stream cannot retroactively
-cancel a default action. The bridge must preserve DOM-first target/bubble order,
-listener ordering, focus/selection/IME and clipboard user activation. The interface
-expresses those obligations; this lane does not implement WebKit transport or DOM.
+`RemoteDOM.connect` supplies stable DOM globals and wraps incoming feedback in
+`realm.task`, including input events and resize callbacks. The host must still
+flush after V8 microtasks/timers. Inspectable lifecycle is created → connected →
+retired, or faulted on page failure. Foreground/background/headless are separate
+host-reported visibility facts; none pauses V8 work. Fault retirement rejects
+pending layout reads, fences all old messages and preserves the owning realm's
+document/history logic. Page recreation/remount and preservation of panel-local
+state are native integration work, not implemented recovery.
+
+The connection accepts the reserved recorder factory but the shim does not yet
+promote DOM canvas elements to native recorder surfaces. Fresh synchronous
+layout, dynamic cancellation of a browser default, full DOM/platform semantics
+and same-element canvas promotion remain explicit cutover blockers. Cached
+geometry is never represented as acknowledged fresh layout.
+
+Svelte component panels use the **shared injected client runtime** for mount,
+flushSync/unmount and `svelte/reactivity.createSubscriber`. Without Svelte,
+ordinary API reads remain plain; component mounting fails explicitly. Native
+project/time/selection/theme publications drive the extracted subscription code.
+A compiled original synthetic Svelte 5.56.10 panel is tested through the actual
+realm, shim and jsdom page: mount → native publication → edit from input →
+reactive render → rebuild → registration disposal → teardown. Component
+registration disposal unmounts immediately; it follows the tag's documented
+intent rather than retaining the tag's leaked mount until owner disposal.
 
 ## Decisions and selecting rules
 
@@ -182,54 +205,132 @@ expresses those obligations; this lane does not implement WebKit transport or DO
 | Report requested apiVersion rather than tag's hard-coded 1                                                             | N3 and quirk policy: accidental hardcoding is not recorded authored intent |
 | Preserve reference/runtime consumers and remove nothing                                                                | Prune rule; N4                                                             |
 
-## Verification and remaining work
+## Package 9 part 2 decisions
 
-Run from the repo with the supplied activation script, then:
+| Decision | Selecting rule |
+| --- | --- |
+| Extract the complete contribution host and PM facade factories, preserving validation, exact argument lists/defaults/results, ownership, stack restoration, callback identity and async-when/menu behavior | N4/N6; reference is v1.2.0, not an inferred API |
+| Native/platform functions remain injected capabilities; absent operations throw Unavailable, including fonts and controls; unavailable transform evaluation never manufactures an identity matrix | N1/N3/N4; presence checks are not operational certification |
+| Preserve later local intent after rejection; defer overtaking publications until the immutable lost-ack request resolves | N3/N4; do not resurrect an acknowledged value over a newer native edit |
+| Keep the submitted structural mirror on a lost finish acknowledgement; abort an unused recovered start lease without running the callback later | N3/N4/N6; callbacks execute at most once, acknowledged work survives |
+| Isolate publication observers and retirement cleanup errors; drain all retired handles | N4/N6; an observer cannot mask a host rejection or strand other pins |
+| Permit omitted optional workspace record fields assigned by tagged layout helpers; retain strict document validation | N3/N6; matches JSON workspace persistence without weakening document validation |
+| Unmount a component when its registration is disposed | N2/N3; host.ts explicitly promises this; the tag's delayed cleanup is a leak, not authored intent |
+| Use requested apiVersion, and log disposer errors without reporting retired-owner health failures | N3 for the accidental hardcoded version; N6 for the extracted disposal policy |
+| Metadata-only realm/page inspection and commands/panels addressable by id | N7; no vars or document contents in inspection metadata |
+| Remove only the replaced unused hypothetical DOM types; retain reference tooling, all existing app/runtime consumers and protocol v1 | Prune rule, N4/N8; lane ownership |
+
+## Verification and coverage
+
+From `apps/native/js/compat`, after shell activation:
 
 ```sh
-cd apps/native/js/compat
 bun install --frozen-lockfile
 bun test tests
 bun run typecheck
+bun run format
 bun run build
 bun run replay
+bun run corpus
 ```
 
-Linux verification: **131/131 package tests** and **8/8 existing trace-recorder
-tests** pass (including the overlay parser check against a disposable extraction
-of the frozen tag). TypeScript checking, production bundling, locked installation,
-Prettier and Git whitespace checks pass. The production bundle is approximately
-129 kB before compression. The tests run in Bun/JavaScriptCore; actual sandboxed
-V8 loading remains a native-host verification item.
+Linux result: **173 compat tests**, **36 remote-DOM tests**, **8 trace-recorder
+tests**, and **22 unchanged Rust remote-DOM router tests** pass. Both JS packages
+pass typechecking/browser builds/formatting; the requested workspace `cargo test --locked -p pm-remote-dom` also passes
+22 tests, and strict standalone router Clippy/rustfmt pass. No Rust source or
+workspace lock changes were needed. The compat production IIFE is approximately **224 kB** uncompressed.
+Bun uses JavaScriptCore; the remote-DOM suite also runs a bare Node V8 dependency
+probe and the real JS↔Rust JSON router roundtrip. This is not certification of the
+pinned sandboxed rusty_v8 embedding. The remote suite's cold Rust build/toolchain setup exceeded its 5-second
+per-test limit. Prebuilding the unchanged wire example and selecting the installed
+Linux toolchain explicitly makes the boundary test pass. The supplied activation script was absent; Bun 1.4.4, Rust
+1.96.1 and gitleaks 8.30.0 were installed in scratch, without tracked tool changes.
 
-Replay executes the **original** `tools/trace-recorder/scenarios.ts` against the
-bundle's facades and the independent fake kernel. It validates all 11 goldens,
-compares root public call/throw/return forms, exact callback assertions, explicit
-callback order, project name/layer IDs/names/types/source revision and history
-availability. It does **not** copy golden output into fake host replies.
-Eight realm scenarios and three input-routing projections match **78/78 public
-boundaries**. Keymap tests use development-only Happy DOM; menu commands are
-explicitly driven at the realm boundary. These are not 1,093-row byte matches,
-full project/provenance/patch comparisons, internal allocation matches, actual
-AppKit/Chromium menu delivery, native kernel replay or visual parity.
+The existing replay still matches **78/78 public boundaries from 11 Electron
+goldens**. It checks returns/errors, callback order, name/layer ids/revision and
+history availability, with test doubles for DOM/menu delivery. These are not
+1,093-row byte matches, a new Electron capture, full document/patch comparisons,
+actual native kernel leases or visual parity.
 
-The legacy runtime has more than these boundaries. This package does not yet
-implement the complete 377-member C-MATRIX API, Svelte mounting/reactivity,
-activation/reload staging, full legacy composition/group/evaluation surfaces,
-workspace/theme ownership stacks, remaining contribution kinds/ownership adapters, host storage,
-media, permissions or every global. Native adapters must provide those capabilities
-before activating arbitrary existing extensions. Structural mutation uses the callback-lease protocol to preserve reentrant host writes. The Rust adapter must implement these three lease methods using native owner tracking and selective rollback; they are not existing string actor calls.
+`tests/corpus/extensions.ts` contains original synthetic registration/runtime
+activations with apiVersion 1, 2 and 3 manifests. The corpus exercises every
+contribution family, storage isolation, activation vars, six typed synchronous
+provider families, workspace appearance, async command visibility and menus,
+import defaults and drag payloads. `facades.test.ts` and `scripts/corpus.ts` run
+**95 call/argument/result comparisons** against facade functions loaded directly
+from the pinned tag's `kernel/install.ts`. Native operations are independent
+synthetic recording providers; 38 native-only assets/scene/extension delegates
+also verify exact arguments, callback/result/error and Promise identity; no golden result is used as a host response.
+This is source-level replay, not additional frozen Electron evidence.
 
-Root `package.json` currently includes only `apps/*` and `packages/*`; the owning
-integration lane must add `apps/native/js/*` to register this nested Bun workspace
-package and reconcile the root lockfile. This lane keeps a local locked package
-so it is independently buildable without editing unowned paths. Rust adapter
-implementation belongs in the V8/kernel runtime lane. No Rust source changed,
-so cargo test/fmt/clippy are not applicable to this TypeScript-only package.
+The following counts are required immediate namespace members (overloads are
+collapsed, optional UI.copy excluded), not the 377 nested C-MATRIX rows. All
+**36 families** declare their required members under each apiVersion. A declared
+native delegate is not proof its platform implementation exists. Source callable
+counts can include nested members and wider adapter methods.
 
-On macOS verify sandboxed V8 loading/microtasks, real kernel mappings and selective
-cancel/foreign-write races, main-thread nonblocking behavior, external-history
-reload pins, native recorder pixels/pm-vector/pm-text/nested render continuations,
-remote WebKit DOM identity/defaults/layout/IME/promotion, AppKit menu delivery,
-unchanged inspector/timeline forks, 39-extension memory and all applicable S1/S5
-latency/background budgets. None of those gates is established by Linux doubles.
+| API family | Required members declared | Behavioral evidence / remaining gate |
+| --- | ---: | --- |
+| panels | 6/6 | Registration/build/unload, compiled Svelte mount/rebuild/dispose, hidden-on-activation policy; native dock host required |
+| commands | 4/4 | Register/run/has/list, exact results, guards, async when, id dispatch |
+| keybindings | 4/4 | Chord/list/ownership plus existing DOM/keymap/golden tests |
+| effects | 3/3 | Tagged validation, get/list/ownership; native shader integration required |
+| transitions | 3/3 | Tagged validation, get/list/ownership; native shader integration required |
+| layers | 3/3 | Tagged validation, definition identity/ownership; native renderer required |
+| scene3d | 24/24 | 24 native delegate identity probes and explicit absence; real scene/navigation/gizmo backend remains |
+| assets | 5/5 | 5 native delegate identity probes and explicit absence; picker/durable import/network backend remains |
+| theme | 6/6 | Register/activation/scheme/ownership restoration; page/native theme application remains |
+| palette | 2/2 | Provider/callback/ownership; native palette host required |
+| menus | 3/3 | Sync collect, async ordered gather, ownership; native presentation required |
+| status | 2/2 | Live callback/list/ownership; native presentation required |
+| project | 14/14 | Existing write/history goldens and Svelte publication/edits; transport host required |
+| anim | 19/19 | 18 source callable comparisons; native evaluator required |
+| model | 15/15 | 11 source callable comparisons, factories/definitions/retained identity |
+| selection | 9/9 | 8 source callable comparisons plus mirror/race tests |
+| groups | 7/7 | 7 source callable comparisons; native graph helpers required |
+| transport | 11/11 | 8 source callable comparisons, lazy backend accessors; engine/clock required |
+| history | 8/8 | Existing goldens, inline continuations/reentry, pin cleanup and lost-ack tests; native selective history required |
+| edit | 6/6 | Existing goldens, preview/admission/structural leases and recovery; actor implementation required |
+| media | 8/8 | 11 nested source callable comparisons, import-default stacks; real media/fonts required |
+| inspector | 2/2 | Section validation/build/cleanup/ownership; real inspector host remains |
+| render | 5/5 | 9 nested source callable comparisons, override→nested capture→held base tests, existing recorder fixtures; native pixels/presenter remains |
+| uiState | 12/12 | 13 source callable comparisons; native persistence/ownership required |
+| ui | 14/14 | Shared Svelte mount, gesture/bindings, explicit native UI/control delegates; actual controls/overlays required |
+| dnd | 11/11 | Tagged MIME/parser helpers, live drag identity, malformed decline; native drag/files required |
+| workspace | 9/9 | Hidden geometry, membership/moves, partial errors and user-over-owner preservation; native persistence required |
+| util | 9/9 | 9 source callable comparisons; pure/backend helpers required |
+| ease | 2/2 | 1 source callable comparison; native/legacy preset provider required |
+| space3d | 10/10 | Existing frozen transform fixtures and fail-explicit live adapter; full scene integration required |
+| services | 2/2 | Six typed provider families' closure/identity/override/disposal; wider runtime provider implementations remain |
+| storage | 3/3 | Namespaced read/modify/write/delete, isolation; native private store backend required |
+| events | 2/2 | Ownership, error isolation, publication ordering and Svelte subscriptions |
+| extensions | 9/9 | 9 native delegate identity probes and explicit absence; loader/compiler/discovery/reload backends remain |
+| vars | 3/3 | Frozen per-activation string values; private native values provider required |
+| host | 4/4 | Exact PM, shared Svelte mount and injected state/haptics; real native state/controls required |
+
+## Remaining completion gates and macOS handoff
+
+**The whole v1–3 contract is not certified complete.** No existing extension is
+excluded and no runtime consumer was pruned. Declared/delegated facade coverage
+must not be reported as complete execution of all 377 typed, 902 PM or 156 wider
+service rows. Arbitrary raw PM subsystems, evaluator/composition/group/media/UI
+backends, all returned handles, remaining runtime globals and Store roles still
+need implementations and behavior evidence from their owning lanes.
+
+Outside these owned paths: implement the string adapter methods over the actual
+Rust actor, including selective ownership/provenance, validation and structural
+leases; txid lookup/deduplication, mailbox ordering, external undo leases and
+retirement; V8 microtask/timer/host entry scheduling; private WebKit transport,
+page recreation/remount/local-state recovery; native canvas promotion/raster/text/
+fonts/pixels/JPEG/WebGL/presenter; scoped storage/assets/extensions/UI/scene
+backends and unchanged live inspector/timeline/provider clusters. The fake actor
+follows the tag's whole-scope cancellation. Its dirty-write/live-edit test proves
+bridge ordering, **not native selective cancel or foreign-writer safety**.
+
+On macOS verify real V8/native actor races (including acknowledged foreign writes
+and external undo racing queued page/agent commands), render error/cancel/revision
+continuations, fresh layout/default-action semantics, IME/clipboard/focus/text undo,
+physical key/menu ordering, accessibility, real styles/fonts/assets/pixels and
+colour, page termination/recreation, retained objects during reload, sandbox and
+permission roles, 39-extension memory and keystroke→visible latency at 60/120 Hz.
+N1/N2 performance and N4/N6 cutover remain open until that evidence exists.

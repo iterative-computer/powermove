@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pm_model::json::{Map, Value, parse, to_canonical_string};
 use pm_model::ops::{ops_from_value, ops_to_value};
@@ -67,7 +67,8 @@ const CHECKPOINT_FORMAT: &str = "powermove-kernel-checkpoint";
 /// Journal knobs.
 #[derive(Clone, Debug)]
 pub struct JournalConfig {
-    /// `F_FULLFSYNC` cadence (power-loss window).
+    /// Requested `F_FULLFSYNC` cadence. Capped at 100 ms to leave headroom
+    /// inside the 200 ms P1 flush budget; zero is clamped to 1 ms.
     pub flush_interval: Duration,
     /// Checkpoint after this many revisions (`CHECKPOINT_REVISIONS`).
     pub checkpoint_revisions: u64,
@@ -106,11 +107,11 @@ impl SyncTarget {
     fn sync(&self) -> io::Result<()> {
         // A second caller must wait even after the flusher claimed `dirty`.
         let _guard = self.syncing.lock().expect("sync target");
-        if self.dirty.swap(false, Ordering::AcqRel) {
-            if let Err(e) = full_sync(&self.file) {
-                self.dirty.store(true, Ordering::Release);
-                return Err(e);
-            }
+        if self.dirty.swap(false, Ordering::AcqRel)
+            && let Err(e) = full_sync(&self.file)
+        {
+            self.dirty.store(true, Ordering::Release);
+            return Err(e);
         }
         Ok(())
     }
@@ -173,11 +174,14 @@ impl Durability {
         });
         let flusher = {
             let shared = shared.clone();
-            let interval = config.flush_interval;
+            let interval = config
+                .flush_interval
+                .clamp(Duration::from_millis(1), Duration::from_millis(100));
             thread::Builder::new()
                 .name("pm-kernel-fsync".into())
                 .spawn(move || {
                     loop {
+                        let cycle = Instant::now();
                         let stop = shared.stop.load(Ordering::Acquire);
                         let targets: Vec<Arc<SyncTarget>> =
                             shared.targets.lock().expect("targets").clone();
@@ -198,7 +202,12 @@ impl Durability {
                             break;
                         }
                         let guard = shared.lock.lock().expect("lock");
-                        let _ = shared.wake.wait_timeout(guard, interval).expect("wait");
+                        // Charge fsync work to this cycle, rather than adding
+                        // a full sleep after every disk flush (N1).
+                        let _ = shared
+                            .wake
+                            .wait_timeout(guard, interval.saturating_sub(cycle.elapsed()))
+                            .expect("wait");
                     }
                 })
                 .expect("spawn fsync thread")
@@ -1036,6 +1045,41 @@ impl Replay {
 mod durability_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn background_fsync_completes_within_200ms_even_with_an_oversized_request() {
+        // Observe the real background worker, without a barrier that would mask
+        // a missing periodic flush. This is process/filesystem evidence only;
+        // physical power-loss and F_FULLFSYNC verification require macOS.
+        let path = std::env::temp_dir().join(format!("pm-fsync-{}", crate::new_id("probe")));
+        let file = File::create(&path).unwrap();
+        let d = Durability::new(JournalConfig {
+            flush_interval: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let target = d.register(&file).unwrap();
+        for _ in 0..4 {
+            (&file).write_all(b"synthetic\n").unwrap();
+            let start = Instant::now();
+            target.dirty.store(true, Ordering::Release);
+            while target.dirty.load(Ordering::Acquire) {
+                assert!(
+                    start.elapsed() < Duration::from_millis(200),
+                    "periodic fsync missed 200 ms"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            // dirty is claimed before fsync: wait for its actual completion.
+            let _completed = target.syncing.lock().unwrap();
+            assert!(
+                start.elapsed() <= Duration::from_millis(200),
+                "fsync completion missed 200 ms"
+            );
+            assert!(d.take_errors().is_empty());
+        }
+        drop(d);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn barrier_waits_for_a_flush_that_already_claimed_dirty() {

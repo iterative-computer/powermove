@@ -402,6 +402,25 @@ pub struct Outcome {
     pub detail: String,
 }
 
+/// Host entry for deterministic campaigns; every compiler and writer runs
+/// within the ordinary killable pool. The standalone fuzz worker instead
+/// calls [`outcome`] locally to avoid nested children.
+pub fn outcome_isolated(source: &str, line_offset: u32) -> Result<Outcome, crate::Failure> {
+    match crate::compiler::default_pool().run(
+        crate::compiler::Request::Fuzz {
+            fragment: source.into(),
+            line_offset,
+        },
+        crate::cache::DEFAULT_DEADLINE,
+    )? {
+        crate::compiler::Response::Fuzz(outcome) => Ok(outcome),
+        _ => Err(crate::Failure::new(
+            crate::FailureStage::CompilerProcess,
+            "unexpected fuzz response",
+        )),
+    }
+}
+
 /// Translates `source` and writes naga's MSL for both stages (wgpu runs the
 /// same writer at pipeline creation). Panics are outcomes, not crashes.
 /// This is the raw fuzz-worker entry: the fuzz binary owns its killable
@@ -422,10 +441,10 @@ pub fn outcome(source: &str, line_offset: u32) -> Outcome {
             },
             Ok(program) => {
                 for module in [&program.vertex.module, &program.fragment.module] {
-                    if let Err(e) = pipeline::msl(module) {
+                    if let Err(e) = pipeline::msl_local(module) {
                         return Outcome {
                             result: "reject:naga-msl".into(),
-                            detail: e.chars().take(400).collect(),
+                            detail: e.to_string().chars().take(400).collect(),
                         };
                     }
                 }

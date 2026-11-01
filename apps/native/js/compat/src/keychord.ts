@@ -238,9 +238,9 @@ export function hasTextSelection(): boolean {
   const selection = window.getSelection();
   return Boolean(
     selection &&
-    selection.rangeCount > 0 &&
-    !selection.isCollapsed &&
-    selection.toString(),
+      selection.rangeCount > 0 &&
+      !selection.isCollapsed &&
+      selection.toString(),
   );
 }
 

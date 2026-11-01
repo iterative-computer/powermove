@@ -12,7 +12,7 @@ export function validatePath(path: Path): void {
     throw new TypeError("Invalid document path");
 }
 /** Reject lossy JSON rather than silently deleting authored values. */
-export function copy<T>(value: T): T {
+export function copy<T>(value: T, omitUndefinedRecordFields = false): T {
   const seen = new Set<object>();
   function visit(v: any): any {
     if (v === null || typeof v === "string" || typeof v === "boolean") return v;
@@ -32,6 +32,14 @@ export function copy<T>(value: T): T {
       const d = Object.getOwnPropertyDescriptor(v, key)!;
       if (!("value" in d))
         throw new TypeError("Document accessors are not supported");
+      // Legacy workspace/layout helpers deliberately assign absent optional fields.
+      // Documents keep strict validation; only workspace persistence opts into this.
+      if (
+        omitUndefinedRecordFields &&
+        !Array.isArray(v) &&
+        d.value === undefined
+      )
+        continue;
       result[key] = visit(d.value);
     }
     if (Array.isArray(v) && Object.keys(v).length !== v.length)
@@ -191,15 +199,17 @@ export class DocumentMirror {
   }
   /** Native writes received before our flush win only where we did not write. */
   receive(document: Data): void {
-    const local = this.pending();
     const previous = this.base;
-    this.base = copy(document);
     try {
+      const local = this.pending();
+      const authoritative = copy(document);
       reconcile(
         this.document,
-        patch(document, rebase(local, previous, document)),
+        patch(authoritative, rebase(local, previous, authoritative)),
       );
+      this.base = authoritative;
     } catch (error) {
+      this.base = copy(document);
       reconcile(this.document, document);
       throw error;
     }

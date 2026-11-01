@@ -432,3 +432,97 @@ fn playback_holds_identical_frames_instead_of_re_presenting_them() {
         std::thread::sleep(Duration::from_millis(2));
     }
 }
+
+#[test]
+fn safe_areas_persist_across_revisions_and_display_moves() {
+    let s = snapshot();
+    let service = EngineService::start(pm_gpu::Gpu::new("safe-area-test").unwrap()).unwrap();
+    let v = service.viewer(config(s.clone())).unwrap();
+    v.safe_areas(
+        OverlayGeometry::new(vec![OverlayLine {
+            ends: [0., 0.5, 1., 0.5],
+            color: [0., 1., 0., 1.],
+        }])
+        .unwrap(),
+    )
+    .unwrap();
+    let line = |v: &Viewer, row: usize, width: usize| {
+        v.capture_next().unwrap();
+        wait_frame(v, v.stamp().unwrap()).pixels.unwrap()[row * width + width / 2]
+    };
+    assert_eq!(line(&v, 90, 320), [0., 1., 0.]);
+    // An edit publishes a new revision: time-invariant overlays stay drawn.
+    v.snapshot(Snapshot {
+        revision: s.revision + 1,
+        document: Arc::new(pm_model::Document::new(
+            s.document.to_value(),
+            s.revision + 1,
+        )),
+        ..s.clone()
+    })
+    .unwrap();
+    assert_eq!(line(&v, 90, 320), [0., 1., 0.]);
+    // A move to another display/size retires old output; overlays follow the
+    // new drawable. A headroom-only change keeps the generation (telemetry).
+    let before = v.stamp().unwrap().generation;
+    v.configure(Output {
+        width: 160,
+        height: 90,
+        display: 7,
+        headroom: 1.,
+    })
+    .unwrap();
+    assert_ne!(v.stamp().unwrap().generation, before);
+    assert_eq!(line(&v, 45, 160), [0., 1., 0.]);
+    let moved = v.stamp().unwrap().generation;
+    v.configure(Output {
+        width: 160,
+        height: 90,
+        display: 7,
+        headroom: 4.,
+    })
+    .unwrap();
+    assert_eq!(v.stamp().unwrap().generation, moved);
+    v.retire();
+}
+
+#[test]
+fn viewer_output_switch_modes_encode_distinct_finite_signals() {
+    // The app's SDR / PQ / HLG switch maps to these engine modes. `Viewer::
+    // mastering` also relabels the layer and needs the main thread; the
+    // shared final-pass transform is checked through the headless path.
+    let s = snapshot();
+    let size = Size::new(64, 36);
+    let time = Ticks::from_whole_seconds(1);
+    let mut frames = vec![];
+    for mode in [
+        color::Mastering::LinearP3,
+        color::Mastering::Pq {
+            source_peak: 1000.,
+            target_peak: 1000.,
+        },
+        color::Mastering::Hlg {
+            source_peak: 1000.,
+            target_peak: 1000.,
+        },
+    ] {
+        let mut h = Headless::new().unwrap();
+        h.mastering(mode).unwrap();
+        let px = h
+            .frame(&scene(&s), time, size, &Default::default())
+            .unwrap();
+        assert!(px.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        frames.push(px);
+    }
+    assert_ne!(frames[0], frames[1], "PQ must encode, not relabel");
+    assert_ne!(frames[1], frames[2], "HLG and PQ are different signals");
+    assert!(
+        color::Mastering::Pq {
+            source_peak: 1000.,
+            target_peak: 100.
+        }
+        .params()
+        .is_err(),
+        "peaks below reference white are refused"
+    );
+}

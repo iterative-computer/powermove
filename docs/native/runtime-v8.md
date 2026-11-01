@@ -1,4 +1,4 @@
-# pm-runtime-v8 — P2 package 8
+# pm-runtime-v8 — P2 package 8, waves 1–2
 
 Headless runtime infrastructure in `apps/native/crates/runtime-v8`, pinned to
 rusty_v8 **152.2.0** (V8 **15.2.124.1-rusty**). No Node, Chromium, UI, kernel or
@@ -16,13 +16,14 @@ toolbar, shader/source-preview hooks, caption/3D callbacks and unproven callback
 consumers. Only theme/effects/transitions default to the rest cluster. Agent is an
 explicit native-port option, never an inferred independent legacy cluster. A
 compat provider replacement routes the whole editor closure to one trusted Compat
-isolate. Each v4 extension key has its own isolate. Store/compiler kinds are
-available infrastructure; Store process confinement is a separate host duty.
+isolate. Each v4 extension key has its own isolate. The compiler kind restores the pinned Svelte compiler snapshot. Direct
+`RuntimePool::realm(Store(..))` is rejected: Store clusters use `StorePool` and
+the separate `pm-store-helper` executable.
 
 `Realm::{eval,reload,invoke_retained,pin}` return `Ticket<T>` immediately. Tickets
 implement Future and `try_take`; there is no blocking wait or join API. Sources
-are bundled script expressions, optionally returning Promises. The compiler lane
-must resolve imports and wrap activation before submission. IDs fence queued
+are bundled script expressions, optionally returning Promises. The module loader must resolve imports, bind the shared Svelte runtime modules
+and wrap activation before submission; `SvelteCompiler` supplies the front end. IDs fence queued
 calls and Stop requests. `eval_generation` refuses a retired generation.
 `active_execution()` returns generation/id/elapsed time from native state,
 including during a hang, without entering JS.
@@ -63,9 +64,91 @@ through V8 interrupts during long tasks; host response capacity is reserved
 before starting I/O. This **does not provide a hard allocation-time cap for all
 JS ArrayBuffers**: S1's sandbox allocator cannot be replaced with rusty_v8's
 non-sandbox Rust allocator. Oversized allocations can precede a sampled check.
-Untrusted Store code still requires a confined helper process. Structured-clone
+Untrusted Store code runs through the confined helper process described below. Structured-clone
 serialization also checks its output budget after serialization. Neither case is
 presented as a hard host allocator or OOM-isolation guarantee.
+
+## Store helper and IPC
+
+`StorePool::helper(cluster_id)` returns immediately and reuses one live process
+for that cluster within its project scope. Process launch, pipe reads, host
+forwarding and reaping run on native transport workers. `StoreHelper::eval`
+returns a normal Future/ticket. Its queue has an explicit admission permit per
+submission, including the active request; moving commands into the dispatch
+queue cannot bypass the bound. Idle transport waits for events, while background
+realm timers can still issue kernel/host RPC without another submitted eval.
+`close()` and last-handle drop cancel the host budget and kill the child without
+joining on the caller. The transport reaps it, completes pending tickets and
+revokes/seals every acknowledged generation. Restart restores acknowledged kernel
+storage; sources/storage are never deleted.
+
+The helper starts with an empty environment, `/` as cwd and inherited stdin/stdout
+pipes. It initializes trusted V8/Store snapshot code, applies confinement, then
+accepts extension source. The `StoreSandbox` trait has a production macOS seatbelt
+implementation using [store.sb](../../apps/native/crates/runtime-v8/store.sb),
+and a Linux test double. Seatbelt is deny-default, with system-library, entropy,
+self process-info, sysctl and JIT necessities. There is no project/home/media,
+file-write, outbound-network, spawn or Mach-service grant. Anonymous inherited
+pipe behavior, OS-version compatibility and final signed JIT **must be verified
+on macOS**; Linux cannot establish seatbelt correctness.
+
+The Linux double installs `no_new_privs` and an architecture-checked seccomp BPF
+filter with TSYNC over existing V8 threads, denies filesystem open/mutation,
+socket creation/connect, exec, ptrace and namespace/mount changes, and preserves
+inherited-pipe IPC/JIT. It first attempts user/network/mount namespaces and reports
+whether the host permits them. This container refused namespace creation (`namespaces=false`), while seccomp
+was installed (`seccomp=true`). Namespace failure is explicit; seccomp failure
+refuses startup. This is a real Linux denial test, not a claim of complete Linux
+sandbox equivalence to the macOS policy.
+
+IPC v1 uses four-byte little-endian lengths followed by UTF-8 JSON. Zero,
+truncated, oversized (>64 MiB), malformed, unknown-version and wrong-id frames
+fail closed. One reader acknowledgement bounds prefetched frames independently
+of the submission queue. Source/response settings are bounded below the frame
+limit to leave JSON-escaping/binary-array expansion headroom. Messages are
+`init`/`ready`, `eval`/`result` and bidirectional `rpc`/`reply`. Kernel
+load/commit/revoke/seal, console, cooperative engine operations and nonblocking
+fetch start/poll/cancel are forwarded to the existing parent traits. No parent JS
+runs. Each connection binds the project/cluster namespace; remote generations
+are checked and translated into process-session-specific ids so stale helper
+ids cannot revive after restart. Fetch remains permission-controlled by the
+host adapter, including redirects, credentials and bytes; child-side requests
+cannot open sockets directly.
+
+`StoreStatus` exposes pid, confinement report, last owner-sampled V8 statistics
+and Linux RSS separately. The helper's hard-failure probe is test-only: it enters
+the **same helper initialization and sandbox trait**, then intentionally creates
+a 16-MiB V8 heap without the production near-limit recovery callback and exhausts
+it. A fatal V8 diagnostic plus SIGABRT/SIGTRAP is required. A live trusted parent
+realm and another production Store helper must both retain their values. No
+fatal-OOM command or quota-disabling switch exists in the production executable.
+
+Store history/activation facade RPC remains an owning-adapter integration gate;
+the helper currently refuses an unleased retained commit. The process boundary
+does not replace permission checks or the kernel's writer/lease validation.
+
+## Svelte compiler front end
+
+`SvelteCompiler` restores the **5.56.10** standalone compiler inside the Compiler
+snapshot. Its unmodified MIT artifact, license and SHA-256 provenance are owned
+under `compiler/`; there is no runtime download, Node loader or package manager.
+`compile(source, filename, Component|Module)` returns `SvelteTicket` immediately;
+type parsing/transformation and all compiler JS execute on the compiler owner.
+Components, including TypeScript script blocks, use Svelte's parser. `.svelte.ts`
+modules first use native OXC **0.152.0**, pinned for Rust 1.96.1, targeting ES2022.
+OXC 0.156.0 requires Rust 1.97 and was therefore not selected for this crate.
+
+The source path follows `v1.2.0:apps/desktop/src/main/extensions/compiler.ts`:
+client output, runes enabled, external component CSS and a `powermove:styles`
+`add` acquisition import. Module output stays ESM. Source maps/warnings are kept;
+Svelte errors preserve name, code, filename, positions and frame. Neither compiler
+path executes the authored source. The bounded derived-output cache keys exact
+source bytes/hash, compiler version/artifact, filename, unit/options and the OXC
+version/target. Changed filenames matter to CSS hashes and source maps. Eviction
+only discards derived output. The loader still owns dependency resolution,
+shared `svelte/*` singleton binding, style acquisition lifetimes, activation and
+remote-DOM mounting. This front end alone does not establish full Svelte panel
+compatibility on macOS.
 
 ## Watchdog and recovery
 
@@ -103,8 +186,15 @@ rolled back; pending requests are cancelled. Native model/UI edits must use the
 staged op surface. Arbitrary module-global mutation is not transactional.
 
 `GenerationPin` retains callable old closures for history/export. Successful
-replacement cancels old I/O, clears old timer registrations and revokes old
-registrations; pinned isolates stay until their last pin retires. Retained calls
+replacement cancels old I/O, clears old timer and EventTarget listener tables,
+revokes old registrations and seals open gestures; pinned isolates stay until their last pin retires. Cleanup retains a private V8
+function handle so replacing the global control object cannot disable retirement.
+Retired generations cannot schedule new timers/fetch/listeners. The final pin
+releases its strong reference **before** waking the idle owner, avoiding a race
+that could otherwise strand the isolate until another submission.
+`Realm::measure()` samples every active/retired isolate on its owner and reports
+used/physical heap, external bytes and serialized snapshot bytes. These are
+separate from configured admission reservations and process RSS. Retained calls
 use `commit_retained`, which must apply only lease-authorized history operations
 and never overwrite current storage. A throwing retained callback reports its error
 and stays callable; termination/quota failure revokes/seals its generation.
@@ -154,44 +244,89 @@ those adapters. No Electron quirk was adopted as a runtime specification.
 | UTF-8/WHATWG/V8 primitives, explicit adapter gaps, no browser-bug imitation | N3 specification wins; N4/N6 do not silently remove legacy capabilities |
 | Preserve all replaced Electron/spike consumers | Prune rule: no deletion before the final consumer is retired |
 
+## Wave 2 decisions and selecting rules
+
+| Decision | Rule |
+|---|---|
+| Require the Store helper API, one process per project/cluster, fail closed on protocol or confinement failure | N1/N2 responsiveness and fatal-OOM containment; N8 no parent/main-thread JS wait |
+| Keep permissioned native proxies, cluster/session fences, acknowledged storage and crash cleanup in the parent | N3/N4 exact acknowledged state; N6 unchanged host contract; N7 inspectable ids |
+| Embed the pinned standalone compiler; compile in a restored isolate; perform TypeScript preprocessing with toolchain-compatible native OXC | N8 no Node/Chromium; N3 explicit compiler identities; N4/N6 retain Svelte module forms |
+| Retire every ephemeral effect while history/export pins retain callable old closures and their exact bytes | N3/N4 authored history remains valid; N6 callback lifetime; N1 bounded resource accounting |
+| Preserve same-realm legacy cluster identity and every existing consumer | N4/N6 and prune rule; fresh-isolate reload remains v4-only |
+| Report Linux seccomp/namespaces, V8 heap, RSS and executable sizes separately; leave macOS seatbelt/JIT as explicit gates | N1/N3 evidence before performance/security claims; no Electron quirk copied |
+
 ## Linux verification and integration
 
-From the repository root (every shell sources the local tool setup):
+Every shell sources the workspace tool setup. Use the owned isolated manifest,
+which compiles the **same production sources**, binary and integration tests:
 
 ```sh
 source /workspace/.tools/activate.sh
 cd /workspace/powermove
 cargo test --locked --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml
+cargo test --locked --release --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml -- --nocapture
 cargo clippy --locked --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --all-targets --no-deps -- -D warnings
 cargo fmt --manifest-path apps/native/crates/runtime-v8/isolated/Cargo.toml --check
 ```
 
-The isolated manifest compiles the **same production sources** with an owned
-lockfile, following the existing S1 pattern. `cd apps/native && cargo test
---locked -p pm-runtime-v8` was attempted: Cargo refuses because the shared native
-lockfile needs this new package/dependencies. This lane does not own that file.
-The integration lane must regenerate it; the existing `crates/*` workspace glob
-already discovers this crate. No other crate/source or shared lock was edited.
+**63 tests pass: 55 unit + 8 integration**, including two gated subprocess probe
+entry points. All original 45 tests remain green. Debug and optimized release
+runs pass; strict Clippy and formatting pass. Coverage adds actual helper IPC,
+cluster reuse/separation, confinement denials, engine/fetch/abort, idle timer RPC,
+shutdown/spawn failure, crash lease cleanup, storage restart/session fencing,
+real fatal OOM with parent/sibling survival, compiler snapshot/TS/CSS/cache/error
+paths, successful/failed activation cleanup, every requested reload effect kind,
+20 callable retained external-history generations, export pin independence,
+idle pin retirement and control-global-independent cleanup. All inputs are
+synthetic; no private profile, project or secret is used.
 
-Current evidence: **45 tests pass**, including real isolate/snapshot/cache
-execution, cross-thread submissions with parked Lockers, routing/identity,
-web APIs, host abort/time/byte bounds, staged activation failure/success,
-retained closures/admission retirement, Wait/Stop and microtask/infinite-loop
-recovery, persisted storage, external-memory termination and a real near-heap
-callback in a subprocess. Further regressions cover sleeping idle owners,
-native Future wakeups, queue saturation, cooperative engine cancellation,
-throwing/active history pins, pre-publication scheduling failure, UTF-8 op budgets
-and exact unusual storage keys. Strict Clippy and Rust formatting pass. All inputs
-are synthetic; no private profile, user project or secret is used.
+The required workspace command `cd apps/native && cargo test --locked -p
+pm-runtime-v8` was attempted. Cargo refuses to update the **shared native
+Cargo.lock** under `--locked`; that file is outside this lane's ownership.
+The integration lane must regenerate it for the runtime/OXC dependencies. libc
+is pinned to **0.2.186**, matching the existing S1 workspace consumer. The
+`crates/*` workspace glob already discovers this crate. No shared lockfile,
+Electron source, vendor or spike file was changed.
 
-Still needed from other lanes: concrete kernel actor hooks (atomic activation,
-writer fencing, gesture sealing and retained history leases), engine/recorder
-bindings, compiler/module loader, host permission/network adapter, native prompt
-wiring, remote-DOM/WebKit panels and full v1–3 facade/corpus/trace replay. This
-crate alone does not establish all-extension compatibility or product budgets.
+### Measurements
 
-macOS verification must link the S1 sandbox library/bindings and confirm sandbox
-activation, hardened-runtime JIT/signing, AppKit prompt/main-thread independence,
-real kernel/engine/recorder behavior, WebKit remote panels, supported-OS and
-39-extension memory/performance rows. No Metal/AppKit/GPUI/WebKit or on-screen
-claim is made from Linux.
+Linux x86_64, Rust 1.96.1, optimized release, upstream unsandboxed Linux V8
+archive. These are synthetic observations, not 39-extension product budgets or
+macOS physical-footprint claims. Snapshot/heap sizes can vary by V8 build.
+
+| Observation | Bytes |
+|---|---:|
+| Store snapshot | 462,920 |
+| Store V8 used heap after synthetic registration/storage | 541,704 |
+| Store V8 physical heap | 1,048,576 |
+| Store V8 external bytes | 34 |
+| Store process RSS at that sample | 20,615,168 |
+| Helper executable, release, unstripped | 69,965,176 |
+| Compiler snapshot | 3,148,600 |
+| Compiler used heap after TS module/error probes | 4,914,048 |
+| Compiler physical heap | 6,160,384 |
+| Compiler external bytes | 33,024 |
+
+The helper RSS is **20.62 MB decimal**, not evidence of passing S1's macOS
+≤20-MB physical-footprint gate. `STORE_MEASUREMENT` and `COMPILER_MEASUREMENT`
+lines reproduce these sampling points. The repeated-reload test retains twenty
+1-MiB external buffers and twenty callable undo closures: admission grows to
+**1,344 MiB** for 21 configured 64-MiB isolates, then falls to **128 MiB** with
+one old export pin plus the active isolate, **64 MiB** after export retirement,
+and **zero** on close. V8 statistics independently verify the external payloads;
+configured heap reservations are not presented as RSS or actual heap use.
+
+Still needed outside this lane: regenerate the shared native lockfile and wire
+package/signing of the helper executable; concrete kernel actor atomic
+activation/registration/gesture/history leases and Store facade RPC; full module
+resolution/shared Svelte runtime and same-realm legacy module reload; engine/
+recorder and permission adapters; native prompt wiring; WebKit remote-DOM mounting
+and full v1–3 facade/corpus/trace replay. No extension is declared incompatible
+because its adapter is incomplete.
+
+macOS must verify seatbelt denial/anonymous inherited pipes across supported
+OS versions, sandbox-enabled S1 archive/bindings, final signed/notarized helper
+JIT entitlements, helper crash blast radius, AppKit/main-thread independence,
+real kernel/engine/recorder behavior, Svelte WebKit panels and 39-extension
+memory/performance rows. No Metal/AppKit/GPUI/WebKit or on-screen claim is made
+from Linux.

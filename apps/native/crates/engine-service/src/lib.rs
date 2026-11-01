@@ -4,6 +4,7 @@ pub mod color;
 pub mod jobs;
 pub mod layers;
 pub mod policy;
+mod present;
 mod render;
 pub mod resources;
 pub mod trace;
@@ -156,6 +157,8 @@ pub struct ViewerStatus {
     /// Display ticks whose frame was identical to the one already on screen.
     /// The layer keeps showing it; no drawable is spent (see `run`).
     pub held_frames: u64,
+    /// Paused pictures re-presented once because they never reached the glass.
+    pub represented: u64,
     /// Playing or waiting for the audio epoch: the host should keep its
     /// display-phase source running so the start can align to vsync.
     pub wants_display: bool,
@@ -289,7 +292,11 @@ impl Viewer {
                 v.config.snapshot = snapshot;
                 v.stamp.revision = v.config.snapshot.revision;
                 v.stamp.sequence += 1;
-                v.overlays = OverlayGeometry::default();
+                // Paused gizmo geometry names one revision and time; safe
+                // areas and guides are time-invariant and persist across edits.
+                if v.overlay_time.take().is_some() {
+                    v.overlays = OverlayGeometry::default();
+                }
                 v.dirty = true;
             }
             Ok(())
@@ -655,10 +662,10 @@ struct Runtime {
     content: u64,
     interval: f64,
     next: f64,
-    /// Observed presentedTime − link target for timed presents: the
-    /// WindowServer/compositor queue the picture cannot avoid. Media time is
-    /// chosen for target + this lag, so a frame lands when its audio plays.
-    lag: VecDeque<f64>,
+    /// Observed presentedTime − requested present time: the WindowServer/
+    /// compositor delay the picture cannot avoid. Media time is chosen for
+    /// requested + this lag, so a frame lands when its audio plays.
+    lag: present::PresentLag,
     /// Most recent known vsync (host s) and refresh interval.
     grid: Option<(f64, f64)>,
     /// Refreshes ahead of the target at which a playing frame is encoded.
@@ -666,22 +673,9 @@ struct Runtime {
     /// Stamp/time already submitted. Repeating identical pixels at the
     /// display rate only queues more drawables behind the compositor.
     last: Option<(Stamp, Ticks)>,
-}
-impl Runtime {
-    fn lag(&self) -> f64 {
-        present_lag(&self.lag)
-    }
-}
-/// Upper decile of recent target → glass lags, 0 until three exist. Presents
-/// land 1 or (≈10%) 2 refreshes after target; the median would leave every
-/// slow one a refresh late. The timed present then holds frames to this slot.
-fn present_lag(samples: &VecDeque<f64>) -> f64 {
-    if samples.len() < 3 {
-        return 0.;
-    }
-    let mut v: Vec<_> = samples.iter().copied().collect();
-    v.sort_by(f64::total_cmp);
-    v[(v.len() * 9).div_ceil(10) - 1]
+    /// A paused picture that never reached the glass was re-presented once
+    /// for this stamp (bounded: a hidden window does not loop).
+    represented: Option<Stamp>,
 }
 struct Flight {
     id: u64,
@@ -736,22 +730,33 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if f.submission.command.status() == metal::MTLCommandBufferStatus::Error {
                 engine.clear_cache();
             }
+            let mut represent = false;
             if let Some(r) = runtime.get_mut(&f.id) {
                 let t = f.submission.trace.lock().unwrap();
                 match t.display.filter(|d| *d > 0.) {
                     Some(display) => {
                         r.grid = Some((display, r.interval));
-                        if t.target > 0. && display >= t.target - 0.0005 {
-                            if r.lag.len() == 15 {
-                                r.lag.pop_front();
-                            }
-                            r.lag.push_back(display - t.target);
+                        // Timed (playing) presents only; legacy requests the
+                        // target itself and never reads the estimate.
+                        if t.requested > 0. {
+                            r.lag.record(t.requested, display, r.interval);
                         }
                     }
                     // Never shown on a layer: the screen may not hold it.
                     None => {
                         if f.submission.drawable.is_some() && r.last == Some((f.stamp, f.time)) {
                             r.last = None;
+                        }
+                        // A paused (untimed) present dropped during window
+                        // activation/reordering leaves an older picture on
+                        // screen; nothing else repaints while paused.
+                        if f.submission.drawable.is_some()
+                            && t.target == 0.
+                            && t.gpu_ok
+                            && r.represented != Some(f.stamp)
+                        {
+                            r.represented = Some(f.stamp);
+                            represent = true;
                         }
                     }
                 }
@@ -766,12 +771,17 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                         "stale":v.stamp != f.stamp,"viewer_id":f.id,"generation":f.stamp.generation,"revision":f.stamp.revision,"sequence":f.stamp.sequence,"gpu_ok":t.gpu_ok,
                         "request":f.pipeline.request,"actor_ms":f.pipeline.actor_ms,"publication_ms":f.pipeline.publication_ms,
                         "render_start":t.render_start,"render_submitted":t.render_submitted,"drawable_asked":t.drawable_asked,"drawable_acquired":t.drawable_acquired,
-                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"predicted":t.predicted})) {
+                        "encode_end":t.encode_end,"scheduled":t.scheduled,"gpu_start":t.gpu_start,"gpu_done":t.gpu_done,"callback":t.display_callback,"target":t.target,"requested":t.requested,"predicted":t.predicted})) {
                     v.status.error = Some("viewer diagnostic trace overflow/disconnected".into());
                 }
                 if v.stamp != f.stamp {
                     v.status.stale_rejections += 1;
                     continue;
+                }
+                if represent && v.commands.is_empty() {
+                    // Same stamp: an exact-cache re-present, not new content.
+                    v.dirty = true;
+                    v.status.represented += 1;
                 }
                 v.status.frame = Some(FrameReport {
                     stamp: f.stamp,
@@ -809,6 +819,43 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             }
             continue;
         }
+        // A new revision rebuilds the audio graph input, which walks the whole
+        // document (O(layers)). Do it without the state lock: the UI thread
+        // takes that lock to publish, configure and read status.
+        let stale: Vec<_> = state
+            .views
+            .iter()
+            .filter_map(|(id, v)| {
+                let r = runtime.get(id)?;
+                (r.revision != v.stamp.revision || r.content != v.content).then(|| {
+                    (
+                        *id,
+                        v.config.snapshot.clone(),
+                        v.config.media.audio_paths(),
+                        v.config.composition.clone(),
+                        v.stamp.revision,
+                        v.content,
+                    )
+                })
+            })
+            .collect();
+        if !stale.is_empty() {
+            drop(state);
+            for (id, snapshot, media, composition, revision, content) in stale {
+                if let Some(r) = runtime.get_mut(&id) {
+                    r.transport.update(&snapshot, media, &composition);
+                    r.revision = revision;
+                    r.content = content;
+                }
+            }
+            // Fall through (no `continue`): a continuous stream of publications
+            // must not starve rendering. A revision that arrived meanwhile is
+            // still caught by the in-loop check below, as before.
+            state = shared.state.lock().unwrap();
+            if state.stop {
+                break;
+            }
+        }
         let now = trace::now();
         let mut work = None;
         let mut changed = false;
@@ -844,9 +891,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                     content: v.content,
                     interval: 1. / 60.,
                     next: now,
-                    lag: VecDeque::with_capacity(15),
+                    lag: present::PresentLag::default(),
                     grid: None,
                     last: None,
+                    represented: None,
                     ahead: 1.,
                 }
             });
@@ -920,11 +968,22 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             if !v.dirty && (!r.transport.clock.is_playing() || now < r.next - r.ahead * interval) {
                 continue;
             }
-            // A timed present reaches glass `lag` after its target (measured
+            // A timed present reaches glass `lag` after its request (measured
             // from presentedTime). Pick the picture for that instant, and for
             // forward play show each frame from the vsync nearest its onset,
             // so picture onsets straddle their audio instead of trailing it.
-            let shown = due.map(|due| due + if legacy { 0. } else { r.lag() });
+            // The request itself never depends on the estimate (see present).
+            let plan = due.map(|due| {
+                if legacy {
+                    present::Plan {
+                        requested: due,
+                        shown: due,
+                    }
+                } else {
+                    present::plan(due, interval, &r.lag, now)
+                }
+            });
+            let shown = plan.map(|p| p.shown);
             let media = if let Some(shown) = shown {
                 let at = |s: f64| {
                     sample.media_time_at(
@@ -983,8 +1042,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 r.transport
                     .audio_host_for(time, (shown.unwrap_or(now) * 1e6) as i64)
                     .map(|t| t / 1e6),
-                shown,
-                interval,
+                plan,
             ));
             break;
         }
@@ -1016,15 +1074,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
             input,
             pipeline,
             audio_host,
-            shown,
-            interval,
+            plan,
         )) = work
         {
             drop(state);
             let trace = Arc::new(Mutex::new(trace::Trace {
                 worker_start: now,
                 target: due.unwrap_or(0.),
-                predicted: shown.unwrap_or(0.),
+                requested: plan.filter(|_| !legacy).map_or(0., |p| p.requested),
+                predicted: plan.map_or(0., |p| p.shown),
                 ..Default::default()
             }));
             engine.mastering = mastering;
@@ -1056,16 +1114,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: std::sync::mpsc::
                 match result {
                     Ok(Some(s)) => {
                         let completed = Arc::downgrade(&shared);
-                        // Ask for glass no earlier than half a refresh before the
-                        // predicted instant: the compositor otherwise sometimes
-                        // latches an early commit one refresh sooner, which shows
-                        // the frame before its audio (and moves the onset).
-                        let present_at = due.map(|d| match shown {
-                            Some(shown) if !legacy => (shown - interval / 2.).max(d),
-                            _ => d,
-                        });
                         s.submit_notifying(
-                            present_at,
+                            plan.map(|p| p.requested),
                             Some(Arc::new(move || {
                                 // Bounded tokens cannot lose a wake; callbacks
                                 // never acquire the service state lock.
@@ -1251,23 +1301,5 @@ mod worker_tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
-    }
-}
-
-#[cfg(test)]
-mod lag_tests {
-    use super::*;
-    #[test]
-    fn lag_is_the_upper_decile_once_three_samples_exist() {
-        let i = 1. / 120.;
-        let mut samples: VecDeque<f64> = std::iter::repeat_n(i, 13).collect();
-        assert_eq!(present_lag(&samples), i);
-        samples.extend([2. * i, 2. * i]);
-        assert_eq!(
-            present_lag(&samples),
-            2. * i,
-            "two slow presents of 15 select the slow slot"
-        );
-        assert_eq!(present_lag(&VecDeque::from([i, i])), 0.);
     }
 }

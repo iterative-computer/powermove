@@ -120,7 +120,8 @@ fn validate_value(s: &Value, v: &Value, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Tools with concrete P1 bodies. Other tools remain listed and fail explicitly.
+/// Tools with concrete bodies/adapters. HOST_BACKED tools need an injected
+/// engine/export worker; without it they still fail explicitly.
 pub const IMPLEMENTED: &[&str] = &[
     "list_projects",
     "create_project",
@@ -136,6 +137,27 @@ pub const IMPLEMENTED: &[&str] = &[
     "edit_layer_strips",
     "rollback_changes",
     "get_panel_layout",
+    "get_3d_scene",
+    "check_project",
+    "list_media",
+    "manage_media",
+    "edit_video",
+    "render_frames",
+    "probe_media",
+    "sample_media_frames",
+    "media_contact_sheet",
+    "media_waveform",
+    "export_video",
+    "export_captions",
+];
+/// Adapter availability is distinct from a working standalone backend.
+pub const HOST_BACKED: &[&str] = &[
+    "render_frames",
+    "probe_media",
+    "sample_media_frames",
+    "media_contact_sheet",
+    "media_waveform",
+    "export_video",
 ];
 pub fn backing(name: &str) -> &'static str {
     match name {
@@ -158,21 +180,35 @@ pub fn backing(name: &str) -> &'static str {
         | "transcribe_media" => "engine-service/media jobs",
         "validate_effect" => "extension registration validator",
         "get_panel_layout" => "pm-kernel saved workspace and winning panel registrations",
-        "set_panel_layout"
-        | "get_panel_state"
-        | "open_panel"
-        | "interact_panel"
-        | "capture_panel"
-        | "computer_use_panel"
-        | "get_workspace_state" => "shell/surface host",
+        "set_panel_layout" => {
+            "workspace editing state and external workspace Undo/Redo continuation host"
+        }
+        "get_workspace_state" => {
+            "macOS shell viewport, renderer diagnostics, projects-screen state and full extension-health records"
+        }
+        "capture_panel" => {
+            "macOS registered panel renderer, encoded pixels and stable capture target validation"
+        }
+        "computer_use_panel" => {
+            "macOS panel input/capture host, observed pixel bounds and stable target validation"
+        }
+        "open_panel" | "get_panel_state" | "interact_panel" => {
+            "macOS shell/remote-DOM panel host, fresh semantic refs and stable element IDs"
+        }
         n if n.starts_with("store_") => "Store service",
-        "get_3d_scene" | "edit_3d" | "generate_captions" | "export_captions" | "edit_video"
-        | "check_project" => "editor domain adapters/engine",
-        "list_media"
-        | "replace_media"
-        | "import_media"
-        | "import_media_to_timeline"
-        | "manage_media" => "durable media service",
+        "get_3d_scene" | "check_project" => {
+            "pm-kernel evaluated composition/3D/source-timing queries and optional live media registry"
+        }
+        "edit_video" => "pm-kernel guarded id-keyed layer edits and source-aware timing adapter",
+        "export_captions" => "native caption text exporter",
+        "edit_3d" | "generate_captions" => "kernel 3D/caption commands and transcription runtime",
+        "list_media" => {
+            "pm-kernel asset/folder/reference snapshot and optional live media registry"
+        }
+        "manage_media" => "pm-kernel guarded asset/folder edits and native media Undo",
+        "replace_media" | "import_media" | "import_media_to_timeline" => {
+            "durable media import/version service: verified bytes, fingerprints, retained versions and native Undo"
+        }
         "fork_builtin_extension" | "stage_fork_rebase" | "publish_extensions" => {
             "extension runtime, compiler and isolated sandbox"
         }

@@ -1,0 +1,9 @@
+(version 1)
+(deny default)
+; Trusted initialization precedes confinement. Only inherited pipe IPC remains.
+; No project/home/media, outbound sockets, process spawn or Mach-service grant.
+(allow file-read* (subpath "/System/Library") (subpath "/usr/lib")
+                  (subpath "/Library/Apple/System/Library") (literal "/dev/urandom"))
+(allow sysctl-read)
+(allow process-info* (target self))
+(allow dynamic-code-generation)

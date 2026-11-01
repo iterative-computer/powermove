@@ -1,6 +1,6 @@
 {
   "reference": "07ed5fa17ee640659cb075f9cad1af2095011d60",
-  "inventorySha256": "aa6f28a5f1078012f0f9f3b4145ce78d877a69290fdc4f3379e8e6723bcdf7f0",
+  "inventorySha256": "d1b1c1c074e2e14a275a88d64ae76267d5a413f21f7be90c678e736ee1ebecdc",
   "rows": [
     {"source":"packages/tokens/tokens.css","line":6,"selector":":root","conditions":null,"surface":"All surfaces / token foundation","class":"T","properties":["color-scheme"]},
     {"source":"packages/tokens/tokens.css","line":7,"selector":":root[data-theme=\"dark\"]","conditions":null,"surface":"All surfaces / token foundation","class":"T","properties":["color-scheme"]},

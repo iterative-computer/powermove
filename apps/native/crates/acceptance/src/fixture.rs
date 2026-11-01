@@ -45,7 +45,11 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Result<Self, String> {
+        Self::configured(|_| Ok(()))
+    }
+    pub fn configured(configure: impl FnOnce(&Path) -> Result<(), String>) -> Result<Self, String> {
         let scratch = Scratch::new().map_err(|e| e.to_string())?;
+        configure(&scratch.0.join("profile"))?;
         let host = Arc::new(Mutex::new(
             Automation::new(scratch.0.join("profile"), scratch.0.join("exports"))
                 .map_err(|e| e.to_string())?,

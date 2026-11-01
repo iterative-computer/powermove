@@ -3,5 +3,8 @@
 pub mod catalog;
 pub mod fixture;
 pub mod keyboard;
+pub mod mcp_cases;
+pub mod pro;
 pub mod runner;
+pub mod runtime;
 pub mod scenarios;

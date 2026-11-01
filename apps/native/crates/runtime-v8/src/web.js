@@ -2,7 +2,8 @@
 (() => {
   'use strict';
   const timers = new Map(), requests = new Map();
-  let nextTimer = 0;
+  let nextTimer = 0, retired = false;
+  const eventTargets = new Set(), listenerTables = new WeakMap();
   const native = (op, arg) => JSON.parse(__host(op, JSON.stringify(arg)));
   globalThis.performance = Object.freeze({now: () => __now(), get timeOrigin() { return __timeOrigin; }});
   globalThis.queueMicrotask = fn => {
@@ -10,6 +11,7 @@
     Promise.resolve().then(fn).catch(e => console.error(e));
   };
   function timer(fn, delay, interval, args) {
+    if (retired) throw new Error('Generation retired');
     if (typeof fn !== 'function') throw new TypeError('String timers are unsupported');
     if (timers.size >= __limits.max_host_ops) throw new RangeError('Timer quota');
     const id = ++nextTimer;
@@ -28,7 +30,9 @@
   globalThis.DOMException = DOMException;
   class EventTarget {
     #listeners = new Map();
+    constructor() { listenerTables.set(this,this.#listeners); if (eventTargets.size >= 256) for (const ref of eventTargets) if (!ref.deref()) eventTargets.delete(ref); eventTargets.add(new WeakRef(this)); }
     addEventListener(type, fn, options = {}) {
+      if (retired) throw new Error('Generation retired');
       if (!fn) return;
       const list = this.#listeners.get(type) || [];
       if (!list.some(x => x.fn === fn)) list.push({fn, once: !!options.once});
@@ -44,6 +48,7 @@
       return !event.defaultPrevented;
     }
   }
+  const removeEventListener = EventTarget.prototype.removeEventListener;
   globalThis.EventTarget = EventTarget;
   globalThis.Event = class Event {
     constructor(type) { this.type = String(type); this.defaultPrevented = false; }
@@ -57,6 +62,7 @@
   class AbortController {
     signal = new AbortSignal();
     abort(reason = new DOMException('Aborted', 'AbortError')) {
+      if (retired) return;
       const s = this.signal;
       if (s.aborted) return;
       s.aborted = true; s.reason = reason;
@@ -186,6 +192,7 @@
   }
   globalThis.Headers=Headers; globalThis.Response=Response;
   globalThis.fetch = (input, init = {}) => {
+    if (retired) return Promise.reject(new Error('Generation retired'));
     const signal=init.signal;
     if(signal?.aborted) return Promise.reject(signal.reason);
     const url=new URL(String(input));
@@ -210,7 +217,13 @@
     nextDelay(now) { return timers.size ? Math.max(0,Math.min(...Array.from(timers.values(),t=>t.due-now))) : null; },
     restore(value, hotValue) { storage=value; hot.data=hotValue; ops=[]; opBytes=2; },
     resetOps() { ops=[]; opBytes=2; },
-    retire() { timers.clear(); requests.clear(); ops=[]; opBytes=2; },
+    retire() {
+      retired=true; timers.clear();
+      for (const req of requests.values()) if(req.signal) { try { removeEventListener.call(req.signal,'abort',req.abort); } catch {} }
+      requests.clear();
+      for (const ref of eventTargets) { const target=ref.deref(); if(target) listenerTables.get(target)?.clear(); }
+      eventTargets.clear(); ops=[]; opBytes=2;
+    },
     pump(now, completed) {
       for (const [id,result] of completed) {
         const req=requests.get(id); if(!req) continue;

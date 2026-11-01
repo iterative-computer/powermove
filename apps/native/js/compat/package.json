@@ -12,11 +12,18 @@
     "test": "bun test tests",
     "build": "bun build src/index.ts --target=browser --format=iife --global-name=PowermoveCompat --outfile=dist/compat-realm.js",
     "typecheck": "tsc --noEmit",
-    "replay": "bun scripts/replay.ts"
+    "replay": "bun scripts/replay.ts",
+    "corpus": "bun scripts/corpus.ts",
+    "freeze-host": "bun scripts/freeze-host.ts",
+    "format": "prettier --check src tests scripts package.json tsconfig.json"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
+    "@types/jsdom": "21.1.7",
     "happy-dom": "20.8.4",
+    "jsdom": "26.1.0",
+    "prettier": "3.6.2",
+    "svelte": "5.56.10",
     "typescript": "5.9.3"
   }
 }

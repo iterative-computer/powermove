@@ -14,6 +14,7 @@ use std::{
 };
 use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 
+pub(crate) const SVELTE: &str = include_str!("../compiler/svelte-5.56.10.js");
 const WEB: &str = include_str!("web.js");
 const MIB: usize = 1024 * 1024;
 pub(crate) const FLAGS: &str = if cfg!(feature = "macos-sandbox") {
@@ -48,6 +49,13 @@ pub(crate) fn snapshot(kind: SnapshotKind) -> Arc<Vec<u8>> {
                         .unwrap()
                         .run(cs)
                         .unwrap();
+                    if kind == SnapshotKind::Compiler {
+                        let source = v8::String::new(cs, SVELTE).unwrap();
+                        v8::Script::compile(cs, source, None)
+                            .unwrap()
+                            .run(cs)
+                            .unwrap();
+                    }
                     let source =
                         v8::String::new(cs, &format!("globalThis.__kind={:?}", kind.name()))
                             .unwrap();
@@ -428,6 +436,7 @@ fn clone_value(s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut rv: v
 
 pub(crate) struct Vm {
     context: Option<v8::Global<v8::Context>>,
+    retire_function: Option<v8::Global<v8::Function>>,
     isolate: Option<v8::SharedIsolate>,
     quota: Box<Quota>,
     pub native: Arc<Mutex<NativeState>>,
@@ -473,7 +482,7 @@ impl Vm {
             sync_calls: 0,
         }));
         isolate.set_slot(Native(native_state.clone()));
-        let context = {
+        let (context, retire_function) = {
             v8::scope!(let s,&mut isolate);
             let context = v8::Context::new(s, Default::default());
             let cs = &mut v8::ContextScope::new(s, context);
@@ -485,7 +494,17 @@ impl Vm {
                 let key = v8::String::new(cs, name).unwrap();
                 context.global(cs).set(cs, key.into(), function.into());
             }
-            v8::Global::new(cs, context)
+            let key = v8::String::new(cs, "__pm").unwrap();
+            let object = context
+                .global(cs)
+                .get(cs, key.into())
+                .unwrap()
+                .to_object(cs)
+                .unwrap();
+            let key = v8::String::new(cs, "retire").unwrap();
+            let function =
+                v8::Local::<v8::Function>::try_from(object.get(cs, key.into()).unwrap()).unwrap();
+            (v8::Global::new(cs, context), v8::Global::new(cs, function))
         };
         // SAFETY: only Send-owned native state, strong Globals, default allocator;
         // no Weak/finalizer/cppgc callbacks. V8 is accessed solely under Locker.
@@ -493,6 +512,7 @@ impl Vm {
             .map_err(|_| Error::Invalid("Cannot park isolate"))?;
         let mut vm = Self {
             context: Some(context),
+            retire_function: Some(retire_function),
             isolate: Some(isolate),
             quota,
             native: native_state,
@@ -509,6 +529,16 @@ impl Vm {
         vm.text(&format!("globalThis.__timeOrigin={origin}; globalThis.__limits={};",json!({"max_host_ops":limits.max_host_ops,"max_ops":limits.max_ops,"max_op_bytes":limits.max_op_bytes})))?;
         vm.restore(storage, hot)?;
         Ok(vm)
+    }
+    pub fn memory(&self) -> crate::IsolateMemory {
+        let mut isolate = self.isolate.as_ref().unwrap().lock();
+        let stats = isolate.get_heap_statistics();
+        crate::IsolateMemory {
+            used_heap_bytes: stats.used_heap_size(),
+            physical_heap_bytes: stats.total_physical_size(),
+            external_bytes: stats.external_memory(),
+            snapshot_bytes: self.blob.len(),
+        }
     }
     pub fn task_cancelled(&self) -> bool {
         self.native.lock().unwrap().cancellation.is_cancelled()
@@ -660,6 +690,21 @@ impl Vm {
         self.settle(&value)?
             .ok_or(Error::Invalid("Pending control operation"))
     }
+    /// Keep cleanup callable even when extension code replaces global __pm.
+    pub fn retire(&mut self) -> Result<()> {
+        let mut isolate = self.isolate.as_ref().unwrap().lock();
+        v8::scope!(let hs,&mut *isolate);
+        let context = v8::Local::new(hs, self.context.as_ref().unwrap());
+        let cs = &mut v8::ContextScope::new(hs, context);
+        let tc = std::pin::pin!(v8::TryCatch::new(cs));
+        let s = &mut tc.init();
+        let function = v8::Local::new(s, self.retire_function.as_ref().unwrap());
+        let receiver = v8::undefined(s).into();
+        function
+            .call(s, receiver, &[])
+            .ok_or_else(|| exception(s))?;
+        Ok(())
+    }
     pub fn restore(&mut self, storage: &Value, hot: &Value) -> Result<()> {
         self.control("restore", json!([storage, hot]))?;
         Ok(())
@@ -693,6 +738,7 @@ impl Drop for Vm {
         );
         if let Some(isolate) = &self.isolate {
             let mut guard = isolate.lock();
+            drop(self.retire_function.take());
             drop(self.context.take());
             guard.remove_near_heap_limit_callback(near_limit, 0);
         }

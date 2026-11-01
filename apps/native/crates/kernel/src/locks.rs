@@ -173,6 +173,8 @@ fn cloud_name(path: &Path) -> bool {
     })
 }
 fn provider_xattr(path: &Path) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
     #[cfg(target_os = "macos")]
     {
         let Ok(p) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {

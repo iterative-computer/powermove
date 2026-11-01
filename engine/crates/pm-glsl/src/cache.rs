@@ -167,11 +167,23 @@ impl Cache {
     }
 
     fn disk_get(&self, key: Key) -> Option<Prepared> {
+        use std::io::Read;
         let path = self.path(key)?;
-        if std::fs::metadata(&path).ok()?.len() > crate::compiler::MAX_FRAME as u64 {
+        let file = std::fs::File::open(path).ok()?;
+        if !file.metadata().ok()?.is_file()
+            || file.metadata().ok()?.len() > crate::compiler::MAX_FRAME as u64
+        {
             return None;
         }
-        let bytes = std::fs::read(path).ok()?;
+        // Metadata is only an early check. Bound the read too: a concurrent
+        // writer must not grow this allocation past the IPC/cache budget.
+        let mut bytes = Vec::new();
+        file.take(crate::compiler::MAX_FRAME as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > crate::compiler::MAX_FRAME {
+            return None;
+        }
         // A damaged or foreign entry is a miss.
         serde_json::from_slice::<DiskEntry>(&bytes)
             .ok()
@@ -348,6 +360,33 @@ mod tests {
                 .exists()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deadline_failure_is_not_remembered_and_can_retry() {
+        let mut cache = Cache::new("retry", None);
+        cache.set_deadline(Duration::ZERO);
+        assert_eq!(
+            cache.prepare(SRC, 5).as_ref().as_ref().unwrap_err().stage,
+            FailureStage::Deadline
+        );
+        cache.set_deadline(DEFAULT_DEADLINE);
+        assert!(cache.prepare(SRC, 5).is_ok());
+    }
+
+    #[test]
+    fn oversized_cache_entries_are_misses_without_removing_the_file() {
+        let dir =
+            std::env::temp_dir().join(format!("pm-glsl-cache-oversize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::new("oversize", Some(dir.clone()));
+        let key = cache.key(SRC, 5);
+        let path = cache.path(key).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::compiler::MAX_FRAME as u64 + 1).unwrap();
+        assert!(cache.disk_get(key).is_none());
+        assert!(path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

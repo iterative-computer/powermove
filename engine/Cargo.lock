@@ -2192,6 +2192,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-captions"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
@@ -2302,6 +2312,14 @@ dependencies = [
  "pm-model",
  "pxfm",
  "smallvec",
+]
+
+[[package]]
+name = "pm-fx-defs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

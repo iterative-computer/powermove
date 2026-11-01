@@ -24,7 +24,17 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     pub media: MediaCatalog,
     pub opening: bool,
-    pub layers: Vec<LayerInfo>,
+    pub rows: crate::rows::LayerRows,
+    /// The last refresh saw a save in flight (drives the status note).
+    pub saving_note: bool,
+    pub project_scroll: gpui::UniformListScrollHandle,
+    pub output_mode: crate::viewer2::OutputMode,
+    pub safe_areas: bool,
+    pub guides: bool,
+    pub popout: Option<crate::viewer2::Popout>,
+    /// The editor viewer's last configured output (size, display, headroom).
+    pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
+    pub timeline_scroll: gpui::UniformListScrollHandle,
     pub selected: Option<String>,
     pub message: String,
     pub path: Option<PathBuf>,
@@ -34,6 +44,10 @@ pub struct Controller {
     pub duration: f64,
     pub dimensions: [f64; 2],
     pub zoom: Option<f64>,
+    /// Composition background (`bg`); `None` when transparent.
+    pub background: Option<u32>,
+    /// Keyframes in the open composition, for the status bar.
+    pub keyframes: usize,
     pub drag: Option<panels::NumericDrag>,
     pub recovery_pending: bool,
     pub mcp: Arc<crate::mcp::Host>,
@@ -42,6 +56,27 @@ pub struct Controller {
     pub close_operation: Option<crate::mcp::Operation>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
+}
+
+/// Why a project opened as a copy, in user language (never the enum name).
+/// A banner with a lock badge replaces this status copy in P3.
+pub fn copy_notice(decision: &pm_kernel::locks::OpenDecision) -> Option<&'static str> {
+    use pm_kernel::locks::{CopyReason::*, OpenDecision};
+    let OpenDecision::AsCopy(reason) = decision else {
+        return None;
+    };
+    Some(match reason {
+        ForeignLibrary => "Opened as a copy because the project belongs to another library.",
+        ChangedOnDisk => "Opened as a copy because the file changed on disk.",
+        OfflineFile => "Opened as a copy because the file isn’t downloaded.",
+        CloudFolder => "Opened as a copy because the file is in a syncing folder.",
+        ReadOnly => "Opened as a copy because the file is read-only.",
+        OlderElectron => "Opened as a copy because an earlier version of Powermove saved it.",
+        Locked => "Opened as a copy because the project is open somewhere else.",
+        UncertainLock => {
+            "Opened as a copy because Powermove couldn’t confirm the project isn’t open elsewhere."
+        }
+    })
 }
 
 pub struct Bridge(pub Entity<Controller>);
@@ -66,7 +101,7 @@ impl pm_shell::integration::Integration for Bridge {
         self.0.read(cx).session.as_ref().map(|s| s.project.clone())
     }
     fn status(&self, cx: &App) -> String {
-        self.0.read(cx).message.clone()
+        self.0.read(cx).status_text()
     }
     fn drop_paths(&self, paths: Vec<PathBuf>, cx: &mut App) {
         if let Some(path) = paths
@@ -78,6 +113,21 @@ impl pm_shell::integration::Integration for Bridge {
     }
 }
 impl Controller {
+    /// Status bar copy (language §14): a pending message or error, else
+    /// `Saved`/`Edited` with layer and keyframe counts.
+    pub fn status_text(&self) -> String {
+        // "Saved" is the state word the computed line already starts with.
+        if (!self.message.is_empty() && self.message != "Saved") || self.session.is_none() {
+            return self.message.clone();
+        }
+        let dirty = self.published.as_ref().is_some_and(|p| p.dirty);
+        panels::status_line(
+            dirty,
+            self.path.is_some(),
+            self.layers().len(),
+            self.keyframes,
+        )
+    }
     pub fn new(
         kernel: KernelHandle,
         engine: Arc<EngineService>,
@@ -96,17 +146,25 @@ impl Controller {
             }
         });
         cx.spawn(async move |this, cx| {
-            while let Ok(e) = rx.recv().await {
+            while let Ok(first) = rx.recv().await {
+                // Coalesce a burst (an MCP run publishes several revisions):
+                // one refresh reads the newest publication for all of them.
+                let mut events = vec![first];
+                while let Ok(e) = rx.try_recv() {
+                    events.push(e);
+                }
                 if this
                     .update(cx, |v, cx| {
-                        match e {
-                            KernelEvent::Durability { message } => {
-                                v.message = format!("Recovery warning: {message}")
+                        for e in events {
+                            match e {
+                                KernelEvent::Durability { message } => {
+                                    v.message = format!("Recovery warning: {message}")
+                                }
+                                KernelEvent::Notice { notice, .. } => {
+                                    v.message = format!("Kernel notice: {notice:?}")
+                                }
+                                _ => {}
                             }
-                            KernelEvent::Notice { notice, .. } => {
-                                v.message = format!("Kernel notice: {notice:?}")
-                            }
-                            _ => {}
                         }
                         v.refresh(cx);
                     })
@@ -154,7 +212,15 @@ impl Controller {
             viewer: None,
             media: MediaCatalog::default(),
             opening: false,
-            layers: vec![],
+            rows: Default::default(),
+            saving_note: false,
+            project_scroll: Default::default(),
+            output_mode: crate::viewer2::OutputMode::from_env(),
+            safe_areas: false,
+            guides: false,
+            popout: None,
+            main_output: Default::default(),
+            timeline_scroll: Default::default(),
             selected: None,
             message: "Open a project to begin".into(),
             path: None,
@@ -164,6 +230,8 @@ impl Controller {
             duration: 1.,
             dimensions: [1920., 1080.],
             zoom: None,
+            background: None,
+            keyframes: 0,
             drag: None,
             recovery_pending: false,
             mcp,
@@ -181,6 +249,7 @@ impl Controller {
         }
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let _span = crate::diag::span("refresh");
         let Some(session) = &self.session else {
             cx.notify();
             return;
@@ -188,17 +257,32 @@ impl Controller {
         let Some(p) = self.kernel.published(&session.project) else {
             return;
         };
-        if let Some(viewer) = &self.viewer
+        if let Some(viewer) = &self.viewer {
+            let _span = crate::diag::span("refresh.publish");
+            if let Err(e) = viewer.publish(&p) {
+                self.message = e.to_string();
+            }
+        }
+        if let Some(popout) = &self.popout
+            && let Some(viewer) = &*popout.viewer.borrow()
             && let Err(e) = viewer.publish(&p)
         {
-            self.message = e.to_string();
+            self.message = format!("Popout viewer: {e}");
         }
-        if let Some(m) = &mut self.mirror {
-            m.sync(&p);
-        } else {
-            self.mirror = Some(QueryMirror::new(&p));
+        {
+            let _span = crate::diag::span("refresh.mirror");
+            if let Some(m) = &mut self.mirror {
+                m.sync(&p);
+            } else {
+                self.mirror = Some(QueryMirror::new(&p));
+            }
         }
-        self.layers = self.mirror.as_mut().unwrap().queries().layers(None);
+        self.sync_rows(&p, cx);
+        let saving = p.saving || self.save_pending;
+        if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
+            self.message = note.into();
+        }
+        self.saving_note = saving;
         self.selected = p.selection.primary().map(str::to_owned);
         self.path = p.session.as_ref().and_then(|s| match &s.destination {
             SessionDestination::File(path) => Some(path.clone()),
@@ -226,6 +310,46 @@ impl Controller {
         );
         self.published = Some(p);
         cx.notify();
+    }
+    pub fn layers(&self) -> &[LayerInfo] {
+        &self.rows.rows
+    }
+    /// Rows follow the newest publication; large lists are built on a worker.
+    fn sync_rows(&mut self, p: &Published, cx: &mut Context<Self>) {
+        use crate::rows::{self, Plan};
+        let key = rows::key(&p.snapshot);
+        match self.rows.plan(key, rows::layer_count(&p.snapshot)) {
+            Plan::Current => {}
+            Plan::Inline => {
+                let _span = crate::diag::span("refresh.rows");
+                if self.rows.accept(key, rows::list(&p.snapshot), Some(key)) {
+                    self.keyframes = rows::keyframe_count(&p.snapshot);
+                }
+            }
+            Plan::Worker => {
+                let snapshot = p.snapshot.clone();
+                cx.spawn(async move |this, cx| {
+                    let list = cx
+                        .background_executor()
+                        .spawn(
+                            async move { (rows::list(&snapshot), rows::keyframe_count(&snapshot)) },
+                        )
+                        .await;
+                    let _ = this.update(cx, |v, cx| {
+                        let latest = v.published.as_ref().map(|p| rows::key(&p.snapshot));
+                        let (list, keyframes) = list;
+                        if v.rows.finish(key, list, latest) {
+                            v.keyframes = keyframes;
+                            cx.notify();
+                        }
+                        if let Some(p) = v.published.clone() {
+                            v.sync_rows(&p, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
     }
     pub fn call(&mut self, call: Call, cx: &mut Context<Self>) {
         self.call_at(call, Self::event_time(), cx);
@@ -469,14 +593,19 @@ impl Controller {
             pm_time::Rate::new((fps * 1000.).round() as i64, 1000).unwrap_or(pm_time::Rate::FPS_30);
         let media = media.unwrap_or_default();
         self.media = media.clone();
-        self.message = format!(
-            "Opened · {decision:?}{}",
-            if history_rejected {
-                " · Saved undo history could not be imported"
-            } else {
-                ""
-            }
-        );
+        self.background = composition
+            .get("bg")
+            .and_then(crate::node_string)
+            .and_then(panels::parse_background);
+        // The status bar shows document state and counts; only exceptions get words.
+        self.message = [
+            copy_notice(&decision),
+            history_rejected.then_some("Undo history from the last session couldn’t be restored."),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
         match self.engine.viewer(ViewerConfig {
             snapshot: p.snapshot.clone(),
             composition: comp,
@@ -495,6 +624,8 @@ impl Controller {
             Ok(viewer) => self.viewer = Some(viewer),
             Err(e) => self.message = format!("Viewer failed: {e}"),
         }
+        self.apply_viewer_options();
+        self.rebuild_popout_viewer();
         if let Some(ui) = self.published.as_ref().map(|p| p.ui_state.clone()) {
             let time = ui
                 .transport
@@ -582,6 +713,9 @@ impl Controller {
             return;
         };
         self.save_pending = true;
+        self.saving_note = true;
+        self.message = SAVING.into();
+        cx.notify();
         self.persist_ui();
         let call = as_path.clone().map_or_else(
             || ShellCall::Save(session.clone()),
@@ -632,7 +766,7 @@ impl Controller {
                         if as_path.is_some() {
                             v.path = as_path;
                         }
-                        v.message = recovery_copy.map_or("Saved".into(), |_| {
+                        v.message = recovery_copy.map_or(String::new(), |_| {
                             "Saved to a recovery copy; original was not overwritten".into()
                         });
                         v.load_recent(cx);
@@ -727,7 +861,7 @@ impl Controller {
                     "prevVisibleEvent" | "nextVisibleEvent" => {
                         let time = self.time();
                         let mut times: Vec<_> = self
-                            .layers
+                            .layers()
                             .iter()
                             .flat_map(|l| [l.in_time, l.out_time])
                             .collect();
@@ -764,6 +898,24 @@ impl Controller {
         true
     }
 }
+pub const SAVING: &str = "Saving…";
+/// Status note for a save in flight, including saves started by MCP or the
+/// kernel. Returns a replacement message on a transition only, so other
+/// notes (refusals, errors) set during the save are kept until it ends.
+pub fn save_note(was: bool, now: bool, dirty: bool, message: &str) -> Option<&'static str> {
+    // Close/quit refusals explain why the window stayed open; keep them.
+    let refusal = message.starts_with("Saving in progress")
+        || message.starts_with("A project operation is in progress");
+    match (was, now) {
+        (false, true) if !refusal => Some(SAVING),
+        (true, false) if message == SAVING || refusal => Some(if dirty {
+            "Save did not complete; recovery data retained"
+        } else {
+            "Saved"
+        }),
+        _ => None,
+    }
+}
 pub(crate) fn stable_id(path: &std::path::Path) -> String {
     // Stable across crashes; no random per-open journal namespace.
     use std::hash::{Hash, Hasher};
@@ -777,6 +929,9 @@ impl Drop for Controller {
     fn drop(&mut self) {
         if let Some(v) = &self.viewer {
             v.retire();
+        }
+        if let Some(p) = self.popout.take() {
+            p.shutdown();
         }
     }
 }
@@ -857,5 +1012,30 @@ impl Controller {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod save_note_tests {
+    use super::*;
+    // `gpui::*` above exports a `test` macro; name the built-in explicitly.
+    #[::core::prelude::v1::test]
+    fn save_note_shows_progress_keeps_refusals_and_reports_the_outcome() {
+        assert_eq!(save_note(false, true, true, "Opened"), Some(SAVING));
+        assert_eq!(save_note(true, true, true, SAVING), None);
+        let refusal = "Saving in progress. Please wait for it to finish before closing.";
+        assert_eq!(save_note(false, true, true, refusal), None);
+        let fence = "A project operation is in progress. Try closing again when it finishes.";
+        assert_eq!(save_note(false, true, true, fence), None);
+        assert_eq!(save_note(true, false, false, refusal), Some("Saved"));
+        assert_eq!(save_note(true, false, false, fence), Some("Saved"));
+        assert_eq!(
+            save_note(true, false, true, SAVING),
+            Some("Save did not complete; recovery data retained")
+        );
+        // Other notes set during the save (errors, UI save results) stay.
+        assert_eq!(save_note(true, false, false, "Saved"), None);
+        assert_eq!(save_note(true, false, false, "Edit failed"), None);
+        assert_eq!(save_note(false, false, false, "Opened"), None);
     }
 }

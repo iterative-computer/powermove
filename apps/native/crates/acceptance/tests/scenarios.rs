@@ -5,6 +5,8 @@ macro_rules! checks {
     )*}
 }
 checks! {
+    mcp_union => "A494", mcp_timeline => "A503", mcp_manage => "A505", mcp_layout => "A520",
+    shuttle => "W079.shuttle", ripple_delete => "W080.ripple-delete", ripple_trim => "W080.ripple-trim", roll => "W081.roll", slide => "W081.slide", source_edit => "W082.source", linked_av => "W083.links",
     composition_settings => "W009.settings", authored_mask => "W048.mask", authored_text => "W049.text", authored_easing => "W061.easing",
     mcp_list => "A495", mcp_create => "A496", mcp_open => "A497",
     mcp_start => "A498", mcp_finish => "A501", mcp_selection => "A517",
@@ -64,7 +66,7 @@ fn corpus_copy_refuses_symlinks_and_never_overwrites_source() {
 /// this baseline expectation when the owning kernel lane fixes fractional fps;
 /// the runner's strict authored-value assertion must stay unchanged.
 #[test]
-fn fractional_fps_defect_is_reported_as_failure() {
+fn fractional_fps_stays_exact_now_that_the_kernel_keeps_authored_rates() {
     let scenario = scenarios::all()
         .into_iter()
         .find(|s| s.id == "W071.fractional-rate")
@@ -76,6 +78,10 @@ fn fractional_fps_defect_is_reported_as_failure() {
         scenario.title,
         scenario.run,
     );
-    assert_eq!(result.status, pm_acceptance::runner::Status::Fail);
-    assert!(result.reason.contains("authored fps=29.97 became 30"));
+    assert_eq!(
+        result.status,
+        pm_acceptance::runner::Status::Pass,
+        "{}",
+        result.reason
+    );
 }

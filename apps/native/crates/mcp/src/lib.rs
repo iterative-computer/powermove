@@ -6,9 +6,14 @@
 pub mod automation;
 pub mod catalog;
 pub mod commands;
+pub mod inspection;
+pub mod media;
+pub mod media_tools;
+pub mod services;
 pub mod session;
 pub mod strips;
 pub mod transport;
+pub mod video;
 pub mod views;
 
 pub use automation::{

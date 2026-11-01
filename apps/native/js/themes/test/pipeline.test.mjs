@@ -527,3 +527,43 @@ test("semantic document boundaries isolate legacy DOM descendants from shell rul
   assert.equal(result.surfaces["legacy-button"].base.style.color, undefined);
   assert.deepEqual(result.surfaces["legacy-button"].base.variables.values, {});
 });
+test("no theme leaves pm-design's native defaults alone (no v1.2.0 Stone dark, no 999 capsule)", () => {
+  for (const scheme of ["light", "dark"]) {
+    const result = evaluateTheme(
+      translateTheme(definition(""), { preference: scheme, systemScheme: scheme }),
+      tree(),
+    );
+    assert.deepEqual(result.nativePatch, {}, scheme);
+    assert.ok(result.nativeDefaults.includes("--bg-window"));
+    assert.ok(result.nativeDefaults.includes("--gap"));
+  }
+  const dark = evaluateTheme(
+    translateTheme(
+      { ...definition(""), tokens: { "--bg-panel": "#202020" } },
+      { systemScheme: "dark" },
+    ),
+    tree(),
+  );
+  assert.deepEqual(dark.nativePatch, { "colors.panel": 0x202020 });
+});
+test("translucent theme colours composite over the panel; lengths move relative to native", () => {
+  const result = evaluateTheme(
+    translateTheme(
+      {
+        ...definition(""),
+        tokens: { "--bg-panel": "#000000", "--line": "rgb(255 255 255 / .25)" },
+      },
+      { systemScheme: "dark", workspace: { density: "compact" } },
+    ),
+    tree(),
+    { nativeTokens: { "metrics.row": 28, "metrics.gap": 6, "metrics.header": 32 } },
+  );
+  assert.equal(result.nativePatch["colors.separator"], 0x404040);
+  // compact: v1.2.0 row 30 -> 26 and gap 10 -> 8, applied as offsets.
+  assert.equal(result.nativePatch["metrics.row"], 24);
+  assert.equal(result.nativePatch["metrics.gap"], 4);
+  assert.equal(result.nativePatch["typography.reading"], 12);
+  assert.equal(result.nativePatch["typography.title"], 12);
+  assert.equal(result.nativePatch["metrics.capsule_radius"], undefined);
+  assert.equal(result.nativePatch["metrics.border"], undefined);
+});

@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Powermove Native · editor mockup v3</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!--
+  Self-contained reference for docs/native/design/language.md. Colours and
+  metrics are pm-design tokens (docs/native/design/tokens.md). Three states,
+  each in dark and light:
+    A  Editor: Project, viewer, timeline, Properties with a colour popover
+    B  Agent: Effect Controls on the left, agent panel docked right
+    C  Sheet: Composition Settings attached below the toolbar
+  Icons approximate SF Symbols; the native app uses the real symbols.
+-->
+<style>
+.dark{--win:#111111;--panel:#1A1A1A;--panel2:#161616;--viewer:#0E0E0E;--field:#262626;--float:#2C2C2C;--hover:#232323;--sep:#303030;
+  --t1:#F2F2F2;--t2:#B4B4B4;--t3:#949494;--acc:#FF6019;--acctx:#FF8A55;--wash:#3C241A;--onacc:#fff;--self:#3A3A3A;--ok:#3FCF8E;--warn:#F59E0B;--bad:#F36357;
+  --lb-blue:#3B4250;--lb-violet:#4A3B6B;--lb-orange:#7A3A1F;--lb-green:#24503A;--lb-teal:#1F4B52;--lb-gray:#3A3A3A;
+  --glass:rgba(58,58,62,.52);--glass-rim:rgba(255,255,255,.12);--glass-hi:rgba(255,255,255,.14);--shadow:0 18px 48px rgba(0,0,0,.6);--frame:rgba(255,255,255,.09);color-scheme:dark}
+.light{--win:#EEEEF1;--panel:#FDFDFE;--panel2:#F5F5F7;--viewer:#E6E6EA;--field:#F3F3F6;--float:#FFFFFF;--hover:#EBEBEF;--sep:#D4D4D8;
+  --t1:#1B1D23;--t2:#52545A;--t3:#62646A;--acc:#F0580A;--acctx:#B93800;--wash:#FBE9E1;--onacc:#fff;--self:#D5D5DA;--ok:#117A52;--warn:#A15C00;--bad:#C22A1F;
+  --lb-blue:#C9D4E8;--lb-violet:#D8CFF0;--lb-orange:#F7CFB6;--lb-green:#C5E3D1;--lb-teal:#C2E2E3;--lb-gray:#DCDCE0;
+  --glass:rgba(255,255,255,.62);--glass-rim:rgba(20,22,28,.08);--glass-hi:rgba(20,22,28,.07);--shadow:0 18px 48px rgba(20,22,28,.22);--frame:rgba(20,22,28,.12);color-scheme:light}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#2a2a2c;font:12px/1.3 -apple-system,"SF Pro Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:28px;color:#ddd}
+h1{font:600 20px/1.2 -apple-system,"SF Pro Display",system-ui;color:#f2f2f2;margin:0 0 4px}
+.lede{color:#aaa;max-width:900px;margin-bottom:22px;font-size:13px;line-height:1.45}
+h2{font:600 13px -apple-system,system-ui;color:#ccc;margin:26px 0 10px}
+.fit{position:relative;width:100%;padding-top:62.5%}.stage{position:absolute;left:0;top:0;width:1440px;height:900px;transform-origin:0 0}
+.win{position:absolute;inset:0;border-radius:26px;background:var(--win);overflow:hidden;color:var(--t1);box-shadow:0 30px 80px rgba(0,0,0,.5),0 0 0 1px var(--frame)}
+.num{font-variant-numeric:tabular-nums}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block;flex:none}
+svg.s13{width:13px;height:13px}svg.s11{width:11px;height:11px}
+.glass{background:var(--glass);backdrop-filter:blur(24px) saturate(170%);-webkit-backdrop-filter:blur(24px) saturate(170%);box-shadow:inset 0 0 0 .5px var(--glass-rim),inset 0 1px 0 var(--glass-hi),0 6px 18px rgba(0,0,0,.18)}
+/* toolbar */
+.tb{position:absolute;left:0;right:0;top:0;height:52px;display:flex;align-items:center;gap:10px;padding:0 12px 0 20px}
+.lights{display:flex;gap:9px;margin-right:6px}.lights i{width:13px;height:13px;border-radius:50%}
+.cap{height:34px;border-radius:17px;display:flex;align-items:center;padding:0 3px;gap:2px;color:var(--t2)}
+.cap b{width:36px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-weight:500}
+.cap b.on{background:var(--glass-hi);color:var(--acc)}
+.ttl{line-height:1.2;margin-left:2px}.ttl strong{font-size:13px;font-weight:600;display:block}.ttl span{font-size:11px;color:var(--t3)}
+.sp{flex:1}
+.export{height:34px;border-radius:17px;display:flex;align-items:center;gap:6px;padding:0 15px 0 12px;background:var(--acc);color:var(--onacc);font-size:13px;font-weight:600;box-shadow:inset 0 1px 0 rgba(255,255,255,.28),0 6px 16px rgba(255,96,25,.22)}
+.ring{width:16px;height:16px;border-radius:50%;background:conic-gradient(var(--acc) 0 62%,var(--sep) 0);-webkit-mask:radial-gradient(circle,transparent 5.2px,#000 5.6px);mask:radial-gradient(circle,transparent 5.2px,#000 5.6px)}
+/* panels */
+.pn{position:absolute;background:var(--panel);border-radius:12px;overflow:hidden}
+.ph{height:32px;display:flex;align-items:center;gap:8px;padding:0 8px 0 12px;font-size:13px;font-weight:600}
+.ph .r{margin-left:auto;display:flex;gap:2px;color:var(--t2)}
+.ib{width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center}
+.ib.hov{background:var(--hover)}
+.seg{display:flex;background:var(--field);border-radius:8px;padding:2px;gap:2px;font-size:12px;font-weight:500;color:var(--t2)}
+.seg span{padding:3px 10px;border-radius:6px;white-space:nowrap}.seg span.on{background:var(--float);color:var(--t1);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+/* project grid */
+.grid{display:flex;flex-wrap:wrap;gap:14px 12px;padding:6px 12px}
+.th{width:132px}.th .im{height:76px;border-radius:6px;position:relative;overflow:hidden}
+.th .im em{position:absolute;left:5px;top:5px;font-style:normal;font-size:11px;color:#fff;background:rgba(0,0,0,.55);border-radius:8px;padding:1px 6px}
+.th .nm{margin-top:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.th .mt{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th.sel .im{box-shadow:0 0 0 2px var(--acc)}
+/* inspector */
+.who{padding:0 12px 4px;font-size:13px;font-weight:600}.who span{font-weight:400;color:var(--t3)}
+.sec{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:12px 12px 6px}
+.sec svg{color:var(--t3)}
+.pr{height:28px;display:flex;align-items:center;gap:7px;padding:0 12px}
+.kd{width:9px;height:9px;transform:rotate(45deg);border:1.3px solid var(--t3);border-radius:1.5px;flex:none;opacity:.8}
+.kd.on{background:var(--acc);border-color:var(--acc);opacity:1}.kd.half{background:linear-gradient(135deg,var(--acc) 50%,transparent 50%);border-color:var(--acc);opacity:1}
+.lab{flex:1;min-width:0;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.col{width:128px;flex:none;display:flex;gap:4px;align-items:center}
+.f{height:22px;flex:1;min-width:0;background:var(--field);border-radius:6px;display:flex;align-items:center;padding:0 7px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.f u{text-decoration:none;color:var(--t3);margin-left:auto;padding-left:4px}
+.f.hot{background:var(--hover);box-shadow:inset 0 0 0 1px var(--sep)}
+.f.pop{justify-content:space-between}.f.pop svg{color:var(--t3)}
+.link{width:14px;color:var(--t3);margin-left:-2px}
+.sw{width:30px;height:18px;border-radius:5px;flex:none;box-shadow:inset 0 0 0 1px var(--frame)}
+.seg2{flex:1;display:flex;background:var(--field);border-radius:6px;padding:2px;gap:2px;height:22px}
+.seg2 i{flex:1;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--t2)}.seg2 i.on{background:var(--float);color:var(--t1);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+/* effects list */
+.search{margin:2px 12px 6px;height:24px;border-radius:6px;background:var(--field);display:flex;align-items:center;gap:6px;padding:0 8px;color:var(--t3)}
+.li{height:26px;display:flex;align-items:center;gap:7px;padding:0 12px;white-space:nowrap}
+.li.grp{font-weight:600;color:var(--t1)}.li.grp svg{color:var(--t3)}.li.sub{padding-left:31px;color:var(--t1)}.li.sub svg{color:var(--t3)}
+.li.sel{background:var(--self);margin:0 6px;padding-left:25px;border-radius:6px}
+/* viewer */
+.vbar{position:absolute;left:0;right:0;top:0;height:32px;display:flex;align-items:center;gap:6px;padding:0 8px 0 12px;color:var(--t2)}
+.pop{height:22px;display:flex;align-items:center;gap:4px;padding:0 6px 0 8px;border-radius:6px;font-size:12px}
+.pop:hover,.pop.hov{background:var(--hover)}
+/* timeline */
+.tl-h{height:32px;display:flex;align-items:center;gap:10px;padding:0 8px 0 10px}
+.tc{font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;letter-spacing:.2px}
+.lc{position:absolute;left:0;top:32px;bottom:0;width:232px;background:var(--panel2)}
+.ruler{position:absolute;left:232px;right:0;top:32px;height:24px}
+.row{position:absolute;left:0;right:0;height:28px}
+.rl{position:absolute;left:0;width:232px;height:100%;display:flex;align-items:center;gap:7px;padding:0 10px;white-space:nowrap}
+.rl .n{width:16px;color:var(--t3);font-size:11px;font-variant-numeric:tabular-nums;text-align:right}
+.badge{width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--t1)}
+.rl .eye{margin-left:auto;color:var(--t3)}
+.clip{position:absolute;top:3px;height:20px;border-radius:4px;display:flex;align-items:center;padding:0 8px;font-size:12px;white-space:nowrap;overflow:hidden;color:var(--t1)}
+.clip.sel{box-shadow:0 0 0 1.5px var(--t1);filter:brightness(1.12)}
+.kf{position:absolute;top:9.5px;width:9px;height:9px;transform:rotate(45deg);border-radius:1.5px;background:var(--t1);opacity:.9}
+.kf.sel{background:var(--acc);opacity:1;box-shadow:0 0 0 1px var(--panel)}
+.kf.sum{width:7px;height:7px;top:20.5px;box-shadow:0 0 0 1px var(--panel)}
+.sub .rl{padding-left:62px;color:var(--t2);font-size:12px}
+.ph-line{position:absolute;width:1.5px;background:var(--acc)}
+.ph-head{position:absolute;width:11px;height:13px;border-radius:3px 3px 6px 6px;background:var(--acc)}
+/* status */
+.status{position:absolute;left:0;right:0;bottom:0;height:30px;display:flex;align-items:center;gap:14px;padding:0 18px;font-size:11px;color:var(--t3)}
+/* floating */
+.popover{position:absolute;border-radius:14px;box-shadow:var(--shadow),inset 0 0 0 .5px var(--glass-rim)}
+.popover .body{position:absolute;inset:8px;border-radius:9px;background:var(--float)}
+.arrow{position:absolute;width:16px;height:16px;transform:rotate(45deg);border-radius:3px}
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.18)}
+.sheet{position:absolute;border-radius:22px;box-shadow:var(--shadow),inset 0 0 0 .5px var(--glass-rim)}
+.sheet .in{position:absolute;inset:0;border-radius:22px;background:var(--panel)}
+.btn{height:28px;padding:0 16px;border-radius:14px;display:flex;align-items:center;font-size:13px;font-weight:500;background:var(--field);color:var(--t1)}
+.btn.pri{background:var(--acc);color:var(--onacc);font-weight:600}
+/* agent */
+.msg{font-size:13px;line-height:1.45;color:var(--t1)}
+.you{align-self:flex-end;max-width:84%;background:var(--float);border-radius:12px;padding:8px 11px;font-size:13px;line-height:1.45}
+.steps{display:flex;align-items:center;gap:6px;color:var(--t3);font-size:12px}
+.card{background:var(--panel2);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 0 0 1px var(--sep)}
+.chip{height:24px;padding:0 10px;border-radius:12px;display:flex;align-items:center;font-size:12px;background:var(--field)}
+.chip.pri{background:var(--acc);color:var(--onacc);font-weight:600}
+.composer{position:absolute;left:12px;right:12px;bottom:12px;min-height:72px;border-radius:10px;background:var(--field);padding:9px 11px;font-size:13px;color:var(--t3)}
+code{font:12px "SF Mono",ui-monospace,Menlo,monospace;background:var(--field);border-radius:4px;padding:0 4px;color:var(--t1)}
+.note{position:absolute;font:500 11px -apple-system,system-ui;color:#fff;background:#000c;border-radius:6px;padding:3px 7px;pointer-events:none}
+.legend{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 24px;max-width:1200px;color:#bbb;font-size:12px;line-height:1.45;margin-top:10px}
+.legend b{color:#eee;font-weight:600}
+</style></head><body>
+<h1>Powermove Native — editor mockup v3</h1>
+<p class="lede">Refines the owner-approved v2 to <a style="color:#ff8a55" href="language.md">language.md</a>: system toolbar with a glass tool capsule, untinted sidebar toggles and one orange Export; solid neutral panels; a viewer bar with pop-ups instead of chips over the image; inspector rows on one shared value column with tabular numbers and muted units; timeline with neutral timecode, label-colour clips, a ring (not an orange fill) for selection and a render bar; a colour popover, the agent panel and a Composition Settings sheet. Every colour is a pm-design token.</p>
+<div id="out"></div>
+<div class="legend">
+  <div><b>Materials.</b> Glass only on the toolbar, popover frame and sheet frame. Everything with dense content is solid; popover and sheet content sit on solid floating/panel material.</div>
+  <div><b>Accent as a mark.</b> Orange appears on Export, the active tool glyph, the playhead, set keyframes, the selected thumbnail ring and the default button — nowhere as a large fill.</div>
+  <div><b>Numbers.</b> SF Pro tabular figures, values left-aligned in 22 pt wells, units in muted after a space, one 128 pt value column.</div>
+</div>
+<script>
+const I = {
+  sidebarL:'<rect x="2" y="3" width="12" height="10" rx="2.5"/><path d="M6 3v10"/>',
+  sidebarR:'<rect x="2" y="3" width="12" height="10" rx="2.5"/><path d="M10 3v10"/>',
+  arrow:'<path d="M4.5 2.5l8 5.5-3.6.9 2 3.8-1.6.8-2-3.8L4.5 12z" fill="currentColor" stroke="none"/>',
+  hand:'<path d="M5 8V4.5a1 1 0 012 0V8M7 7V3.5a1 1 0 012 0V7.5M9 7.5V4.5a1 1 0 012 0v4.5c0 3-1.8 5-4.3 5-1.6 0-2.6-.8-3.4-2L2 9.6a1 1 0 011.6-1.2L5 9.5"/>',
+  zoom:'<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14M5 7h4M7 5v4"/>',
+  crop:'<path d="M4 1.5V12h10.5M1.5 4H12v10.5"/>',
+  anchor:'<circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/>',
+  shape:'<rect x="2.5" y="5" width="7" height="7" rx="1.5"/><circle cx="10.5" cy="6.5" r="3.5"/>',
+  pen:'<path d="M8 2l3.5 9H4.5zM8 2v6M6 14h4"/>',
+  sparkles:'<path d="M7 1.8l1.2 3.5 3.5 1.2-3.5 1.2L7 11.2 5.8 7.7 2.3 6.5l3.5-1.2zM12.3 9.8l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z"/>',
+  share:'<path d="M8 10V2M5 4.5L8 1.5l3 3M4.5 7H3.5v7h9V7h-1"/>',
+  plus:'<path d="M8 3v10M3 8h10"/>',
+  search:'<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>',
+  chev:'<path d="M5 6.5l3-3 3 3M5 9.5l3 3 3-3"/>',
+  disc:'<path d="M4 6l4 4 4-4"/>', discR:'<path d="M6 4l4 4-4 4"/>',
+  play:'<path d="M5 3l8 5-8 5z" fill="currentColor" stroke="none"/>',
+  graph:'<path d="M2 13c3 0 4-10 7-10s3 6 5 6"/>',
+  magnet:'<path d="M4 2v6a4 4 0 008 0V2M4 2h2.5v6a1.5 1.5 0 003 0V2H12"/>',
+  eye:'<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>',
+  text:'<path d="M3 4V3h10v1M8 3v10M6 13h4"/>',
+  film:'<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 3v10M11 3v10M2 6h3M2 10h3M11 6h3M11 10h3"/>',
+  wave:'<path d="M2 8h1M4.5 5v6M7 3v10M9.5 5.5v5M12 7v2M14 8h0"/>',
+  circle:'<circle cx="8" cy="8" r="5"/>',
+  sliders:'<path d="M3 4h10M3 8h10M3 12h10"/><circle cx="6" cy="4" r="1.3" fill="currentColor"/><circle cx="10" cy="8" r="1.3" fill="currentColor"/><circle cx="7" cy="12" r="1.3" fill="currentColor"/>',
+  link:'<path d="M6.5 9.5l3-3M5 7.5L3.5 9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5L12.5 7A2.5 2.5 0 009 3.5L7.5 5"/>',
+  alL:'<path d="M2 4h12M2 8h8M2 12h11"/>', alC:'<path d="M2 4h12M4 8h8M3 12h10"/>', alR:'<path d="M2 4h12M6 8h8M3 12h11"/>',
+  guides:'<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M4.5 5.5h7v5h-7z" stroke-dasharray="1.5 1.5"/>',
+  wand:'<path d="M3 13l7-7M9 3v2M12 6h2M11.5 3.5l-1 1M4 5.5h0"/>',
+  compose:'<path d="M10.5 2.5l3 3L7 12H4V9z"/><path d="M2 14h12"/>',
+  send:'<circle cx="8" cy="8" r="6.5" fill="currentColor" stroke="none"/><path d="M8 11V5M5.5 7.5L8 5l2.5 2.5" stroke="#fff"/>',
+  check:'<path d="M3 8.5l3 3 7-7"/>',
+  clock:'<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/>',
+};
+const ic=(n,c='',st='')=>`<svg class="i ${c}" viewBox="0 0 16 16" style="${st}">${I[n]}</svg>`;
+
+function toolbar(s){
+  const tools=['arrow','hand','zoom','crop','anchor','shape','pen'].map((t,i)=>`<b class="${i===0?'on':''}">${ic(t)}</b>`).join('')+'<b style="font-size:13px">Aa</b>';
+  return `<div class="tb">
+    <div class="lights"><i style="background:#FF5F57"></i><i style="background:#FEBC2E"></i><i style="background:#28C840"></i></div>
+    <div class="cap glass"><b>${ic('sidebarL')}</b></div>
+    <div class="ttl"><strong>Launch Film</strong><span>Edited</span></div>
+    <div class="sp"></div><div class="cap glass">${tools}</div><div class="sp"></div>
+    <div class="cap glass"><b class="${s==='B'?'on':''}">${ic('sparkles')}</b>${s==='A'?'<b title="Background Tasks"><span class="ring"></span></b>':''}</div>
+    <div class="export">${ic('share')}Export</div>
+    <div class="cap glass"><b>${ic('sidebarR')}</b></div>
+  </div>`;
+}
+const pn=(x,y,w,h,inner,st='')=>`<div class="pn" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px;${st}">${inner}</div>`;
+
+function project(){
+  const th=(bg,name,meta,dur,sel,extra='')=>`<div class="th ${sel?'sel':''}"><div class="im" style="background:${bg}">${extra}${dur?`<em class="num">${dur}</em>`:''}</div><div class="nm">${name}</div><div class="mt num">${meta}</div></div>`;
+  return `<div class="ph"><div class="seg"><span class="on">Project</span><span>Effect Controls</span></div><div class="r"><span class="ib">${ic('search','s13')}</span><span class="ib">${ic('plus','s13')}</span></div></div>
+  <div class="grid">
+   ${th('radial-gradient(60% 80% at 40% 50%,#9c4a22,#3c1a0e 70%,#1d0d07)','Atmosphere_loop.mov','1920×1080 · 48 MB','0:12',true)}
+   ${th('#ecebe8','powermove-mark.svg','SVG · 141×116','',false,'<svg width="132" height="76" viewBox="0 0 130 74"><path d="M0 30 Q20 30 26 18 Q32 4 50 14 Q65 22 80 14 Q98 4 104 18 Q110 30 130 30 V74 H0Z" fill="#fff"/></svg>')}
+   ${th('#20382c','VO_take03.wav','48 kHz · 4.1 MB','0:24',false,'<svg style="position:absolute;left:6px;bottom:10px" width="120" height="30" data-wave="120,30"></svg>')}
+   ${th('#2a2a2a radial-gradient(#666 .6px,transparent .8px) 0 0/7px 7px','Grain_35mm.mov','1920×1080 · 22 MB','0:08',false)}
+   ${th('linear-gradient(135deg,#2b3a55,#141a26)','Product_turntable.mov','3840×2160 · 610 MB','0:20',false)}
+   ${th('linear-gradient(160deg,#f2efe9,#d9d3c7)','Packshot_still.png','PNG · 4000×3000','',false)}
+  </div>`;
+}
+
+function effectControls(){
+  return `<div class="ph"><div class="seg"><span>Project</span><span class="on">Effect Controls</span></div><div class="r"><span class="ib">${ic('plus','s13')}</span></div></div>
+  <div class="who">Headline <span>· Text</span></div>
+  <div class="sec">${ic('disc','s11')}Glow<span style="margin-left:auto;color:var(--t3);font-weight:400;font-size:12px">On</span></div>
+  ${row('Radius','<div class="f">24<u>px</u></div>','half')}
+  ${row('Intensity','<div class="f">0.65</div>','on')}
+  ${row('Threshold','<div class="f">72<u>%</u></div>')}
+  ${row('Color','<span class="sw" style="background:#FF7A3C"></span><div class="f">#FF7A3C</div>')}
+  <div class="sec">${ic('disc','s11')}Film Grain</div>
+  ${row('Amount','<div class="f">18<u>%</u></div>')}
+  ${row('Size','<div class="f">1.4<u>px</u></div>')}
+  ${row('Softness','<div class="f">0.2</div>')}
+  ${row('Animate','<div class="seg2"><i class="on" style="font-size:11px">On</i><i style="font-size:11px">Off</i></div>')}
+  <div class="sec">${ic('discR','s11')}Gaussian Blur</div>`;
+}
+function row(label,value,kd='',st=''){return `<div class="pr" style="${st}"><span class="kd ${kd}"></span><span class="lab">${label}</span><div class="col">${value}</div></div>`}
+
+function properties(){
+  return `<div class="ph">Properties<div class="r"><span class="ib">${ic('plus','s13')}</span></div></div>
+  <div class="who">Headline <span>· Text</span></div>
+  <div class="sec">Content</div>
+  <div class="pr" style="height:50px;align-items:flex-start;padding-top:3px"><span class="kd" style="margin-top:7px"></span><span class="lab" style="flex:none;width:60px;margin-top:3px">Text</span><div class="f" style="height:44px;align-items:flex-start;padding-top:4px;white-space:normal">Make it move.</div></div>
+  ${row('Font','<div class="f pop">SF Pro Display'+ic('chev','s11')+'</div>')}
+  ${row('Weight','<div class="f pop">Semibold'+ic('chev','s11')+'</div>')}
+  ${row('Size','<div class="f hot">164<u>px</u></div>','on')}
+  ${row('Tracking','<div class="f">−7<u>px</u></div>')}
+  ${row('Leading','<div class="f">1.0</div>')}
+  ${row('Align','<div class="seg2"><i>'+ic('alL','s11')+'</i><i class="on">'+ic('alC','s11')+'</i><i>'+ic('alR','s11')+'</i></div>')}
+  ${row('Color','<span class="sw" style="background:#F5F3EF" data-anchor="color"></span><div class="f">#F5F3EF</div>')}
+  <div class="sec">Transform</div>
+  ${row('Position','<div class="f">960<u>px</u></div><div class="f">540<u>px</u></div>','half')}
+  ${row('Scale','<div class="f">100<u>%</u></div><div class="f">100<u>%</u></div>','on')+''}
+  ${row('Rotation','<div class="f">0<u>°</u></div>')}
+  ${row('Opacity','<div class="f">100<u>%</u></div>','on')}`;
+}
+
+function effects(){
+  return `<div class="ph">Effects &amp; Presets<div class="r"><span class="ib">${ic('plus','s13')}</span></div></div>
+  <div class="search">${ic('search','s11')}<span>Search effects</span></div>
+  <div class="li grp">${ic('disc','s11')}Blur &amp; Sharpen</div>
+  <div class="li sub">${ic('wand','s11')}Gaussian Blur</div>
+  <div class="li sub sel">${ic('wand','s11')}Directional Blur</div>
+  <div class="li sub">${ic('wand','s11')}Motion Blur</div>
+  <div class="li grp">${ic('disc','s11')}Stylize</div>
+  <div class="li sub">${ic('wand','s11')}Glow</div>
+  <div class="li sub">${ic('wand','s11')}Film Grain</div>
+  <div class="li grp">${ic('discR','s11')}Generate</div>`;
+}
+
+function viewer(w,h){
+  const fw=w-56, fh=Math.round(fw*9/16), fx=28, fy=32+Math.round((h-32-fh)/2);
+  const sc=fw/760;
+  return `<div class="vbar"><span class="sp"></span>
+     <span class="pop">Fit (54 %)${ic('chev','s11')}</span><span class="pop">Auto${ic('chev','s11')}</span><span class="ib">${ic('guides','s13')}</span></div>
+   <div style="position:absolute;inset:32px 0 0 0;background:var(--viewer)"></div>
+   <div style="position:absolute;left:${fx}px;top:${fy}px;width:${fw}px;height:${fh}px;overflow:hidden;background:radial-gradient(45% 60% at 30% 70%,rgba(160,70,30,.65),transparent 70%),radial-gradient(35% 55% at 72% 30%,rgba(140,60,25,.6),transparent 70%),radial-gradient(70% 70% at 50% 45%,#5a2a14,#24100a 75%,#140906)">
+     <div style="position:absolute;inset:0;background:radial-gradient(rgba(255,255,255,.07) .6px,transparent .9px) 0 0/5px 5px;opacity:.6"></div>
+     <div style="position:absolute;left:0;top:0;width:760px;height:427px;transform:scale(${sc});transform-origin:0 0">
+      <div style="position:absolute;left:0;right:0;top:142px;text-align:center;font-size:10.5px;font-weight:600;letter-spacing:1.6px;color:#ff7a3c">DESIGN &nbsp;/&nbsp; MOTION &nbsp;/&nbsp; SYSTEM</div>
+      <div style="position:absolute;left:252px;top:150px;width:40px;height:40px;border-radius:20px;background:#ff6a2c;box-shadow:0 0 30px rgba(255,106,44,.5)"></div>
+      <div style="position:absolute;left:0;right:0;top:160px;text-align:center;font:700 72px/1.15 -apple-system,'SF Pro Display',system-ui;letter-spacing:-2.5px;color:#f7f3ef">Make it move.</div>
+      <div style="position:absolute;left:150px;top:166px;width:460px;height:84px;border:1px solid #FF6019">
+       ${[[-4,-4],[456,-4],[-4,80],[456,80],[226,-4],[226,80],[-4,38],[456,38]].map(([x,y])=>`<i style="position:absolute;left:${x}px;top:${y}px;width:7px;height:7px;background:#FF6019;box-shadow:0 0 0 1px #0E0E0E"></i>`).join('')}
+       <i style="position:absolute;left:229px;top:-22px;width:1px;height:18px;background:#FF6019"></i><i style="position:absolute;left:225px;top:-28px;width:9px;height:9px;border-radius:5px;border:1.5px solid #FF6019;background:#0E0E0E"></i>
+      </div></div>
+   </div>`;
+}
+
+function timeline(w,h){
+  const L=232, sec=58, x0=L+8, tick=(s)=>x0+s*sec;
+  let ruler='';for(let s=0;s<=15;s++){const x=tick(s)-L;ruler+=`<div style="position:absolute;left:${x}px;bottom:0;height:7px;border-left:1px solid var(--t3);opacity:.55"></div><div class="num" style="position:absolute;left:${x+4}px;top:4px;font-size:11px;color:var(--t3)">0:${String(s).padStart(2,'0')}</div>`;for(let q=1;q<4;q++)ruler+=`<div style="position:absolute;left:${x+q*sec/4}px;bottom:0;height:3px;border-left:1px solid var(--sep)"></div>`}
+  // render bar: rendered 0-3.5s, kept 3.5-5, rendering 5-6
+  ruler+=`<div style="position:absolute;left:${tick(0)-L}px;width:${3.5*sec}px;top:0;height:3px;background:var(--ok);opacity:.7"></div>
+          <div style="position:absolute;left:${tick(3.5)-L}px;width:${1.5*sec}px;top:0;height:3px;background:var(--ok);box-shadow:inset 0 1px 0 var(--t1)"></div>
+          <div style="position:absolute;left:${tick(5)-L}px;width:${sec}px;top:0;height:3px;background:repeating-linear-gradient(45deg,var(--t3) 0 3px,transparent 3px 6px)"></div>`;
+  const kinds={T:['text','var(--lb-blue)'],S:['circle','var(--lb-orange)'],M:['film','var(--lb-teal)'],F:['sliders','var(--lb-violet)'],A:['wave','var(--lb-green)'],G:['film','var(--lb-gray)']};
+  const rows=[
+    {n:'01',k:'T',name:'Kicker',from:.5,to:9,kf:[.6,1.4]},
+    {n:'02',k:'T',name:'Headline',from:0,to:10.4,sel:true,open:true},
+    {sub:'Scale',kf:[0,.4,.8,3.8],sel:true},{sub:'Opacity',kf:[0,.4],sel:true},
+    {n:'03',k:'S',name:'Orb',from:1,to:10.4,kf:[1.05,2.6,5.2]},
+    {n:'04',k:'G',name:'Grain_35mm',from:0,to:10.4},
+    {n:'05',k:'F',name:'Atmosphere',from:0,to:10.4,kf:[0,10.35]},
+    {n:'06',k:'A',name:'VO_take03',from:1.6,to:10.4,audio:true},
+  ];
+  let y=58,body='';
+  for(const r of rows){
+    const hgt=r.sub?22:28;
+    if(r.sub){body+=`<div class="row sub" style="top:${y}px;height:22px"><div class="rl">${r.sub}</div>${(r.kf||[]).map(t=>`<i class="kf ${r.sel?'sel':''}" style="left:${tick(t)-4}px;top:6.5px"></i>`).join('')}</div>`}
+    else{
+      const [sym,col]=kinds[r.k];
+      body+=`<div class="row" style="top:${y}px${r.sel?';background:var(--hover)':''}"><div class="rl"><span class="n">${r.n}</span><span class="badge" style="background:${col}">${ic(sym,'s11')}</span><span style="${r.sel?'':'color:var(--t1)'}">${r.name}</span><span class="eye">${ic('eye','s11')}</span></div>
+        <div class="clip ${r.sel?'sel':''}" style="left:${tick(r.from)}px;width:${(r.to-r.from)*sec}px;background:${col}">${r.audio?`<svg width="${(r.to-r.from)*sec}" height="20" data-wave="${Math.round((r.to-r.from)*sec)},20"></svg>`:r.name}</div>
+        ${(r.kf||[]).map(t=>`<i class="kf sum" style="left:${tick(t)-3}px"></i>`).join('')}</div>`;
+    }
+    y+=hgt;
+  }
+  const px=tick(4.5);
+  return `<div class="tl-h"><span class="ib">${ic('play','s13')}</span><span class="tc">00:00:04:15</span><span style="color:var(--t3);font-size:11px">30 fps</span><span class="sp"></span>
+     <div class="seg" style="font-size:11px"><span class="on">Layers</span><span>Tracks</span></div>
+     <span class="ib" style="color:var(--t2)">${ic('graph','s13')}</span><span class="ib" style="color:var(--acc)">${ic('magnet','s13')}</span></div>
+   <div style="position:absolute;left:0;right:0;top:32px;height:1px;background:var(--sep)"></div>
+   <div class="lc"></div><div class="ruler">${ruler}</div>
+   <div style="position:absolute;left:${L}px;right:0;top:56px;height:1px;background:var(--sep)"></div>
+   ${body}
+   <div class="ph-line" style="left:${px}px;top:38px;bottom:0"></div><div class="ph-head" style="left:${px-4.75}px;top:36px"></div>`;
+}
+
+function agent(){
+  return `<div class="ph">Agent<div class="r"><span class="ib">${ic('clock','s13')}</span><span class="ib">${ic('compose','s13')}</span></div></div>
+  <div style="position:absolute;left:12px;right:12px;top:40px;bottom:96px;display:flex;flex-direction:column;gap:12px;overflow:hidden">
+    <div class="you">Make the headline land with a soft overshoot and add some film grain.</div>
+    <div class="steps">${ic('discR','s11')}4 steps · 3.2 s</div>
+    <div class="msg">Done. <b style="font-weight:600">Headline</b> now scales from 92 % to 100 % with a spring (overshoot 6 %) over the first 0.8 s, and opacity fades in over 0.4 s.</div>
+    <div class="msg">I added <b style="font-weight:600">Film Grain</b> to Atmosphere at 18 % so it reads on the dark background without crawling over the type.</div>
+    <div class="card"><div style="font-size:13px;font-weight:600">Apply the same entrance to Kicker?</div>
+      <div style="font-size:12px;color:var(--t2);line-height:1.4">It would start 0.2 s after the headline.</div>
+      <div style="display:flex;gap:6px"><span class="chip pri">Apply to Kicker</span><span class="chip">Not Now</span></div></div>
+    <div class="msg" style="color:var(--t2);font-size:12px">Expression used for the spring: <code>spring(0.8, 6)</code></div>
+  </div>
+  <div class="composer">Ask Powermove…<span style="position:absolute;right:9px;bottom:9px;color:var(--acc)">${ic('send')}</span></div>`;
+}
+
+function colorPopover(x,y){
+  return `<div class="popover glass" style="left:${x}px;top:${y}px;width:260px;height:262px">
+    <div class="arrow glass" style="right:-6px;top:150px;box-shadow:none"></div>
+    <div class="body"><div style="padding:10px">
+      <div style="height:126px;border-radius:6px;background:linear-gradient(to top,#000,transparent),linear-gradient(to right,#fff,#FF6A1F);position:relative"><i style="position:absolute;left:12px;top:10px;width:12px;height:12px;border-radius:6px;box-shadow:0 0 0 2px #fff,0 0 0 3px rgba(0,0,0,.4)"></i></div>
+      <div style="height:12px;border-radius:6px;margin-top:10px;background:linear-gradient(to right,red,#ff0,lime,cyan,blue,#f0f,red);position:relative"><i style="position:absolute;left:12px;top:-2px;width:16px;height:16px;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4)"></i></div>
+      <div style="height:12px;border-radius:6px;margin-top:10px;background:linear-gradient(to right,transparent,#F5F3EF),repeating-conic-gradient(#999 0 25%,#ddd 0 50%) 0 0/8px 8px;position:relative"><i style="position:absolute;right:0;top:-2px;width:16px;height:16px;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4)"></i></div>
+      <div style="display:flex;gap:6px;margin-top:12px;align-items:center"><span class="sw" style="background:#F5F3EF;width:22px;height:22px;border-radius:6px"></span><div class="f" style="flex:1.4">#F5F3EF</div><div class="f" style="flex:1">100<u>%</u></div><span class="ib" style="color:var(--t2)">${ic('crop','s13')}</span></div>
+    </div></div></div>`;
+}
+
+function sheet(){
+  const r=(l,v)=>`<div style="height:32px;display:flex;align-items:center;gap:12px"><span style="flex:1;color:var(--t2)">${l}</span><div style="width:236px;display:flex;gap:6px;align-items:center">${v}</div></div>`;
+  const F=(v,u='',st='')=>`<div class="f" style="height:26px;${st}">${v}${u?`<u>${u}</u>`:''}</div>`;
+  return `<div class="scrim"></div>
+  <div class="sheet glass" style="left:460px;top:60px;width:520px;height:358px"><div class="in" style="inset:6px;border-radius:17px"></div>
+   <div style="position:absolute;inset:6px;padding:20px 22px">
+    <div style="font-size:15px;font-weight:600">Composition Settings</div>
+    <div style="font-size:13px;line-height:1.45;color:var(--t2);margin:4px 0 12px">Changes apply to “Launch Film” and every layer that follows the composition size.</div>
+    ${r('Name',F('Launch Film','','flex:1'))}
+    ${r('Size',F('1920','px','flex:1')+'<span style="color:var(--t3)">×</span>'+F('1080','px','flex:1')+`<span style="color:var(--t3)">${ic('link','s13')}</span>`)}
+    ${r('Frame Rate','<div class="f pop" style="height:26px;flex:1">30 fps'+ic('chev','s11')+'</div>')}
+    ${r('Duration',F('00:00:20:00','','flex:1'))}
+    ${r('Background','<span class="sw" style="background:#141414;width:26px;height:22px"></span>'+F('#141414','','flex:1'))}
+    ${r('Preview Quality','<div class="seg2" style="height:26px"><i class="on" style="font-size:12px">Full</i><i style="font-size:12px">Half</i><i style="font-size:12px">Quarter</i></div>')}
+    <div style="position:absolute;left:0;right:0;bottom:0;height:58px;border-top:1px solid var(--sep);display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 20px">
+      <span class="btn">Cancel</span><span class="btn pri">Save</span></div>
+   </div></div>`;
+}
+
+function editor(scheme,state){
+  const W=1440,H=900,g=6,top=52,bot=H-30-g; // status 30
+  const rightW=state==='B'?360:300, rx=W-g-rightW, leftW=300, cx=g+leftW+g, cw=rx-g-cx;
+  const upperH=466, tlY=top+upperH+g;
+  let h=`<div class="win ${scheme}">${toolbar(state)}`;
+  h+=pn(g,top,leftW,upperH,state==='B'?effectControls():project());
+  h+=pn(cx,top,cw,upperH,viewer(cw,upperH),'background:var(--viewer)');
+  h+=pn(g,tlY,rx-g-g,bot-tlY,timeline(rx-2*g,bot-tlY));
+  if(state==='B') h+=pn(rx,top,rightW,bot-top,agent());
+  else{const ph=542;h+=pn(rx,top,rightW,ph,properties());h+=pn(rx,top+ph+g,rightW,bot-top-ph-g,effects());}
+  h+=`<div class="status"><span>6 layers · 11 keyframes</span><span class="sp"></span><span>Paused</span><span class="num">1920×1080 · 30 fps</span><span>Default</span></div>`;
+  if(state==='A') h+=colorPopover(rx-270,top+166);
+  if(state==='C') h+=sheet();
+  return h+'</div>';
+}
+
+const states=[['A','Editor — inspector focus, colour popover from the Color well, render bar, Background Tasks running'],['B','Agent — Effect Controls on the left, agent panel docked right'],['C','Sheet — Composition Settings attached below the toolbar']];
+let html='';
+for(const [s,label] of states) for(const scheme of ['dark','light'])
+  html+=`<h2>${s} · ${scheme==='dark'?'Dark':'Light'} · ${label}</h2><div class="fit"><div class="stage">${editor(scheme,s)}</div></div>`;
+document.getElementById('out').innerHTML=html;
+document.querySelectorAll('svg[data-wave]').forEach(svg=>{const [n,h]=svg.dataset.wave.split(',').map(Number);let p='';for(let x=0;x<n;x+=3){const a=(Math.sin(x*.07)*.5+.5)*(Math.sin(x*.019)*.4+.6)*(h/2-2)*(.5+.5*Math.abs(Math.sin(x*1.3)));p+=`M${x} ${h/2-a}L${x} ${h/2+a}`}svg.innerHTML=`<path d="${p}" stroke="currentColor" opacity=".75" stroke-width="1.6"/>`});
+function fit(){document.querySelectorAll('.fit').forEach(f=>f.querySelector('.stage').style.transform=`scale(${f.clientWidth/1440})`)}
+fit();new ResizeObserver(fit).observe(document.body);
+</script>
+</body></html>

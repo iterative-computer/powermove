@@ -517,10 +517,10 @@ impl Kernel {
             };
             // All old sessions are kept until the new checkpoint is durable.
             let mut old = journal::sessions(&dir);
-            if let Some(j) = &slot.journal {
-                if !old.contains(&j.dir().to_path_buf()) {
-                    old.push(j.dir().to_path_buf());
-                }
+            if let Some(j) = &slot.journal
+                && !old.contains(&j.dir().to_path_buf())
+            {
+                old.push(j.dir().to_path_buf());
             }
             let j = Journal::create(d, &dir, id, &hash, state, old)
                 .map_err(|e| KernelFailure::Journal(e.to_string()))?;
@@ -537,10 +537,10 @@ impl Kernel {
         tx: crate::state::StateTransaction,
     ) -> Result<crate::state::StateAck, KernelFailure> {
         for op in &tx.ops {
-            if let crate::state::StateOp::Ui { project, .. } = op {
-                if !self.slots.contains_key(project) {
-                    return Err(KernelFailure::NoProject(project.clone()));
-                }
+            if let crate::state::StateOp::Ui { project, .. } = op
+                && !self.slots.contains_key(project)
+            {
+                return Err(KernelFailure::NoProject(project.clone()));
             }
         }
         let (next, changes) = self.state.stage(tx).map_err(KernelFailure::Storage)?;
@@ -549,14 +549,12 @@ impl Kernel {
                 key,
                 value: Some(value),
             } = change
-            {
-                if pm_model::json::to_canonical_string(value).len()
+                && pm_model::json::to_canonical_string(value).len()
                     > crate::library::value_limit(key)
-                {
-                    return Err(KernelFailure::Storage(
-                        "Settings value exceeds its size limit".into(),
-                    ));
-                }
+            {
+                return Err(KernelFailure::Storage(
+                    "Settings value exceeds its size limit".into(),
+                ));
             }
         }
         if let Some(writer) = &self.library

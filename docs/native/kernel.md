@@ -152,7 +152,8 @@ Every `Ack` carries `revision`, `folded: Option<entry>`, `notice`, and the
   SHA-256 of the document as opened).
 * **Write before ack, fsync in the background**: no acknowledged write is
   lost to a process crash; power loss is bounded by the flush interval
-  (200 ms). A failed journal write is never silent (`NotDurable` notice).
+  (200 ms gate budget; the worker now schedules at most 100 ms, with disk work
+  charged to the cycle). A failed journal write is never silent (`NotDurable` notice).
 * Checkpoints every 50 revisions or 4 MiB (today's constants), written by a
   background thread (temp, `F_FULLFSYNC`, rename, dir sync); older segments
   are pruned only after the newer checkpoint is durable.
@@ -662,3 +663,65 @@ Command-W and Command-Q were refused and the save completed intact. The refusal
 note never appeared on screen, and the editor did not reflect the MCP edit on a
 60k-layer fixture. Details and repro are in `integration.md`, “Save-in-flight
 close/quit on screen”.
+
+## Wave 2: Linux P1 kernel and library evidence
+
+Status 2026-11-01. These are the package 5/7 rows exercised on Linux; this does
+not certify the whole P1 gate or the macOS performance rows. All inputs are
+synthetic, with no user profile or private corpus.
+
+Verification: **273 kernel + 17 first-launch + 24 migration = 314 passing tests**,
+with **1 optional real-profile kernel smoke ignored**. Two 1,000-round soak runs
+(seeds `20261101` and `71`) completed **2,000 SIGKILL cycles with zero document
+mismatches**; the final seed also asserts saved-base byte preservation during
+DiscardClose. All three crates pass strict Clippy (`--all-targets --no-deps --
+-D warnings`), formatting and diff whitespace checks. Gitleaks runs before every
+commit. The unchanged `W071.fractional-rate` supporting probe reports pass.
+
+| Gate P1 row | Evidence now covered | Remaining verification |
+|---|---|---|
+| Journal process-kill recovery | `tests/kill_soak.rs` runs the reusable `pm-journal-soak` child-process binary: 18 phase/timing combinations. Seeded kill targets cover multi-field transactions, owner/foreign folding, fold commit, library save/rebase (the headless autosave publication path), and DiscardClose while checkpoint rotation runs. Full recovered documents must match the last delivered ack at before/after boundaries; during a call, only that document or the complete next document is permitted. | Physical power loss, APFS/F_FULLFSYNC, macOS disk pressure, and shell autosave timer wiring. An in-flight write can reach the journal before its reply reaches the client; treating that complete write as a torn write would lose work. |
+| Journal flush ≤200 ms | Background-worker test observes four actual fsync completions within 200 ms without a barrier, even with a requested 60-second interval. The effective cadence is clamped to 1–100 ms; fsync time is subtracted from the next sleep. Existing failure/retry and in-flight-barrier tests remain green. | A scheduler stall or unbounded device fsync cannot be given a hard wall-clock guarantee by a worker loop. Measure the ≤200 ms budget on supported Macs under load and physical failure conditions. |
+| Library → native edit → old reader | `tests/library_roundtrip.rs` executes v1.2.0 and v1.3.0 project/session/history readers obtained with `git show`, plus the v1.3 gzip decoder. It checks full projects, fractional rate, exact timing/geometry/text/unknown fields, undo, redo, redo cursor, and project/history byte stability over reopen/save. v1.2 plain output also opens in v1.3. | Representative full-profile/library corpus and GUI open/save on macOS. v1.3 gzip output is opt-in and is not advertised as v1.2-readable. Node/Bun is used only by development oracles. |
+| v1.3 journal import | Both plain/stringified envelopes and the gzip round trip preserve `recoverySequence`; stale sequence records are skipped, newer records survive a rewound document revision, and v1.2 retains its revision fallback. | Full legacy corpus; migration/host consumers already use this same kernel reader. |
+| Authored fractional FPS / W071.fractional-rate | `CompCommand::Set` keeps 23.976, 29.97, 59.94 and 30000/1001 exact through undo/redo; invalid nonfinite batches stay atomic and existing 1–240 limits remain. The unchanged acceptance supporting probe reports **pass**. | Full W071 playback/export cadence and timecode remain platform/integration work. The acceptance crate's separate defect-baseline unit test still expects failure and needs its owner to update it; no acceptance files changed here. |
+| Migration delta/resume/archive/proxy | See [first-launch](first-launch.md#wave-2-linux-migration-gates) and [S6](s6-migration.md#wave-2-linux-migration-gates): all durable step interruptions, SIGKILL/resume, interrupted deltas, old object/key/pass retention, immutable unknown/quarantined archives and proxy provenance. | Real profile closure, permissions, Keychain and signed transition/restore proofs. |
+
+The soak samples six phases × three kill timings. Transactions also rotate
+checkpoints every three revisions or 32 KiB, using multi-field edits with a
+16 KiB name so writes are large enough to exercise partial-tail recovery.
+Every child must exit by SIGKILL; a child assertion failure cannot count as a
+successful kill. Progress has a timeout, children are reaped on failure, and a
+failed round retains its generated fixture with seed/round/timing for inspection.
+DiscardClose is also checked to leave saved project bytes identical and, after
+its ack, to retain the rejected work only in the explicit archive.
+
+Reproduce from the repository (source the lane environment first):
+
+```sh
+cd apps/native
+cargo test --locked -p pm-kernel -p pm-native-migrate -p pm-first-launch
+cargo run --locked -p pm-kernel --bin pm-journal-soak -- --rounds 1000 --seed 71
+cargo clippy --locked -p pm-kernel -p pm-native-migrate -p pm-first-launch --all-targets --no-deps -- -D warnings
+cargo fmt -p pm-kernel -p pm-native-migrate -p pm-first-launch --check
+cargo run --locked -p pm-acceptance -- --case W071.fractional-rate
+```
+
+The tagged tests require local `v1.2.0` and `v1.3.0` tags, plus Node with
+`stripTypeScriptTypes` or Bun (`PM_TEST_JS_RUNTIME` may select it). Missing
+prerequisites fail the new round-trip test rather than passing silently.
+No Node/Chromium is linked into the app (N8).
+
+### Wave 2 decisions
+
+| # | Decision | Selecting rule |
+|---|---|---|
+| K32 | Preserve finite fractional FPS instead of reproducing shipped command rounding; retain existing limits and atomic validation | N3 authored timing is exact; N1 professional rates; the quirk policy rejects rounding authored intent. |
+| K33 | Import v1.3 recovery sequences independently from document revisions | N3/N4: undo can rewind an edit revision; stale replay must not clobber authored work or skip newer edits. The tagged reader supplies the format oracle. |
+| K34 | Clamp requested background cadence to at most 100 ms and charge fsync work to the cycle | N1/N2: retain margin inside the 200 ms gate budget; N8 keeps the flush worker separate from the host UI. This is scheduling evidence, not a physical power-loss certification. |
+| K35 | Require exact ack state at quiescent kill points; permit only the complete next state for a lost in-flight reply | N3/N4: durable work must not be discarded to make a test match an acknowledgment the client did not receive. N7: seeded, headless, inspectable process harness. |
+| K36 | Extend delta interruption tests to immutable base archives, prior passes/objects/keys and beta tombstones; keep proxy flags/version separate from stored-byte identity | N4 archive-never-delete; N3 original/proxy provenance; N6 extension data survives unchanged. |
+
+Strict Clippy also clears the previously documented 14 kernel warnings and its
+Linux unused-argument warning with equivalent let chains/emptiness checks and a
+fixture initializer; no contract or persistence behavior changes in that cleanup.

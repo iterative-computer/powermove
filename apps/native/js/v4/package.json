@@ -1,0 +1,32 @@
+{
+  "name": "powermove-v4",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./jsx-runtime": "./src/jsx-runtime.ts",
+    "./jsx-dev-runtime": "./src/jsx-dev-runtime.ts",
+    "./hooks": "./src/hooks.ts",
+    "./ui": "./src/ui.ts",
+    "./refresh": "./src/refresh.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "eval": "bun eval/runner.ts",
+    "bench": "bun bench.ts",
+    "build": "bun build src/index.ts src/ui.ts src/jsx-runtime.ts src/refresh.ts --target browser --outdir dist",
+    "format": "prettier --check src test eval bench.ts package.json tsconfig.json",
+    "format:write": "prettier --write src test eval bench.ts package.json tsconfig.json"
+  },
+  "dependencies": {
+    "preact": "11.1.1",
+    "@prefresh/core": "1.5.9"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3",
+    "prettier": "3.6.2"
+  }
+}

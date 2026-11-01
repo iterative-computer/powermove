@@ -57,7 +57,20 @@ pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
     let p = host.read_document(id)?;
     let selection = host.selection(id)?;
     let time = host.playhead(id);
-    project_state_data(p, selection, time, host.revision(id)?, a)
+    let mut result = project_state_data(p, selection, time, host.revision(id)?, a)?;
+    if let Some(registry) = host.media_registry.as_deref()
+        && let Some(assets) = result["mediaAssets"].as_array_mut()
+    {
+        for asset in assets {
+            let state = registry.state(id, asset["id"].as_str().unwrap_or(""));
+            asset["available"] = json!(state.available);
+            asset["hasAudio"] = json!(state.has_audio);
+            if let Some(duration) = state.duration {
+                asset["duration"] = json!(duration);
+            }
+        }
+    }
+    Ok(result)
 }
 /// Shared frozen digest for an immutable actor publication.
 pub fn project_state_data(

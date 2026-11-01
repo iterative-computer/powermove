@@ -83,6 +83,8 @@ pub enum FailureStage {
     Bind,
     NagaParse,
     NagaValidate,
+    /// Downstream MSL writing or entry-point translation failed.
+    NagaMsl,
     /// Translation did not finish within its deadline.
     Deadline,
     /// All compiler process slots are occupied (there is no waiting queue).
@@ -95,6 +97,16 @@ pub enum FailureStage {
     Metal,
     /// Submission, readback, or device recovery failed.
     Draw,
+    /// Another guarded draw owns this device generation.
+    DrawBusy,
+    /// A submitted draw did not complete before its wall deadline.
+    DrawDeadline,
+    /// The GPU reported device loss.
+    DeviceLost,
+    /// Retiring or recreating a failed device did not complete successfully.
+    DeviceRecovery,
+    /// This unchanged source failed earlier and requires explicit host review.
+    DrawQuarantined,
     /// A stage panicked.
     Panic,
 }
@@ -110,12 +122,18 @@ impl FailureStage {
             FailureStage::Bind => "bind",
             FailureStage::NagaParse => "naga-parse",
             FailureStage::NagaValidate => "naga-validate",
+            FailureStage::NagaMsl => "naga-msl",
             FailureStage::Deadline => "deadline",
             FailureStage::CompilerBusy => "compiler-busy",
             FailureStage::CompilerProcess => "compiler-process",
             FailureStage::CompilerResources => "compiler-resources",
             FailureStage::Metal => "metal",
             FailureStage::Draw => "draw",
+            FailureStage::DrawBusy => "draw-busy",
+            FailureStage::DrawDeadline => "draw-deadline",
+            FailureStage::DeviceLost => "device-lost",
+            FailureStage::DeviceRecovery => "device-recovery",
+            FailureStage::DrawQuarantined => "draw-quarantined",
             FailureStage::Panic => "panic",
         }
     }
@@ -468,14 +486,19 @@ pub(crate) fn translate_local(fragment: &str, line_offset: u32) -> Result<Progra
 /// naga's MSL for a module, as wgpu's Metal back end writes it (fuzzing and
 /// diagnostics; wgpu runs the same writer at pipeline creation).
 pub fn msl(module: &naga::Module) -> Result<String, String> {
-    let info = naga_validate(module)?;
+    crate::compiler::diagnostic_msl(module).map_err(|e| e.to_string())
+}
+
+/// Raw diagnostic writer for an already supervised compiler/fuzz worker.
+pub(crate) fn msl_local(module: &naga::Module) -> Result<String, Failure> {
+    let info = naga_validate(module).map_err(|e| Failure::new(FailureStage::NagaValidate, e))?;
     let options = naga::back::msl::Options {
         lang_version: (3, 0),
         ..Default::default()
     };
     naga::back::msl::write_string(module, &info, &options, &Default::default())
         .map(|(source, _)| source)
-        .map_err(|e| format!("{e:?}"))
+        .map_err(|e| Failure::new(FailureStage::NagaMsl, format!("{e:?}")))
 }
 
 #[cfg(test)]
