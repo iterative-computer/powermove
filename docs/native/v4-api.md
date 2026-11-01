@@ -1,7 +1,7 @@
 # v4 native extension surfaces (P3 packages 13/14)
 
-Status: ranked pre-freeze API fixes implemented at the headless contract boundary;
-**native rendering, concrete kernel adapter and cutover gates open**.
+Status: merged UI-kit/API integration and concrete worker data service tested on
+Linux; **application KernelData binding, native rendering and cutover gates open**.
 Owned implementation: `apps/native/js/v4` (`powermove-v4`) and
 `apps/native/crates/surface` (`pm-surface`). No Electron, compatibility realm,
 project/profile data, built-in panel, vendor, or application source is replaced.
@@ -193,8 +193,9 @@ No JS callback is required for these Rust binding operations.
 
 The public package exports `HostClient`, `HOST_API_VERSION`, `HostRequest`,
 `HostAck` and `HostPublication`. Rust exports matching serde envelopes and a
-bounded, nonblocking `host_api::HostRouter<KernelQueue>`. No document/settings
-mirror is owned by either client/router. The application's `KernelQueue` adapter
+bounded, nonblocking `host_api::HostRouter<KernelQueue>` plus the concrete
+`host_data::HostDataService<KernelData>`. No document/settings mirror is owned
+by the client, router or data service. The application's `KernelQueue` adapter
 must route requests to the **single pm-kernel writer**, and return its actual
 acknowledgements. There is no success-shaped default backend.
 
@@ -211,8 +212,9 @@ old edits are never silently replayed. Polling uses `try_recv`, never a wait.
 | Client operation | Native/kernel adapter obligation |
 |---|---|
 | `registerBinding(handle,channels)` / `disposeBinding(handle)` | Register generation-owned channel handles; cancel original gestures before retiring handles. Only use a handle after its registration ack. |
-| `query('selection'|'time'|'evaluated',channels?,time?)` | Read an immutable publication/QueryMirror at the ack revision; never publish a JS document copy. |
+| `query('project'|'selection'|'time'|'evaluated',channels?,time?)` | Read an immutable publication/QueryMirror at the ack revision; never publish a JS document copy. |
 | `subscribe(id,query,callback,channels?)` / returned async unsubscribe | Publish versioned identity, subscription ID, revision, monotonic sequence and value. Client rejects stale, duplicate, foreign-project and retired-generation publications. |
+| `edit(label,commands)` | Admit up to 256 typed `{command,args}` entries as **one** undoable actor transaction, with atomic rollback and actual acknowledgement. No per-command optimistic writes. |
 | `command(id,args)` | Resolve the authorized typed command and use `KernelHandle::call/call_with`, preserving request-ID → kernel-txid dedupe and revision admission. |
 | `getSetting(key)` / `setSetting(key,value)` | Namespace to the extension, preserve arbitrary JSON fields, route durable changes through `KernelHandle::state_transaction`; ack only actual kernel/persistence results. |
 | `retire()` and native queue retirement | Refuse new JS requests; independently seal the realm writer and release binding/subscription resources through the actor. |
@@ -226,13 +228,39 @@ await host.command(commandId, args); // actual ack, never optimistic local mutat
 await stop();
 ```
 
-The executable Linux queue double proves asynchronous routing, acks, rejection,
-stale generations, dedupe and retirement. **A concrete KernelHandle adapter is not
+`HostDataService` implements the query/subscription lifecycle, rather than leaving
+it to a success-shaped transport stub. Its `KernelData::query` reads one immutable
+kernel publication (or a worker-owned QueryMirror synced to it), returning
+`QuerySnapshot {revision,value}`. `project` exposes the authorized project snapshot;
+`selection`, `time` and `evaluated` expose the corresponding authorized projections.
+Channels and evaluation time pass through unchanged. The data service never owns
+a writable document. `KernelData::enqueue` forwards edits, commands, bindings and
+settings to the actor. A failed enqueue produces no ack; a delayed actor ack stays
+pending. Only the actual actor result reaches the client.
+
+Subscribe acks contain the initial query value at their revision. The JS client
+buffers publications while registration is pending, delivering only after its ack;
+a newer publication wins over that ack's older initial value. After each kernel
+or transport publication wake, the worker calls `HostRouter::publications()` and
+queues its returned envelopes to JS. Time changes can publish at the same document
+revision. Sequence numbers start at 1 and increase per subscription; stale or
+unchanged snapshots produce no invented changes. A failed query leaves all cursors
+unchanged. The worker must retain returned envelopes until its JS delivery queue
+accepts them. Active subscriptions are capped at 256; up to 4,096 registered IDs
+are retained per generation. An acknowledged subscription ID never recycles in
+that generation, including after unsubscribe, so late deliveries cannot address a
+new subscription. The client serializes requests against the last actual ack and
+copies authored arguments before queueing, preserving concurrent edit order.
+
+The executable Linux `KernelData` double and standalone `host_wire` example prove
+public-client/native-service routing, acks, rejection, stale generations, dedupe,
+query arguments, subscription races, same-revision time changes and retirement. **A concrete KernelHandle adapter is not
 linked here:** the owned surface manifests have no pm-kernel dependency, and the
 application runtime is outside this lane. Production queries, binding lifecycle,
 settings durability and commands must be verified against that adapter before
-freeze. This is a completed transport contract, not a claim that panel ports now
-perform production edits.
+freeze. The worker data service is implemented; its application trait implementation and
+production edits/settings durability remain integration gates. The `host_wire`
+backend is explicitly a synthetic test double, with no persistence or media claim.
 
 ## Strict primitive authoring (rank 5)
 
@@ -337,16 +365,23 @@ accepted numeric ID. No renderer/component implementation was changed here.
 `eval/tasks.ts` has 40 synthetic task records: ten built-in-style, ten wild, ten
 held-out, ten owner-approved anonymized panel specs. The owner records include
 inputs, interactions, required host reads/writes, edge cases and acceptance checks.
-Their synthetic fixtures report `fixtureStatus` separately from full API
-acceptance: unavailable host capabilities yield `status: fail`,
-`failureKind: api-gap` and a `blockedBy` list. No private owner panel name, ID,
+Their fixtures now report headless `status`, `fixtureStatus` and `serviceStatus`
+separately from `productionReady: false`, `fullAcceptance` and `integrationGates`.
+A headless pass requires executable public-client/native-data-service checks and
+the authored behavior fixture; static absence strings no longer determine that
+score. **This is not full owner-panel acceptance:** permission/media/resource and
+application wiring gates remain explicit even when the headless score is 40/40. No private owner panel name, ID,
 code or source is tracked. The held-out group runs only when explicitly selected;
 because its specs are public this is a separation of evaluation sets, not a claim of secret tests.
 `eval/scenarios.tsx` provides the original 30 scaffold fixtures and ten authored
-owner behavior fixtures. Owner service responses and writes are test seams, not
-working host services or independent extension ports. The runner reports failures
+owner behavior fixtures. Each owner run exercises the public HostClient through
+the real Rust HostRouter/HostDataService and synthetic KernelData backend. The
+annotation fixture additionally uses public project/time queries, time subscription,
+acknowledged edits and current text through `inspect().nodes`; rejected edits
+retain its observable draft. Other domain/media behavior still uses authored test
+seams. These are not independent production extension ports. The runner reports failures
 and returns nonzero. `--candidate=./module.ts` selects
-a module exporting the same `createRoot` adapter API for reconciler comparisons. `--wire` additionally
+a module exporting the same `createRoot` adapter API for reconciler comparisons. `--wire` builds the standalone examples and additionally
 replays every emitted batch into the real Rust validator and compares final
 native types/children; this is a headless protocol subset, not visual acceptance.
 The webview fixture opts in only in its test process.
@@ -355,17 +390,18 @@ The webview fixture opts in only in its test process.
 source /workspace/.tools/activate.sh
 cd /workspace/powermove/apps/native
 cargo test --locked -p pm-surface
-# Shared workspace lock integration is outside this lane. Linux harness, same sources/tests:
+# Linux harness, same sources/tests:
 cargo test --locked --manifest-path crates/surface/standalone/Cargo.toml -p pm-surface
 cargo clippy --locked --manifest-path crates/surface/standalone/Cargo.toml -p pm-surface --all-targets -- -D warnings
 cargo fmt --manifest-path crates/surface/standalone/Cargo.toml --check
-cargo build --locked --manifest-path crates/surface/standalone/Cargo.toml --example wire
+cargo build --locked --manifest-path crates/surface/standalone/Cargo.toml --examples
 cd js/v4
 bun install --frozen-lockfile
-PM_SURFACE_WIRE=../../crates/surface/standalone/target/debug/examples/wire bun test
+bun test # preload builds all native examples; no skipped conformance tests
 bun run typecheck
 bun run format
-bun run eval --include-held-out --wire=../../crates/surface/standalone/target/debug/examples/wire
+bun run eval --include-held-out
+bun run eval --include-held-out --wire
 bun run bench
 cd ../..
 cargo run --release --locked --manifest-path crates/surface/standalone/Cargo.toml --example budget
@@ -386,7 +422,9 @@ binary or existing app test is claimed verified by these Linux checks.
 | Native declared defaults, focus/capture and Rust binding seam | N7/N8: inspect/drive by stable ID; no main-thread JS waits or second document writer |
 | Monotonic element IDs + per-root revisions + explicit fencing | N3/N7: stale events or ambiguous acknowledgements cannot silently address new state |
 | Host opt-in for webview; no browser dependency for other primitives | N8; native operation and bundled JS pass document-free tests |
-| Opaque missing owner specs remain pending | N1/N3: 30 available scenarios cannot be called 40 passes |
+| Owner specs run with explicit headless/full-acceptance reporting | N1/N3: 40 headless passes do not certify production owner ports; native resource and application gates stay open |
+| Queries read immutable publications; edits forward one transaction through KernelData | N3/N7/N8: pm-kernel remains the single writer; no UI-thread wait or local optimistic document |
+| Registration ack supplies initial state; subscription IDs never recycle | N3/N7: avoid lost updates and stale delivery into a replacement subscription |
 | Neutral semantic controls and token references | Design ownership rule: no lane-selected visual language; DESIGN-TODO(opus) above |
 
 Performance evidence and final verification counts follow in the lane result

@@ -93,6 +93,21 @@ survive rounding without overflow, and typed finite commits do not acquire
 scrub clamping. Wheel editing is deliberately left unbound pending the design
 item below; ordinary inspector scrolling cannot accidentally edit values.
 
+## v4 integration reconciliation (2026-11-01)
+
+The strict primitive contract is retained: anchor fixtures create `anchored`,
+matching the JSX components, instead of putting `anchor` on a `div`. No recipe,
+token, visual property or Opus interaction decision changed. JSX declarations
+explicitly enumerate the kit's accessibility and semantic markers. Component
+options/value callbacks override primitive event signatures rather than
+intersecting incompatible types; boolean list selection stays boolean.
+
+Plain `bun test` now builds the standalone native examples and runs native
+conformance instead of failing for a missing environment variable. Current
+combined counts and freeze gates are in [v4-eval.md](v4-eval.md). The older kit-only
+counts below remain historical evidence. New design TODOs: **none**; the existing
+Opus F1–F7 follow-ups and rendering-review gate remain unchanged.
+
 ## Validation and tests
 
 `validate_panel(surface, tokens, layout)` emits stable ID/property diagnostics:
@@ -124,14 +139,14 @@ also mounts without process, Buffer, window, document or Chromium.
 source /workspace/.tools/activate.sh
 cd /workspace/powermove/apps/native
 cargo test --locked -p pm-surface
-# Shared Cargo.lock reconciliation belongs to the integration lane.
+# The merged workspace lock resolves on Linux; standalone uses the same sources.
 cargo test --locked --manifest-path crates/surface/standalone/Cargo.toml -p pm-surface
 cargo clippy --locked --manifest-path crates/surface/standalone/Cargo.toml -p pm-surface --all-targets -- -D warnings
 cargo fmt --manifest-path crates/surface/standalone/Cargo.toml --check
 cargo build --locked --manifest-path crates/surface/standalone/Cargo.toml --examples
 cd js/v4
 bun install --frozen-lockfile
-PM_UI_KIT_WIRE=../../crates/surface/standalone/target/debug/examples/ui_kit_wire PM_SURFACE_WIRE=../../crates/surface/standalone/target/debug/examples/wire bun test
+bun test # builds both kit/surface wire validators and host_wire automatically
 bun run typecheck
 bun run format
 bun run build

@@ -1,0 +1,378 @@
+{
+  "scope": "original scaffold plus authored owner fixtures; headless protocol subset; not visual or macOS acceptance",
+  "mode": "scaffold",
+  "results": [
+    {
+      "id": "builtin-01",
+      "status": "pass",
+      "commits": 1,
+      "ops": 17,
+      "ms": 16.312219
+    },
+    {
+      "id": "builtin-02",
+      "status": "pass",
+      "commits": 2,
+      "ops": 22,
+      "ms": 3.0475310000000064
+    },
+    {
+      "id": "builtin-03",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.543324999999996
+    },
+    {
+      "id": "builtin-04",
+      "status": "pass",
+      "commits": 1,
+      "ops": 8,
+      "ms": 2.241996999999998
+    },
+    {
+      "id": "builtin-05",
+      "status": "pass",
+      "commits": 2,
+      "ops": 19,
+      "ms": 4.577185
+    },
+    {
+      "id": "builtin-06",
+      "status": "pass",
+      "commits": 1,
+      "ops": 4,
+      "ms": 3.2031169999999918
+    },
+    {
+      "id": "builtin-07",
+      "status": "pass",
+      "commits": 1,
+      "ops": 22,
+      "ms": 3.426326000000003
+    },
+    {
+      "id": "builtin-08",
+      "status": "pass",
+      "commits": 1,
+      "ops": 18,
+      "ms": 2.64265300000001
+    },
+    {
+      "id": "builtin-09",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.193286999999998
+    },
+    {
+      "id": "builtin-10",
+      "status": "pass",
+      "commits": 1,
+      "ops": 8,
+      "ms": 2.3299939999999992
+    },
+    {
+      "id": "wild-01",
+      "status": "pass",
+      "commits": 1,
+      "ops": 23,
+      "ms": 2.5937590000000057
+    },
+    {
+      "id": "wild-02",
+      "status": "pass",
+      "commits": 1,
+      "ops": 13,
+      "ms": 2.4552220000000062
+    },
+    {
+      "id": "wild-03",
+      "status": "pass",
+      "commits": 1,
+      "ops": 8,
+      "ms": 2.481076999999999
+    },
+    {
+      "id": "wild-04",
+      "status": "pass",
+      "commits": 1,
+      "ops": 13,
+      "ms": 2.5573890000000006
+    },
+    {
+      "id": "wild-05",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.282671999999991
+    },
+    {
+      "id": "wild-06",
+      "status": "pass",
+      "commits": 2,
+      "ops": 10,
+      "ms": 2.958742000000001
+    },
+    {
+      "id": "wild-07",
+      "status": "pass",
+      "commits": 1,
+      "ops": 11,
+      "ms": 2.0042509999999965
+    },
+    {
+      "id": "wild-08",
+      "status": "pass",
+      "commits": 1,
+      "ops": 18,
+      "ms": 2.508026000000001
+    },
+    {
+      "id": "wild-09",
+      "status": "pass",
+      "commits": 1,
+      "ops": 3,
+      "ms": 1.895150000000001
+    },
+    {
+      "id": "wild-10",
+      "status": "pass",
+      "commits": 1,
+      "ops": 7,
+      "ms": 1.9202279999999945
+    },
+    {
+      "id": "held-out-01",
+      "status": "pass",
+      "commits": 2,
+      "ops": 13,
+      "ms": 2.628793999999999
+    },
+    {
+      "id": "held-out-02",
+      "status": "pass",
+      "commits": 2,
+      "ops": 14,
+      "ms": 2.1814990000000023
+    },
+    {
+      "id": "held-out-03",
+      "status": "pass",
+      "commits": 2,
+      "ops": 7,
+      "ms": 2.656801999999999
+    },
+    {
+      "id": "held-out-04",
+      "status": "pass",
+      "commits": 2,
+      "ops": 7,
+      "ms": 2.0854809999999873
+    },
+    {
+      "id": "held-out-05",
+      "status": "pass",
+      "commits": 1,
+      "ops": 10,
+      "ms": 2.1976760000000013
+    },
+    {
+      "id": "held-out-06",
+      "status": "pass",
+      "commits": 3,
+      "ops": 10,
+      "ms": 2.613596000000001
+    },
+    {
+      "id": "held-out-07",
+      "status": "pass",
+      "commits": 3,
+      "ops": 7,
+      "ms": 2.9796520000000157
+    },
+    {
+      "id": "held-out-08",
+      "status": "pass",
+      "commits": 1,
+      "ops": 17,
+      "ms": 2.4637769999999932
+    },
+    {
+      "id": "held-out-09",
+      "status": "pass",
+      "commits": 1,
+      "ops": 3,
+      "ms": 2.1254490000000033
+    },
+    {
+      "id": "held-out-10",
+      "status": "pass",
+      "commits": 1,
+      "ops": 5,
+      "ms": 2.3812839999999937
+    },
+    {
+      "id": "owner-01",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 3,
+      "ops": 60,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
+        "Production extension-scoped durable settings require state_transaction binding and restart verification.",
+        "Native pointer and clipboard delivery require application input adapters; pointer coordinates are publicly typed."
+      ]
+    },
+    {
+      "id": "owner-02",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 7,
+      "ops": 60,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
+        "No public media decoding, analysis-resource lifecycle or editable mask insertion service.",
+        "Native brush coordinate conversion requires macOS input-adapter verification."
+      ]
+    },
+    {
+      "id": "owner-03",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 5,
+      "ops": 43,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
+        "No public audio capture, asset import, transport control or recovery-export service."
+      ]
+    },
+    {
+      "id": "owner-04",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 3,
+      "ops": 34,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "No public catalog/network capability, file picker, asset import or external navigation service."
+      ]
+    },
+    {
+      "id": "owner-05",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 3,
+      "ops": 50,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "No public image alpha inspection, catalog, attribution, asset import or external navigation service."
+      ]
+    },
+    {
+      "id": "owner-06",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 3,
+      "ops": 24,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "No public evaluated-geometry query, frame rendering/readback or preview-resource lifecycle service."
+      ]
+    },
+    {
+      "id": "owner-07",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 2,
+      "ops": 57,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding.",
+        "Production extension-scoped durable settings require state_transaction binding and restart verification.",
+        "Production evaluated bounds/transforms require a QueryMirror-backed KernelData adapter."
+      ]
+    },
+    {
+      "id": "owner-08",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 5,
+      "ops": 58,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding."
+      ]
+    },
+    {
+      "id": "owner-09",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 2,
+      "ops": 22,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production extension-scoped durable settings require state_transaction binding and restart verification.",
+        "No public panel visibility/focus lifecycle or native frame scheduler."
+      ]
+    },
+    {
+      "id": "owner-10",
+      "scope": "headless owner behavior + native data service; production integration required",
+      "wire": true,
+      "commits": 4,
+      "ops": 37,
+      "status": "pass",
+      "fixtureStatus": "pass",
+      "serviceStatus": "pass",
+      "productionReady": false,
+      "fullAcceptance": "blocked-on-production-integration",
+      "integrationGates": [
+        "Production KernelData project/selection/time publications and atomic edit admission/history/invalidation require application binding."
+      ]
+    }
+  ],
+  "passed": 40,
+  "failed": 0,
+  "pending": 0,
+  "ownerProductionBlocked": 10
+}

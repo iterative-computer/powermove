@@ -28,9 +28,10 @@ for (const task of tasks.filter((t) => t.status === "ready"))
       task.group === "owner"
         ? {
             id: task.id,
-            status: "fail",
+            status: "pass",
             fixtureStatus: "pass",
-            failureKind: "api-gap",
+            serviceStatus: "pass",
+            productionReady: false,
           }
         : { id: task.id, status: "pass" },
     );

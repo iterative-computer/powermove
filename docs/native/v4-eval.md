@@ -1,4 +1,136 @@
-# v4 API evaluation before freeze — pre-freeze fix pass
+# v4 integration evaluation before freeze — 2026-11-01
+
+**Final recommendation: HOLD the production API/cutover freeze.** The integrated
+Linux headless suite is green: **171 Bun tests**, **95 distinct pm-surface tests**,
+and **40/40 headless eval tasks (100%)**, including all ten supplied owner
+behavior specs, both with and without `--wire`. There are no failed, skipped or
+pending tests/tasks. The scaffold-with-wire comparison also passes 40/40.
+**Ten production owner-panel acceptances remain blocked on integration.** No
+Linux score certifies their media services, actual kernel binding or macOS UI.
+
+This section supersedes every status/count/reproduction instruction in the
+archived reports below. Base: `fd9c3109d` on `feat/na-v4-integrate`; Linux x86_64,
+repository-pinned Rust 1.96.1, Bun 1.4.4, synthetic fixtures only. This is an
+integration rerun of the existing corpus, not a new blinded usability study.
+No private owner names, source, identifiers or user projects were used.
+
+## Final evidence and score boundaries
+
+| Check | Result | Scope |
+|---|---|---|
+| `cargo test --locked -p pm-surface` | 95 passed / 0 failed / 0 ignored | 10 module + 11 host-data + 35 surface + 39 kit tests |
+| Same tests via standalone manifest | 95 passed | Same tests, not 95 additional tests |
+| Workspace and standalone all-target Clippy, `-D warnings` | pass | No new warnings |
+| Workspace and standalone rustfmt | pass | Owned surface source/examples/tests |
+| Plain `bun test` | 171 passed / 0 failed / 0 skipped | Preload builds/configures native conformance examples |
+| Base and eval/examples TypeScript, Prettier, browser build | pass | Includes kit declarations and document-free bundle tests |
+| Default `eval --include-held-out` | 40 passed / 0 failed / 0 pending | Public briefs plus authored owner fixtures and native host-service checks |
+| `eval --include-held-out --wire` | 40 passed / 0 failed / 0 pending | Additionally validates surface batches in standalone Rust |
+| `eval --include-held-out --scaffold --wire` | 40 passed / 0 failed / 0 pending | Original scaffold plus the same authored owner fixtures |
+
+The owner score now has two explicit dimensions. `status`, `fixtureStatus` and
+`serviceStatus` report the **executable headless contract**. `productionReady:
+false`, `fullAcceptance: blocked-on-production-integration`, `integrationGates`
+and top-level `ownerProductionBlocked: 10` retain the production gates. This
+replaces unconditional failures based on stale “No public … service” strings;
+it does not declare the remaining media/capture/resource contracts implemented.
+The prior full-acceptance failure reports are preserved below for provenance.
+The private plan's LOC/lookup/success threshold is still unavailable and is not
+certified by the numerical headless task score.
+
+Each owner run executes public HostClient queries/subscriptions/atomic edits and
+settings through the real Rust HostRouter/HostDataService with an explicit
+KernelData double. The annotation fixture additionally drives project/time reads,
+time subscription, acknowledged annotation edit/rejection, unsubscribe and
+current text through `inspect().nodes`; it no longer checks a private test
+observation map for the retained draft. Domain/media algorithms in other owner
+fixtures still use authored synthetic service seams. Their passing behavior is
+not evidence of actual capture, decoding, network access, asset import, frame
+readback or resource ownership. The data smoke checks and fixtures do not port
+the owner's original extension code.
+
+Tracked rerun outputs (historical evidence files are unchanged):
+
+| Evidence | SHA-256 |
+|---|---|
+| `eval/evidence/integration.json` | `53823108899991ad2676045fa81faa6cc9757e2c07cdc677f0eb451322fd43ee` |
+| `eval/evidence/integration-wire.json` | `10320a733e7a33a2ca49f6fe15c9f8ad978157fefaed31638996c4a01dba5252` |
+| `eval/evidence/integration-scaffold-wire.json` | `cac068eef98822b6e4adb81437596d0a3fa21f633c20de417aa08b7a9ea96e9e` |
+
+These outputs contain process/replay timings, not settled performance samples.
+No performance benchmark was rerun or promoted to an N2 result in this pass.
+
+## Changes and rule-selected decisions
+
+| Decision/change | Selecting rule |
+|---|---|
+| Anchor kit fixtures use `anchored`; retain strict primitive validation and every Opus recipe/interaction decision | N1/N3; design ownership and `design/reviews/na-cloud-uikit.md` |
+| Explicit kit AX/semantic props; component callbacks/options override primitive signatures, preserving other primitive callbacks | N3/N7; typed contracts must match the actual wire data |
+| Plain Bun conformance builds the real validators; stale expected-failure assertions now require passes | N1/N3; infrastructure or old assertions cannot hide a regression |
+| Concrete worker HostDataService queries immutable publications; atomic edits forward unchanged through KernelData to the single actor writer | N3/N7/N8; no JS document mirror or UI-thread JS waits |
+| Subscribe ack includes initial snapshot; buffered publication wins over older ack; same-revision time updates use monotonic sequences; acknowledged IDs never recycle | N3/N7; prevent lost updates and stale delivery to another subscription |
+| Requests copy authored data and serialize against actual acks; delayed/rejected edits never become optimistic success; failed queues/retirement remain retryable | N3/N4/N7/N8 |
+| Preserve raw accepted tree versus observed current text; echo emits no redundant value write and rejected annotation edits retain the public draft | N3/N7; exact authored Unicode and native caret/composition semantics |
+| Report headless passes separately from production acceptance, preserving the old reports | N1/N2/N3; no fabricated resource, durability, visual or performance proof |
+| Retain all v1–3/app/built-in consumers and historical evidence; no cutover or pruning | N4/N6 and prune rule |
+
+New **DESIGN-TODO(opus): none**. Existing panel-composition/control-renderer TODOs
+and Opus F1–F7 follow-ups remain. All visual output is provisional pending the
+actual native rendering review.
+
+## Freeze blockers and macOS verification
+
+Before production freeze, bind KernelData to KernelHandle/QueryMirror and
+state_transaction in the application runtime. Verify authorization, writer
+registration/sealing, request-ID -> kernel-txid dedupe, grouped undo/rollback,
+selection/time publication and render invalidation, settings namespace/durability,
+project switching, realm retirement and lost-ack recovery against the actual actor.
+The owned manifests intentionally link no kernel implementation; no application
+source outside this lane was edited.
+
+Supply/verify permission, media decoding/analysis/capture, import/export, catalog,
+frame/readback, preview/resource lifecycle and visibility/frame-scheduler adapters
+for the owner workflows. Verify actual compiler aliases/Refresh boot and realm
+checkpoint/reset. The legacy semantic UI export remains separate from the reviewed
+kit; real compiler/export cutover remains integration work.
+
+On macOS verify GPUI/AppKit controls, system pop-ups/sheets/popover placement,
+Esc/outside dismissal and focus restoration; AX/VoiceOver and keyboard ownership;
+UTF-16 IME/caret/composition/clipboard; pointer capture/lock/infinite scrub and
+coordinate conversion; resource retirement and actual renderer behavior. Obtain
+Opus light/dark/accessibility rendering review and signed V8/physical presentation
+performance evidence, including proof that the main thread never waits on JS.
+No new design, compatibility-cutover or N2 performance approval is claimed.
+
+```sh
+source /workspace/.tools/activate.sh
+cd /workspace/powermove/apps/native
+cargo test --locked -p pm-surface
+cargo clippy --locked -p pm-surface --all-targets -- -D warnings
+cargo fmt -p pm-surface --check
+cargo test --locked --manifest-path crates/surface/standalone/Cargo.toml
+cargo clippy --locked --manifest-path crates/surface/standalone/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path crates/surface/standalone/Cargo.toml --check
+cargo build --locked --manifest-path crates/surface/standalone/Cargo.toml --examples
+cd js/v4
+bun install --frozen-lockfile
+bun test
+bun run typecheck
+bunx tsc -p eval/tsconfig.json
+bun run format
+bun run build
+bun run eval --include-held-out
+bun run eval --include-held-out --wire
+bun run eval --include-held-out --scaffold --wire
+```
+
+## Archived pre-integration reports (superseded)
+
+Everything below is retained historical evidence, including references to then
+current failures, missing owner specs, ownership restrictions and old test counts.
+Use the final report above for the integrated result and freeze recommendation.
+
+### Pre-integration API fix pass
 
 Recommendation: **do not freeze yet**. The rerun of the original independent
 public-API extensions now passes **30/30 available briefs (100%)**, up from 28/30.

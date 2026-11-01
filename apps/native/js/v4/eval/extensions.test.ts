@@ -41,13 +41,10 @@ wireTest(
   },
 );
 wireTest(
-  "negative protocol checks cannot silently pass without a real validator",
+  "negative protocol checks build and use the real validator without an explicit wire",
   async () => {
     const result = await runExtension("held-out-10");
-    expect(result.status).toBe("fail");
-    expect("error" in result && result.error).toContain(
-      "real Rust wire validator required",
-    );
+    expect(result.status, JSON.stringify(result)).toBe("pass");
   },
 );
 wireTest(
@@ -90,16 +87,17 @@ wireTest(
 );
 
 for (const task of tasks.filter((task) => task.group === "owner")) {
-  test(`owner default evaluation ${task.id} keeps API gaps visible`, async () => {
+  test(`owner default evaluation ${task.id} exercises data service and keeps production gates visible`, async () => {
     const result = await runExtension(task.id);
     expect(result).toMatchObject({
       id: task.id,
-      status: "fail",
+      status: "pass",
       fixtureStatus: "pass",
-      failureKind: "api-gap",
+      serviceStatus: "pass",
+      productionReady: false,
       wire: false,
     });
-    expect("blockedBy" in result && result.blockedBy).toEqual(
+    expect("integrationGates" in result && result.integrationGates).toEqual(
       task.behavior!.apiGaps,
     );
     expect("commits" in result && result.commits).toBeGreaterThan(0);

@@ -2,18 +2,13 @@
 import { createContext, h, type ComponentChildren } from "preact";
 import { useContext, useId, useState } from "preact/hooks";
 import type { SurfaceProps } from "../jsx-runtime";
-import type { Json, SurfaceEvent } from "../protocol";
+import { json, type Json, type SurfaceEvent } from "../protocol";
 
 export const token = (name: string) => ({ token: name });
 type Style = NonNullable<SurfaceProps["style"]>;
 // Component callbacks/options override primitive event/JSON props; intersecting
 // them would require a callback accepting both an event and a component value.
-type Common = Omit<
-  SurfaceProps,
-  "options" | "selected" | "onChange" | "onSelect"
-> & {
-  label: string;
-};
+type Common = SurfaceProps & { label: string };
 type Bound<T extends Json> = SurfaceProps & {
   label?: string;
   value: T;
@@ -148,7 +143,7 @@ export interface Option {
   disabled?: boolean;
 }
 export function PopUpButton(
-  props: Bound<Json> & {
+  props: Omit<Bound<Json>, "options"> & {
     label?: string;
     options: (string | Option)[];
   },
@@ -158,6 +153,7 @@ export function PopUpButton(
   const inRow = useContext(Label) !== undefined;
   return field("pop-up-button", "select", "button", {
     ...props,
+    options: json(props.options) as Json[],
     style: {
       height: token(inRow ? "metrics.field" : "metrics.control"),
       ...props.style,
@@ -214,7 +210,7 @@ export interface SegmentOption {
   disabled?: boolean;
 }
 export function SegmentedControl(
-  props: Common & {
+  props: Omit<Common, "options" | "onChange"> & {
     options: SegmentOption[];
     value: string;
     onChange: (id: string) => void;
@@ -305,7 +301,10 @@ export function SegmentedControl(
   );
 }
 export function DisclosureGroup(
-  props: Common & { open: boolean; onChange: (open: boolean) => void },
+  props: Omit<Common, "onChange"> & {
+    open: boolean;
+    onChange: (open: boolean) => void;
+  },
 ) {
   const { children, open, onChange, ...rest } = props;
   const id = useId();
@@ -345,7 +344,10 @@ export function List(props: Common) {
 export function Tree(props: Common) {
   return kit("tree", "div", { ...props, role: "tree" });
 }
-type Item = Common & { selected?: boolean; onSelect: () => void };
+type Item = Omit<Common, "selected" | "onSelect"> & {
+  selected?: boolean;
+  onSelect: () => void;
+};
 function item(
   kind: string,
   role: string,
