@@ -3824,6 +3824,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "pm-acceptance"
+version = "0.1.0"
+dependencies = [
+ "pm-kernel",
+ "pm-mcp",
+ "pm-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-audio"
 version = "0.1.0"
 dependencies = [
@@ -4332,6 +4343,16 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "pm-runtime-v8"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "url",
+ "v8",
 ]
 
 [[package]]
