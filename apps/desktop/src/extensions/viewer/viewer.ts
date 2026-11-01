@@ -2155,16 +2155,27 @@ function anchorUnderPointer(point: Point): SelectionGeometry | null {
 
 /* Anchor Point tool: drag the anchor marker, or press anywhere on the
    selected layer to bring the anchor there and keep dragging. Pressing
-   another layer only selects it. Position compensates so nothing moves;
-   Option moves the layer with its anchor, Command snaps to the box. */
+   another layer selects it; a click stops there, and a drag carries its
+   anchor to the pointer in the same gesture, like the Rotation tool.
+   Position compensates so nothing moves; Option moves the layer with its
+   anchor, Command snaps to the box. */
 function startAnchorTool(e: any): void {
   const pointer = pointerComp(e);
   const grabbed = anchorUnderPointer(pointer);
   const previous = api.selection.layers().join('\n');
-  const selection = grabbed || selectionForTransformTool(e);
+  let selection = grabbed || selectionForTransformTool(e);
+  /* One anchor moves at a time. A press inside a multi-selection narrows it
+     to the layer under the pointer. */
+  if (!grabbed && selection && selection.layers.length > 1 && !e.shiftKey) {
+    const hit = api.render.gl.pick(pointer.x, pointer.y, api.transport.time());
+    if (hit && selection.layers.some((layer: any) => layer.id === hit.id)) {
+      selectLayers(hit.id);
+      selection = resolveSelectionGeometry(api, visualSelection(api), api.transport.time(), space3d);
+    }
+  }
   if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Use Anchor X, Y and Z in Transform for 3D layers'); return; }
   if (!selection?.transformable || selection.layers.length !== 1) return;
-  if (!grabbed && api.selection.layers().join('\n') !== previous) return;
+  const justSelected = !grabbed && api.selection.layers().join('\n') !== previous;
   const layer = selection.layers[0];
   const T = api.transport.time();
   const local = api.anim.localMatrix(layer, T) as AffineMatrix;
@@ -2205,7 +2216,8 @@ function startAnchorTool(e: any): void {
     }
     invalidate();
   };
-  if (!grabbed) follow(e);
+  // A press that only selected the layer waits for a drag, so a click never moves its anchor.
+  if (!grabbed && !justSelected) follow(e);
   beginDrag(e, {
     cursor: 'move',
     move: (dx: number, dy: number, ev: any) => {
