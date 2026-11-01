@@ -1,4 +1,5 @@
 //! Standalone AppKit host for S5. The timer never calls or waits on JavaScript.
+mod lifecycle;
 mod pixels;
 mod server;
 use block2::{DynBlock, RcBlock};
@@ -37,6 +38,9 @@ define_class!(
     struct Bridge;
     unsafe impl NSObjectProtocol for Bridge {}
     unsafe impl WKNavigationDelegate for Bridge {
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        unsafe fn terminated(&self,_web:&WKWebView){self.ivars().terminated.store(true,Ordering::SeqCst);self.ivars().record(json!({"test":"content_process_terminated_callback"}));}
+
         #[unsafe(method(webView:didFinishNavigation:))]
         unsafe fn navigated(&self, _web: &WKWebView, _nav: Option<&WKNavigation>) {
             println!("{}", json!({"test":"navigation_finished"}));
@@ -136,6 +140,8 @@ fn run() {
             &NSString::from_str("s5probe"),
         );
     }
+    let case = std::env::var("S5_CASE").unwrap_or_else(|_| "http".into());
+    let mut lifecycle = lifecycle::Controller::new(case.clone(), &config, &state);
     let rect = NSRect::new(NSPoint::new(80., 80.), NSSize::new(960., 640.));
     let web =
         unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), rect, &config) };
@@ -207,8 +213,20 @@ fn run() {
     let mut diagnosed = false;
     let started = Instant::now();
     println!("{}", json!({"test":"host_started"}));
-    while !state.done.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(90) {
-        if !diagnosed && started.elapsed() > Duration::from_secs(3) {
+    while !state.done.load(Ordering::SeqCst)
+        && started.elapsed()
+            < Duration::from_secs(if case.starts_with("lifecycle-") {
+                160
+            } else {
+                90
+            })
+    {
+        lifecycle.tick(mtm, &app, &window, &web, &state);
+        if !diagnosed
+            && !case.starts_with("kill-")
+            && !case.starts_with("lifecycle-")
+            && started.elapsed() > Duration::from_secs(3)
+        {
             diagnosed = true;
             let diagnostic = RcBlock::new(|value: *mut AnyObject, error: *mut NSError| {
                 let value = if value.is_null() {
@@ -257,6 +275,8 @@ fn run() {
         }
         app.updateWindows();
     }
+    lifecycle.tick(mtm, &app, &window, &web, &state);
+    lifecycle.finish(&state);
     timer.invalidate();
     state.record(json!({"test":"scrub_work", "stats":server::stats(work.borrow().clone()),"intervals":server::stats(intervals.borrow().clone())}));
     for (key, name) in [

@@ -18,6 +18,11 @@ pub struct State {
     pub blocked: AtomicBool,
     pub pings: AtomicUsize,
     pub failures: AtomicUsize,
+    pub life_phase: AtomicUsize,
+    pub life_ready: AtomicBool,
+    pub loop_started: AtomicBool,
+    pub terminated: AtomicBool,
+    pub restarted: AtomicBool,
     pub cancelled_tasks: Mutex<std::collections::HashSet<usize>>,
     pub epoch: Instant,
     pub pixels: Vec<u8>,
@@ -47,6 +52,11 @@ pub fn start() -> Arc<State> {
         blocked: AtomicBool::new(false),
         pings: AtomicUsize::new(0),
         failures: AtomicUsize::new(0),
+        life_phase: AtomicUsize::new(1),
+        life_ready: AtomicBool::new(false),
+        loop_started: AtomicBool::new(false),
+        terminated: AtomicBool::new(false),
+        restarted: AtomicBool::new(false),
         cancelled_tasks: Mutex::new(std::collections::HashSet::new()),
         epoch: Instant::now(),
         pixels: crate::pixels::frame(),
@@ -154,6 +164,15 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
                 let page = include_str!("page.html")
                     .replace("__BASE__", &base)
                     .replace("__PIXELS_JS__", include_str!("pixels.js"))
+                    .replace("__LIFECYCLE_JS__", include_str!("lifecycle.js"))
+                    .replace(
+                        "__RESTARTED__",
+                        if s.restarted.load(Ordering::SeqCst) {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    )
                     .replace(
                         "__CASE__",
                         &std::env::var("S5_CASE").unwrap_or_else(|_| "http".into()),
@@ -165,6 +184,37 @@ fn serve(stream: TcpStream, s: Arc<State>) -> std::io::Result<()> {
                     page.as_bytes(),
                 )?;
             }
+            "life-next" => {
+                let after: usize = route.split('?').nth(1).unwrap_or("0").parse().unwrap_or(0);
+                let start = Instant::now();
+                while s.life_phase.load(Ordering::SeqCst) <= after
+                    && start.elapsed() < Duration::from_secs(100)
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                respond(
+                    reader.get_mut(),
+                    200,
+                    "application/json",
+                    json!({"phase":s.life_phase.load(Ordering::SeqCst)})
+                        .to_string()
+                        .as_bytes(),
+                )?;
+            }
+            "life-ready" => {
+                s.life_ready.store(true, Ordering::SeqCst);
+                respond(reader.get_mut(), 200, "text/plain", b"ok")?;
+            }
+            "loop-start" => {
+                s.loop_started.store(true, Ordering::SeqCst);
+                respond(reader.get_mut(), 200, "text/plain", b"ok")?;
+            }
+            "kernel-snapshot" => respond(
+                reader.get_mut(),
+                200,
+                "application/json",
+                b"{\"revision\":7,\"acknowledged\":true}",
+            )?,
             "outer-pixels" => {
                 let renders = s.renders.lock().unwrap();
                 respond(

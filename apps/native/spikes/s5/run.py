@@ -8,11 +8,11 @@ for case in sys.argv[1:] or ['http', 'scheme', 'prompt', 'app']:
     path = pathlib.Path('/tmp') / ('s5-' + case + '.jsonl')
     with path.open('w') as log:
         try:
-            result = subprocess.run([str(binary)], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=35)
+            result = subprocess.run([str(binary)], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=175 if case.startswith('lifecycle-') else 35)
             failed |= result.returncode != 0
             print(json.dumps({'case':case,'exit':result.returncode,'log':str(path)}),flush=True)
         except subprocess.TimeoutExpired:
             failed=True
-            print(json.dumps({'case':case,'failure':'35-second external watchdog expired','log':str(path)}),flush=True)
+            print(json.dumps({'case':case,'failure':'external watchdog expired','log':str(path)}),flush=True)
 
 sys.exit(1 if failed else 0)
