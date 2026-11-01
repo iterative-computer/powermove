@@ -244,3 +244,11 @@ substitute literals — it blocks on the token.
   says, matching system metrics.
 - No all-caps, no letter-spacing, no text under `t.minimum`.
 - No new shortcut that shadows a w1-keymap binding.
+
+## Owner decisions (Chike, 2026-11-01)
+
+1. Timeline layer-list default width is **266 pt** (as v1.2.0), so Position and Scale values show at the default width. `metrics.layer_column` = 266.
+2. The agent opens as a **popover** under its toolbar button and can be **pinned** into the dock (as specified in agent-panel.md).
+3. "Effects & Presets" is renamed **Effects** until a presets library exists. Specs, menus, palette rows and VoiceOver labels use "Effects".
+4. The "Code (web animation)" export option is **removed**, not hidden (2026-10-29 decision).
+

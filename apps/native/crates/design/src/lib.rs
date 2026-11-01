@@ -368,7 +368,7 @@ impl Tokens {
                 track_row: 28.,
                 property_row: 22.,
                 ruler: 24.,
-                layer_column: 232.,
+                layer_column: 266.,
                 playhead: 1.5,
                 symbol_toolbar: 15.,
                 symbol_panel: 13.,
