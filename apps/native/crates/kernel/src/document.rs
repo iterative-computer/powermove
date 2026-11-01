@@ -182,6 +182,30 @@ struct Staged {
     changed: bool,
 }
 
+/// A durable state change, in order, for the kernel journal
+/// ([`DocumentStore::enable_tap`]).
+#[derive(Clone, Debug)]
+pub(crate) enum Tap {
+    /// A published revision.
+    Rev {
+        base: u64,
+        revision: u64,
+        ops: Arc<[Op]>,
+    },
+    /// A document record pushed (discarding redo, then trimming).
+    Push(crate::history::HistoryRecord),
+    /// An external record pushed.
+    PushExternal(crate::history::HistoryRecord),
+    Undo { external: bool },
+    Redo { external: bool },
+    /// `count` records from the top replaced by `record`.
+    Squash {
+        count: usize,
+        record: crate::history::HistoryRecord,
+    },
+    Clear,
+}
+
 /// Most changes kept for [`DocumentStore::changes_since`].
 const CHANGE_LOG: usize = 256;
 
@@ -205,6 +229,9 @@ pub struct DocumentStore {
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
     save_ticket: Weak<()>,
+    /// Durable changes since the last [`take_tap`](Self::take_tap), when
+    /// enabled (the kernel journal).
+    tap: Option<Vec<Tap>>,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -267,6 +294,7 @@ impl DocumentStore {
             listeners: Vec::new(),
             next_listener: 1,
             save_ticket: Weak::new(),
+            tap: None,
         }
     }
 
@@ -620,6 +648,7 @@ impl DocumentStore {
             revision,
         );
         self.history_owned = true;
+        self.tap_push();
         self.publish(staged.document, forward, cause);
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
@@ -652,6 +681,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_undone();
+        self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(revision)
@@ -680,6 +710,7 @@ impl DocumentStore {
             },
         );
         self.history.mark_redone();
+        self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(revision)
@@ -697,7 +728,13 @@ impl DocumentStore {
         if self.gesture.is_some() {
             return None;
         }
+        let before_len = self.history.len();
         let id = self.history.squash_since(mark, label)?;
+        let count = before_len + 1 - self.history.len();
+        self.tap(|h| Tap::Squash {
+            count,
+            record: h.records().last().expect("pushed").clone(),
+        });
         // The state is unchanged; only its name moved to the new record.
         let dirty_before = self.is_dirty();
         if self.saved_token == self.state_token {
@@ -827,6 +864,7 @@ impl DocumentStore {
             self.revision(),
         );
         self.history_owned = true;
+        self.tap_push();
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Some(record))
@@ -974,6 +1012,13 @@ impl DocumentStore {
             ops,
             cause,
         });
+        if let Some(tap) = &mut self.tap {
+            tap.push(Tap::Rev {
+                base: base_revision,
+                revision,
+                ops: change.ops.clone(),
+            });
+        }
         self.log.push_back(change.clone());
         while self.log.len() > CHANGE_LOG {
             self.log.pop_front();
@@ -1129,7 +1174,6 @@ impl DocumentStore {
 /// What one kernel write applied ([`DocumentStore::kernel_apply`]).
 #[derive(Clone, Debug)]
 pub(crate) struct Applied {
-    pub revision: u64,
     pub forward: Vec<Op>,
     /// Inverses in undo order (last operation first).
     pub inverse: Vec<Op>,
@@ -1142,7 +1186,6 @@ pub(crate) struct Applied {
 pub(crate) enum Step {
     /// A document entry: its operations were applied as `revision`.
     Document {
-        revision: u64,
         ops: Arc<[Op]>,
         /// The operations that reverse this step (the other side of the record).
         reverse: Arc<[Op]>,
@@ -1187,6 +1230,53 @@ impl From<Vec<Command>> for WriteBody {
 /// stand-alone [`DocumentStore::execute`]/gesture API above stays for
 /// single-owner callers and tests.
 impl DocumentStore {
+    /// Starts recording durable changes for the journal.
+    pub(crate) fn enable_tap(&mut self) {
+        self.tap.get_or_insert_with(Vec::new);
+    }
+
+    /// The durable changes since the last call.
+    pub(crate) fn take_tap(&mut self) -> Vec<Tap> {
+        self.tap.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    fn tap(&mut self, event: impl FnOnce(&History) -> Tap) {
+        if self.tap.is_some() {
+            let e = event(&self.history);
+            self.tap.as_mut().expect("enabled").push(e);
+        }
+    }
+
+    fn tap_push(&mut self) {
+        self.tap(|h| Tap::Push(h.records().last().expect("pushed").clone()));
+    }
+
+    /// Reverts a cursor move (an undo barrier).
+    pub(crate) fn kernel_unstep(&mut self, undone: bool) {
+        if undone {
+            self.history.mark_redone();
+            self.tap(|_| Tap::Redo { external: true });
+        } else {
+            self.history.mark_undone();
+            self.tap(|_| Tap::Undo { external: true });
+        }
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+    }
+
+    /// `PM.hist.clear()`.
+    pub(crate) fn kernel_clear(&mut self) {
+        self.history.clear();
+        self.tap(|_| Tap::Clear);
+        self.set_state_token(self.history.state_token());
+        self.emit(StoreEvent::HistoryChanged);
+    }
+
+    /// External entries with a cleanup that retired.
+    pub(crate) fn take_retired(&mut self) -> Vec<crate::history::ExternalRef> {
+        self.history.take_retired()
+    }
+
     /// The current document (shared, immutable).
     pub(crate) fn current(&self) -> &Arc<Document> {
         &self.current
@@ -1207,9 +1297,7 @@ impl DocumentStore {
         if !staged.changed {
             return Ok(None);
         }
-        let revision = staged.document.revision();
         let applied = Applied {
-            revision,
             forward: staged.forward.clone(),
             inverse: staged.inverse,
             scopes: staged.scopes,
@@ -1246,7 +1334,6 @@ impl DocumentStore {
             return Ok(None);
         }
         let applied = Applied {
-            revision: staged.document.revision(),
             forward: staged.forward,
             inverse: staged.inverse,
             scopes: staged.scopes,
@@ -1284,25 +1371,9 @@ impl DocumentStore {
             .history
             .push(label, origin, forward, inverse, saved, self.revision());
         self.history_owned = true;
+        self.tap_push();
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
-        record
-    }
-
-    /// Pushes a document entry exactly as journalled (recovery).
-    pub(crate) fn kernel_record_saved(
-        &mut self,
-        label: String,
-        origin: Origin,
-        forward: Vec<Op>,
-        inverse: Vec<Op>,
-        saved: Option<(Vec<Patch>, Vec<Patch>)>,
-    ) -> u64 {
-        let record = self
-            .history
-            .push(label, origin, forward, inverse, saved, self.revision());
-        self.history_owned = true;
-        self.set_state_token(self.history.state_token());
         record
     }
 
@@ -1317,6 +1388,7 @@ impl DocumentStore {
         let id = self
             .history
             .push_external(label, origin, external, bytes, self.revision());
+        self.tap(|h| Tap::PushExternal(h.records().last().expect("pushed").clone()));
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         id
@@ -1333,6 +1405,7 @@ impl DocumentStore {
             .clone();
         if let Some(external) = record.external {
             self.history.mark_undone();
+            self.tap(|_| Tap::Undo { external: true });
             self.set_state_token(self.history.state_token());
             self.emit(StoreEvent::HistoryChanged);
             return Ok(Step::External {
@@ -1341,7 +1414,6 @@ impl DocumentStore {
             });
         }
         let staged = self.stage_ops(&record.inverse, false)?;
-        let revision = staged.document.revision();
         self.publish(
             staged.document,
             record.inverse.clone(),
@@ -1350,10 +1422,10 @@ impl DocumentStore {
             },
         );
         self.history.mark_undone();
+        self.tap(|_| Tap::Undo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Step::Document {
-            revision,
             ops: record.inverse.clone(),
             reverse: record.forward.clone(),
             label: record.label,
@@ -1369,6 +1441,7 @@ impl DocumentStore {
             .clone();
         if let Some(external) = record.external {
             self.history.mark_redone();
+            self.tap(|_| Tap::Redo { external: true });
             self.set_state_token(self.history.state_token());
             self.emit(StoreEvent::HistoryChanged);
             return Ok(Step::External {
@@ -1377,7 +1450,6 @@ impl DocumentStore {
             });
         }
         let staged = self.stage_ops(&record.forward, false)?;
-        let revision = staged.document.revision();
         self.publish(
             staged.document,
             record.forward.clone(),
@@ -1386,19 +1458,14 @@ impl DocumentStore {
             },
         );
         self.history.mark_redone();
+        self.tap(|_| Tap::Redo { external: false });
         self.set_state_token(self.history.state_token());
         self.emit(StoreEvent::HistoryChanged);
         Ok(Step::Document {
-            revision,
             ops: record.forward.clone(),
             reverse: record.inverse.clone(),
             label: record.label,
         })
-    }
-
-    /// Mutable history (recovery replay, retention budget, clear).
-    pub(crate) fn history_mut(&mut self) -> &mut History {
-        &mut self.history
     }
 
     /// Replaces the selection (a cancelled edit restores the one it began
@@ -1411,16 +1478,25 @@ impl DocumentStore {
         }
     }
 
-    /// Replaces document and history wholesale (journal recovery).
-    pub(crate) fn kernel_reset(&mut self, document: Document, history: History) {
-        self.queries.resync(&document);
-        self.current = Arc::new(document);
-        self.history = history;
-        self.history_owned = true;
-        self.log.clear();
-        let token = self.history.state_token();
-        self.state_token = token;
+    /// A store over a library project (clean: it matches its slot).
+    pub(crate) fn adopt(document: Document, history: History) -> DocumentStore {
+        DocumentStore::from_parts(ProjectFile::untitled(), document, history, true)
     }
+
+    /// Every change still in the log, oldest first (published to mirrors).
+    pub(crate) fn recent_changes(&self) -> Vec<Arc<Change>> {
+        self.log.iter().cloned().collect()
+    }
+
+    /// A store adopting recovered state (journal recovery): dirty, since
+    /// the recovered work is not in any saved file.
+    pub(crate) fn recovered(document: Document, history: History) -> DocumentStore {
+        let mut store =
+            DocumentStore::from_parts(ProjectFile::untitled(), document, history, true);
+        store.saved_token = next_token();
+        store
+    }
+
 }
 
 // ── staging helpers ─────────────────────────────────────────────────────────

@@ -61,10 +61,14 @@
 //! * [`project_io`]: open (JSON, PMV3, PMV4) and the PMV4 writer.
 //! * [`model`]: read helpers over the canonical tree (layer lookup, lock).
 
+pub mod actor;
 pub mod commands;
 pub mod document;
 pub mod error;
 pub mod history;
+pub mod journal;
+pub mod kernel;
+pub mod library;
 pub mod model;
 pub mod project_io;
 pub mod queries;
@@ -89,6 +93,18 @@ pub use project_io::{
 };
 pub use queries::{Bounds, PickHit, PickOptions, QueryContext, QueryError};
 pub use selection::Selection;
+
+pub use actor::{
+    HistorySummary, KernelActor, KernelEvent, KernelHandle, OpenEntryInfo, Pending, Published,
+    QueryMirror, RealmEnvelope,
+};
+pub use journal::{JournalConfig, Recovered, Recovery};
+pub use kernel::{Kernel, KernelConfig, KernelFailure, OpenInfo, OpenSource, base_hash_of};
+pub use library::{LibraryProject, LibraryStore};
+pub use tx::{
+    Ack, Call, Caller, Continuation, Direction, EditCall, EditResult, GestureCall, HistoryCall,
+    KernelError, Notice, Project, RealmMessage, Reply, Request, TxId, WorkspaceCall, Writer,
+};
 
 /// Compile-time checks of the threading contract.
 #[allow(dead_code)]

@@ -374,6 +374,15 @@ impl History {
         id
     }
 
+    /// Removes `n` records from the top (journal replay of a squash).
+    pub(crate) fn pop_top(&mut self, n: usize) {
+        for _ in 0..n.min(self.entries.len()) {
+            let removed = self.entries.pop().expect("non-empty");
+            self.total_bytes -= removed.bytes;
+        }
+        self.cursor = self.cursor.min(self.entries.len());
+    }
+
     pub(crate) fn mark_undone(&mut self) {
         debug_assert!(self.cursor > 0);
         self.cursor -= 1;

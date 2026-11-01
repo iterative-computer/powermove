@@ -299,6 +299,9 @@ pub enum Notice {
     Sealed { label: String, writes: usize },
     /// Undo stopped at an entry whose realm is gone.
     Barrier { label: String },
+    /// The edit is applied but its journal write failed (disk full, I/O
+    /// error): it is not crash-safe until the next successful write.
+    NotDurable { message: String },
 }
 
 /// Errors returned as throws (or refusals) in the caller's API form.
@@ -565,6 +568,10 @@ impl Project {
         std::mem::take(&mut self.outbox)
     }
 
+    pub(crate) fn push_notice(&mut self, notice: Notice) {
+        self.notices.push(notice);
+    }
+
     /// Notices produced since the last call.
     pub fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)
@@ -624,7 +631,7 @@ impl Project {
             } => self.external_done(txid, ticket, ok, message),
             Call::QueryTx { .. } => unreachable!("answered above"),
         };
-        for retired in self.store.history_mut().take_retired() {
+        for retired in self.store.take_retired() {
             self.outbox.push(RealmMessage::Cleanup {
                 writer: Writer {
                     realm: retired.realm,
@@ -999,7 +1006,7 @@ impl Project {
                 }
             }
             HistoryCall::Clear => {
-                self.store.history_mut().clear();
+                self.store.kernel_clear();
                 Reply::Unit
             }
         };
@@ -1032,13 +1039,11 @@ impl Project {
                 ops,
                 reverse,
                 label,
-                ..
             }) => {
                 let folded = self.entry.as_ref().map(|e| e.id);
                 if folded.is_some() {
                     // Today's pending snapshot diff includes the undo.
                     let applied = Applied {
-                        revision: self.revision(),
                         scopes: ops.iter().map(|o| o.path().to_vec()).collect(),
                         forward: ops.to_vec(),
                         inverse: reverse.to_vec(),
@@ -1054,10 +1059,7 @@ impl Project {
                 };
                 if self.dead.contains(&owner) {
                     // Barrier: the closure is gone; the cursor stays.
-                    match direction {
-                        Direction::Undo => self.store.history_mut().mark_redone(),
-                        Direction::Redo => self.store.history_mut().mark_undone(),
-                    }
+                    self.store.kernel_unstep(direction == Direction::Undo);
                     return Handled::reply(self.ack(
                         txid,
                         None,
